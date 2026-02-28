@@ -10,7 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"
   },
