@@ -1,0 +1,72 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typescript:
+    name: TypeScript (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - run: pnpm run test
+      - run: pnpm run typecheck
+
+  go:
+    name: Go Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: cd compilers/go && go build ./...
+      - run: cd compilers/go && go test -race -v ./...
+
+  rust:
+    name: Rust Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cd compilers/rust && cargo build
+      - run: cd compilers/rust && cargo test
+
+  conformance:
+    name: Conformance Tests
+    needs: [typescript, go]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Run conformance tests
+        run: |
+          cd compilers/go && go build -o ../../tsop-go . && cd ../..
+          for test in conformance/tests/*/expected-ir.json; do
+            dir=$(dirname "$test")
+            name=$(basename "$dir")
+            echo "=== $name ==="
+            ./tsop-go --ir "$test" --hex
+          done

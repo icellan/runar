@@ -1,0 +1,391 @@
+{
+  "version": "tsop-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "Stateful",
+  "abi": {
+    "constructor": {
+      "params": [
+        {
+          "name": "count",
+          "type": "bigint"
+        },
+        {
+          "name": "maxCount",
+          "type": "bigint"
+        }
+      ]
+    },
+    "methods": [
+      {
+        "name": "increment",
+        "params": [
+          {
+            "name": "amount",
+            "type": "bigint"
+          },
+          {
+            "name": "txPreimage",
+            "type": "SigHashPreimage"
+          }
+        ],
+        "isPublic": true
+      },
+      {
+        "name": "reset",
+        "params": [
+          {
+            "name": "txPreimage",
+            "type": "SigHashPreimage"
+          }
+        ],
+        "isPublic": true
+      }
+    ]
+  },
+  "script": "76009c63757b210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac6969007c7c7c9376007c7ca169765880aa0082012c947f7701207f757b7c876967757c210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac696900765880aa0082012c947f7701207f757b7c876968",
+  "asm": "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_ROT <0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798> OP_CHECKSIG OP_VERIFY OP_VERIFY OP_0 OP_SWAP OP_SWAP OP_SWAP OP_ADD OP_DUP OP_0 OP_SWAP OP_SWAP OP_LESSTHANOREQUAL OP_VERIFY OP_DUP OP_8 OP_NUM2BIN OP_HASH256 OP_0 OP_SIZE <2c> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_ROT OP_SWAP OP_EQUAL OP_VERIFY OP_ELSE OP_DROP OP_SWAP <0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798> OP_CHECKSIG OP_VERIFY OP_VERIFY OP_0 OP_DUP OP_8 OP_NUM2BIN OP_HASH256 OP_0 OP_SIZE <2c> OP_SUB OP_SPLIT OP_NIP <20> OP_SPLIT OP_DROP OP_ROT OP_SWAP OP_EQUAL OP_VERIFY OP_ENDIF",
+  "buildTimestamp": "2026-02-28T18:26:38.011Z",
+  "stateFields": [
+    {
+      "name": "count",
+      "type": "bigint",
+      "index": 0
+    }
+  ],
+  "ir": {
+    "anf": {
+      "contractName": "Stateful",
+      "properties": [
+        {
+          "name": "count",
+          "type": "bigint",
+          "readonly": false
+        },
+        {
+          "name": "maxCount",
+          "type": "bigint",
+          "readonly": true
+        }
+      ],
+      "methods": [
+        {
+          "name": "constructor",
+          "params": [
+            {
+              "name": "count",
+              "type": "bigint"
+            },
+            {
+              "name": "maxCount",
+              "type": "bigint"
+            }
+          ],
+          "body": [
+            {
+              "name": "t0",
+              "value": {
+                "kind": "load_prop",
+                "name": "count"
+              }
+            },
+            {
+              "name": "t1",
+              "value": {
+                "kind": "load_prop",
+                "name": "maxCount"
+              }
+            },
+            {
+              "name": "t2",
+              "value": {
+                "kind": "call",
+                "func": "super",
+                "args": [
+                  "t0",
+                  "t1"
+                ]
+              }
+            },
+            {
+              "name": "t3",
+              "value": {
+                "kind": "load_prop",
+                "name": "count"
+              }
+            },
+            {
+              "name": "t4",
+              "value": {
+                "kind": "update_prop",
+                "name": "count",
+                "value": "t3"
+              }
+            },
+            {
+              "name": "t5",
+              "value": {
+                "kind": "load_prop",
+                "name": "maxCount"
+              }
+            },
+            {
+              "name": "t6",
+              "value": {
+                "kind": "update_prop",
+                "name": "maxCount",
+                "value": "t5"
+              }
+            }
+          ],
+          "isPublic": false
+        },
+        {
+          "name": "increment",
+          "params": [
+            {
+              "name": "amount",
+              "type": "bigint"
+            },
+            {
+              "name": "txPreimage",
+              "type": "SigHashPreimage"
+            }
+          ],
+          "body": [
+            {
+              "name": "t0",
+              "value": {
+                "kind": "load_param",
+                "name": "txPreimage"
+              }
+            },
+            {
+              "name": "t1",
+              "value": {
+                "kind": "check_preimage",
+                "preimage": "t0"
+              }
+            },
+            {
+              "name": "t2",
+              "value": {
+                "kind": "assert",
+                "value": "t1"
+              }
+            },
+            {
+              "name": "t3",
+              "value": {
+                "kind": "load_prop",
+                "name": "count"
+              }
+            },
+            {
+              "name": "t4",
+              "value": {
+                "kind": "load_param",
+                "name": "amount"
+              }
+            },
+            {
+              "name": "t5",
+              "value": {
+                "kind": "bin_op",
+                "op": "+",
+                "left": "t3",
+                "right": "t4"
+              }
+            },
+            {
+              "name": "t6",
+              "value": {
+                "kind": "update_prop",
+                "name": "count",
+                "value": "t5"
+              }
+            },
+            {
+              "name": "t7",
+              "value": {
+                "kind": "load_prop",
+                "name": "count"
+              }
+            },
+            {
+              "name": "t8",
+              "value": {
+                "kind": "load_prop",
+                "name": "maxCount"
+              }
+            },
+            {
+              "name": "t9",
+              "value": {
+                "kind": "bin_op",
+                "op": "<=",
+                "left": "t7",
+                "right": "t8"
+              }
+            },
+            {
+              "name": "t10",
+              "value": {
+                "kind": "assert",
+                "value": "t9"
+              }
+            },
+            {
+              "name": "t11",
+              "value": {
+                "kind": "get_state_script"
+              }
+            },
+            {
+              "name": "t12",
+              "value": {
+                "kind": "call",
+                "func": "hash256",
+                "args": [
+                  "t11"
+                ]
+              }
+            },
+            {
+              "name": "t13",
+              "value": {
+                "kind": "load_param",
+                "name": "txPreimage"
+              }
+            },
+            {
+              "name": "t14",
+              "value": {
+                "kind": "call",
+                "func": "extractOutputHash",
+                "args": [
+                  "t13"
+                ]
+              }
+            },
+            {
+              "name": "t15",
+              "value": {
+                "kind": "bin_op",
+                "op": "===",
+                "left": "t12",
+                "right": "t14",
+                "result_type": "bytes"
+              }
+            },
+            {
+              "name": "t16",
+              "value": {
+                "kind": "assert",
+                "value": "t15"
+              }
+            }
+          ],
+          "isPublic": true
+        },
+        {
+          "name": "reset",
+          "params": [
+            {
+              "name": "txPreimage",
+              "type": "SigHashPreimage"
+            }
+          ],
+          "body": [
+            {
+              "name": "t0",
+              "value": {
+                "kind": "load_param",
+                "name": "txPreimage"
+              }
+            },
+            {
+              "name": "t1",
+              "value": {
+                "kind": "check_preimage",
+                "preimage": "t0"
+              }
+            },
+            {
+              "name": "t2",
+              "value": {
+                "kind": "assert",
+                "value": "t1"
+              }
+            },
+            {
+              "name": "t3",
+              "value": {
+                "kind": "load_const",
+                "value": "0n"
+              }
+            },
+            {
+              "name": "t4",
+              "value": {
+                "kind": "update_prop",
+                "name": "count",
+                "value": "t3"
+              }
+            },
+            {
+              "name": "t5",
+              "value": {
+                "kind": "get_state_script"
+              }
+            },
+            {
+              "name": "t6",
+              "value": {
+                "kind": "call",
+                "func": "hash256",
+                "args": [
+                  "t5"
+                ]
+              }
+            },
+            {
+              "name": "t7",
+              "value": {
+                "kind": "load_param",
+                "name": "txPreimage"
+              }
+            },
+            {
+              "name": "t8",
+              "value": {
+                "kind": "call",
+                "func": "extractOutputHash",
+                "args": [
+                  "t7"
+                ]
+              }
+            },
+            {
+              "name": "t9",
+              "value": {
+                "kind": "bin_op",
+                "op": "===",
+                "left": "t6",
+                "right": "t8",
+                "result_type": "bytes"
+              }
+            },
+            {
+              "name": "t10",
+              "value": {
+                "kind": "assert",
+                "value": "t9"
+              }
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    }
+  }
+}

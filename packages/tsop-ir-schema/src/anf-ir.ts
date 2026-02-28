@@ -1,0 +1,148 @@
+/**
+ * ANF IR — A-Normal Form intermediate representation (Pass 4 output).
+ *
+ * This is the **canonical conformance boundary** for TSOP compilers.
+ * Two compilers that accept the same TSOP source MUST produce
+ * byte-identical ANF IR (when serialised with canonical JSON).
+ *
+ * Every compound expression is decomposed into a flat sequence of
+ * let-bindings whose right-hand sides are *simple* values: constants,
+ * variable references, a single primitive operation, or a branch/loop.
+ */
+
+// ---------------------------------------------------------------------------
+// Program structure
+// ---------------------------------------------------------------------------
+
+export interface ANFProgram {
+  contractName: string;
+  properties: ANFProperty[];
+  methods: ANFMethod[];
+}
+
+export interface ANFProperty {
+  name: string;
+  type: string;
+  readonly: boolean;
+  initialValue?: string | bigint | boolean;
+}
+
+export interface ANFMethod {
+  name: string;
+  params: ANFParam[];
+  body: ANFBinding[];
+  isPublic: boolean;
+}
+
+export interface ANFParam {
+  name: string;
+  type: string;
+}
+
+// ---------------------------------------------------------------------------
+// Bindings — the core of the ANF representation
+// ---------------------------------------------------------------------------
+
+/**
+ * A single let-binding:  `let <name> = <value>`
+ *
+ * Names follow the pattern `t0`, `t1`, … and are scoped per method.
+ */
+export interface ANFBinding {
+  name: string;
+  value: ANFValue;
+}
+
+// ---------------------------------------------------------------------------
+// ANF value types (discriminated on `kind`)
+// ---------------------------------------------------------------------------
+
+export interface LoadParam {
+  kind: 'load_param';
+  name: string;
+}
+
+export interface LoadProp {
+  kind: 'load_prop';
+  name: string;
+}
+
+export interface LoadConst {
+  kind: 'load_const';
+  value: string | bigint | boolean;
+}
+
+export interface BinOp {
+  kind: 'bin_op';
+  op: string;
+  left: string;   // reference to a temp name
+  right: string;  // reference to a temp name
+}
+
+export interface UnaryOp {
+  kind: 'unary_op';
+  op: string;
+  operand: string; // reference to a temp name
+}
+
+export interface Call {
+  kind: 'call';
+  func: string;
+  args: string[]; // references to temp names
+}
+
+export interface MethodCall {
+  kind: 'method_call';
+  object: string;  // reference to a temp name
+  method: string;
+  args: string[];  // references to temp names
+}
+
+export interface If {
+  kind: 'if';
+  cond: string;             // reference to a temp name
+  then: ANFBinding[];
+  else: ANFBinding[];
+}
+
+export interface Loop {
+  kind: 'loop';
+  count: number;
+  body: ANFBinding[];
+  iterVar: string;
+}
+
+export interface Assert {
+  kind: 'assert';
+  value: string; // reference to a temp name
+}
+
+export interface UpdateProp {
+  kind: 'update_prop';
+  name: string;
+  value: string; // reference to a temp name
+}
+
+export interface GetStateScript {
+  kind: 'get_state_script';
+}
+
+export interface CheckPreimage {
+  kind: 'check_preimage';
+  preimage: string; // reference to a temp name
+}
+
+export type ANFValue =
+  | LoadParam
+  | LoadProp
+  | LoadConst
+  | BinOp
+  | UnaryOp
+  | Call
+  | MethodCall
+  | If
+  | Loop
+  | Assert
+  | UpdateProp
+  | GetStateScript
+  | CheckPreimage;

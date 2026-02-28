@@ -1,0 +1,25 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "tsop-sdk": ["../packages/tsop-sdk/dist/index.d.ts"],
+      "tsop-sdk/*": ["../packages/tsop-sdk/dist/*"],
+      "tsop-lang": ["../packages/tsop-lang/dist/index.d.ts"],
+      "tsop-lang/*": ["../packages/tsop-lang/dist/*"],
+      "tsop-compiler": ["../packages/tsop-compiler/dist/index.d.ts"],
+      "tsop-compiler/*": ["../packages/tsop-compiler/dist/*"],
+      "tsop-ir-schema": ["../packages/tsop-ir-schema/dist/index.d.ts"],
+      "tsop-ir-schema/*": ["../packages/tsop-ir-schema/dist/*"],
+      "@bsv/sdk": ["../node_modules/@bsv/sdk/dist/types/mod.d.ts"]
+    },
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "**/*.tsop.ts",
+    "sdk-usage-typescript.ts"
+  ]
+}

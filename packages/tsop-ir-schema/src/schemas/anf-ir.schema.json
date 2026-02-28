@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tsop.dev/schemas/anf-ir.schema.json",
+  "title": "TSOP ANF IR",
+  "description": "A-Normal Form intermediate representation — the canonical conformance boundary for TSOP compilers.",
+  "type": "object",
+  "required": ["contractName", "properties", "methods"],
+  "additionalProperties": false,
+  "properties": {
+    "contractName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "properties": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ANFProperty" }
+    },
+    "methods": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ANFMethod" }
+    }
+  },
+  "$defs": {
+    "ANFProperty": {
+      "type": "object",
+      "required": ["name", "type", "readonly"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "readonly": { "type": "boolean" },
+        "initialValue": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "integer" },
+            { "type": "boolean" }
+          ]
+        }
+      }
+    },
+    "ANFMethod": {
+      "type": "object",
+      "required": ["name", "params", "body", "isPublic"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ANFParam" }
+        },
+        "body": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ANFBinding" }
+        },
+        "isPublic": { "type": "boolean" }
+      }
+    },
+    "ANFParam": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ANFBinding": {
+      "type": "object",
+      "required": ["name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "$ref": "#/$defs/ANFValue" }
+      }
+    },
+    "ANFValue": {
+      "oneOf": [
+        { "$ref": "#/$defs/LoadParam" },
+        { "$ref": "#/$defs/LoadProp" },
+        { "$ref": "#/$defs/LoadConst" },
+        { "$ref": "#/$defs/BinOp" },
+        { "$ref": "#/$defs/UnaryOp" },
+        { "$ref": "#/$defs/Call" },
+        { "$ref": "#/$defs/MethodCall" },
+        { "$ref": "#/$defs/If" },
+        { "$ref": "#/$defs/Loop" },
+        { "$ref": "#/$defs/Assert" },
+        { "$ref": "#/$defs/UpdateProp" },
+        { "$ref": "#/$defs/GetStateScript" },
+        { "$ref": "#/$defs/CheckPreimage" }
+      ]
+    },
+    "LoadParam": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "load_param" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "LoadProp": {
+      "type": "object",
+      "required": ["kind", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "load_prop" },
+        "name": { "type": "string", "minLength": 1 }
+      }
+    },
+    "LoadConst": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "load_const" },
+        "value": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "integer" },
+            { "type": "boolean" }
+          ]
+        }
+      }
+    },
+    "BinOp": {
+      "type": "object",
+      "required": ["kind", "op", "left", "right"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "bin_op" },
+        "op": { "type": "string", "minLength": 1 },
+        "left": { "type": "string", "minLength": 1 },
+        "right": { "type": "string", "minLength": 1 }
+      }
+    },
+    "UnaryOp": {
+      "type": "object",
+      "required": ["kind", "op", "operand"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "unary_op" },
+        "op": { "type": "string", "minLength": 1 },
+        "operand": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Call": {
+      "type": "object",
+      "required": ["kind", "func", "args"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "call" },
+        "func": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "MethodCall": {
+      "type": "object",
+      "required": ["kind", "object", "method", "args"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "method_call" },
+        "object": { "type": "string", "minLength": 1 },
+        "method": { "type": "string", "minLength": 1 },
+        "args": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "If": {
+      "type": "object",
+      "required": ["kind", "cond", "then", "else"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "if" },
+        "cond": { "type": "string", "minLength": 1 },
+        "then": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ANFBinding" }
+        },
+        "else": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ANFBinding" }
+        }
+      }
+    },
+    "Loop": {
+      "type": "object",
+      "required": ["kind", "count", "body", "iterVar"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "loop" },
+        "count": { "type": "integer", "minimum": 0 },
+        "body": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ANFBinding" }
+        },
+        "iterVar": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Assert": {
+      "type": "object",
+      "required": ["kind", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "assert" },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "UpdateProp": {
+      "type": "object",
+      "required": ["kind", "name", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "update_prop" },
+        "name": { "type": "string", "minLength": 1 },
+        "value": { "type": "string", "minLength": 1 }
+      }
+    },
+    "GetStateScript": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "get_state_script" }
+      }
+    },
+    "CheckPreimage": {
+      "type": "object",
+      "required": ["kind", "preimage"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "check_preimage" },
+        "preimage": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

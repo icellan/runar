@@ -1,0 +1,187 @@
+{
+  "contractName": "IfElse",
+  "properties": [
+    {
+      "name": "limit",
+      "type": "bigint",
+      "readonly": true
+    }
+  ],
+  "methods": [
+    {
+      "name": "constructor",
+      "params": [
+        {
+          "name": "limit",
+          "type": "bigint"
+        }
+      ],
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "limit"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "call",
+            "func": "super",
+            "args": [
+              "t0"
+            ]
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "limit"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "limit",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false
+    },
+    {
+      "name": "check",
+      "params": [
+        {
+          "name": "value",
+          "type": "bigint"
+        },
+        {
+          "name": "mode",
+          "type": "boolean"
+        }
+      ],
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "mode"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "if",
+            "cond": "t1",
+            "then": [
+              {
+                "name": "t2",
+                "value": {
+                  "kind": "load_param",
+                  "name": "value"
+                }
+              },
+              {
+                "name": "t3",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "limit"
+                }
+              },
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "+",
+                  "left": "t2",
+                  "right": "t3"
+                }
+              },
+              {
+                "name": "result",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t4"
+                }
+              }
+            ],
+            "else": [
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "load_param",
+                  "name": "value"
+                }
+              },
+              {
+                "name": "t6",
+                "value": {
+                  "kind": "load_prop",
+                  "name": "limit"
+                }
+              },
+              {
+                "name": "t7",
+                "value": {
+                  "kind": "bin_op",
+                  "op": "-",
+                  "left": "t5",
+                  "right": "t6"
+                }
+              },
+              {
+                "name": "result",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t7"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "bin_op",
+            "op": ">",
+            "left": "result",
+            "right": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "assert",
+            "value": "t10"
+          }
+        }
+      ],
+      "isPublic": true
+    }
+  ]
+}

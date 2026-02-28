@@ -1,0 +1,201 @@
+# TSOP Conformance Tests
+
+**Cross-compiler conformance test suite ensuring all TSOP compilers produce identical output.**
+
+The conformance suite is the enforcement mechanism for TSOP's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every TSOP compiler -- TypeScript, Go, and Rust -- must pass the full suite.
+
+---
+
+## Purpose
+
+TSOP defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
+
+Additionally, the compiled Bitcoin Script output must be identical across compilers. The script is the final artifact deployed on-chain, so even a single-byte difference could mean a different locking script hash and a non-functional contract.
+
+---
+
+## Test Structure
+
+Each test case is a directory containing:
+
+```
+tests/
++-- basic-p2pkh/
+|   +-- basic-p2pkh.tsop.ts      # Source contract
+|   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
+|   +-- expected-script.hex       # Expected compiled script (hex string)
+|
++-- arithmetic/
+|   +-- arithmetic.tsop.ts
+|   +-- expected-ir.json
+|
++-- boolean-logic/
+|   +-- boolean-logic.tsop.ts
+|   +-- expected-ir.json
+|
++-- if-else/
+|   +-- if-else.tsop.ts
+|   +-- expected-ir.json
+|
++-- bounded-loop/
+|   +-- bounded-loop.tsop.ts
+|   +-- expected-ir.json
+|
++-- multi-method/
+|   +-- multi-method.tsop.ts
+|   +-- expected-ir.json
+|
++-- stateful/
+    +-- stateful.tsop.ts
+```
+
+### File Roles
+
+| File | Purpose |
+|---|---|
+| `*.tsop.ts` | The source contract. Input to the compiler. |
+| `expected-ir.json` | The expected ANF IR output. Canonical JSON (RFC 8785, no whitespace, sorted keys). The SHA-256 of this file is the conformance check. |
+| `expected-script.hex` | The expected compiled Bitcoin Script as a hex string. If present, the compiler's script output must match exactly. |
+
+---
+
+## How the Test Runner Works
+
+The runner (in `runner/`) performs these steps for each test case:
+
+```
+For each test directory:
+  1. Read the .tsop.ts source file.
+  2. Invoke the compiler under test to produce ANF IR.
+  3. Serialize the compiler's ANF IR using canonical JSON (RFC 8785).
+  4. Compare SHA-256(compiler_output) with SHA-256(expected-ir.json).
+  5. If expected-script.hex exists:
+     a. Invoke the compiler to produce the final script.
+     b. Compare the script hex with expected-script.hex.
+  6. Report pass/fail.
+```
+
+### Running for Each Compiler
+
+```bash
+# TypeScript reference compiler
+pnpm run conformance:ts
+
+# Go compiler
+pnpm run conformance:go
+
+# Rust compiler
+pnpm run conformance:rust
+```
+
+All three commands run the same test cases against different compiler binaries.
+
+---
+
+## How to Add New Test Cases
+
+1. Create a new directory under `tests/` with a descriptive name:
+
+```bash
+mkdir conformance/tests/my-new-test
+```
+
+2. Write the source contract:
+
+```bash
+# conformance/tests/my-new-test/my-new-test.tsop.ts
+```
+
+3. Generate the expected IR using the reference compiler:
+
+```bash
+tsop compile conformance/tests/my-new-test/my-new-test.tsop.ts --ir --canonical
+# Copy the canonical ANF IR to expected-ir.json
+```
+
+4. Optionally generate the expected script:
+
+```bash
+tsop compile conformance/tests/my-new-test/my-new-test.tsop.ts
+# Copy the script hex to expected-script.hex
+```
+
+5. Run the conformance suite to verify the new test passes:
+
+```bash
+pnpm run conformance:ts
+```
+
+---
+
+## Differential Fuzzing
+
+The fuzzer (in `fuzzer/`) generates random valid TSOP programs and tests compiler correctness by comparing against the reference interpreter.
+
+### How It Works
+
+```
+  +----------+      +-----------+      +----------+
+  |  Fuzzer   | --> | Compiler  | --> | Script VM |
+  | generates |     | compiles  |     | executes  |
+  | random    |     | to script |     |           |
+  | .tsop.ts  |     |           |     |           |
+  +----------+      +-----------+      +----------+
+       |                  |                  |
+       |                  v                  v
+       |           +-------------+    +-----------+
+       +---------> | Interpreter | -->| Compare   |
+                   | evaluates   |    | results   |
+                   | ANF IR      |    |           |
+                   +-------------+    +-----------+
+                                           |
+                                      pass / MISMATCH
+```
+
+If the compiler + VM produce a different result than the interpreter, a bug has been found. The fuzzer saves the failing program for reproduction.
+
+### Running the Fuzzer
+
+```bash
+# Run 10,000 random programs
+pnpm run fuzz -- --iterations 10000
+
+# Run with a specific seed (for reproducibility)
+pnpm run fuzz -- --seed 42 --iterations 5000
+
+# Run continuously until a mismatch is found
+pnpm run fuzz -- --until-fail
+```
+
+---
+
+## Golden File Management
+
+Golden files (`expected-ir.json`, `expected-script.hex`) are checked into version control. When the spec changes in a way that affects IR output:
+
+1. Update the spec documents in `spec/`.
+2. Update the reference compiler.
+3. Regenerate all golden files:
+
+```bash
+pnpm run conformance:update-golden
+```
+
+4. Review the diffs to verify the changes are expected.
+5. Commit the updated golden files alongside the compiler changes.
+
+Golden file updates should always be reviewed carefully. An unexpected change in a golden file indicates either a compiler bug or an unintended spec change.
+
+---
+
+## Current Test Cases
+
+| Test | Exercises | Has Script Golden |
+|---|---|---|
+| `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
+| `arithmetic` | Binary arithmetic operations (+, -, *, /, %) | No |
+| `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | No |
+| `if-else` | Conditional branches in ANF IR | No |
+| `bounded-loop` | Loop unrolling in ANF IR | No |
+| `multi-method` | Method dispatch table generation | No |
+| `stateful` | State updates, checkPreimage, getStateScript | In progress |

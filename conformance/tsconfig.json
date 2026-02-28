@@ -1,0 +1,20 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": ".",
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noUncheckedIndexedAccess": false,
+    "paths": {
+      "tsop-lang": ["../packages/tsop-lang/dist/index.d.ts"],
+      "tsop-lang/*": ["../packages/tsop-lang/dist/*"]
+    },
+    "baseUrl": "."
+  },
+  "include": [
+    "runner/**/*.ts",
+    "fuzzer/**/*.ts",
+    "tests/**/*.tsop.ts"
+  ]
+}

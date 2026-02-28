@@ -1,0 +1,31 @@
+{
+  "name": "tsop",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "TypeScript-to-Bitcoin Script compiler for BSV smart contracts",
+  "scripts": {
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "clean": "turbo run clean",
+    "typecheck": "turbo run typecheck",
+    "conformance:ts": "cd conformance && npx tsx runner/index.ts --tests-dir tests",
+    "conformance:go": "cd compilers/go && go test -v -run TestSourceCompile ./...",
+    "conformance:rust": "cd compilers/rust && PATH=\"$HOME/.cargo/bin:$PATH\" cargo test --test compiler_tests",
+    "conformance:all": "pnpm run conformance:ts && pnpm run conformance:go && pnpm run conformance:rust"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "packageManager": "pnpm@9.15.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^2.0.5"
+  }
+}

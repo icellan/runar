@@ -1,0 +1,419 @@
+# API Reference
+
+This document covers the TSOP CLI commands and the SDK classes for deploying, calling, and managing smart contracts programmatically.
+
+---
+
+## CLI Commands
+
+The TSOP CLI is provided by the `tsop-cli` package. Install it globally or use via `npx`:
+
+```bash
+npx tsop <command> [options]
+```
+
+### `tsop init`
+
+Initialize a new TSOP project in the current directory.
+
+```bash
+tsop init [project-name]
+```
+
+Creates a project scaffold with:
+- `package.json` with TSOP dependencies
+- `tsconfig.json` configured for TSOP
+- `contracts/` directory with a sample contract
+- `tests/` directory with a sample test
+- `artifacts/` directory (gitignored)
+
+### `tsop compile`
+
+Compile one or more TSOP contract source files into artifact JSON.
+
+```bash
+tsop compile <files...> [options]
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--output <dir>` | `./artifacts` | Output directory for compiled artifacts |
+| `--ir` | `false` | Include the ANF IR in the artifact (for debugging) |
+| `--asm` | `false` | Print the human-readable assembly to stdout |
+
+**Example:**
+
+```bash
+tsop compile contracts/P2PKH.tsop.ts --output ./build --asm
+
+# Output:
+# Compiling: /path/to/contracts/P2PKH.tsop.ts
+#   Artifact written: /path/to/build/P2PKH.json
+#
+#   ASM (P2PKH):
+#   OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+```
+
+### `tsop test`
+
+Run the project's test suite using vitest.
+
+```bash
+tsop test [options]
+```
+
+Discovers and runs all `*.test.ts` files in the project. Under the hood this invokes vitest with TSOP-appropriate configuration.
+
+### `tsop deploy`
+
+Deploy a compiled contract to the BSV blockchain.
+
+```bash
+tsop deploy <artifact-path> [options]
+```
+
+**Options:**
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--network <net>` | Yes | `mainnet` or `testnet` |
+| `--key <wif>` | Yes | WIF-encoded private key for funding the deployment |
+| `--satoshis <n>` | Yes | Amount of satoshis to lock in the contract UTXO |
+
+**Example:**
+
+```bash
+tsop deploy ./artifacts/P2PKH.json --network testnet --key cN1... --satoshis 10000
+
+# Output:
+# Deploying contract: P2PKH
+#   Network: testnet
+#   Satoshis: 10000
+#   Deployer address: mxyz...
+#
+# Broadcasting...
+#
+# Deployment successful!
+#   TXID: abc123...
+#   Explorer: https://whatsonchain.com/tx/abc123...
+```
+
+### `tsop verify`
+
+Verify a deployed contract matches a compiled artifact. Fetches the transaction from the blockchain and compares the on-chain locking script against the artifact's expected script.
+
+```bash
+tsop verify <artifact-path> --txid <txid> --network <net>
+```
+
+---
+
+## SDK Classes
+
+The SDK is provided by the `tsop-sdk` package. It gives you programmatic control over contract deployment, method invocation, and state management.
+
+### TSOPContract
+
+The main runtime wrapper for a compiled TSOP contract.
+
+```typescript
+import { TSOPContract } from 'tsop-sdk';
+```
+
+#### Constructor
+
+```typescript
+new TSOPContract(artifact: TSOPArtifact, constructorArgs: unknown[])
+```
+
+- **`artifact`** -- The compiled JSON artifact (loaded from the file produced by `tsop compile`).
+- **`constructorArgs`** -- Values for the contract's constructor parameters, matching the ABI in order.
+
+Throws if the number of arguments does not match the ABI.
+
+#### `deploy(provider, signer, options)`
+
+Deploy the contract by creating a UTXO with the locking script.
+
+```typescript
+async deploy(
+  provider: Provider,
+  signer: Signer,
+  options: { satoshis: number; changeAddress?: string }
+): Promise<{ txid: string; tx: Transaction }>
+```
+
+1. Fetches funding UTXOs from the provider.
+2. Builds the deploy transaction with the locking script.
+3. Signs all inputs with the signer.
+4. Broadcasts via the provider.
+5. Tracks the deployed UTXO internally.
+
+#### `call(methodName, args, provider, signer, options?)`
+
+Call a public method on the contract (spend the UTXO).
+
+```typescript
+async call(
+  methodName: string,
+  args: unknown[],
+  provider: Provider,
+  signer: Signer,
+  options?: { satoshis?: number; changeAddress?: string }
+): Promise<{ txid: string; tx: Transaction }>
+```
+
+For stateful contracts, a new UTXO is created with the updated state. For stateless contracts, the UTXO is consumed.
+
+#### `state`
+
+Read the current contract state (for stateful contracts).
+
+```typescript
+get state(): Record<string, unknown>
+```
+
+Returns a copy of the state object. Keys are property names, values are the current values.
+
+#### `getLockingScript()`
+
+Get the full locking script hex, including constructor parameters and serialized state.
+
+```typescript
+getLockingScript(): string
+```
+
+#### `TSOPContract.fromTxId(artifact, txid, outputIndex, provider)`
+
+Reconnect to an existing deployed contract from its on-chain UTXO.
+
+```typescript
+static async fromTxId(
+  artifact: TSOPArtifact,
+  txid: string,
+  outputIndex: number,
+  provider: Provider
+): Promise<TSOPContract>
+```
+
+Fetches the transaction, extracts the UTXO, and if the contract is stateful, deserializes the current state from the locking script.
+
+---
+
+## Provider Interface
+
+Providers give the SDK access to the blockchain. All providers implement the `Provider` interface:
+
+```typescript
+interface Provider {
+  getTransaction(txid: string): Promise<Transaction>;
+  broadcast(rawTx: string): Promise<string>;
+  getUtxos(address: string): Promise<UTXO[]>;
+  getContractUtxo(scriptHash: string): Promise<UTXO | null>;
+  getNetwork(): 'mainnet' | 'testnet';
+}
+```
+
+### WhatsOnChainProvider
+
+Production provider that connects to the WhatsOnChain API.
+
+```typescript
+import { WhatsOnChainProvider } from 'tsop-sdk';
+
+const provider = new WhatsOnChainProvider('testnet');
+// or
+const provider = new WhatsOnChainProvider('mainnet');
+```
+
+Uses the WhatsOnChain REST API for transaction lookups, UTXO queries, and broadcasting.
+
+### MockProvider
+
+In-memory provider for testing. Does not connect to any blockchain.
+
+```typescript
+import { MockProvider } from 'tsop-sdk';
+
+const provider = new MockProvider('testnet');
+```
+
+Useful for unit testing contract deployment and method calls without touching a real network. Stores transactions in memory and returns them from `getTransaction`.
+
+---
+
+## Signer Interface
+
+Signers handle private key operations. All signers implement the `Signer` interface:
+
+```typescript
+interface Signer {
+  getPublicKey(): Promise<string>;  // 33-byte compressed pubkey, hex
+  getAddress(): Promise<string>;     // Base58Check BSV address
+  sign(
+    txHex: string,
+    inputIndex: number,
+    subscript: string,
+    satoshis: number,
+    sigHashType?: number             // defaults to ALL | FORKID (0x41)
+  ): Promise<string>;               // DER signature + sighash byte, hex
+}
+```
+
+### LocalSigner
+
+Signs transactions using a local private key (hex-encoded).
+
+```typescript
+import { LocalSigner } from 'tsop-sdk';
+
+const signer = new LocalSigner('abc123...'); // 32-byte private key, hex
+```
+
+Suitable for server-side applications, CLI tools, and testing.
+
+### ExternalSigner
+
+Delegates signing to an external service or hardware wallet.
+
+```typescript
+import { ExternalSigner } from 'tsop-sdk';
+
+const signer = new ExternalSigner(signingCallback);
+```
+
+The callback receives the transaction data and returns a signature. This pattern supports integration with browser wallets, hardware security modules, or custodial APIs.
+
+---
+
+## State Management API
+
+For stateful contracts, the SDK provides functions to serialize and deserialize contract state.
+
+### `serializeState(fields, values)`
+
+Serialize state values into hex-encoded Bitcoin Script push data.
+
+```typescript
+import { serializeState } from 'tsop-sdk';
+
+const hex = serializeState(
+  artifact.stateFields,
+  { counter: 42n, owner: '02abc...' }
+);
+```
+
+Field order is determined by each `StateField`'s `index` property.
+
+### `deserializeState(fields, scriptHex)`
+
+Deserialize state values from a hex-encoded Script data section.
+
+```typescript
+import { deserializeState } from 'tsop-sdk';
+
+const state = deserializeState(artifact.stateFields, stateHex);
+// state = { counter: 42n, owner: '02abc...' }
+```
+
+### `extractStateFromScript(artifact, scriptHex)`
+
+Extract state from a full locking script. Finds the `OP_RETURN` delimiter and deserializes the state section.
+
+```typescript
+import { extractStateFromScript } from 'tsop-sdk';
+
+const state = extractStateFromScript(artifact, fullLockingScriptHex);
+```
+
+Returns `null` for stateless contracts or if no state section is found.
+
+---
+
+## Token Wallet API
+
+The `TokenWallet` class is a higher-level convenience wrapper for managing fungible token UTXOs.
+
+```typescript
+import { TokenWallet } from 'tsop-sdk';
+
+const wallet = new TokenWallet(tokenArtifact, provider, signer);
+```
+
+### `getBalance()`
+
+Get the total token balance across all UTXOs belonging to this wallet.
+
+```typescript
+const balance: bigint = await wallet.getBalance();
+```
+
+Iterates over all UTXOs, reconnects each as a `TSOPContract`, reads the state's `balance` or `amount` field, and sums them.
+
+### `transfer(recipientAddr, amount)`
+
+Transfer tokens to a recipient address.
+
+```typescript
+const txid: string = await wallet.transfer('mxyz...', 1000n);
+```
+
+Finds a UTXO with sufficient balance and calls its `transfer` public method.
+
+### `merge()`
+
+Merge multiple token UTXOs into a single UTXO (assumes the contract has a `merge` method).
+
+```typescript
+const txid: string = await wallet.merge();
+```
+
+### `getUtxos()`
+
+Get all token UTXOs associated with this wallet's signer address.
+
+```typescript
+const utxos: UTXO[] = await wallet.getUtxos();
+```
+
+Filters UTXOs by matching the token contract's locking script prefix.
+
+---
+
+## Types
+
+### UTXO
+
+```typescript
+interface UTXO {
+  txid: string;
+  outputIndex: number;
+  satoshis: number;
+  script: string; // hex-encoded locking script
+}
+```
+
+### Transaction
+
+```typescript
+interface Transaction {
+  txid: string;
+  version: number;
+  inputs: TransactionInput[];
+  outputs: TransactionOutput[];
+  locktime: number;
+  raw: string; // hex-encoded raw transaction
+}
+```
+
+### TSOPArtifact
+
+The compiled contract artifact. See `spec/artifact-format.md` for the full schema. Key fields:
+
+- `contractName: string`
+- `abi: { constructor: { params: ABIParam[] }, methods: ABIMethod[] }`
+- `script: string` (hex template)
+- `asm: string`
+- `stateFields: StateField[]`
