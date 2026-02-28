@@ -14,7 +14,8 @@
   "files": ["dist"],
   "dependencies": {
     "tsop-lang": "workspace:*",
-    "tsop-ir-schema": "workspace:*"
+    "tsop-ir-schema": "workspace:*",
+    "tsop-compiler": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.6.0",

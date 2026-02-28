@@ -111,6 +111,14 @@ class Environment {
 
 export class TSOPInterpreter {
   private readonly props: Map<string, TSOPValue>;
+  private _outputs: { satoshis: TSOPValue; stateValues: Record<string, TSOPValue> }[] = [];
+  private _contract: ContractNode | null = null;
+  private _mockPreimage: Record<string, bigint> = {
+    locktime: 0n,
+    amount: 10000n,
+    version: 1n,
+    sequence: 0xfffffffen,
+  };
 
   /**
    * @param properties - Contract constructor properties (name -> value).
@@ -120,6 +128,16 @@ export class TSOPInterpreter {
     for (const [k, v] of Object.entries(properties)) {
       this.props.set(k, v);
     }
+  }
+
+  setContract(contract: ContractNode): void { this._contract = contract; }
+  setMockPreimage(overrides: Record<string, bigint>): void { Object.assign(this._mockPreimage, overrides); }
+  resetOutputs(): void { this._outputs = []; }
+  getOutputs(): { satoshis: TSOPValue; stateValues: Record<string, TSOPValue> }[] { return [...this._outputs]; }
+  getState(): Record<string, TSOPValue> {
+    const state: Record<string, TSOPValue> = {};
+    for (const [k, v] of this.props) state[k] = v;
+    return state;
   }
 
   /**
@@ -304,6 +322,10 @@ export class TSOPInterpreter {
         return env.get(expr.name);
 
       case 'property_access': {
+        if (expr.property === 'txPreimage') {
+          // Return mock preimage bytes (181 zero bytes — valid BIP-143 length)
+          return { kind: 'bytes', value: new Uint8Array(181) };
+        }
         const val = this.props.get(expr.property);
         if (val === undefined) {
           throw new Error(`Undefined property: this.${expr.property}`);
@@ -505,6 +527,43 @@ export class TSOPInterpreter {
     env: Environment,
     methods: MethodNode[],
   ): TSOPValue {
+    // Handle this.method() where callee is property_access
+    if (callee.kind === 'property_access') {
+      const methodName = callee.property;
+
+      if (methodName === 'addOutput') {
+        const evaluatedArgs = argExprs.map(a => this.evalExpr(a, env, methods));
+        const satoshis = evaluatedArgs[0]!;
+        const stateValues: Record<string, TSOPValue> = {};
+        if (this._contract) {
+          const mutableProps = this._contract.properties.filter(p => !p.readonly);
+          for (let i = 0; i < mutableProps.length && i + 1 < evaluatedArgs.length; i++) {
+            stateValues[mutableProps[i]!.name] = evaluatedArgs[i + 1]!;
+          }
+        }
+        this._outputs.push({ satoshis, stateValues });
+        return { kind: 'void' };
+      }
+
+      if (methodName === 'getStateScript') {
+        return { kind: 'bytes', value: new Uint8Array(0) };
+      }
+
+      if (methodName === 'buildP2PKH') {
+        return { kind: 'bytes', value: new Uint8Array(25) };
+      }
+
+      // Fall through to regular method resolution — set funcName and continue
+      // Actually, private method calls via this.method() come through here too.
+      // Evaluate args and try to find the private method.
+      const evaluatedArgs = argExprs.map(a => this.evalExpr(a, env, methods));
+      const method = methods.find(m => m.name === methodName);
+      if (method) {
+        return this.executePrivateMethod(method, evaluatedArgs, env, methods);
+      }
+      throw new Error(`Unknown method: this.${methodName}`);
+    }
+
     // Determine function name.
     let funcName: string;
     if (callee.kind === 'identifier') {
@@ -696,6 +755,42 @@ export class TSOPInterpreter {
         const max = this.toBigInt(args[2]!);
         return { kind: 'boolean', value: value >= min && value < max };
       }
+
+      case 'checkPreimage':
+        return { kind: 'boolean', value: true };
+
+      case 'verifyRabinSig':
+        return { kind: 'boolean', value: true };
+
+      case 'extractLocktime':
+        return { kind: 'bigint', value: this._mockPreimage.locktime ?? 0n };
+
+      case 'extractAmount':
+        return { kind: 'bigint', value: this._mockPreimage.amount ?? 10000n };
+
+      case 'extractVersion':
+        return { kind: 'bigint', value: this._mockPreimage.version ?? 1n };
+
+      case 'extractSequence':
+        return { kind: 'bigint', value: this._mockPreimage.sequence ?? 0xfffffffen };
+
+      case 'extractOutputHash':
+      case 'extractOutputs':
+      case 'extractHashPrevouts':
+      case 'extractHashSequence':
+        return { kind: 'bytes', value: new Uint8Array(32) };
+
+      case 'extractOutpoint':
+        return { kind: 'bytes', value: new Uint8Array(36) };
+
+      case 'extractInputIndex':
+        return { kind: 'bigint', value: 0n };
+
+      case 'extractScriptCode':
+        return { kind: 'bytes', value: new Uint8Array(0) };
+
+      case 'extractSigHashType':
+        return { kind: 'bigint', value: 0x41n };
 
       default: {
         // Try to find a private method in the contract.

@@ -109,6 +109,9 @@ importers:
 
   packages/tsop-testing:
     dependencies:
+      tsop-compiler:
+        specifier: workspace:*
+        version: link:../tsop-compiler
       tsop-ir-schema:
         specifier: workspace:*
         version: link:../tsop-ir-schema

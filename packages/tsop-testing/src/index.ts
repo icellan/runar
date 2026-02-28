@@ -37,3 +37,7 @@ export {
   expectStackTop,
   expectStackTopNum,
 } from './helpers.js';
+
+// TestContract API
+export { TestContract } from './test-contract.js';
+export type { TestCallResult, OutputSnapshot, MockPreimage } from './test-contract.js';

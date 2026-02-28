@@ -13,6 +13,8 @@
       "tsop-compiler/*": ["../packages/tsop-compiler/dist/*"],
       "tsop-ir-schema": ["../packages/tsop-ir-schema/dist/index.d.ts"],
       "tsop-ir-schema/*": ["../packages/tsop-ir-schema/dist/*"],
+      "tsop-testing": ["../packages/tsop-testing/dist/index.d.ts"],
+      "tsop-testing/*": ["../packages/tsop-testing/dist/*"],
       "@bsv/sdk": ["../node_modules/@bsv/sdk/dist/types/mod.d.ts"]
     },
     "noUnusedLocals": false,
@@ -20,6 +22,7 @@
   },
   "include": [
     "**/*.tsop.ts",
+    "**/*.test.ts",
     "sdk-usage-typescript.ts"
   ]
 }

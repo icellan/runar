@@ -1,0 +1,52 @@
+import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { TestContract } from 'tsop-testing';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const source = readFileSync(join(__dirname, 'NFTExample.tsop.ts'), 'utf8');
+
+const ALICE = '02' + 'aa'.repeat(32);
+const BOB = '02' + 'bb'.repeat(32);
+const TOKEN_ID = 'deadbeef01020304';
+const METADATA = 'cafebabe';
+const MOCK_SIG = '30' + 'ff'.repeat(35);
+const SATS = 1000n;
+
+describe('SimpleNFT', () => {
+  function makeNFT(owner = ALICE) {
+    return TestContract.fromSource(source, {
+      owner,
+      tokenId: TOKEN_ID,
+      metadata: METADATA,
+    });
+  }
+
+  it('transfers ownership', () => {
+    const nft = makeNFT();
+    const result = nft.call('transfer', {
+      sig: MOCK_SIG,
+      newOwner: BOB,
+      outputSatoshis: SATS,
+    });
+    expect(result.success).toBe(true);
+    expect(result.outputs).toHaveLength(1);
+    expect(result.outputs[0]!.owner).toBe(BOB);
+  });
+
+  it('burns the token with no outputs', () => {
+    const nft = makeNFT();
+    const result = nft.call('burn', { sig: MOCK_SIG });
+    expect(result.success).toBe(true);
+    expect(result.outputs).toHaveLength(0);
+  });
+
+  it('preserves immutable properties after transfer', () => {
+    const nft = makeNFT();
+    nft.call('transfer', { sig: MOCK_SIG, newOwner: BOB, outputSatoshis: SATS });
+    // tokenId and metadata are readonly — they don't change
+    expect(nft.state.tokenId).toBe(TOKEN_ID);
+    expect(nft.state.metadata).toBe(METADATA);
+  });
+});
