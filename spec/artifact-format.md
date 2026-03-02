@@ -1,15 +1,15 @@
-# TSOP Compiled Artifact Format
+# Rúnar Compiled Artifact Format
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the JSON artifact produced by the TSOP compiler. The artifact contains everything needed to deploy and interact with a compiled smart contract on Bitcoin SV.
+This document specifies the JSON artifact produced by the Rúnar compiler. The artifact contains everything needed to deploy and interact with a compiled smart contract on Bitcoin SV.
 
 ---
 
 ## 1. Overview
 
-When the TSOP compiler processes a `.ts` source file, it produces a `.json` artifact file. This artifact is consumed by the TSOP SDK at runtime to:
+When the Rúnar compiler processes a `.ts` source file, it produces a `.json` artifact file. This artifact is consumed by the Rúnar SDK at runtime to:
 
 1. Deploy the contract (create the locking script with constructor parameters).
 2. Call public methods (construct unlocking scripts).
@@ -50,7 +50,7 @@ When the TSOP compiler processes a `.ts` source file, it produces a `.json` arti
 
 - **Type**: `string`
 - **Required**: Yes
-- **Description**: Version of the TSOP compiler that produced this artifact.
+- **Description**: Version of the Rúnar compiler that produced this artifact.
 - **Example**: `"0.1.0-alpha.1"`
 - **Rules**: Informational. The SDK MAY warn if the compiler version is significantly older or newer than the SDK version.
 
@@ -188,7 +188,7 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | Property name |
-| `type` | `string` | TSOP type |
+| `type` | `string` | Rúnar type |
 | `index` | `number` | Position in state serialization (0-based) |
 
 For stateless contracts (no mutable properties), this is an empty array `[]`.
@@ -239,7 +239,7 @@ The final locking script bytes are placed in a transaction output.
 
 ## 5. Method Invocation Flow
 
-To spend a UTXO locked by a TSOP contract:
+To spend a UTXO locked by a Rúnar contract:
 
 ### Step 1: Select Method
 

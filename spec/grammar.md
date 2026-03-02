@@ -1,9 +1,9 @@
-# TSOP Language Grammar
+# Rúnar Language Grammar
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document defines the formal grammar for TSOP, a strict subset of TypeScript designed for compilation to Bitcoin SV Script. TSOP source files are valid TypeScript that can be type-checked by `tsc`, but only the constructs defined here are accepted by the TSOP compiler.
+This document defines the formal grammar for Rúnar, a strict subset of TypeScript designed for compilation to Bitcoin SV Script. Rúnar source files are valid TypeScript that can be type-checked by `tsc`, but only the constructs defined here are accepted by the Rúnar compiler.
 
 ---
 
@@ -25,7 +25,7 @@ The grammar is specified in Extended Backus-Naur Form (EBNF) with the following 
 
 ## 2. Source File Structure
 
-A TSOP source file contains exactly one contract. Imports are restricted to the TSOP standard library.
+A Rúnar source file contains exactly one contract. Imports are restricted to the Rúnar standard library.
 
 ```ebnf
 SourceFile
@@ -48,7 +48,7 @@ ImportSpecifier
 
 ### Import Restrictions
 
-- The `from` path MUST be one of the allowed TSOP library modules (e.g., `'tsop'`, `'tsop/builtins'`).
+- The `from` path MUST be one of the allowed Rúnar library modules (e.g., `'runar'`, `'runar/builtins'`).
 - Arbitrary filesystem or npm imports are **disallowed**.
 - Re-exports and namespace imports (`import * as`) are **disallowed**.
 
@@ -94,7 +94,7 @@ PropertyDeclaration
 - **`readonly`** properties are immutable. They are set in the constructor and cannot be reassigned. They are embedded in the locking script at deployment time.
 - **Non-`readonly`** properties are stateful. They can be modified within public methods and their new values are propagated across transactions via `OP_PUSH_TX`. Contracts with mutable properties should extend `StatefulSmartContract`, which automatically handles preimage verification and state continuation.
 - Properties MUST NOT have initializers at the declaration site; all initialization happens in the constructor.
-- Access modifiers (`public`, `private`, `protected`) on properties are **optional** but have no semantic effect in TSOP -- all properties are accessible within the contract.
+- Access modifiers (`public`, `private`, `protected`) on properties are **optional** but have no semantic effect in Rúnar -- all properties are accessible within the contract.
 
 ---
 
@@ -231,7 +231,7 @@ FixedArrayType
 
 ### Disallowed Types
 
-The following TypeScript types are **not permitted** in TSOP:
+The following TypeScript types are **not permitted** in Rúnar:
 
 - `number` -- use `bigint` instead
 - `string` -- use `ByteString` instead
@@ -444,7 +444,7 @@ IdentifierPart
     ;
 ```
 
-Reserved words follow TypeScript conventions. Additionally, the following are reserved in TSOP:
+Reserved words follow TypeScript conventions. Additionally, the following are reserved in Rúnar:
 
 - `SmartContract` (base class)
 - All type names listed in section 8
@@ -454,7 +454,7 @@ Reserved words follow TypeScript conventions. Additionally, the following are re
 
 ## 13. Built-in Functions
 
-The following functions are available without import (provided by the TSOP runtime):
+The following functions are available without import (provided by the Rúnar runtime):
 
 ```ebnf
 BuiltinFunction
@@ -483,7 +483,7 @@ BuiltinFunction
 ## 14. Complete Example
 
 ```typescript
-import { SmartContract, assert, checkSig, PubKey, Sig } from 'tsop';
+import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar';
 
 export class P2PKH extends SmartContract {
     readonly pubKeyHash: Addr;
@@ -504,7 +504,7 @@ export class P2PKH extends SmartContract {
 
 ## 15. Disallowed Features Summary
 
-The following TypeScript features are explicitly excluded from TSOP:
+The following TypeScript features are explicitly excluded from Rúnar:
 
 | Feature | Reason |
 |---|---|

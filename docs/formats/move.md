@@ -1,7 +1,7 @@
 # Move-like Contract Format
 
 **Status:** Experimental
-**File extension:** `.tsop.move`
+**File extension:** `.runar.move`
 **Supported compilers:** TypeScript, Go, Rust
 
 ---
@@ -20,7 +20,7 @@ This is **not** Move. There is no borrow checker, no ability system, and no modu
 
 ```move
 module P2PKH {
-    use tsop::SmartContract;
+    use runar::SmartContract;
 
     resource struct P2PKH {
         pub_key_hash: Addr readonly,
@@ -37,15 +37,15 @@ module P2PKH {
 
 ```move
 module ContractName {
-    use tsop::SmartContract;
+    use runar::SmartContract;
     // or
-    use tsop::StatefulSmartContract;
+    use runar::StatefulSmartContract;
 
     // resource struct + functions
 }
 ```
 
-The `use` declaration specifies the base class. `tsop::SmartContract` for stateless contracts, `tsop::StatefulSmartContract` for stateful contracts.
+The `use` declaration specifies the base class. `runar::SmartContract` for stateless contracts, `runar::StatefulSmartContract` for stateful contracts.
 
 ### Resource Struct
 
@@ -108,7 +108,7 @@ The `self` keyword replaces `this`. The parser converts `self` references to pro
 
 ### Reference Stripping
 
-Move uses `&` and `&mut` references extensively. The TSOP Move parser strips these:
+Move uses `&` and `&mut` references extensively. The Rúnar Move parser strips these:
 
 ```move
 public fun settle(price: &bigint, sig: &Sig) {
@@ -116,7 +116,7 @@ public fun settle(price: &bigint, sig: &Sig) {
 }
 ```
 
-References have no semantic effect in the TSOP compilation model -- there is no heap, no borrow checker, and all values are stack-based.
+References have no semantic effect in the Rúnar compilation model -- there is no heap, no borrow checker, and all values are stack-based.
 
 ### State Mutation
 
@@ -125,7 +125,7 @@ self.count = self.count + 1;   // explicit assignment
 self.highest_bidder = bidder;
 ```
 
-Unlike TypeScript TSOP, Move syntax does not have `++` and `--` operators. Use explicit assignment.
+Unlike TypeScript Rúnar, Move syntax does not have `++` and `--` operators. Use explicit assignment.
 
 ### add_output
 
@@ -143,7 +143,7 @@ The `add_output` function (snake_case) maps to `this.addOutput()` in the AST.
 
 ```move
 module P2PKH {
-    use tsop::SmartContract;
+    use runar::SmartContract;
 
     resource struct P2PKH {
         pub_key_hash: Addr readonly,
@@ -160,7 +160,7 @@ module P2PKH {
 
 ```move
 module Counter {
-    use tsop::StatefulSmartContract;
+    use runar::StatefulSmartContract;
 
     resource struct Counter {
         count: bigint,
@@ -181,7 +181,7 @@ module Counter {
 
 ```move
 module Escrow {
-    use tsop::SmartContract;
+    use runar::SmartContract;
 
     resource struct Escrow {
         buyer: PubKey readonly,
@@ -211,7 +211,7 @@ module Escrow {
 
 ```move
 module Auction {
-    use tsop::StatefulSmartContract;
+    use runar::StatefulSmartContract;
 
     resource struct Auction {
         auctioneer: PubKey readonly,
@@ -239,7 +239,7 @@ module Auction {
 
 ```move
 module OraclePriceFeed {
-    use tsop::SmartContract;
+    use runar::SmartContract;
 
     resource struct OraclePriceFeed {
         oracle_pub_key: RabinPubKey readonly,
@@ -259,7 +259,7 @@ module OraclePriceFeed {
 
 ```move
 module CovenantVault {
-    use tsop::SmartContract;
+    use runar::SmartContract;
 
     resource struct CovenantVault {
         owner: PubKey readonly,
@@ -279,7 +279,7 @@ module CovenantVault {
 
 ```move
 module FungibleToken {
-    use tsop::StatefulSmartContract;
+    use runar::StatefulSmartContract;
 
     resource struct FungibleToken {
         owner: PubKey,
@@ -313,7 +313,7 @@ module FungibleToken {
 
 ```move
 module SimpleNFT {
-    use tsop::StatefulSmartContract;
+    use runar::StatefulSmartContract;
 
     resource struct SimpleNFT {
         owner: PubKey,
@@ -336,7 +336,7 @@ module SimpleNFT {
 
 ## Differences from Real Move
 
-| Feature | Real Move (Sui/Aptos) | TSOP Move-like |
+| Feature | Real Move (Sui/Aptos) | Rúnar Move-like |
 |---------|----------------------|----------------|
 | Borrow checker | Full ownership and borrowing model | No borrow checker; references stripped |
 | Abilities | `key`, `store`, `copy`, `drop` | Not supported |
@@ -367,7 +367,7 @@ The parser applies these conversions automatically:
 
 Built-in function name mapping:
 
-| Move | TSOP |
+| Move | Rúnar |
 |------|------|
 | `check_sig` | `checkSig` |
 | `check_multi_sig` | `checkMultiSig` |

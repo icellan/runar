@@ -1,8 +1,0 @@
-[package]
-name = "tsop-macros"
-version = "0.1.0"
-edition = "2021"
-description = "Proc-macro attributes for TSOP smart contract development"
-
-[lib]
-proc-macro = true

@@ -1,4 +1,4 @@
-//! Solidity-like parser for TSOP contracts.
+//! Solidity-like parser for Rúnar contracts.
 //!
 //! Parses a Solidity-style syntax into the same AST as the TypeScript parser.
 //! Hand-written tokenizer + recursive descent parser.
@@ -39,9 +39,9 @@ use super::parser::ParseResult;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Parse a Solidity-format TSOP contract source.
+/// Parse a Solidity-format Rúnar contract source.
 pub fn parse_solidity(source: &str, file_name: Option<&str>) -> ParseResult {
-    let file = file_name.unwrap_or("contract.tsop.sol");
+    let file = file_name.unwrap_or("contract.runar.sol");
     let mut errors: Vec<String> = Vec::new();
 
     let tokens = tokenize(source);
@@ -538,7 +538,7 @@ impl<'a> SolParser<'a> {
             }
         }
 
-        // Map Solidity-like type names to TSOP types
+        // Map Solidity-like type names to Rúnar types
         let mapped = match name.as_str() {
             "uint256" | "int256" | "uint" | "int" => "bigint",
             "bool" => "boolean",
@@ -1375,7 +1375,7 @@ contract P2PKH is SmartContract {
 }
 "#;
 
-        let result = parse_solidity(source, Some("P2PKH.tsop.sol"));
+        let result = parse_solidity(source, Some("P2PKH.runar.sol"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "P2PKH");
@@ -1411,7 +1411,7 @@ contract Counter is StatefulSmartContract {
 }
 "#;
 
-        let result = parse_solidity(source, Some("Counter.tsop.sol"));
+        let result = parse_solidity(source, Some("Counter.runar.sol"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "Counter");
@@ -1439,7 +1439,7 @@ contract Test is SmartContract {
 }
 "#;
 
-        let result = parse_solidity(source, Some("Test.tsop.sol"));
+        let result = parse_solidity(source, Some("Test.runar.sol"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         let body = &contract.methods[0].body;
@@ -1480,7 +1480,7 @@ contract Loop is SmartContract {
 }
 "#;
 
-        let result = parse_solidity(source, Some("Loop.tsop.sol"));
+        let result = parse_solidity(source, Some("Loop.runar.sol"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         assert_eq!(contract.methods[0].body.len(), 3); // let sum, for, require

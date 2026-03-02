@@ -637,6 +637,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 
 [[package]]
+name = "runar-compiler-rust"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "swc_common",
+ "swc_ecma_ast",
+ "swc_ecma_parser",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -979,20 +993,6 @@ checksum = "dd69c5aa8f924c7519d6372789a74eac5b94fb0f8fcf0d4a97eb0bfc3e785f39"
 dependencies = [
  "serde",
  "stable_deref_trait",
-]
-
-[[package]]
-name = "tsop-compiler-rust"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "swc_common",
- "swc_ecma_ast",
- "swc_ecma_parser",
 ]
 
 [[package]]

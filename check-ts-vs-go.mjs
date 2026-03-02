@@ -1,12 +1,12 @@
-import { compile } from './packages/tsop-compiler/dist/index.js';
-import { lowerToStack } from './packages/tsop-compiler/dist/passes/05-stack-lower.js';
-import { emit } from './packages/tsop-compiler/dist/passes/06-emit.js';
+import { compile } from './packages/runar-compiler/dist/index.js';
+import { lowerToStack } from './packages/runar-compiler/dist/passes/05-stack-lower.js';
+import { emit } from './packages/runar-compiler/dist/passes/06-emit.js';
 import { readFileSync } from 'node:fs';
 
 const tests = ['basic-p2pkh', 'arithmetic', 'boolean-logic', 'bounded-loop', 'if-else', 'multi-method', 'stateful'];
 
 for (const test of tests) {
-  const source = readFileSync(`conformance/tests/${test}/${test}.tsop.ts`, 'utf-8');
+  const source = readFileSync(`conformance/tests/${test}/${test}.runar.ts`, 'utf-8');
   const result = compile(source);
   if (result.success && result.anf) {
     try {

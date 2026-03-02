@@ -1,8 +1,8 @@
-#[path = "P2PKH.tsop.rs"]
+#[path = "P2PKH.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[test]
 fn test_unlock() {
@@ -22,5 +22,5 @@ fn test_unlock_wrong_key() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("P2PKH.tsop.rs"), "P2PKH.tsop.rs").unwrap();
+    runar::compile_check(include_str!("P2PKH.runar.rs"), "P2PKH.runar.rs").unwrap();
 }

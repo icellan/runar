@@ -1,7 +1,7 @@
 //! ANF IR types and loader.
 //!
-//! These types mirror the canonical TSOP ANF IR JSON schema. Any conformant
-//! TSOP compiler produces byte-identical ANF IR (when serialised with canonical
+//! These types mirror the canonical Rúnar ANF IR JSON schema. Any conformant
+//! Rúnar compiler produces byte-identical ANF IR (when serialised with canonical
 //! JSON), so these types serve as the universal interchange format.
 
 pub mod loader;

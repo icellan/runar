@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * TSOP Conformance Test Runner -- CLI entry point.
+ * Rúnar Conformance Test Runner -- CLI entry point.
  *
  * Usage:
  *   npx tsx conformance/runner/index.ts [options]
@@ -83,9 +83,9 @@ function parseArgs(argv: string[]): CLIOptions {
 
 function printHelp(): void {
   console.log(`
-TSOP Conformance Test Runner
+Rúnar Conformance Test Runner
 
-Runs TSOP contract source files through all available compiler implementations
+Runs Rúnar contract source files through all available compiler implementations
 (TypeScript, Go, Rust) and compares the outputs byte-for-byte.
 
 Usage:
@@ -104,7 +104,7 @@ Options:
 Test Directory Structure:
   Each subdirectory under the tests directory is a test case:
     <test-name>/
-      <test-name>.tsop.ts      Contract source (required)
+      <test-name>.runar.ts      Contract source (required)
       expected-ir.json          Expected ANF IR golden file (optional)
       expected-script.hex       Expected script hex golden file (optional)
 

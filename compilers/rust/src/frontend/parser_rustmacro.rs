@@ -1,4 +1,4 @@
-//! Rust DSL parser for TSOP contracts (.tsop.rs).
+//! Rust DSL parser for Rúnar contracts (.runar.rs).
 //!
 //! Parses Rust-style contract definitions using a hand-written tokenizer
 //! and recursive descent parser. Produces the same AST as the TypeScript parser.
@@ -263,7 +263,7 @@ impl RustDslParser {
             if matches!(self.current().typ, TokenType::Semi) { self.advance_clone(); }
         }
 
-        // Look for #[tsop::contract] struct
+        // Look for #[runar::contract] struct
         let mut properties: Vec<PropertyNode> = Vec::new();
         let mut contract_name = String::new();
         let mut parent_class = "SmartContract".to_string();
@@ -274,8 +274,8 @@ impl RustDslParser {
             if matches!(self.current().typ, TokenType::HashBracket) {
                 let attr = self.parse_attribute();
 
-                if attr == "tsop::contract" || attr == "tsop::stateful_contract" {
-                    if attr == "tsop::stateful_contract" {
+                if attr == "runar::contract" || attr == "runar::stateful_contract" {
+                    if attr == "runar::stateful_contract" {
                         parent_class = "StatefulSmartContract".to_string();
                     }
                     // Parse struct
@@ -317,7 +317,7 @@ impl RustDslParser {
                         }
                     }
                     self.expect(&TokenType::RBrace);
-                } else if attr.starts_with("tsop::methods") {
+                } else if attr.starts_with("runar::methods") {
                     // Parse impl block
                     if matches!(self.current().typ, TokenType::Impl) { self.advance_clone(); }
                     // Skip type name
@@ -353,7 +353,7 @@ impl RustDslParser {
         }
 
         if contract_name.is_empty() {
-            self.errors.push("No TSOP contract struct found".to_string());
+            self.errors.push("No Rúnar contract struct found".to_string());
             return ParseResult { contract: None, errors: self.errors };
         }
 
@@ -875,7 +875,7 @@ impl RustDslParser {
                 let tok = self.current().clone();
                 self.advance_clone();
                 self.errors.push(format!(
-                    "unsupported token '{:?}' at {}:{} — not valid in TSOP contract",
+                    "unsupported token '{:?}' at {}:{} — not valid in Rúnar contract",
                     tok.typ, tok.line, tok.col));
                 Expression::Identifier { name: "unknown".to_string() }
             }
@@ -937,7 +937,7 @@ fn map_rust_builtin(name: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn parse_rust_dsl(source: &str, file_name: Option<&str>) -> ParseResult {
-    let file = file_name.unwrap_or("contract.tsop.rs").to_string();
+    let file = file_name.unwrap_or("contract.runar.rs").to_string();
     let tokens = tokenize(source);
     let parser = RustDslParser::new(tokens, file);
     parser.parse()

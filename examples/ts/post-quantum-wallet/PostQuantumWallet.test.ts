@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 // Import directly from the source path (vitest resolves via alias)
-import { wotsKeygen, wotsSign } from '../../../packages/tsop-testing/src/crypto/wots.js';
+import { wotsKeygen, wotsSign } from '../../../packages/runar-testing/src/crypto/wots.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'PostQuantumWallet.tsop.ts'), 'utf8');
+const source = readFileSync(join(__dirname, 'PostQuantumWallet.runar.ts'), 'utf8');
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');

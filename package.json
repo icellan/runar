@@ -1,5 +1,5 @@
 {
-  "name": "tsop",
+  "name": "runar",
   "version": "0.1.0",
   "type": "module",
   "private": true,
@@ -14,7 +14,7 @@
     "conformance:go": "cd compilers/go && go test -v -run TestSourceCompile ./...",
     "conformance:rust": "cd compilers/rust && PATH=\"$HOME/.cargo/bin:$PATH\" cargo test --test compiler_tests",
     "conformance:all": "pnpm run conformance:ts && pnpm run conformance:go && pnpm run conformance:rust",
-    "whitepaper": "cd docs && pdflatex -interaction=nonstopmode tsop-whitepaper.tex && pdflatex -interaction=nonstopmode tsop-whitepaper.tex && pdflatex -interaction=nonstopmode tsop-whitepaper.tex"
+    "whitepaper": "cd docs && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

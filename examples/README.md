@@ -1,8 +1,8 @@
-# TSOP Example Contracts
+# Rúnar Example Contracts
 
-**A collection of example smart contracts demonstrating TSOP patterns and features.**
+**A collection of example smart contracts demonstrating Rúnar patterns and features.**
 
-Each example is a self-contained directory with a `.tsop.ts` source file and its own README explaining the contract's logic.
+Each example is a self-contained directory with a `.runar.ts` source file and its own README explaining the contract's logic.
 
 ---
 
@@ -26,23 +26,23 @@ Each example is a self-contained directory with a `.tsop.ts` source file and its
 ### Single Contract
 
 ```bash
-tsop compile examples/p2pkh/P2PKH.tsop.ts --outdir artifacts/
+runar compile examples/p2pkh/P2PKH.runar.ts --outdir artifacts/
 ```
 
 ### All Contracts
 
 ```bash
-tsop compile examples/**/*.tsop.ts --outdir artifacts/
+runar compile examples/**/*.runar.ts --outdir artifacts/
 ```
 
 ---
 
 ## How to Test Examples
 
-Each example can be tested using the `tsop-testing` helpers:
+Each example can be tested using the `runar-testing` helpers:
 
 ```typescript
-import { TestSmartContract, PubKey, Sig, Addr } from 'tsop-testing';
+import { TestSmartContract, PubKey, Sig, Addr } from 'runar-testing';
 
 describe('P2PKH', () => {
   it('should accept valid signature', () => {
@@ -63,7 +63,7 @@ describe('P2PKH', () => {
 Run tests:
 
 ```bash
-tsop test
+runar test
 ```
 
 ---
@@ -75,7 +75,7 @@ tsop test
 2. Deploy:
 
 ```bash
-tsop deploy ./artifacts/P2PKH.json \
+runar deploy ./artifacts/P2PKH.json \
   --network testnet \
   --key <your-testnet-WIF> \
   --satoshis 10000 \
@@ -85,7 +85,7 @@ tsop deploy ./artifacts/P2PKH.json \
 3. Verify the deployment:
 
 ```bash
-tsop verify <txid> --artifact ./artifacts/P2PKH.json --network testnet
+runar verify <txid> --artifact ./artifacts/P2PKH.json --network testnet
 ```
 
 ---

@@ -1,8 +1,8 @@
 {
-  "name": "tsop-conformance",
+  "name": "runar-conformance",
   "version": "0.1.0",
   "private": true,
-  "description": "Conformance test infrastructure for verifying TSOP compiler implementations produce identical output",
+  "description": "Conformance test infrastructure for verifying Rúnar compiler implementations produce identical output",
   "type": "module",
   "scripts": {
     "test": "tsx runner/index.ts",

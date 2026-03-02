@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"math/big"
 
-	"github.com/tsop/compiler-go/ir"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-// LowerToANF lowers a type-checked TSOP AST to the ANF IR.
+// LowerToANF lowers a type-checked Rúnar AST to the ANF IR.
 // This matches the TypeScript reference compiler's 04-anf-lower.ts exactly.
 func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	properties := lowerProperties(contract)

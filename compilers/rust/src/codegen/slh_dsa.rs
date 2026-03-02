@@ -1,4 +1,4 @@
-//! SLH-DSA (FIPS 205) Bitcoin Script codegen for the TSOP Rust stack lowerer.
+//! SLH-DSA (FIPS 205) Bitcoin Script codegen for the Rúnar Rust stack lowerer.
 //!
 //! Port of compilers/go/codegen/slh_dsa.go. All helpers are self-contained.
 //! Entry: `emit_verify_slh_dsa()` emits the full verification script.

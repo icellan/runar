@@ -1,4 +1,4 @@
-//! TSOP Artifact -- the final compiled output of a TSOP compiler.
+//! Rúnar Artifact -- the final compiled output of a Rúnar compiler.
 //!
 //! This is what gets consumed by wallets, SDKs, and deployment tooling.
 
@@ -53,7 +53,7 @@ pub struct StateField {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TSOPArtifact {
+pub struct RunarArtifact {
     pub version: String,
     #[serde(rename = "compilerVersion")]
     pub compiler_version: String,
@@ -72,15 +72,15 @@ pub struct TSOPArtifact {
 // Assembly
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: &str = "tsop-v0.1.0";
+const SCHEMA_VERSION: &str = "runar-v0.1.0";
 const COMPILER_VERSION: &str = "0.1.0-rust";
 
-/// Build a TSOPArtifact from the compilation products.
+/// Build a RunarArtifact from the compilation products.
 pub fn assemble_artifact(
     program: &ANFProgram,
     script_hex: &str,
     script_asm: &str,
-) -> TSOPArtifact {
+) -> RunarArtifact {
     // Build constructor params from properties
     let constructor_params: Vec<ABIParam> = program
         .properties
@@ -126,7 +126,7 @@ pub fn assemble_artifact(
     // Timestamp
     let now = chrono_lite_utc_now();
 
-    TSOPArtifact {
+    RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
         contract_name: program.contract_name.clone(),

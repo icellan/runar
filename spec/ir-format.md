@@ -1,15 +1,15 @@
-# TSOP ANF IR Specification
+# Rúnar ANF IR Specification
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the Administrative Normal Form (ANF) Intermediate Representation used by TSOP. The ANF IR is the **canonical conformance boundary**: all TSOP compilers MUST produce byte-identical ANF IR for the same input program. This enables interoperability, testing, and verification across implementations.
+This document specifies the Administrative Normal Form (ANF) Intermediate Representation used by Rúnar. The ANF IR is the **canonical conformance boundary**: all Rúnar compilers MUST produce byte-identical ANF IR for the same input program. This enables interoperability, testing, and verification across implementations.
 
 ---
 
 ## 1. Design Principles
 
-1. **Canonical**: There is exactly one valid ANF IR for any given TSOP source program. Two conforming compilers must produce identical output.
+1. **Canonical**: There is exactly one valid ANF IR for any given Rúnar source program. Two conforming compilers must produce identical output.
 2. **Explicit**: All intermediate computations are named. There are no nested expressions.
 3. **Serializable**: The IR has a well-defined JSON serialization using RFC 8785 (JSON Canonicalization Scheme / JCS).
 4. **Flat**: Method bodies are flat lists of bindings -- no nested blocks except for `if` and `loop` nodes.
@@ -414,7 +414,7 @@ Write to a fixed array (produces a new array).
 
 Types are represented as strings or objects in the IR:
 
-| TSOP Type | ANF Type Representation |
+| Rúnar Type | ANF Type Representation |
 |---|---|
 | `bigint` | `"bigint"` |
 | `boolean` | `"boolean"` |
@@ -443,11 +443,11 @@ The ANF IR MUST be serialized according to **RFC 8785 (JSON Canonicalization Sch
 5. **No duplicate keys**.
 6. **UTF-8 encoding** for the output byte stream.
 
-This ensures that any two conforming compilers produce byte-identical JSON for the same TSOP source.
+This ensures that any two conforming compilers produce byte-identical JSON for the same Rúnar source.
 
 ### Verification
 
-Given a TSOP source file `input.ts`, any conforming compiler must satisfy:
+Given a Rúnar source file `input.ts`, any conforming compiler must satisfy:
 
 ```
 sha256(compile_to_anf(input.ts)) == sha256(reference_compile_to_anf(input.ts))
@@ -510,7 +510,7 @@ t1 = if(t0) {
 ### Source
 
 ```typescript
-import { SmartContract, assert, checkSig, PubKey, Sig } from 'tsop';
+import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar';
 
 export class P2PKH extends SmartContract {
     readonly pubKeyHash: Addr;

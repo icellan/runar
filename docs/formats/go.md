@@ -1,16 +1,16 @@
 # Go Contract Format
 
 **Status:** Experimental
-**File extension:** `.tsop.go`
+**File extension:** `.runar.go`
 **Supported compilers:** Go only
 
 ---
 
 ## Overview
 
-The Go format lets you write TSOP contracts as idiomatic Go code. Contracts are Go structs embedding `tsop.SmartContract` or `tsop.StatefulSmartContract`, with methods defined as receiver functions. The Go compiler parses these directly -- no intermediate conversion to TypeScript.
+The Go format lets you write Rúnar contracts as idiomatic Go code. Contracts are Go structs embedding `runar.SmartContract` or `runar.StatefulSmartContract`, with methods defined as receiver functions. The Go compiler parses these directly -- no intermediate conversion to TypeScript.
 
-This format is **only supported by the Go compiler** (`compilers/go`). The TypeScript and Rust compilers cannot parse `.tsop.go` files. If you need cross-compiler portability, use the TypeScript format instead.
+This format is **only supported by the Go compiler** (`compilers/go`). The TypeScript and Rust compilers cannot parse `.runar.go` files. If you need cross-compiler portability, use the TypeScript format instead.
 
 ---
 
@@ -21,30 +21,30 @@ This format is **only supported by the Go compiler** (`compilers/go`). The TypeS
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 ```
 
-The package name is ignored by the compiler. The `"tsop"` import provides the base types and built-in functions.
+The package name is ignored by the compiler. The `"runar"` import provides the base types and built-in functions.
 
 ### Struct Declaration
 
 ```go
 type P2PKH struct {
-    tsop.SmartContract
-    PubKeyHash tsop.Addr `tsop:"readonly"`
+    runar.SmartContract
+    PubKeyHash runar.Addr `runar:"readonly"`
 }
 ```
 
-- Embed `tsop.SmartContract` or `tsop.StatefulSmartContract` as the first field (anonymous embed).
-- Properties are struct fields with `tsop.Type` types.
-- The `tsop:"readonly"` struct tag marks immutable properties.
+- Embed `runar.SmartContract` or `runar.StatefulSmartContract` as the first field (anonymous embed).
+- Properties are struct fields with `runar.Type` types.
+- The `runar:"readonly"` struct tag marks immutable properties.
 - Fields without the `readonly` tag are mutable (stateful).
 
 ### Exported vs. Unexported
 
-Go's visibility rules map to TSOP method visibility:
+Go's visibility rules map to Rúnar method visibility:
 
-| Go convention | TSOP visibility |
+| Go convention | Rúnar visibility |
 |--------------|-----------------|
 | `func (c *P2PKH) Unlock(...)` (exported) | `public` |
 | `func (c *P2PKH) helper(...)` (unexported) | `private` |
@@ -54,9 +54,9 @@ Exported methods (capitalized first letter) are spending entry points. Unexporte
 ### Methods
 
 ```go
-func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
-    tsop.Assert(tsop.Hash160(pubKey) == c.PubKeyHash)
-    tsop.Assert(tsop.CheckSig(sig, pubKey))
+func (c *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
+    runar.Assert(runar.Hash160(pubKey) == c.PubKeyHash)
+    runar.Assert(runar.CheckSig(sig, pubKey))
 }
 ```
 
@@ -65,10 +65,10 @@ func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
 - Public methods must not return a value.
 - Private methods may return a value.
 
-### tsop.Assert
+### runar.Assert
 
 ```go
-tsop.Assert(condition)
+runar.Assert(condition)
 ```
 
 Maps to `assert(condition)` in the AST. Fails the script if the condition is false.
@@ -96,8 +96,8 @@ Go's `++` and `--` statements and assignment work as expected for mutable proper
 ### Variable Declarations
 
 ```go
-msg := tsop.Num2Bin(price, 8)     // short variable declaration (let)
-var msg tsop.ByteString = expr     // explicit type (const if never reassigned)
+msg := runar.Num2Bin(price, 8)     // short variable declaration (let)
+var msg runar.ByteString = expr     // explicit type (const if never reassigned)
 ```
 
 Short variable declarations (`:=`) map to `let` bindings. The compiler infers mutability: if the variable is never reassigned, it is treated as `const`.
@@ -140,19 +140,19 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 
 ## Type Mapping
 
-| Go type | TSOP type |
+| Go type | Rúnar type |
 |---------|-----------|
-| `int64` / `tsop.BigInt` | `bigint` |
+| `int64` / `runar.BigInt` | `bigint` |
 | `bool` | `boolean` |
-| `tsop.ByteString` | `ByteString` |
-| `tsop.PubKey` | `PubKey` |
-| `tsop.Sig` | `Sig` |
-| `tsop.Sha256` | `Sha256` |
-| `tsop.Ripemd160` | `Ripemd160` |
-| `tsop.Addr` | `Addr` |
-| `tsop.SigHashPreimage` | `SigHashPreimage` |
-| `tsop.RabinSig` | `RabinSig` |
-| `tsop.RabinPubKey` | `RabinPubKey` |
+| `runar.ByteString` | `ByteString` |
+| `runar.PubKey` | `PubKey` |
+| `runar.Sig` | `Sig` |
+| `runar.Sha256` | `Sha256` |
+| `runar.Ripemd160` | `Ripemd160` |
+| `runar.Addr` | `Addr` |
+| `runar.SigHashPreimage` | `SigHashPreimage` |
+| `runar.RabinSig` | `RabinSig` |
+| `runar.RabinPubKey` | `RabinPubKey` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
 
@@ -160,42 +160,42 @@ Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats t
 
 ## Built-in Functions
 
-Built-in functions are accessed through the `tsop` package with PascalCase names:
+Built-in functions are accessed through the `runar` package with PascalCase names:
 
-| Go function | TSOP built-in |
+| Go function | Rúnar built-in |
 |------------|---------------|
-| `tsop.Assert(cond)` | `assert(cond)` |
-| `tsop.CheckSig(sig, pk)` | `checkSig(sig, pk)` |
-| `tsop.CheckMultiSig(sigs, pks)` | `checkMultiSig(sigs, pks)` |
-| `tsop.Hash256(data)` | `hash256(data)` |
-| `tsop.Hash160(data)` | `hash160(data)` |
-| `tsop.Sha256(data)` | `sha256(data)` |
-| `tsop.Ripemd160(data)` | `ripemd160(data)` |
-| `tsop.Len(data)` | `len(data)` |
-| `tsop.Num2Bin(n, size)` | `num2bin(n, size)` |
-| `tsop.Pack(n)` | `pack(n)` |
-| `tsop.Unpack(data)` | `unpack(data)` |
-| `tsop.Abs(n)` | `abs(n)` |
-| `tsop.Min(a, b)` | `min(a, b)` |
-| `tsop.Max(a, b)` | `max(a, b)` |
-| `tsop.Within(x, lo, hi)` | `within(x, lo, hi)` |
-| `tsop.Safediv(a, b)` | `safediv(a, b)` |
-| `tsop.Safemod(a, b)` | `safemod(a, b)` |
-| `tsop.Clamp(val, lo, hi)` | `clamp(val, lo, hi)` |
-| `tsop.Sign(n)` | `sign(n)` |
-| `tsop.Pow(base, exp)` | `pow(base, exp)` |
-| `tsop.MulDiv(a, b, c)` | `mulDiv(a, b, c)` |
-| `tsop.PercentOf(amount, bps)` | `percentOf(amount, bps)` |
-| `tsop.Sqrt(n)` | `sqrt(n)` |
-| `tsop.Gcd(a, b)` | `gcd(a, b)` |
-| `tsop.Divmod(a, b)` | `divmod(a, b)` |
-| `tsop.Log2(n)` | `log2(n)` |
-| `tsop.ToBool(n)` | `bool(n)` |
-| `tsop.CheckPreimage(pre)` | `checkPreimage(pre)` |
-| `tsop.ExtractLocktime(pre)` | `extractLocktime(pre)` |
-| `tsop.ExtractOutputHash(pre)` | `extractOutputHash(pre)` |
-| `tsop.ExtractAmount(pre)` | `extractAmount(pre)` |
-| `tsop.VerifyRabinSig(msg, sig, pad, pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
+| `runar.Assert(cond)` | `assert(cond)` |
+| `runar.CheckSig(sig, pk)` | `checkSig(sig, pk)` |
+| `runar.CheckMultiSig(sigs, pks)` | `checkMultiSig(sigs, pks)` |
+| `runar.Hash256(data)` | `hash256(data)` |
+| `runar.Hash160(data)` | `hash160(data)` |
+| `runar.Sha256(data)` | `sha256(data)` |
+| `runar.Ripemd160(data)` | `ripemd160(data)` |
+| `runar.Len(data)` | `len(data)` |
+| `runar.Num2Bin(n, size)` | `num2bin(n, size)` |
+| `runar.Pack(n)` | `pack(n)` |
+| `runar.Unpack(data)` | `unpack(data)` |
+| `runar.Abs(n)` | `abs(n)` |
+| `runar.Min(a, b)` | `min(a, b)` |
+| `runar.Max(a, b)` | `max(a, b)` |
+| `runar.Within(x, lo, hi)` | `within(x, lo, hi)` |
+| `runar.Safediv(a, b)` | `safediv(a, b)` |
+| `runar.Safemod(a, b)` | `safemod(a, b)` |
+| `runar.Clamp(val, lo, hi)` | `clamp(val, lo, hi)` |
+| `runar.Sign(n)` | `sign(n)` |
+| `runar.Pow(base, exp)` | `pow(base, exp)` |
+| `runar.MulDiv(a, b, c)` | `mulDiv(a, b, c)` |
+| `runar.PercentOf(amount, bps)` | `percentOf(amount, bps)` |
+| `runar.Sqrt(n)` | `sqrt(n)` |
+| `runar.Gcd(a, b)` | `gcd(a, b)` |
+| `runar.Divmod(a, b)` | `divmod(a, b)` |
+| `runar.Log2(n)` | `log2(n)` |
+| `runar.ToBool(n)` | `bool(n)` |
+| `runar.CheckPreimage(pre)` | `checkPreimage(pre)` |
+| `runar.ExtractLocktime(pre)` | `extractLocktime(pre)` |
+| `runar.ExtractOutputHash(pre)` | `extractOutputHash(pre)` |
+| `runar.ExtractAmount(pre)` | `extractAmount(pre)` |
+| `runar.VerifyRabinSig(msg, sig, pad, pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
 
 ---
 
@@ -206,16 +206,16 @@ Built-in functions are accessed through the `tsop` package with PascalCase names
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type P2PKH struct {
-    tsop.SmartContract
-    PubKeyHash tsop.Addr `tsop:"readonly"`
+    runar.SmartContract
+    PubKeyHash runar.Addr `runar:"readonly"`
 }
 
-func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
-    tsop.Assert(tsop.Hash160(pubKey) == c.PubKeyHash)
-    tsop.Assert(tsop.CheckSig(sig, pubKey))
+func (c *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
+    runar.Assert(runar.Hash160(pubKey) == c.PubKeyHash)
+    runar.Assert(runar.CheckSig(sig, pubKey))
 }
 ```
 
@@ -224,10 +224,10 @@ func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type Counter struct {
-    tsop.StatefulSmartContract
+    runar.StatefulSmartContract
     Count int64
 }
 
@@ -236,7 +236,7 @@ func (c *Counter) Increment() {
 }
 
 func (c *Counter) Decrement() {
-    tsop.Assert(c.Count > 0)
+    runar.Assert(c.Count > 0)
     c.Count--
 }
 ```
@@ -246,29 +246,29 @@ func (c *Counter) Decrement() {
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type Escrow struct {
-    tsop.SmartContract
-    Buyer  tsop.PubKey `tsop:"readonly"`
-    Seller tsop.PubKey `tsop:"readonly"`
-    Arbiter tsop.PubKey `tsop:"readonly"`
+    runar.SmartContract
+    Buyer  runar.PubKey `runar:"readonly"`
+    Seller runar.PubKey `runar:"readonly"`
+    Arbiter runar.PubKey `runar:"readonly"`
 }
 
-func (c *Escrow) ReleaseBySeller(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Seller))
+func (c *Escrow) ReleaseBySeller(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Seller))
 }
 
-func (c *Escrow) ReleaseByArbiter(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Arbiter))
+func (c *Escrow) ReleaseByArbiter(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Arbiter))
 }
 
-func (c *Escrow) RefundToBuyer(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Buyer))
+func (c *Escrow) RefundToBuyer(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Buyer))
 }
 
-func (c *Escrow) RefundByArbiter(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Arbiter))
+func (c *Escrow) RefundByArbiter(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Arbiter))
 }
 ```
 
@@ -277,27 +277,27 @@ func (c *Escrow) RefundByArbiter(sig tsop.Sig) {
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type Auction struct {
-    tsop.StatefulSmartContract
-    Auctioneer    tsop.PubKey `tsop:"readonly"`
-    HighestBidder tsop.PubKey
+    runar.StatefulSmartContract
+    Auctioneer    runar.PubKey `runar:"readonly"`
+    HighestBidder runar.PubKey
     HighestBid    int64
-    Deadline      int64 `tsop:"readonly"`
+    Deadline      int64 `runar:"readonly"`
 }
 
-func (c *Auction) Bid(bidder tsop.PubKey, bidAmount int64) {
-    tsop.Assert(bidAmount > c.HighestBid)
-    tsop.Assert(tsop.ExtractLocktime(c.TxPreimage) < c.Deadline)
+func (c *Auction) Bid(bidder runar.PubKey, bidAmount int64) {
+    runar.Assert(bidAmount > c.HighestBid)
+    runar.Assert(runar.ExtractLocktime(c.TxPreimage) < c.Deadline)
 
     c.HighestBidder = bidder
     c.HighestBid = bidAmount
 }
 
-func (c *Auction) Close(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Auctioneer))
-    tsop.Assert(tsop.ExtractLocktime(c.TxPreimage) >= c.Deadline)
+func (c *Auction) Close(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Auctioneer))
+    runar.Assert(runar.ExtractLocktime(c.TxPreimage) >= c.Deadline)
 }
 ```
 
@@ -306,19 +306,19 @@ func (c *Auction) Close(sig tsop.Sig) {
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type OraclePriceFeed struct {
-    tsop.SmartContract
-    OraclePubKey tsop.RabinPubKey `tsop:"readonly"`
-    Receiver     tsop.PubKey      `tsop:"readonly"`
+    runar.SmartContract
+    OraclePubKey runar.RabinPubKey `runar:"readonly"`
+    Receiver     runar.PubKey      `runar:"readonly"`
 }
 
-func (c *OraclePriceFeed) Settle(price int64, rabinSig tsop.RabinSig, padding tsop.ByteString, sig tsop.Sig) {
-    msg := tsop.Num2Bin(price, 8)
-    tsop.Assert(tsop.VerifyRabinSig(msg, rabinSig, padding, c.OraclePubKey))
-    tsop.Assert(price > 50000)
-    tsop.Assert(tsop.CheckSig(sig, c.Receiver))
+func (c *OraclePriceFeed) Settle(price int64, rabinSig runar.RabinSig, padding runar.ByteString, sig runar.Sig) {
+    msg := runar.Num2Bin(price, 8)
+    runar.Assert(runar.VerifyRabinSig(msg, rabinSig, padding, c.OraclePubKey))
+    runar.Assert(price > 50000)
+    runar.Assert(runar.CheckSig(sig, c.Receiver))
 }
 ```
 
@@ -327,19 +327,19 @@ func (c *OraclePriceFeed) Settle(price int64, rabinSig tsop.RabinSig, padding ts
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type CovenantVault struct {
-    tsop.SmartContract
-    Owner     tsop.PubKey `tsop:"readonly"`
-    Recipient tsop.Addr   `tsop:"readonly"`
-    MinAmount int64       `tsop:"readonly"`
+    runar.SmartContract
+    Owner     runar.PubKey `runar:"readonly"`
+    Recipient runar.Addr   `runar:"readonly"`
+    MinAmount int64       `runar:"readonly"`
 }
 
-func (c *CovenantVault) Spend(sig tsop.Sig, amount int64, txPreimage tsop.SigHashPreimage) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
-    tsop.Assert(tsop.CheckPreimage(txPreimage))
-    tsop.Assert(amount >= c.MinAmount)
+func (c *CovenantVault) Spend(sig runar.Sig, amount int64, txPreimage runar.SigHashPreimage) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
+    runar.Assert(runar.CheckPreimage(txPreimage))
+    runar.Assert(amount >= c.MinAmount)
 }
 ```
 
@@ -348,32 +348,32 @@ func (c *CovenantVault) Spend(sig tsop.Sig, amount int64, txPreimage tsop.SigHas
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type FungibleToken struct {
-    tsop.StatefulSmartContract
-    Owner   tsop.PubKey      `tsop:""`
+    runar.StatefulSmartContract
+    Owner   runar.PubKey      `runar:""`
     Balance int64
-    TokenId tsop.ByteString  `tsop:"readonly"`
+    TokenId runar.ByteString  `runar:"readonly"`
 }
 
-func (c *FungibleToken) Transfer(sig tsop.Sig, to tsop.PubKey, amount int64, outputSatoshis int64) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
-    tsop.Assert(amount > 0)
-    tsop.Assert(amount <= c.Balance)
+func (c *FungibleToken) Transfer(sig runar.Sig, to runar.PubKey, amount int64, outputSatoshis int64) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
+    runar.Assert(amount > 0)
+    runar.Assert(amount <= c.Balance)
 
     c.AddOutput(outputSatoshis, to, amount)
     c.AddOutput(outputSatoshis, c.Owner, c.Balance - amount)
 }
 
-func (c *FungibleToken) Send(sig tsop.Sig, to tsop.PubKey, outputSatoshis int64) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
+func (c *FungibleToken) Send(sig runar.Sig, to runar.PubKey, outputSatoshis int64) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
     c.AddOutput(outputSatoshis, to, c.Balance)
 }
 
-func (c *FungibleToken) Merge(sig tsop.Sig, totalBalance int64, outputSatoshis int64) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
-    tsop.Assert(totalBalance >= c.Balance)
+func (c *FungibleToken) Merge(sig runar.Sig, totalBalance int64, outputSatoshis int64) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
+    runar.Assert(totalBalance >= c.Balance)
     c.AddOutput(outputSatoshis, c.Owner, totalBalance)
 }
 ```
@@ -383,22 +383,22 @@ func (c *FungibleToken) Merge(sig tsop.Sig, totalBalance int64, outputSatoshis i
 ```go
 package contracts
 
-import "tsop"
+import "runar"
 
 type SimpleNFT struct {
-    tsop.StatefulSmartContract
-    Owner    tsop.PubKey     `tsop:""`
-    TokenId  tsop.ByteString `tsop:"readonly"`
-    Metadata tsop.ByteString `tsop:"readonly"`
+    runar.StatefulSmartContract
+    Owner    runar.PubKey     `runar:""`
+    TokenId  runar.ByteString `runar:"readonly"`
+    Metadata runar.ByteString `runar:"readonly"`
 }
 
-func (c *SimpleNFT) Transfer(sig tsop.Sig, newOwner tsop.PubKey, outputSatoshis int64) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
+func (c *SimpleNFT) Transfer(sig runar.Sig, newOwner runar.PubKey, outputSatoshis int64) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
     c.AddOutput(outputSatoshis, newOwner)
 }
 
-func (c *SimpleNFT) Burn(sig tsop.Sig) {
-    tsop.Assert(tsop.CheckSig(sig, c.Owner))
+func (c *SimpleNFT) Burn(sig runar.Sig) {
+    runar.Assert(runar.CheckSig(sig, c.Owner))
 }
 ```
 

@@ -1,18 +1,18 @@
-# TSOP Language Reference
+# Rúnar Language Reference
 
-TSOP is a strict subset of TypeScript designed for compilation to Bitcoin SV Script. Every TSOP source file is valid TypeScript -- it type-checks with `tsc` and gets full IDE support -- but only the constructs described in this document are accepted by the TSOP compiler.
+Rúnar is a strict subset of TypeScript designed for compilation to Bitcoin SV Script. Every Rúnar source file is valid TypeScript -- it type-checks with `tsc` and gets full IDE support -- but only the constructs described in this document are accepted by the Rúnar compiler.
 
 ---
 
 ## Contract Structure
 
-A TSOP source file contains exactly one contract class that extends `SmartContract` (stateless) or `StatefulSmartContract` (stateful):
+A Rúnar source file contains exactly one contract class that extends `SmartContract` (stateless) or `StatefulSmartContract` (stateful):
 
 **Stateless contract** — all properties are `readonly`:
 
 ```typescript
-import { SmartContract, assert, checkSig } from 'tsop-lang';
-import type { PubKey, Sig } from 'tsop-lang';
+import { SmartContract, assert, checkSig } from 'runar-lang';
+import type { PubKey, Sig } from 'runar-lang';
 
 class P2PKH extends SmartContract {
   readonly pubKeyHash: Addr;
@@ -32,7 +32,7 @@ class P2PKH extends SmartContract {
 **Stateful contract** — has mutable properties, state persists across transactions:
 
 ```typescript
-import { StatefulSmartContract, assert } from 'tsop-lang';
+import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
   count: bigint;  // mutable = stateful
@@ -54,7 +54,7 @@ class Counter extends StatefulSmartContract {
 
 - One class per file, extending `SmartContract` or `StatefulSmartContract`.
 - No decorators, no generics on the class.
-- Imports are restricted to `tsop-lang` (or `tsop` / `tsop/builtins`).
+- Imports are restricted to `runar-lang` (or `runar` / `runar/builtins`).
 
 ---
 
@@ -207,7 +207,7 @@ Mixing `bigint` and `ByteString` with `+` is a compile-time error.
 | `===` / `==` | Equality | `OP_NUMEQUAL` (bigint) or `OP_EQUAL` (bytes) |
 | `!==` / `!=` | Inequality | `OP_NUMNOTEQUAL` (bigint) or `OP_EQUAL OP_NOT` (bytes) |
 
-Both `==` and `===` have identical semantics in TSOP (no type coercion). The compiler recommends `===`.
+Both `==` and `===` have identical semantics in Rúnar (no type coercion). The compiler recommends `===`.
 
 ### Logical (operands: `boolean`)
 
@@ -432,7 +432,7 @@ In `StatefulSmartContract`, `checkPreimage` and state continuation are handled a
 
 ## Disallowed Features
 
-The following TypeScript features are explicitly excluded from TSOP, with rationale:
+The following TypeScript features are explicitly excluded from Rúnar, with rationale:
 
 | Feature | Reason |
 |---------|--------|
@@ -445,13 +445,13 @@ The following TypeScript features are explicitly excluded from TSOP, with ration
 | Dynamic arrays (`T[]`) | No heap allocation |
 | `number` | Ambiguous precision; use `bigint` |
 | Decorators | Not representable in Script |
-| Arbitrary function calls | Only TSOP built-in functions and contract methods are allowed |
+| Arbitrary function calls | Only Rúnar built-in functions and contract methods are allowed |
 | Arbitrary imports | Sandboxed compilation |
 | Multiple classes per file | One contract = one locking script |
 | Enums | Use `bigint` constants |
 | Interfaces / type aliases | Use concrete types only |
 | Template literals | Not needed; use `toByteString` |
-| Optional chaining (`?.`) / nullish coalescing (`??`) | No null/undefined in TSOP |
+| Optional chaining (`?.`) / nullish coalescing (`??`) | No null/undefined in Rúnar |
 | Spread operator (`...`) | Dynamic arity not supported |
 | `typeof` / `instanceof` | No runtime type information |
 | `new` expressions | Contract instantiation is handled by the framework |

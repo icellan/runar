@@ -1,4 +1,4 @@
-#[path = "MathDemo.tsop.rs"]
+#[path = "MathDemo.runar.rs"]
 mod contract;
 
 use contract::*;
@@ -131,5 +131,5 @@ fn test_log2() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("MathDemo.tsop.rs"), "MathDemo.tsop.rs").unwrap();
+    runar::compile_check(include_str!("MathDemo.runar.rs"), "MathDemo.runar.rs").unwrap();
 }

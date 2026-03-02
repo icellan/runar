@@ -1,18 +1,18 @@
 # Rust DSL Contract Format
 
 **Status:** Experimental
-**File extension:** `.tsop.rs`
+**File extension:** `.runar.rs`
 **Supported compilers:** Rust only
 
 ---
 
 ## Overview
 
-The Rust DSL format lets you write TSOP contracts as idiomatic Rust code using attribute macros. Contracts are Rust structs annotated with `#[tsop::contract]`, and methods are defined in `impl` blocks annotated with `#[tsop::methods(ContractName)]`. The Rust compiler parses these directly into the TSOP AST.
+The Rust DSL format lets you write Rúnar contracts as idiomatic Rust code using attribute macros. Contracts are Rust structs annotated with `#[runar::contract]`, and methods are defined in `impl` blocks annotated with `#[runar::methods(ContractName)]`. The Rust compiler parses these directly into the Rúnar AST.
 
-Contracts are also valid Rust that can be compiled and tested natively with `cargo test`, using the `tsop` mock crate which provides types and mock crypto functions.
+Contracts are also valid Rust that can be compiled and tested natively with `cargo test`, using the `runar` mock crate which provides types and mock crypto functions.
 
-This format is **only supported by the Rust compiler** (`compilers/rust`). The TypeScript and Go compilers cannot parse `.tsop.rs` files.
+This format is **only supported by the Rust compiler** (`compilers/rust`). The TypeScript and Go compilers cannot parse `.runar.rs` files.
 
 ---
 
@@ -21,25 +21,25 @@ This format is **only supported by the Rust compiler** (`compilers/rust`). The T
 ### Struct Declaration
 
 ```rust
-use tsop::prelude::*;
+use runar::prelude::*;
 
-#[tsop::contract]
+#[runar::contract]
 pub struct P2PKH {
     #[readonly]
     pub pub_key_hash: Addr,
 }
 ```
 
-- `#[tsop::contract]` marks the struct as a TSOP contract. The macro strips `#[readonly]` annotations at compile time.
+- `#[runar::contract]` marks the struct as a Rúnar contract. The macro strips `#[readonly]` annotations at compile time.
 - `#[readonly]` marks immutable properties (baked into the locking script).
 - Fields without `#[readonly]` are mutable (stateful).
 - Fields should be `pub` so tests can construct the struct directly.
-- All fields use snake_case; the TSOP parser converts to camelCase for the AST.
+- All fields use snake_case; the Rúnar parser converts to camelCase for the AST.
 
 ### Method Blocks
 
 ```rust
-#[tsop::methods(P2PKH)]
+#[runar::methods(P2PKH)]
 impl P2PKH {
     #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
@@ -49,7 +49,7 @@ impl P2PKH {
 }
 ```
 
-- `#[tsop::methods(ContractName)]` links the impl block to the contract struct.
+- `#[runar::methods(ContractName)]` links the impl block to the contract struct.
 - `#[public]` marks spending entry points. Methods without `#[public]` are private helpers.
 - The first parameter is `&self` (stateless) or `&mut self` (stateful).
 - Byte-type parameters use references (`&Sig`, `&PubKey`) to avoid ownership issues.
@@ -101,7 +101,7 @@ pub struct FtOutput {
     pub balance: Bigint,
 }
 
-#[tsop::contract]
+#[runar::contract]
 pub struct FungibleToken {
     pub owner: PubKey,
     pub balance: Bigint,
@@ -131,7 +131,7 @@ impl FungibleToken {
 }
 ```
 
-The TSOP compiler parses `self.add_output(...)` as `this.addOutput(...)` regardless of the Rust implementation details.
+The Rúnar compiler parses `self.add_output(...)` as `this.addOutput(...)` regardless of the Rust implementation details.
 
 ### For Loops
 
@@ -163,7 +163,7 @@ let x = if cond { a } else { b };
 
 ## Type Mapping
 
-| Rust type | TSOP type |
+| Rust type | Rúnar type |
 |-----------|-----------|
 | `Bigint` / `Int` / `i64` | `bigint` |
 | `bool` | `boolean` |
@@ -185,7 +185,7 @@ All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
 
 Built-in functions use snake_case and take references for byte-type arguments:
 
-| Rust function | TSOP built-in |
+| Rust function | Rúnar built-in |
 |--------------|---------------|
 | `assert!(cond)` | `assert(cond)` |
 | `assert_eq!(a, b)` | `assert(a === b)` |
@@ -221,11 +221,11 @@ Contracts can be tested natively with `cargo test`. Each test file includes the 
 
 ```rust
 // p2pkh/P2PKH_test.rs
-#[path = "P2PKH.tsop.rs"]
+#[path = "P2PKH.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[test]
 fn test_unlock() {
@@ -244,7 +244,7 @@ fn test_unlock_wrong_key() {
 }
 ```
 
-The `tsop` crate provides:
+The `runar` crate provides:
 - **Mock crypto:** `check_sig`, `check_preimage`, `verify_rabin_sig` always return `true`
 - **Real hashes:** `hash160`, `hash256`, `sha256`, `ripemd160` compute real hashes
 - **Test helpers:** `mock_sig()`, `mock_pub_key()`, `mock_preimage()`
@@ -258,15 +258,15 @@ Run tests with `cargo test` from the `examples/` directory.
 ### P2PKH
 
 ```rust
-use tsop::prelude::*;
+use runar::prelude::*;
 
-#[tsop::contract]
+#[runar::contract]
 pub struct P2PKH {
     #[readonly]
     pub pub_key_hash: Addr,
 }
 
-#[tsop::methods(P2PKH)]
+#[runar::methods(P2PKH)]
 impl P2PKH {
     #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
@@ -279,14 +279,14 @@ impl P2PKH {
 ### Counter
 
 ```rust
-use tsop::prelude::*;
+use runar::prelude::*;
 
-#[tsop::contract]
+#[runar::contract]
 pub struct Counter {
     pub count: Bigint,
 }
 
-#[tsop::methods(Counter)]
+#[runar::methods(Counter)]
 impl Counter {
     #[public]
     pub fn increment(&mut self) {
@@ -304,9 +304,9 @@ impl Counter {
 ### Escrow
 
 ```rust
-use tsop::prelude::*;
+use runar::prelude::*;
 
-#[tsop::contract]
+#[runar::contract]
 pub struct Escrow {
     #[readonly]
     pub buyer: PubKey,
@@ -316,7 +316,7 @@ pub struct Escrow {
     pub arbiter: PubKey,
 }
 
-#[tsop::methods(Escrow)]
+#[runar::methods(Escrow)]
 impl Escrow {
     #[public]
     pub fn release_by_seller(&self, sig: &Sig) {
@@ -361,7 +361,7 @@ The constructor is auto-generated from the struct fields. There is no explicit c
 
 ## Differences from Real Rust
 
-| Feature | Real Rust | TSOP Rust DSL |
+| Feature | Real Rust | Rúnar Rust DSL |
 |---------|-----------|---------------|
 | Ownership | Full borrow checker | Simplified; use `.clone()` where needed for `add_output` |
 | Traits | Supported | Not supported |

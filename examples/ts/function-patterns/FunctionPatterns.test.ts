@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'FunctionPatterns.tsop.ts'), 'utf8');
+const source = readFileSync(join(__dirname, 'FunctionPatterns.runar.ts'), 'utf8');
 
 const MOCK_SIG = '30' + 'ff'.repeat(35);
 const OWNER_PK = '02' + 'aa'.repeat(32);

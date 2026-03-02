@@ -2,9 +2,9 @@
 //
 // The contract struct is defined inline (not via #[path]) because the
 // add_output output-tracking requires fields and methods that are test
-// infrastructure, not part of the TSOP contract.
+// infrastructure, not part of the Rúnar contract.
 
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[derive(Clone)]
 struct FtOutput { satoshis: Bigint, owner: PubKey, balance: Bigint }
@@ -99,8 +99,8 @@ fn test_merge_less_than_balance_fails() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("FungibleTokenExample.tsop.rs"),
-        "FungibleTokenExample.tsop.rs",
+    runar::compile_check(
+        include_str!("FungibleTokenExample.runar.rs"),
+        "FungibleTokenExample.runar.rs",
     ).unwrap();
 }

@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'NFTExample.tsop.sol'), 'utf8');
-const FILE_NAME = 'NFTExample.tsop.sol';
+const source = readFileSync(join(__dirname, 'NFTExample.runar.sol'), 'utf8');
+const FILE_NAME = 'NFTExample.runar.sol';
 
 const ALICE = '02' + 'aa'.repeat(32);
 const BOB = '02' + 'bb'.repeat(32);

@@ -1,23 +1,23 @@
-//! TSOP Compiler (Rust) — CLI entry point.
+//! Rúnar Compiler (Rust) — CLI entry point.
 //!
 //! Supports two modes:
 //!   --ir <path>     Compile from ANF IR JSON to Bitcoin Script
-//!   --source <path> Compile from .tsop.ts source to Bitcoin Script (full pipeline)
+//!   --source <path> Compile from .runar.ts source to Bitcoin Script (full pipeline)
 
 use clap::Parser;
 use std::path::PathBuf;
 use std::process;
 
-/// TSOP Compiler (Rust implementation)
+/// Rúnar Compiler (Rust implementation)
 #[derive(Parser, Debug)]
-#[command(name = "tsop-compiler-rust")]
-#[command(about = "Compile TSOP contracts to Bitcoin Script")]
+#[command(name = "runar-compiler-rust")]
+#[command(about = "Compile Rúnar contracts to Bitcoin Script")]
 struct Args {
     /// Path to ANF IR JSON file
     #[arg(long)]
     ir: Option<PathBuf>,
 
-    /// Path to .tsop.ts source file
+    /// Path to .runar.ts source file
     #[arg(long)]
     source: Option<PathBuf>,
 
@@ -45,8 +45,8 @@ fn main() {
         eprintln!("Error: must provide --ir or --source flag.");
         eprintln!();
         eprintln!("Usage:");
-        eprintln!("  tsop-compiler-rust --ir <path>     Compile from ANF IR JSON");
-        eprintln!("  tsop-compiler-rust --source <path>  Compile from .tsop.ts source");
+        eprintln!("  runar-compiler-rust --ir <path>     Compile from ANF IR JSON");
+        eprintln!("  runar-compiler-rust --source <path>  Compile from .runar.ts source");
         eprintln!();
         eprintln!("Options:");
         eprintln!("  --output <path>  Write output to file (default: stdout)");
@@ -65,7 +65,7 @@ fn main() {
                 process::exit(1);
             }
         };
-        match tsop_compiler_rust::compile_source_to_ir(source_path) {
+        match runar_compiler_rust::compile_source_to_ir(source_path) {
             Ok(program) => {
                 match serde_json::to_string_pretty(&program) {
                     Ok(json) => println!("{}", json),
@@ -84,7 +84,7 @@ fn main() {
     }
 
     let artifact = if let Some(source_path) = args.source {
-        match tsop_compiler_rust::compile_from_source(&source_path) {
+        match runar_compiler_rust::compile_from_source(&source_path) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Compilation error: {}", e);
@@ -93,7 +93,7 @@ fn main() {
         }
     } else {
         let ir_path = args.ir.unwrap();
-        match tsop_compiler_rust::compile_from_ir(&ir_path) {
+        match runar_compiler_rust::compile_from_ir(&ir_path) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Compilation error: {}", e);

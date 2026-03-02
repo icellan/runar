@@ -11,7 +11,7 @@ import (
 // Public API
 // ---------------------------------------------------------------------------
 
-// ParseSolidity parses a Solidity-like TSOP contract and produces the standard AST.
+// ParseSolidity parses a Solidity-like Rúnar contract and produces the standard AST.
 func ParseSolidity(source []byte, fileName string) *ParseResult {
 	p := &solParser{
 		fileName: fileName,
@@ -539,7 +539,7 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 }
 
 func parseSolType(name string) TypeNode {
-	// Map Solidity-style types to TSOP types
+	// Map Solidity-style types to Rúnar types
 	switch name {
 	case "uint", "uint256", "int", "int256":
 		return PrimitiveType{Name: "bigint"}

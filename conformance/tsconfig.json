@@ -7,14 +7,14 @@
     "noUnusedParameters": false,
     "noUncheckedIndexedAccess": false,
     "paths": {
-      "tsop-lang": ["../packages/tsop-lang/dist/index.d.ts"],
-      "tsop-lang/*": ["../packages/tsop-lang/dist/*"]
+      "runar-lang": ["../packages/runar-lang/dist/index.d.ts"],
+      "runar-lang/*": ["../packages/runar-lang/dist/*"]
     },
     "baseUrl": "."
   },
   "include": [
     "runner/**/*.ts",
     "fuzzer/**/*.ts",
-    "tests/**/*.tsop.ts"
+    "tests/**/*.runar.ts"
   ]
 }

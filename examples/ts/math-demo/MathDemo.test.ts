@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'MathDemo.tsop.ts'), 'utf8');
+const source = readFileSync(join(__dirname, 'MathDemo.runar.ts'), 'utf8');
 
 describe('MathDemo', () => {
   // --- safediv ---

@@ -1,29 +1,29 @@
-# TSOP Multi-Format Input
+# Rúnar Multi-Format Input
 
-TSOP's canonical input format is TypeScript (`.tsop.ts`). In addition, four **experimental** alternative input formats are available. All formats compile through the same pipeline and produce identical Bitcoin Script output for equivalent contracts.
+Rúnar's canonical input format is TypeScript (`.runar.ts`). In addition, four **experimental** alternative input formats are available. All formats compile through the same pipeline and produce identical Bitcoin Script output for equivalent contracts.
 
 ---
 
 ## How It Works
 
-The TSOP compiler auto-detects the input format by file extension:
+The Rúnar compiler auto-detects the input format by file extension:
 
 | Extension | Format | Description |
 |-----------|--------|-------------|
-| `.tsop.ts` | TypeScript | Canonical format. Full IDE support via `tsc`. |
-| `.tsop.sol` | Solidity-like | Familiar syntax for Ethereum developers. |
-| `.tsop.move` | Move-like | Resource-oriented, inspired by Sui/Aptos Move. |
-| `.tsop.go` | Go | Native Go syntax with struct tags. Go compiler only. |
-| `.tsop.rs` | Rust DSL | Idiomatic Rust with attribute macros. Rust compiler only. |
+| `.runar.ts` | TypeScript | Canonical format. Full IDE support via `tsc`. |
+| `.runar.sol` | Solidity-like | Familiar syntax for Ethereum developers. |
+| `.runar.move` | Move-like | Resource-oriented, inspired by Sui/Aptos Move. |
+| `.runar.go` | Go | Native Go syntax with struct tags. Go compiler only. |
+| `.runar.rs` | Rust DSL | Idiomatic Rust with attribute macros. Rust compiler only. |
 
 All formats parse into the same `ContractNode` AST. From that point forward, the pipeline is identical: validate, typecheck, ANF lower, optimize, stack lower, emit.
 
 ```
-  .tsop.ts ──┐
-  .tsop.sol ──┤
-  .tsop.move ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
-  .tsop.go ───┤
-  .tsop.rs ───┘
+  .runar.ts ──┐
+  .runar.sol ──┤
+  .runar.move ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
+  .runar.go ───┤
+  .runar.rs ───┘
 ```
 
 ---
@@ -51,11 +51,11 @@ Each compiler has a primary native format plus support for the shared formats:
 
 | Compiler | Native format | Also supports |
 |----------|--------------|---------------|
-| TypeScript (`tsop-compiler`) | `.tsop.ts` | `.tsop.sol`, `.tsop.move` |
-| Go (`compilers/go`) | `.tsop.go` | `.tsop.ts`, `.tsop.sol`, `.tsop.move` |
-| Rust (`compilers/rust`) | `.tsop.rs` | `.tsop.ts`, `.tsop.sol`, `.tsop.move` |
+| TypeScript (`runar-compiler`) | `.runar.ts` | `.runar.sol`, `.runar.move` |
+| Go (`compilers/go`) | `.runar.go` | `.runar.ts`, `.runar.sol`, `.runar.move` |
+| Rust (`compilers/rust`) | `.runar.rs` | `.runar.ts`, `.runar.sol`, `.runar.move` |
 
-The Go format (`.tsop.go`) is only understood by the Go compiler. The Rust format (`.tsop.rs`) is only understood by the Rust compiler. All other formats are portable across all three compilers.
+The Go format (`.runar.go`) is only understood by the Go compiler. The Rust format (`.runar.rs`) is only understood by the Rust compiler. All other formats are portable across all three compilers.
 
 ---
 

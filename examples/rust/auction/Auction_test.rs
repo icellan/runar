@@ -1,8 +1,8 @@
-#[path = "Auction.tsop.rs"]
+#[path = "Auction.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 fn new_auction() -> Auction {
     Auction {
@@ -55,5 +55,5 @@ fn test_close_before_deadline_fails() { new_auction().close(&mock_sig()); }
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("Auction.tsop.rs"), "Auction.tsop.rs").unwrap();
+    runar::compile_check(include_str!("Auction.runar.rs"), "Auction.runar.rs").unwrap();
 }

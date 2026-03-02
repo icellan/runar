@@ -4,13 +4,13 @@
 //! appropriate parser based on file extension, and that each format parser
 //! produces a valid AST for the conformance test contracts.
 //!
-//! Full end-to-end compilation for non-.tsop.ts formats requires parser
+//! Full end-to-end compilation for non-.runar.ts formats requires parser
 //! maturation (type mapping, constructor synthesis, etc.). These tests
 //! focus on parse-level correctness and dispatch routing.
 
-use tsop_compiler_rust::compile_from_source_str;
-use tsop_compiler_rust::frontend::ast::Visibility;
-use tsop_compiler_rust::frontend::parser::parse_source;
+use runar_compiler_rust::compile_from_source_str;
+use runar_compiler_rust::frontend::ast::Visibility;
+use runar_compiler_rust::frontend::parser::parse_source;
 
 fn conformance_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -31,18 +31,18 @@ fn read_conformance_format(test_name: &str, ext: &str) -> Option<String> {
 
 #[test]
 fn test_parse_dispatch_sol() {
-    let source = read_conformance_format("arithmetic", ".tsop.sol");
+    let source = read_conformance_format("arithmetic", ".runar.sol");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.sol"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.sol"));
     assert!(result.contract.is_some(), "Solidity parser should produce a contract");
     assert_eq!(result.contract.as_ref().unwrap().name, "Arithmetic");
 }
 
 #[test]
 fn test_parse_dispatch_move() {
-    let source = read_conformance_format("arithmetic", ".tsop.move");
+    let source = read_conformance_format("arithmetic", ".runar.move");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.move"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.move"));
     // Move parser may produce errors on some constructs (known issue)
     if result.contract.is_some() {
         assert_eq!(result.contract.as_ref().unwrap().name, "Arithmetic");
@@ -51,9 +51,9 @@ fn test_parse_dispatch_move() {
 
 #[test]
 fn test_parse_dispatch_rs() {
-    let source = read_conformance_format("arithmetic", ".tsop.rs");
+    let source = read_conformance_format("arithmetic", ".runar.rs");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.rs"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.rs"));
     if result.contract.is_some() {
         assert_eq!(result.contract.as_ref().unwrap().name, "Arithmetic");
     }
@@ -61,9 +61,9 @@ fn test_parse_dispatch_rs() {
 
 #[test]
 fn test_parse_dispatch_ts() {
-    let source = read_conformance_format("arithmetic", ".tsop.ts");
+    let source = read_conformance_format("arithmetic", ".runar.ts");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.ts"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.ts"));
     assert!(result.errors.is_empty(), "TS parser should succeed: {:?}", result.errors);
     assert!(result.contract.is_some());
     assert_eq!(result.contract.as_ref().unwrap().name, "Arithmetic");
@@ -75,9 +75,9 @@ fn test_parse_dispatch_ts() {
 
 #[test]
 fn test_parse_sol_arithmetic_structure() {
-    let source = read_conformance_format("arithmetic", ".tsop.sol");
+    let source = read_conformance_format("arithmetic", ".runar.sol");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.sol"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.sol"));
     let contract = result.contract.expect("should parse contract");
 
     assert_eq!(contract.name, "Arithmetic");
@@ -91,9 +91,9 @@ fn test_parse_sol_arithmetic_structure() {
 
 #[test]
 fn test_parse_sol_p2pkh() {
-    let source = read_conformance_format("basic-p2pkh", ".tsop.sol");
+    let source = read_conformance_format("basic-p2pkh", ".runar.sol");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("basic-p2pkh.tsop.sol"));
+    let result = parse_source(&source.unwrap(), Some("basic-p2pkh.runar.sol"));
     let contract = result.contract.expect("should parse contract");
 
     assert_eq!(contract.name, "P2PKH");
@@ -106,9 +106,9 @@ fn test_parse_sol_p2pkh() {
 
 #[test]
 fn test_parse_move_arithmetic_structure() {
-    let source = read_conformance_format("arithmetic", ".tsop.move");
+    let source = read_conformance_format("arithmetic", ".runar.move");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("arithmetic.tsop.move"));
+    let result = parse_source(&source.unwrap(), Some("arithmetic.runar.move"));
     if result.contract.is_none() { return; } // Move parser may have issues (known)
     let contract = result.contract.unwrap();
 
@@ -120,16 +120,16 @@ fn test_parse_move_arithmetic_structure() {
 
 #[test]
 fn test_parse_move_p2pkh() {
-    let source = read_conformance_format("basic-p2pkh", ".tsop.move");
+    let source = read_conformance_format("basic-p2pkh", ".runar.move");
     if source.is_none() { return; }
-    let result = parse_source(&source.unwrap(), Some("basic-p2pkh.tsop.move"));
+    let result = parse_source(&source.unwrap(), Some("basic-p2pkh.runar.move"));
     if result.contract.is_none() { return; } // Move parser may have issues (known)
 
     assert_eq!(result.contract.unwrap().name, "P2PKH");
 }
 
 // ---------------------------------------------------------------------------
-// Test: .tsop.ts format compiles end-to-end via parse_source dispatch
+// Test: .runar.ts format compiles end-to-end via parse_source dispatch
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -140,9 +140,9 @@ fn test_ts_end_to_end_all_conformance() {
     ];
 
     for dir in &test_dirs {
-        let source = read_conformance_format(dir, ".tsop.ts");
+        let source = read_conformance_format(dir, ".runar.ts");
         if source.is_none() { continue; }
-        let artifact = compile_from_source_str(&source.unwrap(), Some(&format!("{}.tsop.ts", dir)))
+        let artifact = compile_from_source_str(&source.unwrap(), Some(&format!("{}.runar.ts", dir)))
             .unwrap_or_else(|e| panic!("{}: compilation failed: {}", dir, e));
 
         assert!(!artifact.script.is_empty(), "{}: empty script hex", dir);
@@ -157,7 +157,7 @@ fn test_ts_end_to_end_all_conformance() {
 
 #[test]
 fn test_cross_format_property_consistency() {
-    let formats = [".tsop.sol", ".tsop.move"];
+    let formats = [".runar.sol", ".runar.move"];
 
     for ext in &formats {
         let source = read_conformance_format("arithmetic", ext);
@@ -177,7 +177,7 @@ fn test_cross_format_property_consistency() {
 
 #[test]
 fn test_cross_format_method_param_consistency() {
-    let formats = [".tsop.sol", ".tsop.move"];
+    let formats = [".runar.sol", ".runar.move"];
 
     for ext in &formats {
         let source = read_conformance_format("arithmetic", ext);

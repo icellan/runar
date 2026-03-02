@@ -2,7 +2,7 @@ package contract
 
 import (
 	"testing"
-	"tsop"
+	"runar"
 )
 
 func TestMathDemo_Safediv(t *testing.T) {
@@ -152,7 +152,7 @@ func TestMathDemo_Log2(t *testing.T) {
 }
 
 func TestMathDemo_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("MathDemo.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("MathDemo.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }

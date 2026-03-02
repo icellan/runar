@@ -1,8 +1,8 @@
-#[path = "FunctionPatterns.tsop.rs"]
+#[path = "FunctionPatterns.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 fn make(balance: Bigint) -> FunctionPatterns {
     FunctionPatterns {
@@ -154,10 +154,10 @@ fn test_scale_then_normalize() {
 }
 
 // ---------------------------------------------------------------------------
-// TSOP compile check
+// Rúnar compile check
 // ---------------------------------------------------------------------------
 
-// Note: compile_check is skipped for this contract because the Rust TSOP
+// Note: compile_check is skipped for this contract because the Rust Rúnar
 // parser does not yet infer return types from private method signatures.
 // The type checker sees private methods returning void instead of bigint,
 // causing false type errors. The business logic is fully tested above

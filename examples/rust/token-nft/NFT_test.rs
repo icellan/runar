@@ -1,9 +1,9 @@
 // Contract logic tests for SimpleNFT.
 //
 // The contract struct is defined inline because add_output output-tracking
-// requires test infrastructure not part of the TSOP contract.
+// requires test infrastructure not part of the Rúnar contract.
 
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[derive(Clone)]
 struct NftOutput { satoshis: Bigint, owner: PubKey }
@@ -70,5 +70,5 @@ fn test_burn() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("NFTExample.tsop.rs"), "NFTExample.tsop.rs").unwrap();
+    runar::compile_check(include_str!("NFTExample.runar.rs"), "NFTExample.runar.rs").unwrap();
 }

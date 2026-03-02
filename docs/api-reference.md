@@ -1,38 +1,38 @@
 # API Reference
 
-This document covers the TSOP CLI commands and the SDK classes for deploying, calling, and managing smart contracts programmatically.
+This document covers the Rúnar CLI commands and the SDK classes for deploying, calling, and managing smart contracts programmatically.
 
 ---
 
 ## CLI Commands
 
-The TSOP CLI is provided by the `tsop-cli` package. Install it globally or use via `npx`:
+The Rúnar CLI is provided by the `runar-cli` package. Install it globally or use via `npx`:
 
 ```bash
-npx tsop <command> [options]
+npx runar <command> [options]
 ```
 
-### `tsop init`
+### `runar init`
 
-Initialize a new TSOP project in the current directory.
+Initialize a new Rúnar project in the current directory.
 
 ```bash
-tsop init [project-name]
+runar init [project-name]
 ```
 
 Creates a project scaffold with:
-- `package.json` with TSOP dependencies
-- `tsconfig.json` configured for TSOP
+- `package.json` with Rúnar dependencies
+- `tsconfig.json` configured for Rúnar
 - `contracts/` directory with a sample contract
 - `tests/` directory with a sample test
 - `artifacts/` directory (gitignored)
 
-### `tsop compile`
+### `runar compile`
 
-Compile one or more TSOP contract source files into artifact JSON.
+Compile one or more Rúnar contract source files into artifact JSON.
 
 ```bash
-tsop compile <files...> [options]
+runar compile <files...> [options]
 ```
 
 **Options:**
@@ -46,32 +46,32 @@ tsop compile <files...> [options]
 **Example:**
 
 ```bash
-tsop compile contracts/P2PKH.tsop.ts --output ./build --asm
+runar compile contracts/P2PKH.runar.ts --output ./build --asm
 
 # Output:
-# Compiling: /path/to/contracts/P2PKH.tsop.ts
+# Compiling: /path/to/contracts/P2PKH.runar.ts
 #   Artifact written: /path/to/build/P2PKH.json
 #
 #   ASM (P2PKH):
 #   OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
 ```
 
-### `tsop test`
+### `runar test`
 
 Run the project's test suite using vitest.
 
 ```bash
-tsop test [options]
+runar test [options]
 ```
 
-Discovers and runs all `*.test.ts` files in the project. Under the hood this invokes vitest with TSOP-appropriate configuration.
+Discovers and runs all `*.test.ts` files in the project. Under the hood this invokes vitest with Rúnar-appropriate configuration.
 
-### `tsop deploy`
+### `runar deploy`
 
 Deploy a compiled contract to the BSV blockchain.
 
 ```bash
-tsop deploy <artifact-path> [options]
+runar deploy <artifact-path> [options]
 ```
 
 **Options:**
@@ -85,7 +85,7 @@ tsop deploy <artifact-path> [options]
 **Example:**
 
 ```bash
-tsop deploy ./artifacts/P2PKH.json --network testnet --key cN1... --satoshis 10000
+runar deploy ./artifacts/P2PKH.json --network testnet --key cN1... --satoshis 10000
 
 # Output:
 # Deploying contract: P2PKH
@@ -100,35 +100,35 @@ tsop deploy ./artifacts/P2PKH.json --network testnet --key cN1... --satoshis 100
 #   Explorer: https://whatsonchain.com/tx/abc123...
 ```
 
-### `tsop verify`
+### `runar verify`
 
 Verify a deployed contract matches a compiled artifact. Fetches the transaction from the blockchain and compares the on-chain locking script against the artifact's expected script.
 
 ```bash
-tsop verify <artifact-path> --txid <txid> --network <net>
+runar verify <artifact-path> --txid <txid> --network <net>
 ```
 
 ---
 
 ## SDK Classes
 
-The SDK is provided by the `tsop-sdk` package. It gives you programmatic control over contract deployment, method invocation, and state management.
+The SDK is provided by the `runar-sdk` package. It gives you programmatic control over contract deployment, method invocation, and state management.
 
-### TSOPContract
+### RunarContract
 
-The main runtime wrapper for a compiled TSOP contract.
+The main runtime wrapper for a compiled Rúnar contract.
 
 ```typescript
-import { TSOPContract } from 'tsop-sdk';
+import { RunarContract } from 'runar-sdk';
 ```
 
 #### Constructor
 
 ```typescript
-new TSOPContract(artifact: TSOPArtifact, constructorArgs: unknown[])
+new RunarContract(artifact: RunarArtifact, constructorArgs: unknown[])
 ```
 
-- **`artifact`** -- The compiled JSON artifact (loaded from the file produced by `tsop compile`).
+- **`artifact`** -- The compiled JSON artifact (loaded from the file produced by `runar compile`).
 - **`constructorArgs`** -- Values for the contract's constructor parameters, matching the ABI in order.
 
 Throws if the number of arguments does not match the ABI.
@@ -185,17 +185,17 @@ Get the full locking script hex, including constructor parameters and serialized
 getLockingScript(): string
 ```
 
-#### `TSOPContract.fromTxId(artifact, txid, outputIndex, provider)`
+#### `RunarContract.fromTxId(artifact, txid, outputIndex, provider)`
 
 Reconnect to an existing deployed contract from its on-chain UTXO.
 
 ```typescript
 static async fromTxId(
-  artifact: TSOPArtifact,
+  artifact: RunarArtifact,
   txid: string,
   outputIndex: number,
   provider: Provider
-): Promise<TSOPContract>
+): Promise<RunarContract>
 ```
 
 Fetches the transaction, extracts the UTXO, and if the contract is stateful, deserializes the current state from the locking script.
@@ -221,7 +221,7 @@ interface Provider {
 Production provider that connects to the WhatsOnChain API.
 
 ```typescript
-import { WhatsOnChainProvider } from 'tsop-sdk';
+import { WhatsOnChainProvider } from 'runar-sdk';
 
 const provider = new WhatsOnChainProvider('testnet');
 // or
@@ -235,7 +235,7 @@ Uses the WhatsOnChain REST API for transaction lookups, UTXO queries, and broadc
 In-memory provider for testing. Does not connect to any blockchain.
 
 ```typescript
-import { MockProvider } from 'tsop-sdk';
+import { MockProvider } from 'runar-sdk';
 
 const provider = new MockProvider('testnet');
 ```
@@ -267,7 +267,7 @@ interface Signer {
 Signs transactions using a local private key (hex-encoded).
 
 ```typescript
-import { LocalSigner } from 'tsop-sdk';
+import { LocalSigner } from 'runar-sdk';
 
 const signer = new LocalSigner('abc123...'); // 32-byte private key, hex
 ```
@@ -279,7 +279,7 @@ Suitable for server-side applications, CLI tools, and testing.
 Delegates signing to an external service or hardware wallet.
 
 ```typescript
-import { ExternalSigner } from 'tsop-sdk';
+import { ExternalSigner } from 'runar-sdk';
 
 const signer = new ExternalSigner(signingCallback);
 ```
@@ -297,7 +297,7 @@ For stateful contracts, the SDK provides functions to serialize and deserialize 
 Serialize state values into hex-encoded Bitcoin Script push data.
 
 ```typescript
-import { serializeState } from 'tsop-sdk';
+import { serializeState } from 'runar-sdk';
 
 const hex = serializeState(
   artifact.stateFields,
@@ -312,7 +312,7 @@ Field order is determined by each `StateField`'s `index` property.
 Deserialize state values from a hex-encoded Script data section.
 
 ```typescript
-import { deserializeState } from 'tsop-sdk';
+import { deserializeState } from 'runar-sdk';
 
 const state = deserializeState(artifact.stateFields, stateHex);
 // state = { counter: 42n, owner: '02abc...' }
@@ -323,7 +323,7 @@ const state = deserializeState(artifact.stateFields, stateHex);
 Extract state from a full locking script. Finds the `OP_RETURN` delimiter and deserializes the state section.
 
 ```typescript
-import { extractStateFromScript } from 'tsop-sdk';
+import { extractStateFromScript } from 'runar-sdk';
 
 const state = extractStateFromScript(artifact, fullLockingScriptHex);
 ```
@@ -337,7 +337,7 @@ Returns `null` for stateless contracts or if no state section is found.
 The `TokenWallet` class is a higher-level convenience wrapper for managing fungible token UTXOs.
 
 ```typescript
-import { TokenWallet } from 'tsop-sdk';
+import { TokenWallet } from 'runar-sdk';
 
 const wallet = new TokenWallet(tokenArtifact, provider, signer);
 ```
@@ -350,7 +350,7 @@ Get the total token balance across all UTXOs belonging to this wallet.
 const balance: bigint = await wallet.getBalance();
 ```
 
-Iterates over all UTXOs, reconnects each as a `TSOPContract`, reads the state's `balance` or `amount` field, and sums them.
+Iterates over all UTXOs, reconnects each as a `RunarContract`, reads the state's `balance` or `amount` field, and sums them.
 
 ### `transfer(recipientAddr, amount)`
 
@@ -408,7 +408,7 @@ interface Transaction {
 }
 ```
 
-### TSOPArtifact
+### RunarArtifact
 
 The compiled contract artifact. See `spec/artifact-format.md` for the full schema. Key fields:
 

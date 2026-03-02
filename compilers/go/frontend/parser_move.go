@@ -11,7 +11,7 @@ import (
 // Public API
 // ---------------------------------------------------------------------------
 
-// ParseMove parses a Move-style TSOP contract and produces the standard AST.
+// ParseMove parses a Move-style Rúnar contract and produces the standard AST.
 func ParseMove(source []byte, fileName string) *ParseResult {
 	p := &moveParser{
 		fileName: fileName,
@@ -453,7 +453,7 @@ func snakeToCamel(s string) string {
 	return result
 }
 
-// moveBuiltinMap maps Move-style snake_case builtins to TSOP camelCase.
+// moveBuiltinMap maps Move-style snake_case builtins to Rúnar camelCase.
 var moveBuiltinMap = map[string]string{
 	"check_sig":       "checkSig",
 	"check_multi_sig": "checkMultiSig",
@@ -487,7 +487,7 @@ func moveMapBuiltin(name string) string {
 	return snakeToCamel(name)
 }
 
-// moveMapType maps Move-style type names to TSOP types.
+// moveMapType maps Move-style type names to Rúnar types.
 func moveMapType(name string) TypeNode {
 	switch name {
 	case "u64", "u128", "u256":
@@ -1165,7 +1165,7 @@ func (p *moveParser) parseMoveUnary() Expression {
 		operand := p.parseMoveUnary()
 		return UnaryExpr{Op: "~", Operand: operand}
 	}
-	// Skip & (reference) — it's a no-op in the TSOP context
+	// Skip & (reference) — it's a no-op in the Rúnar context
 	if p.match(moveTokAmp) {
 		if p.matchIdent("mut") {
 			// &mut expr — skip both

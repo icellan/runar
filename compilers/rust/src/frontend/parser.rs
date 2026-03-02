@@ -1,7 +1,7 @@
 //! Pass 1: Parse
 //!
 //! Uses SWC to parse a TypeScript source file and extract the SmartContract
-//! subclass into a TSOP AST.
+//! subclass into a Rúnar AST.
 
 use swc_common::sync::Lrc;
 use swc_common::{FileName, SourceMap};
@@ -31,7 +31,7 @@ pub struct ParseResult {
     pub errors: Vec<String>,
 }
 
-/// Parse a TypeScript source string and extract the TSOP contract AST.
+/// Parse a TypeScript source string and extract the Rúnar contract AST.
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let mut errors: Vec<String> = Vec::new();
     let file = file_name.unwrap_or("contract.ts");
@@ -387,11 +387,11 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> Ty
             }
             TsKeywordTypeKind::TsVoidKeyword => TypeNode::Primitive(PrimitiveTypeName::Void),
             TsKeywordTypeKind::TsNumberKeyword => {
-                errors.push("'number' type is not allowed in TSOP contracts; use 'bigint' instead".to_string());
+                errors.push("'number' type is not allowed in Rúnar contracts; use 'bigint' instead".to_string());
                 TypeNode::Primitive(PrimitiveTypeName::Bigint)
             }
             TsKeywordTypeKind::TsStringKeyword => {
-                errors.push("'string' type is not allowed in TSOP contracts; use 'ByteString' instead".to_string());
+                errors.push("'string' type is not allowed in Rúnar contracts; use 'ByteString' instead".to_string());
                 TypeNode::Primitive(PrimitiveTypeName::ByteString)
             }
             _ => {
@@ -836,7 +836,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
         Expr::Member(member) => parse_member_expression(member, file, errors),
 
         Expr::SuperProp(super_prop) => {
-            // super.x -- unlikely in TSOP but handle gracefully
+            // super.x -- unlikely in Rúnar but handle gracefully
             match &super_prop.prop {
                 SuperProp::Ident(ident) => Expression::MemberExpr {
                     object: Box::new(Expression::Identifier {
@@ -865,7 +865,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
         }
 
         Expr::Lit(Lit::Num(num)) => {
-            // Plain numeric literal -- treat as bigint for TSOP
+            // Plain numeric literal -- treat as bigint for Rúnar
             Expression::BigIntLiteral {
                 value: num.value as i64,
             }
@@ -1112,19 +1112,19 @@ fn bigint_to_i64(bigint_lit: &swc::BigInt) -> i64 {
 /// Parse a source string, automatically selecting the parser based on file extension.
 ///
 /// Supported extensions:
-/// - `.tsop.sol` -> Solidity-like parser
-/// - `.tsop.move` -> Move-style parser
-/// - `.tsop.rs` -> Rust DSL parser
-/// - anything else (including `.tsop.ts`) -> TypeScript parser (default)
+/// - `.runar.sol` -> Solidity-like parser
+/// - `.runar.move` -> Move-style parser
+/// - `.runar.rs` -> Rust DSL parser
+/// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     let name = file_name.unwrap_or("contract.ts");
-    if name.ends_with(".tsop.sol") {
+    if name.ends_with(".runar.sol") {
         return super::parser_sol::parse_solidity(source, file_name);
     }
-    if name.ends_with(".tsop.move") {
+    if name.ends_with(".runar.move") {
         return super::parser_move::parse_move(source, file_name);
     }
-    if name.ends_with(".tsop.rs") {
+    if name.ends_with(".runar.rs") {
         return super::parser_rustmacro::parse_rust_dsl(source, file_name);
     }
     // Default: TypeScript parser

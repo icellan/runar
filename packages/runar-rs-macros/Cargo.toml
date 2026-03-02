@@ -1,0 +1,8 @@
+[package]
+name = "runar-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Proc-macro attributes for Rúnar smart contract development"
+
+[lib]
+proc-macro = true

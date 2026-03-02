@@ -2,23 +2,23 @@ package contract
 
 import (
 	"testing"
-	"tsop"
+	"runar"
 )
 
 func newVault() *CovenantVault {
 	return &CovenantVault{
-		Owner:     tsop.MockPubKey(),
-		Recipient: tsop.Hash160(tsop.MockPubKey()),
+		Owner:     runar.MockPubKey(),
+		Recipient: runar.Hash160(runar.MockPubKey()),
 		MinAmount: 1000,
 	}
 }
 
 func TestCovenantVault_Spend(t *testing.T) {
-	newVault().Spend(tsop.MockSig(), 5000, tsop.MockPreimage())
+	newVault().Spend(runar.MockSig(), 5000, runar.MockPreimage())
 }
 
 func TestCovenantVault_Spend_ExactMinimum(t *testing.T) {
-	newVault().Spend(tsop.MockSig(), 1000, tsop.MockPreimage())
+	newVault().Spend(runar.MockSig(), 1000, runar.MockPreimage())
 }
 
 func TestCovenantVault_Spend_BelowMinimum_Fails(t *testing.T) {
@@ -27,11 +27,11 @@ func TestCovenantVault_Spend_BelowMinimum_Fails(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newVault().Spend(tsop.MockSig(), 999, tsop.MockPreimage())
+	newVault().Spend(runar.MockSig(), 999, runar.MockPreimage())
 }
 
 func TestCovenantVault_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("CovenantVault.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("CovenantVault.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }

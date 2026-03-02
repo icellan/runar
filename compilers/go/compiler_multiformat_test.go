@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/tsop/compiler-go/frontend"
+	"github.com/icellan/runar/compilers/go/frontend"
 )
 
 // ---------------------------------------------------------------------------
@@ -15,13 +15,13 @@ import (
 // appropriate parser based on file extension, and that each format parser
 // produces a valid AST for the conformance test contracts.
 //
-// Note: Full end-to-end compilation (CompileFromSource) for non-.tsop.ts
+// Note: Full end-to-end compilation (CompileFromSource) for non-.runar.ts
 // formats is deferred until the format-specific parsers are fully integrated
 // with the validator (they need to synthesize super() calls, map types like
 // Int→bigint, etc.). These tests focus on parse-level correctness.
 // ---------------------------------------------------------------------------
 
-var multiFormats = []string{".tsop.ts", ".tsop.sol", ".tsop.move", ".tsop.go"}
+var multiFormats = []string{".runar.ts", ".runar.sol", ".runar.move", ".runar.go"}
 
 func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
 	t.Helper()
@@ -45,10 +45,10 @@ func TestParseSource_Dispatch(t *testing.T) {
 		ext          string
 		expectedName string
 	}{
-		{".tsop.ts", "Arithmetic"},
-		{".tsop.sol", "Arithmetic"},
-		{".tsop.move", "Arithmetic"},
-		{".tsop.go", "Arithmetic"},
+		{".runar.ts", "Arithmetic"},
+		{".runar.sol", "Arithmetic"},
+		{".runar.move", "Arithmetic"},
+		{".runar.go", "Arithmetic"},
 	}
 
 	for _, tt := range tests {
@@ -74,7 +74,7 @@ func TestParseSource_Dispatch(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseSolidity_Arithmetic(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "arithmetic", ".tsop.sol")
+	source, fileName := readConformanceFormat(t, "arithmetic", ".runar.sol")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -98,7 +98,7 @@ func TestParseSolidity_Arithmetic(t *testing.T) {
 }
 
 func TestParseSolidity_P2PKH(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".tsop.sol")
+	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".runar.sol")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -117,7 +117,7 @@ func TestParseSolidity_P2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseMove_Arithmetic(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "arithmetic", ".tsop.move")
+	source, fileName := readConformanceFormat(t, "arithmetic", ".runar.move")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -135,7 +135,7 @@ func TestParseMove_Arithmetic(t *testing.T) {
 }
 
 func TestParseMove_P2PKH(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".tsop.move")
+	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".runar.move")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -151,7 +151,7 @@ func TestParseMove_P2PKH(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestParseGoContract_Arithmetic(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "arithmetic", ".tsop.go")
+	source, fileName := readConformanceFormat(t, "arithmetic", ".runar.go")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -163,7 +163,7 @@ func TestParseGoContract_Arithmetic(t *testing.T) {
 }
 
 func TestParseGoContract_P2PKH(t *testing.T) {
-	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".tsop.go")
+	source, fileName := readConformanceFormat(t, "basic-p2pkh", ".runar.go")
 	result := frontend.ParseSource(source, fileName)
 
 	if result.Contract == nil {
@@ -175,7 +175,7 @@ func TestParseGoContract_P2PKH(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: .tsop.ts format still compiles end-to-end via ParseSource dispatch
+// Test: .runar.ts format still compiles end-to-end via ParseSource dispatch
 // ---------------------------------------------------------------------------
 
 func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
@@ -183,7 +183,7 @@ func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".tsop.ts")
+			source := filepath.Join(conformanceDir(), dir, dir+".runar.ts")
 			artifact, err := CompileFromSource(source)
 			if err != nil {
 				t.Fatalf("CompileFromSource failed: %v", err)
@@ -203,7 +203,7 @@ func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMultiFormat_PropertyConsistency(t *testing.T) {
-	for _, ext := range []string{".tsop.sol", ".tsop.move", ".tsop.go"} {
+	for _, ext := range []string{".runar.sol", ".runar.move", ".runar.go"} {
 		t.Run("arithmetic"+ext, func(t *testing.T) {
 			source, fileName := readConformanceFormat(t, "arithmetic", ext)
 			result := frontend.ParseSource(source, fileName)
@@ -233,7 +233,7 @@ func TestMultiFormat_PropertyConsistency(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestMultiFormat_MethodParamConsistency(t *testing.T) {
-	for _, ext := range []string{".tsop.sol", ".tsop.move", ".tsop.go"} {
+	for _, ext := range []string{".runar.sol", ".runar.move", ".runar.go"} {
 		t.Run("arithmetic"+ext, func(t *testing.T) {
 			source, fileName := readConformanceFormat(t, "arithmetic", ext)
 			result := frontend.ParseSource(source, fileName)
@@ -266,10 +266,10 @@ func TestMultiFormat_MethodParamConsistency(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: .tsop.go example contracts compile to Bitcoin Script
+// Test: .runar.go example contracts compile to Bitcoin Script
 //
-// This ensures that contracts valid as Go are also valid TSOP — catching
-// cases where Go code compiles but uses features outside the TSOP subset.
+// This ensures that contracts valid as Go are also valid Rúnar — catching
+// cases where Go code compiles but uses features outside the Rúnar subset.
 // ---------------------------------------------------------------------------
 
 func TestGoContract_CompileExamples(t *testing.T) {
@@ -279,14 +279,14 @@ func TestGoContract_CompileExamples(t *testing.T) {
 		file         string
 		contractName string
 	}{
-		{"p2pkh", "P2PKH.tsop.go", "P2PKH"},
-		{"escrow", "Escrow.tsop.go", "Escrow"},
-		{"stateful-counter", "Counter.tsop.go", "Counter"},
-		{"auction", "Auction.tsop.go", "Auction"},
-		{"covenant-vault", "CovenantVault.tsop.go", "CovenantVault"},
-		{"oracle-price", "OraclePriceFeed.tsop.go", "OraclePriceFeed"},
-		{"token-ft", "FungibleTokenExample.tsop.go", "FungibleToken"},
-		{"token-nft", "NFTExample.tsop.go", "SimpleNFT"},
+		{"p2pkh", "P2PKH.runar.go", "P2PKH"},
+		{"escrow", "Escrow.runar.go", "Escrow"},
+		{"stateful-counter", "Counter.runar.go", "Counter"},
+		{"auction", "Auction.runar.go", "Auction"},
+		{"covenant-vault", "CovenantVault.runar.go", "CovenantVault"},
+		{"oracle-price", "OraclePriceFeed.runar.go", "OraclePriceFeed"},
+		{"token-ft", "FungibleTokenExample.runar.go", "FungibleToken"},
+		{"token-nft", "NFTExample.runar.go", "SimpleNFT"},
 	}
 
 	for _, ex := range examples {
@@ -298,7 +298,7 @@ func TestGoContract_CompileExamples(t *testing.T) {
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {
-				t.Fatalf("TSOP compilation failed: %v", err)
+				t.Fatalf("Rúnar compilation failed: %v", err)
 			}
 
 			if artifact.ContractName != ex.contractName {
@@ -317,7 +317,7 @@ func TestGoContract_CompileExamples(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: .tsop.go conformance tests compile to Bitcoin Script
+// Test: .runar.go conformance tests compile to Bitcoin Script
 // ---------------------------------------------------------------------------
 
 func TestGoContract_CompileConformance(t *testing.T) {
@@ -326,14 +326,14 @@ func TestGoContract_CompileConformance(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".tsop.go")
+			source := filepath.Join(conformanceDir(), dir, dir+".runar.go")
 			if _, err := os.Stat(source); os.IsNotExist(err) {
 				t.Skipf("source not found: %s", source)
 			}
 
 			artifact, err := CompileFromSource(source)
 			if err != nil {
-				t.Fatalf("TSOP compilation failed: %v", err)
+				t.Fatalf("Rúnar compilation failed: %v", err)
 			}
 
 			if artifact.Script == "" {

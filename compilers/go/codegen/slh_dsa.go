@@ -1,4 +1,4 @@
-// SLH-DSA (FIPS 205) Bitcoin Script codegen for the TSOP Go stack lowerer.
+// SLH-DSA (FIPS 205) Bitcoin Script codegen for the Rúnar Go stack lowerer.
 //
 // Splice into LoweringContext in stack.go. All helpers self-contained.
 // Entry: lowerVerifySLHDSA() → calls EmitVerifySLHDSA().

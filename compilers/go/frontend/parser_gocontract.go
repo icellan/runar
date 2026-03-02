@@ -14,8 +14,8 @@ import (
 // Public API
 // ---------------------------------------------------------------------------
 
-// ParseGoContract parses a Go contract syntax (.tsop.go) source file and
-// produces the standard TSOP AST. Uses Go's built-in go/parser.
+// ParseGoContract parses a Go contract syntax (.runar.go) source file and
+// produces the standard Rúnar AST. Uses Go's built-in go/parser.
 func ParseGoContract(source []byte, fileName string) *ParseResult {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, fileName, source, parser.ParseComments)
@@ -31,7 +31,7 @@ func ParseGoContract(source []byte, fileName string) *ParseResult {
 
 	contract := p.extractContract()
 	if contract == nil && len(p.errors) == 0 {
-		p.errors = append(p.errors, "no TSOP contract struct found in Go source")
+		p.errors = append(p.errors, "no Rúnar contract struct found in Go source")
 	}
 
 	return &ParseResult{
@@ -58,7 +58,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 	var properties []PropertyNode
 	var methods []MethodNode
 
-	// Find the struct type that embeds tsop.SmartContract or tsop.StatefulSmartContract
+	// Find the struct type that embeds runar.SmartContract or runar.StatefulSmartContract
 	for _, decl := range p.file.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok || genDecl.Tok != token.TYPE {
@@ -74,11 +74,11 @@ func (p *goContractParser) extractContract() *ContractNode {
 				continue
 			}
 
-			// Check for tsop.SmartContract / tsop.StatefulSmartContract embed
+			// Check for runar.SmartContract / runar.StatefulSmartContract embed
 			found := false
 			for _, field := range structType.Fields.List {
 				if sel, ok := field.Type.(*ast.SelectorExpr); ok {
-					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "tsop" {
+					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "runar" {
 						switch sel.Sel.Name {
 						case "SmartContract":
 							parentClass = "SmartContract"
@@ -114,7 +114,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 					readonly := false
 					if field.Tag != nil {
 						tagStr := field.Tag.Value
-						if strings.Contains(tagStr, `tsop:"readonly"`) {
+						if strings.Contains(tagStr, `runar:"readonly"`) {
 							readonly = true
 						}
 					}
@@ -192,7 +192,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 
 	// Find standalone (non-method) functions — treated as private helpers.
 	// These are package-level functions without a receiver, e.g.:
-	//   func testInternal(amount tsop.Bigint) tsop.Bigint { ... }
+	//   func testInternal(amount runar.Bigint) runar.Bigint { ... }
 	// They become private methods with no access to contract state.
 	for _, decl := range p.file.Decls {
 		funcDecl, ok := decl.(*ast.FuncDecl)
@@ -277,7 +277,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 func (p *goContractParser) resolveType(expr ast.Expr) TypeNode {
 	switch e := expr.(type) {
 	case *ast.SelectorExpr:
-		if ident, ok := e.X.(*ast.Ident); ok && ident.Name == "tsop" {
+		if ident, ok := e.X.(*ast.Ident); ok && ident.Name == "runar" {
 			return mapGoType(e.Sel.Name)
 		}
 		return CustomType{Name: fmt.Sprintf("%v.%s", e.X, e.Sel.Name)}
@@ -350,7 +350,7 @@ func (p *goContractParser) extractStatements(block *ast.BlockStmt) []Statement {
 		} else {
 			pos := p.fset.Position(stmt.Pos())
 			p.errors = append(p.errors, fmt.Sprintf(
-				"unsupported Go statement at %s:%d:%d — not valid in TSOP contract",
+				"unsupported Go statement at %s:%d:%d — not valid in Rúnar contract",
 				p.fileName, pos.Line, pos.Column))
 		}
 	}
@@ -519,19 +519,19 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		return Identifier{Name: name}
 
 	case *ast.SelectorExpr:
-		// tsop.FuncName -> function call identifier
+		// runar.FuncName -> function call identifier
 		if ident, ok := e.X.(*ast.Ident); ok {
-			if ident.Name == "tsop" {
+			if ident.Name == "runar" {
 				return Identifier{Name: mapGoBuiltin(e.Sel.Name)}
 			}
 			// receiver.Field -> property access (e.g. c.Count, m.Value)
 			if ident.Name == p.receiverName || ident.Name == "c" || ident.Name == "self" {
 				return PropertyAccessExpr{Property: goFieldToCamel(e.Sel.Name)}
 			}
-			// Any other package selector (math.Log, fmt.Println, etc.) is not valid TSOP
+			// Any other package selector (math.Log, fmt.Println, etc.) is not valid Rúnar
 			pos := p.fset.Position(e.Pos())
 			p.errors = append(p.errors, fmt.Sprintf(
-				"unsupported expression '%s.%s' at %s:%d:%d — only tsop.* builtins and contract field access are allowed",
+				"unsupported expression '%s.%s' at %s:%d:%d — only runar.* builtins and contract field access are allowed",
 				ident.Name, e.Sel.Name, p.fileName, pos.Line, pos.Column))
 			return nil
 		}
@@ -539,9 +539,9 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		return MemberExpr{Object: obj, Property: goFieldToCamel(e.Sel.Name)}
 
 	case *ast.CallExpr:
-		// Handle type conversions: tsop.Int(0), tsop.Bigint(x) -> inner value
+		// Handle type conversions: runar.Int(0), runar.Bigint(x) -> inner value
 		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
-			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "tsop" {
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "runar" {
 				typeName := sel.Sel.Name
 				if (typeName == "Int" || typeName == "Bigint" || typeName == "Bool") && len(e.Args) == 1 {
 					return p.convertExpression(e.Args[0])
@@ -557,11 +557,11 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 				args = append(args, a)
 			}
 		}
-		// tsop.Assert(expr) -> assert(expr)
+		// runar.Assert(expr) -> assert(expr)
 		if ident, ok := callee.(Identifier); ok && ident.Name == "assert" {
 			return CallExpr{Callee: Identifier{Name: "assert"}, Args: args}
 		}
-		// tsop.FuncName(args) -> funcName(args) for builtins
+		// runar.FuncName(args) -> funcName(args) for builtins
 		return CallExpr{Callee: callee, Args: args}
 
 	case *ast.BinaryExpr:

@@ -1,15 +1,15 @@
-//! TSOP Compiler (Rust) — library root.
+//! Rúnar Compiler (Rust) — library root.
 //!
 //! Full compilation pipeline:
 //!   - IR consumer mode: accepts ANF IR JSON, emits Bitcoin Script.
-//!   - Source mode: compiles `.tsop.ts` source files through all passes.
+//!   - Source mode: compiles `.runar.ts` source files through all passes.
 
 pub mod artifact;
 pub mod codegen;
 pub mod frontend;
 pub mod ir;
 
-use artifact::{assemble_artifact, TSOPArtifact};
+use artifact::{assemble_artifact, RunarArtifact};
 use codegen::emit::emit;
 use codegen::stack::lower_to_stack;
 use ir::loader::{load_ir, load_ir_from_str};
@@ -17,19 +17,19 @@ use ir::loader::{load_ir, load_ir_from_str};
 use std::path::Path;
 
 /// Compile from an ANF IR JSON file on disk.
-pub fn compile_from_ir(path: &Path) -> Result<TSOPArtifact, String> {
+pub fn compile_from_ir(path: &Path) -> Result<RunarArtifact, String> {
     let program = load_ir(path)?;
     compile_from_program(&program)
 }
 
 /// Compile from an ANF IR JSON string.
-pub fn compile_from_ir_str(json_str: &str) -> Result<TSOPArtifact, String> {
+pub fn compile_from_ir_str(json_str: &str) -> Result<RunarArtifact, String> {
     let program = load_ir_from_str(json_str)?;
     compile_from_program(&program)
 }
 
-/// Compile from a `.tsop.ts` source file on disk.
-pub fn compile_from_source(path: &Path) -> Result<TSOPArtifact, String> {
+/// Compile from a `.runar.ts` source file on disk.
+pub fn compile_from_source(path: &Path) -> Result<RunarArtifact, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("reading source file: {}", e))?;
     let file_name = path
@@ -39,11 +39,11 @@ pub fn compile_from_source(path: &Path) -> Result<TSOPArtifact, String> {
     compile_from_source_str(&source, Some(&file_name))
 }
 
-/// Compile from a `.tsop.ts` source string.
+/// Compile from a `.runar.ts` source string.
 pub fn compile_from_source_str(
     source: &str,
     file_name: Option<&str>,
-) -> Result<TSOPArtifact, String> {
+) -> Result<RunarArtifact, String> {
     // Pass 1: Parse (auto-selects parser based on file extension)
     let parse_result = frontend::parser::parse_source(source, file_name);
     if !parse_result.errors.is_empty() {
@@ -83,7 +83,7 @@ pub fn compile_from_source_str(
     compile_from_program(&anf_program)
 }
 
-/// Compile from a `.tsop.ts` source file to ANF IR only (passes 1-4).
+/// Compile from a `.runar.ts` source file to ANF IR only (passes 1-4).
 pub fn compile_source_to_ir(path: &Path) -> Result<ir::ANFProgram, String> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| format!("reading source file: {}", e))?;
@@ -94,7 +94,7 @@ pub fn compile_source_to_ir(path: &Path) -> Result<ir::ANFProgram, String> {
     compile_source_str_to_ir(&source, Some(&file_name))
 }
 
-/// Compile from a `.tsop.ts` source string to ANF IR only (passes 1-4).
+/// Compile from a `.runar.ts` source string to ANF IR only (passes 1-4).
 pub fn compile_source_str_to_ir(
     source: &str,
     file_name: Option<&str>,
@@ -128,8 +128,8 @@ pub fn compile_source_str_to_ir(
     Ok(frontend::anf_lower::lower_to_anf(&contract))
 }
 
-/// Compile a parsed ANF program to a TSOP artifact.
-pub fn compile_from_program(program: &ir::ANFProgram) -> Result<TSOPArtifact, String> {
+/// Compile a parsed ANF program to a Rúnar artifact.
+pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
     // Pass 5: Stack lowering
     let stack_methods = lower_to_stack(program)?;
 

@@ -1,8 +1,8 @@
-#[path = "CovenantVault.tsop.rs"]
+#[path = "CovenantVault.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 fn new_vault() -> CovenantVault {
     CovenantVault {
@@ -28,8 +28,8 @@ fn test_spend_zero_amount_fails() { new_vault().spend(&mock_sig(), 0, &mock_prei
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("CovenantVault.tsop.rs"),
-        "CovenantVault.tsop.rs",
+    runar::compile_check(
+        include_str!("CovenantVault.runar.rs"),
+        "CovenantVault.runar.rs",
     ).unwrap();
 }

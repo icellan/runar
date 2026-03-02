@@ -13,7 +13,7 @@ import (
 // ---------------------------------------------------------------------------
 // Integration test: Full TS -> Go pipeline
 //
-// These tests compile .tsop.ts files through the TS compiler to produce IR,
+// These tests compile .runar.ts files through the TS compiler to produce IR,
 // then verify the Go compiler can process the IR and produce valid output.
 // Run with: go test -tags integration -v
 // ---------------------------------------------------------------------------
@@ -68,8 +68,8 @@ func TestTStoGoIntegration(t *testing.T) {
 			if artifact.ContractName == "" {
 				t.Errorf("expected non-empty contractName for %s", dir)
 			}
-			if artifact.Version != "tsop-v0.1.0" {
-				t.Errorf("expected version tsop-v0.1.0, got %s", artifact.Version)
+			if artifact.Version != "runar-v0.1.0" {
+				t.Errorf("expected version runar-v0.1.0, got %s", artifact.Version)
 			}
 
 			t.Logf("OK: %s -> %s (hex=%d bytes)", dir, artifact.ContractName, len(artifact.Script)/2)
@@ -81,7 +81,7 @@ func TestTStoGoIntegration(t *testing.T) {
 // and invoked from the command line with a conformance test IR.
 func TestGoBinaryCompilation(t *testing.T) {
 	// Build the Go compiler binary
-	tmpBin := filepath.Join(t.TempDir(), "tsop-go")
+	tmpBin := filepath.Join(t.TempDir(), "runar-go")
 	cmd := exec.Command("go", "build", "-o", tmpBin, ".")
 	cmd.Dir = filepath.Join(".")
 	output, err := cmd.CombinedOutput()

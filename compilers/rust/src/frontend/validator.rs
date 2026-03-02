@@ -1,6 +1,6 @@
 //! Pass 2: Validate
 //!
-//! Validates the TSOP AST against the language subset constraints.
+//! Validates the Rúnar AST against the language subset constraints.
 //! This pass does NOT modify the AST; it only reports errors and warnings.
 
 use std::collections::{HashMap, HashSet};
@@ -17,7 +17,7 @@ pub struct ValidationResult {
     pub warnings: Vec<String>,
 }
 
-/// Validate a parsed TSOP AST against the language subset constraints.
+/// Validate a parsed Rúnar AST against the language subset constraints.
 pub fn validate(contract: &ContractNode) -> ValidationResult {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
@@ -392,7 +392,7 @@ fn check_no_recursion(contract: &ContractNode, errors: &mut Vec<String>) {
             &mut stack,
         ) {
             errors.push(format!(
-                "Recursion detected: method '{}' calls itself directly or indirectly. Recursion is not allowed in TSOP contracts.",
+                "Recursion detected: method '{}' calls itself directly or indirectly. Recursion is not allowed in Rúnar contracts.",
                 method.name
             ));
         }

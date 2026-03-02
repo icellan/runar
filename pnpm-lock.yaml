@@ -25,20 +25,20 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-cli:
+  packages/runar-cli:
     dependencies:
       commander:
         specifier: ^12.1.0
         version: 12.1.0
-      tsop-compiler:
+      runar-compiler:
         specifier: workspace:*
-        version: link:../tsop-compiler
-      tsop-sdk:
+        version: link:../runar-compiler
+      runar-sdk:
         specifier: workspace:*
-        version: link:../tsop-sdk
-      tsop-testing:
+        version: link:../runar-sdk
+      runar-testing:
         specifier: workspace:*
-        version: link:../tsop-testing
+        version: link:../runar-testing
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -47,17 +47,17 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-compiler:
+  packages/runar-compiler:
     dependencies:
+      runar-ir-schema:
+        specifier: workspace:*
+        version: link:../runar-ir-schema
+      runar-lang:
+        specifier: workspace:*
+        version: link:../runar-lang
       ts-morph:
         specifier: ^24.0.0
         version: 24.0.0
-      tsop-ir-schema:
-        specifier: workspace:*
-        version: link:../tsop-ir-schema
-      tsop-lang:
-        specifier: workspace:*
-        version: link:../tsop-lang
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -66,7 +66,7 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-ir-schema:
+  packages/runar-ir-schema:
     dependencies:
       ajv:
         specifier: ^8.17.0
@@ -79,7 +79,7 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-lang:
+  packages/runar-lang:
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -88,17 +88,17 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-sdk:
+  packages/runar-sdk:
     dependencies:
       '@bsv/sdk':
         specifier: ^2.0.5
         version: 2.0.5
-      tsop-ir-schema:
+      runar-ir-schema:
         specifier: workspace:*
-        version: link:../tsop-ir-schema
-      tsop-lang:
+        version: link:../runar-ir-schema
+      runar-lang:
         specifier: workspace:*
-        version: link:../tsop-lang
+        version: link:../runar-lang
     devDependencies:
       typescript:
         specifier: ^5.6.0
@@ -107,20 +107,20 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
-  packages/tsop-testing:
+  packages/runar-testing:
     dependencies:
       '@bsv/sdk':
         specifier: ^2.0.5
         version: 2.0.5
-      tsop-compiler:
+      runar-compiler:
         specifier: workspace:*
-        version: link:../tsop-compiler
-      tsop-ir-schema:
+        version: link:../runar-compiler
+      runar-ir-schema:
         specifier: workspace:*
-        version: link:../tsop-ir-schema
-      tsop-lang:
+        version: link:../runar-ir-schema
+      runar-lang:
         specifier: workspace:*
-        version: link:../tsop-lang
+        version: link:../runar-lang
     devDependencies:
       fast-check:
         specifier: ^3.22.0

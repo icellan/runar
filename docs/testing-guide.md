@@ -1,12 +1,12 @@
 # Testing Guide
 
-This guide covers how to test TSOP smart contracts at every level, from unit tests of individual contracts to property-based fuzzing and cross-compiler conformance testing.
+This guide covers how to test Rúnar smart contracts at every level, from unit tests of individual contracts to property-based fuzzing and cross-compiler conformance testing.
 
 ---
 
 ## Unit Testing with Vitest
 
-TSOP uses vitest as its test runner. Contract tests compile a `.tsop.ts` file to an artifact, then execute methods against the built-in Script VM.
+Rúnar uses vitest as its test runner. Contract tests compile a `.runar.ts` file to an artifact, then execute methods against the built-in Script VM.
 
 ### Basic Test Structure
 
@@ -16,7 +16,7 @@ import {
   TestSmartContract,
   expectScriptSuccess,
   expectScriptFailure,
-} from 'tsop-testing';
+} from 'runar-testing';
 import artifact from '../artifacts/P2PKH.json';
 
 describe('P2PKH', () => {
@@ -64,7 +64,7 @@ pnpm test -- --watch
 ### Creating an Instance
 
 ```typescript
-import { TestSmartContract } from 'tsop-testing';
+import { TestSmartContract } from 'runar-testing';
 
 // From a JSON artifact object
 const contract = TestSmartContract.fromArtifact(artifact, constructorArgs);
@@ -111,7 +111,7 @@ import {
   expectScriptFailure,
   expectStackTop,
   expectStackTopNum,
-} from 'tsop-testing';
+} from 'runar-testing';
 
 // Assert script execution succeeded
 expectScriptSuccess(result);
@@ -135,7 +135,7 @@ Each helper throws a descriptive error on failure, including the actual stack co
 The `ScriptVM` class can be used directly for lower-level testing without the `TestSmartContract` wrapper.
 
 ```typescript
-import { ScriptVM, hexToBytes, bytesToHex, disassemble } from 'tsop-testing';
+import { ScriptVM, hexToBytes, bytesToHex, disassemble } from 'runar-testing';
 
 const vm = new ScriptVM();
 
@@ -161,7 +161,7 @@ import {
   isTruthy,
   hexToBytes,
   bytesToHex,
-} from 'tsop-testing';
+} from 'runar-testing';
 
 // Encode/decode Script numbers
 const encoded = encodeScriptNumber(42n);  // Uint8Array
@@ -176,16 +176,16 @@ isTruthy(new Uint8Array([]));     // false (OP_FALSE)
 
 ## Reference Interpreter for Oracle Testing
 
-The reference interpreter (`TSOPInterpreter`) evaluates ANF IR directly, without compiling to Bitcoin Script. It serves as an oracle: if the compiled script and the interpreter produce different results for the same inputs, there is a bug.
+The reference interpreter (`RunarInterpreter`) evaluates ANF IR directly, without compiling to Bitcoin Script. It serves as an oracle: if the compiled script and the interpreter produce different results for the same inputs, there is a bug.
 
 ```typescript
-import { TSOPInterpreter } from 'tsop-testing';
-import type { ANFProgram } from 'tsop-ir-schema';
+import { RunarInterpreter } from 'runar-testing';
+import type { ANFProgram } from 'runar-ir-schema';
 
 // Load the ANF IR (from a compiled artifact with --ir flag)
 const anfProgram: ANFProgram = artifact.ir;
 
-const interpreter = new TSOPInterpreter(anfProgram);
+const interpreter = new RunarInterpreter(anfProgram);
 
 // Evaluate a method with arguments
 const result = interpreter.evaluate('unlock', {
@@ -215,7 +215,7 @@ This pattern is the foundation of differential testing. If they ever disagree, y
 
 ## Property-Based Fuzzing
 
-TSOP includes property-based testing generators built on fast-check. These generate random valid TSOP contracts and verify compiler correctness.
+Rúnar includes property-based testing generators built on fast-check. These generate random valid Rúnar contracts and verify compiler correctness.
 
 ### Built-in Generators
 
@@ -225,12 +225,12 @@ import {
   arbStatelessContract,
   arbArithmeticContract,
   arbCryptoContract,
-} from 'tsop-testing';
+} from 'runar-testing';
 ```
 
 | Generator | Produces |
 |-----------|----------|
-| `arbContract` | Random valid TSOP contract source |
+| `arbContract` | Random valid Rúnar contract source |
 | `arbStatelessContract` | Random contract with only `readonly` properties |
 | `arbArithmeticContract` | Contract focusing on arithmetic operations |
 | `arbCryptoContract` | Contract using cryptographic built-ins |
@@ -240,14 +240,14 @@ import {
 ```typescript
 import { describe, it } from 'vitest';
 import * as fc from 'fast-check';
-import { arbStatelessContract } from 'tsop-testing';
-import { compile } from 'tsop-compiler';
+import { arbStatelessContract } from 'runar-testing';
+import { compile } from 'runar-compiler';
 
 describe('compiler fuzzing', () => {
   it('never crashes on valid input', () => {
     fc.assert(
       fc.property(arbStatelessContract, (source) => {
-        // The compiler should never throw on valid TSOP
+        // The compiler should never throw on valid Rúnar
         const artifact = compile(source);
         expect(artifact).toBeDefined();
         expect(artifact.script).toBeTruthy();
@@ -276,7 +276,7 @@ pnpm run fuzz -- --until-fail
 The fuzzer follows this pipeline:
 
 ```
-Generate random .tsop.ts --> Compile to ANF IR --> Compile to Script
+Generate random .runar.ts --> Compile to ANF IR --> Compile to Script
                          |                    |
                          v                    v
                     Interpret ANF IR     Execute in VM
@@ -291,7 +291,7 @@ If the results disagree, the failing program is saved for reproduction. This is 
 
 ## Testing Go Contracts
 
-Go contracts are tested as native Go code using Go's standard `testing` package. The `tsop` mock package (`packages/tsop-go`) provides type aliases, mock crypto functions, and real hash functions so contracts execute as plain Go.
+Go contracts are tested as native Go code using Go's standard `testing` package. The `runar` mock package (`packages/runar-go`) provides type aliases, mock crypto functions, and real hash functions so contracts execute as plain Go.
 
 ### Project Setup
 
@@ -301,11 +301,11 @@ Go examples live in `examples/go/`, with one directory per contract. The module 
 go.work
 ├── compilers/go         # Go compiler
 ├── examples/go          # Go contract examples + tests
-├── packages/tsop-go     # Mock types, crypto, CompileCheck()
+├── packages/runar-go     # Mock types, crypto, CompileCheck()
 └── conformance          # Cross-compiler tests
 ```
 
-This workspace allows `import "tsop"` to resolve to the mock package everywhere.
+This workspace allows `import "runar"` to resolve to the mock package everywhere.
 
 ### Basic Test Structure
 
@@ -314,13 +314,13 @@ package contract
 
 import (
 	"testing"
-	"tsop"
+	"runar"
 )
 
 func TestP2PKH_Unlock(t *testing.T) {
-	pk := tsop.MockPubKey()
-	c := &P2PKH{PubKeyHash: tsop.Hash160(pk)}
-	c.Unlock(tsop.MockSig(), pk)
+	pk := runar.MockPubKey()
+	c := &P2PKH{PubKeyHash: runar.Hash160(pk)}
+	c.Unlock(runar.MockSig(), pk)
 }
 
 func TestP2PKH_Unlock_WrongKey(t *testing.T) {
@@ -329,20 +329,20 @@ func TestP2PKH_Unlock_WrongKey(t *testing.T) {
 			t.Fatal("expected assertion failure for wrong public key")
 		}
 	}()
-	pk := tsop.MockPubKey()
-	wrongPk := tsop.PubKey("\x03" + string(make([]byte, 32)))
-	c := &P2PKH{PubKeyHash: tsop.Hash160(pk)}
-	c.Unlock(tsop.MockSig(), wrongPk)
+	pk := runar.MockPubKey()
+	wrongPk := runar.PubKey("\x03" + string(make([]byte, 32)))
+	c := &P2PKH{PubKeyHash: runar.Hash160(pk)}
+	c.Unlock(runar.MockSig(), wrongPk)
 }
 
 func TestP2PKH_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("P2PKH.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("P2PKH.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }
 ```
 
-Contracts call `tsop.Assert()` which panics on failure. Tests that expect a failure use `defer/recover` to catch the panic.
+Contracts call `runar.Assert()` which panics on failure. Tests that expect a failure use `defer/recover` to catch the panic.
 
 ### Testing Stateful Contracts
 
@@ -375,7 +375,7 @@ Contracts that call `AddOutput()` track outputs via the embedded `StatefulSmartC
 ```go
 func TestFungibleToken_Transfer(t *testing.T) {
 	c := newToken(alice, 100)
-	c.Transfer(tsop.MockSig(), bob, 30, 1000)
+	c.Transfer(runar.MockSig(), bob, 30, 1000)
 	out := c.Outputs()
 	if len(out) != 2 {
 		t.Fatalf("expected 2 outputs, got %d", len(out))
@@ -383,7 +383,7 @@ func TestFungibleToken_Transfer(t *testing.T) {
 	if out[0].Values[0] != bob {
 		t.Error("output[0] owner should be bob")
 	}
-	if out[0].Values[1] != tsop.Bigint(30) {
+	if out[0].Values[1] != runar.Bigint(30) {
 		t.Errorf("output[0] balance: expected 30, got %v", out[0].Values[1])
 	}
 }
@@ -393,7 +393,7 @@ The `OutputSnapshot` struct holds `Satoshis int64` and `Values []any` (mutable p
 
 ### Mock Types and Functions
 
-The `tsop` package provides:
+The `runar` package provides:
 
 | Category | Functions |
 |----------|-----------|
@@ -408,12 +408,12 @@ Byte-backed types use `string` (not `[]byte`) so that `==` comparison works natu
 
 ### CompileCheck
 
-`tsop.CompileCheck(filename)` runs the contract source through the Go compiler frontend (parse → validate → typecheck) and returns an error if anything fails. Always include a compile check test alongside your business logic tests:
+`runar.CompileCheck(filename)` runs the contract source through the Go compiler frontend (parse → validate → typecheck) and returns an error if anything fails. Always include a compile check test alongside your business logic tests:
 
 ```go
 func TestMyContract_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("MyContract.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("MyContract.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }
 ```
@@ -431,7 +431,7 @@ go test -v ./stateful-counter/   # Verbose output
 
 ## Testing Rust Contracts
 
-Rust contracts are tested as native Rust code using `#[test]` attributes. The `tsop` mock crate (`packages/tsop-rs`) provides a prelude with type aliases, mock crypto, and real hash functions.
+Rust contracts are tested as native Rust code using `#[test]` attributes. The `runar` mock crate (`packages/runar-rs`) provides a prelude with type aliases, mock crypto, and real hash functions.
 
 ### Project Setup
 
@@ -439,13 +439,13 @@ Rust examples live in `examples/rust/`, with one directory per contract. A singl
 
 ```toml
 [package]
-name = "tsop-example-tests"
+name = "runar-example-tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dependencies]
-tsop = { path = "../../packages/tsop-rs" }
+runar = { path = "../../packages/runar-rs" }
 
 [[test]]
 name = "p2pkh"
@@ -461,11 +461,11 @@ path = "stateful-counter/Counter_test.rs"
 ### Basic Test Structure
 
 ```rust
-#[path = "P2PKH.tsop.rs"]
+#[path = "P2PKH.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[test]
 fn test_unlock() {
@@ -485,16 +485,16 @@ fn test_unlock_wrong_key() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("P2PKH.tsop.rs"),
-        "P2PKH.tsop.rs",
+    runar::compile_check(
+        include_str!("P2PKH.runar.rs"),
+        "P2PKH.runar.rs",
     ).unwrap();
 }
 ```
 
 Key patterns:
-- **`#[path = "Contract.tsop.rs"] mod contract;`** imports the contract source as a Rust module.
-- **`use tsop::prelude::*;`** brings all mock types and functions into scope.
+- **`#[path = "Contract.runar.rs"] mod contract;`** imports the contract source as a Rust module.
+- **`use runar::prelude::*;`** brings all mock types and functions into scope.
 - **`#[should_panic]`** cleanly asserts that a contract method panics (no need for `catch_unwind`).
 - **`include_str!()`** embeds the contract source for `compile_check()`.
 
@@ -558,11 +558,11 @@ fn test_transfer() {
 }
 ```
 
-Note: The `.tsop.rs` contract file itself needs `.clone()` on owned values passed to `add_output()`. This is a no-op for Bitcoin Script compilation but satisfies the Rust borrow checker.
+Note: The `.runar.rs` contract file itself needs `.clone()` on owned values passed to `add_output()`. This is a no-op for Bitcoin Script compilation but satisfies the Rust borrow checker.
 
 ### Mock Types and Functions
 
-The `tsop::prelude` provides:
+The `runar::prelude` provides:
 
 | Category | Functions |
 |----------|-----------|
@@ -578,19 +578,19 @@ Byte-backed types use `Vec<u8>`, so equality comparisons with `==` work via `Par
 
 ### compile_check
 
-`tsop::compile_check(source, filename)` runs the contract through the Rust compiler frontend (parse → validate → typecheck) and returns `Result<(), String>`:
+`runar::compile_check(source, filename)` runs the contract through the Rust compiler frontend (parse → validate → typecheck) and returns `Result<(), String>`:
 
 ```rust
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("Counter.tsop.rs"),
-        "Counter.tsop.rs",
+    runar::compile_check(
+        include_str!("Counter.runar.rs"),
+        "Counter.runar.rs",
     ).unwrap();
 }
 ```
 
-Always include a compile check test. This catches TSOP language errors (invalid types, unknown functions, recursion, etc.) that the Rust compiler itself would not flag.
+Always include a compile check test. This catches Rúnar language errors (invalid types, unknown functions, recursion, etc.) that the Rust compiler itself would not flag.
 
 ### Running Rust Tests
 
@@ -610,11 +610,11 @@ cargo test --test counter -- --nocapture  # Verbose output
 | **Test framework** | vitest | `testing.T` | `#[test]` |
 | **Failure assertion** | `expectScriptFailure(result)` | `defer/recover` | `#[should_panic]` |
 | **Contract loading** | `TestSmartContract.fromArtifact(artifact, args)` | Struct literal in same package | `#[path = "..."] mod contract;` |
-| **Type imports** | `import { ... } from 'tsop-testing'` | `import "tsop"` | `use tsop::prelude::*;` |
+| **Type imports** | `import { ... } from 'runar-testing'` | `import "runar"` | `use runar::prelude::*;` |
 | **Byte types** | Hex strings / `Uint8Array` | `string` (for `==`) | `Vec<u8>` (for `==` via `PartialEq`) |
 | **Scalar types** | `bigint` | `int64` aliases | `i64` aliases |
 | **Output tracking** | `contract.state` after `call()` | `c.Outputs()` method | Manual `Vec<Output>` field |
-| **Compile check** | Built into `fromArtifact` / `fromSource` | `tsop.CompileCheck("file.tsop.go")` | `tsop::compile_check(include_str!("file"), "file")` |
+| **Compile check** | Built into `fromArtifact` / `fromSource` | `runar.CompileCheck("file.runar.go")` | `runar::compile_check(include_str!("file"), "file")` |
 | **Borrow workarounds** | N/A | None needed | `.clone()` for owned fields in `add_output` |
 | **Run command** | `npx vitest run` | `go test ./...` | `cargo test` |
 
@@ -626,13 +626,13 @@ Post-quantum signature verification (WOTS+ and SLH-DSA) has dedicated testing at
 
 ### Reference Implementation Tests
 
-Pure TypeScript implementations in `packages/tsop-testing/src/crypto/`:
+Pure TypeScript implementations in `packages/runar-testing/src/crypto/`:
 
 - `wots.ts` — WOTS+ keygen, sign, verify (18 unit tests)
 - `slh-dsa.ts` — SLH-DSA for all 6 SHA-256 parameter sets (9 unit tests)
 
 ```bash
-npx vitest run packages/tsop-testing/src/crypto/__tests__/
+npx vitest run packages/runar-testing/src/crypto/__tests__/
 ```
 
 ### Interpreter Tests
@@ -664,7 +664,7 @@ Both paths must agree on valid signatures (accept) and invalid signatures (rejec
 
 ## Conformance Testing Across Compilers
 
-The conformance suite in `conformance/` ensures all TSOP compilers (TypeScript, Go, Rust) produce identical output.
+The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust) produce identical output.
 
 ### Golden-File Tests
 
@@ -672,7 +672,7 @@ Each test case is a directory containing:
 
 ```
 conformance/tests/basic-p2pkh/
-  basic-p2pkh.tsop.ts      # Source contract
+  basic-p2pkh.runar.ts      # Source contract
   expected-ir.json          # Expected ANF IR (canonical JSON)
   expected-script.hex       # Expected compiled script (hex)
 ```
@@ -695,11 +695,11 @@ The runner compiles each source file, serializes the ANF IR using canonical JSON
 ### Adding a New Conformance Test
 
 1. Create a directory under `conformance/tests/` with a descriptive name.
-2. Write the source contract (`.tsop.ts`).
+2. Write the source contract (`.runar.ts`).
 3. Generate the expected IR using the reference compiler:
 
 ```bash
-tsop compile conformance/tests/my-test/my-test.tsop.ts --ir --canonical
+runar compile conformance/tests/my-test/my-test.runar.ts --ir --canonical
 ```
 
 4. Copy the canonical ANF IR to `expected-ir.json`.
@@ -720,14 +720,14 @@ Review the diffs carefully. An unexpected change in a golden file indicates eith
 
 ## Testing Strategy Summary
 
-TSOP employs a layered testing strategy:
+Rúnar employs a layered testing strategy:
 
 | Layer | What It Tests | Tool |
 |-------|--------------|------|
 | **Unit tests per pass** | Each compiler pass in isolation | vitest |
 | **End-to-end compilation** | Full pipeline: source to script | vitest + conformance golden files |
 | **VM execution** | Compiled script with specific inputs | `TestSmartContract` + `ScriptVM` |
-| **Interpreter oracle** | ANF IR evaluation matches VM execution | `TSOPInterpreter` vs `ScriptVM` |
+| **Interpreter oracle** | ANF IR evaluation matches VM execution | `RunarInterpreter` vs `ScriptVM` |
 | **Property-based fuzzing** | Random valid programs compile correctly | fast-check generators |
 | **Differential fuzzing** | Compiler + VM agree with interpreter | `conformance/fuzzer` |
 | **Cross-compiler conformance** | All compilers produce identical output | Golden-file SHA-256 comparison |
@@ -740,8 +740,8 @@ The layers build on each other. Unit tests catch obvious regressions. VM tests v
 Each compiler pass has its own test file. Tests provide specific input IR, run the pass, and assert properties of the output:
 
 ```
-Pass 1 tests: source string      --> TSOP AST assertions
-Pass 2 tests: TSOP AST           --> validation error/success
+Pass 1 tests: source string      --> Rúnar AST assertions
+Pass 2 tests: Rúnar AST           --> validation error/success
 Pass 3 tests: Validated AST      --> type annotation assertions
 Pass 4 tests: Typed AST          --> ANF IR structural assertions
 Pass 5 tests: ANF IR             --> Stack IR depth assertions

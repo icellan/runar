@@ -1,6 +1,6 @@
-# TSOP Go Compiler
+# Rúnar Go Compiler
 
-**Alternative TSOP compiler implemented in Go.**
+**Alternative Rúnar compiler implemented in Go.**
 
 ---
 
@@ -9,7 +9,7 @@
 | Phase | Description | Status |
 |---|---|---|
 | **Phase 1** | IR consumer: accepts canonical ANF IR JSON, performs stack lowering and emission (Passes 5-6). | Implemented |
-| **Phase 2** | Full frontend: parses `.tsop.ts` source files directly (Passes 1-4), produces canonical ANF IR. | Implemented |
+| **Phase 2** | Full frontend: parses `.runar.ts` source files directly (Passes 1-4), produces canonical ANF IR. | Implemented |
 
 Phase 1 validates that the Go implementation can produce identical Bitcoin Script from the same ANF IR as the reference compiler. Phase 2 adds an independent frontend that must produce byte-identical ANF IR.
 
@@ -29,7 +29,7 @@ The Go compiler reads the canonical ANF IR JSON (produced by the TS reference co
 ### Phase 2: Full Frontend
 
 ```
-  .tsop.ts  -->  [Parse]  -->  [Validate]  -->  [Typecheck]  -->  [ANF Lower]
+  .runar.ts  -->  [Parse]  -->  [Validate]  -->  [Typecheck]  -->  [ANF Lower]
                 tree-sitter    Go pass 2        Go pass 3        Go pass 4
                 frontend
                                                                      |
@@ -41,9 +41,9 @@ The Go compiler reads the canonical ANF IR JSON (produced by the TS reference co
             Go pass 5          Go pass 6
 ```
 
-The parsing frontend uses **tree-sitter-typescript** for parsing `.tsop.ts` files. tree-sitter provides a concrete syntax tree (CST) that the Go code walks to build the TSOP AST. This avoids depending on the TypeScript compiler.
+The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` files. tree-sitter provides a concrete syntax tree (CST) that the Go code walks to build the Rúnar AST. This avoids depending on the TypeScript compiler.
 
-Why tree-sitter instead of a custom parser? TSOP source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
+Why tree-sitter instead of a custom parser? Rúnar source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
 
 ---
 
@@ -51,7 +51,7 @@ Why tree-sitter instead of a custom parser? TSOP source files are valid TypeScri
 
 ```bash
 cd compilers/go
-go build -o tsop-go ./cmd/tsop-go
+go build -o runar-go ./cmd/runar-go
 
 # Or with make
 make build
@@ -70,20 +70,20 @@ make build
 
 ```bash
 # Compile from ANF IR to Bitcoin Script
-./tsop-go emit --ir input-anf.json --output script.hex
+./runar-go emit --ir input-anf.json --output script.hex
 
 # Verify against expected script
-./tsop-go verify --ir input-anf.json --expected expected-script.hex
+./runar-go verify --ir input-anf.json --expected expected-script.hex
 ```
 
 ### Phase 2: Full Compilation (when available)
 
 ```bash
 # Full compilation from source
-./tsop-go compile MyContract.tsop.ts --output artifacts/MyContract.json
+./runar-go compile MyContract.runar.ts --output artifacts/MyContract.json
 
 # Dump ANF IR for conformance checking
-./tsop-go compile MyContract.tsop.ts --ir-only --output anf-ir.json
+./runar-go compile MyContract.runar.ts --ir-only --output anf-ir.json
 ```
 
 ---
@@ -113,7 +113,7 @@ go test ./conformance/...
 
 For each test case:
 
-1. Read `*.tsop.ts` as input.
+1. Read `*.runar.ts` as input.
 2. Run the full pipeline (Passes 1-6).
 3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
 4. Compare script output with `expected-script.hex` (if present).

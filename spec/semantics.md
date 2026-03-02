@@ -1,15 +1,15 @@
-# TSOP Operational Semantics
+# Rúnar Operational Semantics
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document defines the operational semantics of TSOP programs. It specifies how TSOP expressions and statements evaluate, how they relate to Bitcoin Script execution, and the formal rules governing contract behavior.
+This document defines the operational semantics of Rúnar programs. It specifies how Rúnar expressions and statements evaluate, how they relate to Bitcoin Script execution, and the formal rules governing contract behavior.
 
 ---
 
 ## 1. Overview
 
-TSOP programs execute in two distinct contexts:
+Rúnar programs execute in two distinct contexts:
 
 1. **Locking Script Context**: The compiled contract is placed in a transaction output. It encodes the spending conditions.
 2. **Unlocking Script Context**: When spending the UTXO, an unlocking script (scriptSig) provides arguments to the public method being invoked.
@@ -131,7 +131,7 @@ When both operands are values:
     <v1 !== v2, env, sigma>  -->  VBool(v1 ≠ v2)
 ```
 
-Note: `==` and `===` have identical semantics in TSOP (no type coercion). The compiler accepts both but recommends `===`.
+Note: `==` and `===` have identical semantics in Rúnar (no type coercion). The compiler accepts both but recommends `===`.
 
 ### 3.7 Logical Operators
 
@@ -318,7 +318,7 @@ The loop variable `i` is substituted with the concrete iteration value in each u
 
 ## 5. Assert Semantics
 
-The `assert` built-in is central to TSOP. Every public method must end with an `assert` call (or a sequence of asserts).
+The `assert` built-in is central to Rúnar. Every public method must end with an `assert` call (or a sequence of asserts).
 
 ### 5.1 Basic Assert
 
@@ -500,7 +500,7 @@ Transaction 2 (Increment by 5):
 
 ### 8.1 Stack Machine
 
-Bitcoin Script is a stack-based language. TSOP compilation targets this stack machine.
+Bitcoin Script is a stack-based language. Rúnar compilation targets this stack machine.
 
 - The stack holds byte vectors.
 - Integers are encoded as Script numbers (little-endian, sign-magnitude, minimal encoding).
@@ -520,14 +520,14 @@ Bitcoin Script is a stack-based language. TSOP compilation targets this stack ma
 
 ### 8.3 Script Size Limits
 
-BSV (post-Genesis) has removed most script size limits, but TSOP still enforces:
+BSV (post-Genesis) has removed most script size limits, but Rúnar still enforces:
 
 - **Stack depth**: Maximum 800 items (enforced at compile time via static analysis).
 - **Script size**: No hard limit, but the compiler will warn if the generated script exceeds 100 KB.
 
 ### 8.4 Deterministic Execution
 
-All TSOP operations are deterministic. Given the same unlocking script and locking script, execution always produces the same result. There is no randomness, no I/O, and no access to external state beyond what is provided in the sighash preimage.
+All Rúnar operations are deterministic. Given the same unlocking script and locking script, execution always produces the same result. There is no randomness, no I/O, and no access to external state beyond what is provided in the sighash preimage.
 
 ---
 
@@ -547,7 +547,7 @@ All TSOP operations are deterministic. Given the same unlocking script and locki
 
 ### 10.1 Termination
 
-All TSOP programs terminate. This is guaranteed by:
+All Rúnar programs terminate. This is guaranteed by:
 - No unbounded loops (all loops have compile-time bounds).
 - No recursion (checked via call graph analysis).
 - All built-in operations terminate.
@@ -559,14 +559,14 @@ For any given `(unlocking_script, locking_script)` pair, the execution result is
 
 ### 10.3 Type Safety
 
-If a TSOP program type-checks, then at runtime:
+If a Rúnar program type-checks, then at runtime:
 - No type errors will occur (all operations receive operands of the correct type).
 - No stack underflow will occur (static stack analysis guarantees sufficient items).
 - The only runtime failures are explicit `assert` failures and division by zero.
 
 ### 10.4 UTXO Safety (Affine Guarantee)
 
-If a TSOP program passes affine type checking, then:
+If a Rúnar program passes affine type checking, then:
 - `SigHashPreimage` values are used exactly once.
 - `Sig` values are not duplicated.
 - State transitions are properly guarded by `checkPreimage`.

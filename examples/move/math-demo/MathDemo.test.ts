@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'MathDemo.tsop.move'), 'utf8');
-const FILE_NAME = 'MathDemo.tsop.move';
+const source = readFileSync(join(__dirname, 'MathDemo.runar.move'), 'utf8');
+const FILE_NAME = 'MathDemo.runar.move';
 
 describe('MathDemo (Move)', () => {
   it('safediv divides correctly', () => {

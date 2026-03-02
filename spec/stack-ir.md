@@ -1,4 +1,4 @@
-# TSOP Stack IR Specification
+# Rúnar Stack IR Specification
 
 **Version:** 0.1.0
 **Status:** Draft

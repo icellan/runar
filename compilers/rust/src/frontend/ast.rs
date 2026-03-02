@@ -1,6 +1,6 @@
-//! TSOP AST types.
+//! Rúnar AST types.
 //!
-//! These types mirror the TypeScript `tsop-ast.ts` definitions. They represent
+//! These types mirror the TypeScript `runar-ast.ts` definitions. They represent
 //! the parsed contract structure before ANF lowering.
 
 // ---------------------------------------------------------------------------
@@ -19,7 +19,7 @@ pub struct SourceLocation {
 // Types
 // ---------------------------------------------------------------------------
 
-/// Primitive type names recognized by TSOP.
+/// Primitive type names recognized by Rúnar.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimitiveTypeName {
     Bigint,
@@ -90,7 +90,7 @@ pub enum TypeNode {
 // Top-level nodes
 // ---------------------------------------------------------------------------
 
-/// A complete TSOP contract.
+/// A complete Rúnar contract.
 #[derive(Debug, Clone)]
 pub struct ContractNode {
     pub name: String,

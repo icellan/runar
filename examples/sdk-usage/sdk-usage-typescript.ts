@@ -1,14 +1,14 @@
 // @ts-nocheck — This is a reference document, not a runnable program.
 // It requires @bsv/sdk which is not a workspace dependency.
 /**
- * TSOP SDK Usage Examples -- TypeScript
+ * Rúnar SDK Usage Examples -- TypeScript
  *
  * Comprehensive examples showing how to compile, deploy, and spend/unlock
- * all 8 TSOP example contracts using the tsop-compiler and tsop-sdk packages.
+ * all 8 Rúnar example contracts using the runar-compiler and runar-sdk packages.
  *
  * Each section follows the same pattern:
- *   1. Compile the contract source to a TSOPArtifact
- *   2. Instantiate a TSOPContract with constructor arguments
+ *   1. Compile the contract source to a RunarArtifact
+ *   2. Instantiate a RunarContract with constructor arguments
  *   3. Deploy: create a locking-script UTXO on chain
  *   4. Call/spend: build an unlocking script that satisfies the contract
  *
@@ -21,27 +21,27 @@
  *   - Reference: https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
  *
  * Prerequisites:
- *   npm install tsop-compiler tsop-sdk tsop-lang
+ *   npm install runar-compiler runar-sdk runar-lang
  *   (or use the monorepo workspace packages)
  */
 
 import { readFileSync } from 'node:fs';
-import { compile } from 'tsop-compiler';
-import type { CompileResult } from 'tsop-compiler';
-import type { TSOPArtifact } from 'tsop-ir-schema';
+import { compile } from 'runar-compiler';
+import type { CompileResult } from 'runar-compiler';
+import type { RunarArtifact } from 'runar-ir-schema';
 import {
-  TSOPContract,
+  RunarContract,
   MockProvider,
   LocalSigner,
   serializeState,
   deserializeState,
-} from 'tsop-sdk';
+} from 'runar-sdk';
 
 // =============================================================================
-// Helper: compile a .tsop.ts file and return the artifact
+// Helper: compile a .runar.ts file and return the artifact
 // =============================================================================
 
-function compileContract(filePath: string): TSOPArtifact {
+function compileContract(filePath: string): RunarArtifact {
   const source = readFileSync(filePath, 'utf-8');
   const result: CompileResult = compile(source, { fileName: filePath });
 
@@ -75,8 +75,8 @@ function compileContract(filePath: string): TSOPArtifact {
 // Helper: compile from an inline string (alternative to file-based compilation)
 // =============================================================================
 
-function compileInline(source: string, name: string): TSOPArtifact {
-  const result = compile(source, { fileName: `${name}.tsop.ts` });
+function compileInline(source: string, name: string): RunarArtifact {
+  const result = compile(source, { fileName: `${name}.runar.ts` });
 
   if (!result.success || !result.artifact) {
     const errors = result.diagnostics
@@ -154,7 +154,7 @@ async function exampleP2PKH() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile the contract ----
-  const artifact = compileContract('examples/ts/p2pkh/P2PKH.tsop.ts');
+  const artifact = compileContract('examples/ts/p2pkh/P2PKH.runar.ts');
 
   // The P2PKH ABI expects one constructor param: pubKeyHash (Addr = 20 bytes)
   // and one public method: unlock(sig: Sig, pubKey: PubKey)
@@ -171,7 +171,7 @@ async function exampleP2PKH() {
   const alicePubKeyHash = simpleHash160(alicePubKey);
 
   // ---- Step 3: Deploy -- create a UTXO locked to Alice's pubkey hash ----
-  const contract = new TSOPContract(artifact, [alicePubKeyHash]);
+  const contract = new RunarContract(artifact, [alicePubKeyHash]);
 
   console.log('\nLocking script hex:', contract.getLockingScript().slice(0, 80) + '...');
 
@@ -195,7 +195,7 @@ async function exampleP2PKH() {
 
   // You can also compile P2PKH inline:
   const inlineArtifact = compileInline(`
-    import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'tsop-lang';
+    import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 
     class P2PKH extends SmartContract {
       readonly pubKeyHash: Addr;
@@ -231,7 +231,7 @@ async function exampleEscrow() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/escrow/Escrow.tsop.ts');
+  const artifact = compileContract('examples/ts/escrow/Escrow.runar.ts');
 
   // The Escrow contract has 3 constructor params (buyer, seller, arbiter PubKeys)
   // and 4 public methods, each requiring a single Sig argument.
@@ -247,7 +247,7 @@ async function exampleEscrow() {
   const arbiterPubKey = await carol.getPublicKey();
 
   // ---- Step 3: Deploy -- buyer funds the escrow ----
-  const escrow = new TSOPContract(artifact, [buyerPubKey, sellerPubKey, arbiterPubKey]);
+  const escrow = new RunarContract(artifact, [buyerPubKey, sellerPubKey, arbiterPubKey]);
 
   const deployResult = await escrow.deploy(provider, alice, {
     satoshis: 75_000,
@@ -279,7 +279,7 @@ async function exampleEscrow() {
   // In a dispute scenario, the arbiter signs a refund to the buyer.
   // First re-deploy for this example path.
   await seedFunding(provider, alice);
-  const escrow2 = new TSOPContract(artifact, [buyerPubKey, sellerPubKey, arbiterPubKey]);
+  const escrow2 = new RunarContract(artifact, [buyerPubKey, sellerPubKey, arbiterPubKey]);
   const deploy2 = await escrow2.deploy(provider, alice, { satoshis: 75_000 });
 
   const arbiterSig = await carol.sign(deploy2.tx.raw ?? '', 0, escrow2.getLockingScript(), 75_000);
@@ -316,7 +316,7 @@ async function exampleCounter() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/stateful-counter/Counter.tsop.ts');
+  const artifact = compileContract('examples/ts/stateful-counter/Counter.runar.ts');
 
   // The Counter has one state field: count (bigint), which is NOT readonly.
   // State fields appear in artifact.stateFields.
@@ -330,7 +330,7 @@ async function exampleCounter() {
   await seedFunding(provider, alice, 200_000);
 
   // ---- Step 3: Deploy with initial count = 0 ----
-  const counter = new TSOPContract(artifact, [0n]);
+  const counter = new RunarContract(artifact, [0n]);
 
   console.log('\nInitial state:', counter.state);
   console.log('Locking script (with state):', counter.getLockingScript().slice(0, 80) + '...');
@@ -449,7 +449,7 @@ async function exampleFungibleToken() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.tsop.ts');
+  const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
 
   console.log('\nState fields:', artifact.stateFields);
   // State: owner (PubKey) is mutable; supply (bigint) is readonly.
@@ -462,7 +462,7 @@ async function exampleFungibleToken() {
   const bobPubKey   = await bob.getPublicKey();
 
   // ---- Step 3: Deploy -- Alice mints 1,000,000 tokens ----
-  const token = new TSOPContract(artifact, [alicePubKey, 1_000_000n]);
+  const token = new RunarContract(artifact, [alicePubKey, 1_000_000n]);
 
   const deployResult = await token.deploy(provider, alice, {
     satoshis: 10_000,
@@ -525,7 +525,7 @@ async function exampleNFT() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/token-nft/NFTExample.tsop.ts');
+  const artifact = compileContract('examples/ts/token-nft/NFTExample.runar.ts');
 
   console.log('\nState fields:', artifact.stateFields);
   // State: owner (PubKey) is mutable; tokenId and metadata are readonly.
@@ -538,11 +538,11 @@ async function exampleNFT() {
   const bobPubKey   = await bob.getPublicKey();
 
   // Token metadata: a unique ID and a metadata URI/hash
-  const tokenId = Buffer.from('TSOP-NFT-0001').toString('hex');
+  const tokenId = Buffer.from('Rúnar-NFT-0001').toString('hex');
   const metadata = Buffer.from('ipfs://QmExample123').toString('hex');
 
   // ---- Step 3: Deploy -- Alice mints the NFT ----
-  const nft = new TSOPContract(artifact, [alicePubKey, tokenId, metadata]);
+  const nft = new RunarContract(artifact, [alicePubKey, tokenId, metadata]);
 
   const deployResult = await nft.deploy(provider, alice, {
     satoshis: 5_000,
@@ -609,7 +609,7 @@ async function exampleAuction() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/auction/Auction.tsop.ts');
+  const artifact = compileContract('examples/ts/auction/Auction.runar.ts');
 
   console.log('\nState fields:', artifact.stateFields);
   // State: highestBidder (PubKey) and highestBid (bigint) are mutable.
@@ -629,7 +629,7 @@ async function exampleAuction() {
   const deadline = 800_000n; // block height at which the auction closes
   const initialBid = 1000n;  // starting bid in satoshis
 
-  const auction = new TSOPContract(artifact, [
+  const auction = new RunarContract(artifact, [
     auctioneerPubKey, // auctioneer
     auctioneerPubKey, // initial highest bidder (auctioneer as placeholder)
     initialBid,       // initial highest bid
@@ -731,7 +731,7 @@ async function exampleOraclePriceFeed() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/oracle-price/OraclePriceFeed.tsop.ts');
+  const artifact = compileContract('examples/ts/oracle-price/OraclePriceFeed.runar.ts');
 
   console.log('\nABI methods:', artifact.abi.methods.filter(m => m.isPublic).map(m =>
     `${m.name}(${m.params.map(p => p.name + ': ' + p.type).join(', ')})`
@@ -750,7 +750,7 @@ async function exampleOraclePriceFeed() {
   const oracleRabinPubKey = 'ab'.repeat(32); // 256-bit placeholder
 
   // ---- Step 3: Deploy ----
-  const oracle = new TSOPContract(artifact, [oracleRabinPubKey, receiverPubKey]);
+  const oracle = new RunarContract(artifact, [oracleRabinPubKey, receiverPubKey]);
 
   const deployResult = await oracle.deploy(provider, alice, {
     satoshis: 25_000,
@@ -812,7 +812,7 @@ async function exampleCovenantVault() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile ----
-  const artifact = compileContract('examples/ts/covenant-vault/CovenantVault.tsop.ts');
+  const artifact = compileContract('examples/ts/covenant-vault/CovenantVault.runar.ts');
 
   console.log('\nABI:', artifact.abi.methods.filter(m => m.isPublic).map(m =>
     `${m.name}(${m.params.map(p => p.name + ': ' + p.type).join(', ')})`
@@ -830,7 +830,7 @@ async function exampleCovenantVault() {
   const minAmount = 10_000n; // minimum 10,000 satoshis per withdrawal
 
   // ---- Step 3: Deploy ----
-  const vault = new TSOPContract(artifact, [ownerPubKey, recipientAddr, minAmount]);
+  const vault = new RunarContract(artifact, [ownerPubKey, recipientAddr, minAmount]);
 
   const deployResult = await vault.deploy(provider, alice, {
     satoshis: 100_000,
@@ -966,7 +966,7 @@ transaction that is spending it. Here is how it works:
 //
 //  Install:  npm install @bsv/sdk
 //
-//  Below is a documented walkthrough of how to use @bsv/sdk with TSOP
+//  Below is a documented walkthrough of how to use @bsv/sdk with Rúnar
 //  artifacts. The code is written as a reference — to run it, install @bsv/sdk
 //  and uncomment the import.
 //
@@ -980,7 +980,7 @@ import { PrivateKey, Transaction, P2PKH, ARC, Hash, LockingScript, UnlockingScri
  * Production-grade @bsv/sdk integration.
  *
  * This function demonstrates how to use the official BSV TypeScript SDK
- * (https://github.com/bsv-blockchain/ts-sdk) alongside TSOP-compiled
+ * (https://github.com/bsv-blockchain/ts-sdk) alongside Rúnar-compiled
  * artifacts for real transaction construction.
  */
 async function advancedBsvSdkIntegration() {
@@ -989,7 +989,7 @@ async function advancedBsvSdkIntegration() {
   console.log('='.repeat(72));
 
   // ---- Step 1: Compile a contract ----
-  const artifact = compileContract('examples/ts/p2pkh/P2PKH.tsop.ts');
+  const artifact = compileContract('examples/ts/p2pkh/P2PKH.runar.ts');
 
   // ---- Step 2: Create keys using @bsv/sdk ----
   const privKey = PrivateKey.fromRandom();
@@ -1001,9 +1001,9 @@ async function advancedBsvSdkIntegration() {
   console.log('  pubKeyHex:', pubKeyHex.slice(0, 20) + '...');
   console.log('  pubKeyHash:', pubKeyHash.length, 'bytes');
 
-  // ---- Step 3: Build the locking script from the TSOP artifact ----
+  // ---- Step 3: Build the locking script from the Rúnar artifact ----
   const dummyPubKeyHash = 'ab'.repeat(20);
-  const contract = new TSOPContract(artifact, [dummyPubKeyHash]);
+  const contract = new RunarContract(artifact, [dummyPubKeyHash]);
   const lockingScriptHex = contract.getLockingScript();
   console.log('Locking script:', lockingScriptHex.slice(0, 40) + '...');
   console.log('Locking script length:', lockingScriptHex.length / 2, 'bytes');
@@ -1045,12 +1045,12 @@ async function advancedBsvSdkIntegration() {
   console.log('\nDeploy TX pattern:');
   console.log('  LockingScript from @bsv/sdk:', bsvLockingScript.toHex().slice(0, 40) + '...');
   console.log('  Input:  funding UTXO with P2PKH().unlock(privKey)');
-  console.log('  Output: TSOP lockingScript (' + lockingScriptHex.length / 2 + ' bytes) + 10,000 sats');
+  console.log('  Output: Rúnar lockingScript (' + lockingScriptHex.length / 2 + ' bytes) + 10,000 sats');
   console.log('  Output: P2PKH change');
 
   // ---- Step 5: Spend/unlock the contract ----
   //
-  // For TSOP contracts, the unlocking script is built from the ABI:
+  // For Rúnar contracts, the unlocking script is built from the ABI:
   //   1. Push method parameters in reverse order (so first param ends up on top)
   //   2. For multi-method contracts, push the method selector index
   //
@@ -1075,7 +1075,7 @@ async function advancedBsvSdkIntegration() {
   //   const spendResult = await spendTx.broadcast(broadcaster);
 
   console.log('\nSpend TX pattern:');
-  console.log('  Input:  TSOP UTXO with unlockingScript from buildUnlockingScript()');
+  console.log('  Input:  Rúnar UTXO with unlockingScript from buildUnlockingScript()');
   console.log('  Output: P2PKH to recipient');
 
   // ---- Step 6: OP_PUSH_TX for stateful contracts ----
@@ -1107,7 +1107,7 @@ OP_PUSH_TX reference: https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
 // #############################################################################
 
 async function main() {
-  console.log('TSOP SDK Usage Examples');
+  console.log('Rúnar SDK Usage Examples');
   console.log('======================');
   console.log('Running all 8 contract examples...\n');
 

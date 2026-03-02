@@ -133,7 +133,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
 export function formatReportAsMarkdown(report: ConformanceReport): string {
   const lines: string[] = [];
 
-  lines.push('# TSOP Conformance Test Report');
+  lines.push('# Rúnar Conformance Test Report');
   lines.push('');
   lines.push(`**Date:** ${report.timestamp}`);
   lines.push(`**Total:** ${report.totalTests} | **Passed:** ${report.passed} | **Failed:** ${report.failed} | **Skipped:** ${report.skipped}`);
@@ -219,7 +219,7 @@ export function printReportToConsole(report: ConformanceReport): void {
   const DIM = '\x1b[2m';
 
   console.log('');
-  console.log(`${BOLD}TSOP Conformance Test Report${RESET}`);
+  console.log(`${BOLD}Rúnar Conformance Test Report${RESET}`);
   console.log(`${DIM}${report.timestamp}${RESET}`);
   console.log('');
 

@@ -1,9 +1,9 @@
-# TSOP Frontend Specification
+# Rúnar Frontend Specification
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the **language-agnostic contract** of TSOP frontend parsers. Every parser -- regardless of input format (TypeScript, YAML, Solidity-like, Move-like, Go, Rust) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
+This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, YAML, Solidity-like, Move-like, Go, Rust) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
 
 ---
 
@@ -47,9 +47,9 @@ ContractNode = {
 | TypeScript | `class Name extends Base` | `extends SmartContract` / `extends StatefulSmartContract` |
 | YAML | `contract: Name` | `extends: SmartContract` / `extends: StatefulSmartContract` |
 | Solidity | `contract Name is Base` | `is SmartContract` / `is StatefulSmartContract` |
-| Move | `module Name { ... }` | `use tsop::SmartContract` / `use tsop::StatefulSmartContract` |
-| Go | `type Name struct { tsop.SmartContract; ... }` | embedded `tsop.SmartContract` / `tsop.StatefulSmartContract` |
-| Rust | `#[tsop::contract(Base)] struct Name` | attribute argument `SmartContract` / `StatefulSmartContract` |
+| Move | `module Name { ... }` | `use runar::SmartContract` / `use runar::StatefulSmartContract` |
+| Go | `type Name struct { runar.SmartContract; ... }` | embedded `runar.SmartContract` / `runar.StatefulSmartContract` |
+| Rust | `#[runar::contract(Base)] struct Name` | attribute argument `SmartContract` / `StatefulSmartContract` |
 
 ---
 
@@ -82,7 +82,7 @@ PropertyNode = {
 | YAML | `{ name, type, readonly: true }` | `readonly` field |
 | Solidity | `Type immutable name;` / `Type name;` | `immutable` keyword |
 | Move | `name: Type readonly,` / `name: Type,` | `readonly` suffix |
-| Go | `Name tsop.Type \`tsop:"readonly"\`` | struct tag |
+| Go | `Name runar.Type \`runar:"readonly"\`` | struct tag |
 | Rust | `#[readonly] name: Type` / `name: Type` | `#[readonly]` attribute |
 
 ---
@@ -222,7 +222,7 @@ PrimitiveTypeName =
 
 ### Type Normalization Rules
 
-Parsers must normalize format-specific type names to TSOP canonical names:
+Parsers must normalize format-specific type names to Rúnar canonical names:
 
 | Input (any format) | Canonical PrimitiveTypeName |
 |--------------------|---------------------------|
@@ -516,7 +516,7 @@ A parser is conformant if, for every valid input in its format, it produces a `C
 
 1. **Structural correctness.** All required fields are present with correct types.
 2. **Name normalization.** All identifier names are camelCase (except the contract name, which is PascalCase).
-3. **Type normalization.** All type names are canonical TSOP type names.
+3. **Type normalization.** All type names are canonical Rúnar type names.
 4. **Operator normalization.** `==` is `===`, `!=` is `!==`.
 5. **Constructor presence.** A constructor `MethodNode` is always present, even if synthesized.
 6. **Declaration order.** Properties and methods appear in the same order as in the source.
