@@ -4,5 +4,5 @@ use (
 	./compilers/go
 	./conformance
 	./examples/go
-	./packages/tsop-go
+	./packages/runar-go
 )

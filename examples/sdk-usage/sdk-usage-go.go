@@ -1,9 +1,9 @@
 //go:build ignore
 
-// sdk-usage-go.go -- Go SDK usage examples for all 8 TSOP contracts.
+// sdk-usage-go.go -- Go SDK usage examples for all 8 Rúnar contracts.
 //
-// Demonstrates how to use the TSOP Go compiler and the official BSV go-sdk to:
-//   1. Compile .tsop.ts contract source files to Bitcoin Script artifacts
+// Demonstrates how to use the Rúnar Go compiler and the official BSV go-sdk to:
+//   1. Compile .runar.ts contract source files to Bitcoin Script artifacts
 //   2. Generate keys, derive addresses, and build locking/unlocking scripts
 //   3. Construct deployment transactions using go-sdk transaction builder
 //   4. Compute BIP-143 sighash preimages for OP_PUSH_TX contracts
@@ -11,7 +11,7 @@
 //
 // Prerequisites:
 //   go get github.com/bsv-blockchain/go-sdk
-//   go get github.com/tsop/compiler-go
+//   go get github.com/icellan/runar/compilers/go
 //
 // Build & run:  go run sdk-usage-go.go
 
@@ -31,8 +31,8 @@ import (
 	sighash "github.com/bsv-blockchain/go-sdk/transaction/sighash"
 	"github.com/bsv-blockchain/go-sdk/transaction/template/p2pkh"
 
-	// TSOP Go compiler -- used as a library.
-	// In a real project:  import tsop "github.com/tsop/compiler-go"
+	// Rúnar Go compiler -- used as a library.
+	// In a real project:  import runar "github.com/icellan/runar/compilers/go"
 	// Exports: CompileFromSource, CompileFromIR, CompileFromIRBytes,
 	//          CompileSourceToIR, ArtifactToJSON, and the Artifact/ABI types.
 )
@@ -93,7 +93,7 @@ func buildUnlockingScript(pushes ...[]byte) *script.Script {
 	return s
 }
 
-// appendMethodIndex appends a TSOP method dispatch index to a script.
+// appendMethodIndex appends a Rúnar method dispatch index to a script.
 // Uses canonical Bitcoin Script number opcodes: OP_0 (0), OP_1..OP_16 (1-16).
 func appendMethodIndex(s *script.Script, idx int) {
 	if idx == 0 {
@@ -108,7 +108,7 @@ func appendMethodIndex(s *script.Script, idx int) {
 // =========================================================================
 // Example 1: P2PKH (Pay to Public Key Hash)
 // =========================================================================
-// Source: examples/ts/p2pkh/P2PKH.tsop.ts
+// Source: examples/ts/p2pkh/P2PKH.runar.ts
 // Constructor: (pubKeyHash: Addr)
 // Method:      unlock(sig: Sig, pubKey: PubKey)
 // Stateful:    No
@@ -117,9 +117,9 @@ func exampleP2PKH() {
 	fmt.Println("=== Example 1: P2PKH ===")
 
 	// --- Step 1: Compile the contract ---
-	// artifact, err := tsop.CompileFromSource("examples/ts/p2pkh/P2PKH.tsop.ts")
+	// artifact, err := runar.CompileFromSource("examples/ts/p2pkh/P2PKH.runar.ts")
 	// lockingScript, _ := script.NewFromHex(artifact.Script)
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/p2pkh/P2PKH.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/p2pkh/P2PKH.runar.ts\")")
 
 	// --- Step 2: Generate a keypair using go-sdk ---
 	ownerKey, err := ec.NewPrivateKey()
@@ -136,7 +136,7 @@ func exampleP2PKH() {
 	lockScript, _ := p2pkh.Lock(ownerAddr)
 
 	// --- Step 4: Deploy -- create a UTXO locked by the contract ---
-	// In production, the locking script comes from the compiled TSOP artifact.
+	// In production, the locking script comes from the compiled Rúnar artifact.
 	// Here we use a standard P2PKH for demonstration.
 	fundTxIDHex := "0102030405060708091011121314151617181920212223242526272829303132"
 	deployTx := transaction.NewTransaction()
@@ -169,7 +169,7 @@ func exampleP2PKH() {
 // =========================================================================
 // Example 2: Escrow (multi-method, no state)
 // =========================================================================
-// Source: examples/ts/escrow/Escrow.tsop.ts
+// Source: examples/ts/escrow/Escrow.runar.ts
 // Constructor: (buyer: PubKey, seller: PubKey, arbiter: PubKey)
 // Methods (4): releaseBySeller(sig), releaseByArbiter(sig),
 //              refundToBuyer(sig), refundByArbiter(sig)
@@ -178,8 +178,8 @@ func exampleP2PKH() {
 func exampleEscrow() {
 	fmt.Println("=== Example 2: Escrow (4 methods) ===")
 
-	// artifact, err := tsop.CompileFromSource("examples/ts/escrow/Escrow.tsop.ts")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/escrow/Escrow.tsop.ts\")")
+	// artifact, err := runar.CompileFromSource("examples/ts/escrow/Escrow.runar.ts")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/escrow/Escrow.runar.ts\")")
 
 	// Generate 3 keypairs: buyer, seller, arbiter
 	buyerKey, _ := ec.NewPrivateKey()
@@ -190,7 +190,7 @@ func exampleEscrow() {
 	fmt.Printf("  Buyer pubkey:   %s...\n", hex.EncodeToString(buyerKey.PubKey().Compressed())[:20])
 	fmt.Printf("  Seller pubkey:  %s...\n", hex.EncodeToString(sellerKey.PubKey().Compressed())[:20])
 
-	// The TSOP compiler embeds constructor args (buyer, seller, arbiter pubkeys)
+	// The Rúnar compiler embeds constructor args (buyer, seller, arbiter pubkeys)
 	// into the locking script at compile time. The deployed script is self-contained.
 	//
 	// Multi-method dispatch: the compiler emits OP_DUP/OP_NUMEQUAL/OP_IF chains.
@@ -235,7 +235,7 @@ func exampleEscrow() {
 // =========================================================================
 // Example 3: Stateful Counter (OP_PUSH_TX)
 // =========================================================================
-// Source: examples/ts/stateful-counter/Counter.tsop.ts
+// Source: examples/ts/stateful-counter/Counter.runar.ts
 // Constructor: (count: bigint)      State: count (mutable)
 // Methods:     increment(txPreimage), decrement(txPreimage)
 // The contract verifies hash256(getStateScript()) == extractOutputHash(preimage),
@@ -244,8 +244,8 @@ func exampleEscrow() {
 func exampleCounter() {
 	fmt.Println("=== Example 3: Stateful Counter (OP_PUSH_TX) ===")
 
-	// artifact, err := tsop.CompileFromSource("examples/ts/stateful-counter/Counter.tsop.ts")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/stateful-counter/Counter.tsop.ts\")")
+	// artifact, err := runar.CompileFromSource("examples/ts/stateful-counter/Counter.runar.ts")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/stateful-counter/Counter.runar.ts\")")
 
 	lockScript, _ := script.NewFromHex("aa") // placeholder for artifact.Script
 	fundTxIDHex := strings.Repeat("10", 32)
@@ -301,14 +301,14 @@ func exampleCounter() {
 // =========================================================================
 // Example 4: Fungible Token (stateful, OP_PUSH_TX)
 // =========================================================================
-// Source: examples/ts/token-ft/FungibleTokenExample.tsop.ts
+// Source: examples/ts/token-ft/FungibleTokenExample.runar.ts
 // Constructor: (owner: PubKey, supply: bigint)
 // State:       owner (mutable)     Readonly: supply
 // Method:      transfer(sig, newOwner, txPreimage)
 
 func exampleFungibleToken() {
 	fmt.Println("=== Example 4: Fungible Token ===")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/token-ft/FungibleTokenExample.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/token-ft/FungibleTokenExample.runar.ts\")")
 
 	ownerKey, _ := ec.NewPrivateKey()
 	newOwnerKey, _ := ec.NewPrivateKey()
@@ -364,14 +364,14 @@ func exampleFungibleToken() {
 // =========================================================================
 // Example 5: NFT (stateful + burn method)
 // =========================================================================
-// Source: examples/ts/token-nft/NFTExample.tsop.ts
+// Source: examples/ts/token-nft/NFTExample.runar.ts
 // Constructor: (owner: PubKey, tokenId: ByteString, metadata: ByteString)
 // State:       owner (mutable)
 // Methods:     transfer(sig, newOwner, txPreimage) [0], burn(sig) [1]
 
 func exampleNFT() {
 	fmt.Println("=== Example 5: NFT ===")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/token-nft/NFTExample.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/token-nft/NFTExample.runar.ts\")")
 
 	ownerKey, _ := ec.NewPrivateKey()
 	tokenId := hex.EncodeToString([]byte("NFT-001"))
@@ -408,7 +408,7 @@ func exampleNFT() {
 // =========================================================================
 // Example 6: Auction (stateful + locktime)
 // =========================================================================
-// Source: examples/ts/auction/Auction.tsop.ts
+// Source: examples/ts/auction/Auction.runar.ts
 // Constructor: (auctioneer, highestBidder, highestBid, deadline)
 // State:       highestBidder (PubKey), highestBid (bigint)
 // Methods:     bid(bidder, bidAmount, txPreimage) [0]
@@ -417,7 +417,7 @@ func exampleNFT() {
 
 func exampleAuction() {
 	fmt.Println("=== Example 6: Auction (stateful + locktime) ===")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/auction/Auction.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/auction/Auction.runar.ts\")")
 
 	auctioneerKey, _ := ec.NewPrivateKey()
 	prevBidderKey, _ := ec.NewPrivateKey()
@@ -475,14 +475,14 @@ func exampleAuction() {
 // =========================================================================
 // Example 7: Oracle Price Feed (Rabin signature)
 // =========================================================================
-// Source: examples/ts/oracle-price/OraclePriceFeed.tsop.ts
+// Source: examples/ts/oracle-price/OraclePriceFeed.runar.ts
 // Constructor: (oraclePubKey: RabinPubKey, receiver: PubKey)
 // Method:      settle(price, rabinSig, padding, sig)
 // Stateless -- no OP_PUSH_TX needed.
 
 func exampleOraclePriceFeed() {
 	fmt.Println("=== Example 7: Oracle Price Feed (Rabin sig) ===")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/oracle-price/OraclePriceFeed.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/oracle-price/OraclePriceFeed.runar.ts\")")
 
 	receiverKey, _ := ec.NewPrivateKey()
 	lockScript, _ := script.NewFromHex("aa")
@@ -520,14 +520,14 @@ func exampleOraclePriceFeed() {
 // =========================================================================
 // Example 8: Covenant Vault (OP_PUSH_TX, output enforcement)
 // =========================================================================
-// Source: examples/ts/covenant-vault/CovenantVault.tsop.ts
+// Source: examples/ts/covenant-vault/CovenantVault.runar.ts
 // Constructor: (owner: PubKey, recipient: Addr, minAmount: bigint)
 // Method:      spend(sig, amount, txPreimage)
 // Stateless but uses checkPreimage to enforce spending constraints.
 
 func exampleCovenantVault() {
 	fmt.Println("=== Example 8: Covenant Vault ===")
-	fmt.Println("  artifact, err := tsop.CompileFromSource(\"examples/ts/covenant-vault/CovenantVault.tsop.ts\")")
+	fmt.Println("  artifact, err := runar.CompileFromSource(\"examples/ts/covenant-vault/CovenantVault.runar.ts\")")
 
 	ownerKey, _ := ec.NewPrivateKey()
 	recipientKey, _ := ec.NewPrivateKey()
@@ -614,16 +614,16 @@ func explainOpPushTx() {
 // =========================================================================
 
 func main() {
-	fmt.Println("TSOP Go SDK Usage Examples")
+	fmt.Println("Rúnar Go SDK Usage Examples")
 	fmt.Println("==========================")
 	fmt.Println()
 	fmt.Println("Dependencies:")
 	fmt.Println("  github.com/bsv-blockchain/go-sdk  -- BSV transaction building, signing, keys")
-	fmt.Println("  github.com/tsop/compiler-go        -- TSOP contract compilation")
+	fmt.Println("  github.com/icellan/runar/compilers/go        -- Rúnar contract compilation")
 	fmt.Println()
-	fmt.Println("Compiler API (github.com/tsop/compiler-go):")
-	fmt.Println("  CompileFromSource(path)   -- .tsop.ts -> Artifact (passes 1-6)")
-	fmt.Println("  CompileSourceToIR(path)   -- .tsop.ts -> ANFProgram (passes 1-4)")
+	fmt.Println("Compiler API (github.com/icellan/runar/compilers/go):")
+	fmt.Println("  CompileFromSource(path)   -- .runar.ts -> Artifact (passes 1-6)")
+	fmt.Println("  CompileSourceToIR(path)   -- .runar.ts -> ANFProgram (passes 1-4)")
 	fmt.Println("  CompileFromIR(path)       -- ANF JSON -> Artifact (passes 5-6)")
 	fmt.Println("  CompileFromIRBytes(data)  -- ANF bytes -> Artifact")
 	fmt.Println("  ArtifactToJSON(artifact)  -- Artifact -> JSON")

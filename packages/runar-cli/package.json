@@ -1,0 +1,28 @@
+{
+  "name": "runar-cli",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Rúnar CLI: compile, test, deploy, and manage smart contracts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "runar": "dist/bin.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run --passWithNoTests",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "files": ["dist"],
+  "dependencies": {
+    "commander": "^12.1.0",
+    "runar-compiler": "workspace:*",
+    "runar-sdk": "workspace:*",
+    "runar-testing": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

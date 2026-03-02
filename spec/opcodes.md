@@ -1,9 +1,9 @@
-# TSOP Opcode Reference
+# Rúnar Opcode Reference
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document provides a complete reference for Bitcoin SV opcodes used by TSOP, including their hex values, stack effects, and how they map from TSOP operations.
+This document provides a complete reference for Bitcoin SV opcodes used by Rúnar, including their hex values, stack effects, and how they map from Rúnar operations.
 
 ---
 
@@ -59,9 +59,9 @@ Means: `b` is on top, `a` is below it. The operation consumes both and pushes `a
 | `0x4d` | `OP_PUSHDATA2` | `( -- data)` | Next 2 bytes (LE) are length L, push next L bytes |
 | `0x4e` | `OP_PUSHDATA4` | `( -- data)` | Next 4 bytes (LE) are length L, push next L bytes |
 
-### 2.3 TSOP Mapping
+### 2.3 Rúnar Mapping
 
-| TSOP Operation | Opcode(s) Used |
+| Rúnar Operation | Opcode(s) Used |
 |---|---|
 | `bigint` literal `0n` | `OP_0` |
 | `bigint` literal `1n`-`16n` | `OP_1`-`OP_16` |
@@ -86,9 +86,9 @@ Means: `b` is on top, `a` is below it. The operation consumes both and pushes `a
 | `0x69` | `OP_VERIFY` | `(cond -- )` | Fail script if top is falsy; otherwise remove top |
 | `0x6a` | `OP_RETURN` | `( -- )` | Mark transaction output as unspendable. Immediately fails script |
 
-### 3.1 TSOP Mapping
+### 3.1 Rúnar Mapping
 
-| TSOP Operation | Opcode(s) Used |
+| Rúnar Operation | Opcode(s) Used |
 |---|---|
 | `if (cond) { ... }` | `OP_IF ... OP_ENDIF` |
 | `if (cond) { ... } else { ... }` | `OP_IF ... OP_ELSE ... OP_ENDIF` |
@@ -135,9 +135,9 @@ Both branches must leave the same number of items on the stack.
 | `0x71` | `OP_2ROT` | `(a b c d e f -- c d e f a b)` | Rotate top 6 in pairs |
 | `0x72` | `OP_2SWAP` | `(a b c d -- c d a b)` | Swap top two pairs |
 
-### 4.1 TSOP Mapping
+### 4.1 Rúnar Mapping
 
-| TSOP Operation | Opcode(s) Used |
+| Rúnar Operation | Opcode(s) Used |
 |---|---|
 | Duplicate a value for multiple uses | `OP_DUP`, `OP_2DUP`, `OP_PICK` |
 | Access a deep stack value | `OP_ROLL(n)` or `OP_PICK(n)` |
@@ -174,9 +174,9 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `0x98` | `OP_LSHIFT` | `(a b -- a<<b)` | Left shift (BSV re-enabled) |
 | `0x99` | `OP_RSHIFT` | `(a b -- a>>b)` | Right shift (BSV re-enabled) |
 
-### 5.1 TSOP Mapping
+### 5.1 Rúnar Mapping
 
-| TSOP Expression | Opcode |
+| Rúnar Expression | Opcode |
 |---|---|
 | `a + b` (bigint) | `OP_ADD` |
 | `a - b` | `OP_SUB` |
@@ -199,7 +199,7 @@ The following opcodes were disabled in BTC but are **re-enabled in BSV** (post-G
 - `OP_LSHIFT` (0x98)
 - `OP_RSHIFT` (0x99)
 
-These are fully available for TSOP on BSV. They are NOT available on BTC or BCH.
+These are fully available for Rúnar on BSV. They are NOT available on BTC or BCH.
 
 ---
 
@@ -220,9 +220,9 @@ These are fully available for TSOP on BSV. They are NOT available on BTC or BCH.
 | `0xa4` | `OP_MAX` | `(a b -- max)` | Return the larger value |
 | `0xa5` | `OP_WITHIN` | `(x lo hi -- lo<=x<hi)` | True if x is in range [lo, hi) |
 
-### 6.1 TSOP Mapping
+### 6.1 Rúnar Mapping
 
-| TSOP Expression | Opcode |
+| Rúnar Expression | Opcode |
 |---|---|
 | `a === b` (bigint) | `OP_NUMEQUAL` |
 | `a === b` (ByteString) | `OP_EQUAL` |
@@ -241,7 +241,7 @@ These are fully available for TSOP on BSV. They are NOT available on BTC or BCH.
 - **`OP_EQUAL`**: Compares raw byte sequences. Used for `ByteString`, `PubKey`, `Sha256`, etc.
 - **`OP_NUMEQUAL`**: Interprets both values as Script numbers and compares numerically. Used for `bigint`. Handles different encodings of the same number (e.g., `0x00` vs empty).
 
-TSOP selects the appropriate opcode based on the operand types determined during type checking.
+Rúnar selects the appropriate opcode based on the operand types determined during type checking.
 
 ---
 
@@ -259,9 +259,9 @@ TSOP selects the appropriate opcode based on the operand types determined during
 | `0xae` | `OP_CHECKMULTISIG` | `(... sigs n pubKeys m -- bool)` | Verify m-of-n multi-signature |
 | `0xaf` | `OP_CHECKMULTISIGVERIFY` | `(... -- )` | `OP_CHECKMULTISIG` then `OP_VERIFY` |
 
-### 7.1 TSOP Mapping
+### 7.1 Rúnar Mapping
 
-| TSOP Function | Opcode |
+| Rúnar Function | Opcode |
 |---|---|
 | `ripemd160(data)` | `OP_RIPEMD160` |
 | `sha256(data)` | `OP_SHA256` |
@@ -310,7 +310,7 @@ Top:    m (number of public keys)
         dummy (due to off-by-one bug, must be OP_0)
 ```
 
-Note the historical off-by-one bug: `OP_CHECKMULTISIG` pops one extra item (the "dummy"). TSOP always pushes `OP_0` as the dummy.
+Note the historical off-by-one bug: `OP_CHECKMULTISIG` pops one extra item (the "dummy"). Rúnar always pushes `OP_0` as the dummy.
 
 ---
 
@@ -326,9 +326,9 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | `0x80` | `OP_NUM2BIN` | `(num size -- bin)` | Convert Script number to byte string of given size |
 | `0x81` | `OP_BIN2NUM` | `(bin -- num)` | Convert byte string to Script number (minimal encoding) |
 
-### 8.1 TSOP Mapping
+### 8.1 Rúnar Mapping
 
-| TSOP Operation | Opcode |
+| Rúnar Operation | Opcode |
 |---|---|
 | `a + b` (ByteString) | `OP_CAT` |
 | `ByteString.slice(start, end)` | `OP_SPLIT` (twice if needed) |
@@ -355,26 +355,26 @@ Without `OP_CAT`, stateful contracts and many advanced patterns would be impossi
 | `0x61` | `OP_NOP` | No operation |
 | `0xb0`-`0xb9` | `OP_NOP1`-`OP_NOP10` | Reserved no-ops (for soft-fork upgrades in BTC; no special meaning in BSV) |
 
-TSOP does not generate NOP opcodes in normal compilation.
+Rúnar does not generate NOP opcodes in normal compilation.
 
 ---
 
 ## 10. Disabled / Invalid Opcodes
 
-The following opcodes exist in the Bitcoin Script specification but are **not used by TSOP**:
+The following opcodes exist in the Bitcoin Script specification but are **not used by Rúnar**:
 
 | Hex | Name | Reason |
 |-----|------|--------|
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
-| `0xa8` | `OP_SHA1` | Not used by TSOP (weak hash) |
-| `0xab`+ | `OP_CODESEPARATOR` | Not used by TSOP |
+| `0xa8` | `OP_SHA1` | Not used by Rúnar (weak hash) |
+| `0xab`+ | `OP_CODESEPARATOR` | Not used by Rúnar |
 
 ---
 
 ## 11. OP_PUSH_TX Pattern
 
-The **OP_PUSH_TX** pattern is not a single opcode but a technique using existing opcodes to enable a contract to inspect its own transaction. This is the foundation of stateful contracts in TSOP.
+The **OP_PUSH_TX** pattern is not a single opcode but a technique using existing opcodes to enable a contract to inspect its own transaction. This is the foundation of stateful contracts in Rúnar.
 
 ### 11.1 How It Works
 
@@ -406,9 +406,9 @@ The sighash preimage for BSV (with SIGHASH_FORKID) has this structure:
 | var | 4 | nLocktime |
 | var | 4 | sighash type |
 
-### 11.3 TSOP Integration
+### 11.3 Rúnar Integration
 
-The `this.checkPreimage(preimage)` call in TSOP generates the OP_PUSH_TX verification code. The compiler also generates code to:
+The `this.checkPreimage(preimage)` call in Rúnar generates the OP_PUSH_TX verification code. The compiler also generates code to:
 
 - Extract `scriptCode` from the preimage (contains current locking script = current state + code).
 - Extract `hashOutputs` for verifying the new state.
@@ -440,17 +440,17 @@ All opcodes listed in sections 2-10 are BSV-native and available on mainnet.
 | `OP_INVALUE` | Push the value of a specific input | Proposed |
 | `OP_INSCRIPT` | Push the scriptSig of a specific input | Proposed |
 
-If Chronicle extensions become available, TSOP would be able to replace the OP_PUSH_TX sighash-trick pattern with direct introspection opcodes, resulting in smaller and more efficient scripts for stateful contracts.
+If Chronicle extensions become available, Rúnar would be able to replace the OP_PUSH_TX sighash-trick pattern with direct introspection opcodes, resulting in smaller and more efficient scripts for stateful contracts.
 
-### 12.3 Impact on TSOP
+### 12.3 Impact on Rúnar
 
-TSOP's IR is designed to be opcode-agnostic at the ANF level. The `check_preimage` and `get_state_script` IR nodes abstract over the underlying mechanism. If native introspection opcodes become available, only the code generator (Stack IR to Script) needs to change -- the ANF IR and higher-level semantics remain the same.
+Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preimage` and `get_state_script` IR nodes abstract over the underlying mechanism. If native introspection opcodes become available, only the code generator (Stack IR to Script) needs to change -- the ANF IR and higher-level semantics remain the same.
 
 ---
 
-## 13. Quick Reference: TSOP Operation to Opcode
+## 13. Quick Reference: Rúnar Operation to Opcode
 
-| TSOP Operation | Primary Opcode(s) | Hex |
+| Rúnar Operation | Primary Opcode(s) | Hex |
 |---|---|---|
 | `a + b` (bigint) | `OP_ADD` | `0x93` |
 | `a + b` (ByteString) | `OP_CAT` | `0x7e` |

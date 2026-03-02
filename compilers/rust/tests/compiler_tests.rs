@@ -1,6 +1,6 @@
-//! Integration tests for the TSOP Rust compiler.
+//! Integration tests for the Rúnar Rust compiler.
 
-use tsop_compiler_rust::{compile_from_ir_str, compile_from_source_str};
+use runar_compiler_rust::{compile_from_ir_str, compile_from_source_str};
 
 // ---------------------------------------------------------------------------
 // Test: IR loading — Basic P2PKH
@@ -37,7 +37,7 @@ fn test_load_ir_basic_p2pkh() {
     assert_eq!(artifact.contract_name, "P2PKH");
     assert!(!artifact.script.is_empty(), "script hex should not be empty");
     assert!(!artifact.asm.is_empty(), "asm should not be empty");
-    assert_eq!(artifact.version, "tsop-v0.1.0");
+    assert_eq!(artifact.version, "runar-v0.1.0");
 
     println!("P2PKH script hex: {}", artifact.script);
     println!("P2PKH script asm: {}", artifact.asm);
@@ -202,7 +202,7 @@ fn test_compile_boolean_logic() {
 
 #[test]
 fn test_encode_script_numbers() {
-    use tsop_compiler_rust::codegen::emit::{encode_push_int, encode_script_number};
+    use runar_compiler_rust::codegen::emit::{encode_push_int, encode_script_number};
 
     // Zero
     assert_eq!(encode_script_number(0), Vec::<u8>::new());
@@ -277,7 +277,7 @@ fn test_artifact_json_structure() {
     );
     assert_eq!(
         parsed["version"].as_str().unwrap(),
-        "tsop-v0.1.0"
+        "runar-v0.1.0"
     );
 }
 
@@ -302,8 +302,8 @@ fn test_validation_empty_contract_name() {
 
 #[test]
 fn test_optimizer_swap_swap() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::StackOp;
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::StackOp;
 
     let ops = vec![
         StackOp::Swap,
@@ -317,8 +317,8 @@ fn test_optimizer_swap_swap() {
 
 #[test]
 fn test_optimizer_checksig_verify() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::StackOp;
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::StackOp;
 
     let ops = vec![
         StackOp::Opcode("OP_CHECKSIG".to_string()),
@@ -331,8 +331,8 @@ fn test_optimizer_checksig_verify() {
 
 #[test]
 fn test_optimizer_numequal_verify() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::StackOp;
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::StackOp;
 
     let ops = vec![
         StackOp::Opcode("OP_NUMEQUAL".to_string()),
@@ -535,7 +535,7 @@ fn test_all_conformance_tests() {
 
 #[test]
 fn test_push_data_encoding() {
-    use tsop_compiler_rust::codegen::emit::encode_push_data;
+    use runar_compiler_rust::codegen::emit::encode_push_data;
 
     // Empty data -> OP_0
     let encoded = encode_push_data(&[]);
@@ -637,8 +637,8 @@ fn test_deterministic_output() {
 
 #[test]
 fn test_optimizer_push_drop() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::{PushValue, StackOp};
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::{PushValue, StackOp};
 
     let ops = vec![
         StackOp::Push(PushValue::Int(42)),
@@ -666,8 +666,8 @@ fn test_optimizer_push_drop() {
 
 #[test]
 fn test_optimizer_2drop() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::StackOp;
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::StackOp;
 
     let ops = vec![StackOp::Drop, StackOp::Drop];
     let optimized = optimize_stack_ops(&ops);
@@ -690,8 +690,8 @@ fn test_optimizer_2drop() {
 
 #[test]
 fn test_optimizer_1add() {
-    use tsop_compiler_rust::codegen::optimizer::optimize_stack_ops;
-    use tsop_compiler_rust::codegen::stack::{PushValue, StackOp};
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::{PushValue, StackOp};
 
     let ops = vec![
         StackOp::Push(PushValue::Int(1)),
@@ -759,13 +759,13 @@ fn test_empty_ir_error() {
 }
 
 // ---------------------------------------------------------------------------
-// Source compilation tests (.tsop.ts → Bitcoin Script via native SWC frontend)
+// Source compilation tests (.runar.ts → Bitcoin Script via native SWC frontend)
 // ---------------------------------------------------------------------------
 
 fn conformance_source(test_name: &str) -> String {
     let path = conformance_dir()
         .join(test_name)
-        .join(format!("{}.tsop.ts", test_name));
+        .join(format!("{}.runar.ts", test_name));
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read source {}: {}", path.display(), e))
 }
@@ -785,7 +785,7 @@ fn example_source(contract_dir: &str, file_name: &str) -> String {
 #[test]
 fn test_source_compile_p2pkh() {
     let source = conformance_source("basic-p2pkh");
-    let artifact = compile_from_source_str(&source, Some("basic-p2pkh.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("basic-p2pkh.runar.ts"))
         .expect("source compilation should succeed");
 
     assert_eq!(artifact.contract_name, "P2PKH");
@@ -807,7 +807,7 @@ fn test_source_compile_p2pkh() {
 #[test]
 fn test_source_compile_arithmetic() {
     let source = conformance_source("arithmetic");
-    let artifact = compile_from_source_str(&source, Some("arithmetic.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("arithmetic.runar.ts"))
         .expect("source compilation should succeed");
 
     assert_eq!(artifact.contract_name, "Arithmetic");
@@ -821,7 +821,7 @@ fn test_source_compile_arithmetic() {
 #[test]
 fn test_source_compile_boolean_logic() {
     let source = conformance_source("boolean-logic");
-    let artifact = compile_from_source_str(&source, Some("boolean-logic.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("boolean-logic.runar.ts"))
         .expect("source compilation should succeed");
 
     assert_eq!(artifact.contract_name, "BooleanLogic");
@@ -834,7 +834,7 @@ fn test_source_compile_boolean_logic() {
 #[test]
 fn test_source_compile_if_else() {
     let source = conformance_source("if-else");
-    let artifact = compile_from_source_str(&source, Some("if-else.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("if-else.runar.ts"))
         .expect("source compilation should succeed");
 
     assert!(artifact.asm.contains("OP_IF"), "expected OP_IF in ASM");
@@ -843,7 +843,7 @@ fn test_source_compile_if_else() {
 #[test]
 fn test_source_compile_bounded_loop() {
     let source = conformance_source("bounded-loop");
-    let artifact = compile_from_source_str(&source, Some("bounded-loop.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("bounded-loop.runar.ts"))
         .expect("source compilation should succeed");
 
     assert!(!artifact.script.is_empty());
@@ -852,7 +852,7 @@ fn test_source_compile_bounded_loop() {
 #[test]
 fn test_source_compile_multi_method() {
     let source = conformance_source("multi-method");
-    let artifact = compile_from_source_str(&source, Some("multi-method.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("multi-method.runar.ts"))
         .expect("source compilation should succeed");
 
     assert!(
@@ -864,7 +864,7 @@ fn test_source_compile_multi_method() {
 #[test]
 fn test_source_compile_stateful() {
     let source = conformance_source("stateful");
-    let artifact = compile_from_source_str(&source, Some("stateful.tsop.ts"))
+    let artifact = compile_from_source_str(&source, Some("stateful.runar.ts"))
         .expect("source compilation should succeed");
 
     assert!(
@@ -887,7 +887,7 @@ fn test_source_compile_all_conformance() {
 
     for dir in &test_dirs {
         let source = conformance_source(dir);
-        let artifact = compile_from_source_str(&source, Some(&format!("{}.tsop.ts", dir)))
+        let artifact = compile_from_source_str(&source, Some(&format!("{}.runar.ts", dir)))
             .unwrap_or_else(|e| panic!("source compilation failed for {}: {}", dir, e));
 
         assert!(
@@ -926,8 +926,8 @@ fn test_source_compile_all_conformance() {
 
 #[test]
 fn test_source_compile_example_p2pkh() {
-    let source = example_source("p2pkh", "P2PKH.tsop.ts");
-    let artifact = compile_from_source_str(&source, Some("P2PKH.tsop.ts"))
+    let source = example_source("p2pkh", "P2PKH.runar.ts");
+    let artifact = compile_from_source_str(&source, Some("P2PKH.runar.ts"))
         .expect("example P2PKH should compile");
 
     assert_eq!(artifact.contract_name, "P2PKH");
@@ -936,8 +936,8 @@ fn test_source_compile_example_p2pkh() {
 
 #[test]
 fn test_source_compile_example_escrow() {
-    let source = example_source("escrow", "Escrow.tsop.ts");
-    let artifact = compile_from_source_str(&source, Some("Escrow.tsop.ts"))
+    let source = example_source("escrow", "Escrow.runar.ts");
+    let artifact = compile_from_source_str(&source, Some("Escrow.runar.ts"))
         .expect("example Escrow should compile");
 
     assert_eq!(artifact.contract_name, "Escrow");
@@ -955,7 +955,7 @@ fn test_source_vs_ir_both_produce_output() {
 
     // Compile from source
     let source = conformance_source("basic-p2pkh");
-    let source_artifact = compile_from_source_str(&source, Some("basic-p2pkh.tsop.ts"))
+    let source_artifact = compile_from_source_str(&source, Some("basic-p2pkh.runar.ts"))
         .expect("source compilation");
 
     // Both should produce P2PKH

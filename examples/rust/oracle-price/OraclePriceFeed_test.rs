@@ -1,8 +1,8 @@
-#[path = "OraclePriceFeed.tsop.rs"]
+#[path = "OraclePriceFeed.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 fn new_oracle_feed() -> OraclePriceFeed {
     OraclePriceFeed {
@@ -29,8 +29,8 @@ fn test_settle_high_price() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("OraclePriceFeed.tsop.rs"),
-        "OraclePriceFeed.tsop.rs",
+    runar::compile_check(
+        include_str!("OraclePriceFeed.runar.rs"),
+        "OraclePriceFeed.runar.rs",
     ).unwrap();
 }

@@ -1,11 +1,11 @@
 [package]
-name = "tsop-example-tests"
+name = "runar-example-tests"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [dependencies]
-tsop = { path = "../../packages/tsop-rs" }
+runar = { path = "../../packages/runar-rs" }
 
 [[test]]
 name = "p2pkh"

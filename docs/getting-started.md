@@ -1,6 +1,6 @@
-# Getting Started with TSOP
+# Getting Started with Rúnar
 
-This guide walks you through installing TSOP, writing your first Bitcoin SV smart contract, compiling it, testing it, and deploying it to testnet.
+This guide walks you through installing Rúnar, writing your first Bitcoin SV smart contract, compiling it, testing it, and deploying it to testnet.
 
 ---
 
@@ -30,34 +30,34 @@ go version       # go1.22.x or higher (optional)
 ### From Source (Monorepo)
 
 ```bash
-git clone https://github.com/icellan/tsop.git
-cd tsop
+git clone https://github.com/icellan/runar.git
+cd runar
 pnpm install
 pnpm build
 ```
 
-This builds all packages in the workspace: `tsop-lang`, `tsop-compiler`, `tsop-cli`, `tsop-sdk`, `tsop-testing`, and `tsop-ir-schema`.
+This builds all packages in the workspace: `runar-lang`, `runar-compiler`, `runar-cli`, `runar-sdk`, `runar-testing`, and `runar-ir-schema`.
 
 ### As npm Packages
 
 If you only want to write and compile contracts without developing the toolchain itself:
 
 ```bash
-pnpm add tsop-lang tsop-compiler tsop-cli
+pnpm add runar-lang runar-compiler runar-cli
 ```
 
-- **tsop-lang** -- Types and built-in function declarations you import in your contracts.
-- **tsop-compiler** -- The reference TypeScript-to-Bitcoin-Script compiler.
-- **tsop-cli** -- Command-line tool for compiling, testing, and deploying.
+- **runar-lang** -- Types and built-in function declarations you import in your contracts.
+- **runar-compiler** -- The reference TypeScript-to-Bitcoin-Script compiler.
+- **runar-cli** -- Command-line tool for compiling, testing, and deploying.
 
 ---
 
 ## Writing Your First Contract
 
-Create a file named `P2PKH.tsop.ts`. TSOP contracts use the `.tsop.ts` extension so they remain valid TypeScript files with full IDE support.
+Create a file named `P2PKH.runar.ts`. Rúnar contracts use the `.runar.ts` extension so they remain valid TypeScript files with full IDE support.
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'tsop-lang';
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 
 class P2PKH extends SmartContract {
   readonly pubKeyHash: Addr;
@@ -76,9 +76,9 @@ class P2PKH extends SmartContract {
 
 ### Step-by-Step Explanation
 
-1. **Import from `tsop-lang`**: Every contract imports `SmartContract` (the base class), `assert` (the spending condition enforcer), and the types and built-in functions it needs.
+1. **Import from `runar-lang`**: Every contract imports `SmartContract` (the base class), `assert` (the spending condition enforcer), and the types and built-in functions it needs.
 
-2. **Class extends `SmartContract`**: TSOP contracts are classes. Exactly one class per file, and it must extend `SmartContract` directly.
+2. **Class extends `SmartContract`**: Rúnar contracts are classes. Exactly one class per file, and it must extend `SmartContract` directly.
 
 3. **`readonly pubKeyHash: Addr`**: The `readonly` keyword marks this property as immutable. It is embedded in the locking script at deploy time. `Addr` is a 20-byte address type (the result of `hash160` on a public key).
 
@@ -99,7 +99,7 @@ This contract compiles to the standard P2PKH script: `OP_DUP OP_HASH160 <pubKeyH
 Use the CLI to compile:
 
 ```bash
-tsop compile P2PKH.tsop.ts
+runar compile P2PKH.runar.ts
 ```
 
 This produces `artifacts/P2PKH.json`, a JSON artifact containing:
@@ -113,13 +113,13 @@ This produces `artifacts/P2PKH.json`, a JSON artifact containing:
 
 ```bash
 # Specify output directory
-tsop compile P2PKH.tsop.ts --output ./build
+runar compile P2PKH.runar.ts --output ./build
 
 # Include the ANF IR in the artifact (for debugging)
-tsop compile P2PKH.tsop.ts --ir
+runar compile P2PKH.runar.ts --ir
 
 # Print the assembly to stdout
-tsop compile P2PKH.tsop.ts --asm
+runar compile P2PKH.runar.ts --asm
 ```
 
 ---
@@ -130,7 +130,7 @@ Create a test file `P2PKH.test.ts` using vitest:
 
 ```typescript
 import { describe, it, expect } from 'vitest';
-import { TestSmartContract, expectScriptSuccess, expectScriptFailure } from 'tsop-testing';
+import { TestSmartContract, expectScriptSuccess, expectScriptFailure } from 'runar-testing';
 import artifact from './artifacts/P2PKH.json';
 
 describe('P2PKH', () => {
@@ -158,12 +158,12 @@ describe('P2PKH', () => {
 Run tests:
 
 ```bash
-tsop test
+runar test
 # or directly with vitest:
 pnpm test
 ```
 
-The `TestSmartContract` class loads your compiled artifact, builds unlocking scripts from the arguments you provide, and executes them against the locking script in TSOP's built-in Script VM.
+The `TestSmartContract` class loads your compiled artifact, builds unlocking scripts from the arguments you provide, and executes them against the locking script in Rúnar's built-in Script VM.
 
 ---
 
@@ -172,7 +172,7 @@ The `TestSmartContract` class loads your compiled artifact, builds unlocking scr
 Once your contract compiles and passes tests, deploy it to the BSV testnet:
 
 ```bash
-tsop deploy ./artifacts/P2PKH.json --network testnet --key <your-WIF-private-key> --satoshis 10000
+runar deploy ./artifacts/P2PKH.json --network testnet --key <your-WIF-private-key> --satoshis 10000
 ```
 
 This will:

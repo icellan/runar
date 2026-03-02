@@ -1,9 +1,9 @@
-# TSOP ABI Specification
+# Rúnar ABI Specification
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the Application Binary Interface (ABI) for TSOP smart contracts. The ABI defines how constructor parameters, method parameters, and state fields are encoded and decoded for on-chain interaction.
+This document specifies the Application Binary Interface (ABI) for Rúnar smart contracts. The ABI defines how constructor parameters, method parameters, and state fields are encoded and decoded for on-chain interaction.
 
 ---
 
@@ -70,7 +70,7 @@ Each `Param`:
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | Parameter name (matches source code) |
-| `type` | `string` | TSOP type name (see Type Encoding below) |
+| `type` | `string` | Rúnar type name (see Type Encoding below) |
 
 ### 3.3 Semantics
 
@@ -204,7 +204,7 @@ Unlocking script to call `refund`:
 
 Types are encoded as strings in the ABI:
 
-| TSOP Type | ABI Type String | Encoding Description |
+| Rúnar Type | ABI Type String | Encoding Description |
 |---|---|---|
 | `bigint` | `"bigint"` | Script number (LE sign-magnitude, minimal) |
 | `boolean` | `"boolean"` | `OP_TRUE` (0x01) or `OP_FALSE` (empty) |
@@ -300,7 +300,7 @@ State fields are described separately from the ABI but are included in the artif
 | Field | Type | Description |
 |---|---|---|
 | `name` | `string` | Property name |
-| `type` | `string` | TSOP type (same encoding as ABI types) |
+| `type` | `string` | Rúnar type (same encoding as ABI types) |
 | `index` | `number` | Position in state serialization (0-based) |
 
 ### 6.3 State Serialization Format
@@ -415,6 +415,6 @@ A conforming ABI must satisfy:
 2. **Non-empty methods**: There must be at least one public method.
 3. **Unique method names**: No two methods may share the same name.
 4. **Sequential indices**: Method indices must be `0, 1, 2, ...` with no gaps.
-5. **Valid types**: All type strings must be recognized TSOP types.
+5. **Valid types**: All type strings must be recognized Rúnar types.
 6. **Unique parameter names**: Within each method, parameter names must be unique.
 7. **Constructor-property alignment**: Constructor parameters must correspond 1:1 to contract properties (both readonly and mutable) in declaration order.

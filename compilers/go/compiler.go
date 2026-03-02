@@ -7,13 +7,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tsop/compiler-go/codegen"
-	"github.com/tsop/compiler-go/frontend"
-	"github.com/tsop/compiler-go/ir"
+	"github.com/icellan/runar/compilers/go/codegen"
+	"github.com/icellan/runar/compilers/go/frontend"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
-// Artifact types — mirrors the TypeScript TSOPArtifact schema
+// Artifact types — mirrors the TypeScript RunarArtifact schema
 // ---------------------------------------------------------------------------
 
 // ABIParam describes a parameter in the ABI.
@@ -47,7 +47,7 @@ type StateField struct {
 	Index int    `json:"index"`
 }
 
-// Artifact is the final compiled output of a TSOP compiler.
+// Artifact is the final compiled output of a Rúnar compiler.
 type Artifact struct {
 	Version         string       `json:"version"`
 	CompilerVersion string       `json:"compilerVersion"`
@@ -60,7 +60,7 @@ type Artifact struct {
 }
 
 const (
-	schemaVersion   = "tsop-v0.1.0"
+	schemaVersion   = "runar-v0.1.0"
 	compilerVersion = "0.1.0-go"
 )
 
@@ -68,7 +68,7 @@ const (
 // Compilation pipeline
 // ---------------------------------------------------------------------------
 
-// CompileFromIR reads an ANF IR JSON file and compiles it to a TSOP artifact.
+// CompileFromIR reads an ANF IR JSON file and compiles it to a Rúnar artifact.
 func CompileFromIR(irPath string) (*Artifact, error) {
 	program, err := ir.LoadIR(irPath)
 	if err != nil {
@@ -88,7 +88,7 @@ func CompileFromIRBytes(data []byte) (*Artifact, error) {
 	return CompileFromProgram(program)
 }
 
-// CompileFromProgram compiles a parsed ANF program to a TSOP artifact.
+// CompileFromProgram compiles a parsed ANF program to a Rúnar artifact.
 func CompileFromProgram(program *ir.ANFProgram) (*Artifact, error) {
 	// Pass 5: Stack lowering
 	stackMethods, err := codegen.LowerToStack(program)
@@ -161,7 +161,7 @@ func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string) *Arti
 	}
 }
 
-// CompileFromSource compiles a .tsop.ts source file through all passes to a TSOP artifact.
+// CompileFromSource compiles a .runar.ts source file through all passes to a Rúnar artifact.
 func CompileFromSource(sourcePath string) (*Artifact, error) {
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -196,7 +196,7 @@ func CompileFromSource(sourcePath string) (*Artifact, error) {
 	return CompileFromProgram(program)
 }
 
-// CompileSourceToIR runs passes 1-4 on a .tsop.ts source file and returns the ANF program.
+// CompileSourceToIR runs passes 1-4 on a .runar.ts source file and returns the ANF program.
 func CompileSourceToIR(sourcePath string) (*ir.ANFProgram, error) {
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {

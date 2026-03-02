@@ -646,6 +646,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "runar"
+version = "0.1.0"
+dependencies = [
+ "ripemd",
+ "runar-compiler-rust",
+ "runar-macros",
+ "sha2",
+]
+
+[[package]]
+name = "runar-compiler-rust"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "swc_common",
+ "swc_ecma_ast",
+ "swc_ecma_parser",
+]
+
+[[package]]
+name = "runar-example-tests"
+version = "0.1.0"
+dependencies = [
+ "runar",
+]
+
+[[package]]
+name = "runar-macros"
+version = "0.1.0"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -989,41 +1024,6 @@ dependencies = [
  "serde",
  "stable_deref_trait",
 ]
-
-[[package]]
-name = "tsop"
-version = "0.1.0"
-dependencies = [
- "ripemd",
- "sha2",
- "tsop-compiler-rust",
- "tsop-macros",
-]
-
-[[package]]
-name = "tsop-compiler-rust"
-version = "0.1.0"
-dependencies = [
- "clap",
- "hex",
- "serde",
- "serde_json",
- "sha2",
- "swc_common",
- "swc_ecma_ast",
- "swc_ecma_parser",
-]
-
-[[package]]
-name = "tsop-example-tests"
-version = "0.1.0"
-dependencies = [
- "tsop",
-]
-
-[[package]]
-name = "tsop-macros"
-version = "0.1.0"
 
 [[package]]
 name = "typed-arena"

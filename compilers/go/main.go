@@ -1,7 +1,7 @@
-// Command tsop-compiler-go is the Go implementation of the TSOP compiler.
+// Command runar-compiler-go is the Go implementation of the Rúnar compiler.
 //
 // Phase 1: IR consumer mode — accepts ANF IR JSON, emits Bitcoin Script.
-// Phase 2: Full compilation from .tsop.ts source files.
+// Phase 2: Full compilation from .runar.ts source files.
 package main
 
 import (
@@ -13,7 +13,7 @@ import (
 
 func main() {
 	irFile := flag.String("ir", "", "path to ANF IR JSON file")
-	sourceFile := flag.String("source", "", "path to .tsop.ts source file (Phase 2)")
+	sourceFile := flag.String("source", "", "path to .runar.ts source file (Phase 2)")
 	outputFile := flag.String("output", "", "output artifact path (default: stdout)")
 	hexOnly := flag.Bool("hex", false, "output only the script hex (no artifact JSON)")
 	asmOnly := flag.Bool("asm", false, "output only the script ASM (no artifact JSON)")
@@ -21,10 +21,10 @@ func main() {
 	flag.Parse()
 
 	if *irFile == "" && *sourceFile == "" {
-		fmt.Fprintln(os.Stderr, "Usage: tsop-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir]")
+		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir]")
 		fmt.Fprintln(os.Stderr, "")
 		fmt.Fprintln(os.Stderr, "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir).")
-		fmt.Fprintln(os.Stderr, "Phase 2: Compile from .tsop.ts source to Bitcoin Script (--source).")
+		fmt.Fprintln(os.Stderr, "Phase 2: Compile from .runar.ts source to Bitcoin Script (--source).")
 		os.Exit(1)
 	}
 

@@ -1,6 +1,6 @@
-# TSOP Rust Compiler
+# Rúnar Rust Compiler
 
-**Alternative TSOP compiler implemented in Rust.**
+**Alternative Rúnar compiler implemented in Rust.**
 
 ---
 
@@ -9,7 +9,7 @@
 | Phase | Description | Status |
 |---|---|---|
 | **Phase 1** | IR consumer: accepts canonical ANF IR JSON, performs stack lowering and emission (Passes 5-6). | Implemented |
-| **Phase 2** | Full frontend: parses `.tsop.ts` source files directly (Passes 1-4), produces canonical ANF IR. | Implemented (untested) |
+| **Phase 2** | Full frontend: parses `.runar.ts` source files directly (Passes 1-4), produces canonical ANF IR. | Implemented (untested) |
 
 Phase 1 validates that the Rust implementation can produce identical Bitcoin Script from the same ANF IR as the reference compiler. Phase 2 adds an independent frontend that must produce byte-identical ANF IR.
 
@@ -29,7 +29,7 @@ The Rust compiler reads canonical ANF IR JSON and performs stack scheduling and 
 ### Phase 2: Full Frontend
 
 ```
-  .tsop.ts  -->  [Parse]  -->  [Validate]  -->  [Typecheck]  -->  [ANF Lower]
+  .runar.ts  -->  [Parse]  -->  [Validate]  -->  [Typecheck]  -->  [ANF Lower]
                 SWC parser     Rust pass 2      Rust pass 3      Rust pass 4
                 frontend
                                                                      |
@@ -41,7 +41,7 @@ The Rust compiler reads canonical ANF IR JSON and performs stack scheduling and 
             Rust pass 5        Rust pass 6
 ```
 
-The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.tsop.ts` files. SWC is a Rust-native TypeScript/JavaScript parser that provides a full AST. Since SWC is already written in Rust, it integrates naturally as a library dependency.
+The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.runar.ts` files. SWC is a Rust-native TypeScript/JavaScript parser that provides a full AST. Since SWC is already written in Rust, it integrates naturally as a library dependency.
 
 Why SWC instead of tree-sitter or a custom parser? SWC provides a typed Rust AST rather than a generic CST, reducing the amount of manual tree-walking needed. It is also the fastest TypeScript parser available, which matters for large projects. The Rust ecosystem already depends heavily on SWC for tooling (Next.js, Parcel, Deno), so it is well-maintained.
 
@@ -55,7 +55,7 @@ A secondary benefit: the Rust compiler can be compiled to **WebAssembly**, enabl
 cd compilers/rust
 cargo build --release
 
-# The binary is at target/release/tsop-rust
+# The binary is at target/release/runar-rust
 ```
 
 ### Prerequisites
@@ -73,7 +73,7 @@ cargo install wasm-pack
 wasm-pack build --target web
 ```
 
-This produces a WASM module that can compile TSOP contracts in the browser.
+This produces a WASM module that can compile Rúnar contracts in the browser.
 
 ---
 
@@ -83,20 +83,20 @@ This produces a WASM module that can compile TSOP contracts in the browser.
 
 ```bash
 # Compile from ANF IR to Bitcoin Script
-./tsop-rust emit --ir input-anf.json --output script.hex
+./runar-rust emit --ir input-anf.json --output script.hex
 
 # Verify against expected script
-./tsop-rust verify --ir input-anf.json --expected expected-script.hex
+./runar-rust verify --ir input-anf.json --expected expected-script.hex
 ```
 
 ### Phase 2: Full Compilation (when available)
 
 ```bash
 # Full compilation from source
-./tsop-rust compile MyContract.tsop.ts --output artifacts/MyContract.json
+./runar-rust compile MyContract.runar.ts --output artifacts/MyContract.json
 
 # Dump ANF IR for conformance checking
-./tsop-rust compile MyContract.tsop.ts --ir-only --output anf-ir.json
+./runar-rust compile MyContract.runar.ts --ir-only --output anf-ir.json
 ```
 
 ---
@@ -126,7 +126,7 @@ cargo test --test conformance
 
 For each test case:
 
-1. Read `*.tsop.ts` as input.
+1. Read `*.runar.ts` as input.
 2. Run the full pipeline (Passes 1-6).
 3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
 4. Compare script output with `expected-script.hex` (if present).

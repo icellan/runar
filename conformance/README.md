@@ -1,14 +1,14 @@
-# TSOP Conformance Tests
+# Rúnar Conformance Tests
 
-**Cross-compiler conformance test suite ensuring all TSOP compilers produce identical output.**
+**Cross-compiler conformance test suite ensuring all Rúnar compilers produce identical output.**
 
-The conformance suite is the enforcement mechanism for TSOP's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every TSOP compiler -- TypeScript, Go, and Rust -- must pass the full suite.
+The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, and Rust -- must pass the full suite.
 
 ---
 
 ## Purpose
 
-TSOP defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
+Rúnar defines a **canonical IR conformance boundary** at the ANF level. For any given source program, all conforming compilers must produce byte-identical ANF IR (serialized via RFC 8785). The conformance suite verifies this property.
 
 Additionally, the compiled Bitcoin Script output must be identical across compilers. The script is the final artifact deployed on-chain, so even a single-byte difference could mean a different locking script hash and a non-functional contract.
 
@@ -21,39 +21,39 @@ Each test case is a directory containing:
 ```
 tests/
 +-- basic-p2pkh/
-|   +-- basic-p2pkh.tsop.ts      # Source contract
+|   +-- basic-p2pkh.runar.ts      # Source contract
 |   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
 |   +-- expected-script.hex       # Expected compiled script (hex string)
 |
 +-- arithmetic/
-|   +-- arithmetic.tsop.ts
+|   +-- arithmetic.runar.ts
 |   +-- expected-ir.json
 |
 +-- boolean-logic/
-|   +-- boolean-logic.tsop.ts
+|   +-- boolean-logic.runar.ts
 |   +-- expected-ir.json
 |
 +-- if-else/
-|   +-- if-else.tsop.ts
+|   +-- if-else.runar.ts
 |   +-- expected-ir.json
 |
 +-- bounded-loop/
-|   +-- bounded-loop.tsop.ts
+|   +-- bounded-loop.runar.ts
 |   +-- expected-ir.json
 |
 +-- multi-method/
-|   +-- multi-method.tsop.ts
+|   +-- multi-method.runar.ts
 |   +-- expected-ir.json
 |
 +-- stateful/
-    +-- stateful.tsop.ts
+    +-- stateful.runar.ts
 ```
 
 ### File Roles
 
 | File | Purpose |
 |---|---|
-| `*.tsop.ts` | The source contract. Input to the compiler. |
+| `*.runar.ts` | The source contract. Input to the compiler. |
 | `expected-ir.json` | The expected ANF IR output. Canonical JSON (RFC 8785, no whitespace, sorted keys). The SHA-256 of this file is the conformance check. |
 | `expected-script.hex` | The expected compiled Bitcoin Script as a hex string. If present, the compiler's script output must match exactly. |
 
@@ -65,7 +65,7 @@ The runner (in `runner/`) performs these steps for each test case:
 
 ```
 For each test directory:
-  1. Read the .tsop.ts source file.
+  1. Read the .runar.ts source file.
   2. Invoke the compiler under test to produce ANF IR.
   3. Serialize the compiler's ANF IR using canonical JSON (RFC 8785).
   4. Compare SHA-256(compiler_output) with SHA-256(expected-ir.json).
@@ -103,20 +103,20 @@ mkdir conformance/tests/my-new-test
 2. Write the source contract:
 
 ```bash
-# conformance/tests/my-new-test/my-new-test.tsop.ts
+# conformance/tests/my-new-test/my-new-test.runar.ts
 ```
 
 3. Generate the expected IR using the reference compiler:
 
 ```bash
-tsop compile conformance/tests/my-new-test/my-new-test.tsop.ts --ir --canonical
+runar compile conformance/tests/my-new-test/my-new-test.runar.ts --ir --canonical
 # Copy the canonical ANF IR to expected-ir.json
 ```
 
 4. Optionally generate the expected script:
 
 ```bash
-tsop compile conformance/tests/my-new-test/my-new-test.tsop.ts
+runar compile conformance/tests/my-new-test/my-new-test.runar.ts
 # Copy the script hex to expected-script.hex
 ```
 
@@ -130,7 +130,7 @@ pnpm run conformance:ts
 
 ## Differential Fuzzing
 
-The fuzzer (in `fuzzer/`) generates random valid TSOP programs and tests compiler correctness by comparing against the reference interpreter.
+The fuzzer (in `fuzzer/`) generates random valid Rúnar programs and tests compiler correctness by comparing against the reference interpreter.
 
 ### How It Works
 
@@ -139,7 +139,7 @@ The fuzzer (in `fuzzer/`) generates random valid TSOP programs and tests compile
   |  Fuzzer   | --> | Compiler  | --> | Script VM |
   | generates |     | compiles  |     | executes  |
   | random    |     | to script |     |           |
-  | .tsop.ts  |     |           |     |           |
+  | .runar.ts  |     |           |     |           |
   +----------+      +-----------+      +----------+
        |                  |                  |
        |                  v                  v

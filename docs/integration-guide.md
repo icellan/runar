@@ -1,6 +1,6 @@
 # Integration Guide
 
-This guide covers the full TSOP development pipeline: writing contracts, testing them, compiling to artifacts, and loading those artifacts for deployment and interaction from TypeScript, Go, or Rust.
+This guide covers the full Rúnar development pipeline: writing contracts, testing them, compiling to artifacts, and loading those artifacts for deployment and interaction from TypeScript, Go, or Rust.
 
 ---
 
@@ -8,16 +8,16 @@ This guide covers the full TSOP development pipeline: writing contracts, testing
 
 ```
  Source Code                     Artifact (JSON)                   On-Chain
- (.tsop.ts / .tsop.sol /        ┌──────────────────┐              ┌──────────────┐
-  .tsop.move / .tsop.go /  ──►  │ version          │  ──►  deploy │ Locking UTXO │
-  .tsop.rs)                     │ abi              │              │ (Bitcoin SV)  │
+ (.runar.ts / .runar.sol /        ┌──────────────────┐              ┌──────────────┐
+  .runar.move / .runar.go /  ──►  │ version          │  ──►  deploy │ Locking UTXO │
+  .runar.rs)                     │ abi              │              │ (Bitcoin SV)  │
                                 │ script (hex)     │  ◄──  call  └──────────────┘
        │                        │ asm              │
        │  test                  │ stateFields      │
        ▼                        └──────────────────┘
  vitest / go test /                  ▲
  cargo test                          │
-                               tsop compile
+                               runar compile
                                compile() (TS)
                                CompileFromSource() (Go)
                                compile_from_source() (Rust)
@@ -29,20 +29,20 @@ The artifact JSON is the intermediary form that bridges compilation and deployme
 
 ## Developing Contracts
 
-TSOP contracts are classes that extend `SmartContract` (stateless) or `StatefulSmartContract` (stateful). You can write them in any of five syntax formats -- all compile to the same AST and produce identical Bitcoin Script.
+Rúnar contracts are classes that extend `SmartContract` (stateless) or `StatefulSmartContract` (stateful). You can write them in any of five syntax formats -- all compile to the same AST and produce identical Bitcoin Script.
 
 | Extension | Syntax Style | Parser |
 |-----------|-------------|--------|
-| `.tsop.ts` | TypeScript (stable) | ts-morph |
-| `.tsop.sol` | Solidity-like | Hand-written recursive descent |
-| `.tsop.move` | Move-style | Hand-written recursive descent |
-| `.tsop.go` | Go | `go/parser` stdlib |
-| `.tsop.rs` | Rust macro DSL | Custom token parser |
+| `.runar.ts` | TypeScript (stable) | ts-morph |
+| `.runar.sol` | Solidity-like | Hand-written recursive descent |
+| `.runar.move` | Move-style | Hand-written recursive descent |
+| `.runar.go` | Go | `go/parser` stdlib |
+| `.runar.rs` | Rust macro DSL | Custom token parser |
 
 A minimal stateless contract in TypeScript:
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'tsop-lang';
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 
 class P2PKH extends SmartContract {
   readonly pubKeyHash: Addr;
@@ -65,7 +65,7 @@ See the [Getting Started](./getting-started.md) guide for a detailed walkthrough
 
 ## Testing Contracts
 
-TSOP supports testing at multiple levels. The summary below covers the most common patterns; see the [Testing Guide](./testing-guide.md) for advanced techniques including property-based fuzzing, differential testing, and cross-compiler conformance.
+Rúnar supports testing at multiple levels. The summary below covers the most common patterns; see the [Testing Guide](./testing-guide.md) for advanced techniques including property-based fuzzing, differential testing, and cross-compiler conformance.
 
 ### TypeScript (vitest)
 
@@ -74,10 +74,10 @@ TSOP supports testing at multiple levels. The summary below covers the most comm
 ```typescript
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 describe('Counter', () => {
-  const source = readFileSync('Counter.tsop.ts', 'utf8');
+  const source = readFileSync('Counter.runar.ts', 'utf8');
   const counter = TestContract.fromSource(source, { count: 0n });
 
   it('increments', () => {
@@ -90,12 +90,12 @@ describe('Counter', () => {
 For multi-format sources, pass the filename so the parser can dispatch by extension:
 
 ```typescript
-const solCounter = TestContract.fromSource(solSource, { count: 0n }, 'Counter.tsop.sol');
+const solCounter = TestContract.fromSource(solSource, { count: 0n }, 'Counter.runar.sol');
 ```
 
 ### Go (go test)
 
-Go contracts run as native Go code using the `tsop` mock package. Add a `CompileCheck` test to verify the contract is valid TSOP.
+Go contracts run as native Go code using the `runar` mock package. Add a `CompileCheck` test to verify the contract is valid Rúnar.
 
 ```go
 func TestCounter_Increment(t *testing.T) {
@@ -107,8 +107,8 @@ func TestCounter_Increment(t *testing.T) {
 }
 
 func TestCounter_Compile(t *testing.T) {
-    if err := tsop.CompileCheck("Counter.tsop.go"); err != nil {
-        t.Fatalf("TSOP compile check failed: %v", err)
+    if err := runar.CompileCheck("Counter.runar.go"); err != nil {
+        t.Fatalf("Rúnar compile check failed: %v", err)
     }
 }
 ```
@@ -117,13 +117,13 @@ Run with `go test ./...` from the contract directory.
 
 ### Rust (cargo test)
 
-Rust contracts run as native Rust code using the `tsop::prelude` mock types. Use `#[should_panic]` for expected failures.
+Rust contracts run as native Rust code using the `runar::prelude` mock types. Use `#[should_panic]` for expected failures.
 
 ```rust
-#[path = "Counter.tsop.rs"]
+#[path = "Counter.runar.rs"]
 mod contract;
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 #[test]
 fn test_increment() {
@@ -134,9 +134,9 @@ fn test_increment() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(
-        include_str!("Counter.tsop.rs"),
-        "Counter.tsop.rs",
+    runar::compile_check(
+        include_str!("Counter.runar.rs"),
+        "Counter.runar.rs",
     ).unwrap();
 }
 ```
@@ -148,7 +148,7 @@ Run with `cargo test` from the examples/rust directory.
 For full script execution testing (compiled Bitcoin Script, not interpreter), use `TestSmartContract.fromArtifact()`:
 
 ```typescript
-import { TestSmartContract, expectScriptSuccess } from 'tsop-testing';
+import { TestSmartContract, expectScriptSuccess } from 'runar-testing';
 import artifact from './artifacts/P2PKH.json';
 
 const contract = TestSmartContract.fromArtifact(artifact, [pubKeyHash]);
@@ -167,20 +167,20 @@ The artifact is a JSON file containing the compiled locking script, the contract
 ### CLI
 
 ```bash
-tsop compile Counter.tsop.ts                   # Outputs artifacts/Counter.json
-tsop compile Counter.tsop.ts --output ./build  # Custom output directory
-tsop compile Counter.tsop.ts --ir              # Include ANF IR in artifact
-tsop compile Counter.tsop.ts --asm             # Print assembly to stdout
+runar compile Counter.runar.ts                   # Outputs artifacts/Counter.json
+runar compile Counter.runar.ts --output ./build  # Custom output directory
+runar compile Counter.runar.ts --ir              # Include ANF IR in artifact
+runar compile Counter.runar.ts --asm             # Print assembly to stdout
 ```
 
 ### Programmatic (TypeScript)
 
 ```typescript
-import { compile } from 'tsop-compiler';
-import type { CompileResult, TSOPArtifact } from 'tsop-compiler';
+import { compile } from 'runar-compiler';
+import type { CompileResult, RunarArtifact } from 'runar-compiler';
 
-const source = readFileSync('Counter.tsop.ts', 'utf8');
-const result: CompileResult = compile(source, { fileName: 'Counter.tsop.ts' });
+const source = readFileSync('Counter.runar.ts', 'utf8');
+const result: CompileResult = compile(source, { fileName: 'Counter.runar.ts' });
 
 if (!result.success) {
   const errors = result.diagnostics
@@ -189,7 +189,7 @@ if (!result.success) {
   throw new Error(`Compilation failed: ${errors.join(', ')}`);
 }
 
-const artifact: TSOPArtifact = result.artifact!;
+const artifact: RunarArtifact = result.artifact!;
 // Write to disk, load in SDK, etc.
 ```
 
@@ -201,7 +201,7 @@ The Go compiler exposes the same pipeline as a library:
 import main // or your import path for the Go compiler package
 
 // From source file
-artifact, err := CompileFromSource("Counter.tsop.go")
+artifact, err := CompileFromSource("Counter.runar.go")
 
 // From ANF IR JSON (generated by any compiler)
 artifact, err := CompileFromIR("Counter-anf.json")
@@ -218,14 +218,14 @@ jsonBytes, err := ArtifactToJSON(artifact)
 The Rust compiler provides equivalent functions:
 
 ```rust
-use tsop_compiler_rust::{compile_from_source, compile_from_ir, compile_from_source_str};
+use runar_compiler_rust::{compile_from_source, compile_from_ir, compile_from_source_str};
 use std::path::Path;
 
 // From source file
-let artifact = compile_from_source(Path::new("Counter.tsop.rs"))?;
+let artifact = compile_from_source(Path::new("Counter.runar.rs"))?;
 
 // From source string
-let artifact = compile_from_source_str(&source, Some("Counter.tsop.rs"))?;
+let artifact = compile_from_source_str(&source, Some("Counter.runar.rs"))?;
 
 // From ANF IR JSON file
 let artifact = compile_from_ir(Path::new("Counter-anf.json"))?;
@@ -243,7 +243,7 @@ All three compilers produce artifacts with the same JSON schema:
 
 ```json
 {
-  "version": "tsop-v0.1.0",
+  "version": "runar-v0.1.0",
   "compilerVersion": "0.1.0",
   "contractName": "Counter",
   "abi": {
@@ -280,32 +280,32 @@ Key fields:
 
 ## Loading Artifacts in TypeScript
 
-The `tsop-sdk` package provides `TSOPContract` for deploying and interacting with compiled contracts.
+The `runar-sdk` package provides `RunarContract` for deploying and interacting with compiled contracts.
 
 ### Setup
 
 ```bash
-pnpm add tsop-sdk tsop-compiler tsop-lang
+pnpm add runar-sdk runar-compiler runar-lang
 ```
 
 ### Deploy and Call
 
 ```typescript
 import { readFileSync } from 'node:fs';
-import { compile } from 'tsop-compiler';
-import { TSOPContract, LocalSigner } from 'tsop-sdk';
-import type { TSOPArtifact } from 'tsop-ir-schema';
+import { compile } from 'runar-compiler';
+import { RunarContract, LocalSigner } from 'runar-sdk';
+import type { RunarArtifact } from 'runar-ir-schema';
 
 // 1. Compile (or load a pre-compiled artifact JSON)
-const source = readFileSync('P2PKH.tsop.ts', 'utf8');
-const result = compile(source, { fileName: 'P2PKH.tsop.ts' });
-const artifact: TSOPArtifact = result.artifact!;
+const source = readFileSync('P2PKH.runar.ts', 'utf8');
+const result = compile(source, { fileName: 'P2PKH.runar.ts' });
+const artifact: RunarArtifact = result.artifact!;
 
 // Or load from a saved artifact file:
 // const artifact = JSON.parse(readFileSync('artifacts/P2PKH.json', 'utf8'));
 
 // 2. Instantiate with constructor arguments
-const contract = new TSOPContract(artifact, [pubKeyHash]);
+const contract = new RunarContract(artifact, [pubKeyHash]);
 
 // 3. Get the locking script (hex)
 const lockingScript = contract.getLockingScript();
@@ -317,14 +317,14 @@ const { txid } = await contract.deploy(provider, signer, { satoshis: 10_000 });
 const result = await contract.call('unlock', [sig, pubKey], provider, signer);
 
 // 6. Reconnect to an existing deployed contract
-const existing = await TSOPContract.fromTxId(artifact, txid, 0, provider);
+const existing = await RunarContract.fromTxId(artifact, txid, 0, provider);
 console.log(existing.state); // Extract state from the locking script
 ```
 
 ### State Management (Stateful Contracts)
 
 ```typescript
-import { serializeState, deserializeState } from 'tsop-sdk';
+import { serializeState, deserializeState } from 'runar-sdk';
 
 // Serialize state to hex (for embedding in locking scripts)
 const stateHex = serializeState(artifact.stateFields!, { count: 42n });
@@ -384,7 +384,7 @@ import (
     "os"
 )
 
-// Artifact mirrors the TSOP artifact schema (same struct as in compiler.go)
+// Artifact mirrors the Rúnar artifact schema (same struct as in compiler.go)
 type Artifact struct {
     Version         string       `json:"version"`
     CompilerVersion string       `json:"compilerVersion"`
@@ -413,7 +413,7 @@ To compile and produce an artifact directly from Go:
 
 ```go
 // Full pipeline: source file → artifact
-artifact, err := CompileFromSource("Counter.tsop.go")
+artifact, err := CompileFromSource("Counter.runar.go")
 if err != nil {
     log.Fatal(err)
 }
@@ -447,10 +447,10 @@ The Rust compiler uses serde for JSON serialization. To load a pre-compiled arti
 use serde::{Deserialize, Serialize};
 use std::fs;
 
-// TSOPArtifact mirrors the shared schema (same struct as in artifact.rs)
+// RunarArtifact mirrors the shared schema (same struct as in artifact.rs)
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TSOPArtifact {
+struct RunarArtifact {
     version: String,
     compiler_version: String,
     contract_name: String,
@@ -462,9 +462,9 @@ struct TSOPArtifact {
     build_timestamp: String,
 }
 
-fn load_artifact(path: &str) -> Result<TSOPArtifact, Box<dyn std::error::Error>> {
+fn load_artifact(path: &str) -> Result<RunarArtifact, Box<dyn std::error::Error>> {
     let data = fs::read_to_string(path)?;
-    let artifact: TSOPArtifact = serde_json::from_str(&data)?;
+    let artifact: RunarArtifact = serde_json::from_str(&data)?;
     Ok(artifact)
 }
 ```
@@ -472,16 +472,16 @@ fn load_artifact(path: &str) -> Result<TSOPArtifact, Box<dyn std::error::Error>>
 To compile and produce an artifact directly from Rust:
 
 ```rust
-use tsop_compiler_rust::{compile_from_source, compile_from_source_str};
+use runar_compiler_rust::{compile_from_source, compile_from_source_str};
 use std::path::Path;
 
 // Full pipeline: source file → artifact
-let artifact = compile_from_source(Path::new("Counter.tsop.rs"))
+let artifact = compile_from_source(Path::new("Counter.runar.rs"))
     .expect("compilation failed");
 
 // Or from a source string
-let source = std::fs::read_to_string("Counter.tsop.rs").unwrap();
-let artifact = compile_from_source_str(&source, Some("Counter.tsop.rs"))
+let source = std::fs::read_to_string("Counter.runar.rs").unwrap();
+let artifact = compile_from_source_str(&source, Some("Counter.runar.rs"))
     .expect("compilation failed");
 
 // Access the compiled script
@@ -501,7 +501,7 @@ The `artifact.script` hex string is the locking script for embedding in a Bitcoi
 
 All three compilers produce byte-identical Bitcoin Script for the same contract source. This means you can:
 
-1. **Write** a contract in any supported format (`.tsop.ts`, `.tsop.sol`, `.tsop.go`, etc.)
+1. **Write** a contract in any supported format (`.runar.ts`, `.runar.sol`, `.runar.go`, etc.)
 2. **Test** using the language-native test runner (vitest, go test, cargo test)
 3. **Compile** with any of the three compilers
 4. **Load** the artifact from any language
@@ -510,13 +510,13 @@ The ANF IR (A-Normal Form Intermediate Representation) serves as the portable in
 
 ```bash
 # Generate ANF IR with the TypeScript compiler
-tsop compile Counter.tsop.ts --ir
+runar compile Counter.runar.ts --ir
 
 # Feed the ANF IR to the Go compiler backend
-tsop-go --ir Counter-anf.json --output Counter.json
+runar-go --ir Counter-anf.json --output Counter.json
 
 # Or to the Rust compiler backend
-tsop-rust --ir Counter-anf.json --output Counter.json
+runar-rust --ir Counter-anf.json --output Counter.json
 ```
 
 This produces identical `script` hex in all three cases. The cross-compiler conformance test suite (`conformance/`) validates this guarantee by comparing SHA-256 hashes of the output across all compilers.
@@ -525,12 +525,12 @@ This produces identical `script` hex in all three cases. The cross-compiler conf
 
 ## Recommended Workflow
 
-1. **Development**: Write contracts in your preferred format with full IDE support. TypeScript (`.tsop.ts`) has the most mature tooling.
+1. **Development**: Write contracts in your preferred format with full IDE support. TypeScript (`.runar.ts`) has the most mature tooling.
 
-2. **Testing**: Run language-native tests for fast iteration on business logic. Add `CompileCheck` / `compile_check` tests to catch TSOP language errors the host compiler would miss.
+2. **Testing**: Run language-native tests for fast iteration on business logic. Add `CompileCheck` / `compile_check` tests to catch Rúnar language errors the host compiler would miss.
 
-3. **Compilation**: Use the CLI (`tsop compile`) or the programmatic API to produce artifact JSON files. Commit artifacts to version control or store them as build outputs.
+3. **Compilation**: Use the CLI (`runar compile`) or the programmatic API to produce artifact JSON files. Commit artifacts to version control or store them as build outputs.
 
-4. **Deployment**: Load the artifact in your application using `TSOPContract` (TypeScript), `json.Unmarshal` (Go), or `serde_json::from_str` (Rust). Use the `script` field as the locking script for transaction construction.
+4. **Deployment**: Load the artifact in your application using `RunarContract` (TypeScript), `json.Unmarshal` (Go), or `serde_json::from_str` (Rust). Use the `script` field as the locking script for transaction construction.
 
 5. **Interaction**: Use the ABI from the artifact to build unlocking scripts for spending. For stateful contracts, use `stateFields` to serialize/deserialize on-chain state.

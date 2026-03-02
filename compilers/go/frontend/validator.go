@@ -12,7 +12,7 @@ type ValidationResult struct {
 	Warnings []string
 }
 
-// Validate checks the TSOP AST against language subset constraints.
+// Validate checks the Rúnar AST against language subset constraints.
 // It does NOT modify the AST; it only reports errors and warnings.
 func Validate(contract *ContractNode) *ValidationResult {
 	ctx := &validationContext{

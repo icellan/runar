@@ -1,8 +1,8 @@
 [package]
-name = "tsop-compiler-rust"
+name = "runar-compiler-rust"
 version = "0.1.0"
 edition = "2021"
-description = "Rust implementation of the TSOP compiler (full pipeline: .tsop.ts → Bitcoin Script)"
+description = "Rust implementation of the Rúnar compiler (full pipeline: .runar.ts → Bitcoin Script)"
 
 [dependencies]
 serde = { version = "=1.0.203", features = ["derive"] }

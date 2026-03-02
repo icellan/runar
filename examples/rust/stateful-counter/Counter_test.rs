@@ -1,4 +1,4 @@
-#[path = "Counter.tsop.rs"]
+#[path = "Counter.runar.rs"]
 mod contract;
 
 use contract::*;
@@ -49,5 +49,5 @@ fn test_increment_then_decrement() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("Counter.tsop.rs"), "Counter.tsop.rs").unwrap();
+    runar::compile_check(include_str!("Counter.runar.rs"), "Counter.runar.rs").unwrap();
 }

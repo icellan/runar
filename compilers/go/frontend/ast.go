@@ -1,4 +1,4 @@
-// Package frontend implements passes 1-4 of the TSOP compiler in Go:
+// Package frontend implements passes 1-4 of the Rúnar compiler in Go:
 // parse, validate, typecheck, and ANF lowering.
 package frontend
 
@@ -17,7 +17,7 @@ type SourceLocation struct {
 // Type nodes
 // ---------------------------------------------------------------------------
 
-// TypeNode represents a type annotation in the TSOP AST.
+// TypeNode represents a type annotation in the Rúnar AST.
 type TypeNode interface {
 	typeNodeMarker()
 }
@@ -48,7 +48,7 @@ func (CustomType) typeNodeMarker() {}
 // Top-level nodes
 // ---------------------------------------------------------------------------
 
-// ContractNode is the parsed representation of a TSOP smart contract class.
+// ContractNode is the parsed representation of a Rúnar smart contract class.
 type ContractNode struct {
 	Name        string
 	ParentClass string // "SmartContract" or "StatefulSmartContract"
@@ -276,7 +276,7 @@ var primitiveTypeNames = map[string]bool{
 	"void":           true,
 }
 
-// IsPrimitiveType returns true if the name is a recognized TSOP primitive type.
+// IsPrimitiveType returns true if the name is a recognized Rúnar primitive type.
 func IsPrimitiveType(name string) bool {
 	return primitiveTypeNames[name]
 }

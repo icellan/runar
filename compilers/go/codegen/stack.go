@@ -1,5 +1,5 @@
 // Package codegen implements the Stack IR lowering and Bitcoin Script emission
-// passes of the TSOP Go compiler. It mirrors the TypeScript compiler's Pass 5
+// passes of the Rúnar Go compiler. It mirrors the TypeScript compiler's Pass 5
 // (stack lowering) and Pass 6 (emit).
 package codegen
 
@@ -9,7 +9,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/tsop/compiler-go/ir"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------

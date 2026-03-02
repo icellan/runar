@@ -15,7 +15,7 @@ type TypeCheckResult struct {
 	Errors   []string
 }
 
-// TypeCheck type-checks a TSOP AST. Returns the same AST plus any errors.
+// TypeCheck type-checks a Rúnar AST. Returns the same AST plus any errors.
 func TypeCheck(contract *ContractNode) *TypeCheckResult {
 	checker := newTypeChecker(contract)
 
@@ -550,7 +550,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return "<unknown>"
 		}
 		tc.errors = append(tc.errors, fmt.Sprintf(
-			"unknown function '%s' — only TSOP built-in functions and contract methods are allowed", id.Name))
+			"unknown function '%s' — only Rúnar built-in functions and contract methods are allowed", id.Name))
 		for _, arg := range e.Args {
 			tc.inferExprType(arg, env)
 		}
@@ -572,7 +572,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			return tc.checkCallArgs(pa.Property, sig, e.Args, env)
 		}
 		tc.errors = append(tc.errors, fmt.Sprintf(
-			"unknown method 'this.%s' — only TSOP built-in methods and contract methods are allowed", pa.Property))
+			"unknown method 'this.%s' — only Rúnar built-in methods and contract methods are allowed", pa.Property))
 		for _, arg := range e.Args {
 			tc.inferExprType(arg, env)
 		}
@@ -599,7 +599,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			objName = id.Name
 		}
 		tc.errors = append(tc.errors, fmt.Sprintf(
-			"unknown function '%s.%s' — only TSOP built-in functions and contract methods are allowed",
+			"unknown function '%s.%s' — only Rúnar built-in functions and contract methods are allowed",
 			objName, me.Property))
 		for _, arg := range e.Args {
 			tc.inferExprType(arg, env)
@@ -608,7 +608,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 	}
 
 	// Fallback — unknown callee shape
-	tc.errors = append(tc.errors, "unsupported function call expression — only TSOP built-in functions and contract methods are allowed")
+	tc.errors = append(tc.errors, "unsupported function call expression — only Rúnar built-in functions and contract methods are allowed")
 	tc.inferExprType(e.Callee, env)
 	for _, arg := range e.Args {
 		tc.inferExprType(arg, env)

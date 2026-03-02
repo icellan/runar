@@ -1,36 +1,36 @@
 {
-  "description": "Registry of TSOP input formats and which compilers support them.",
+  "description": "Registry of Rúnar input formats and which compilers support them.",
   "formats": [
     {
-      "extension": ".tsop.ts",
+      "extension": ".runar.ts",
       "name": "TypeScript",
       "description": "Primary TypeScript contract syntax",
       "compilers": ["ts", "go", "rust"],
       "status": "stable"
     },
     {
-      "extension": ".tsop.sol",
+      "extension": ".runar.sol",
       "name": "Solidity-like",
       "description": "Solidity-inspired contract syntax",
       "compilers": ["ts", "go", "rust"],
       "status": "experimental"
     },
     {
-      "extension": ".tsop.move",
+      "extension": ".runar.move",
       "name": "Move-style",
       "description": "Move-inspired resource language syntax",
       "compilers": ["ts", "go", "rust"],
       "status": "experimental"
     },
     {
-      "extension": ".tsop.go",
+      "extension": ".runar.go",
       "name": "Go Contracts",
       "description": "Go struct/method contract syntax",
       "compilers": ["go"],
       "status": "experimental"
     },
     {
-      "extension": ".tsop.rs",
+      "extension": ".runar.rs",
       "name": "Rust DSL",
       "description": "Rust attribute-macro contract syntax",
       "compilers": ["rust"],

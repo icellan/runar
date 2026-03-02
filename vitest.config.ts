@@ -4,10 +4,10 @@ import { resolve } from 'node:path';
 export default defineConfig({
   resolve: {
     alias: {
-      'tsop-testing': resolve(__dirname, 'packages/tsop-testing/src/index.ts'),
-      'tsop-compiler': resolve(__dirname, 'packages/tsop-compiler/src/index.ts'),
-      'tsop-ir-schema': resolve(__dirname, 'packages/tsop-ir-schema/src/index.ts'),
-      'tsop-lang': resolve(__dirname, 'packages/tsop-lang/src/index.ts'),
+      'runar-testing': resolve(__dirname, 'packages/runar-testing/src/index.ts'),
+      'runar-compiler': resolve(__dirname, 'packages/runar-compiler/src/index.ts'),
+      'runar-ir-schema': resolve(__dirname, 'packages/runar-ir-schema/src/index.ts'),
+      'runar-lang': resolve(__dirname, 'packages/runar-lang/src/index.ts'),
     },
   },
 });

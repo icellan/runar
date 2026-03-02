@@ -31,24 +31,24 @@ export interface FuzzerOptions {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a random TSOP type. Weighted towards common types (bigint, boolean)
+ * Generate a random Rúnar type. Weighted towards common types (bigint, boolean)
  * since they exercise the most code paths in the compiler.
  */
-const tsopType = fc.oneof(
+const runarType = fc.oneof(
   { weight: 5, arbitrary: fc.constant('bigint') },
   { weight: 3, arbitrary: fc.constant('boolean') },
   { weight: 1, arbitrary: fc.constant('ByteString') },
   { weight: 1, arbitrary: fc.constant('PubKey') },
 );
 
-/** Generate a valid TSOP identifier (lowercase, underscore-prefixed to avoid collisions). */
-const tsopIdentifier = fc.stringOf(
+/** Generate a valid Rúnar identifier (lowercase, underscore-prefixed to avoid collisions). */
+const runarIdentifier = fc.stringOf(
   fc.constantFrom('a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'),
   { minLength: 1, maxLength: 4 },
 ).map((s) => `_${s}`);
 
-/** Generate a bigint literal appropriate for TSOP. */
-const tsopBigintLiteral = fc.oneof(
+/** Generate a bigint literal appropriate for Rúnar. */
+const runarBigintLiteral = fc.oneof(
   fc.constant('0n'),
   fc.constant('1n'),
   fc.integer({ min: 0, max: 1000 }).map((n) => `${n}n`),
@@ -56,26 +56,26 @@ const tsopBigintLiteral = fc.oneof(
 );
 
 /** Generate a boolean literal. */
-const tsopBoolLiteral = fc.oneof(fc.constant('true'), fc.constant('false'));
+const runarBoolLiteral = fc.oneof(fc.constant('true'), fc.constant('false'));
 
 /** Generate a simple expression that produces a bigint. */
 const bigintExpr: fc.Arbitrary<string> = fc.oneof(
-  tsopBigintLiteral,
-  fc.tuple(tsopBigintLiteral, fc.constantFrom('+', '-', '*'), tsopBigintLiteral).map(
+  runarBigintLiteral,
+  fc.tuple(runarBigintLiteral, fc.constantFrom('+', '-', '*'), runarBigintLiteral).map(
     ([a, op, b]) => `(${a} ${op} ${b})`,
   ),
 );
 
 /** Generate a simple expression that produces a boolean. */
 const boolExpr: fc.Arbitrary<string> = fc.oneof(
-  tsopBoolLiteral,
-  fc.tuple(tsopBigintLiteral, fc.constantFrom('===', '!==', '<', '>', '<=', '>='), tsopBigintLiteral).map(
+  runarBoolLiteral,
+  fc.tuple(runarBigintLiteral, fc.constantFrom('===', '!==', '<', '>', '<=', '>='), runarBigintLiteral).map(
     ([a, op, b]) => `(${a} ${op} ${b})`,
   ),
   fc.tuple(
-    fc.oneof(tsopBoolLiteral, fc.constant('true')),
+    fc.oneof(runarBoolLiteral, fc.constant('true')),
     fc.constantFrom('&&', '||'),
-    fc.oneof(tsopBoolLiteral, fc.constant('false')),
+    fc.oneof(runarBoolLiteral, fc.constant('false')),
   ).map(([a, op, b]) => `(${a} ${op} ${b})`),
 );
 
@@ -87,12 +87,12 @@ interface PropDef {
 }
 
 const propDef: fc.Arbitrary<PropDef> = fc.record({
-  name: tsopIdentifier,
+  name: runarIdentifier,
   type: fc.constant('bigint'),  // Keep props simple for fuzzing
   readonly: fc.boolean(),
 });
 
-/** Assemble a complete TSOP contract source from generated pieces. */
+/** Assemble a complete Rúnar contract source from generated pieces. */
 function assembleContract(
   contractName: string,
   props: PropDef[],
@@ -112,7 +112,7 @@ function assembleContract(
   const importItems = ['SmartContract', 'assert'];
   const lines: string[] = [];
 
-  lines.push(`import { ${importItems.join(', ')} } from 'tsop-lang';`);
+  lines.push(`import { ${importItems.join(', ')} } from 'runar-lang';`);
   lines.push('');
   lines.push(`class ${contractName} extends SmartContract {`);
 
@@ -147,20 +147,20 @@ function assembleContract(
 }
 
 /**
- * Generate a complete random TSOP contract source that is syntactically
+ * Generate a complete random Rúnar contract source that is syntactically
  * valid and exercises a variety of language features.
  */
-const tsopContractArb: fc.Arbitrary<string> = fc
+const runarContractArb: fc.Arbitrary<string> = fc
   .tuple(
     // 0-3 properties
     fc.array(propDef, { minLength: 1, maxLength: 3 }),
     // 1-3 method parameters (always bigint for simplicity)
-    fc.array(tsopIdentifier, { minLength: 1, maxLength: 3 }),
+    fc.array(runarIdentifier, { minLength: 1, maxLength: 3 }),
     // 1-4 body statements (culminating in an assert)
     fc.array(
       fc.oneof(
         // Variable declaration with arithmetic
-        fc.tuple(tsopIdentifier, bigintExpr).map(
+        fc.tuple(runarIdentifier, bigintExpr).map(
           ([name, expr]) => `const ${name}_v: bigint = ${expr};`,
         ),
         // If-else with simple body
@@ -188,11 +188,11 @@ const tsopContractArb: fc.Arbitrary<string> = fc
 // ---------------------------------------------------------------------------
 
 function compileTsSource(source: string, tmpDir: string): string | null {
-  const tmpFile = join(tmpDir, 'fuzz-test.tsop.ts');
+  const tmpFile = join(tmpDir, 'fuzz-test.runar.ts');
   writeFileSync(tmpFile, source, 'utf-8');
   try {
     const output = execSync(
-      `npx tsx ${resolve(__dirname, '../../packages/tsop-cli/src/bin.ts')} compile --ir "${tmpFile}"`,
+      `npx tsx ${resolve(__dirname, '../../packages/runar-cli/src/bin.ts')} compile --ir "${tmpFile}"`,
       { timeout: 15_000, encoding: 'utf-8', cwd: resolve(__dirname, '../..') },
     ).trim();
     return output;
@@ -203,15 +203,15 @@ function compileTsSource(source: string, tmpDir: string): string | null {
 
 function compileGoSource(source: string, tmpDir: string): string | null {
   try {
-    execSync('which tsop-go', { stdio: 'pipe' });
+    execSync('which runar-go', { stdio: 'pipe' });
   } catch {
     return null;
   }
-  const tmpFile = join(tmpDir, 'fuzz-test-go.tsop.ts');
+  const tmpFile = join(tmpDir, 'fuzz-test-go.runar.ts');
   writeFileSync(tmpFile, source, 'utf-8');
   try {
     const output = execSync(
-      `tsop-go --source "${tmpFile}" --emit-ir`,
+      `runar-go --source "${tmpFile}" --emit-ir`,
       { timeout: 15_000, encoding: 'utf-8' },
     ).trim();
     return output;
@@ -222,15 +222,15 @@ function compileGoSource(source: string, tmpDir: string): string | null {
 
 function compileRustSource(source: string, tmpDir: string): string | null {
   try {
-    execSync('which tsop-rust', { stdio: 'pipe' });
+    execSync('which runar-rust', { stdio: 'pipe' });
   } catch {
     return null;
   }
-  const tmpFile = join(tmpDir, 'fuzz-test-rust.tsop.ts');
+  const tmpFile = join(tmpDir, 'fuzz-test-rust.runar.ts');
   writeFileSync(tmpFile, source, 'utf-8');
   try {
     const output = execSync(
-      `tsop-rust --source "${tmpFile}" --hex`,
+      `runar-rust --source "${tmpFile}" --hex`,
       { timeout: 15_000, encoding: 'utf-8' },
     ).trim();
     return output;
@@ -253,7 +253,7 @@ function canonicalize(json: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Run differential fuzzing: generate random valid TSOP programs, compile
+ * Run differential fuzzing: generate random valid Rúnar programs, compile
  * through all available compilers, and check that the IR output is identical.
  *
  * @param numPrograms - Number of random programs to generate and test.
@@ -274,7 +274,7 @@ export async function runDifferentialFuzzing(
   let mismatchCount = 0;
 
   // Use fast-check's sample to generate programs deterministically
-  const programs = fc.sample(tsopContractArb, {
+  const programs = fc.sample(runarContractArb, {
     numRuns: numPrograms,
     seed: options?.seed,
   });
@@ -361,7 +361,7 @@ export async function runPropertyBasedDifferential(options?: FuzzerOptions): Pro
   const compilers = options?.compilers ?? ['ts', 'go', 'rust'];
 
   fc.assert(
-    fc.property(tsopContractArb, (source: string) => {
+    fc.property(runarContractArb, (source: string) => {
       const outputs: Array<{ name: string; ir: string }> = [];
 
       if (compilers.includes('ts')) {
@@ -398,4 +398,4 @@ export async function runPropertyBasedDifferential(options?: FuzzerOptions): Pro
 }
 
 /** Export the program generator so external tools can reuse it. */
-export { tsopContractArb };
+export { runarContractArb };

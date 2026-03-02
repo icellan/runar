@@ -1,4 +1,4 @@
-module github.com/tsop/compiler-go
+module github.com/icellan/runar/compilers/go
 
 go 1.22
 

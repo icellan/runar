@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * TSOP Differential Fuzzer -- CLI entry point.
+ * Rúnar Differential Fuzzer -- CLI entry point.
  *
  * Usage:
  *   npx tsx conformance/fuzzer/index.ts [options]
@@ -86,9 +86,9 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
 
 function printHelp(): void {
   console.log(`
-TSOP Differential Fuzzer
+Rúnar Differential Fuzzer
 
-Generates random valid TSOP contract programs, compiles them through all
+Generates random valid Rúnar contract programs, compiles them through all
 available compiler implementations, and verifies that the IR output matches
 byte-for-byte.
 
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
-  console.log('TSOP Differential Fuzzer');
+  console.log('Rúnar Differential Fuzzer');
   console.log(`  Programs: ${opts.num}`);
   console.log(`  Compilers: ${opts.compilers.join(', ')}`);
   if (opts.seed !== undefined) {

@@ -2,7 +2,7 @@ package contract
 
 import (
 	"testing"
-	"tsop"
+	"runar"
 )
 
 func TestCounter_Increment(t *testing.T) {
@@ -53,7 +53,7 @@ func TestCounter_IncrementThenDecrement(t *testing.T) {
 }
 
 func TestCounter_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("Counter.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("Counter.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }

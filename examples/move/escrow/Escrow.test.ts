@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'Escrow.tsop.move'), 'utf8');
-const FILE_NAME = 'Escrow.tsop.move';
+const source = readFileSync(join(__dirname, 'Escrow.runar.move'), 'utf8');
+const FILE_NAME = 'Escrow.runar.move';
 
 const BUYER_PK = '02' + 'aa'.repeat(32);
 const SELLER_PK = '02' + 'bb'.repeat(32);

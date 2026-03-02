@@ -1,8 +1,8 @@
-#[path = "Escrow.tsop.rs"]
+#[path = "Escrow.runar.rs"]
 mod contract;
 
 use contract::*;
-use tsop::prelude::*;
+use runar::prelude::*;
 
 fn new_escrow() -> Escrow {
     Escrow {
@@ -19,5 +19,5 @@ fn new_escrow() -> Escrow {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("Escrow.tsop.rs"), "Escrow.tsop.rs").unwrap();
+    runar::compile_check(include_str!("Escrow.runar.rs"), "Escrow.runar.rs").unwrap();
 }

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tsop/compiler-go/codegen"
-	"github.com/tsop/compiler-go/ir"
+	"github.com/icellan/runar/compilers/go/codegen"
+	"github.com/icellan/runar/compilers/go/ir"
 )
 
 // ---------------------------------------------------------------------------
@@ -358,8 +358,8 @@ func TestArtifactJSON(t *testing.T) {
 		}
 	}
 
-	if parsed["version"] != "tsop-v0.1.0" {
-		t.Errorf("expected version tsop-v0.1.0, got %v", parsed["version"])
+	if parsed["version"] != "runar-v0.1.0" {
+		t.Errorf("expected version runar-v0.1.0, got %v", parsed["version"])
 	}
 }
 
@@ -939,11 +939,11 @@ func TestDeterministicOutput(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Source compilation tests (.tsop.ts → Bitcoin Script via native frontend)
+// Source compilation tests (.runar.ts → Bitcoin Script via native frontend)
 // ---------------------------------------------------------------------------
 
 func TestSourceCompile_P2PKH(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.tsop.ts")
+	source := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -967,7 +967,7 @@ func TestSourceCompile_P2PKH(t *testing.T) {
 }
 
 func TestSourceCompile_Arithmetic(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "arithmetic", "arithmetic.tsop.ts")
+	source := filepath.Join(conformanceDir(), "arithmetic", "arithmetic.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -985,7 +985,7 @@ func TestSourceCompile_Arithmetic(t *testing.T) {
 }
 
 func TestSourceCompile_BooleanLogic(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "boolean-logic", "boolean-logic.tsop.ts")
+	source := filepath.Join(conformanceDir(), "boolean-logic", "boolean-logic.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -999,7 +999,7 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 }
 
 func TestSourceCompile_IfElse(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "if-else", "if-else.tsop.ts")
+	source := filepath.Join(conformanceDir(), "if-else", "if-else.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1010,7 +1010,7 @@ func TestSourceCompile_IfElse(t *testing.T) {
 }
 
 func TestSourceCompile_BoundedLoop(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "bounded-loop", "bounded-loop.tsop.ts")
+	source := filepath.Join(conformanceDir(), "bounded-loop", "bounded-loop.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1021,7 +1021,7 @@ func TestSourceCompile_BoundedLoop(t *testing.T) {
 }
 
 func TestSourceCompile_MultiMethod(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "multi-method", "multi-method.tsop.ts")
+	source := filepath.Join(conformanceDir(), "multi-method", "multi-method.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1032,7 +1032,7 @@ func TestSourceCompile_MultiMethod(t *testing.T) {
 }
 
 func TestSourceCompile_Stateful(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "stateful", "stateful.tsop.ts")
+	source := filepath.Join(conformanceDir(), "stateful", "stateful.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1049,7 +1049,7 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 	}
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".tsop.ts")
+			source := filepath.Join(conformanceDir(), dir, dir+".runar.ts")
 			artifact, err := CompileFromSource(source)
 			if err != nil {
 				t.Fatalf("source compilation failed for %s: %v", dir, err)
@@ -1080,7 +1080,7 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 }
 
 func TestSourceCompile_ExampleP2PKH(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "..", "..", "examples", "ts", "p2pkh", "P2PKH.tsop.ts")
+	source := filepath.Join(conformanceDir(), "..", "..", "examples", "ts", "p2pkh", "P2PKH.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1094,7 +1094,7 @@ func TestSourceCompile_ExampleP2PKH(t *testing.T) {
 }
 
 func TestSourceCompile_ExampleEscrow(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "..", "..", "examples", "ts", "escrow", "Escrow.tsop.ts")
+	source := filepath.Join(conformanceDir(), "..", "..", "examples", "ts", "escrow", "Escrow.runar.ts")
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1111,7 +1111,7 @@ func TestSourceCompile_ExampleEscrow(t *testing.T) {
 func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	// Compile from IR and from source, both should produce non-empty valid output
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
-	sourcePath := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.tsop.ts")
+	sourcePath := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.runar.ts")
 
 	irArtifact, err := CompileFromIR(irPath)
 	if err != nil {

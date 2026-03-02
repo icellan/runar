@@ -1,0 +1,429 @@
+{
+  "anf": {
+    "contractName": "Arithmetic",
+    "properties": [
+      {
+        "name": "target",
+        "type": "bigint",
+        "readonly": true
+      }
+    ],
+    "methods": [
+      {
+        "name": "constructor",
+        "params": [
+          {
+            "name": "target",
+            "type": "bigint"
+          }
+        ],
+        "body": [
+          {
+            "name": "t0",
+            "value": {
+              "kind": "load_prop",
+              "name": "target"
+            }
+          },
+          {
+            "name": "t1",
+            "value": {
+              "kind": "call",
+              "func": "super",
+              "args": [
+                "t0"
+              ]
+            }
+          },
+          {
+            "name": "t2",
+            "value": {
+              "kind": "load_prop",
+              "name": "target"
+            }
+          },
+          {
+            "name": "t3",
+            "value": {
+              "kind": "update_prop",
+              "name": "target",
+              "value": "t2"
+            }
+          }
+        ],
+        "isPublic": false
+      },
+      {
+        "name": "verify",
+        "params": [
+          {
+            "name": "a",
+            "type": "bigint"
+          },
+          {
+            "name": "b",
+            "type": "bigint"
+          }
+        ],
+        "body": [
+          {
+            "name": "result",
+            "value": {
+              "kind": "load_const",
+              "value": "@ref:t14"
+            }
+          },
+          {
+            "name": "t15",
+            "value": {
+              "kind": "load_prop",
+              "name": "target"
+            }
+          },
+          {
+            "name": "t16",
+            "value": {
+              "kind": "bin_op",
+              "op": "===",
+              "left": "result",
+              "right": "t15"
+            }
+          },
+          {
+            "name": "t17",
+            "value": {
+              "kind": "assert",
+              "value": "t16"
+            }
+          }
+        ],
+        "isPublic": true
+      }
+    ]
+  },
+  "contract": {
+    "kind": "contract",
+    "name": "Arithmetic",
+    "properties": [
+      {
+        "kind": "property",
+        "name": "target",
+        "type": {
+          "kind": "primitive_type",
+          "name": "bigint"
+        },
+        "readonly": true,
+        "sourceLocation": {
+          "file": "contract.ts",
+          "line": 4,
+          "column": 2
+        }
+      }
+    ],
+    "constructor": {
+      "kind": "method",
+      "name": "constructor",
+      "params": [
+        {
+          "kind": "param",
+          "name": "target",
+          "type": {
+            "kind": "primitive_type",
+            "name": "bigint"
+          }
+        }
+      ],
+      "body": [
+        {
+          "kind": "expression_statement",
+          "expression": {
+            "kind": "call_expr",
+            "callee": {
+              "kind": "identifier",
+              "name": "super"
+            },
+            "args": [
+              {
+                "kind": "identifier",
+                "name": "target"
+              }
+            ]
+          },
+          "sourceLocation": {
+            "file": "contract.ts",
+            "line": 7,
+            "column": 4
+          }
+        },
+        {
+          "kind": "assignment",
+          "target": {
+            "kind": "property_access",
+            "property": "target"
+          },
+          "value": {
+            "kind": "identifier",
+            "name": "target"
+          },
+          "sourceLocation": {
+            "file": "contract.ts",
+            "line": 8,
+            "column": 4
+          }
+        }
+      ],
+      "visibility": "public",
+      "sourceLocation": {
+        "file": "contract.ts",
+        "line": 6,
+        "column": 2
+      }
+    },
+    "methods": [
+      {
+        "kind": "method",
+        "name": "verify",
+        "params": [
+          {
+            "kind": "param",
+            "name": "a",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            }
+          },
+          {
+            "kind": "param",
+            "name": "b",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            }
+          }
+        ],
+        "body": [
+          {
+            "kind": "variable_decl",
+            "name": "sum",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            },
+            "mutable": false,
+            "init": {
+              "kind": "binary_expr",
+              "op": "+",
+              "left": {
+                "kind": "identifier",
+                "name": "a"
+              },
+              "right": {
+                "kind": "identifier",
+                "name": "b"
+              }
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 12,
+              "column": 4
+            }
+          },
+          {
+            "kind": "variable_decl",
+            "name": "diff",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            },
+            "mutable": false,
+            "init": {
+              "kind": "binary_expr",
+              "op": "-",
+              "left": {
+                "kind": "identifier",
+                "name": "a"
+              },
+              "right": {
+                "kind": "identifier",
+                "name": "b"
+              }
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 13,
+              "column": 4
+            }
+          },
+          {
+            "kind": "variable_decl",
+            "name": "prod",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            },
+            "mutable": false,
+            "init": {
+              "kind": "binary_expr",
+              "op": "*",
+              "left": {
+                "kind": "identifier",
+                "name": "a"
+              },
+              "right": {
+                "kind": "identifier",
+                "name": "b"
+              }
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 14,
+              "column": 4
+            }
+          },
+          {
+            "kind": "variable_decl",
+            "name": "quot",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            },
+            "mutable": false,
+            "init": {
+              "kind": "binary_expr",
+              "op": "/",
+              "left": {
+                "kind": "identifier",
+                "name": "a"
+              },
+              "right": {
+                "kind": "identifier",
+                "name": "b"
+              }
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 15,
+              "column": 4
+            }
+          },
+          {
+            "kind": "variable_decl",
+            "name": "result",
+            "type": {
+              "kind": "primitive_type",
+              "name": "bigint"
+            },
+            "mutable": false,
+            "init": {
+              "kind": "binary_expr",
+              "op": "+",
+              "left": {
+                "kind": "binary_expr",
+                "op": "+",
+                "left": {
+                  "kind": "binary_expr",
+                  "op": "+",
+                  "left": {
+                    "kind": "identifier",
+                    "name": "sum"
+                  },
+                  "right": {
+                    "kind": "identifier",
+                    "name": "diff"
+                  }
+                },
+                "right": {
+                  "kind": "identifier",
+                  "name": "prod"
+                }
+              },
+              "right": {
+                "kind": "identifier",
+                "name": "quot"
+              }
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 16,
+              "column": 4
+            }
+          },
+          {
+            "kind": "expression_statement",
+            "expression": {
+              "kind": "call_expr",
+              "callee": {
+                "kind": "identifier",
+                "name": "assert"
+              },
+              "args": [
+                {
+                  "kind": "binary_expr",
+                  "op": "===",
+                  "left": {
+                    "kind": "identifier",
+                    "name": "result"
+                  },
+                  "right": {
+                    "kind": "property_access",
+                    "property": "target"
+                  }
+                }
+              ]
+            },
+            "sourceLocation": {
+              "file": "contract.ts",
+              "line": 17,
+              "column": 4
+            }
+          }
+        ],
+        "visibility": "public",
+        "sourceLocation": {
+          "file": "contract.ts",
+          "line": 11,
+          "column": 2
+        }
+      }
+    ],
+    "sourceFile": "contract.ts"
+  },
+  "diagnostics": [],
+  "success": true,
+  "artifact": {
+    "version": "runar-v0.1.0",
+    "compilerVersion": "0.1.0",
+    "contractName": "Arithmetic",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "target",
+            "type": "bigint"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "verify",
+          "params": [
+            {
+              "name": "a",
+              "type": "bigint"
+            },
+            {
+              "name": "b",
+              "type": "bigint"
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    },
+    "script": "00007c7c9c69",
+    "asm": "OP_0 OP_0 OP_SWAP OP_SWAP OP_NUMEQUAL OP_VERIFY",
+    "buildTimestamp": "2026-02-28T17:52:22.476Z"
+  },
+  "scriptHex": "00007c7c9c69",
+  "scriptAsm": "OP_0 OP_0 OP_SWAP OP_SWAP OP_NUMEQUAL OP_VERIFY"
+}

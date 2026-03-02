@@ -1,6 +1,6 @@
 # Post-Quantum Signature Verification in Bitcoin Script
 
-Analysis of implementing post-quantum digital signature verification within TSOP smart contracts on Bitcoin SV.
+Analysis of implementing post-quantum digital signature verification within Rúnar smart contracts on Bitcoin SV.
 
 ## Background
 
@@ -60,15 +60,15 @@ BSV re-enabled opcodes disabled in BTC, changing the feasibility picture signifi
 
 1. **SHAKE-256/128 must be built from scratch** — No Keccak opcode in Bitcoin Script. Must implement Keccak-f[1600] from bitwise primitives: 25 lanes x 64 bits, 24 rounds, ~12,000 opcodes per permutation. ML-DSA needs 8-104 permutations = 100K-1.25M opcodes just for SHAKE.
 
-2. **Stack depth critically tight** — Each polynomial = 256 stack items. TSOP's 800-item limit means at most 3 polynomials simultaneously with 32 slots working space. NTT butterfly operations need OP_PICK/OP_ROLL at depths up to 255.
+2. **Stack depth critically tight** — Each polynomial = 256 stack items. Rúnar's 800-item limit means at most 3 polynomials simultaneously with 32 slots working space. NTT butterfly operations need OP_PICK/OP_ROLL at depths up to 255.
 
-3. **FixedArray indexed access not implemented** — TSOP's type system supports `FixedArray<T, N>` but the stack lowerer has no handler for `__array_access`. Would need implementation first.
+3. **FixedArray indexed access not implemented** — Rúnar's type system supports `FixedArray<T, N>` but the stack lowerer has no handler for `__array_access`. Would need implementation first.
 
 4. **Script size explosion** — Estimated 1-4 MB depending on whether matrix A is provided as witness data or derived from seed. Within BSV's 10 MB limit but enormous.
 
 ### Verdict
 
-**Theoretically possible in BSV. Impractical for TSOP today.** Requires implementing Keccak from scratch (~100K opcodes), dealing with polynomial operations at the stack depth limit, and building array indexing support. Multi-month effort for a ~1 MB verification script.
+**Theoretically possible in BSV. Impractical for Rúnar today.** Requires implementing Keccak from scratch (~100K opcodes), dealing with polynomial operations at the stack depth limit, and building array indexing support. Multi-month effort for a ~1 MB verification script.
 
 ## Hash-Based Signatures: The Practical Alternative
 
@@ -151,7 +151,7 @@ The signer must track which keys have been used. Reusing an index breaks securit
 
 ## Implementation Status
 
-Both WOTS+ and SLH-DSA are fully implemented in all three TSOP compilers (TypeScript, Go, Rust), producing byte-identical Bitcoin Script verified by the conformance suite.
+Both WOTS+ and SLH-DSA are fully implemented in all three Rúnar compilers (TypeScript, Go, Rust), producing byte-identical Bitcoin Script verified by the conformance suite.
 
 | Scheme | Measured Script Size | Conformance Status |
 |--------|---------------------|-------------------|

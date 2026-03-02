@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://runar.dev/schemas/artifact.schema.json",
+  "title": "Rúnar Artifact",
+  "description": "Compiled output of a Rúnar compiler — locking script, ABI, and optional debug info.",
+  "type": "object",
+  "required": [
+    "version",
+    "compilerVersion",
+    "contractName",
+    "abi",
+    "script",
+    "asm",
+    "buildTimestamp"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "pattern": "^runar-v\\d+\\.\\d+\\.\\d+$"
+    },
+    "compilerVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "contractName": {
+      "type": "string",
+      "minLength": 1
+    },
+    "abi": { "$ref": "#/$defs/ABI" },
+    "script": {
+      "type": "string",
+      "pattern": "^([0-9a-fA-F]{2})*$",
+      "description": "Hex-encoded locking script"
+    },
+    "asm": {
+      "type": "string",
+      "description": "Human-readable assembly (space-separated opcodes)"
+    },
+    "sourceMap": { "$ref": "#/$defs/SourceMap" },
+    "ir": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "anf": {
+          "$ref": "anf-ir.schema.json",
+          "description": "Optional ANF IR snapshot for debugging"
+        },
+        "stack": {
+          "type": "object",
+          "description": "Optional Stack IR snapshot for debugging"
+        }
+      }
+    },
+    "stateFields": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/StateField" }
+    },
+    "buildTimestamp": {
+      "type": "string",
+      "description": "ISO-8601 date-time string",
+      "minLength": 1
+    }
+  },
+  "$defs": {
+    "ABI": {
+      "type": "object",
+      "required": ["constructor", "methods"],
+      "additionalProperties": false,
+      "properties": {
+        "constructor": { "$ref": "#/$defs/ABIConstructor" },
+        "methods": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ABIMethod" }
+        }
+      }
+    },
+    "ABIConstructor": {
+      "type": "object",
+      "required": ["params"],
+      "additionalProperties": false,
+      "properties": {
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ABIParam" }
+        }
+      }
+    },
+    "ABIMethod": {
+      "type": "object",
+      "required": ["name", "params", "isPublic"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "params": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ABIParam" }
+        },
+        "isPublic": { "type": "boolean" }
+      }
+    },
+    "ABIParam": {
+      "type": "object",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 }
+      }
+    },
+    "SourceMap": {
+      "type": "object",
+      "required": ["mappings"],
+      "additionalProperties": false,
+      "properties": {
+        "mappings": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SourceMapping" }
+        }
+      }
+    },
+    "SourceMapping": {
+      "type": "object",
+      "required": ["opcodeIndex", "sourceFile", "line", "column"],
+      "additionalProperties": false,
+      "properties": {
+        "opcodeIndex": { "type": "integer", "minimum": 0 },
+        "sourceFile": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "column": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "StateField": {
+      "type": "object",
+      "required": ["name", "type", "index"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "type": { "type": "string", "minLength": 1 },
+        "index": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
-// Package ir defines the Go representation of TSOP's A-Normal Form intermediate
+// Package ir defines the Go representation of Rúnar's A-Normal Form intermediate
 // representation. These types mirror the canonical ANF IR JSON schema and are
-// used to deserialise IR files produced by any conformant TSOP compiler.
+// used to deserialise IR files produced by any conformant Rúnar compiler.
 package ir
 
 import (

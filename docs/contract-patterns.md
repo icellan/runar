@@ -1,6 +1,6 @@
 # Contract Patterns
 
-This guide walks through common smart contract patterns in TSOP with complete code examples and explanations. Each pattern demonstrates a different capability of Bitcoin SV script, from simple spending conditions to stateful on-chain logic.
+This guide walks through common smart contract patterns in Rúnar with complete code examples and explanations. Each pattern demonstrates a different capability of Bitcoin SV script, from simple spending conditions to stateful on-chain logic.
 
 ---
 
@@ -9,7 +9,7 @@ This guide walks through common smart contract patterns in TSOP with complete co
 The simplest and most common Bitcoin contract. Funds can be spent by anyone who can produce a valid signature for the specified public key hash.
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'tsop-lang';
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
 
 class P2PKH extends SmartContract {
   readonly pubKeyHash: Addr;
@@ -44,7 +44,7 @@ This is exactly the standard P2PKH script that most Bitcoin wallets use.
 An escrow contract where funds can be released to the seller or refunded to the buyer, with an arbiter who can authorize either action.
 
 ```typescript
-import { SmartContract, assert, PubKey, Sig, checkSig } from 'tsop-lang';
+import { SmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
 
 class Escrow extends SmartContract {
   readonly buyer: PubKey;
@@ -83,7 +83,7 @@ Because this contract has two public methods, the compiler generates a dispatch 
 A contract whose state persists across transactions. The counter can be incremented or decremented, and the updated value is carried to the next UTXO.
 
 ```typescript
-import { StatefulSmartContract, assert } from 'tsop-lang';
+import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
   count: bigint; // non-readonly = stateful
@@ -127,8 +127,8 @@ Decrement: Spend UTXO, create new UTXO with count=1
 A simple fungible token where ownership can be transferred. The total supply is immutable; the owner is mutable state.
 
 ```typescript
-import { StatefulSmartContract, assert, checkSig } from 'tsop-lang';
-import type { PubKey, Sig } from 'tsop-lang';
+import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
+import type { PubKey, Sig } from 'runar-lang';
 
 class FungibleToken extends StatefulSmartContract {
   owner: PubKey;           // stateful: current token owner
@@ -184,8 +184,8 @@ The `tokenId` is `readonly` and baked into the locking script at deploy time.
 An NFT with a unique token ID, metadata, and a burn function.
 
 ```typescript
-import { StatefulSmartContract, assert, checkSig } from 'tsop-lang';
-import type { PubKey, Sig, ByteString } from 'tsop-lang';
+import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
+import type { PubKey, Sig, ByteString } from 'runar-lang';
 
 class SimpleNFT extends StatefulSmartContract {
   owner: PubKey;                   // stateful
@@ -224,7 +224,7 @@ A contract that uses an external data feed (oracle) verified via Rabin signature
 import {
   SmartContract, assert, PubKey, Sig, ByteString,
   RabinSig, RabinPubKey, checkSig, verifyRabinSig, num2bin
-} from 'tsop-lang';
+} from 'runar-lang';
 
 class OraclePriceFeed extends SmartContract {
   readonly oraclePubKey: RabinPubKey;
@@ -270,7 +270,7 @@ Covenants restrict how a UTXO can be spent by inspecting the spending transactio
 import {
   SmartContract, assert, PubKey, Sig, Addr, SigHashPreimage,
   checkSig, checkPreimage
-} from 'tsop-lang';
+} from 'runar-lang';
 
 class CovenantVault extends SmartContract {
   readonly owner: PubKey;
@@ -306,7 +306,7 @@ A stateful auction where bidders can submit increasing bids, and the auctioneer 
 import {
   SmartContract, assert, PubKey, Sig, SigHashPreimage,
   checkSig, checkPreimage, hash256, extractOutputHash, extractLocktime
-} from 'tsop-lang';
+} from 'runar-lang';
 
 class Auction extends SmartContract {
   readonly auctioneer: PubKey;

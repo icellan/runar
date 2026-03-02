@@ -2,18 +2,18 @@ package contract
 
 import (
 	"testing"
-	"tsop"
+	"runar"
 )
 
 func newOracleFeed() *OraclePriceFeed {
 	return &OraclePriceFeed{
-		OraclePubKey: tsop.RabinPubKey("oracle_rabin_pk"),
-		Receiver:     tsop.MockPubKey(),
+		OraclePubKey: runar.RabinPubKey("oracle_rabin_pk"),
+		Receiver:     runar.MockPubKey(),
 	}
 }
 
 func TestOraclePriceFeed_Settle(t *testing.T) {
-	newOracleFeed().Settle(60000, tsop.RabinSig("sig"), tsop.ByteString("pad"), tsop.MockSig())
+	newOracleFeed().Settle(60000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig())
 }
 
 func TestOraclePriceFeed_Settle_PriceTooLow_Fails(t *testing.T) {
@@ -22,11 +22,11 @@ func TestOraclePriceFeed_Settle_PriceTooLow_Fails(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newOracleFeed().Settle(50000, tsop.RabinSig("sig"), tsop.ByteString("pad"), tsop.MockSig())
+	newOracleFeed().Settle(50000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig())
 }
 
 func TestOraclePriceFeed_Compile(t *testing.T) {
-	if err := tsop.CompileCheck("OraclePriceFeed.tsop.go"); err != nil {
-		t.Fatalf("TSOP compile check failed: %v", err)
+	if err := runar.CompileCheck("OraclePriceFeed.runar.go"); err != nil {
+		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }

@@ -1,0 +1,285 @@
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "Arithmetic",
+  "abi": {
+    "constructor": {
+      "params": [
+        {
+          "name": "target",
+          "type": "bigint"
+        }
+      ]
+    },
+    "methods": [
+      {
+        "name": "verify",
+        "params": [
+          {
+            "name": "a",
+            "type": "bigint"
+          },
+          {
+            "name": "b",
+            "type": "bigint"
+          }
+        ],
+        "isPublic": true
+      }
+    ]
+  },
+  "script": "7c7c7c7c937600007c7c947600007c7c957600007c7c9676567a557a93537a937c9376007c7c9c69",
+  "asm": "OP_SWAP OP_SWAP OP_SWAP OP_SWAP OP_ADD OP_DUP OP_0 OP_0 OP_SWAP OP_SWAP OP_SUB OP_DUP OP_0 OP_0 OP_SWAP OP_SWAP OP_MUL OP_DUP OP_0 OP_0 OP_SWAP OP_SWAP OP_DIV OP_DUP OP_6 OP_ROLL OP_5 OP_ROLL OP_ADD OP_3 OP_ROLL OP_ADD OP_SWAP OP_ADD OP_DUP OP_0 OP_SWAP OP_SWAP OP_NUMEQUAL OP_VERIFY",
+  "buildTimestamp": "2026-02-28T18:26:28.586Z",
+  "ir": {
+    "anf": {
+      "contractName": "Arithmetic",
+      "properties": [
+        {
+          "name": "target",
+          "type": "bigint",
+          "readonly": true
+        }
+      ],
+      "methods": [
+        {
+          "name": "constructor",
+          "params": [
+            {
+              "name": "target",
+              "type": "bigint"
+            }
+          ],
+          "body": [
+            {
+              "name": "t0",
+              "value": {
+                "kind": "load_prop",
+                "name": "target"
+              }
+            },
+            {
+              "name": "t1",
+              "value": {
+                "kind": "call",
+                "func": "super",
+                "args": [
+                  "t0"
+                ]
+              }
+            },
+            {
+              "name": "t2",
+              "value": {
+                "kind": "load_prop",
+                "name": "target"
+              }
+            },
+            {
+              "name": "t3",
+              "value": {
+                "kind": "update_prop",
+                "name": "target",
+                "value": "t2"
+              }
+            }
+          ],
+          "isPublic": false
+        },
+        {
+          "name": "verify",
+          "params": [
+            {
+              "name": "a",
+              "type": "bigint"
+            },
+            {
+              "name": "b",
+              "type": "bigint"
+            }
+          ],
+          "body": [
+            {
+              "name": "t0",
+              "value": {
+                "kind": "load_param",
+                "name": "a"
+              }
+            },
+            {
+              "name": "t1",
+              "value": {
+                "kind": "load_param",
+                "name": "b"
+              }
+            },
+            {
+              "name": "t2",
+              "value": {
+                "kind": "bin_op",
+                "op": "+",
+                "left": "t0",
+                "right": "t1"
+              }
+            },
+            {
+              "name": "sum",
+              "value": {
+                "kind": "load_const",
+                "value": "@ref:t2"
+              }
+            },
+            {
+              "name": "t3",
+              "value": {
+                "kind": "load_param",
+                "name": "a"
+              }
+            },
+            {
+              "name": "t4",
+              "value": {
+                "kind": "load_param",
+                "name": "b"
+              }
+            },
+            {
+              "name": "t5",
+              "value": {
+                "kind": "bin_op",
+                "op": "-",
+                "left": "t3",
+                "right": "t4"
+              }
+            },
+            {
+              "name": "diff",
+              "value": {
+                "kind": "load_const",
+                "value": "@ref:t5"
+              }
+            },
+            {
+              "name": "t6",
+              "value": {
+                "kind": "load_param",
+                "name": "a"
+              }
+            },
+            {
+              "name": "t7",
+              "value": {
+                "kind": "load_param",
+                "name": "b"
+              }
+            },
+            {
+              "name": "t8",
+              "value": {
+                "kind": "bin_op",
+                "op": "*",
+                "left": "t6",
+                "right": "t7"
+              }
+            },
+            {
+              "name": "prod",
+              "value": {
+                "kind": "load_const",
+                "value": "@ref:t8"
+              }
+            },
+            {
+              "name": "t9",
+              "value": {
+                "kind": "load_param",
+                "name": "a"
+              }
+            },
+            {
+              "name": "t10",
+              "value": {
+                "kind": "load_param",
+                "name": "b"
+              }
+            },
+            {
+              "name": "t11",
+              "value": {
+                "kind": "bin_op",
+                "op": "/",
+                "left": "t9",
+                "right": "t10"
+              }
+            },
+            {
+              "name": "quot",
+              "value": {
+                "kind": "load_const",
+                "value": "@ref:t11"
+              }
+            },
+            {
+              "name": "t12",
+              "value": {
+                "kind": "bin_op",
+                "op": "+",
+                "left": "sum",
+                "right": "diff"
+              }
+            },
+            {
+              "name": "t13",
+              "value": {
+                "kind": "bin_op",
+                "op": "+",
+                "left": "t12",
+                "right": "prod"
+              }
+            },
+            {
+              "name": "t14",
+              "value": {
+                "kind": "bin_op",
+                "op": "+",
+                "left": "t13",
+                "right": "quot"
+              }
+            },
+            {
+              "name": "result",
+              "value": {
+                "kind": "load_const",
+                "value": "@ref:t14"
+              }
+            },
+            {
+              "name": "t15",
+              "value": {
+                "kind": "load_prop",
+                "name": "target"
+              }
+            },
+            {
+              "name": "t16",
+              "value": {
+                "kind": "bin_op",
+                "op": "===",
+                "left": "result",
+                "right": "t15"
+              }
+            },
+            {
+              "name": "t17",
+              "value": {
+                "kind": "assert",
+                "value": "t16"
+              }
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    }
+  }
+}

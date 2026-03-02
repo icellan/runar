@@ -1,4 +1,4 @@
-//! Move-style parser for TSOP contracts.
+//! Move-style parser for Rúnar contracts.
 //!
 //! Parses a Move-inspired syntax into the same AST as the TypeScript parser.
 //! Hand-written tokenizer + recursive descent parser.
@@ -37,9 +37,9 @@ use super::parser::ParseResult;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Parse a Move-format TSOP contract source.
+/// Parse a Move-format Rúnar contract source.
 pub fn parse_move(source: &str, file_name: Option<&str>) -> ParseResult {
-    let file = file_name.unwrap_or("contract.tsop.move");
+    let file = file_name.unwrap_or("contract.runar.move");
     let mut errors: Vec<String> = Vec::new();
 
     let tokens = tokenize(source);
@@ -76,7 +76,7 @@ fn snake_to_camel(s: &str) -> String {
     result
 }
 
-/// Map Move builtin names to TSOP builtin names.
+/// Map Move builtin names to Rúnar builtin names.
 fn map_builtin_name(name: &str) -> String {
     match name {
         "check_sig" => "checkSig".to_string(),
@@ -95,7 +95,7 @@ fn map_builtin_name(name: &str) -> String {
     }
 }
 
-/// Map Move type names to TSOP type names.
+/// Map Move type names to Rúnar type names.
 fn map_type_name(name: &str) -> &str {
     match name {
         "u64" | "u128" | "u256" => "bigint",
@@ -702,7 +702,7 @@ impl<'a> MoveParser<'a> {
         // First param might be `self: &StructName` -- skip it
         let first = self.parse_one_param();
         if first.name == "self" {
-            // Skip self param -- it's implicit in TSOP
+            // Skip self param -- it's implicit in Rúnar
         } else {
             params.push(first);
         }
@@ -1009,7 +1009,7 @@ impl<'a> MoveParser<'a> {
         self.parse_block()
     }
 
-    /// Parse `while` loop as a for loop (for compatibility with TSOP AST which only has ForStatement).
+    /// Parse `while` loop as a for loop (for compatibility with Rúnar AST which only has ForStatement).
     fn parse_while_as_for(&mut self) -> Statement {
         self.advance(); // consume 'while'
 
@@ -1539,7 +1539,7 @@ module p2pkh {
 }
 "#;
 
-        let result = parse_move(source, Some("P2PKH.tsop.move"));
+        let result = parse_move(source, Some("P2PKH.runar.move"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "P2PKH");
@@ -1575,7 +1575,7 @@ module counter {
 }
 "#;
 
-        let result = parse_move(source, Some("Counter.tsop.move"));
+        let result = parse_move(source, Some("Counter.runar.move"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "Counter");
@@ -1598,7 +1598,7 @@ module test {
 }
 "#;
 
-        let result = parse_move(source, Some("Test.tsop.move"));
+        let result = parse_move(source, Some("Test.runar.move"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         let body = &contract.methods[0].body;
@@ -1633,7 +1633,7 @@ module example {
 }
 "#;
 
-        let result = parse_move(source, Some("Example.tsop.move"));
+        let result = parse_move(source, Some("Example.runar.move"));
         assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
         let contract = result.contract.unwrap();
         let body = &contract.methods[0].body;

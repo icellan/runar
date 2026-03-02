@@ -2,13 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 import {
   slhKeygen, slhSign, SLH_SHA2_128s,
-} from '../../../packages/tsop-testing/src/crypto/slh-dsa.js';
+} from '../../../packages/runar-testing/src/crypto/slh-dsa.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'SPHINCSWallet.tsop.ts'), 'utf8');
+const source = readFileSync(join(__dirname, 'SPHINCSWallet.runar.ts'), 'utf8');
 
 function toHex(bytes: Uint8Array): string {
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');

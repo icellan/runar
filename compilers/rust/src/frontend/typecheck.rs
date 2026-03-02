@@ -1,6 +1,6 @@
 //! Pass 3: Type-Check
 //!
-//! Type-checks the TSOP AST. Builds type environments from properties,
+//! Type-checks the Rúnar AST. Builds type environments from properties,
 //! constructor parameters, and method parameters, then verifies all
 //! expressions have consistent types.
 
@@ -17,7 +17,7 @@ pub struct TypeCheckResult {
     pub errors: Vec<String>,
 }
 
-/// Type-check a TSOP AST. Returns any type errors found.
+/// Type-check a Rúnar AST. Returns any type errors found.
 pub fn typecheck(contract: &ContractNode) -> TypeCheckResult {
     let mut errors = Vec::new();
     let mut checker = TypeChecker::new(contract, &mut errors);
@@ -750,7 +750,7 @@ impl<'a> TypeChecker<'a> {
             }
 
             self.errors.push(format!(
-                "unknown function '{}' — only TSOP built-in functions and contract methods are allowed",
+                "unknown function '{}' — only Rúnar built-in functions and contract methods are allowed",
                 name
             ));
             for arg in args {
@@ -783,7 +783,7 @@ impl<'a> TypeChecker<'a> {
             }
 
             self.errors.push(format!(
-                "unknown method 'self.{}' — only TSOP built-in methods and contract methods are allowed",
+                "unknown method 'self.{}' — only Rúnar built-in methods and contract methods are allowed",
                 property
             ));
             for arg in args {
@@ -826,7 +826,7 @@ impl<'a> TypeChecker<'a> {
                 _ => "<expr>".to_string(),
             };
             self.errors.push(format!(
-                "unknown function '{}.{}' — only TSOP built-in functions and contract methods are allowed",
+                "unknown function '{}.{}' — only Rúnar built-in functions and contract methods are allowed",
                 obj_name, property
             ));
             for arg in args {
@@ -837,7 +837,7 @@ impl<'a> TypeChecker<'a> {
 
         // Fallback — unknown callee shape
         self.errors.push(
-            "unsupported function call expression — only TSOP built-in functions and contract methods are allowed".to_string()
+            "unsupported function call expression — only Rúnar built-in functions and contract methods are allowed".to_string()
         );
         self.infer_expr_type(callee, env);
         for arg in args {

@@ -1,25 +1,25 @@
 # Compiler Architecture
 
-This document describes the internal architecture of the TSOP compiler for contributors and anyone who wants to understand how TypeScript smart contracts are transformed into Bitcoin Script.
+This document describes the internal architecture of the Rúnar compiler for contributors and anyone who wants to understand how TypeScript smart contracts are transformed into Bitcoin Script.
 
 ---
 
 ## Nanopass Overview
 
-The TSOP compiler is structured as six small, composable passes. Each pass does one thing, transforms one intermediate representation (IR) into the next, and is small enough to audit in a single sitting. This design is based on the nanopass framework (Sarkar, Waddell & Dybvig, ICFP 2004).
+The Rúnar compiler is structured as six small, composable passes. Each pass does one thing, transforms one intermediate representation (IR) into the next, and is small enough to audit in a single sitting. This design is based on the nanopass framework (Sarkar, Waddell & Dybvig, ICFP 2004).
 
 ```
-.tsop.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [Stack Lower] --> [Emit]
+.runar.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [Stack Lower] --> [Emit]
 source       Pass 1       Pass 2         Pass 3           Pass 4          Pass 5          Pass 6
             ~150 LOC     ~120 LOC       ~200 LOC         ~180 LOC        ~160 LOC        ~100 LOC
 ```
 
-Each pass lives in its own file under `packages/tsop-compiler/src/passes/`:
+Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
 
 | File | Pass | Input | Output |
 |------|------|-------|--------|
-| `01-parse.ts` | Parse | `.tsop.ts` source | TSOP AST |
-| `02-validate.ts` | Validate | TSOP AST | Validated AST |
+| `01-parse.ts` | Parse | `.runar.ts` source | Rúnar AST |
+| `02-validate.ts` | Validate | Rúnar AST | Validated AST |
 | `03-typecheck.ts` | Type-check | Validated AST | Typed AST |
 | `04-anf-lower.ts` | ANF Lower | Typed AST | ANF IR |
 | `05-stack-lower.ts` | Stack Lower | ANF IR | Stack IR |
@@ -32,11 +32,11 @@ The key benefit of this approach: each pass can be tested and verified in isolat
 
 ## Pass 1: Parse
 
-**File:** `packages/tsop-compiler/src/passes/01-parse.ts`
-**Input:** Raw `.tsop.ts` source string
-**Output:** TSOP AST (defined in `tsop-ir-schema`)
+**File:** `packages/runar-compiler/src/passes/01-parse.ts`
+**Input:** Raw `.runar.ts` source string
+**Output:** Rúnar AST (defined in `runar-ir-schema`)
 
-The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to parse the source file into a TypeScript AST, then extracts the TSOP-relevant structure: the class declaration, properties, constructor, and methods.
+The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to parse the source file into a TypeScript AST, then extracts the Rúnar-relevant structure: the class declaration, properties, constructor, and methods.
 
 ### What It Does
 
@@ -45,21 +45,21 @@ The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to p
 3. Extracts property declarations (name, type, readonly flag).
 4. Extracts the constructor (parameters, super call, assignments).
 5. Extracts method declarations (visibility, parameters, body statements).
-6. Builds a TSOP AST node tree.
+6. Builds a Rúnar AST node tree.
 
 ### Alternative Frontends
 
-The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing. The planned Rust compiler would use **SWC**. All three frontends must produce structurally equivalent TSOP AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
+The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing. The planned Rust compiler would use **SWC**. All three frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
 
 ---
 
 ## Pass 2: Validate
 
-**File:** `packages/tsop-compiler/src/passes/02-validate.ts`
-**Input:** TSOP AST
+**File:** `packages/runar-compiler/src/passes/02-validate.ts`
+**Input:** Rúnar AST
 **Output:** Validated AST (same structure, but guaranteed to satisfy all constraints)
 
-The validation pass enforces the subset rules that distinguish TSOP from general TypeScript. It walks the AST and rejects any construct that is not in the allowed subset.
+The validation pass enforces the subset rules that distinguish Rúnar from general TypeScript. It walks the AST and rejects any construct that is not in the allowed subset.
 
 ### Checks Performed
 
@@ -74,7 +74,7 @@ The validation pass enforces the subset rules that distinguish TSOP from general
 - For-loop bounds are compile-time constant integers.
 - No disallowed statements: `while`, `do-while`, `try/catch`, `switch`, `throw`, `break`, `continue`.
 - No disallowed expressions: `new`, arrow functions, template literals, `typeof`, `instanceof`, optional chaining, spread, `await`, `yield`.
-- All imports come from allowed TSOP library modules.
+- All imports come from allowed Rúnar library modules.
 - No disallowed types: `number`, `string`, `any`, `unknown`, `null`, `undefined`, dynamic arrays.
 
 Each violation produces a clear error message referencing the source location.
@@ -83,11 +83,11 @@ Each violation produces a clear error message referencing the source location.
 
 ## Pass 3: Type-check
 
-**File:** `packages/tsop-compiler/src/passes/03-typecheck.ts`
+**File:** `packages/runar-compiler/src/passes/03-typecheck.ts`
 **Input:** Validated AST
 **Output:** Typed AST (every node annotated with its resolved type)
 
-The type checker resolves types for all expressions and enforces the TSOP type system, including subtyping and affine type rules.
+The type checker resolves types for all expressions and enforces the Rúnar type system, including subtyping and affine type rules.
 
 ### Phases
 
@@ -113,15 +113,15 @@ Every built-in function (`checkSig`, `hash160`, `sha256`, etc.) has a known sign
 
 ## Pass 4: ANF Lower
 
-**File:** `packages/tsop-compiler/src/passes/04-anf-lower.ts`
+**File:** `packages/runar-compiler/src/passes/04-anf-lower.ts`
 **Input:** Typed AST
-**Output:** ANF IR (canonical JSON, defined in `tsop-ir-schema`)
+**Output:** ANF IR (canonical JSON, defined in `runar-ir-schema`)
 
 This is the most conceptually important pass. It transforms the typed AST into **Administrative Normal Form (ANF)**, where every sub-expression is bound to a named temporary. There are no nested expressions.
 
 ### What Is ANF?
 
-In ANF, every intermediate computation gets a name. Consider this TSOP expression:
+In ANF, every intermediate computation gets a name. Consider this Rúnar expression:
 
 ```typescript
 assert(hash160(pubKey) === this.pubKeyHash);
@@ -173,7 +173,7 @@ t1 = if(t0) {
 
 ## Pass 5: Stack Lower
 
-**File:** `packages/tsop-compiler/src/passes/05-stack-lower.ts`
+**File:** `packages/runar-compiler/src/passes/05-stack-lower.ts`
 **Input:** ANF IR
 **Output:** Stack IR (linear sequence of stack instructions)
 
@@ -214,7 +214,7 @@ The compiler statically verifies that the stack depth never exceeds 800 items. B
 
 ## Pass 6: Emit
 
-**File:** `packages/tsop-compiler/src/passes/06-emit.ts`
+**File:** `packages/runar-compiler/src/passes/06-emit.ts`
 **Input:** Stack IR
 **Output:** Bitcoin Script (hex-encoded byte string)
 
@@ -249,7 +249,7 @@ Complex built-in functions like `verifyWOTS` and `verifySLHDSA_SHA2_*` are handl
 - **SLH-DSA** (`verifySLHDSA_SHA2_*`): In separate module `slh-dsa-codegen.ts`. Emits 200-900 KB of Bitcoin Script depending on parameter set. Uses a `SLHTracker` class to manage named stack positions across ~2,100 tweakable hash operations. Each hash uses a dynamically-constructed 22-byte ADRS for domain separation.
 
 The SLH-DSA codegen is replicated across all three compilers:
-- TypeScript: `packages/tsop-compiler/src/passes/slh-dsa-codegen.ts`
+- TypeScript: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts`
 - Go: `compilers/go/codegen/slh_dsa.go`
 - Rust: `compilers/rust/src/codegen/slh_dsa.rs`
 
@@ -259,7 +259,7 @@ All three produce byte-identical Bitcoin Script, verified by the conformance sui
 
 ## Optimizer
 
-The optimizer runs after Pass 5 (Stack Lower) and before Pass 6 (Emit). It consists of two components in `packages/tsop-compiler/src/optimizer/`:
+The optimizer runs after Pass 5 (Stack Lower) and before Pass 6 (Emit). It consists of two components in `packages/runar-compiler/src/optimizer/`:
 
 ### Peephole Optimizer (`peephole.ts`)
 
@@ -307,7 +307,7 @@ Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-re
 
 ## Multi-Compiler Strategy
 
-TSOP defines a canonical IR conformance boundary at the ANF level. Any compiler that produces byte-identical ANF IR (serialized via RFC 8785) for a given source file is conformant.
+Rúnar defines a canonical IR conformance boundary at the ANF level. Any compiler that produces byte-identical ANF IR (serialized via RFC 8785) for a given source file is conformant.
 
 | Compiler | Frontend | Status |
 |----------|----------|--------|

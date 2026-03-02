@@ -1,4 +1,4 @@
-module tsop-conformance
+module runar-conformance
 
 go 1.26
 

@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'P2PKH.tsop.sol'), 'utf8');
-const FILE_NAME = 'P2PKH.tsop.sol';
+const source = readFileSync(join(__dirname, 'P2PKH.runar.sol'), 'utf8');
+const FILE_NAME = 'P2PKH.runar.sol';
 
 // Mock 33-byte compressed pubkey and its hash160
 const PUBKEY = '02' + 'ab'.repeat(32);

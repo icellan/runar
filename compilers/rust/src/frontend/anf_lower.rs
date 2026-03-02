@@ -1,6 +1,6 @@
 //! Pass 4: ANF Lower
 //!
-//! Lowers the TSOP AST to A-Normal Form (ANF) IR. This is the critical
+//! Lowers the Rúnar AST to A-Normal Form (ANF) IR. This is the critical
 //! transformation pass -- it flattens all nested expressions into a sequence
 //! of let-bindings where every right-hand side is a simple value.
 //!
@@ -28,7 +28,7 @@ use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFVal
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Lower a type-checked TSOP AST to ANF IR.
+/// Lower a type-checked Rúnar AST to ANF IR.
 pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     let properties = lower_properties(contract);
     let methods = lower_methods(contract);

@@ -11,17 +11,17 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script/interpreter"
 )
 
-// compileTSOP invokes the TypeScript compiler to produce hex for a conformance
+// compileRúnar invokes the TypeScript compiler to produce hex for a conformance
 // contract with baked constructor args.  The args are passed as JSON.
-func compileTSOP(contractName string, argsJSON string) (string, error) {
-	// Use node to invoke the compiler from the tsop-testing package
-	// (where tsop-compiler is a resolved dependency).
+func compileRúnar(contractName string, argsJSON string) (string, error) {
+	// Use node to invoke the compiler from the runar-testing package
+	// (where runar-compiler is a resolved dependency).
 	code := fmt.Sprintf(`
-const { compile } = require('./packages/tsop-compiler/dist/index.js');
+const { compile } = require('./packages/runar-compiler/dist/index.js');
 const fs = require('fs');
-const src = fs.readFileSync('conformance/tests/%s/%s.tsop.ts', 'utf-8');
+const src = fs.readFileSync('conformance/tests/%s/%s.runar.ts', 'utf-8');
 const args = JSON.parse('%s', (k,v) => typeof v === 'string' && /^-?\d+$/.test(v) ? BigInt(v) : v);
-const r = compile(src, { fileName: '%s.tsop.ts', constructorArgs: args });
+const r = compile(src, { fileName: '%s.runar.ts', constructorArgs: args });
 if (!r.success || !r.scriptHex) { process.exit(1); }
 process.stdout.write(r.scriptHex);
 `, contractName, contractName, argsJSON, contractName)
@@ -120,7 +120,7 @@ func executeScript(lockingHex, unlockingHex string) error {
 
 func TestArithmetic_ScriptExecution(t *testing.T) {
 	// 3+7=10, 3-7=-4, 3*7=21, 3/7=0 → result = 10+(-4)+21+0 = 27
-	lockingHex, err := compileTSOP("arithmetic", `{"target":"27"}`)
+	lockingHex, err := compileRúnar("arithmetic", `{"target":"27"}`)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestArithmetic_ScriptExecution(t *testing.T) {
 }
 
 func TestArithmetic_ScriptExecution_Fail(t *testing.T) {
-	lockingHex, err := compileTSOP("arithmetic", `{"target":"0"}`)
+	lockingHex, err := compileRúnar("arithmetic", `{"target":"0"}`)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestArithmetic_ScriptExecution_Fail(t *testing.T) {
 }
 
 func TestBooleanLogic_ScriptExecution(t *testing.T) {
-	lockingHex, err := compileTSOP("boolean-logic", `{"threshold":"2"}`)
+	lockingHex, err := compileRúnar("boolean-logic", `{"threshold":"2"}`)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestBooleanLogic_ScriptExecution(t *testing.T) {
 }
 
 func TestIfElse_ScriptExecution(t *testing.T) {
-	lockingHex, err := compileTSOP("if-else", `{"limit":"10"}`)
+	lockingHex, err := compileRúnar("if-else", `{"limit":"10"}`)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestIfElse_ScriptExecution(t *testing.T) {
 
 func TestBoundedLoop_ScriptExecution(t *testing.T) {
 	// sum = (3+0)+(3+1)+(3+2)+(3+3)+(3+4) = 25
-	lockingHex, err := compileTSOP("bounded-loop", `{"expectedSum":"25"}`)
+	lockingHex, err := compileRúnar("bounded-loop", `{"expectedSum":"25"}`)
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}

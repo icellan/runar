@@ -15,32 +15,32 @@ import (
 // Public API
 // ---------------------------------------------------------------------------
 
-// ParseResult holds the result of parsing a TSOP source file.
+// ParseResult holds the result of parsing a Rúnar source file.
 type ParseResult struct {
 	Contract *ContractNode
 	Errors   []string
 }
 
 // ParseSource detects the file extension and routes to the appropriate parser.
-//   - .tsop.sol -> ParseSolidity
-//   - .tsop.move -> ParseMove
-//   - .tsop.go -> ParseGoContract
+//   - .runar.sol -> ParseSolidity
+//   - .runar.move -> ParseMove
+//   - .runar.go -> ParseGoContract
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
 	lower := strings.ToLower(fileName)
 	switch {
-	case strings.HasSuffix(lower, ".tsop.sol"):
+	case strings.HasSuffix(lower, ".runar.sol"):
 		return ParseSolidity(source, fileName)
-	case strings.HasSuffix(lower, ".tsop.move"):
+	case strings.HasSuffix(lower, ".runar.move"):
 		return ParseMove(source, fileName)
-	case strings.HasSuffix(lower, ".tsop.go"):
+	case strings.HasSuffix(lower, ".runar.go"):
 		return ParseGoContract(source, fileName)
 	default:
 		return Parse(source, fileName)
 	}
 }
 
-// Parse parses a TypeScript source string and extracts the TSOP contract AST.
+// Parse parses a TypeScript source string and extracts the Rúnar contract AST.
 func Parse(source []byte, fileName string) *ParseResult {
 	parser := sitter.NewParser()
 	parser.SetLanguage(typescript.GetLanguage())
@@ -399,7 +399,7 @@ func (p *parseContext) parseTypeExpr(node *sitter.Node) TypeNode {
 		case "void":
 			return PrimitiveType{Name: "void"}
 		case "number":
-			p.addError("use 'bigint' instead of 'number' in TSOP contracts")
+			p.addError("use 'bigint' instead of 'number' in Rúnar contracts")
 			return PrimitiveType{Name: "bigint"}
 		}
 		return CustomType{Name: text}

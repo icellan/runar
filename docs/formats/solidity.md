@@ -1,14 +1,14 @@
 # Solidity-like Contract Format
 
 **Status:** Experimental
-**File extension:** `.tsop.sol`
+**File extension:** `.runar.sol`
 **Supported compilers:** TypeScript, Go, Rust
 
 ---
 
 ## Overview
 
-The Solidity-like format provides a familiar syntax for developers coming from Ethereum. It uses Solidity's structural conventions -- `pragma`, `contract ... is ...`, `function`, `require` -- while compiling to Bitcoin SV Script through the standard TSOP pipeline.
+The Solidity-like format provides a familiar syntax for developers coming from Ethereum. It uses Solidity's structural conventions -- `pragma`, `contract ... is ...`, `function`, `require` -- while compiling to Bitcoin SV Script through the standard Rúnar pipeline.
 
 This is **not** Solidity. It borrows syntax but has different semantics, a different type system, and targets a fundamentally different execution model (UTXO-based Script vs. account-based EVM). The goal is to reduce the learning curve, not to provide Solidity compatibility.
 
@@ -19,7 +19,7 @@ This is **not** Solidity. It borrows syntax but has different semantics, a diffe
 ### File Structure
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract P2PKH is SmartContract {
     Addr immutable pubKeyHash;
@@ -34,10 +34,10 @@ contract P2PKH is SmartContract {
 ### Pragma
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 ```
 
-The `pragma` directive specifies the TSOP language version. It follows Solidity conventions but uses `tsop` instead of `solidity`. The version constraint is advisory -- the compiler checks compatibility but the pragma is not included in the output.
+The `pragma` directive specifies the Rúnar language version. It follows Solidity conventions but uses `runar` instead of `solidity`. The version constraint is advisory -- the compiler checks compatibility but the pragma is not included in the output.
 
 ### Contract Declaration
 
@@ -81,11 +81,11 @@ function helper(Type param) private returns (Type) {
 require(condition);
 ```
 
-`require(expr)` maps directly to `assert(expr)`. Both are accepted; `require` is idiomatic Solidity, `assert` is idiomatic TSOP. They compile to the same `OP_VERIFY`.
+`require(expr)` maps directly to `assert(expr)`. Both are accepted; `require` is idiomatic Solidity, `assert` is idiomatic Rúnar. They compile to the same `OP_VERIFY`.
 
 ### Operators
 
-| Solidity syntax | TSOP equivalent | Notes |
+| Solidity syntax | Rúnar equivalent | Notes |
 |----------------|-----------------|-------|
 | `==` | `===` | Equality (no type coercion in either language) |
 | `!=` | `!==` | Inequality |
@@ -103,7 +103,7 @@ pubKeyHash          // access property directly (no this. prefix needed)
 this.pubKeyHash     // also valid (explicit)
 ```
 
-Unlike TypeScript TSOP where `this.` is required, the Solidity format allows bare property names. The parser resolves them to `PropertyAccessExpr` nodes.
+Unlike TypeScript Rúnar where `this.` is required, the Solidity format allows bare property names. The parser resolves them to `PropertyAccessExpr` nodes.
 
 ### State Mutation
 
@@ -131,7 +131,7 @@ The `addOutput` call uses the same positional convention as TypeScript: the firs
 ### P2PKH
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract P2PKH is SmartContract {
     Addr immutable pubKeyHash;
@@ -146,7 +146,7 @@ contract P2PKH is SmartContract {
 ### Counter
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract Counter is StatefulSmartContract {
     int256 count;
@@ -167,7 +167,7 @@ Note: `int256` is an alias for `bigint` in the Solidity format. Plain integer li
 ### Escrow
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract Escrow is SmartContract {
     PubKey immutable buyer;
@@ -195,7 +195,7 @@ contract Escrow is SmartContract {
 ### Auction
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract Auction is StatefulSmartContract {
     PubKey immutable auctioneer;
@@ -221,7 +221,7 @@ contract Auction is StatefulSmartContract {
 ### OraclePriceFeed
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract OraclePriceFeed is SmartContract {
     RabinPubKey immutable oraclePubKey;
@@ -239,7 +239,7 @@ contract OraclePriceFeed is SmartContract {
 ### CovenantVault
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract CovenantVault is SmartContract {
     PubKey immutable owner;
@@ -257,7 +257,7 @@ contract CovenantVault is SmartContract {
 ### FungibleToken
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract FungibleToken is StatefulSmartContract {
     PubKey owner;
@@ -289,7 +289,7 @@ contract FungibleToken is StatefulSmartContract {
 ### SimpleNFT
 
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract SimpleNFT is StatefulSmartContract {
     PubKey owner;
@@ -311,7 +311,7 @@ contract SimpleNFT is StatefulSmartContract {
 
 ## Differences from Real Solidity
 
-| Feature | Real Solidity | TSOP Solidity-like |
+| Feature | Real Solidity | Rúnar Solidity-like |
 |---------|--------------|-------------------|
 | Execution model | Account-based EVM | UTXO-based Bitcoin Script |
 | Integer types | `uint256`, `int256`, etc. | `int256` is an alias for `bigint`; no unsigned types |
@@ -332,7 +332,7 @@ contract SimpleNFT is StatefulSmartContract {
 
 ## Type Mapping
 
-| Solidity-like type | TSOP type |
+| Solidity-like type | Rúnar type |
 |-------------------|-----------|
 | `int256` | `bigint` |
 | `bool` | `boolean` |
@@ -346,4 +346,4 @@ contract SimpleNFT is StatefulSmartContract {
 | `RabinSig` | `RabinSig` |
 | `RabinPubKey` | `RabinPubKey` |
 
-Both Solidity-style names (`int256`, `bool`, `bytes`, `address`) and TSOP-native names (`bigint`, `boolean`, `ByteString`, `Addr`) are accepted. The parser normalizes to TSOP types.
+Both Solidity-style names (`int256`, `bool`, `bytes`, `address`) and Rúnar-native names (`bigint`, `boolean`, `ByteString`, `Addr`) are accepted. The parser normalizes to Rúnar types.

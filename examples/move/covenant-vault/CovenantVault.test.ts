@@ -2,11 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(__dirname, 'CovenantVault.tsop.move'), 'utf8');
-const FILE_NAME = 'CovenantVault.tsop.move';
+const source = readFileSync(join(__dirname, 'CovenantVault.runar.move'), 'utf8');
+const FILE_NAME = 'CovenantVault.runar.move';
 
 const OWNER_PK = '02' + 'aa'.repeat(32);
 const RECIPIENT = 'bb'.repeat(20);  // 20-byte Addr

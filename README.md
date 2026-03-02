@@ -1,4 +1,6 @@
-# TSOP -- Smart Contract Operations Protocol for Bitcoin
+# Rúnar
+
+*Old Norse plural for "runes" (rún = secret/script/mystery). Pronounced ROO-nar.*
 
 **Write Bitcoin smart contracts in TypeScript, Go, Rust, Solidity, or Move. Compile to Bitcoin Script.**
 
@@ -11,7 +13,7 @@
 
 ## Write Once, Compile Anywhere
 
-TSOP lets you write Bitcoin SV smart contracts in the language you already know. All formats compile through the same pipeline and produce identical Bitcoin Script.
+Rúnar lets you write Bitcoin SV smart contracts in the language you already know. All formats compile through the same pipeline and produce identical Bitcoin Script.
 
 <table>
 <tr>
@@ -39,13 +41,13 @@ class P2PKH extends SmartContract {
 **Go**
 ```go
 type P2PKH struct {
-    tsop.SmartContract
-    PubKeyHash tsop.Addr `tsop:"readonly"`
+    runar.SmartContract
+    PubKeyHash runar.Addr `runar:"readonly"`
 }
 
-func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
-    tsop.Assert(tsop.Hash160(pubKey) == c.PubKeyHash)
-    tsop.Assert(tsop.CheckSig(sig, pubKey))
+func (c *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
+    runar.Assert(runar.Hash160(pubKey) == c.PubKeyHash)
+    runar.Assert(runar.CheckSig(sig, pubKey))
 }
 ```
 </td>
@@ -55,13 +57,13 @@ func (c *P2PKH) Unlock(sig tsop.Sig, pubKey tsop.PubKey) {
 
 **Rust**
 ```rust
-#[tsop::contract]
+#[runar::contract]
 pub struct P2PKH {
     #[readonly]
     pub pub_key_hash: Addr,
 }
 
-#[tsop::methods(P2PKH)]
+#[runar::methods(P2PKH)]
 impl P2PKH {
     #[public]
     pub fn unlock(&self, sig: &Sig, pub_key: &PubKey) {
@@ -75,7 +77,7 @@ impl P2PKH {
 
 **Solidity-like**
 ```solidity
-pragma tsop ^0.1.0;
+pragma runar ^0.1.0;
 
 contract P2PKH is SmartContract {
     Addr immutable pubKeyHash;
@@ -98,9 +100,9 @@ All four produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQU
 
 ---
 
-## Why TSOP?
+## Why Rúnar?
 
-Bitcoin Script development today forces a choice between hand-writing opcodes (error-prone, unauditable) or adopting a framework with heavy decorator-based DSLs that obscure what happens on-chain. TSOP takes a different path:
+Bitcoin Script development today forces a choice between hand-writing opcodes (error-prone, unauditable) or adopting a framework with heavy decorator-based DSLs that obscure what happens on-chain. Rúnar takes a different path:
 
 - **No decorators** — uses native language keywords (`readonly`, `public`, `immutable`, `#[readonly]`)
 - **Write in your language** — TypeScript, Go, Rust, Solidity-like, or Move-style
@@ -117,23 +119,23 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 ### TypeScript
 
 ```bash
-pnpm add tsop-lang tsop-compiler tsop-cli
-tsop compile MyContract.tsop.ts    # => artifacts/MyContract.json
+pnpm add runar-lang runar-compiler runar-cli
+runar compile MyContract.runar.ts    # => artifacts/MyContract.json
 ```
 
 ### Go
 
 ```bash
-# In your go.mod, add: require tsop v0.0.0
-# Contracts are real Go — test with go test, compile with the TSOP Go compiler
+# In your go.mod, add: require runar v0.0.0
+# Contracts are real Go — test with go test, compile with the Rúnar Go compiler
 go test ./...
 ```
 
 ### Rust
 
 ```bash
-# In Cargo.toml: tsop = { path = "..." }
-# Contracts are real Rust — test with cargo test, compile with the TSOP Rust compiler
+# In Cargo.toml: runar = { path = "..." }
+# Contracts are real Rust — test with cargo test, compile with the Rúnar Rust compiler
 cargo test
 ```
 
@@ -141,11 +143,11 @@ cargo test
 
 ## Test Your Contracts
 
-Every contract format has native testing support. Business logic tests run the contract as real code in the host language. TSOP compile checks verify the contract will produce valid Bitcoin Script.
+Every contract format has native testing support. Business logic tests run the contract as real code in the host language. Rúnar compile checks verify the contract will produce valid Bitcoin Script.
 
 **TypeScript** (vitest):
 ```typescript
-import { TestContract } from 'tsop-testing';
+import { TestContract } from 'runar-testing';
 
 const counter = TestContract.fromSource(source, { count: 0n });
 counter.call('increment');
@@ -161,15 +163,15 @@ func TestCounter_Increment(t *testing.T) {
 }
 
 func TestCounter_Compile(t *testing.T) {
-    if err := tsop.CompileCheck("Counter.tsop.go"); err != nil {
-        t.Fatalf("TSOP compile check failed: %v", err)
+    if err := runar.CompileCheck("Counter.runar.go"); err != nil {
+        t.Fatalf("Rúnar compile check failed: %v", err)
     }
 }
 ```
 
 **Rust** (cargo test):
 ```rust
-#[path = "Counter.tsop.rs"]
+#[path = "Counter.runar.rs"]
 mod contract;
 use contract::*;
 
@@ -182,7 +184,7 @@ fn test_increment() {
 
 #[test]
 fn test_compile() {
-    tsop::compile_check(include_str!("Counter.tsop.rs"), "Counter.tsop.rs").unwrap();
+    runar::compile_check(include_str!("Counter.runar.rs"), "Counter.runar.rs").unwrap();
 }
 ```
 
@@ -192,20 +194,20 @@ fn test_compile() {
 
 | Format | Extension | Compilers | IDE Support | Status |
 |--------|-----------|-----------|-------------|--------|
-| TypeScript | `.tsop.ts` | TS, Go, Rust | Full (`tsc`) | **Stable** |
-| Go | `.tsop.go` | Go | Full (`gopls`) | Experimental |
-| Rust DSL | `.tsop.rs` | Rust | Full (`rust-analyzer`) | Experimental |
-| Solidity-like | `.tsop.sol` | TS, Go, Rust | Syntax highlighting | Experimental |
-| Move-style | `.tsop.move` | TS, Go, Rust | Syntax highlighting | Experimental |
+| TypeScript | `.runar.ts` | TS, Go, Rust | Full (`tsc`) | **Stable** |
+| Go | `.runar.go` | Go | Full (`gopls`) | Experimental |
+| Rust DSL | `.runar.rs` | Rust | Full (`rust-analyzer`) | Experimental |
+| Solidity-like | `.runar.sol` | TS, Go, Rust | Syntax highlighting | Experimental |
+| Move-style | `.runar.move` | TS, Go, Rust | Syntax highlighting | Experimental |
 
 All formats parse into the same `ContractNode` AST. From there, the pipeline is identical:
 
 ```
-  .tsop.ts ──┐
-  .tsop.sol ──┤
-  .tsop.move ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
-  .tsop.go ───┤
-  .tsop.rs ───┘
+  .runar.ts ──┐
+  .runar.sol ──┤
+  .runar.move ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
+  .runar.go ───┤
+  .runar.rs ───┘
 ```
 
 ---
@@ -230,11 +232,11 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 Each contract has tests in TypeScript, Go, Rust, Solidity, and Move:
 ```
 examples/
-  ts/p2pkh/          P2PKH.tsop.ts + P2PKH.test.ts
-  go/p2pkh/          P2PKH.tsop.go + P2PKH_test.go
-  rust/p2pkh/        P2PKH.tsop.rs + P2PKH_test.rs
-  sol/p2pkh/         P2PKH.tsop.sol + P2PKH.test.ts
-  move/p2pkh/        P2PKH.tsop.move + P2PKH.test.ts
+  ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
+  go/p2pkh/          P2PKH.runar.go + P2PKH_test.go
+  rust/p2pkh/        P2PKH.runar.rs + P2PKH_test.rs
+  sol/p2pkh/         P2PKH.runar.sol + P2PKH.test.ts
+  move/p2pkh/        P2PKH.runar.move + P2PKH.test.ts
 ```
 
 ---
@@ -247,8 +249,8 @@ The compiler is structured as six small, composable nanopass transforms. Each pa
 
 | Pass | Name | Input | Output |
 |------|------|-------|--------|
-| 1 | **Parse** | Source (any format) | TSOP AST |
-| 2 | **Validate** | TSOP AST | Validated AST |
+| 1 | **Parse** | Source (any format) | Rúnar AST |
+| 2 | **Validate** | Rúnar AST | Validated AST |
 | 3 | **Type-check** | Validated AST | Typed AST |
 | 4 | **ANF Lower** | Typed AST | ANF IR |
 | 5 | **Stack Lower** | ANF IR | Stack IR |
@@ -258,7 +260,7 @@ The optimizer (constant folding + dead binding elimination) runs between passes 
 
 ### Multi-Compiler Strategy
 
-TSOP defines a **canonical IR conformance boundary** at the ANF level. Any compiler that produces byte-identical ANF IR for a given source file is conformant:
+Rúnar defines a **canonical IR conformance boundary** at the ANF level. Any compiler that produces byte-identical ANF IR for a given source file is conformant:
 
 - The **TypeScript compiler** is the reference implementation
 - The **Go compiler** produces identical output for all example contracts including post-quantum
@@ -271,13 +273,13 @@ The conformance suite in `conformance/` contains 9 golden-file tests (including 
 - `SmartContract` — stateless, all properties `readonly`
 - `StatefulSmartContract` — mutable state carried across transactions via OP_PUSH_TX
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic for token splitting/merging
-- Only TSOP built-in functions are allowed — the compiler rejects arbitrary function calls
+- Only Rúnar built-in functions are allowed — the compiler rejects arbitrary function calls
 
 ### Language Subset
 
-Only a strict subset of each language is valid TSOP. The compiler enforces this at parse, validate, and typecheck time:
+Only a strict subset of each language is valid Rúnar. The compiler enforces this at parse, validate, and typecheck time:
 
-**Allowed:** Class/struct declarations, readonly/mutable properties, public/private methods, const/let variables, if/else, bounded for loops, arithmetic/comparison/logical/bitwise operators, ternary expressions, TSOP built-in function calls.
+**Allowed:** Class/struct declarations, readonly/mutable properties, public/private methods, const/let variables, if/else, bounded for loops, arithmetic/comparison/logical/bitwise operators, ternary expressions, Rúnar built-in function calls.
 
 **Disallowed:** Unbounded loops, recursion, async/await, closures, exceptions, dynamic arrays, arbitrary function calls (`Math.floor`, `console.log`, etc.).
 
@@ -287,15 +289,15 @@ Only a strict subset of each language is valid TSOP. The compiler enforces this 
 
 ```
 packages/
-  tsop-lang/          # Language types and builtins (developer imports)
-  tsop-compiler/      # TypeScript compiler (6 nanopass passes)
-  tsop-ir-schema/     # Shared IR type definitions and JSON schemas
-  tsop-testing/       # TestContract API, Script VM, interpreter
-  tsop-sdk/           # Deployment SDK (providers, signers)
-  tsop-cli/           # CLI tool
-  tsop-go/            # Go mock package (types, mock crypto, CompileCheck)
-  tsop-rs/            # Rust mock crate (prelude types, compile_check)
-  tsop-rs-macros/     # Rust proc-macros (#[tsop::contract], #[public], etc.)
+  runar-lang/          # Language types and builtins (developer imports)
+  runar-compiler/      # TypeScript compiler (6 nanopass passes)
+  runar-ir-schema/     # Shared IR type definitions and JSON schemas
+  runar-testing/       # TestContract API, Script VM, interpreter
+  runar-sdk/           # Deployment SDK (providers, signers)
+  runar-cli/           # CLI tool
+  runar-go/            # Go mock package (types, mock crypto, CompileCheck)
+  runar-rs/            # Rust mock crate (prelude types, compile_check)
+  runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
 compilers/
   go/                 # Go compiler (tree-sitter + native Go frontend)
   rust/               # Rust compiler (SWC + native Rust frontend)
@@ -323,7 +325,7 @@ docs/                 # Documentation + format guides
 ### Build & Test
 
 ```bash
-git clone https://github.com/icellan/tsop.git && cd tsop
+git clone https://github.com/icellan/runar.git && cd runar
 pnpm install && pnpm build
 
 # TypeScript (packages + all format examples)

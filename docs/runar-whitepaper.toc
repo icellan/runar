@@ -1,0 +1,66 @@
+\contentsline {section}{\numberline {1}Introduction}{3}{section.1}%
+\contentsline {section}{\numberline {2}Source Language}{3}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Grammar}{3}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Type System}{4}{subsection.2.2}%
+\contentsline {subsubsection}{\numberline {2.2.1}Typing Rules}{5}{subsubsection.2.2.1}%
+\contentsline {subsubsection}{\numberline {2.2.2}Built-in Function Typing}{5}{subsubsection.2.2.2}%
+\contentsline {subsection}{\numberline {2.3}Contract Model}{6}{subsection.2.3}%
+\contentsline {section}{\numberline {3}Multi-Frontend Architecture}{7}{section.3}%
+\contentsline {subsection}{\numberline {3.1}TypeScript Frontend}{7}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Solidity-like Frontend}{7}{subsection.3.2}%
+\contentsline {subsection}{\numberline {3.3}Move-style Frontend}{8}{subsection.3.3}%
+\contentsline {subsection}{\numberline {3.4}Go Frontend}{9}{subsection.3.4}%
+\contentsline {subsection}{\numberline {3.5}Rust Frontend}{9}{subsection.3.5}%
+\contentsline {subsection}{\numberline {3.6}Frontend Convergence}{9}{subsection.3.6}%
+\contentsline {section}{\numberline {4}Compilation Pipeline}{10}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Pass 1: Parse}{10}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Pass 2: Validate}{10}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Pass 3: Type Check}{11}{subsection.4.3}%
+\contentsline {subsection}{\numberline {4.4}Pass 4: ANF Lowering}{11}{subsection.4.4}%
+\contentsline {subsubsection}{\numberline {4.4.1}Logical Operator Lowering}{11}{subsubsection.4.4.1}%
+\contentsline {subsubsection}{\numberline {4.4.2}Stateful Contract Injection}{12}{subsubsection.4.4.2}%
+\contentsline {subsection}{\numberline {4.5}Pass 4.5: Constant Folding (Optimizer)}{12}{subsection.4.5}%
+\contentsline {subsection}{\numberline {4.6}Pass 5: Stack Lowering}{12}{subsection.4.6}%
+\contentsline {subsubsection}{\numberline {4.6.1}Stack Model}{12}{subsubsection.4.6.1}%
+\contentsline {subsubsection}{\numberline {4.6.2}Last-Use Analysis}{12}{subsubsection.4.6.2}%
+\contentsline {subsubsection}{\numberline {4.6.3}Value Retrieval}{13}{subsubsection.4.6.3}%
+\contentsline {subsubsection}{\numberline {4.6.4}Lowering Bindings}{13}{subsubsection.4.6.4}%
+\contentsline {subsection}{\numberline {4.7}Pass 6: Emit}{13}{subsection.4.7}%
+\contentsline {section}{\numberline {5}Intermediate Representations}{14}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Contract AST}{14}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}ANF IR}{14}{subsection.5.2}%
+\contentsline {subsection}{\numberline {5.3}Stack IR}{15}{subsection.5.3}%
+\contentsline {section}{\numberline {6}Bitcoin Script Code Generation}{15}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Operator Compilation}{15}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Built-in Function Compilation}{15}{subsection.6.2}%
+\contentsline {subsubsection}{\numberline {6.2.1}Single-Opcode Built-ins}{15}{subsubsection.6.2.1}%
+\contentsline {subsubsection}{\numberline {6.2.2}Multi-Opcode Built-ins}{16}{subsubsection.6.2.2}%
+\contentsline {paragraph}{Power (\texttt {pow}).}{16}{section*.7}%
+\contentsline {paragraph}{Square Root (\texttt {sqrt}).}{16}{section*.8}%
+\contentsline {paragraph}{GCD (\texttt {gcd}).}{16}{section*.9}%
+\contentsline {subsection}{\numberline {6.3}Method Dispatch}{16}{subsection.6.3}%
+\contentsline {subsection}{\numberline {6.4}Terminal Assert Pattern}{17}{subsection.6.4}%
+\contentsline {subsection}{\numberline {6.5}Loop Compilation}{17}{subsection.6.5}%
+\contentsline {section}{\numberline {7}Stateful Contract Compilation}{17}{section.7}%
+\contentsline {subsection}{\numberline {7.1}The OP\_PUSH\_TX Pattern}{17}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}State Continuation}{17}{subsection.7.2}%
+\contentsline {subsection}{\numberline {7.3}Multi-Output Contracts}{18}{subsection.7.3}%
+\contentsline {section}{\numberline {8}Correctness Properties}{18}{section.8}%
+\contentsline {section}{\numberline {9}Post-Quantum Signature Verification (Experimental)}{19}{section.9}%
+\contentsline {subsection}{\numberline {9.1}WOTS+ (Winternitz One-Time Signature)}{19}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}SLH-DSA (FIPS 205, SPHINCS+ SHA-256)}{19}{subsection.9.2}%
+\contentsline {section}{\numberline {10}Empirical Evaluation}{20}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Test Corpus}{20}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}Cross-Compiler Conformance Results}{20}{subsection.10.2}%
+\contentsline {subsection}{\numberline {10.3}Script Size Measurements}{21}{subsection.10.3}%
+\contentsline {subsection}{\numberline {10.4}Test Infrastructure}{22}{subsection.10.4}%
+\contentsline {section}{\numberline {11}Limitations and Threats to Validity}{22}{section.11}%
+\contentsline {paragraph}{Proof sketches, not mechanized proofs.}{22}{section*.14}%
+\contentsline {paragraph}{Conformance is empirical, not proven.}{22}{section*.15}%
+\contentsline {paragraph}{Limited affine tracking.}{22}{section*.16}%
+\contentsline {paragraph}{Loop unrolling size overhead.}{22}{section*.17}%
+\contentsline {paragraph}{Post-quantum features are experimental.}{23}{section*.18}%
+\contentsline {paragraph}{Go and Rust frontends are single-compiler.}{23}{section*.19}%
+\contentsline {paragraph}{No formal Bitcoin Script semantics.}{23}{section*.20}%
+\contentsline {section}{\numberline {12}Related Work}{23}{section.12}%
+\contentsline {section}{\numberline {13}Conclusion}{23}{section.13}%

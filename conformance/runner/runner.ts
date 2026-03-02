@@ -29,7 +29,7 @@ function cargoAwareEnv(): NodeJS.ProcessEnv {
 
 export interface ConformanceResult {
   testName: string;
-  /** Source format used (e.g. '.tsop.ts', '.tsop.yaml', '.tsop.sol', '.tsop.move', '.tsop.go', '.tsop.rs') */
+  /** Source format used (e.g. '.runar.ts', '.runar.yaml', '.runar.sol', '.runar.move', '.runar.go', '.runar.rs') */
   format?: string;
   tsCompiler: CompilerOutput;
   goCompiler?: CompilerOutput;
@@ -43,11 +43,11 @@ export interface ConformanceResult {
  * Known input format extensions and which compilers support them.
  */
 export const INPUT_FORMATS = [
-  { ext: '.tsop.ts',   compilers: ['ts', 'go', 'rust'] as const },
-  { ext: '.tsop.sol',  compilers: ['ts', 'go', 'rust'] as const },
-  { ext: '.tsop.move', compilers: ['ts', 'go', 'rust'] as const },
-  { ext: '.tsop.go',   compilers: ['go'] as const },
-  { ext: '.tsop.rs',   compilers: ['rust'] as const },
+  { ext: '.runar.ts',   compilers: ['ts', 'go', 'rust'] as const },
+  { ext: '.runar.sol',  compilers: ['ts', 'go', 'rust'] as const },
+  { ext: '.runar.move', compilers: ['ts', 'go', 'rust'] as const },
+  { ext: '.runar.go',   compilers: ['go'] as const },
+  { ext: '.runar.rs',   compilers: ['rust'] as const },
 ] as const;
 
 export interface CompilerOutput {
@@ -66,16 +66,16 @@ export interface CompilerOutput {
 /** Check whether the Go compiler binary is available, falling back to `go run`. */
 function findGoBinary(): string | null {
   const candidates = [
-    join(GO_COMPILER_DIR, 'tsop-go'),
-    join(GO_COMPILER_DIR, 'tsop-go.exe'),
+    join(GO_COMPILER_DIR, 'runar-go'),
+    join(GO_COMPILER_DIR, 'runar-go.exe'),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   // Try PATH
   try {
-    execSync('which tsop-go', { stdio: 'pipe' });
-    return 'tsop-go';
+    execSync('which runar-go', { stdio: 'pipe' });
+    return 'runar-go';
   } catch {
     // Fallback: run module from its own working directory.
     if (existsSync(join(GO_COMPILER_DIR, 'main.go'))) {
@@ -93,17 +93,17 @@ function findGoBinary(): string | null {
 /** Check whether the Rust compiler binary is available, falling back to `cargo run`. */
 function findRustBinary(): string | null {
   const candidates = [
-    join(RUST_COMPILER_DIR, 'target/release/tsop-compiler-rust'),
-    join(RUST_COMPILER_DIR, 'target/debug/tsop-compiler-rust'),
-    join(RUST_COMPILER_DIR, 'tsop-compiler-rust'),
+    join(RUST_COMPILER_DIR, 'target/release/runar-compiler-rust'),
+    join(RUST_COMPILER_DIR, 'target/debug/runar-compiler-rust'),
+    join(RUST_COMPILER_DIR, 'runar-compiler-rust'),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
   }
   // Try PATH
   try {
-    execSync('which tsop-compiler-rust', { stdio: 'pipe', env: cargoAwareEnv() });
-    return 'tsop-compiler-rust';
+    execSync('which runar-compiler-rust', { stdio: 'pipe', env: cargoAwareEnv() });
+    return 'runar-compiler-rust';
   } catch {
     // Fallback: try `cargo run` from the compiler directory
     if (existsSync(join(RUST_COMPILER_DIR, 'Cargo.toml'))) {
@@ -125,7 +125,7 @@ function findRustBinary(): string | null {
 /**
  * Run the TypeScript reference compiler on the given source.
  *
- * Invokes tsop-cli to emit an artifact JSON, then reads script/IR from the
+ * Invokes runar-cli to emit an artifact JSON, then reads script/IR from the
  * generated artifact instead of parsing human-readable CLI stdout.
  */
 function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
@@ -140,7 +140,7 @@ function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
     if (!existsSync(artifactDir)) mkdirSync(artifactDir, { recursive: true });
 
     execSync(
-      `npx tsx ${shellEscape(resolve(__dirname, '../../packages/tsop-cli/src/bin.ts'))} compile ${shellEscape(tmpFile)} --ir -o ${shellEscape(artifactDir)}`,
+      `npx tsx ${shellEscape(resolve(__dirname, '../../packages/runar-cli/src/bin.ts'))} compile ${shellEscape(tmpFile)} --ir -o ${shellEscape(artifactDir)}`,
       { timeout: 30_000, encoding: 'utf-8', cwd: resolve(__dirname, '../..') },
     );
 
@@ -393,13 +393,13 @@ function compareScript(...outputs: (CompilerOutput | undefined)[]): boolean {
  * Run the conformance test in a single test directory.
  *
  * The directory is expected to contain:
- * - `<name>.tsop.ts` -- the contract source
+ * - `<name>.runar.ts` -- the contract source
  * - `expected-ir.json` -- golden ANF IR (optional)
  * - `expected-script.hex` -- golden compiled script (optional)
  */
 export async function runConformanceTest(testDir: string): Promise<ConformanceResult> {
   const testName = basename(testDir);
-  const sourceFile = join(testDir, `${testName}.tsop.ts`);
+  const sourceFile = join(testDir, `${testName}.runar.ts`);
   const expectedIrFile = join(testDir, 'expected-ir.json');
   const expectedScriptFile = join(testDir, 'expected-script.hex');
 
@@ -530,7 +530,7 @@ export async function runAllConformanceTests(
  */
 export async function updateGoldenFiles(testDir: string): Promise<void> {
   const testName = basename(testDir);
-  const sourceFile = join(testDir, `${testName}.tsop.ts`);
+  const sourceFile = join(testDir, `${testName}.runar.ts`);
   const source = readFileSync(sourceFile, 'utf-8');
 
   const tsResult = runTsCompiler(source, sourceFile);
@@ -678,7 +678,7 @@ export async function runConformanceTestForFormat(
 /**
  * Run conformance tests for all discovered formats in a single test directory.
  *
- * For each format variant found (e.g., .tsop.ts, .tsop.yaml, .tsop.sol),
+ * For each format variant found (e.g., .runar.ts, .runar.yaml, .runar.sol),
  * run the test independently. Also checks cross-format consistency: all
  * formats must produce the same output.
  */

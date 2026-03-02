@@ -1,20 +1,20 @@
-//! TSOP Rust SDK Usage Examples
+//! Rúnar Rust SDK Usage Examples
 //!
-//! Comprehensive examples for compiling, deploying, and spending all 8 TSOP
+//! Comprehensive examples for compiling, deploying, and spending all 8 Rúnar
 //! example contracts using the Rust compiler as a library.
 //!
 //! Contracts: P2PKH, Escrow, Counter, FungibleToken, NFT, Auction,
 //!            OraclePriceFeed, CovenantVault
 //!
 //! Prerequisites (Cargo.toml):
-//!   tsop-compiler-rust = { path = "compilers/rust" }
+//!   runar-compiler-rust = { path = "compilers/rust" }
 //!   sha2 = "0.10"
 //!
 //! Run: cargo run --example sdk-usage-rust
 
 use std::path::Path;
-use tsop_compiler_rust::artifact::TSOPArtifact;
-use tsop_compiler_rust::{compile_from_source, compile_from_source_str};
+use runar_compiler_rust::artifact::RunarArtifact;
+use runar_compiler_rust::{compile_from_source, compile_from_source_str};
 
 // ============================================================================
 // Helper utilities
@@ -98,7 +98,7 @@ fn separator(title: &str) {
 }
 
 /// Print artifact summary: name, script, ABI, state fields.
-fn print_summary(a: &TSOPArtifact) {
+fn print_summary(a: &RunarArtifact) {
     println!("Contract: {}  |  Script: {} bytes  |  ASM: {}", a.contract_name, a.script.len()/2, a.asm);
     for p in &a.abi.constructor.params { println!("  ctor param: {} : {}", p.name, p.param_type); }
     for m in &a.abi.methods {
@@ -133,11 +133,11 @@ fn build_raw_tx(prev_txid: &[u8; 32], vout: u32, script_sig: &[u8],
 
 /// Compile, deploy, and spend a P2PKH contract.
 ///
-/// This is the simplest TSOP contract: a single-method script that checks
+/// This is the simplest Rúnar contract: a single-method script that checks
 /// hash160(pubKey) == pubKeyHash and verifies an ECDSA signature. It is the
-/// TSOP equivalent of Bitcoin's standard P2PKH output.
+/// Rúnar equivalent of Bitcoin's standard P2PKH output.
 ///
-/// Contract source (P2PKH.tsop.ts):
+/// Contract source (P2PKH.runar.ts):
 ///   constructor(pubKeyHash: Addr)
 ///   unlock(sig: Sig, pubKey: PubKey)
 ///     assert(hash160(pubKey) === this.pubKeyHash)
@@ -148,7 +148,7 @@ fn example_p2pkh() -> Result<(), String> {
     // Step 1: Compile from source file on disk.
     // compile_from_source runs all 6 passes: parse -> validate -> typecheck
     // -> ANF lower -> stack lower -> emit.
-    let artifact = compile_from_source(Path::new("examples/ts/p2pkh/P2PKH.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/p2pkh/P2PKH.runar.ts"))?;
     print_summary(&artifact);
 
     // Step 2: Prepare constructor arguments.
@@ -160,7 +160,7 @@ fn example_p2pkh() -> Result<(), String> {
     println!("  pubKeyHash (20 bytes): {}", to_hex(&pkh));
 
     // Step 3: Build the locking script (scriptPubKey) for the deployment UTXO.
-    // TSOP locking script layout: <constructor_args> <compiled_contract_code>
+    // Rúnar locking script layout: <constructor_args> <compiled_contract_code>
     // The constructor args are pushed first; the compiled code consumes them
     // via load_prop instructions that reference stack positions.
     let mut lock = Vec::new();
@@ -170,7 +170,7 @@ fn example_p2pkh() -> Result<(), String> {
     println!("  = [push 20-byte hash] + [{}  bytes compiled code]", artifact.script.len() / 2);
 
     // Step 4: Build a deployment transaction.
-    // This is a standard Bitcoin TX that creates a UTXO locked by our TSOP script.
+    // This is a standard Bitcoin TX that creates a UTXO locked by our Rúnar script.
     let funding_txid = [0xaa; 32]; // placeholder: txid of the funding input
     let deploy_tx = build_raw_tx(&funding_txid, 0, &[], &lock, 10_000, 0);
     println!("\nDeploy TX: {} bytes  |  Locking 10,000 satoshis", deploy_tx.len());
@@ -200,11 +200,11 @@ fn example_p2pkh() -> Result<(), String> {
 
 /// Compile and demonstrate a 3-party Escrow with 4 spending methods.
 ///
-/// Multi-method dispatch: TSOP compiles N methods into a nested OP_IF/OP_ELSE
+/// Multi-method dispatch: Rúnar compiles N methods into a nested OP_IF/OP_ELSE
 /// tree. The spender pushes method selector values (0 or 1) in the scriptSig
 /// to navigate to the desired branch.
 ///
-/// Contract source (Escrow.tsop.ts):
+/// Contract source (Escrow.runar.ts):
 ///   constructor(buyer: PubKey, seller: PubKey, arbiter: PubKey)
 ///   releaseBySeller(sig)  -- seller releases funds to buyer
 ///   releaseByArbiter(sig) -- arbiter releases funds to buyer
@@ -212,7 +212,7 @@ fn example_p2pkh() -> Result<(), String> {
 ///   refundByArbiter(sig)  -- arbiter authorizes refund to buyer
 fn example_escrow() -> Result<(), String> {
     separator("2. Escrow -- 3-Party Multi-Method");
-    let artifact = compile_from_source(Path::new("examples/ts/escrow/Escrow.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/escrow/Escrow.runar.ts"))?;
     print_summary(&artifact);
 
     // Three parties, each identified by a compressed public key (33 bytes).
@@ -228,7 +228,7 @@ fn example_escrow() -> Result<(), String> {
     lock.extend(&from_hex(&artifact.script));
     println!("\nDeploy locking script: {} bytes", lock.len());
 
-    // Multi-method dispatch tree (generated by the TSOP compiler):
+    // Multi-method dispatch tree (generated by the Rúnar compiler):
     //
     //   <selector_N> OP_IF
     //     [method 0 body]
@@ -282,7 +282,7 @@ fn example_escrow() -> Result<(), String> {
 ///   Reference: https://wiki.bitcoinsv.io/index.php/OP_PUSH_TX
 fn example_counter() -> Result<(), String> {
     separator("3. Counter -- Stateful with OP_PUSH_TX");
-    let artifact = compile_from_source(Path::new("examples/ts/stateful-counter/Counter.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/stateful-counter/Counter.runar.ts"))?;
     print_summary(&artifact);
     assert!(!artifact.state_fields.is_empty(), "Counter must have state fields");
 
@@ -347,7 +347,7 @@ fn example_counter() -> Result<(), String> {
 ///
 /// The `owner` property is mutable (stateful) -- it changes on each transfer.
 /// The `supply` property is readonly (immutable) -- fixed at deploy time.
-/// This distinction is declared in the TSOP source:
+/// This distinction is declared in the Rúnar source:
 ///   owner: PubKey;          // no readonly = mutable state
 ///   readonly supply: bigint; // readonly = immutable
 ///
@@ -355,7 +355,7 @@ fn example_counter() -> Result<(), String> {
 /// which tells the SDK which parts of the locking script need updating.
 fn example_fungible_token() -> Result<(), String> {
     separator("4. FungibleToken -- Stateful Token Transfer");
-    let artifact = compile_from_source(Path::new("examples/ts/token-ft/FungibleTokenExample.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/token-ft/FungibleTokenExample.runar.ts"))?;
     print_summary(&artifact);
 
     let owner = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -400,7 +400,7 @@ fn example_fungible_token() -> Result<(), String> {
 ///     no new contract output is required. The NFT ceases to exist.
 fn example_nft() -> Result<(), String> {
     separator("5. NFT -- Non-Fungible Token");
-    let artifact = compile_from_source(Path::new("examples/ts/token-nft/NFTExample.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/token-nft/NFTExample.runar.ts"))?;
     print_summary(&artifact);
 
     let owner = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -454,7 +454,7 @@ fn example_nft() -> Result<(), String> {
 /// Readonly fields: auctioneer (PubKey), deadline (bigint).
 fn example_auction() -> Result<(), String> {
     separator("6. Auction -- Stateful with Locktime");
-    let artifact = compile_from_source(Path::new("examples/ts/auction/Auction.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/auction/Auction.runar.ts"))?;
     print_summary(&artifact);
 
     let auctioneer = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -505,7 +505,7 @@ fn example_auction() -> Result<(), String> {
 /// The contract only pays out if the oracle-attested price exceeds 50,000.
 fn example_oracle_price_feed() -> Result<(), String> {
     separator("7. OraclePriceFeed -- Rabin Oracle Signature");
-    let artifact = compile_from_source(Path::new("examples/ts/oracle-price/OraclePriceFeed.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/oracle-price/OraclePriceFeed.runar.ts"))?;
     print_summary(&artifact);
 
     let rabin_pk = "deadbeef".repeat(32); // 128-byte Rabin pubkey placeholder
@@ -541,7 +541,7 @@ fn example_oracle_price_feed() -> Result<(), String> {
 /// threshold -- even though they hold the private key.
 fn example_covenant_vault() -> Result<(), String> {
     separator("8. CovenantVault -- Covenant-Enforced Spending");
-    let artifact = compile_from_source(Path::new("examples/ts/covenant-vault/CovenantVault.tsop.ts"))?;
+    let artifact = compile_from_source(Path::new("examples/ts/covenant-vault/CovenantVault.runar.ts"))?;
     print_summary(&artifact);
 
     let owner = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
@@ -577,7 +577,7 @@ fn example_inline_compile() -> Result<(), String> {
     separator("Bonus: Inline Source Compilation");
 
     let source = r#"
-import { SmartContract, assert, PubKey, Sig, checkSig } from 'tsop-lang';
+import { SmartContract, assert, PubKey, Sig, checkSig } from 'runar-lang';
 
 class SimpleLock extends SmartContract {
     readonly owner: PubKey;
@@ -596,10 +596,10 @@ class SimpleLock extends SmartContract {
 
     // compile_from_source_str takes the source text and an optional filename
     // (used for error messages). It runs the full 6-pass pipeline.
-    let artifact = compile_from_source_str(source, Some("inline.tsop.ts"))?;
+    let artifact = compile_from_source_str(source, Some("inline.runar.ts"))?;
     print_summary(&artifact);
 
-    // The TSOPArtifact is Serialize + Deserialize (serde), so you can
+    // The RunarArtifact is Serialize + Deserialize (serde), so you can
     // persist it as JSON for later use by wallets or deployment tools.
     let json = serde_json::to_string_pretty(&artifact).map_err(|e| e.to_string())?;
     println!("\nArtifact JSON ({} bytes):", json.len());
@@ -613,7 +613,7 @@ class SimpleLock extends SmartContract {
 // OP_PUSH_TX Deep Dive
 // ============================================================================
 
-/// Explains the cryptographic mechanism behind stateful TSOP contracts.
+/// Explains the cryptographic mechanism behind stateful Rúnar contracts.
 fn explain_op_push_tx() {
     separator("OP_PUSH_TX -- Deep Dive");
     println!("OP_PUSH_TX is a technique that lets a script inspect its own transaction.");
@@ -644,7 +644,7 @@ fn explain_op_push_tx() {
     println!("  6. OP_CHECKSIG then verifies the preimage is authentic (not forged)");
     println!("  => The chain of UTXOs forms a state machine, each TX advancing the state.\n");
 
-    println!("--- Which TSOP contracts use OP_PUSH_TX? ---");
+    println!("--- Which Rúnar contracts use OP_PUSH_TX? ---");
     println!("  Counter:       increment/decrement -- state = count");
     println!("  FungibleToken: transfer -- state = owner");
     println!("  NFT:           transfer -- state = owner (burn does NOT use it)");
@@ -661,7 +661,7 @@ fn explain_op_push_tx() {
 // ============================================================================
 
 fn main() {
-    println!("TSOP Rust SDK -- Comprehensive Usage Examples");
+    println!("Rúnar Rust SDK -- Comprehensive Usage Examples");
     println!("=============================================\n");
 
     let examples: Vec<(&str, fn() -> Result<(), String>)> = vec![

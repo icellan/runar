@@ -1,0 +1,11 @@
+[package]
+name = "runar"
+version = "0.1.0"
+edition = "2021"
+description = "Types and mock functions for Rúnar smart contract development in Rust"
+
+[dependencies]
+runar-macros = { path = "../runar-rs-macros" }
+runar-compiler-rust = { path = "../../compilers/rust" }
+sha2 = "0.10"
+ripemd = "0.1"

@@ -1,15 +1,15 @@
-# TSOP Type System
+# Rúnar Type System
 
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the type system for TSOP. The type system is designed to be simple, fully static, and to guarantee that all programs can be compiled to finite Bitcoin Script.
+This document specifies the type system for Rúnar. The type system is designed to be simple, fully static, and to guarantee that all programs can be compiled to finite Bitcoin Script.
 
 ---
 
 ## 1. Overview
 
-TSOP uses a structural type system with the following characteristics:
+Rúnar uses a structural type system with the following characteristics:
 
 - **Fully static**: All types are resolved at compile time. There is no runtime type information.
 - **No subtype polymorphism**: Except for the domain-type-to-ByteString relationship.
@@ -21,7 +21,7 @@ TSOP uses a structural type system with the following characteristics:
 ## 2. Type Hierarchy
 
 ```
-          Top (not expressible in TSOP)
+          Top (not expressible in Rúnar)
            |
      +-----+-----+
      |            |
@@ -116,7 +116,7 @@ FixedArray<T, N>    where T : Type, N : positive integer literal
 
 - `N` MUST be a compile-time constant positive integer literal.
 - All elements have the same type `T`.
-- `T` can be any TSOP type, including another `FixedArray` (for multi-dimensional arrays).
+- `T` can be any Rúnar type, including another `FixedArray` (for multi-dimensional arrays).
 - Index access is bounds-checked at compile time where possible.
 - On the Bitcoin Script stack, a `FixedArray<T, N>` is represented as N consecutive stack items.
 
@@ -139,7 +139,7 @@ const first: PubKey = keys[0n];
 
 ## 3. Type Inference
 
-TSOP supports limited type inference via TypeScript's inference rules:
+Rúnar supports limited type inference via TypeScript's inference rules:
 
 ### 3.1 Variable Declaration Inference
 
@@ -224,7 +224,7 @@ Mixing `bigint` and `ByteString` with `+` is a **compile-time error**.
 
 ## 4. Affine Type Rules for UTXO Safety
 
-TSOP enforces affine type discipline on certain values to prevent common smart contract bugs.
+Rúnar enforces affine type discipline on certain values to prevent common smart contract bugs.
 
 ### 4.1 Motivation
 
@@ -354,7 +354,7 @@ Using relational operators on `ByteString` or domain types is a **compile-time e
 
 ## 7. Type Checking Algorithm
 
-The TSOP type checker operates in the following phases:
+The Rúnar type checker operates in the following phases:
 
 ### Phase 1: Declaration Collection
 
@@ -388,7 +388,7 @@ For each method:
 
 ## 8. Type Encoding for Script
 
-| TSOP Type | Script Representation |
+| Rúnar Type | Script Representation |
 |---|---|
 | `bigint` | Script number (little-endian sign-magnitude, minimal encoding) |
 | `boolean` | `OP_TRUE` (0x01) or `OP_FALSE` (empty) |

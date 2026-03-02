@@ -5,23 +5,23 @@
     "rootDir": ".",
     "baseUrl": ".",
     "paths": {
-      "tsop-sdk": ["../packages/tsop-sdk/dist/index.d.ts"],
-      "tsop-sdk/*": ["../packages/tsop-sdk/dist/*"],
-      "tsop-lang": ["../packages/tsop-lang/dist/index.d.ts"],
-      "tsop-lang/*": ["../packages/tsop-lang/dist/*"],
-      "tsop-compiler": ["../packages/tsop-compiler/dist/index.d.ts"],
-      "tsop-compiler/*": ["../packages/tsop-compiler/dist/*"],
-      "tsop-ir-schema": ["../packages/tsop-ir-schema/dist/index.d.ts"],
-      "tsop-ir-schema/*": ["../packages/tsop-ir-schema/dist/*"],
-      "tsop-testing": ["../packages/tsop-testing/dist/index.d.ts"],
-      "tsop-testing/*": ["../packages/tsop-testing/dist/*"],
+      "runar-sdk": ["../packages/runar-sdk/dist/index.d.ts"],
+      "runar-sdk/*": ["../packages/runar-sdk/dist/*"],
+      "runar-lang": ["../packages/runar-lang/dist/index.d.ts"],
+      "runar-lang/*": ["../packages/runar-lang/dist/*"],
+      "runar-compiler": ["../packages/runar-compiler/dist/index.d.ts"],
+      "runar-compiler/*": ["../packages/runar-compiler/dist/*"],
+      "runar-ir-schema": ["../packages/runar-ir-schema/dist/index.d.ts"],
+      "runar-ir-schema/*": ["../packages/runar-ir-schema/dist/*"],
+      "runar-testing": ["../packages/runar-testing/dist/index.d.ts"],
+      "runar-testing/*": ["../packages/runar-testing/dist/*"],
       "@bsv/sdk": ["../node_modules/@bsv/sdk/dist/types/mod.d.ts"]
     },
     "noUnusedLocals": false,
     "noUnusedParameters": false
   },
   "include": [
-    "**/*.tsop.ts",
+    "**/*.runar.ts",
     "**/*.test.ts",
     "sdk-usage/sdk-usage-typescript.ts"
   ]
