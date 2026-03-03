@@ -459,61 +459,6 @@ function emitIf(
 }
 
 // ---------------------------------------------------------------------------
-// Peephole optimization: combine OP_X + OP_VERIFY → OP_XVERIFY
-// ---------------------------------------------------------------------------
-
-const VERIFY_COMBINATIONS: Record<string, string> = {
-  'OP_EQUAL': 'OP_EQUALVERIFY',
-  'OP_NUMEQUAL': 'OP_NUMEQUALVERIFY',
-  'OP_CHECKSIG': 'OP_CHECKSIGVERIFY',
-  'OP_CHECKMULTISIG': 'OP_CHECKMULTISIGVERIFY',
-};
-
-function peepholeOptimize(ops: StackOp[]): StackOp[] {
-  const result: StackOp[] = [];
-
-  for (let i = 0; i < ops.length; i++) {
-    const op = ops[i]!;
-    const next = ops[i + 1];
-
-    // Combine OP_X + OP_VERIFY → OP_XVERIFY
-    if (
-      op.op === 'opcode' &&
-      next?.op === 'opcode' &&
-      next.code === 'OP_VERIFY' &&
-      op.code in VERIFY_COMBINATIONS
-    ) {
-      result.push({ op: 'opcode', code: VERIFY_COMBINATIONS[op.code]! });
-      i++; // skip the OP_VERIFY
-      continue;
-    }
-
-    // Eliminate OP_SWAP OP_SWAP (no-op pair)
-    if (
-      op.op === 'swap' &&
-      next?.op === 'swap'
-    ) {
-      i++; // skip the second swap
-      continue;
-    }
-
-    // Recurse into if/else blocks
-    if (op.op === 'if') {
-      result.push({
-        op: 'if',
-        then: peepholeOptimize(op.then),
-        else: op.else ? peepholeOptimize(op.else) : undefined,
-      } as StackOp);
-      continue;
-    }
-
-    result.push(op);
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -538,11 +483,6 @@ export function emit(program: StackProgram): EmitResult {
       sourceMap: [],
       constructorSlots: [],
     };
-  }
-
-  // Apply peephole optimizations to each method's ops
-  for (const method of publicMethods) {
-    method.ops = peepholeOptimize(method.ops);
   }
 
   if (publicMethods.length === 1) {

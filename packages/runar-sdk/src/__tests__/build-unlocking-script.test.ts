@@ -244,7 +244,7 @@ describe('buildUnlockingScript — argument encoding', () => {
     expect(script).toBe('21' + pubkey);
   });
 
-  it('encodes boolean true as 0x01 0x51 (push 1 byte: OP_TRUE)', () => {
+  it('encodes boolean true as OP_1 (0x51)', () => {
     const artifact = makeArtifact({
       script: '51',
       abi: {
@@ -256,10 +256,10 @@ describe('buildUnlockingScript — argument encoding', () => {
     });
 
     const contract = new RunarContract(artifact, []);
-    expect(contract.buildUnlockingScript('check', [true])).toBe('0151');
+    expect(contract.buildUnlockingScript('check', [true])).toBe('51');
   });
 
-  it('encodes boolean false as 0x01 0x00 (push 1 byte: 0x00)', () => {
+  it('encodes boolean false as OP_0 (0x00)', () => {
     const artifact = makeArtifact({
       script: '51',
       abi: {
@@ -271,7 +271,7 @@ describe('buildUnlockingScript — argument encoding', () => {
     });
 
     const contract = new RunarContract(artifact, []);
-    expect(contract.buildUnlockingScript('check', [false])).toBe('0100');
+    expect(contract.buildUnlockingScript('check', [false])).toBe('00');
   });
 });
 

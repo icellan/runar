@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
-// runar-sdk/state.ts — State management for stateful contracts
+// runar-sdk/state.ts -- State management for stateful contracts
 // ---------------------------------------------------------------------------
 //
-// Stateful Rúnar contracts embed their state in the locking script as a
+// Stateful Runar contracts embed their state in the locking script as a
 // suffix of OP_RETURN-delimited data pushes. The state section follows
 // the contract's compiled code and is structured as:
 //
@@ -15,7 +15,7 @@ import type { StateField, RunarArtifact } from 'runar-ir-schema';
 
 /**
  * Serialize a set of state values into a hex-encoded Bitcoin Script data
- * section (without the OP_RETURN prefix — that is handled by the caller).
+ * section (without the OP_RETURN prefix -- that is handled by the caller).
  *
  * Field order is determined by the `index` property of each StateField.
  */
@@ -145,7 +145,7 @@ function encodeStateValue(value: unknown, type: string): string {
       return encodeScriptInt(n);
     }
     case 'bool': {
-      return value ? '0151' : '0100'; // OP_PUSH1 0x51 (OP_TRUE) or 0x00
+      return value ? '51' : '00'; // OP_1 (OP_TRUE) or OP_0 (OP_FALSE)
     }
     case 'bytes':
     case 'ByteString': {
@@ -178,7 +178,7 @@ function encodeStateValue(value: unknown, type: string): string {
  */
 function encodeScriptInt(n: bigint): string {
   if (n === 0n) {
-    return '0100'; // OP_PUSH1 0x00
+    return '00'; // OP_0
   }
 
   const negative = n < 0n;
@@ -243,14 +243,19 @@ function decodeStateValue(
   offset: number,
   type: string,
 ): { value: unknown; bytesRead: number } {
+  if (type === 'bool') {
+    // Boolean values are encoded as single-byte opcodes:
+    // OP_0 (0x00) = false, OP_1/OP_TRUE (0x51) = true
+    const opcode = parseInt(hex.slice(offset, offset + 2), 16);
+    return { value: opcode !== 0x00, bytesRead: 2 };
+  }
+
   const { data, bytesRead } = decodePushData(hex, offset);
 
   switch (type) {
     case 'int':
     case 'bigint':
       return { value: decodeScriptInt(data), bytesRead };
-    case 'bool':
-      return { value: data !== '00' && data !== '', bytesRead };
     default:
       return { value: data, bytesRead };
   }
@@ -305,7 +310,7 @@ function decodePushData(
     };
   }
 
-  // Unknown opcode — treat as zero-length
+  // Unknown opcode -- treat as zero-length
   return { data: '', bytesRead: 2 };
 }
 

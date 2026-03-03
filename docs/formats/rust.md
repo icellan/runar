@@ -30,7 +30,8 @@ pub struct P2PKH {
 }
 ```
 
-- `#[runar::contract]` marks the struct as a Rúnar contract. The macro strips `#[readonly]` annotations at compile time.
+- `#[runar::contract]` marks the struct as a Rúnar contract. The parser auto-detects whether the contract is stateless or stateful based on field annotations: if any field lacks `#[readonly]`, the contract is treated as `StatefulSmartContract`.
+- `#[runar::stateful_contract]` can be used instead to explicitly mark a contract as stateful. This is equivalent to `#[runar::contract]` when any field lacks `#[readonly]`.
 - `#[readonly]` marks immutable properties (baked into the locking script).
 - Fields without `#[readonly]` are mutable (stateful).
 - Fields should be `pub` so tests can construct the struct directly.
@@ -300,6 +301,34 @@ impl Counter {
     }
 }
 ```
+
+### Stateful Counter (explicit `stateful_contract`)
+
+This is equivalent to the Counter example above, but uses the explicit `#[runar::stateful_contract]` attribute instead of relying on auto-detection from missing `#[readonly]` annotations:
+
+```rust
+use runar::prelude::*;
+
+#[runar::stateful_contract]
+pub struct StatefulCounter {
+    pub count: Bigint,
+}
+
+#[runar::methods(StatefulCounter)]
+impl StatefulCounter {
+    #[public]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    #[public]
+    pub fn reset(&mut self) {
+        self.count = 0;
+    }
+}
+```
+
+In practice, `#[runar::contract]` is sufficient for stateful contracts since the parser auto-detects statefulness. Use `#[runar::stateful_contract]` when you want to be explicit about the intent.
 
 ### Escrow
 

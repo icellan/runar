@@ -3,7 +3,7 @@
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, YAML, Solidity-like, Move-like, Go, Rust) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
+This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, Solidity-like, Move-like, Go, Rust) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
 
 ---
 
@@ -11,7 +11,7 @@ This document specifies the **language-agnostic contract** of Rúnar frontend pa
 
 1. **One AST for all formats.** There is exactly one AST definition. All parsers target it. The backend never knows which format the source was written in.
 2. **Canonical field names use camelCase.** Parsers for languages that use snake_case (Move, Rust) or PascalCase (Go) must convert identifiers to camelCase.
-3. **Constructor is always present.** Even if the source format does not have explicit constructor syntax (YAML, Go, Rust), the parser must synthesize one.
+3. **Constructor is always present.** Even if the source format does not have explicit constructor syntax (Go, Rust), the parser must synthesize one.
 4. **Source locations are best-effort.** Parsers should attach source locations for error reporting, but the exact line/column values are format-specific and not part of conformance testing.
 
 ---
@@ -45,11 +45,10 @@ ContractNode = {
 | Format | Contract name source | parentClass source |
 |--------|--------------------|--------------------|
 | TypeScript | `class Name extends Base` | `extends SmartContract` / `extends StatefulSmartContract` |
-| YAML | `contract: Name` | `extends: SmartContract` / `extends: StatefulSmartContract` |
 | Solidity | `contract Name is Base` | `is SmartContract` / `is StatefulSmartContract` |
 | Move | `module Name { ... }` | `use runar::SmartContract` / `use runar::StatefulSmartContract` |
 | Go | `type Name struct { runar.SmartContract; ... }` | embedded `runar.SmartContract` / `runar.StatefulSmartContract` |
-| Rust | `#[runar::contract(Base)] struct Name` | attribute argument `SmartContract` / `StatefulSmartContract` |
+| Rust | `#[runar::contract] struct Name` / `#[runar::stateful_contract] struct Name` | `#[runar::contract]` (auto-detects if any field lacks `#[readonly]`) / `#[runar::stateful_contract]` |
 
 ---
 
@@ -79,7 +78,6 @@ PropertyNode = {
 | Format | Property syntax | Readonly marker |
 |--------|----------------|-----------------|
 | TypeScript | `readonly name: Type;` / `name: Type;` | `readonly` keyword |
-| YAML | `{ name, type, readonly: true }` | `readonly` field |
 | Solidity | `Type immutable name;` / `Type name;` | `immutable` keyword |
 | Move | `name: Type readonly,` / `name: Type,` | `readonly` suffix |
 | Go | `Name runar.Type \`runar:"readonly"\`` | struct tag |
@@ -116,7 +114,6 @@ MethodNode = {
 | Format | Public marker | Private marker |
 |--------|--------------|----------------|
 | TypeScript | `public methodName(...)` | `private methodName(...)` |
-| YAML | `public: true` | `public: false` (default) |
 | Solidity | `function name(...) public` | `function name(...) private` |
 | Move | `public fun name(...)` | `fun name(...)` |
 | Go | `func (c *T) Name(...)` (exported) | `func (c *T) name(...)` (unexported) |
@@ -138,7 +135,7 @@ Parameter names must be camelCase. Parsers for snake_case languages must convert
 
 ## 5. Constructor Synthesis
 
-For formats without explicit constructor syntax (YAML, Go, Rust), the parser must synthesize a constructor with the following structure:
+For formats without explicit constructor syntax (Go, Rust), the parser must synthesize a constructor with the following structure:
 
 ```
 MethodNode = {
@@ -254,7 +251,6 @@ All parsers must produce statements using these exact `kind` values.
 | Format | Immutable | Mutable |
 |--------|-----------|---------|
 | TypeScript | `const x = ...` | `let x = ...` |
-| YAML | `const: { name, value }` | `let: { name, value }` |
 | Solidity | `Type x = ...` (inferred const) | `Type x = ...` (if reassigned) |
 | Move | `let x = ...` | `let x = ...` (if reassigned) |
 | Go | `x := ...` (inferred) | `var x Type = ...` |
@@ -299,7 +295,6 @@ All parsers must produce statements using these exact `kind` values.
 | Format | Loop syntax |
 |--------|-------------|
 | TypeScript | `for (let i = 0n; i < 10n; i++)` |
-| YAML | `for: { init, condition, update, body }` |
 | Solidity | `for (int256 i = 0; i < 10; i++)` |
 | Move | `let i = 0; while (i < 10) { ... i = i + 1; }` (desugared to for) |
 | Go | `for i := 0; i < 10; i++` |
@@ -344,6 +339,7 @@ Used for function calls (including `assert`), increment/decrement as statements,
 
 ```
 BinaryOp = "+" | "-" | "*" | "/" | "%" |
+           "<<" | ">>" |
            "===" | "!==" | "<" | "<=" | ">" | ">=" |
            "&&" | "||" | "&" | "|" | "^"
 ```
@@ -436,7 +432,6 @@ All integer literals from all formats (with or without `n` suffix) must be repre
 | Format | Ternary syntax |
 |--------|---------------|
 | TypeScript | `cond ? a : b` |
-| YAML | Not supported (use if/else statement) |
 | Solidity | `cond ? a : b` |
 | Move | `if (cond) a else b` (expression) |
 | Go | Not supported (use if/else statement) |
@@ -476,7 +471,6 @@ Represents `this.x` access. The `this`/`self`/`c.` prefix is stripped; only the 
 | Format | Increment syntax | Representation |
 |--------|-----------------|----------------|
 | TypeScript | `x++` / `++x` | `prefix: false` / `prefix: true` |
-| YAML | `increment: { prop: x }` | `prefix: false` |
 | Solidity | `x++` | `prefix: false` |
 | Move | Not available (use `x = x + 1`) | Parser desugars assignment to increment when pattern matches |
 | Go | `x++` | `prefix: false` (Go only has postfix) |

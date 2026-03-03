@@ -48,7 +48,7 @@ ImportSpecifier
 
 ### Import Restrictions
 
-- The `from` path MUST be one of the allowed Rúnar library modules (e.g., `'runar'`, `'runar/builtins'`).
+- The `from` path MUST be one of the allowed Rúnar library modules (e.g., `'runar-lang'`).
 - Arbitrary filesystem or npm imports are **disallowed**.
 - Re-exports and namespace imports (`import * as`) are **disallowed**.
 
@@ -333,7 +333,15 @@ EqualityExpression
     ;
 
 RelationalExpression
-    = AdditiveExpression { RelOp AdditiveExpression }
+    = BitwiseExpression { RelOp BitwiseExpression }
+    ;
+
+BitwiseExpression
+    = ShiftExpression { ( '&' | '|' | '^' ) ShiftExpression }
+    ;
+
+ShiftExpression
+    = AdditiveExpression { ( '<<' | '>>' ) AdditiveExpression }
     ;
 
 AdditiveExpression
@@ -454,27 +462,143 @@ Reserved words follow TypeScript conventions. Additionally, the following are re
 
 ## 13. Built-in Functions
 
-The following functions are available without import (provided by the Rúnar runtime):
+The following functions are available without import (provided by the Rúnar runtime).
+
+### Assertion and Control
 
 ```ebnf
-BuiltinFunction
+BuiltinFunction_Assert
     = 'assert'             /* assert(condition: boolean, message?: string): void */
-    | 'checkSig'           /* checkSig(sig: Sig, pubKey: PubKey): boolean */
-    | 'checkMultiSig'      /* checkMultiSig(sigs: FixedArray<Sig, M>, pubKeys: FixedArray<PubKey, N>): boolean */
-    | 'hash256'            /* hash256(data: ByteString): Sha256 -- double SHA-256 */
-    | 'hash160'            /* hash160(data: ByteString): Ripemd160 -- SHA-256 then RIPEMD-160 */
-    | 'sha256'             /* sha256(data: ByteString): Sha256 */
+    | 'exit'               /* exit(success: boolean): void -- OP_RETURN */
+    ;
+```
+
+### Cryptographic Hash Functions
+
+```ebnf
+BuiltinFunction_Hash
+    = 'sha256'             /* sha256(data: ByteString): Sha256 */
     | 'ripemd160'          /* ripemd160(data: ByteString): Ripemd160 */
+    | 'hash160'            /* hash160(data: ByteString): Ripemd160 -- SHA-256 then RIPEMD-160 */
+    | 'hash256'            /* hash256(data: ByteString): Sha256 -- double SHA-256 */
+    ;
+```
+
+### Signature Verification
+
+```ebnf
+BuiltinFunction_Sig
+    = 'checkSig'           /* checkSig(sig: Sig, pubKey: PubKey): boolean */
+    | 'checkMultiSig'      /* checkMultiSig(sigs: FixedArray<Sig, M>, pubKeys: FixedArray<PubKey, N>): boolean */
+    | 'verifyRabinSig'     /* verifyRabinSig(msg: ByteString, sig: RabinSig, padding: ByteString, pubKey: RabinPubKey): boolean */
+    ;
+```
+
+### Post-Quantum Signature Verification
+
+```ebnf
+BuiltinFunction_PQ
+    = 'verifyWOTS'                /* verifyWOTS(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_128s'   /* verifySLHDSA_SHA2_128s(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_128f'   /* verifySLHDSA_SHA2_128f(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_192s'   /* verifySLHDSA_SHA2_192s(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_192f'   /* verifySLHDSA_SHA2_192f(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_256s'   /* verifySLHDSA_SHA2_256s(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    | 'verifySLHDSA_SHA2_256f'   /* verifySLHDSA_SHA2_256f(msg: ByteString, sig: ByteString, pubKey: ByteString): boolean */
+    ;
+```
+
+### Byte-String Operations
+
+```ebnf
+BuiltinFunction_Bytes
+    = 'len'                /* len(data: ByteString): bigint */
+    | 'cat'                /* cat(a: ByteString, b: ByteString): ByteString */
+    | 'substr'             /* substr(data: ByteString, start: bigint, len: bigint): ByteString */
+    | 'left'               /* left(data: ByteString, len: bigint): ByteString */
+    | 'right'              /* right(data: ByteString, len: bigint): ByteString */
+    | 'split'              /* split(data: ByteString, index: bigint): [ByteString, ByteString] */
+    | 'reverseBytes'       /* reverseBytes(data: ByteString): ByteString */
     | 'toByteString'       /* toByteString(hex: string): ByteString */
-    | 'len'                /* len(data: ByteString): bigint */
-    | 'reverseByteString'  /* reverseByteString(data: ByteString, size: bigint): ByteString */
+    ;
+```
+
+### Conversion
+
+```ebnf
+BuiltinFunction_Conv
+    = 'num2bin'            /* num2bin(value: bigint, byteLen: bigint): ByteString */
+    | 'bin2num'            /* bin2num(data: ByteString): bigint */
+    | 'int2str'            /* int2str(value: bigint, byteLen: bigint): ByteString */
     | 'pack'               /* pack(n: bigint): ByteString -- encode integer as Script number */
     | 'unpack'             /* unpack(data: ByteString): bigint -- decode Script number */
-    | 'abs'                /* abs(n: bigint): bigint */
+    | 'bool'               /* bool(n: bigint): boolean -- convert integer to boolean */
+    ;
+```
+
+### Math
+
+```ebnf
+BuiltinFunction_Math
+    = 'abs'                /* abs(n: bigint): bigint */
     | 'min'                /* min(a: bigint, b: bigint): bigint */
     | 'max'                /* max(a: bigint, b: bigint): bigint */
     | 'within'             /* within(x: bigint, lo: bigint, hi: bigint): boolean */
-    | 'exit'               /* exit(success: boolean): void -- OP_RETURN */
+    | 'safediv'            /* safediv(a: bigint, b: bigint): bigint -- asserts b != 0 */
+    | 'safemod'            /* safemod(a: bigint, b: bigint): bigint -- asserts b != 0 */
+    | 'clamp'              /* clamp(value: bigint, lo: bigint, hi: bigint): bigint */
+    | 'sign'               /* sign(value: bigint): bigint -- returns -1, 0, or 1 */
+    | 'pow'                /* pow(base: bigint, exp: bigint): bigint */
+    | 'mulDiv'             /* mulDiv(a: bigint, b: bigint, c: bigint): bigint -- (a * b) / c */
+    | 'percentOf'          /* percentOf(amount: bigint, bps: bigint): bigint -- (amount * bps) / 10000 */
+    | 'sqrt'               /* sqrt(n: bigint): bigint -- integer square root */
+    | 'gcd'                /* gcd(a: bigint, b: bigint): bigint -- greatest common divisor */
+    | 'divmod'             /* divmod(a: bigint, b: bigint): bigint -- quotient */
+    | 'log2'               /* log2(n: bigint): bigint -- approximate floor(log2(n)) */
+    ;
+```
+
+### Preimage / Transaction Introspection
+
+```ebnf
+BuiltinFunction_Preimage
+    = 'checkPreimage'      /* checkPreimage(txPreimage: SigHashPreimage): boolean */
+    | 'extractVersion'     /* extractVersion(txPreimage: SigHashPreimage): bigint */
+    | 'extractHashPrevouts'  /* extractHashPrevouts(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractHashSequence'  /* extractHashSequence(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractOutpoint'    /* extractOutpoint(txPreimage: SigHashPreimage): ByteString */
+    | 'extractInputIndex'  /* extractInputIndex(txPreimage: SigHashPreimage): bigint */
+    | 'extractScriptCode'  /* extractScriptCode(txPreimage: SigHashPreimage): ByteString */
+    | 'extractAmount'      /* extractAmount(txPreimage: SigHashPreimage): bigint */
+    | 'extractSequence'    /* extractSequence(txPreimage: SigHashPreimage): bigint */
+    | 'extractOutputHash'  /* extractOutputHash(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractOutputs'     /* extractOutputs(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractLocktime'    /* extractLocktime(txPreimage: SigHashPreimage): bigint */
+    | 'extractSigHashType' /* extractSigHashType(txPreimage: SigHashPreimage): bigint */
+    ;
+```
+
+### State Management (StatefulSmartContract only)
+
+```ebnf
+BuiltinFunction_State
+    = 'addOutput'          /* this.addOutput(satoshis: bigint, ...stateValues): void */
+    ;
+```
+
+The complete set of built-in functions is:
+
+```ebnf
+BuiltinFunction
+    = BuiltinFunction_Assert
+    | BuiltinFunction_Hash
+    | BuiltinFunction_Sig
+    | BuiltinFunction_PQ
+    | BuiltinFunction_Bytes
+    | BuiltinFunction_Conv
+    | BuiltinFunction_Math
+    | BuiltinFunction_Preimage
+    | BuiltinFunction_State
     ;
 ```
 
@@ -483,7 +607,7 @@ BuiltinFunction
 ## 14. Complete Example
 
 ```typescript
-import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar';
+import { SmartContract, assert, checkSig, PubKey, Sig } from 'runar-lang';
 
 export class P2PKH extends SmartContract {
     readonly pubKeyHash: Addr;

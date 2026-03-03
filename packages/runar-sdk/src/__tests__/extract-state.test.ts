@@ -433,11 +433,11 @@ describe('findLastOpReturn', () => {
 // ---------------------------------------------------------------------------
 
 describe('serializeState — encoding specifics', () => {
-  it('encodes bigint 0n as 0x01 0x00 (push 1 byte of zero)', () => {
+  it('encodes bigint 0n as OP_0 (0x00)', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: 0n });
-    // State encoding: encodeScriptInt(0n) returns '0100' (push 1 byte: 0x00)
-    expect(hex).toBe('0100');
+    // State encoding: encodeScriptInt(0n) returns '00' (OP_0)
+    expect(hex).toBe('00');
   });
 
   it('encodes bigint 42n as 0x01 0x2a (push 1 byte: 42)', () => {
@@ -471,16 +471,16 @@ describe('serializeState — encoding specifics', () => {
     expect(hex).toBe('028080');
   });
 
-  it('encodes bool true as 0x01 0x51 (push OP_TRUE byte)', () => {
+  it('encodes bool true as OP_1 (0x51)', () => {
     const fields = makeFields({ name: 'flag', type: 'bool', index: 0 });
     const hex = serializeState(fields, { flag: true });
-    expect(hex).toBe('0151');
+    expect(hex).toBe('51');
   });
 
-  it('encodes bool false as 0x01 0x00 (push zero byte)', () => {
+  it('encodes bool false as OP_0 (0x00)', () => {
     const fields = makeFields({ name: 'flag', type: 'bool', index: 0 });
     const hex = serializeState(fields, { flag: false });
-    expect(hex).toBe('0100');
+    expect(hex).toBe('00');
   });
 
   it('encodes PubKey as push-data with length prefix 0x21 (33 bytes)', () => {

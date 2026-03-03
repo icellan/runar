@@ -30,10 +30,11 @@ examples/
   sol/                # Solidity-like contracts + vitest tests
   move/               # Move-style contracts + vitest tests
   sdk-usage/          # SDK usage reference docs (not runnable)
+end2end-example/      # End-to-end example (ts, go, rust, sol, move)
 spec/                 # Language specification (grammar, semantics, type system)
 docs/                 # User-facing documentation
   formats/            # Format-specific guides (solidity.md, move.md, go.md, rust.md)
-go.work              # Go workspace: compilers/go + examples/go + conformance + packages/runar-go
+go.work              # Go workspace: compilers/go + conformance + end2end-example/go + examples/go + packages/runar-go
 ```
 
 ## Build & Test
@@ -96,7 +97,7 @@ When adding a new frontend format parser:
 - Add the parser file in `packages/runar-compiler/src/passes/01-parse-{format}.ts`
 - Add dispatch case in `01-parse.ts` based on file extension
 - Export from `packages/runar-compiler/src/index.ts`
-- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`) and Rust (`compilers/rust/src/frontend/parser_{format}.rs`)
+- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`, e.g. `parser_sol.go`, `parser_move.go`, `parser_gocontract.go`) and Rust (`compilers/rust/src/frontend/parser_{format}.rs`, e.g. `parser_sol.rs`, `parser_move.rs`, `parser_rustmacro.rs`)
 - Add dispatch in Go `ParseSource()` and Rust `parse_source()`
 - Auto-generated constructors MUST include `super()` as the first statement
 - Type names must map to Rúnar primitives (e.g., `int` → `bigint`, `Int` → `bigint`)
@@ -185,7 +186,7 @@ Key SDK concepts:
 
 ### Module Resolution
 - pnpm workspace packages are not hoisted to root `node_modules`. The `vitest.config.ts` at root provides aliases so `examples/` tests can import `runar-testing` by name.
-- `go.work` at the project root connects `compilers/go`, `examples/go`, `conformance`, and `packages/runar-go` so `import "runar"` resolves everywhere.
+- `go.work` at the project root connects `compilers/go`, `conformance`, `end2end-example/go`, `examples/go`, and `packages/runar-go` so `import "runar"` resolves everywhere.
 - Rust example tests use `Cargo.toml` at `examples/rust/` with `[[test]]` entries pointing to each contract's `_test.rs` file.
 
 ## Style

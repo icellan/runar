@@ -128,8 +128,9 @@ export function left(_data: ByteString, _len: bigint): ByteString {
 }
 
 /**
- * Take the rightmost `len` bytes.
- * Compiles to: `OP_SPLIT OP_NIP` (keep right part).
+ * Returns the rightmost `len` bytes of a byte string.
+ * Compiles to: `OP_SIZE <len> OP_SUB OP_SPLIT OP_NIP`
+ * (computes split offset from end, keeps right part).
  */
 export function right(_data: ByteString, _len: bigint): ByteString {
   return compilerStub('right');
@@ -261,7 +262,8 @@ export function clamp(_value: bigint, _lo: bigint, _hi: bigint): bigint {
 
 /**
  * Sign of a number: returns -1, 0, or 1.
- * Compiles to: `OP_DUP OP_ABS OP_SWAP OP_DIV`
+ * Guards against division by zero when value is 0.
+ * Compiles to: `OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF`
  */
 export function sign(_value: bigint): bigint {
   return compilerStub('sign');

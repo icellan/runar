@@ -3,7 +3,8 @@ import { parse } from '../passes/01-parse.js';
 import { lowerToANF } from '../passes/04-anf-lower.js';
 import { lowerToStack } from '../passes/05-stack-lower.js';
 import { emit, emitMethod, OPCODES } from '../passes/06-emit.js';
-import type { StackMethod } from '../ir/index.js';
+import { optimizeStackIR } from '../optimizer/peephole.js';
+import type { StackMethod, StackOp } from '../ir/index.js';
 import type { EmitResult } from '../passes/06-emit.js';
 import type { ContractNode } from '../ir/index.js';
 
@@ -23,6 +24,10 @@ function compileToEmit(source: string): EmitResult {
   const contract = parseContract(source);
   const anf = lowerToANF(contract);
   const stack = lowerToStack(anf);
+  // Match the real pipeline: apply standalone peephole optimizer before emit
+  for (const method of stack.methods) {
+    method.ops = optimizeStackIR(method.ops);
+  }
   return emit(stack);
 }
 
@@ -487,6 +492,81 @@ describe('Pass 6: Emit', () => {
       `;
       const result = compileToEmit(source);
       expect(Array.isArray(result.sourceMap)).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Standalone peephole handles verify-combinations (no emit-phase duplicate)
+  // ---------------------------------------------------------------------------
+
+  describe('verify-combination via standalone peephole optimizer', () => {
+    it('emits OP_EQUALVERIFY when standalone optimizer runs before emit', () => {
+      // OP_EQUAL + OP_VERIFY should be combined by the standalone peephole optimizer
+      const ops: StackOp[] = [
+        { op: 'push', value: 1n },
+        { op: 'push', value: 1n },
+        { op: 'opcode', code: 'OP_EQUAL' },
+        { op: 'opcode', code: 'OP_VERIFY' },
+      ];
+      // Run standalone peephole optimizer (as the real pipeline does)
+      const optimized = optimizeStackIR(ops);
+      // Should combine OP_EQUAL + OP_VERIFY into OP_EQUALVERIFY
+      expect(optimized).toEqual([
+        { op: 'push', value: 1n },
+        { op: 'push', value: 1n },
+        { op: 'opcode', code: 'OP_EQUALVERIFY' },
+      ]);
+      // Emit the optimized ops
+      const method: StackMethod = { name: 'test', ops: optimized, maxStackDepth: 2 };
+      const result = emitMethod(method);
+      expect(result.scriptAsm).toContain('OP_EQUALVERIFY');
+      expect(result.scriptAsm).not.toContain('OP_VERIFY');
+    });
+
+    it('emits OP_CHECKSIGVERIFY when standalone optimizer runs before emit', () => {
+      const ops: StackOp[] = [
+        { op: 'opcode', code: 'OP_CHECKSIG' },
+        { op: 'opcode', code: 'OP_VERIFY' },
+      ];
+      const optimized = optimizeStackIR(ops);
+      expect(optimized).toEqual([
+        { op: 'opcode', code: 'OP_CHECKSIGVERIFY' },
+      ]);
+      const method: StackMethod = { name: 'test', ops: optimized, maxStackDepth: 2 };
+      const result = emitMethod(method);
+      expect(result.scriptAsm).toBe('OP_CHECKSIGVERIFY');
+    });
+
+    it('emits OP_NUMEQUALVERIFY when standalone optimizer runs before emit', () => {
+      const ops: StackOp[] = [
+        { op: 'opcode', code: 'OP_NUMEQUAL' },
+        { op: 'opcode', code: 'OP_VERIFY' },
+      ];
+      const optimized = optimizeStackIR(ops);
+      expect(optimized).toEqual([
+        { op: 'opcode', code: 'OP_NUMEQUALVERIFY' },
+      ]);
+      const method: StackMethod = { name: 'test', ops: optimized, maxStackDepth: 2 };
+      const result = emitMethod(method);
+      expect(result.scriptAsm).toBe('OP_NUMEQUALVERIFY');
+    });
+
+    it('emit produces correct hex without its own peephole pass', () => {
+      // Verify that after standalone peephole runs, emit correctly encodes
+      // the already-optimized ops without needing its own peephole
+      const ops: StackOp[] = [
+        { op: 'push', value: 42n },
+        { op: 'push', value: 42n },
+        { op: 'opcode', code: 'OP_EQUAL' },
+        { op: 'opcode', code: 'OP_VERIFY' },
+      ];
+      const optimized = optimizeStackIR(ops);
+      const method: StackMethod = { name: 'test', ops: optimized, maxStackDepth: 2 };
+      const result = emitMethod(method);
+      // OP_EQUALVERIFY is 0x88
+      expect(result.scriptHex).toContain('88');
+      // Should NOT contain separate OP_EQUAL (0x87) followed by OP_VERIFY (0x69)
+      expect(result.scriptHex).not.toContain('8769');
     });
   });
 

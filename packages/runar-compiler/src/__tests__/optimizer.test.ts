@@ -214,6 +214,43 @@ describe('Optimizer: Constant Folding', () => {
       expect(folded.methods[0]!.body[2]!.value).toEqual({ kind: 'load_const', value: 'abcd' });
     });
 
+    it('does not fold concatenation with invalid hex characters', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 'aabb' }),
+          b('t1', { kind: 'load_const', value: 'zzzz' }),
+          b('t2', { kind: 'bin_op', op: '+', left: 't0', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      // Should NOT fold: 'zzzz' is not valid hex
+      expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
+    });
+
+    it('does not fold concatenation when left operand has invalid hex', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 'xyz1' }),
+          b('t1', { kind: 'load_const', value: 'aabb' }),
+          b('t2', { kind: 'bin_op', op: '+', left: 't0', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[2]!.value.kind).toBe('bin_op');
+    });
+
+    it('folds concatenation of valid hex strings', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 'aabb' }),
+          b('t1', { kind: 'load_const', value: 'ccdd' }),
+          b('t2', { kind: 'bin_op', op: '+', left: 't0', right: 't1' }),
+        ]),
+      ]);
+      const folded = foldConstants(program);
+      expect(folded.methods[0]!.body[2]!.value).toEqual({ kind: 'load_const', value: 'aabbccdd' });
+    });
+
     it('folds string equality', () => {
       const program = makeProgram([
         makeMethod('m', [

@@ -456,6 +456,80 @@ describe('Pass 4: ANF Lower', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // ByteString + lowering (C4)
+  // ---------------------------------------------------------------------------
+
+  describe('ByteString concatenation lowering', () => {
+    it('lowers ByteString + ByteString with result_type bytes', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: ByteString;
+          constructor(x: ByteString) { super(x); this.x = x; }
+          public m(y: ByteString) {
+            const z: ByteString = this.x + y;
+            assert(len(z) > 0n);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'm');
+      const binOps = bindingsOfKind(method.body, 'bin_op');
+      const addOp = binOps.find(b => (b.value as { op: string }).op === '+');
+      expect(addOp).toBeDefined();
+      const addVal = addOp!.value as { kind: 'bin_op'; op: string; result_type?: string };
+      expect(addVal.result_type).toBe('bytes');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RabinSig/RabinPubKey equality lowering (M3)
+  // ---------------------------------------------------------------------------
+
+  describe('RabinSig/RabinPubKey equality lowering', () => {
+    it('=== on two RabinPubKey values produces numeric equality (no result_type bytes)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly rpk: RabinPubKey;
+          constructor(rpk: RabinPubKey) { super(rpk); this.rpk = rpk; }
+          public m(otherPk: RabinPubKey) {
+            assert(this.rpk === otherPk);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'm');
+      const binOps = bindingsOfKind(method.body, 'bin_op');
+      const eqOp = binOps.find(b => (b.value as { op: string }).op === '===');
+      expect(eqOp).toBeDefined();
+      const eqVal = eqOp!.value as { kind: 'bin_op'; op: string; result_type?: string };
+      expect(eqVal.result_type).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Non-constant loop bound error (M5)
+  // ---------------------------------------------------------------------------
+
+  describe('non-constant loop bound error', () => {
+    it('throws an error for non-constant loop bound', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(n: bigint) {
+            let sum: bigint = 0n;
+            for (let i: bigint = 0n; i < n; i++) {
+              sum = sum + 1n;
+            }
+            assert(sum > 0n);
+          }
+        }
+      `;
+      expect(() => lowerSource(source)).toThrow(/loop bound|compile time/i);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Assignment lowering: update_prop
   // ---------------------------------------------------------------------------
 

@@ -410,7 +410,7 @@ function extractLoopCount(
     }
   }
 
-  return 0;
+  throw new Error('Cannot determine loop bound at compile time. For-loop bounds must be integer literals.');
 }
 
 function extractBigIntValue(expr: Expression): bigint | null {
@@ -565,6 +565,12 @@ function lowerBinaryExpr(
   // can choose OP_EQUAL vs OP_NUMEQUAL.
   const binOp: BinOp = { kind: 'bin_op', op: expr.op, left: leftRef, right: rightRef };
   if (expr.op === '===' || expr.op === '!==') {
+    if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
+      binOp.result_type = 'bytes';
+    }
+  }
+  // For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
+  if (expr.op === '+') {
     if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
       binOp.result_type = 'bytes';
     }
@@ -748,7 +754,6 @@ function lowerDecrementExpr(
 /** Byte-typed primitive names — values that are already byte sequences. */
 const BYTE_TYPES = new Set([
   'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage',
-  'RabinSig', 'RabinPubKey',
 ]);
 
 /** Builtin functions that return byte-typed values. */

@@ -392,63 +392,6 @@ func emitIf(thenOps []StackOp, elseOps []StackOp, ctx *emitContext) error {
 // Peephole optimization
 // ---------------------------------------------------------------------------
 
-// verifyCombinations maps opcodes that can be combined with a following
-// OP_VERIFY into a single *VERIFY opcode.
-var verifyCombinations = map[string]string{
-	"OP_EQUAL":         "OP_EQUALVERIFY",
-	"OP_NUMEQUAL":      "OP_NUMEQUALVERIFY",
-	"OP_CHECKSIG":      "OP_CHECKSIGVERIFY",
-	"OP_CHECKMULTISIG": "OP_CHECKMULTISIGVERIFY",
-}
-
-// peepholeOptimize combines adjacent opcode pairs into single opcodes
-// (e.g. OP_EQUAL + OP_VERIFY → OP_EQUALVERIFY) and recurses into if/else blocks.
-func peepholeOptimize(ops []StackOp) []StackOp {
-	var result []StackOp
-
-	for i := 0; i < len(ops); i++ {
-		op := ops[i]
-
-		// Combine OP_X + OP_VERIFY → OP_XVERIFY
-		if i+1 < len(ops) {
-			next := ops[i+1]
-			if op.Op == "opcode" && next.Op == "opcode" && next.Code == "OP_VERIFY" {
-				if combined, ok := verifyCombinations[op.Code]; ok {
-					result = append(result, StackOp{Op: "opcode", Code: combined})
-					i++ // skip the OP_VERIFY
-					continue
-				}
-			}
-		}
-
-		// Eliminate OP_SWAP OP_SWAP (no-op pair)
-		if i+1 < len(ops) {
-			next := ops[i+1]
-			if op.Op == "swap" && next.Op == "swap" {
-				i++ // skip the second swap
-				continue
-			}
-		}
-
-		// Recurse into if/else blocks
-		if op.Op == "if" {
-			optimized := StackOp{
-				Op:   "if",
-				Then: peepholeOptimize(op.Then),
-			}
-			if len(op.Else) > 0 {
-				optimized.Else = peepholeOptimize(op.Else)
-			}
-			result = append(result, optimized)
-			continue
-		}
-
-		result = append(result, op)
-	}
-
-	return result
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -456,6 +399,8 @@ func peepholeOptimize(ops []StackOp) []StackOp {
 // Emit converts a slice of StackMethods into Bitcoin Script hex and ASM.
 // For contracts with multiple public methods, it generates a method dispatch
 // preamble using OP_IF/OP_ELSE chains.
+// Note: peephole optimization (VERIFY combinations, SWAP elimination) is
+// handled by OptimizeStackOps in optimizer.go, which runs before Emit.
 func Emit(methods []StackMethod) (*EmitResult, error) {
 	ctx := newEmitContext()
 
@@ -469,11 +414,6 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 
 	if len(publicMethods) == 0 {
 		return &EmitResult{ScriptHex: "", ScriptAsm: "", ConstructorSlots: nil}, nil
-	}
-
-	// Apply peephole optimizations to each method's ops
-	for i := range publicMethods {
-		publicMethods[i].Ops = peepholeOptimize(publicMethods[i].Ops)
 	}
 
 	if len(publicMethods) == 1 {

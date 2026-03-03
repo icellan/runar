@@ -179,11 +179,12 @@ func TestEmit_SimpleSequenceHex(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test: Emit with peephole optimization (CHECKSIG + VERIFY -> CHECKSIGVERIFY)
+// Test: Peephole optimization via OptimizeStackOps before Emit
+// (CHECKSIG + VERIFY -> CHECKSIGVERIFY)
 // ---------------------------------------------------------------------------
 
 func TestEmit_PeepholeOptimization(t *testing.T) {
-	// When using the full Emit() function (not EmitMethod), peephole optimization is applied
+	// The real compiler pipeline calls OptimizeStackOps before Emit.
 	methods := []StackMethod{
 		{
 			Name: "check",
@@ -193,6 +194,11 @@ func TestEmit_PeepholeOptimization(t *testing.T) {
 				{Op: "opcode", Code: "OP_1"},
 			},
 		},
+	}
+
+	// Apply peephole optimization (as the compiler pipeline does before emit)
+	for i := range methods {
+		methods[i].Ops = OptimizeStackOps(methods[i].Ops)
 	}
 
 	result, err := Emit(methods)

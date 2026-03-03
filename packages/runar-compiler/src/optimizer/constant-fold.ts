@@ -66,7 +66,10 @@ function evalBinOp(op: string, left: ConstValue, right: ConstValue): ConstValue 
   // String (ByteString) operations
   if (typeof left === 'string' && typeof right === 'string') {
     switch (op) {
-      case '+': return left + right; // concatenation
+      case '+':
+        // Validate both operands are valid hex before concatenating
+        if (!/^[0-9a-fA-F]*$/.test(left) || !/^[0-9a-fA-F]*$/.test(right)) return null;
+        return left + right; // concatenation
       case '===': return left === right;
       case '!==': return left !== right;
       default: return null;

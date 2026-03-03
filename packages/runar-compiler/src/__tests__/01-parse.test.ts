@@ -432,6 +432,46 @@ describe('Pass 1: Parse', () => {
       expect((memberExpr.object as Identifier).name).toBe('SigHash');
     });
 
+    it('parses left shift operator <<', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(x: bigint) {
+            const y: bigint = x << 3n;
+            assert(y > 0n);
+          }
+        }
+      `;
+      const result = parse(source);
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const method = result.contract!.methods[0]!;
+      const decl = method.body[0] as VariableDeclStatement;
+      const binExpr = decl.init as BinaryExpr;
+      expect(binExpr.kind).toBe('binary_expr');
+      expect(binExpr.op).toBe('<<');
+    });
+
+    it('parses right shift operator >>', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(x: bigint) {
+            const z: bigint = x >> 2n;
+            assert(z > 0n);
+          }
+        }
+      `;
+      const result = parse(source);
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const method = result.contract!.methods[0]!;
+      const decl = method.body[0] as VariableDeclStatement;
+      const binExpr = decl.init as BinaryExpr;
+      expect(binExpr.kind).toBe('binary_expr');
+      expect(binExpr.op).toBe('>>');
+    });
+
     it('parses comparison operators producing correct BinaryOp', () => {
       const source = `
         class C extends SmartContract {
@@ -642,6 +682,26 @@ describe('Pass 1: Parse', () => {
       expect(err.loc!.file).toBe('contract.ts');
       expect(typeof err.loc!.line).toBe('number');
       expect(typeof err.loc!.column).toBe('number');
+    });
+
+    it('warns or errors on multiple variable declarations in one statement', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m() {
+            const a = 1n, b = 2n;
+            assert(a > 0n);
+          }
+        }
+      `;
+      const result = parse(source);
+      const diagnostics = result.errors;
+      expect(diagnostics.some(d => d.message.includes('multiple')
+        || d.message.includes('Multiple')
+        || d.message.includes('one variable')
+        || d.message.includes('single')
+      )).toBe(true);
     });
 
     it('warns about == usage and maps it to ===', () => {

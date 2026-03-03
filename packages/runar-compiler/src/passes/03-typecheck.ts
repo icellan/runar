@@ -179,6 +179,10 @@ function isBigintFamily(t: TType): boolean {
   return BIGINT_SUBTYPES.has(t);
 }
 
+function isByteFamily(t: TType): boolean {
+  return BYTESTRING_SUBTYPES.has(t);
+}
+
 // ---------------------------------------------------------------------------
 // Type environment
 // ---------------------------------------------------------------------------
@@ -539,6 +543,13 @@ class TypeChecker {
   ): TType {
     const leftType = this.inferExprType(expr.left, env);
     const rightType = this.inferExprType(expr.right, env);
+
+    // ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
+    if (expr.op === '+') {
+      if (isByteFamily(leftType) && isByteFamily(rightType)) {
+        return BYTESTRING;
+      }
+    }
 
     // Arithmetic operators: bigint x bigint -> bigint
     const arithmeticOps = new Set(['+', '-', '*', '/', '%']);

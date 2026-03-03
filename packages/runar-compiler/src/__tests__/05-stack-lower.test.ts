@@ -549,4 +549,213 @@ describe('Pass 5: Stack Lower', () => {
       expect(opcodes).toContain('OP_BIN2NUM');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // C1: Rabin Sig — correct stack order (no orphaned OP_DUP/OP_TOALTSTACK)
+  // ---------------------------------------------------------------------------
+
+  describe('verifyRabinSig stack order (C1)', () => {
+    it('does not emit orphaned OP_TOALTSTACK for verifyRabinSig', () => {
+      const source = `
+        class RabinOracle extends SmartContract {
+          readonly rpk: RabinPubKey;
+          constructor(rpk: RabinPubKey) { super(rpk); this.rpk = rpk; }
+          public verify(msg: ByteString, sig: RabinSig, padding: ByteString) {
+            assert(verifyRabinSig(msg, sig, padding, this.rpk));
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'verify');
+      const allOps = flattenOps(method.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+
+      // The fixed version should NOT use OP_TOALTSTACK (orphaned pubKey dup).
+      // Instead it uses OP_SWAP + OP_ROT to rearrange stack correctly.
+      expect(opcodes).not.toContain('OP_TOALTSTACK');
+    });
+
+    it('emits OP_SWAP and OP_ROT for correct Rabin sig stack arrangement', () => {
+      const source = `
+        class RabinOracle extends SmartContract {
+          readonly rpk: RabinPubKey;
+          constructor(rpk: RabinPubKey) { super(rpk); this.rpk = rpk; }
+          public verify(msg: ByteString, sig: RabinSig, padding: ByteString) {
+            assert(verifyRabinSig(msg, sig, padding, this.rpk));
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'verify');
+      const allOps = flattenOps(method.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+
+      // After OP_SWAP and OP_ROT, sig should be on top for squaring (OP_DUP OP_MUL)
+      expect(opcodes).toContain('OP_SWAP');
+      expect(opcodes).toContain('OP_ROT');
+      expect(opcodes).toContain('OP_DUP');
+      expect(opcodes).toContain('OP_MUL');
+
+      // Verify the sig-squaring sequence: OP_DUP immediately followed by OP_MUL
+      const dupIdx = opcodes.indexOf('OP_DUP');
+      expect(opcodes[dupIdx + 1]).toBe('OP_MUL');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // C2: sign(0) division by zero — must guard with OP_IF
+  // ---------------------------------------------------------------------------
+
+  describe('sign() division-by-zero guard (C2)', () => {
+    it('emits OP_DUP OP_IF pattern for sign() to avoid div-by-zero', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            const s: bigint = sign(a);
+            assert(s > 0n);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+      const allOps = flattenOps(method.ops);
+      // The safe sign() implementation must use an OP_IF guard:
+      // OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF
+      // This means an 'if' StackOp must be present (for the conditional)
+      const allOpTypes = allOps.map(o => o.op);
+      expect(allOpTypes).toContain('if');
+
+      // The if-branch should contain OP_ABS and OP_DIV for the x / abs(x) computation
+      const ifOp = allOps.find(o => o.op === 'if') as
+        | { op: 'if'; then: StackOp[]; else?: StackOp[] }
+        | undefined;
+      expect(ifOp).toBeDefined();
+      const thenOpcodes = ifOp!.then
+        .filter(o => o.op === 'opcode')
+        .map(o => (o as { code: string }).code);
+      expect(thenOpcodes).toContain('OP_ABS');
+      expect(thenOpcodes).toContain('OP_DIV');
+    });
+
+    it('sign() does not emit OP_DIV at top level (only inside if-branch)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            const s: bigint = sign(a);
+            assert(s > 0n);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+
+      // sign() should NOT unconditionally emit OP_DIV without a guard.
+      // The old buggy version emitted: OP_DUP OP_ABS OP_SWAP OP_DIV
+      // Check that OP_DIV is ONLY inside an if-branch, not at top level.
+      const topLevelOpcodes = method.ops
+        .filter(o => o.op === 'opcode')
+        .map(o => (o as { code: string }).code);
+      expect(topLevelOpcodes).not.toContain('OP_DIV');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // M1: right() — must use OP_SIZE to get rightmost bytes
+  // ---------------------------------------------------------------------------
+
+  describe('right() correct semantics (M1)', () => {
+    it('emits OP_SIZE for right() to compute split offset from end', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: ByteString;
+          constructor(x: ByteString) { super(x); this.x = x; }
+          public m(data: ByteString) {
+            const tail: ByteString = right(data, 2n);
+            assert(tail === this.x);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+      const allOps = flattenOps(method.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+
+      // right(data, n) should compute: size(data) - n, then split at that offset
+      // This requires OP_SIZE and OP_SUB before OP_SPLIT
+      expect(opcodes).toContain('OP_SIZE');
+      expect(opcodes).toContain('OP_SUB');
+      expect(opcodes).toContain('OP_SPLIT');
+    });
+
+    it('right() emits nip to keep the right portion after split', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: ByteString;
+          constructor(x: ByteString) { super(x); this.x = x; }
+          public m(data: ByteString) {
+            const tail: ByteString = right(data, 2n);
+            assert(tail === this.x);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+      const allOps = flattenOps(method.ops);
+      const allOpTypes = allOps.map(o => o.op);
+
+      // After OP_SPLIT, we keep the right part (NIP removes the left)
+      expect(allOpTypes).toContain('nip');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // C4: ByteString + emits OP_CAT not OP_ADD
+  // ---------------------------------------------------------------------------
+
+  describe('ByteString concatenation with + operator (C4)', () => {
+    it('emits OP_CAT for ByteString + ByteString', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: ByteString;
+          constructor(x: ByteString) { super(x); this.x = x; }
+          public m(a: ByteString, b: ByteString) {
+            const c: ByteString = a + b;
+            assert(c === this.x);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+      const allOps = flattenOps(method.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+
+      // When result_type is 'bytes', + should emit OP_CAT, not OP_ADD
+      expect(opcodes).toContain('OP_CAT');
+      expect(opcodes).not.toContain('OP_ADD');
+    });
+
+    it('still emits OP_ADD for bigint + bigint', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint, b: bigint) {
+            const c: bigint = a + b;
+            assert(c > 0n);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'm');
+      const allOps = flattenOps(method.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+
+      // Numeric + should remain OP_ADD
+      expect(opcodes).toContain('OP_ADD');
+    });
+  });
 });

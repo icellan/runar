@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// runar-sdk/deployment.ts — Transaction construction for contract deployment
+// runar-sdk/deployment.ts -- Transaction construction for contract deployment
 // ---------------------------------------------------------------------------
 
 import type { UTXO } from './types.js';
@@ -44,7 +44,7 @@ export function buildDeployTransaction(
   // Input count (varint)
   tx += encodeVarInt(utxos.length);
 
-  // Inputs (unsigned — scriptSig is empty)
+  // Inputs (unsigned -- scriptSig is empty)
   for (const utxo of utxos) {
     // Previous txid (32 bytes, internal byte order = reversed hex)
     tx += reverseHex(utxo.txid);
@@ -52,7 +52,7 @@ export function buildDeployTransaction(
     tx += toLittleEndian32(utxo.outputIndex);
     // ScriptSig length + script (empty for unsigned)
     tx += '00';
-    // Sequence (4 bytes LE) — 0xffffffff
+    // Sequence (4 bytes LE) -- 0xffffffff
     tx += 'ffffffff';
   }
 
@@ -147,24 +147,30 @@ function varIntByteSize(n: number): number {
 
 /**
  * Estimate the fee for a deploy transaction given the number of P2PKH
- * inputs and the contract locking script byte length. Assumes 1 sat/byte
- * fee rate and includes a P2PKH change output.
+ * inputs and the contract locking script byte length. Includes a P2PKH
+ * change output.
+ *
+ * @param numInputs              - Number of P2PKH inputs.
+ * @param lockingScriptByteLen   - Byte length of the contract locking script.
+ * @param feeRate                - Fee rate in satoshis per byte (default: 1).
  */
 export function estimateDeployFee(
   numInputs: number,
   lockingScriptByteLen: number,
+  feeRate: number = 1,
 ): number {
   const inputsSize = numInputs * P2PKH_INPUT_SIZE;
   const contractOutputSize =
     8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen;
   const changeOutputSize = P2PKH_OUTPUT_SIZE;
-  return TX_OVERHEAD + inputsSize + contractOutputSize + changeOutputSize;
+  const txSize = TX_OVERHEAD + inputsSize + contractOutputSize + changeOutputSize;
+  return txSize * feeRate;
 }
 
 /**
  * Select the minimum set of UTXOs needed to fund a deployment, using a
  * largest-first strategy. Returns the selected subset (possibly all UTXOs
- * if the total is still insufficient — the caller should check).
+ * if the total is still insufficient -- the caller should check).
  */
 export function selectUtxos(
   utxos: UTXO[],

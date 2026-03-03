@@ -80,13 +80,16 @@ func (c *RunarContract) Deploy(
 
 	// Build the deploy transaction
 	changeScript := BuildP2PKHScript(changeAddress)
-	txHex, inputCount := BuildDeployTransaction(
+	txHex, inputCount, err := BuildDeployTransaction(
 		lockingScript,
 		utxos,
 		options.Satoshis,
 		changeAddress,
 		changeScript,
 	)
+	if err != nil {
+		return "", nil, fmt.Errorf("RunarContract.Deploy: %w", err)
+	}
 
 	// Sign all inputs
 	signedTx := txHex

@@ -4,7 +4,7 @@ import { selectUtxos, estimateDeployFee } from '../deployment.js';
 import { buildCallTransaction } from '../calling.js';
 import { MockProvider } from '../providers/mock.js';
 import { LocalSigner } from '../signers/local.js';
-import { serializeState } from '../state.js';
+import { serializeState, deserializeState } from '../state.js';
 import type { RunarArtifact, StateField } from 'runar-ir-schema';
 import type { Transaction, UTXO } from '../types.js';
 
@@ -321,7 +321,7 @@ describe('state mutation during call()', () => {
     const scriptAfter = contract.getLockingScript();
     expect(scriptAfter).not.toBe(scriptBefore);
     // The new script should contain the serialized state for count=5
-    // 5n → OP_5 → 0x55, but in state encoding it's push-data: 0105
+    // 5n -> OP_5 -> 0x55, but in state encoding it's push-data: 0105
     expect(scriptAfter).toContain('6a'); // OP_RETURN separator
   });
 });
@@ -391,7 +391,7 @@ describe('fromTxId code script preservation', () => {
     // getLockingScript() should return the original full script
     expect(contract.getLockingScript()).toBe(fullScript);
 
-    // Now update state — the code portion should stay the same
+    // Now update state -- the code portion should stay the same
     contract.setState({ count: 100n });
     const updatedScript = contract.getLockingScript();
 
@@ -416,7 +416,7 @@ describe('fromTxId code script preservation', () => {
       constructorSlots: [{ paramIndex: 0, byteOffset: 0 }],
     });
 
-    // On chain, threshold was set to 1000n → encoded as 02e803
+    // On chain, threshold was set to 1000n -> encoded as 02e803
     const onChainScript = '02e8039c69';
 
     const provider = new MockProvider();
@@ -498,10 +498,10 @@ describe('selectUtxos', () => {
       makeUtxo(30_000, 2),
     ];
 
-    // Need 50,000 sats — no single UTXO is enough
+    // Need 50,000 sats -- no single UTXO is enough
     const selected = selectUtxos(utxos, 50_000, 1);
 
-    // Largest-first: 30,000 first, then 25,000 → total 55,000
+    // Largest-first: 30,000 first, then 25,000 -> total 55,000
     expect(selected.length).toBe(2);
     expect(selected[0]!.satoshis).toBe(30_000);
     expect(selected[1]!.satoshis).toBe(25_000);
@@ -564,5 +564,106 @@ describe('selectUtxos', () => {
     const broadcastedTx = provider.getBroadcastedTxs()[0]!;
     const parsed = parseTxHex(broadcastedTx);
     expect(parsed.inputCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M2: Boolean encoding -- must use minimal push (OP_TRUE / OP_FALSE)
+// ---------------------------------------------------------------------------
+
+describe('M2: SDK boolean encoding mismatch', () => {
+  it('encodeArg(true) produces 51 (OP_TRUE) via buildUnlockingScript', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [{ name: 'check', params: [{ name: 'flag', type: 'bool' }], isPublic: true }],
+      },
+    });
+
+    const contract = new RunarContract(artifact, []);
+    const unlockScript = contract.buildUnlockingScript('check', [true]);
+    expect(unlockScript).toBe('51');
+  });
+
+  it('encodeArg(false) produces 00 (OP_FALSE) via buildUnlockingScript', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [{ name: 'check', params: [{ name: 'flag', type: 'bool' }], isPublic: true }],
+      },
+    });
+
+    const contract = new RunarContract(artifact, []);
+    const unlockScript = contract.buildUnlockingScript('check', [false]);
+    expect(unlockScript).toBe('00');
+  });
+
+  it('encodeStateValue(true, "bool") produces 51 via serializeState', () => {
+    const fields: StateField[] = [{ name: 'flag', type: 'bool', index: 0 }];
+    const hex = serializeState(fields, { flag: true });
+    expect(hex).toBe('51');
+  });
+
+  it('encodeStateValue(false, "bool") produces 00 via serializeState', () => {
+    const fields: StateField[] = [{ name: 'flag', type: 'bool', index: 0 }];
+    const hex = serializeState(fields, { flag: false });
+    expect(hex).toBe('00');
+  });
+
+  it('boolean roundtrip: encode then deserialize preserves value', () => {
+    const fields: StateField[] = [{ name: 'flag', type: 'bool', index: 0 }];
+
+    const trueHex = serializeState(fields, { flag: true });
+    const trueResult = deserializeState(fields, trueHex);
+    expect(trueResult.flag).toBe(true);
+
+    const falseHex = serializeState(fields, { flag: false });
+    const falseResult = deserializeState(fields, falseHex);
+    expect(falseResult.flag).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// m9: encodeScriptInt(0n) should return '00' (OP_0)
+// ---------------------------------------------------------------------------
+
+describe('m9: encodeScriptInt zero encoding', () => {
+  it('state serialization of zero bigint produces 00 (OP_0)', () => {
+    const fields: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
+    const hex = serializeState(fields, { count: 0n });
+    expect(hex).toBe('00');
+  });
+
+  it('zero bigint roundtrips correctly through serialize/deserialize', () => {
+    const fields: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
+    const hex = serializeState(fields, { count: 0n });
+    const result = deserializeState(fields, hex);
+    expect(result.count).toBe(0n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// m10: Fee rate parameter
+// ---------------------------------------------------------------------------
+
+describe('m10: fee rate parameter', () => {
+  it('estimateDeployFee with feeRate=2 returns double the default', () => {
+    const fee1 = estimateDeployFee(1, 100);
+    const fee2 = estimateDeployFee(1, 100, 2);
+    expect(fee2).toBe(fee1 * 2);
+  });
+
+  it('estimateDeployFee with explicit feeRate=1 matches default', () => {
+    const feeDefault = estimateDeployFee(1, 100);
+    const feeExplicit = estimateDeployFee(1, 100, 1);
+    expect(feeExplicit).toBe(feeDefault);
+  });
+
+  it('estimateDeployFee with feeRate=3 returns triple the default', () => {
+    const fee1 = estimateDeployFee(1, 100);
+    const fee3 = estimateDeployFee(1, 100, 3);
+    expect(fee3).toBe(fee1 * 3);
   });
 });

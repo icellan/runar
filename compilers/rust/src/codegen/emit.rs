@@ -269,73 +269,6 @@ fn emit_if(
 // Peephole optimization
 // ---------------------------------------------------------------------------
 
-use std::collections::HashMap;
-
-/// Maps opcodes that can be combined with a following OP_VERIFY into a single
-/// *VERIFY opcode.
-fn verify_combinations() -> HashMap<&'static str, &'static str> {
-    let mut m = HashMap::new();
-    m.insert("OP_EQUAL", "OP_EQUALVERIFY");
-    m.insert("OP_NUMEQUAL", "OP_NUMEQUALVERIFY");
-    m.insert("OP_CHECKSIG", "OP_CHECKSIGVERIFY");
-    m.insert("OP_CHECKMULTISIG", "OP_CHECKMULTISIGVERIFY");
-    m
-}
-
-/// Peephole optimizer: combines adjacent opcode pairs into single opcodes
-/// (e.g. OP_EQUAL + OP_VERIFY -> OP_EQUALVERIFY) and eliminates no-op
-/// OP_SWAP OP_SWAP pairs. Recurses into If/Else blocks.
-fn peephole_optimize(ops: &[StackOp]) -> Vec<StackOp> {
-    let combinations = verify_combinations();
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < ops.len() {
-        let op = &ops[i];
-
-        // Combine OP_X + OP_VERIFY -> OP_XVERIFY
-        if i + 1 < ops.len() {
-            let next = &ops[i + 1];
-            if let (StackOp::Opcode(code), StackOp::Opcode(next_code)) = (op, next) {
-                if next_code == "OP_VERIFY" {
-                    if let Some(&combined) = combinations.get(code.as_str()) {
-                        result.push(StackOp::Opcode(combined.to_string()));
-                        i += 2; // skip the OP_VERIFY
-                        continue;
-                    }
-                }
-            }
-        }
-
-        // Eliminate OP_SWAP OP_SWAP (no-op pair)
-        if i + 1 < ops.len() {
-            if matches!((&ops[i], &ops[i + 1]), (StackOp::Swap, StackOp::Swap)) {
-                i += 2; // skip both swaps
-                continue;
-            }
-        }
-
-        // Recurse into if/else blocks
-        if let StackOp::If { then_ops, else_ops } = op {
-            result.push(StackOp::If {
-                then_ops: peephole_optimize(then_ops),
-                else_ops: if else_ops.is_empty() {
-                    Vec::new()
-                } else {
-                    peephole_optimize(else_ops)
-                },
-            });
-            i += 1;
-            continue;
-        }
-
-        result.push(op.clone());
-        i += 1;
-    }
-
-    result
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -344,18 +277,17 @@ fn peephole_optimize(ops: &[StackOp]) -> Vec<StackOp> {
 ///
 /// For contracts with multiple public methods, generates a method dispatch
 /// preamble using OP_IF/OP_ELSE chains.
+///
+/// Note: peephole optimization (VERIFY combinations, SWAP elimination) is
+/// handled by `optimize_stack_ops` in optimizer.rs, which runs before emit.
 pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
     let mut ctx = EmitContext::new();
 
-    // Filter to public methods (exclude constructor) and apply peephole optimizations
+    // Filter to public methods (exclude constructor)
     let public_methods: Vec<StackMethod> = methods
         .iter()
         .filter(|m| m.name != "constructor")
-        .map(|m| StackMethod {
-            name: m.name.clone(),
-            ops: peephole_optimize(&m.ops),
-            max_stack_depth: m.max_stack_depth,
-        })
+        .cloned()
         .collect();
 
     if public_methods.is_empty() {
@@ -528,6 +460,8 @@ mod tests {
 
     #[test]
     fn test_emit_single_method_produces_hex_and_asm() {
+        use super::super::optimizer::optimize_stack_ops;
+
         let method = StackMethod {
             name: "check".to_string(),
             ops: vec![
@@ -538,12 +472,19 @@ mod tests {
             max_stack_depth: 1,
         };
 
-        let result = emit(&[method]).expect("emit should succeed");
+        // Apply peephole optimization before emit (as the compiler pipeline does)
+        let optimized_method = StackMethod {
+            name: method.name.clone(),
+            ops: optimize_stack_ops(&method.ops),
+            max_stack_depth: method.max_stack_depth,
+        };
+
+        let result = emit(&[optimized_method]).expect("emit should succeed");
         assert!(!result.script_hex.is_empty(), "hex should not be empty");
         assert!(!result.script_asm.is_empty(), "asm should not be empty");
         assert!(
             result.script_asm.contains("OP_NUMEQUALVERIFY"),
-            "peephole optimizer should combine OP_NUMEQUAL + OP_VERIFY into OP_NUMEQUALVERIFY, got: {}",
+            "standalone peephole optimizer should combine OP_NUMEQUAL + OP_VERIFY into OP_NUMEQUALVERIFY, got: {}",
             result.script_asm
         );
     }

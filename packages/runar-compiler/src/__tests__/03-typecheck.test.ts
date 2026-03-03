@@ -309,6 +309,73 @@ describe('Pass 3: Type-Check', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // ByteString concatenation with +
+  // ---------------------------------------------------------------------------
+
+  describe('ByteString concatenation with +', () => {
+    it('allows ByteString + ByteString (concatenation via OP_CAT)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: ByteString;
+
+          constructor(x: ByteString) {
+            super(x);
+            this.x = x;
+          }
+
+          public m(y: ByteString) {
+            const z: ByteString = this.x + y;
+            assert(len(z) > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('allows PubKey + ByteString (byte family concatenation)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+
+          constructor(pk: PubKey) {
+            super(pk);
+            this.pk = pk;
+          }
+
+          public m(data: ByteString) {
+            const z: ByteString = this.pk + data;
+            assert(len(z) > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('rejects bigint + ByteString (mixed types)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+
+          constructor(x: bigint) {
+            super(x);
+            this.x = x;
+          }
+
+          public m(data: ByteString) {
+            const z: ByteString = this.x + data;
+            assert(true);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(hasError(result, "must be bigint")).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Comparison operators return boolean
   // ---------------------------------------------------------------------------
 

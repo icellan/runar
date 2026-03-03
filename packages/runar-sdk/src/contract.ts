@@ -11,7 +11,7 @@ import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 
 /**
- * Runtime wrapper for a compiled Rúnar contract.
+ * Runtime wrapper for a compiled Runar contract.
  *
  * Handles deployment, method invocation, state tracking, and script
  * construction. Works with any Provider and Signer implementation.
@@ -24,6 +24,13 @@ import { serializeState, extractStateFromScript, findLastOpReturn } from './stat
  */
 export class RunarContract {
   readonly artifact: RunarArtifact;
+  /**
+   * Constructor arguments for the contract, typed as `unknown[]` because
+   * they can be any of the Runar primitive types: `bigint`, `boolean`,
+   * `ByteString` (hex string), `PubKey` (hex string), etc. TypeScript
+   * generics are not practical here since the types depend on the specific
+   * contract being used and are only known at runtime from the ABI.
+   */
   private readonly constructorArgs: unknown[];
   private _state: Record<string, unknown> = {};
   private _codeScript: string | null = null;
@@ -44,7 +51,7 @@ export class RunarContract {
     // Initialize state from constructor args for stateful contracts.
     // State fields are matched to constructor args by their declaration
     // index, not by name, since the constructor param name may differ
-    // from the state field name (e.g., `initialHash` → `rollingHash`).
+    // from the state field name (e.g., `initialHash` -> `rollingHash`).
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       for (const field of artifact.stateFields) {
         if (field.index < constructorArgs.length) {
@@ -114,14 +121,17 @@ export class RunarContract {
       script: lockingScript,
     };
 
-    const tx = await provider.getTransaction(txid).catch(() => ({
-      txid,
-      version: 1,
-      inputs: [],
-      outputs: [{ satoshis: options.satoshis, script: lockingScript }],
-      locktime: 0,
-      raw: signedTx,
-    }));
+    const tx = await provider.getTransaction(txid).catch((err) => {
+      console.warn('Failed to fetch transaction after broadcast:', err);
+      return {
+        txid,
+        version: 1,
+        inputs: [],
+        outputs: [{ satoshis: options.satoshis, script: lockingScript }],
+        locktime: 0,
+        raw: signedTx,
+      };
+    });
 
     return { txid, tx };
   }
@@ -231,14 +241,17 @@ export class RunarContract {
       this.currentUtxo = null;
     }
 
-    const tx = await provider.getTransaction(txid).catch(() => ({
-      txid,
-      version: 1,
-      inputs: [],
-      outputs: [],
-      locktime: 0,
-      raw: signedTx,
-    }));
+    const tx = await provider.getTransaction(txid).catch((err) => {
+      console.warn('Failed to fetch transaction after broadcast:', err);
+      return {
+        txid,
+        version: 1,
+        inputs: [],
+        outputs: [],
+        locktime: 0,
+        raw: signedTx,
+      };
+    });
 
     return { txid, tx };
   }
@@ -371,7 +384,7 @@ export class RunarContract {
     const output = tx.outputs[outputIndex]!;
     const contract = new RunarContract(
       artifact,
-      // Dummy constructor args — we store the on-chain code script directly
+      // Dummy constructor args -- we store the on-chain code script directly
       // so these won't be used in getLockingScript().
       new Array(artifact.abi.constructor.params.length).fill(0n) as unknown[],
     );
@@ -436,7 +449,7 @@ function encodeArg(value: unknown): string {
     return encodeScriptNumber(BigInt(value));
   }
   if (typeof value === 'boolean') {
-    return value ? '0151' : '0100';
+    return value ? '51' : '00';
   }
   if (typeof value === 'string') {
     // Assume hex-encoded data
@@ -603,7 +616,7 @@ function readVarIntHex(
       hexLen: 10,
     };
   }
-  // 0xff — 8-byte varint; handle the low 4 bytes (sufficient for scripts)
+  // 0xff -- 8-byte varint; handle the low 4 bytes (sufficient for scripts)
   const b0 = parseInt(hex.slice(pos + 2, pos + 4), 16);
   const b1 = parseInt(hex.slice(pos + 4, pos + 6), 16);
   const b2 = parseInt(hex.slice(pos + 6, pos + 8), 16);

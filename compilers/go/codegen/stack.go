@@ -70,9 +70,7 @@ var builtinOpcodes = map[string][]string{
 	"within":       {"OP_WITHIN"},
 	"split":        {"OP_SPLIT"},
 	"left":         {"OP_SPLIT", "OP_DROP"},
-	"right":        {"OP_SPLIT", "OP_NIP"},
 	"int2str":      {"OP_NUM2BIN"},
-	"sign":         {"OP_DUP", "OP_ABS", "OP_SWAP", "OP_DIV"},
 	"bool":         {"OP_0NOTEQUAL"},
 }
 
@@ -675,6 +673,16 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 
 	if funcName == "log2" {
 		ctx.lowerLog2(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "sign" {
+		ctx.lowerSign(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "right" {
+		ctx.lowerRight(bindingName, args, bindingIndex, lastUses)
 		return
 	}
 
@@ -1503,8 +1511,7 @@ func (ctx *loweringContext) lowerVerifyRabinSig(bindingName string, args []strin
 
 	// Stack input: <msg> <sig> <padding> <pubKey>
 	// Computation: (sig^2 + padding) mod pubKey == SHA256(msg)
-	// Opcode sequence: OP_DUP OP_TOALTSTACK OP_SWAP OP_3 OP_ROLL
-	//                  OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+	// Opcode sequence: OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
 	msg, sig, padding, pubKey := args[0], args[1], args[2], args[3]
 
 	msgIsLast := ctx.isLastUse(msg, bindingIndex, lastUses)
@@ -1526,19 +1533,76 @@ func (ctx *loweringContext) lowerVerifyRabinSig(bindingName string, args []strin
 	ctx.sm.pop()
 
 	// Emit the Rabin signature verification opcode sequence
+	// Stack: msg(3) sig(2) padding(1) pubKey(0)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // msg sig pubKey padding
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROT"})   // msg pubKey padding sig
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_3"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ROLL"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MUL"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ADD"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MUL"})   // msg pubKey padding sig^2
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ADD"})   // msg pubKey (sig^2+padding)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // msg (sig^2+padding) pubKey
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_MOD"})   // msg ((sig^2+padding) mod pubKey)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})  // ((sig^2+padding) mod pubKey) msg
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SHA256"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_EQUAL"})
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// lowerSign lowers sign(x) to Script that avoids division by zero for x == 0.
+// Stack: <x>
+// OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF
+// If x == 0, the duplicated 0 is consumed by OP_IF (falsy) and original 0 stays.
+func (ctx *loweringContext) lowerSign(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	if len(args) < 1 {
+		panic("sign requires 1 argument")
+	}
+	x := args[0]
+
+	xIsLast := ctx.isLastUse(x, bindingIndex, lastUses)
+	ctx.bringToTop(x, xIsLast)
+	ctx.sm.pop()
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
+	ctx.emitOp(StackOp{
+		Op: "if",
+		Then: []StackOp{
+			{Op: "opcode", Code: "OP_DUP"},
+			{Op: "opcode", Code: "OP_ABS"},
+			{Op: "swap"},
+			{Op: "opcode", Code: "OP_DIV"},
+		},
+	})
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// lowerRight lowers right(data, len) to Script.
+// right() returns the rightmost `len` bytes of `data`.
+// Stack: <data> <len>
+// OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP
+func (ctx *loweringContext) lowerRight(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	if len(args) < 2 {
+		panic("right requires 2 arguments")
+	}
+	data, length := args[0], args[1]
+
+	dataIsLast := ctx.isLastUse(data, bindingIndex, lastUses)
+	ctx.bringToTop(data, dataIsLast)
+
+	lengthIsLast := ctx.isLastUse(length, bindingIndex, lastUses)
+	ctx.bringToTop(length, lengthIsLast)
+
+	ctx.sm.pop() // len
+	ctx.sm.pop() // data
+
+	ctx.emitOp(StackOp{Op: "swap"})                          // <len> <data>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})       // <len> <data> <size>
+	ctx.emitOp(StackOp{Op: "rot"})                            // <data> <size> <len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})        // <data> <size-len>
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})      // <left> <right>
+	ctx.emitOp(StackOp{Op: "nip"})                            // <right>
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

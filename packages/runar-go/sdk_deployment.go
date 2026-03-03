@@ -28,9 +28,9 @@ func BuildDeployTransaction(
 	satoshis int64,
 	changeAddress string,
 	changeScript string,
-) (txHex string, inputCount int) {
+) (txHex string, inputCount int, err error) {
 	if len(utxos) == 0 {
-		panic("buildDeployTransaction: no UTXOs provided")
+		return "", 0, fmt.Errorf("buildDeployTransaction: no UTXOs provided")
 	}
 
 	var totalInput int64
@@ -42,10 +42,10 @@ func BuildDeployTransaction(
 	change := totalInput - satoshis - fee
 
 	if change < 0 {
-		panic(fmt.Sprintf(
+		return "", 0, fmt.Errorf(
 			"buildDeployTransaction: insufficient funds. Need %d sats, have %d",
 			satoshis+fee, totalInput,
-		))
+		)
 	}
 
 	var tx string
@@ -95,7 +95,7 @@ func BuildDeployTransaction(
 	// Locktime (4 bytes LE)
 	tx += toLittleEndian32(0)
 
-	return tx, len(utxos)
+	return tx, len(utxos), nil
 }
 
 // SelectUtxos selects the minimum set of UTXOs needed to fund a deployment,
@@ -120,7 +120,7 @@ func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int) [
 		}
 	}
 
-	// Return all UTXOs; BuildDeployTransaction will panic if still insufficient
+	// Return all UTXOs; BuildDeployTransaction will return an error if still insufficient
 	return selected
 }
 

@@ -766,13 +766,16 @@ func TestFindLastOpReturn_NoOpReturn(t *testing.T) {
 func TestBuildDeployTransaction_NonEmptyHex(t *testing.T) {
 	lockingScript := "76a914" + strings.Repeat("00", 20) + "88ac"
 	utxos := []UTXO{makeUtxo(100000, 0)}
-	txHex, inputCount := BuildDeployTransaction(
+	txHex, inputCount, err := BuildDeployTransaction(
 		lockingScript,
 		utxos,
 		50000,
 		"testChangeAddress",
 		"76a914"+strings.Repeat("ff", 20)+"88ac",
 	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if txHex == "" {
 		t.Fatal("expected non-empty txHex")
@@ -793,7 +796,10 @@ func TestBuildDeployTransaction_CorrectStructure(t *testing.T) {
 	utxos := []UTXO{makeUtxo(100000, 0)}
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildDeployTransaction(lockingScript, utxos, 50000, "testChangeAddress", changeScript)
+	txHex, _, err := BuildDeployTransaction(lockingScript, utxos, 50000, "testChangeAddress", changeScript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	parsed := parseTxHex(txHex)
 
 	if parsed.version != 1 {
@@ -826,7 +832,10 @@ func TestBuildDeployTransaction_MultipleUtxos(t *testing.T) {
 	utxos := []UTXO{makeUtxo(30000, 0), makeUtxo(40000, 1), makeUtxo(50000, 2)}
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, inputCount := BuildDeployTransaction("51", utxos, 50000, "testChangeAddress", changeScript)
+	txHex, inputCount, err := BuildDeployTransaction("51", utxos, 50000, "testChangeAddress", changeScript)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if inputCount != 3 {
 		t.Errorf("expected 3 inputs, got %d", inputCount)
@@ -838,38 +847,33 @@ func TestBuildDeployTransaction_MultipleUtxos(t *testing.T) {
 	}
 }
 
-func TestBuildDeployTransaction_PanicsNoUtxos(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for no UTXOs")
-		}
-		msg := fmt.Sprintf("%v", r)
-		if !strings.Contains(msg, "no UTXOs provided") {
-			t.Fatalf("unexpected panic: %s", msg)
-		}
-	}()
-	BuildDeployTransaction("51", nil, 50000, "addr", "51")
+func TestBuildDeployTransaction_ErrorNoUtxos(t *testing.T) {
+	_, _, err := BuildDeployTransaction("51", nil, 50000, "addr", "51")
+	if err == nil {
+		t.Fatal("expected error for no UTXOs")
+	}
+	if !strings.Contains(err.Error(), "no UTXOs provided") {
+		t.Fatalf("unexpected error: %s", err)
+	}
 }
 
-func TestBuildDeployTransaction_PanicsInsufficientFunds(t *testing.T) {
-	defer func() {
-		r := recover()
-		if r == nil {
-			t.Fatal("expected panic for insufficient funds")
-		}
-		msg := fmt.Sprintf("%v", r)
-		if !strings.Contains(msg, "insufficient funds") {
-			t.Fatalf("unexpected panic: %s", msg)
-		}
-	}()
-	BuildDeployTransaction("51", []UTXO{makeUtxo(100, 0)}, 50000, "addr", "51")
+func TestBuildDeployTransaction_ErrorInsufficientFunds(t *testing.T) {
+	_, _, err := BuildDeployTransaction("51", []UTXO{makeUtxo(100, 0)}, 50000, "addr", "51")
+	if err == nil {
+		t.Fatal("expected error for insufficient funds")
+	}
+	if !strings.Contains(err.Error(), "insufficient funds") {
+		t.Fatalf("unexpected error: %s", err)
+	}
 }
 
 func TestBuildDeployTransaction_SingleOutputWhenZeroChange(t *testing.T) {
 	// Fee: TX_OVERHEAD(10) + 1 input * P2PKH(148) + contract output(8+1+1) + change output(34) = 202
 	utxos := []UTXO{makeUtxo(50202, 0)}
-	txHex, _ := BuildDeployTransaction("51", utxos, 50000, "addr", "51")
+	txHex, _, err := BuildDeployTransaction("51", utxos, 50000, "addr", "51")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	parsed := parseTxHex(txHex)
 	if parsed.outputCount != 1 {
@@ -1813,8 +1817,11 @@ func TestBigintEdgeCases(t *testing.T) {
 func TestInsertUnlockingScript_Basic(t *testing.T) {
 	// Build a simple 1-input tx with empty scriptSig
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildDeployTransaction("51", []UTXO{utxo}, 50000, "addr",
+	txHex, _, err := BuildDeployTransaction("51", []UTXO{utxo}, 50000, "addr",
 		"76a914"+strings.Repeat("ff", 20)+"88ac")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	// Insert a mock unlocking script
 	unlockScript := "48" + strings.Repeat("aa", 72) // 72-byte sig push

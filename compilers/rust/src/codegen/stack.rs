@@ -88,9 +88,7 @@ fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
         "within" => Some(vec!["OP_WITHIN"]),
         "split" => Some(vec!["OP_SPLIT"]),
         "left" => Some(vec!["OP_SPLIT", "OP_DROP"]),
-        "right" => Some(vec!["OP_SPLIT", "OP_NIP"]),
         "int2str" => Some(vec!["OP_NUM2BIN"]),
-        "sign" => Some(vec!["OP_DUP", "OP_ABS", "OP_SWAP", "OP_DIV"]),
         "bool" => Some(vec!["OP_0NOTEQUAL"]),
         _ => None,
     }
@@ -772,6 +770,16 @@ impl LoweringContext {
 
         if func_name == "log2" {
             self.lower_log2(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "sign" {
+            self.lower_sign(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "right" {
+            self.lower_right(binding_name, args, binding_index, last_uses);
             return;
         }
 
@@ -1653,8 +1661,7 @@ impl LoweringContext {
 
         // Stack input: <msg> <sig> <padding> <pubKey>
         // Computation: (sig^2 + padding) mod pubKey == SHA256(msg)
-        // Opcode sequence: OP_DUP OP_TOALTSTACK OP_SWAP OP_3 OP_ROLL
-        //                  OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
+        // Opcode sequence: OP_SWAP OP_ROT OP_DUP OP_MUL OP_ADD OP_SWAP OP_MOD OP_SWAP OP_SHA256 OP_EQUAL
         let msg = &args[0];
         let sig = &args[1];
         let padding = &args[2];
@@ -1679,19 +1686,81 @@ impl LoweringContext {
         self.sm.pop();
 
         // Emit the Rabin signature verification opcode sequence
+        // Stack: msg(3) sig(2) padding(1) pubKey(0)
+        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // msg sig pubKey padding
+        self.emit_op(StackOp::Opcode("OP_ROT".to_string()));   // msg pubKey padding sig
         self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_3".to_string()));
-        self.emit_op(StackOp::Opcode("OP_ROLL".to_string()));
-        self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_MUL".to_string()));
-        self.emit_op(StackOp::Opcode("OP_ADD".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_MOD".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
+        self.emit_op(StackOp::Opcode("OP_MUL".to_string()));   // msg pubKey padding sig^2
+        self.emit_op(StackOp::Opcode("OP_ADD".to_string()));   // msg pubKey (sig^2+padding)
+        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // msg (sig^2+padding) pubKey
+        self.emit_op(StackOp::Opcode("OP_MOD".to_string()));   // msg ((sig^2+padding) mod pubKey)
+        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));  // ((sig^2+padding) mod pubKey) msg
         self.emit_op(StackOp::Opcode("OP_SHA256".to_string()));
         self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// Lower sign(x) to Script that avoids division by zero for x == 0.
+    /// OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF
+    fn lower_sign(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(!args.is_empty(), "sign requires 1 argument");
+        let x = &args[0];
+
+        let x_is_last = self.is_last_use(x, binding_index, last_uses);
+        self.bring_to_top(x, x_is_last);
+        self.sm.pop();
+
+        self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
+        self.emit_op(StackOp::If {
+            then_ops: vec![
+                StackOp::Opcode("OP_DUP".to_string()),
+                StackOp::Opcode("OP_ABS".to_string()),
+                StackOp::Swap,
+                StackOp::Opcode("OP_DIV".to_string()),
+            ],
+            else_ops: vec![],
+        });
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// Lower right(data, len) to Script.
+    /// OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP
+    fn lower_right(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(args.len() >= 2, "right requires 2 arguments");
+        let data = &args[0];
+        let length = &args[1];
+
+        let data_is_last = self.is_last_use(data, binding_index, last_uses);
+        self.bring_to_top(data, data_is_last);
+
+        let length_is_last = self.is_last_use(length, binding_index, last_uses);
+        self.bring_to_top(length, length_is_last);
+
+        self.sm.pop(); // len
+        self.sm.pop(); // data
+
+        self.emit_op(StackOp::Swap);                                     // <len> <data>
+        self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));            // <len> <data> <size>
+        self.emit_op(StackOp::Rot);                                      // <data> <size> <len>
+        self.emit_op(StackOp::Opcode("OP_SUB".to_string()));             // <data> <size-len>
+        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));           // <left> <right>
+        self.emit_op(StackOp::Nip);                                      // <right>
 
         self.sm.push(binding_name);
         self.track_depth();

@@ -4,7 +4,6 @@
  * Multi-format parser dispatcher. Detects the source format by file extension
  * and routes to the appropriate parser:
  *   - `.runar.ts`   → TypeScript (ts-morph)
- *   - `.runar.yaml`  → YAML declarative templates
  *   - `.runar.sol`  → Solidity-like syntax
  *   - `.runar.move` → Move-style resource language
  */
@@ -475,6 +474,15 @@ function parseVariableStatement(
     return null;
   }
 
+  // Warn about multiple declarations in a single statement
+  if (decls.length > 1) {
+    errors.push(makeDiagnostic(
+      'Multiple variable declarations in a single statement are not supported. Declare one variable per statement.',
+      'warning',
+      locFromNode(node, file),
+    ));
+  }
+
   // We only handle single-declaration variable statements
   const decl = decls[0]!;
   const name = decl.getName();
@@ -916,6 +924,8 @@ function parseBinaryExpression(
     [SyntaxKind.AmpersandToken]: '&',
     [SyntaxKind.BarToken]: '|',
     [SyntaxKind.CaretToken]: '^',
+    [SyntaxKind.LessThanLessThanToken]: '<<',
+    [SyntaxKind.GreaterThanGreaterThanToken]: '>>',
   };
 
   // Handle == and != (loose equality) -- map to === and !== with a warning

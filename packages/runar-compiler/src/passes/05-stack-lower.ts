@@ -48,9 +48,7 @@ const BUILTIN_OPCODES: Record<string, string[]> = {
   within: ['OP_WITHIN'],
   split: ['OP_SPLIT'],
   left: ['OP_SPLIT', 'OP_DROP'],
-  right: ['OP_SPLIT', 'OP_NIP'],
   int2str: ['OP_NUM2BIN'],
-  sign: ['OP_DUP', 'OP_ABS', 'OP_SWAP', 'OP_DIV'],
   bool: ['OP_0NOTEQUAL'],
   unpack: ['OP_BIN2NUM'],
 };
@@ -568,12 +566,15 @@ class LoweringContext {
     this.stackMap.pop();
     this.stackMap.pop();
 
-    // For equality operators, choose OP_EQUAL vs OP_NUMEQUAL based on operand type.
+    // For byte-typed operands, override certain operators.
     if (resultType === 'bytes' && (op === '===' || op === '!==')) {
       this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
       if (op === '!==') {
         this.emitOp({ op: 'opcode', code: 'OP_NOT' });
       }
+    } else if (resultType === 'bytes' && op === '+') {
+      // ByteString concatenation: + on byte types emits OP_CAT, not OP_ADD.
+      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
     } else {
       // Emit the opcode(s) from the standard table
       const opcodes = BINOP_OPCODES[op];
@@ -742,6 +743,16 @@ class LoweringContext {
 
     if (func === 'log2') {
       this.lowerLog2(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    if (func === 'sign') {
+      this.lowerSign(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    if (func === 'right') {
+      this.lowerRight(bindingName, args, bindingIndex, lastUses);
       return;
     }
 
@@ -922,6 +933,16 @@ class LoweringContext {
 
       for (let j = 0; j < body.length; j++) {
         this.lowerBinding(body[j]!, j, lastUses);
+      }
+
+      // Clean up the iteration variable if it was not consumed by the body.
+      // The body may not reference _iterVar at all, leaving it on the stack.
+      if (this.stackMap.has(_iterVar)) {
+        const depth = this.stackMap.findDepth(_iterVar);
+        if (depth === 0) {
+          this.emitOp({ op: 'drop' });
+          this.stackMap.pop();
+        }
       }
     }
     // Loop produces a dummy value
@@ -1395,7 +1416,7 @@ class LoweringContext {
 
       case 'extractAmount':
         // End-relative: 8 bytes (LE int64) before nSequence(4) + hashOutputs(32) + nLocktime(4) + sighashType(4) = 44 bytes from end.
-        // Total end offset: 44 + 4 + 8 = 56. Amount starts 56 bytes from end, is 8 bytes.
+        // Total end offset: 44 + 8 = 52. Amount starts 52 bytes from end, is 8 bytes.
         // <preimage> OP_SIZE 52 OP_SUB OP_SPLIT OP_NIP 8 OP_SPLIT OP_DROP OP_BIN2NUM
         this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
         this.stackMap.push(null);
@@ -1496,7 +1517,11 @@ class LoweringContext {
         break;
 
       case 'extractInputIndex':
-        // The input index is encoded in the outpoint's vout field (bytes 100-103, 4 bytes at offset 100).
+        // NOTE: This extracts the prevout index (vout) from the outpoint field of the
+        // BIP-143 sighash preimage. This is the output index in the *previous* transaction
+        // that created the UTXO being spent -- NOT the spending input's position in the
+        // current transaction's input list.
+        // The outpoint's vout field is at bytes 100-103 (4 bytes at offset 100).
         // Outpoint is at offset 68, 36 bytes. vout is the last 4 bytes of outpoint = offset 100.
         // <preimage> 100 OP_SPLIT OP_NIP 4 OP_SPLIT OP_DROP OP_BIN2NUM
         this.emitOp({ op: 'push', value: 100n });
@@ -1627,6 +1652,16 @@ class LoweringContext {
 
     this.stackMap.pop(); // exp
     this.stackMap.pop(); // base
+
+    // NOTE: The stack map is intentionally abandoned during the pow computation.
+    // The pow loop uses raw opcode-level stack manipulation (PICK, SWAP, OVER)
+    // that bypasses the stack map tracking. This is safe because:
+    //   1. Both operands have been popped from the stack map above.
+    //   2. The entire pow sequence is self-contained -- it consumes exactly 2 values
+    //      (base, exp) and produces exactly 1 value (result) on the real stack.
+    //   3. No other named variables are accessed during the computation.
+    //   4. After completion, the result is registered in the stack map as bindingName.
+    // This pattern is also used by gcd, sqrt, and other bounded-iteration builtins.
 
     // Emit the pow computation as a flat opcode sequence:
     // Input stack:  <base> <exp>  (already consumed from stackMap above)
@@ -1926,22 +1961,119 @@ class LoweringContext {
   }
 
   /**
+   * Lower sign(x) — returns -1, 0, or 1.
+   *
+   * Guards against division by zero when x=0 by using an OP_IF:
+   *   OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF
+   *
+   * When x=0: OP_DUP pushes 0, OP_IF is false so we skip the division,
+   * and the original 0 remains on the stack.
+   * When x!=0: we compute x / abs(x) which gives -1 or 1.
+   */
+  private lowerSign(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 1) throw new Error('sign requires 1 argument');
+    const x = args[0]!;
+
+    const xIsLast = this.isLastUse(x, bindingIndex, lastUses);
+    this.bringToTop(x, xIsLast);
+    this.stackMap.pop();
+
+    // Stack: <x>
+    // OP_DUP: <x> <x>
+    // OP_IF (x != 0):
+    //   OP_DUP OP_ABS OP_SWAP OP_DIV => x / abs(x)
+    // OP_ENDIF
+    // If x == 0, the duplicated 0 is consumed by OP_IF (falsy) and original 0 stays.
+    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
+    this.emitOp({
+      op: 'if',
+      then: [
+        { op: 'opcode', code: 'OP_DUP' },
+        { op: 'opcode', code: 'OP_ABS' },
+        { op: 'swap' },
+        { op: 'opcode', code: 'OP_DIV' },
+      ],
+      else: undefined,
+    });
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  /**
+   * Lower right(data, n) — returns the rightmost n bytes of data.
+   *
+   * Splits at (size - n) and keeps the right part:
+   *   <data> <n> OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP
+   *
+   * Stack trace:
+   *   <data> <n>
+   *   OP_SWAP → <n> <data>
+   *   OP_SIZE → <n> <data> <size>
+   *   OP_ROT  → <data> <size> <n>
+   *   OP_SUB  → <data> <size-n>
+   *   OP_SPLIT → <left> <right>
+   *   OP_NIP   → <right>  (rightmost n bytes)
+   */
+  private lowerRight(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 2) throw new Error('right requires 2 arguments');
+    const [data, len] = args as [string, string];
+
+    // Push data onto the stack
+    const dataIsLast = this.isLastUse(data, bindingIndex, lastUses);
+    this.bringToTop(data, dataIsLast);
+
+    // Push len onto the stack
+    const lenIsLast = this.isLastUse(len, bindingIndex, lastUses);
+    this.bringToTop(len, lenIsLast);
+
+    // Stack: <data> <len>
+    this.stackMap.pop(); // len
+    this.stackMap.pop(); // data
+
+    // OP_SWAP → <len> <data>
+    this.emitOp({ op: 'swap' });
+    // OP_SIZE → <len> <data> <size>
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    // OP_ROT → <data> <size> <len>
+    this.emitOp({ op: 'rot' });
+    // OP_SUB → <data> <size-len>
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    // OP_SPLIT → <left> <right>
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    // OP_NIP → <right>
+    this.emitOp({ op: 'nip' });
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  /**
    * Lower verifyRabinSig(msg, sig, padding, pubKey) to Script.
    *
    * Rabin signature verification checks: (sig^2 + padding) mod pubKey == SHA256(msg)
    *
-   * Stack before: <msg> <sig> <padding> <pubKey>
+   * Stack before: <msg(3)> <sig(2)> <padding(1)> <pubKey(0)>
    * Script:
-   *   OP_DUP OP_TOALTSTACK        -- save pubKey copy for modulo
-   *   OP_SWAP                     -- <msg> <sig> <pubKey> <padding>
-   *   OP_3 OP_ROLL                -- <msg> <pubKey> <padding> <sig>
-   *   OP_DUP OP_MUL               -- <msg> <pubKey> <padding> <sig^2>
-   *   OP_ADD                      -- <msg> <pubKey> <sig^2+padding>
-   *   OP_SWAP                     -- <msg> <sig^2+padding> <pubKey>
-   *   OP_MOD                      -- <msg> <(sig^2+padding) mod pubKey>
-   *   OP_SWAP                     -- <(sig^2+padding) mod pubKey> <msg>
-   *   OP_SHA256                   -- <(sig^2+padding) mod pubKey> <SHA256(msg)>
-   *   OP_EQUAL                    -- <result>
+   *   OP_SWAP                     -- msg sig pubKey padding
+   *   OP_ROT                      -- msg pubKey padding sig  (sig on top for squaring)
+   *   OP_DUP OP_MUL               -- msg pubKey padding sig^2
+   *   OP_ADD                      -- msg pubKey (sig^2+padding)
+   *   OP_SWAP                     -- msg (sig^2+padding) pubKey
+   *   OP_MOD                      -- msg ((sig^2+padding) mod pubKey)
+   *   OP_SWAP                     -- ((sig^2+padding) mod pubKey) msg
+   *   OP_SHA256                   -- ((sig^2+padding) mod pubKey) SHA256(msg)
+   *   OP_EQUAL                    -- result
    */
   private lowerVerifyRabinSig(
     bindingName: string,
@@ -1964,29 +2096,26 @@ class LoweringContext {
       this.stackMap.pop();
     }
 
-    // Stack: <msg> <sig> <padding> <pubKey>
+    // Stack bottom->top: msg(3) sig(2) padding(1) pubKey(0)
     // Compute: (sig^2 + padding) mod pubKey == SHA256(msg)
 
-    // Save pubKey copy, swap padding and pubKey, roll sig to top
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });        // dup pubKey
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });  // stash pubKey in altstack
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });        // swap padding and pubKey
-    this.emitOp({ op: 'opcode', code: 'OP_3' });           // push 3 for ROLL
-    this.emitOp({ op: 'opcode', code: 'OP_ROLL' });        // bring sig to top
+    // Rearrange so sig is on top for squaring
+    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // msg sig pubKey padding
+    this.emitOp({ op: 'opcode', code: 'OP_ROT' });   // msg pubKey padding sig
 
     // sig^2
     this.emitOp({ op: 'opcode', code: 'OP_DUP' });
-    this.emitOp({ op: 'opcode', code: 'OP_MUL' });
+    this.emitOp({ op: 'opcode', code: 'OP_MUL' });   // msg pubKey padding sig^2
 
     // sig^2 + padding
-    this.emitOp({ op: 'opcode', code: 'OP_ADD' });
+    this.emitOp({ op: 'opcode', code: 'OP_ADD' });   // msg pubKey (sig^2+padding)
 
     // (sig^2 + padding) mod pubKey
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });
-    this.emitOp({ op: 'opcode', code: 'OP_MOD' });
+    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // msg (sig^2+padding) pubKey
+    this.emitOp({ op: 'opcode', code: 'OP_MOD' });   // msg ((sig^2+padding) mod pubKey)
 
     // SHA256(msg) and compare
-    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });
+    this.emitOp({ op: 'opcode', code: 'OP_SWAP' });  // ((sig^2+padding) mod pubKey) msg
     this.emitOp({ op: 'opcode', code: 'OP_SHA256' });
     this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
 
