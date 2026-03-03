@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"strings"
 
 	"github.com/icellan/runar/compilers/go/ir"
 )
@@ -134,7 +135,152 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	for _, method := range contract.Methods {
 		methodCtx := newLowerCtx(contract)
 
-		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
+		if contract.ParentClass == "InductiveSmartContract" && method.Visibility == "public" {
+			// ---------------------------------------------------------------
+			// InductiveSmartContract public method lowering
+			// ---------------------------------------------------------------
+
+			// Register implicit parameters: parentTx + txPreimage
+			methodCtx.addParam("parentTx")
+			methodCtx.addParam("txPreimage")
+
+			// 1. Inject checkPreimage(txPreimage) at the start
+			preimageRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			checkResult := methodCtx.emit(ir.ANFValue{Kind: "check_preimage", Preimage: preimageRef})
+			methodCtx.emit(makeAssert(checkResult))
+
+			// 2. Verify parent tx authenticity:
+			//    assert(hash256(parentTx) === left(extractOutpoint(txPreimage), 32))
+			parentTxRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "parentTx"})
+			parentTxHash := methodCtx.emit(makeCall("hash256", []string{parentTxRef}))
+			preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			outpointRef := methodCtx.emit(makeCall("extractOutpoint", []string{preimageRef2}))
+			thirtyTwo := methodCtx.emit(makeLoadConstInt(32))
+			parentTxIdFromPreimage := methodCtx.emit(makeCall("left", []string{outpointRef, thirtyTwo}))
+			parentHashEq := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: parentTxHash, Right: parentTxIdFromPreimage, ResultType: "bytes"})
+			methodCtx.emit(makeAssert(parentHashEq))
+
+			// 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
+			genesisRef := methodCtx.emit(ir.ANFValue{Kind: "load_prop", Name: "_genesisOutpoint"})
+			zeroSentinel := methodCtx.emit(makeLoadConstString(strings.Repeat("0", 72))) // 36 bytes = 72 hex chars
+			isGenesis := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: genesisRef, Right: zeroSentinel, ResultType: "bytes"})
+
+			// Genesis branch: set _genesisOutpoint = extractOutpoint(txPreimage)
+			genesisCtx := methodCtx.subContext()
+			gpRef := genesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			currentOutpoint := genesisCtx.emit(makeCall("extractOutpoint", []string{gpRef}))
+			genesisCtx.emit(makeUpdateProp("_genesisOutpoint", currentOutpoint))
+			methodCtx.syncCounter(genesisCtx)
+
+			// Non-genesis branch: verify chain consistency
+			nonGenesisCtx := methodCtx.subContext()
+			// Extract parent output script via extract_parent_output
+			ptxRef := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "parentTx"})
+			// Derive output index dynamically from the current transaction's outpoint.
+			// The outpoint is 36 bytes: 32-byte txid + 4-byte vout (little-endian).
+			// We extract the last 4 bytes (vout) and convert to a number via OP_BIN2NUM.
+			preimageForIdx := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			outpointForIdx := nonGenesisCtx.emit(makeCall("extractOutpoint", []string{preimageForIdx}))
+			fourC := nonGenesisCtx.emit(makeLoadConstInt(4))
+			outputIdxBytes := nonGenesisCtx.emit(makeCall("right", []string{outpointForIdx, fourC}))
+			outputIdx := nonGenesisCtx.emit(ir.ANFValue{Kind: "unary_op", Op: "unpack", Operand: outputIdxBytes})
+			parentScript := nonGenesisCtx.emit(ir.ANFValue{Kind: "extract_parent_output", RawTx: ptxRef, OutputIndex: outputIdx})
+
+			// Extract internal fields from the END of parent script
+			// Internal fields are the last 111 bytes (3 * 37 bytes: 1 push opcode + 36 data bytes each)
+			parentScriptLen := nonGenesisCtx.emit(makeCall("len", []string{parentScript}))
+			oneEleven := nonGenesisCtx.emit(makeLoadConstInt(111))
+			prefixLen := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "-", Left: parentScriptLen, Right: oneEleven})
+			_ = prefixLen
+			internalFieldsWithPrefixes := nonGenesisCtx.emit(makeCall("right", []string{parentScript, oneEleven}))
+
+			// Now extract each 37-byte field (1 push opcode + 36 data bytes)
+			thirtySevenC := nonGenesisCtx.emit(makeLoadConstInt(37))
+			thirtySixC := nonGenesisCtx.emit(makeLoadConstInt(36))
+			_ = thirtySixC
+
+			// parentGenesis: left(internalFieldsWithPrefixes, 37), then right(_, 36) to skip push opcode
+			parentGenesisRaw := nonGenesisCtx.emit(makeCall("left", []string{internalFieldsWithPrefixes, thirtySevenC}))
+			thirtySixC2 := nonGenesisCtx.emit(makeLoadConstInt(36))
+			parentGenesis := nonGenesisCtx.emit(makeCall("right", []string{parentGenesisRaw, thirtySixC2}))
+
+			// parentParentOutpoint: left(internalFieldsWithPrefixes, 74), then right(_, 37), then right(_, 36)
+			seventyFourC := nonGenesisCtx.emit(makeLoadConstInt(74))
+			parentParentOutpointRaw := nonGenesisCtx.emit(makeCall("left", []string{internalFieldsWithPrefixes, seventyFourC}))
+			thirtySevenC2 := nonGenesisCtx.emit(makeLoadConstInt(37))
+			parentParentOutpointWithPrefix := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointRaw, thirtySevenC2}))
+			thirtySixC3 := nonGenesisCtx.emit(makeLoadConstInt(36))
+			parentParentOutpoint := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointWithPrefix, thirtySixC3}))
+
+			// Assert: parentGenesis === _genesisOutpoint (same lineage)
+			myGenesis := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_prop", Name: "_genesisOutpoint"})
+			genesisEq := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: parentGenesis, Right: myGenesis, ResultType: "bytes"})
+			nonGenesisCtx.emit(makeAssert(genesisEq))
+
+			// Assert: parentParentOutpoint === _grandparentOutpoint (chain links match)
+			myGrandparent := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_prop", Name: "_grandparentOutpoint"})
+			chainEq := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: parentParentOutpoint, Right: myGrandparent, ResultType: "bytes"})
+			nonGenesisCtx.emit(makeAssert(chainEq))
+			methodCtx.syncCounter(nonGenesisCtx)
+
+			// Emit the if/else
+			methodCtx.emit(ir.ANFValue{
+				Kind: "if",
+				Cond: isGenesis,
+				Then: genesisCtx.bindings,
+				Else: nonGenesisCtx.bindings,
+			})
+
+			// 4. Inject internal field updates BEFORE the developer body, so that
+			//    addOutput calls in the developer's code pick up the updated values
+			//    via auto-appended load_prop references.
+			//    _grandparentOutpoint = _parentOutpoint
+			oldParent := methodCtx.emit(ir.ANFValue{Kind: "load_prop", Name: "_parentOutpoint"})
+			methodCtx.emit(makeUpdateProp("_grandparentOutpoint", oldParent))
+			//    _parentOutpoint = extractOutpoint(txPreimage)
+			preimageRef3 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+			currentOutpoint2 := methodCtx.emit(makeCall("extractOutpoint", []string{preimageRef3}))
+			methodCtx.emit(makeUpdateProp("_parentOutpoint", currentOutpoint2))
+
+			// 5. Lower the developer's method body
+			methodCtx.lowerStatements(method.Body)
+
+			// 6. State continuation (same as StatefulSmartContract)
+			addOutputRefs := methodCtx.getAddOutputRefs()
+			if len(addOutputRefs) > 0 {
+				// Multi-output continuation
+				accumulated := addOutputRefs[0]
+				for i := 1; i < len(addOutputRefs); i++ {
+					accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, addOutputRefs[i]}))
+				}
+				hashRef := methodCtx.emit(makeCall("hash256", []string{accumulated}))
+				preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+				outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
+				eqRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: hashRef, Right: outputHashRef, ResultType: "bytes"})
+				methodCtx.emit(makeAssert(eqRef))
+			} else {
+				// InductiveSmartContract always mutates state (internal fields)
+				stateScriptRef := methodCtx.emit(ir.ANFValue{Kind: "get_state_script"})
+				hashRef := methodCtx.emit(makeCall("hash256", []string{stateScriptRef}))
+				preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
+				outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
+				eqRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: hashRef, Right: outputHashRef, ResultType: "bytes"})
+				methodCtx.emit(makeAssert(eqRef))
+			}
+
+			// Append implicit params: parentTx + txPreimage
+			augmentedParams := append(lowerParams(method.Params),
+				ir.ANFParam{Name: "parentTx", Type: "ByteString"},
+				ir.ANFParam{Name: "txPreimage", Type: "SigHashPreimage"},
+			)
+
+			result = append(result, ir.ANFMethod{
+				Name:     method.Name,
+				Params:   augmentedParams,
+				Body:     methodCtx.bindings,
+				IsPublic: true,
+			})
+		} else if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
 			// Register txPreimage as an implicit parameter
 			methodCtx.addParam("txPreimage")
 
@@ -666,6 +812,15 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		argRefs := ctx.lowerArgs(e.Args)
 		satoshis := argRefs[0]
 		stateValues := argRefs[1:]
+		// For InductiveSmartContract, auto-append internal field values.
+		// The internal fields have already been updated (update_prop) before the
+		// developer's body, so load_prop returns the correct new-generation values.
+		if ctx.contract.ParentClass == "InductiveSmartContract" {
+			genesisRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_genesisOutpoint"})
+			parentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_parentOutpoint"})
+			grandparentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_grandparentOutpoint"})
+			stateValues = append(stateValues, genesisRef, parentRef, grandparentRef)
+		}
 		ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues})
 		ctx.addOutputRef(ref)
 		return ref
@@ -675,6 +830,13 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			argRefs := ctx.lowerArgs(e.Args)
 			satoshis := argRefs[0]
 			stateValues := argRefs[1:]
+			// For InductiveSmartContract, auto-append internal field values.
+			if ctx.contract.ParentClass == "InductiveSmartContract" {
+				genesisRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_genesisOutpoint"})
+				parentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_parentOutpoint"})
+				grandparentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_grandparentOutpoint"})
+				stateValues = append(stateValues, genesisRef, parentRef, grandparentRef)
+			}
 			ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues})
 			ctx.addOutputRef(ref)
 			return ref

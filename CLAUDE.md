@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless) or `StatefulSmartContract` (stateful), and the compiler produces Bitcoin Script locking scripts.
+Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `InductiveSmartContract` (stateful with backward chain verification), and the compiler produces Bitcoin Script locking scripts.
 
 Three independent compiler implementations (TypeScript, Go, Rust) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, or Rust DSL syntax — all formats compile to the same AST and produce identical Bitcoin Script.
 
@@ -109,8 +109,9 @@ Any language feature change must be implemented in TypeScript, Go, AND Rust. Cro
 ### Contract Model
 - `SmartContract` — stateless, all properties `readonly`, developer writes full logic
 - `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit
+- `InductiveSmartContract` — extends `StatefulSmartContract` with backward chain verification (verifies parent tx authenticity via hash, checks lineage consistency and chain linking)
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic; values are positional matching mutable properties in declaration order
-- `parentClass` field on `ContractNode` discriminates between the two base classes
+- `parentClass` field on `ContractNode` discriminates between the three base classes
 - Only Rúnar built-in functions and contract methods are allowed — the type checker rejects calls to unknown functions like `Math.floor()` or `console.log()`
 
 ### Testing Contracts

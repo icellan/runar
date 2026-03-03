@@ -478,14 +478,20 @@ impl<'a> SolParser<'a> {
             }
         });
 
-        Some(ContractNode {
+        let mut contract = ContractNode {
             name,
             parent_class,
             properties,
             constructor,
             methods,
             source_file: self.file.to_string(),
-        })
+        };
+
+        if contract.parent_class == "InductiveSmartContract" {
+            super::parser::inject_inductive_internal_fields(&mut contract, self.file);
+        }
+
+        Some(contract)
     }
 
     // -----------------------------------------------------------------------

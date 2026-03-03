@@ -547,8 +547,11 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 				p.advance() // skip "resource"
 				parentClass = "StatefulSmartContract"
 			}
-			props := p.parseMoveStruct()
+			props, hasInductive := p.parseMoveStruct()
 			properties = append(properties, props...)
+			if hasInductive {
+				parentClass = "InductiveSmartContract"
+			}
 			continue
 		}
 
@@ -568,14 +571,20 @@ func (p *moveParser) parseModule() (*ContractNode, error) {
 	// Build constructor from properties
 	constructor := p.buildMoveConstructor(properties)
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        moduleName,
 		ParentClass: parentClass,
 		Properties:  properties,
 		Constructor: constructor,
 		Methods:     methods,
 		SourceFile:  p.fileName,
-	}, nil
+	}
+
+	if contract.ParentClass == "InductiveSmartContract" {
+		injectInductiveInternalFields(contract)
+	}
+
+	return contract, nil
 }
 
 func (p *moveParser) skipUseDecl() {
@@ -590,16 +599,20 @@ func (p *moveParser) skipUseDecl() {
 // Struct parsing
 // ---------------------------------------------------------------------------
 
-func (p *moveParser) parseMoveStruct() []PropertyNode {
+func (p *moveParser) parseMoveStruct() ([]PropertyNode, bool) {
 	p.expectIdent("struct")
 
 	// struct name
 	p.expect(moveTokIdent) // skip struct name (same as module name)
 
-	// Optional: has key, store, copy, drop abilities
+	// Optional: has key, store, copy, drop, inductive abilities
+	hasInductive := false
 	if p.checkIdent("has") {
 		p.advance()
 		for p.peek().kind == moveTokIdent || p.peek().kind == moveTokComma {
+			if p.peek().kind == moveTokIdent && p.peek().value == "inductive" {
+				hasInductive = true
+			}
 			p.advance()
 		}
 	}
@@ -631,7 +644,7 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 	}
 
 	p.expect(moveTokRBrace)
-	return props
+	return props, hasInductive
 }
 
 func (p *moveParser) parseMoveTypeName() string {

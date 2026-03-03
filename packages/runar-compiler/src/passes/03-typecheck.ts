@@ -255,8 +255,8 @@ class TypeChecker {
       this.propTypes.set(prop.name, typeNodeToTType(prop.type));
     }
 
-    // For StatefulSmartContract, add the implicit txPreimage property
-    if (contract.parentClass === 'StatefulSmartContract') {
+    // For StatefulSmartContract / InductiveSmartContract, add the implicit txPreimage property
+    if (contract.parentClass === 'StatefulSmartContract' || contract.parentClass === 'InductiveSmartContract') {
       this.propTypes.set('txPreimage', 'SigHashPreimage');
     }
 
@@ -759,14 +759,17 @@ class TypeChecker {
       }
 
       if (methodName === 'addOutput') {
-        if (this.contract.parentClass !== 'StatefulSmartContract') {
+        if (this.contract.parentClass !== 'StatefulSmartContract' && this.contract.parentClass !== 'InductiveSmartContract') {
           this.errors.push(makeDiagnostic(
-            `addOutput() is only available in StatefulSmartContract`,
+            `addOutput() is only available in StatefulSmartContract or InductiveSmartContract`,
             'error',
           ));
           return VOID;
         }
-        const mutableProps = this.contract.properties.filter(p => !p.readonly);
+        const INDUCTIVE_INTERNAL = new Set(['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint']);
+        const mutableProps = this.contract.properties.filter(p =>
+          !p.readonly && !(this.contract.parentClass === 'InductiveSmartContract' && INDUCTIVE_INTERNAL.has(p.name))
+        );
         const expectedArgCount = 1 + mutableProps.length;
         if (args.length !== expectedArgCount) {
           this.errors.push(makeDiagnostic(

@@ -13,8 +13,7 @@ import (
 // The transaction:
 //   - Input 0: the current contract UTXO with the given unlocking script.
 //   - Additional inputs: funding UTXOs if provided.
-//   - Output 0 (optional): new contract UTXO with updated locking script
-//     (for stateful contracts).
+//   - Continuation outputs: one or more contract outputs (for stateful contracts).
 //   - Last output (optional): change.
 //
 // Returns the transaction hex (with unlocking script for input 0 already
@@ -27,6 +26,7 @@ func BuildCallTransaction(
 	changeAddress string,
 	changeScript string,
 	additionalUtxos []UTXO,
+	multiOutputs []CallOutput,
 ) (txHex string, inputCount int) {
 	allUtxos := []UTXO{currentUtxo}
 	allUtxos = append(allUtxos, additionalUtxos...)
@@ -36,14 +36,24 @@ func BuildCallTransaction(
 		totalInput += u.Satoshis
 	}
 
-	// Calculate outputs total
-	contractOutputSats := int64(0)
-	if newLockingScript != "" {
-		if newSatoshis > 0 {
-			contractOutputSats = newSatoshis
-		} else {
-			contractOutputSats = currentUtxo.Satoshis
+	// Build the list of contract outputs
+	var contractOutputs []CallOutput
+	if len(multiOutputs) > 0 {
+		contractOutputs = append(contractOutputs, multiOutputs...)
+	} else if newLockingScript != "" {
+		sats := newSatoshis
+		if sats <= 0 {
+			sats = currentUtxo.Satoshis
 		}
+		contractOutputs = append(contractOutputs, CallOutput{
+			LockingScript: newLockingScript,
+			Satoshis:      sats,
+		})
+	}
+
+	contractOutputSats := int64(0)
+	for _, o := range contractOutputs {
+		contractOutputSats += o.Satoshis
 	}
 
 	// Estimate fee using actual script sizes
@@ -54,9 +64,9 @@ func BuildCallTransaction(
 	inputsSize := input0Size + additionalInputsSize
 
 	outputsSize := 0
-	if newLockingScript != "" {
-		outputsSize += 8 + varIntByteSize(len(newLockingScript)/2) +
-			len(newLockingScript)/2
+	for _, o := range contractOutputs {
+		outputsSize += 8 + varIntByteSize(len(o.LockingScript)/2) +
+			len(o.LockingScript)/2
 	}
 	if changeAddress != "" || changeScript != "" {
 		outputsSize += 34 // P2PKH change
@@ -92,20 +102,17 @@ func BuildCallTransaction(
 	}
 
 	// Output count
-	numOutputs := 0
-	if newLockingScript != "" {
-		numOutputs++
-	}
+	numOutputs := len(contractOutputs)
 	if change > 0 && (changeAddress != "" || changeScript != "") {
 		numOutputs++
 	}
 	tx += encodeVarInt(numOutputs)
 
-	// Output 0: new contract state (if stateful)
-	if newLockingScript != "" {
-		tx += toLittleEndian64(contractOutputSats)
-		tx += encodeVarInt(len(newLockingScript) / 2)
-		tx += newLockingScript
+	// Contract continuation outputs
+	for _, o := range contractOutputs {
+		tx += toLittleEndian64(o.Satoshis)
+		tx += encodeVarInt(len(o.LockingScript) / 2)
+		tx += o.LockingScript
 	}
 
 	// Change output

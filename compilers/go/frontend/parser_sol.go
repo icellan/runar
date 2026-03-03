@@ -454,7 +454,7 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 		parentClass = parentTok.value
 	}
 
-	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" {
+	if parentClass != "SmartContract" && parentClass != "StatefulSmartContract" && parentClass != "InductiveSmartContract" {
 		return nil, fmt.Errorf("unknown parent class: %s", parentClass)
 	}
 
@@ -492,14 +492,20 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 		}
 	}
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        contractName,
 		ParentClass: parentClass,
 		Properties:  properties,
 		Constructor: *constructor,
 		Methods:     methods,
 		SourceFile:  p.fileName,
-	}, nil
+	}
+
+	if contract.ParentClass == "InductiveSmartContract" {
+		injectInductiveInternalFields(contract)
+	}
+
+	return contract, nil
 }
 
 // ---------------------------------------------------------------------------

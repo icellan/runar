@@ -353,7 +353,7 @@ func TestCounter_DecrementAtZero_Fails(t *testing.T) {
 
 ### Multi-Output Contracts
 
-Contracts that call `AddOutput()` track outputs via the embedded `StatefulSmartContract` base. Use `Outputs()` to inspect them:
+Contracts that call `AddOutput()` track outputs via the embedded `StatefulSmartContract` (or `InductiveSmartContract`) base. Use `Outputs()` to inspect them:
 
 ```go
 func TestFungibleToken_Transfer(t *testing.T) {

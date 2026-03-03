@@ -113,6 +113,10 @@ type ANFValue struct {
 	// add_output
 	Satoshis    string   `json:"satoshis,omitempty"`
 	StateValues []string `json:"stateValues,omitempty"`
+
+	// extract_parent_output
+	RawTx       string `json:"rawTx,omitempty"`
+	OutputIndex string `json:"outputIndex,omitempty"`
 }
 
 // DecodeConstants walks the program and decodes the RawValue fields in
@@ -172,6 +176,8 @@ func decodeValue(v *ANFValue) error {
 		}
 	case "add_output":
 		// satoshis and stateValues are decoded directly from JSON tags; nothing extra needed.
+	case "extract_parent_output":
+		// rawTx and outputIndex are decoded directly from JSON tags; nothing extra needed.
 	}
 	return nil
 }

@@ -81,6 +81,17 @@ type StatefulSmartContract struct {
 	TxPreimage SigHashPreimage
 }
 
+// InductiveSmartContract is the base struct for inductive Rúnar contracts.
+// Inductive contracts extend stateful contracts with chain-of-custody
+// tracking via parent transaction introspection. The compiler auto-injects
+// parentTx verification at method entry.
+type InductiveSmartContract struct {
+	StatefulSmartContract
+	GenesisOutpoint     ByteString
+	ParentOutpoint      ByteString
+	GrandparentOutpoint ByteString
+}
+
 // AddOutput records a new output with the given satoshis and state values.
 // The values should match the mutable properties in declaration order.
 func (s *StatefulSmartContract) AddOutput(satoshis int64, values ...any) {

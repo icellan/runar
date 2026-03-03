@@ -63,7 +63,7 @@ The validation pass enforces the subset rules that distinguish Rúnar from gener
 
 ### Checks Performed
 
-- Exactly one class per file extending `SmartContract` or `StatefulSmartContract`.
+- Exactly one class per file extending `SmartContract`, `StatefulSmartContract`, or `InductiveSmartContract`.
 - No decorators on the class, properties, or methods.
 - No generic type parameters.
 - Constructor calls `super(...)` as its first statement.

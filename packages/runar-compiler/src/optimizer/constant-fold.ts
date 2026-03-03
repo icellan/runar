@@ -388,6 +388,9 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
 
     case 'add_output':
       return value;
+
+    case 'extract_parent_output':
+      return value;
   }
 }
 
@@ -500,6 +503,10 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
     case 'add_output':
       refs.add(value.satoshis);
       for (const sv of value.stateValues) refs.add(sv);
+      break;
+    case 'extract_parent_output':
+      refs.add(value.rawTx);
+      refs.add(value.outputIndex);
       break;
   }
 }

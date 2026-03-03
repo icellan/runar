@@ -56,6 +56,8 @@ export type {
   UpdateProp,
   GetStateScript,
   CheckPreimage,
+  AddOutput,
+  ExtractParentOutput,
 } from './anf-ir.js';
 
 // Stack IR types

@@ -438,7 +438,7 @@ const matrix: FixedArray<FixedArray<bigint, 2>, 2> = [[1n, 2n], [3n, 4n]];
 const val: bigint = matrix[0n][1n];  // 2n
 ```
 
-### 9.4 Stateful Contract Types
+### 9.4 Stateful and Inductive Contract Types
 
 ```typescript
 export class Counter extends StatefulSmartContract {

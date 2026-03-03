@@ -105,7 +105,8 @@ var knownKinds = map[string]bool{
 	"update_prop":      true,
 	"get_state_script": true,
 	"check_preimage":   true,
-	"add_output":       true,
+	"add_output":              true,
+	"extract_parent_output":   true,
 }
 
 func validateBindings(bindings []ANFBinding, methodName string) error {

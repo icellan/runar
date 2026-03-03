@@ -44,9 +44,10 @@ The `pragma` directive specifies the Rúnar language version. It follows Solidit
 ```solidity
 contract Name is SmartContract { ... }
 contract Name is StatefulSmartContract { ... }
+contract Name is InductiveSmartContract { ... }
 ```
 
-The `is` keyword replaces TypeScript's `extends`. The base class must be `SmartContract` or `StatefulSmartContract`.
+The `is` keyword replaces TypeScript's `extends`. The base class must be `SmartContract`, `StatefulSmartContract`, or `InductiveSmartContract`.
 
 ### Properties
 
@@ -319,7 +320,7 @@ contract SimpleNFT is StatefulSmartContract {
 | `payable` | Modifier for receiving ETH | Not applicable; satoshis are UTXO-based |
 | Events | `emit Event(...)` | Not supported |
 | Mappings | `mapping(K => V)` | Not supported; use properties |
-| Inheritance | Multiple inheritance | Single base class only (`SmartContract` or `StatefulSmartContract`) |
+| Inheritance | Multiple inheritance | Single base class only (`SmartContract`, `StatefulSmartContract`, or `InductiveSmartContract`) |
 | Libraries | `library` keyword | Not supported |
 | Modifiers | `modifier onlyOwner` | Not supported; use `require` in method body |
 | Constructor | `constructor(...) payable` | Auto-generated from properties |

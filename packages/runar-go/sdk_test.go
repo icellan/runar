@@ -887,7 +887,7 @@ func TestBuildDeployTransaction_SingleOutputWhenZeroChange(t *testing.T) {
 
 func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.version != 1 {
@@ -900,7 +900,7 @@ func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 
 func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil)
+	txHex, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].script != "aabb" {
@@ -910,7 +910,7 @@ func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 
 func TestBuildCallTransaction_SingleInput(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 1 {
@@ -926,7 +926,7 @@ func TestBuildCallTransaction_AdditionalInputs(t *testing.T) {
 	additional := []UTXO{makeUtxo(50000, 1), makeUtxo(30000, 2)}
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional)
+	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional, nil)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 3 {
@@ -949,7 +949,7 @@ func TestBuildCallTransaction_StatefulOutput(t *testing.T) {
 	newLockingScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil)
+	txHex, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].script != newLockingScript {
@@ -965,7 +965,7 @@ func TestBuildCallTransaction_DefaultSatoshis(t *testing.T) {
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
 	// newSatoshis = 0 with newLockingScript set => defaults to currentUtxo.Satoshis
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil)
+	txHex, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].satoshis != 75000 {
@@ -977,7 +977,7 @@ func TestBuildCallTransaction_ChangeCalculation(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil)
+	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, nil)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
@@ -998,7 +998,7 @@ func TestBuildCallTransaction_NoChangeWhenZero(t *testing.T) {
 	utxo := makeUtxo(50096, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil)
+	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputCount != 1 {
@@ -1010,7 +1010,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil)
+	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil, nil)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(42) + changeOut(34) + overhead(10) = 86
@@ -1028,7 +1028,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 
 func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
 	parsed := parseTxHex(txHex)
 
 	expected := reverseHex(utxo.Txid)
@@ -1039,7 +1039,7 @@ func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 
 func TestBuildCallTransaction_CorrectOutputIndex(t *testing.T) {
 	utxo := makeUtxo(100000, 3)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].prevIndex != 3 {
@@ -1881,5 +1881,433 @@ func TestSetState(t *testing.T) {
 	state := c.GetState()
 	if state["count"] != int64(99) {
 		t.Errorf("expected count=99, got %v", state["count"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BuildCallTransaction with multi-output
+// ---------------------------------------------------------------------------
+
+func TestBuildCallTransaction_MultiOutput_CreatesMultipleOutputs(t *testing.T) {
+	utxo := makeUtxo(100000, 0)
+	multiOutputs := []CallOutput{
+		{LockingScript: "51", Satoshis: 30000},
+		{LockingScript: "52", Satoshis: 20000},
+	}
+
+	txHex, _ := BuildCallTransaction(utxo, "00", "", 0, "", "", nil, multiOutputs)
+	parsed := parseTxHex(txHex)
+
+	if parsed.outputCount != 2 {
+		t.Fatalf("expected 2 outputs, got %d", parsed.outputCount)
+	}
+	if parsed.outputs[0].script != "51" {
+		t.Errorf("expected first output script 51, got %s", parsed.outputs[0].script)
+	}
+	if parsed.outputs[0].satoshis != 30000 {
+		t.Errorf("expected first output 30000 sats, got %d", parsed.outputs[0].satoshis)
+	}
+	if parsed.outputs[1].script != "52" {
+		t.Errorf("expected second output script 52, got %s", parsed.outputs[1].script)
+	}
+	if parsed.outputs[1].satoshis != 20000 {
+		t.Errorf("expected second output 20000 sats, got %d", parsed.outputs[1].satoshis)
+	}
+}
+
+func TestBuildCallTransaction_MultiOutput_WithChangeOutput(t *testing.T) {
+	utxo := makeUtxo(200000, 0)
+	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
+	multiOutputs := []CallOutput{
+		{LockingScript: "51", Satoshis: 30000},
+		{LockingScript: "52", Satoshis: 20000},
+	}
+
+	txHex, _ := BuildCallTransaction(utxo, "00", "", 0, "changeaddr", changeScript, nil, multiOutputs)
+	parsed := parseTxHex(txHex)
+
+	// Should have 3 outputs: 2 contract + 1 change
+	if parsed.outputCount != 3 {
+		t.Fatalf("expected 3 outputs (2 contract + 1 change), got %d", parsed.outputCount)
+	}
+	if parsed.outputs[0].satoshis != 30000 {
+		t.Errorf("expected first contract output 30000 sats, got %d", parsed.outputs[0].satoshis)
+	}
+	if parsed.outputs[1].satoshis != 20000 {
+		t.Errorf("expected second contract output 20000 sats, got %d", parsed.outputs[1].satoshis)
+	}
+	if parsed.outputs[2].script != changeScript {
+		t.Errorf("expected change script, got %s", parsed.outputs[2].script)
+	}
+	// Verify change = totalInput - contractOutputSats - fee
+	totalContractSats := int64(30000 + 20000)
+	changeAmount := parsed.outputs[2].satoshis
+	if changeAmount <= 0 {
+		t.Errorf("expected positive change, got %d", changeAmount)
+	}
+	// change + fee + contractOutputSats should equal totalInput
+	reconstructed := changeAmount + totalContractSats
+	if reconstructed >= 200000 {
+		t.Errorf("change + contract sats should be less than total input (fee deducted), got %d", reconstructed)
+	}
+}
+
+func TestBuildCallTransaction_MultiOutput_ThreeOutputs(t *testing.T) {
+	utxo := makeUtxo(200000, 0)
+	multiOutputs := []CallOutput{
+		{LockingScript: "5193", Satoshis: 10000},
+		{LockingScript: "5293", Satoshis: 20000},
+		{LockingScript: "5393", Satoshis: 30000},
+	}
+
+	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, multiOutputs)
+	parsed := parseTxHex(txHex)
+
+	if parsed.outputCount != 3 {
+		t.Fatalf("expected 3 outputs, got %d", parsed.outputCount)
+	}
+	for i, expected := range []struct {
+		script   string
+		satoshis int64
+	}{
+		{"5193", 10000},
+		{"5293", 20000},
+		{"5393", 30000},
+	} {
+		if parsed.outputs[i].script != expected.script {
+			t.Errorf("output %d: expected script %s, got %s", i, expected.script, parsed.outputs[i].script)
+		}
+		if parsed.outputs[i].satoshis != expected.satoshis {
+			t.Errorf("output %d: expected %d sats, got %d", i, expected.satoshis, parsed.outputs[i].satoshis)
+		}
+	}
+}
+
+func TestBuildCallTransaction_MultiOutput_IgnoresNewLockingScript(t *testing.T) {
+	// When multiOutputs is provided, newLockingScript should be ignored
+	utxo := makeUtxo(100000, 0)
+	multiOutputs := []CallOutput{
+		{LockingScript: "51", Satoshis: 30000},
+	}
+
+	txHex, _ := BuildCallTransaction(utxo, "00", "deadbeef", 50000, "", "", nil, multiOutputs)
+	parsed := parseTxHex(txHex)
+
+	if parsed.outputCount != 1 {
+		t.Fatalf("expected 1 output, got %d", parsed.outputCount)
+	}
+	// Output should use multiOutputs, not the newLockingScript
+	if parsed.outputs[0].script != "51" {
+		t.Errorf("expected script from multiOutputs (51), got %s", parsed.outputs[0].script)
+	}
+	if parsed.outputs[0].satoshis != 30000 {
+		t.Errorf("expected 30000 sats from multiOutputs, got %d", parsed.outputs[0].satoshis)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Call() with multi-output options
+// ---------------------------------------------------------------------------
+
+func TestCall_MultiOutput_BuildsMultipleOutputs(t *testing.T) {
+	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+		},
+		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+	}, func(a *RunarArtifact) {
+		a.StateFields = stateFields
+	})
+
+	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	// Deploy the contract first
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    200000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	// Call with multi-output
+	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{
+			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
+			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+	if txid == "" {
+		t.Fatal("expected non-empty txid after multi-output call")
+	}
+
+	// Verify the broadcasted transaction has multiple outputs
+	broadcasted := provider.GetBroadcastedTxs()
+	if len(broadcasted) < 2 {
+		t.Fatal("expected at least 2 broadcasted txs (deploy + call)")
+	}
+	callTxHex := broadcasted[len(broadcasted)-1]
+	parsed := parseTxHex(callTxHex)
+
+	// Should have at least 2 contract outputs
+	if parsed.outputCount < 2 {
+		t.Fatalf("expected at least 2 outputs in call tx, got %d", parsed.outputCount)
+	}
+
+	// Verify the satoshis on each output
+	if parsed.outputs[0].satoshis != 40000 {
+		t.Errorf("expected first output 40000 sats, got %d", parsed.outputs[0].satoshis)
+	}
+	if parsed.outputs[1].satoshis != 60000 {
+		t.Errorf("expected second output 60000 sats, got %d", parsed.outputs[1].satoshis)
+	}
+}
+
+func TestCall_MultiOutput_DefaultContinuationIsLastOutput(t *testing.T) {
+	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+		},
+		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+	}, func(a *RunarArtifact) {
+		a.StateFields = stateFields
+	})
+
+	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    200000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	// Call with multi-output, no ContinuationOutputIndex specified (default to last)
+	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{
+			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
+			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+
+	// Default continuation is the last output (index 1)
+	state := contract.GetState()
+	if state["count"] != int64(60) {
+		t.Errorf("expected continuation state count=60 (last output), got %v", state["count"])
+	}
+
+	// Verify the tracked UTXO has the correct output index and satoshis
+	if contract.currentUtxo == nil {
+		t.Fatal("expected currentUtxo to be tracked after multi-output call")
+	}
+	if contract.currentUtxo.OutputIndex != 1 {
+		t.Errorf("expected continuation output index 1 (last), got %d", contract.currentUtxo.OutputIndex)
+	}
+	if contract.currentUtxo.Satoshis != 60000 {
+		t.Errorf("expected continuation satoshis 60000, got %d", contract.currentUtxo.Satoshis)
+	}
+	if contract.currentUtxo.Txid != txid {
+		t.Errorf("expected continuation txid %s, got %s", txid, contract.currentUtxo.Txid)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ContinuationOutputIndex tracking
+// ---------------------------------------------------------------------------
+
+func TestCall_MultiOutput_ContinuationOutputIndex_TracksCorrectOutput(t *testing.T) {
+	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+		},
+		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+	}, func(a *RunarArtifact) {
+		a.StateFields = stateFields
+	})
+
+	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    200000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	// Call with multi-output, tracking the FIRST output (index 0)
+	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{
+			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
+			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
+			{Satoshis: 30000, State: map[string]interface{}{"count": int64(30)}},
+		},
+		ContinuationOutputIndex: 1,
+	})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+
+	// Should track output at index 1
+	state := contract.GetState()
+	if state["count"] != int64(60) {
+		t.Errorf("expected continuation state count=60 (output index 1), got %v", state["count"])
+	}
+
+	if contract.currentUtxo == nil {
+		t.Fatal("expected currentUtxo to be tracked")
+	}
+	if contract.currentUtxo.OutputIndex != 1 {
+		t.Errorf("expected continuation output index 1, got %d", contract.currentUtxo.OutputIndex)
+	}
+	if contract.currentUtxo.Satoshis != 60000 {
+		t.Errorf("expected continuation satoshis 60000, got %d", contract.currentUtxo.Satoshis)
+	}
+	if contract.currentUtxo.Txid != txid {
+		t.Errorf("expected continuation txid %s, got %s", txid, contract.currentUtxo.Txid)
+	}
+}
+
+func TestCall_MultiOutput_EachOutputGetsDistinctState(t *testing.T) {
+	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+		},
+		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+	}, func(a *RunarArtifact) {
+		a.StateFields = stateFields
+	})
+
+	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    200000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	// Each output should get its own locking script with distinct state
+	_, _, err = contract.Call("split", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{
+			{Satoshis: 40000, State: map[string]interface{}{"count": int64(10)}},
+			{Satoshis: 60000, State: map[string]interface{}{"count": int64(20)}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+
+	// Verify distinct locking scripts were produced in the raw transaction
+	broadcasted := provider.GetBroadcastedTxs()
+	callTxHex := broadcasted[len(broadcasted)-1]
+	parsed := parseTxHex(callTxHex)
+
+	if parsed.outputCount < 2 {
+		t.Fatalf("expected at least 2 outputs, got %d", parsed.outputCount)
+	}
+
+	// The two contract outputs should have different locking scripts
+	// because they encode different state values
+	if parsed.outputs[0].script == parsed.outputs[1].script {
+		t.Error("expected distinct locking scripts for outputs with different state, but they are identical")
+	}
+}
+
+func TestCall_MultiOutput_OriginalStatePreservedDuringScriptBuilding(t *testing.T) {
+	// Verify that multi-output building does not corrupt the contract's state
+	// during locking script generation (state is saved and restored for each output)
+	stateFields := []StateField{
+		{Name: "a", Type: "bigint", Index: 0},
+		{Name: "b", Type: "bigint", Index: 1},
+	}
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{
+				{Name: "a", Type: "bigint"},
+				{Name: "b", Type: "bigint"},
+			},
+		},
+		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+	}, func(a *RunarArtifact) {
+		a.StateFields = stateFields
+	})
+
+	contract := NewRunarContract(artifact, []interface{}{int64(10), int64(20)})
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    200000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	// Call with multi-output — outputs override only some fields
+	_, _, err = contract.Call("split", nil, provider, signer, &CallOptions{
+		Outputs: []OutputSpec{
+			{Satoshis: 40000, State: map[string]interface{}{"a": int64(99), "b": int64(88)}},
+			{Satoshis: 60000, State: map[string]interface{}{"a": int64(77), "b": int64(66)}},
+		},
+		// Default continuation is last output (index 1)
+	})
+	if err != nil {
+		t.Fatalf("Call error: %v", err)
+	}
+
+	// After the call, continuation state should be from the last output (default)
+	state := contract.GetState()
+	if state["a"] != int64(77) {
+		t.Errorf("expected a=77 (from continuation output), got %v", state["a"])
+	}
+	if state["b"] != int64(66) {
+		t.Errorf("expected b=66 (from continuation output), got %v", state["b"])
 	}
 }

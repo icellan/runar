@@ -24,7 +24,7 @@ The root of the AST. Every parser produces exactly one `ContractNode`.
 ContractNode = {
     kind: "contract",
     name: string,                              // PascalCase contract name
-    parentClass: "SmartContract" | "StatefulSmartContract",
+    parentClass: "SmartContract" | "StatefulSmartContract" | "InductiveSmartContract",
     properties: PropertyNode[],                // in declaration order
     constructor: MethodNode,                   // always present
     methods: MethodNode[],                     // in declaration order (excludes constructor)
@@ -35,7 +35,7 @@ ContractNode = {
 ### Rules
 
 - `name` must be a valid PascalCase identifier.
-- `parentClass` must be exactly `"SmartContract"` or `"StatefulSmartContract"`.
+- `parentClass` must be exactly `"SmartContract"`, `"StatefulSmartContract"`, or `"InductiveSmartContract"`.
 - `properties` must be in the same order as they appear in the source (or struct definition).
 - `constructor` is the synthetic or explicit constructor method.
 - `methods` must be in declaration order and must not include the constructor.
@@ -44,11 +44,11 @@ ContractNode = {
 
 | Format | Contract name source | parentClass source |
 |--------|--------------------|--------------------|
-| TypeScript | `class Name extends Base` | `extends SmartContract` / `extends StatefulSmartContract` |
-| Solidity | `contract Name is Base` | `is SmartContract` / `is StatefulSmartContract` |
-| Move | `module Name { ... }` | `use runar::SmartContract` / `use runar::StatefulSmartContract` |
-| Go | `type Name struct { runar.SmartContract; ... }` | embedded `runar.SmartContract` / `runar.StatefulSmartContract` |
-| Rust | `#[runar::contract] struct Name` / `#[runar::stateful_contract] struct Name` | `#[runar::contract]` (auto-detects if any field lacks `#[readonly]`) / `#[runar::stateful_contract]` |
+| TypeScript | `class Name extends Base` | `extends SmartContract` / `extends StatefulSmartContract` / `extends InductiveSmartContract` |
+| Solidity | `contract Name is Base` | `is SmartContract` / `is StatefulSmartContract` / `is InductiveSmartContract` |
+| Move | `module Name { ... }` | `use runar::SmartContract` / `use runar::StatefulSmartContract` / `use runar::InductiveSmartContract` |
+| Go | `type Name struct { runar.SmartContract; ... }` | embedded `runar.SmartContract` / `runar.StatefulSmartContract` / `runar.InductiveSmartContract` |
+| Rust | `#[runar::contract] struct Name` / `#[runar::stateful_contract] struct Name` / `#[runar::inductive_contract] struct Name` | `#[runar::contract]` (auto-detects) / `#[runar::stateful_contract]` / `#[runar::inductive_contract]` |
 
 ---
 
@@ -70,7 +70,7 @@ PropertyNode = {
 
 - `name` must be camelCase.
 - For `SmartContract`, all properties should have `readonly: true`.
-- For `StatefulSmartContract`, at least one property should have `readonly: false`.
+- For `StatefulSmartContract` or `InductiveSmartContract`, at least one property should have `readonly: false`.
 - Properties must not have initializer expressions; initialization happens in the constructor.
 
 ### Format Mapping

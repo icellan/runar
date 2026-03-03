@@ -139,6 +139,14 @@ pub enum ANFValue {
         #[serde(rename = "stateValues")]
         state_values: Vec<String>,
     },
+
+    #[serde(rename = "extract_parent_output")]
+    ExtractParentOutput {
+        #[serde(rename = "rawTx")]
+        raw_tx: String,
+        #[serde(rename = "outputIndex")]
+        output_index: String,
+    },
 }
 
 // ---------------------------------------------------------------------------

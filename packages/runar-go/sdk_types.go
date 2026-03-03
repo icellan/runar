@@ -42,11 +42,28 @@ type DeployOptions struct {
 	ChangeAddress string `json:"changeAddress,omitempty"`
 }
 
+// OutputSpec describes one continuation output for multi-output methods.
+type OutputSpec struct {
+	Satoshis int64                  `json:"satoshis"`
+	State    map[string]interface{} `json:"state"`
+}
+
+// CallOutput describes a single output in the call transaction.
+type CallOutput struct {
+	LockingScript string `json:"lockingScript"`
+	Satoshis      int64  `json:"satoshis"`
+}
+
 // CallOptions specifies options for calling a contract method.
 type CallOptions struct {
 	Satoshis      int64                  `json:"satoshis,omitempty"`
 	ChangeAddress string                 `json:"changeAddress,omitempty"`
 	NewState      map[string]interface{} `json:"newState,omitempty"`
+	// For multi-output methods: specify multiple continuation outputs.
+	Outputs []OutputSpec `json:"outputs,omitempty"`
+	// After a multi-output call, which output index to track as the
+	// contract's continuation UTXO. Default: last output.
+	ContinuationOutputIndex int `json:"continuationOutputIndex,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

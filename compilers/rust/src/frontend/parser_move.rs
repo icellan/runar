@@ -566,14 +566,20 @@ impl<'a> MoveParser<'a> {
         // Build constructor from properties
         let constructor = build_constructor(&properties, self.file);
 
-        Some(ContractNode {
+        let mut contract = ContractNode {
             name: contract_name,
             parent_class,
             properties,
             constructor,
             methods,
             source_file: self.file.to_string(),
-        })
+        };
+
+        if contract.parent_class == "InductiveSmartContract" {
+            super::parser::inject_inductive_internal_fields(&mut contract, self.file);
+        }
+
+        Some(contract)
     }
 
     // -----------------------------------------------------------------------
@@ -584,10 +590,15 @@ impl<'a> MoveParser<'a> {
         self.advance(); // consume 'struct'
         let name = self.expect_ident();
 
-        // 'has' BaseClass
+        // 'has' BaseClass (or 'has inductive' -> InductiveSmartContract)
         let parent_class = if *self.peek() == Token::Has {
             self.advance();
-            self.expect_ident()
+            let ability = self.expect_ident();
+            if ability == "inductive" {
+                "InductiveSmartContract".to_string()
+            } else {
+                ability
+            }
         } else {
             "SmartContract".to_string()
         };

@@ -179,15 +179,61 @@ func (c *RunarContract) Call(
 		changeAddress = address
 	}
 
-	unlockingScript := c.BuildUnlockingScript(methodName, args)
+	// For InductiveSmartContract methods, detect if the ABI includes a
+	// "parentTx" implicit parameter. If so, fetch the raw parent transaction
+	// (the tx that created the current UTXO) and prepend it to the unlocking
+	// script before the regular arguments and method selector.
+	parentTxPrefix := ""
+	hasParentTxParam := false
+	for _, p := range method.Params {
+		if p.Name == "parentTx" {
+			hasParentTxParam = true
+			break
+		}
+	}
+	if hasParentTxParam {
+		parentTx, err := provider.GetTransaction(c.currentUtxo.Txid)
+		if err != nil {
+			return "", nil, fmt.Errorf("RunarContract.Call: fetching parent tx for InductiveSmartContract: %w", err)
+		}
+		if parentTx.Raw == "" {
+			return "", nil, fmt.Errorf("RunarContract.Call: provider returned transaction without raw hex, needed for parentTx (InductiveSmartContract)")
+		}
+		parentTxPrefix = EncodePushData(parentTx.Raw)
+	}
+
+	unlockingScript := parentTxPrefix + c.BuildUnlockingScript(methodName, args)
 
 	// Determine if this is a stateful call
 	isStateful := len(c.Artifact.StateFields) > 0
 
+	// Check for multi-output mode
+	isMultiOutput := options != nil && len(options.Outputs) > 0
+
 	newLockingScript := ""
 	newSatoshis := int64(0)
+	var multiOutputs []CallOutput
 
-	if isStateful {
+	if isMultiOutput {
+		// Multi-output mode: build a locking script for each output spec
+		for _, spec := range options.Outputs {
+			// Apply the output-specific state to build its locking script
+			savedState := make(map[string]interface{})
+			for k, v := range c.state {
+				savedState[k] = v
+			}
+			for k, v := range spec.State {
+				c.state[k] = v
+			}
+			ls := c.GetLockingScript()
+			multiOutputs = append(multiOutputs, CallOutput{
+				LockingScript: ls,
+				Satoshis:      spec.Satoshis,
+			})
+			// Restore state
+			c.state = savedState
+		}
+	} else if isStateful {
 		newSatoshis = c.currentUtxo.Satoshis
 		if options != nil && options.Satoshis > 0 {
 			newSatoshis = options.Satoshis
@@ -217,6 +263,7 @@ func (c *RunarContract) Call(
 		changeAddress,
 		changeScript,
 		additionalUtxos,
+		multiOutputs,
 	)
 
 	// Sign additional inputs (input 0 already has the unlocking script)
@@ -243,8 +290,29 @@ func (c *RunarContract) Call(
 		return "", nil, fmt.Errorf("RunarContract.Call: broadcasting: %w", err)
 	}
 
-	// Update tracked UTXO for stateful contracts
-	if isStateful && newLockingScript != "" {
+	// Update tracked UTXO
+	if isMultiOutput {
+		// Determine which output to track as continuation
+		contIdx := len(multiOutputs) - 1 // default: last output
+		if options != nil && options.ContinuationOutputIndex > 0 {
+			contIdx = options.ContinuationOutputIndex
+		}
+		if contIdx < len(multiOutputs) {
+			tracked := multiOutputs[contIdx]
+			// Apply the tracked output's state
+			if contIdx < len(options.Outputs) {
+				for k, v := range options.Outputs[contIdx].State {
+					c.state[k] = v
+				}
+			}
+			c.currentUtxo = &UTXO{
+				Txid:        txid,
+				OutputIndex: contIdx,
+				Satoshis:    tracked.Satoshis,
+				Script:      tracked.LockingScript,
+			}
+		}
+	} else if isStateful && newLockingScript != "" {
 		c.currentUtxo = &UTXO{
 			Txid:        txid,
 			OutputIndex: 0,

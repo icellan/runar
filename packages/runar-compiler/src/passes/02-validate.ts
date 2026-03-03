@@ -61,14 +61,29 @@ const VALID_PRIMITIVE_TYPES = new Set<string>([
   'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
 ]);
 
+/** Reserved internal field names for InductiveSmartContract. */
+const INDUCTIVE_RESERVED_NAMES = new Set(['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint']);
+
 function validateProperties(ctx: ValidationContext): void {
+  const isStateful = ctx.contract.parentClass === 'StatefulSmartContract' || ctx.contract.parentClass === 'InductiveSmartContract';
+
   for (const prop of ctx.contract.properties) {
     validatePropertyType(prop.type, prop.sourceLocation, ctx);
 
-    // txPreimage is an implicit property of StatefulSmartContract
-    if (ctx.contract.parentClass === 'StatefulSmartContract' && prop.name === 'txPreimage') {
+    // txPreimage is an implicit property of StatefulSmartContract / InductiveSmartContract
+    if (isStateful && prop.name === 'txPreimage') {
       ctx.errors.push(makeDiagnostic(
         `'txPreimage' is an implicit property of StatefulSmartContract and must not be declared`,
+        'error',
+        prop.sourceLocation,
+      ));
+    }
+
+    // Reject developer-declared properties using reserved inductive names
+    // (only flag if NOT InductiveSmartContract — if it IS inductive, the compiler injected them)
+    if (ctx.contract.parentClass !== 'InductiveSmartContract' && INDUCTIVE_RESERVED_NAMES.has(prop.name)) {
+      ctx.errors.push(makeDiagnostic(
+        `Property '${prop.name}' is reserved for InductiveSmartContract`,
         'error',
         prop.sourceLocation,
       ));
@@ -252,8 +267,8 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
     }
   }
 
-  // Warn on manual preimage boilerplate in StatefulSmartContract
-  if (ctx.contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
+  // Warn on manual preimage boilerplate in StatefulSmartContract / InductiveSmartContract
+  if ((ctx.contract.parentClass === 'StatefulSmartContract' || ctx.contract.parentClass === 'InductiveSmartContract') && method.visibility === 'public') {
     warnManualPreimageUsage(method, ctx);
   }
 

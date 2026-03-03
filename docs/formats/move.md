@@ -40,12 +40,14 @@ module ContractName {
     use runar::SmartContract;
     // or
     use runar::StatefulSmartContract;
+    // or
+    use runar::InductiveSmartContract;
 
     // resource struct + functions
 }
 ```
 
-The `use` declaration specifies the base class. `runar::SmartContract` for stateless contracts, `runar::StatefulSmartContract` for stateful contracts.
+The `use` declaration specifies the base class. `runar::SmartContract` for stateless contracts, `runar::StatefulSmartContract` for stateful contracts, `runar::InductiveSmartContract` for stateful contracts with backward chain verification.
 
 ### Resource Struct
 

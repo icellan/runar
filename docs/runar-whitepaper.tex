@@ -196,7 +196,7 @@ base classes. The grammar is given in Figure~\ref{fig:grammar}.
 
 <contract> ::= `class' <id> `extends' <base-class> `\{' <member>* `\}'
 
-<base-class> ::= `SmartContract' | `StatefulSmartContract'
+<base-class> ::= `SmartContract' | `StatefulSmartContract' | `InductiveSmartContract'
 
 <member> ::= <property> | <constructor> | <method>
 
@@ -421,8 +421,16 @@ stateless model with:
 \end{enumerate}
 \end{definition}
 
+\begin{definition}[Inductive Contract]
+An \emph{inductive contract} (\texttt{InductiveSmartContract}) extends
+\texttt{StatefulSmartContract} with backward chain verification: each
+transaction verifies its parent transaction's authenticity, lineage
+consistency, and chain linking, proving the entire UTXO history back to
+genesis by mathematical induction.
+\end{definition}
+
 The \texttt{parentClass} field on the AST's \texttt{ContractNode}
-discriminates between these two models, determining which compilation
+discriminates between these three models, determining which compilation
 strategy is applied in later passes.
 
 %=============================================================================
@@ -600,7 +608,7 @@ Type mappings include \texttt{Int} $\to$ \bigintty{},
 \texttt{Bool} $\to$ \boolty{}, and \texttt{vector} $\to$ \bs{}.
 Reference types (\texttt{\&T}, \texttt{\&mut T}) are stripped during parsing.
 The presence of mutable fields (\texttt{\&mut}) or the use of
-\texttt{StatefulSmartContract} determines the contract model.
+\texttt{StatefulSmartContract} or \texttt{InductiveSmartContract} determines the contract model.
 
 %-----------------------------------------------------------------------------
 \subsection{Go Frontend}
@@ -757,9 +765,10 @@ the AST. The following invariants are checked:
   \item \label{v:assign} Each property is assigned exactly once in the
     constructor.
   \item \label{v:readonly} All properties in \texttt{SmartContract} are
-    \texttt{readonly}. If a \texttt{StatefulSmartContract} has no mutable
-    properties, a warning is emitted (suggesting \texttt{SmartContract}
-    instead), but compilation proceeds.
+    \texttt{readonly}. If a \texttt{StatefulSmartContract} or
+    \texttt{InductiveSmartContract} has no mutable properties, a warning
+    is emitted (suggesting \texttt{SmartContract} instead), but
+    compilation proceeds.
   \item \label{v:recursion} No direct or mutual recursion among methods.
   \item \label{v:loops} All \texttt{for} loop bounds are compile-time
     constants.
@@ -853,9 +862,10 @@ evaluation.
 
 \subsubsection{Stateful Contract Injection}
 
-For contracts extending \texttt{StatefulSmartContract}, the ANF lowering
-pass automatically injects additional bindings at the entry and exit of
-every public method:
+For contracts extending \texttt{StatefulSmartContract} (or
+\texttt{InductiveSmartContract}, which adds parent tx verification),
+the ANF lowering pass automatically injects additional bindings at the
+entry and exit of every public method:
 
 \textbf{Entry injection:}
 \begin{align*}

@@ -30,7 +30,7 @@ pub struct P2PKH {
 }
 ```
 
-- `#[runar::contract]` marks the struct as a Rúnar contract. The parser auto-detects whether the contract is stateless or stateful based on field annotations: if any field lacks `#[readonly]`, the contract is treated as `StatefulSmartContract`.
+- `#[runar::contract]` marks the struct as a Rúnar contract. The parser auto-detects whether the contract is stateless or stateful based on field annotations: if any field lacks `#[readonly]`, the contract is treated as `StatefulSmartContract`. Use `#[runar::inductive_contract]` for contracts requiring backward chain verification (`InductiveSmartContract`).
 - `#[runar::stateful_contract]` can be used instead to explicitly mark a contract as stateful. This is equivalent to `#[runar::contract]` when any field lacks `#[readonly]`.
 - `#[readonly]` marks immutable properties (baked into the locking script).
 - Fields without `#[readonly]` are mutable (stateful).

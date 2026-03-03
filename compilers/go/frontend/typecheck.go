@@ -219,8 +219,8 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 		tc.propTypes[prop.Name] = typeNodeToString(prop.Type)
 	}
 
-	// For StatefulSmartContract, add the implicit txPreimage property
-	if contract.ParentClass == "StatefulSmartContract" {
+	// For StatefulSmartContract and InductiveSmartContract, add the implicit txPreimage property
+	if contract.ParentClass == "StatefulSmartContract" || contract.ParentClass == "InductiveSmartContract" {
 		tc.propTypes["txPreimage"] = "SigHashPreimage"
 	}
 

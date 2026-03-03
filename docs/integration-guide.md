@@ -175,7 +175,7 @@ console.log(artifact.stateFields);    // [{ name: "count", type: "bigint", index
 }
 ```
 
-The `stateFields` array is present only for `StatefulSmartContract`. It tells the SDK which fields are mutable and their serialization order.
+The `stateFields` array is present only for `StatefulSmartContract` and `InductiveSmartContract`. It tells the SDK which fields are mutable and their serialization order.
 
 ---
 

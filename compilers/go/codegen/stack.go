@@ -105,9 +105,10 @@ var binopOpcodes = map[string][]string{
 // ---------------------------------------------------------------------------
 
 var unaryopOpcodes = map[string][]string{
-	"!": {"OP_NOT"},
-	"-": {"OP_NEGATE"},
-	"~": {"OP_INVERT"},
+	"!":      {"OP_NOT"},
+	"-":      {"OP_NEGATE"},
+	"~":      {"OP_INVERT"},
+	"unpack": {"OP_BIN2NUM"},
 }
 
 // ---------------------------------------------------------------------------
@@ -260,6 +261,8 @@ func collectRefs(value *ir.ANFValue) []string {
 	case "add_output":
 		refs = append(refs, value.Satoshis)
 		refs = append(refs, value.StateValues...)
+	case "extract_parent_output":
+		refs = append(refs, value.RawTx, value.OutputIndex)
 	}
 
 	return refs
@@ -452,6 +455,8 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 		ctx.lowerCheckPreimage(name, value.Preimage, bindingIndex, lastUses)
 	case "add_output":
 		ctx.lowerAddOutput(name, value.Satoshis, value.StateValues, bindingIndex, lastUses)
+	case "extract_parent_output":
+		ctx.lowerExtractParentOutput(name, value.RawTx, value.OutputIndex, bindingIndex, lastUses)
 	}
 }
 
@@ -1009,6 +1014,243 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 		ctx.sm.push("")
 	}
+
+	// Rename top to binding name
+	ctx.sm.pop()
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// lowerExtractParentOutput extracts an output script from a raw Bitcoin
+// transaction. Parses the raw tx bytes on the stack to extract the script
+// at the given output index. Handles 1-byte varints (< 253
+// inputs/outputs), covering 99%+ of real transactions.
+// Supports output indices 0-3 via an unrolled output-skipping loop.
+//
+// Algorithm:
+//  1. Skip version (4 bytes)
+//  2. Read inputCount varint (1 byte)
+//  3. For each input, skip: prevTxId(32) + prevVout(4) + varint(scriptSig.len) + scriptSig + sequence(4)
+//  4. Read outputCount varint (1 byte) and discard
+//  5. Use outputIndex as counter; skip that many outputs
+//  6. At target output: skip satoshis(8), read varint(scriptLen), extract script
+func (ctx *loweringContext) lowerExtractParentOutput(bindingName, rawTx, outputIndex string, bindingIndex int, lastUses map[string]int) {
+	// Bring rawTx to top
+	isLastRawTx := ctx.isLastUse(rawTx, bindingIndex, lastUses)
+	ctx.bringToTop(rawTx, isLastRawTx)
+
+	// --- Step 1: Skip version (4 bytes) ---
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // version (left)
+	ctx.sm.push("") // remainder (right)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // remainder
+
+	// --- Step 2: Read inputCount (1 byte varint) ---
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // inputCountByte (left)
+	ctx.sm.push("") // remainder (right)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+
+	// --- Step 3: Skip each input (unrolled, up to 4 inputs) ---
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	ctx.sm.pop()
+
+	for i := 0; i < 4; i++ {
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_1SUB"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+
+		// Skip 36 bytes (prevTxId + prevVout)
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(36)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		// Read 1-byte varint for scriptSig length
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+
+		// Skip scriptLen + 4 (sequence) bytes
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ADD"})
+		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	}
+
+	// Clean up input counter from alt stack
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DROP"})
+	ctx.sm.pop()
+
+	// --- Step 4: Read outputCount (1 byte varint) and discard ---
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // outputCountByte
+	ctx.sm.push("") // remainder
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // remainder
+
+	// --- Step 5: Bring outputIndex to top, push to alt stack as counter ---
+	isLastOutputIndex := ctx.isLastUse(outputIndex, bindingIndex, lastUses)
+	ctx.bringToTop(outputIndex, isLastOutputIndex)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	ctx.sm.pop()
+
+	// --- Step 6: Unrolled output-skipping loop (up to 4 iterations) ---
+	// Each output: 8 bytes (satoshis) + 1-byte varint (scriptLen) + script bytes
+	for i := 0; i < 4; i++ {
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DUP"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_1SUB"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+
+		// Skip 8 bytes (satoshis)
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		// Read 1-byte varint for script length
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+
+		// Skip scriptLen bytes
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	}
+
+	// Clean up output counter from alt stack
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DROP"})
+	ctx.sm.pop()
+
+	// --- Step 7: Extract the target output's script ---
+	// Skip satoshis (8 bytes)
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // satoshis
+	ctx.sm.push("") // rest
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NIP"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // rest
+
+	// Read 1-byte varint for script length
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // scriptLenByte
+	ctx.sm.push("") // rest
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+
+	// Extract the script bytes
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SWAP"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop() // scriptLen
+	ctx.sm.pop() // rest
+	ctx.sm.push("") // script
+	ctx.sm.push("") // remainder
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DROP"})
+	ctx.sm.pop() // drop remainder
 
 	// Rename top to binding name
 	ctx.sm.pop()

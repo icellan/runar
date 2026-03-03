@@ -274,9 +274,11 @@ impl RustDslParser {
             if matches!(self.current().typ, TokenType::HashBracket) {
                 let attr = self.parse_attribute();
 
-                if attr == "runar::contract" || attr == "runar::stateful_contract" {
+                if attr == "runar::contract" || attr == "runar::stateful_contract" || attr == "runar::inductive_contract" {
                     if attr == "runar::stateful_contract" {
                         parent_class = "StatefulSmartContract".to_string();
+                    } else if attr == "runar::inductive_contract" {
+                        parent_class = "InductiveSmartContract".to_string();
                     }
                     // Parse struct
                     if matches!(self.current().typ, TokenType::Pub) { self.advance_clone(); }
@@ -348,7 +350,8 @@ impl RustDslParser {
         }
 
         // Determine parent class from property mutability
-        if properties.iter().any(|p| !p.readonly) {
+        // (but don't override InductiveSmartContract which was set by #[runar::inductive_contract])
+        if parent_class != "InductiveSmartContract" && properties.iter().any(|p| !p.readonly) {
             parent_class = "StatefulSmartContract".to_string();
         }
 
@@ -393,7 +396,7 @@ impl RustDslParser {
             source_location: loc,
         };
 
-        let contract = ContractNode {
+        let mut contract = ContractNode {
             name: contract_name,
             parent_class,
             properties,
@@ -401,6 +404,10 @@ impl RustDslParser {
             methods,
             source_file: self.file.clone(),
         };
+
+        if contract.parent_class == "InductiveSmartContract" {
+            super::parser::inject_inductive_internal_fields(&mut contract, &self.file);
+        }
 
         ParseResult { contract: Some(contract), errors: self.errors }
     }

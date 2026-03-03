@@ -54,6 +54,20 @@ pub struct DeployOptions {
     pub change_address: Option<String>,
 }
 
+/// Describes one continuation output for multi-output methods.
+#[derive(Debug, Clone)]
+pub struct OutputSpec {
+    pub satoshis: i64,
+    pub state: HashMap<String, SdkValue>,
+}
+
+/// A single output to include in the call transaction.
+#[derive(Debug, Clone)]
+pub struct CallOutput {
+    pub locking_script: String,
+    pub satoshis: i64,
+}
+
 /// Options for calling a contract method.
 #[derive(Debug, Clone)]
 pub struct CallOptions {
@@ -62,6 +76,11 @@ pub struct CallOptions {
     pub change_address: Option<String>,
     /// New state values for the continuation output (stateful contracts).
     pub new_state: Option<HashMap<String, SdkValue>>,
+    /// For multi-output methods: specify multiple continuation outputs.
+    pub outputs: Option<Vec<OutputSpec>>,
+    /// After a multi-output call, which output index to track as the
+    /// contract's continuation UTXO. Default: last output.
+    pub continuation_output_index: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------

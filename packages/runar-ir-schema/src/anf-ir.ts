@@ -139,6 +139,12 @@ export interface AddOutput {
   stateValues: string[];  // references to temps, one per mutable property in declaration order
 }
 
+export interface ExtractParentOutput {
+  kind: 'extract_parent_output';
+  rawTx: string;        // reference to raw transaction bytes
+  outputIndex: string;   // reference to output index
+}
+
 export type ANFValue =
   | LoadParam
   | LoadProp
@@ -153,4 +159,5 @@ export type ANFValue =
   | UpdateProp
   | GetStateScript
   | CheckPreimage
-  | AddOutput;
+  | AddOutput
+  | ExtractParentOutput;

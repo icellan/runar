@@ -62,6 +62,68 @@ pub struct OutputSnapshot {
 }
 
 // ---------------------------------------------------------------------------
+// Inductive smart contract support
+// ---------------------------------------------------------------------------
+
+/// Base struct for inductive Rúnar contracts.
+///
+/// Inductive contracts extend stateful contracts with chain-of-custody
+/// tracking via parent transaction introspection. The compiler auto-injects
+/// parentTx verification at method entry.
+///
+/// Fields:
+/// - `genesis_outpoint`: The outpoint of the original deployment transaction.
+/// - `parent_outpoint`: The outpoint of the immediate parent transaction.
+/// - `grandparent_outpoint`: The outpoint of the parent's parent transaction.
+/// - `outputs`: Recorded outputs from `add_output` calls.
+/// - `tx_preimage`: The sighash preimage for transaction validation.
+#[derive(Debug, Clone)]
+pub struct InductiveSmartContract {
+    pub genesis_outpoint: ByteString,
+    pub parent_outpoint: ByteString,
+    pub grandparent_outpoint: ByteString,
+    pub outputs: Vec<OutputSnapshot>,
+    pub tx_preimage: SigHashPreimage,
+}
+
+impl InductiveSmartContract {
+    /// Create a new InductiveSmartContract with the given outpoints.
+    pub fn new(
+        genesis_outpoint: ByteString,
+        parent_outpoint: ByteString,
+        grandparent_outpoint: ByteString,
+    ) -> Self {
+        Self {
+            genesis_outpoint,
+            parent_outpoint,
+            grandparent_outpoint,
+            outputs: Vec::new(),
+            tx_preimage: Vec::new(),
+        }
+    }
+
+    /// Record a new output with the given satoshis and state values.
+    pub fn add_output(&mut self, satoshis: Bigint, values: Vec<Vec<u8>>) {
+        self.outputs.push(OutputSnapshot { satoshis, values });
+    }
+
+    /// Returns a mock state script (empty bytes in test mode).
+    pub fn get_state_script(&self) -> ByteString {
+        vec![]
+    }
+
+    /// Returns the recorded outputs.
+    pub fn outputs(&self) -> &[OutputSnapshot] {
+        &self.outputs
+    }
+
+    /// Clears recorded outputs (call between test method invocations).
+    pub fn reset_outputs(&mut self) {
+        self.outputs.clear();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock crypto — always succeed for testing business logic
 // ---------------------------------------------------------------------------
 

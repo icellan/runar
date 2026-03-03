@@ -51,7 +51,7 @@ func (CustomType) typeNodeMarker() {}
 // ContractNode is the parsed representation of a Rúnar smart contract class.
 type ContractNode struct {
 	Name        string
-	ParentClass string // "SmartContract" or "StatefulSmartContract"
+	ParentClass string // "SmartContract", "StatefulSmartContract", or "InductiveSmartContract"
 	Properties  []PropertyNode
 	Constructor MethodNode
 	Methods     []MethodNode
