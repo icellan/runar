@@ -92,10 +92,10 @@ export class LocalSigner implements Signer {
       scope,
     });
 
-    // Hash the preimage with double-SHA256 to get the sighash
-    const sighash = Hash.hash256(preimage);
-
-    // Sign the sighash digest with ECDSA
+    // PrivateKey.sign() internally SHA-256 hashes its input before signing.
+    // We pass SHA256(preimage) so the total is SHA256(SHA256(preimage)) =
+    // hash256(preimage), which is the correct BIP-143 sighash digest.
+    const sighash = Hash.sha256(preimage);
     const signature = this.bsvPrivKey.sign(sighash);
 
     // Return DER-encoded signature with sighash byte appended

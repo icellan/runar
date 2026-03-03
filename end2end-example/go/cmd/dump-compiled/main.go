@@ -454,11 +454,11 @@ Inside cancel(aliceSig, bobSig):
 │  TX 1: FUNDING (creates the bet UTXO)                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Inputs:                                                        │
-│    [0] Alice funds (e.g. 0.5 BSV)                               │
-│    [1] Bob funds   (e.g. 0.5 BSV)                               │
+│    [0] Alice funds (1 BSV)                                      │
+│    [1] Bob funds   (1 BSV)                                      │
 │  Outputs:                                                       │
 │    [0] PriceBet UTXO                                            │
-│        satoshis:       100,000,000  (1 BSV combined)            │
+│        satoshis:       200,000,000  (2 BSV combined)            │
 │        locking script: <compiled PriceBet>  (%d bytes)          │
 └─────────────────────────────────────────────────────────────────┘
 

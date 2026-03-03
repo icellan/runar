@@ -4,6 +4,7 @@ use (
 	./compilers/go
 	./conformance
 	./end2end-example/go
+	./end2end-example/webapp
 	./examples/go
 	./packages/runar-go
 )
