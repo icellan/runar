@@ -96,7 +96,7 @@ contract P2PKH is SmartContract {
 </tr>
 </table>
 
-All four produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
+All five formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
 
 ---
 
@@ -214,7 +214,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-12 example contracts demonstrate all major patterns, each available in all supported formats:
+12 example contracts demonstrate all major patterns:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -231,7 +231,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [FunctionPatterns](examples/ts/function-patterns/) | Public/private methods, built-ins | Yes | Yes |
 | [MathDemo](examples/ts/math-demo/) | Math built-in functions | Yes | Yes |
 
-Each contract has tests in TypeScript, Go, Rust, Solidity, and Move:
+9 contracts are available in all 5 formats (TypeScript, Go, Rust, Solidity, Move). FunctionPatterns is available in TypeScript, Go, and Rust only. PostQuantumWallet and SPHINCSWallet are TypeScript-only.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -321,7 +321,7 @@ docs/                 # Documentation + format guides
 ### Prerequisites
 
 - **Node.js** >= 20, **pnpm** 9.15+
-- **Go** 1.22+ (for Go compiler and Go contract tests)
+- **Go** 1.26+ (for Go compiler and Go contract tests)
 - **Rust** 1.75+ (for Rust compiler and Rust contract tests)
 
 ### Build & Test

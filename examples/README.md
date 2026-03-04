@@ -15,7 +15,7 @@ Contracts available across all five formats (TypeScript, Solidity-like, Move-sty
 | **P2PKH** | `*/p2pkh/` | Stateless | Beginner | Pay-to-Public-Key-Hash. The simplest possible contract: verify a signature against a hashed public key. |
 | **Escrow** | `*/escrow/` | Stateless, Multi-method | Beginner | Three-party escrow with buyer, seller, and arbiter. Four spending paths: release by seller, release by arbiter, refund to buyer, and refund by arbiter. |
 | **Counter** | `*/stateful-counter/` | Stateful (OP_PUSH_TX) | Intermediate | On-chain counter that persists across transactions. Uses `StatefulSmartContract` for automatic state management. |
-| **Fungible Token** | `*/token-ft/` | Stateful, Token | Intermediate | Simple fungible token with transferable ownership. Owner signs to transfer; state tracks current owner. |
+| **Fungible Token** | `*/token-ft/` | Stateful, Token | Intermediate | Fungible token with UTXO splitting and merging. Three spending paths: transfer/split (1 input to 2 outputs), send (full balance transfer), and merge (N inputs to 1 output). State tracks owner and balance. |
 | **Non-Fungible Token** | `*/token-nft/` | Stateful, Token | Intermediate | NFT with transfer and burn operations. Immutable token ID and metadata, mutable owner. |
 | **Oracle Price Feed** | `*/oracle-price/` | Oracle (Rabin) | Advanced | Contract that settles based on an oracle-signed price. Uses Rabin signatures for cheap on-chain verification. |
 | **Auction** | `*/auction/` | Stateful, Multi-method | Advanced | On-chain auction with bidding and closing phases. Tracks highest bidder and bid amount. Enforces deadline via locktime. |

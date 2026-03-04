@@ -168,21 +168,30 @@ import { compile } from 'runar-compiler';
 
 // Compile the contract to get the AST (ContractNode)
 const result = compile(source, { fileName: 'P2PKH.runar.ts' });
-const contract = result.artifact!.ast; // ContractNode
+const contractNode = result.artifact!.ast; // ContractNode
 
-// Create interpreter with property values (constructor args)
+// Create interpreter with property values (constructor args).
+// Unlike TestContract (which accepts plain JS values), RunarInterpreter
+// requires RunarValue wrappers for all values:
+//   { kind: 'bigint', value: 42n }
+//   { kind: 'boolean', value: true }
+//   { kind: 'bytes', value: hexToBytes('abcd') }
 const interpreter = new RunarInterpreter({
   pubKeyHash: { kind: 'bytes', value: hexToBytes('89abcdef...') },
 });
 
-// Execute a method with arguments
-const interpResult = interpreter.executeMethod(contract, 'unlock', {
+// Optionally set the contract node for reuse across multiple calls
+interpreter.setContract(contractNode);
+
+// Execute a method with RunarValue-wrapped arguments
+const interpResult = interpreter.executeMethod(contractNode, 'unlock', {
   sig: { kind: 'bytes', value: hexToBytes('3044022...') },
   pubKey: { kind: 'bytes', value: hexToBytes('02abc...') },
 });
 
 // interpResult.success: boolean
-// interpResult.returnValue: the final value (for private methods)
+// interpResult.error?: string (if an assertion failed)
+// interpResult.returnValue?: RunarValue (for private methods)
 ```
 
 ### Comparing Interpreter and VM Results

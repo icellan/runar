@@ -48,6 +48,8 @@ console.log(result.anf);          // ANF IR program
 console.log(result.diagnostics);  // warnings and errors
 ```
 
+`compile()` runs all 6 passes: Parse, Validate, Type-check, ANF Lower, Stack Lower (+ peephole optimize), and Emit (+ artifact assembly). It **never throws** -- all errors are caught and returned as diagnostics in the `CompileResult`. If a pass produces errors, subsequent passes are skipped and the partial result is returned.
+
 ### CompileOptions
 
 ```typescript
@@ -113,6 +115,19 @@ interface CompilerDiagnostic {
 
 No error code system — diagnostics use plain-text messages with optional source locations.
 
+### Constructor Slots and Argument Baking
+
+The compiled artifact includes `constructorSlots`, which record the byte offsets of constructor parameter placeholders in the emitted script:
+
+```typescript
+interface ConstructorSlot {
+  paramIndex: number;   // index of the constructor parameter
+  byteOffset: number;   // byte offset in the script hex where the placeholder lives
+}
+```
+
+When `constructorArgs` are provided in `CompileOptions`, the compiler replaces ANF property `initialValue` fields before stack lowering. This produces a complete locking script with real push-data values instead of `OP_0` placeholders. Without `constructorArgs`, the script contains placeholder bytes that must be spliced at deploy time using the `constructorSlots` offsets from the artifact.
+
 ---
 
 ## Individual Pass Functions
@@ -152,13 +167,25 @@ const anf = lowerToANF(parseResult.contract);
     Rúnar AST        Validated AST      Typed AST
                                            |
                                            v
-  +-----------+     +-----------+     +------------+
-  |  Pass 6   | <-- |  Pass 5   | <-- |  Pass 4    |
-  |  EMIT     |     |  STACK    |     |  ANF LOWER |
-  +-----------+     +-----------+     +------------+
-       |                 |                  |
-  Bitcoin Script     Stack IR          ANF IR
-  (hex bytes)     (stack offsets)   (canonical JSON)
+                     +------------+     +-----------+
+                     |  Pass 4    | --> |  Pass 5   |
+                     |  ANF LOWER |     |  STACK    |
+                     +------------+     |  LOWER    |
+                          |             +-----------+
+                       ANF IR                |
+                     (canonical JSON)     Stack IR
+                                        (stack offsets)
+                                             |
+                                             v
+                     +------------+     +------------+
+                     |  Pass 6    | <-- |  Peephole  |
+                     |  EMIT +    |     |  Optimize  |
+                     |  Artifact  |     |  (always)  |
+                     +------------+     +------------+
+                          |
+                     Bitcoin Script
+                     (hex bytes)
+                     + RunarArtifact
 ```
 
 The peephole optimizer runs on Stack IR between passes 5 and 6 (always enabled). The constant folding optimizer is available between passes 4 and 5 but disabled by default to preserve ANF conformance.

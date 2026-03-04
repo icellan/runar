@@ -141,6 +141,8 @@ Load a compile-time constant.
 
 The `value` field holds the constant directly. In JSON serialization, `bigint` values are represented as strings or numbers, `boolean` as JSON booleans, and byte string literals as hex strings.
 
+> **Implementation note:** When the `value` field is a string with the prefix `@ref:` (e.g., `"@ref:t3"`), it represents an alias to another binding rather than a literal constant. This is used internally by the ANF lowerer for variable aliasing (e.g., `let x = y` or reassignment `x = expr`). The stack lowerer resolves `@ref:` values by looking up the referenced binding on the virtual stack. This convention affects cross-compiler conformance: all three compilers must emit identical `@ref:` aliases for the same source input.
+
 ### 4.4 `bin_op`
 
 Binary operation on two previously-bound values.

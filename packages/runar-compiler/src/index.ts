@@ -1,11 +1,13 @@
 /**
  * Rúnar Compiler -- main entry point.
  *
- * Chains the nanopass pipeline:
- *   Pass 1: Parse (TypeScript source -> Rúnar AST)
+ * Chains the 6-pass nanopass pipeline:
+ *   Pass 1: Parse (source -> Rúnar AST)
  *   Pass 2: Validate (Rúnar AST -> validated Rúnar AST)
  *   Pass 3: Type-Check (Rúnar AST -> type-checked Rúnar AST)
  *   Pass 4: ANF Lower (Rúnar AST -> ANF IR)
+ *   Pass 5: Stack Lower (ANF IR -> Stack IR) + peephole optimize
+ *   Pass 6: Emit (Stack IR -> Bitcoin Script hex) + artifact assembly
  */
 
 export { parse } from './passes/01-parse.js';
@@ -86,16 +88,25 @@ export interface CompileResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Compile a Rúnar TypeScript source string through the frontend passes.
+ * Compile a Rúnar source string through all 6 nanopass pipeline stages.
  *
  * The pipeline is:
- *   1. Parse: TS source -> Rúnar AST
+ *   1. Parse: source -> Rúnar AST (auto-dispatches by file extension)
  *   2. Validate: check language subset constraints
  *   3. Type-check: verify type consistency
  *   4. ANF Lower: flatten to A-Normal Form IR
+ *   5. Stack Lower: ANF IR -> Stack IR (+ peephole optimize)
+ *   6. Emit: Stack IR -> hex-encoded Bitcoin Script (+ artifact assembly)
  *
  * Each pass is a pure function. If a pass produces errors, subsequent
  * passes are skipped and the partial result is returned.
+ *
+ * This function never throws. All errors are caught and returned as
+ * diagnostics in the `CompileResult`.
+ *
+ * When `constructorArgs` are provided, the compiler replaces ANF property
+ * `initialValue` fields before stack lowering, producing a complete
+ * locking script with real values instead of OP_0 placeholders.
  */
 export function compile(source: string, options?: CompileOptions): CompileResult {
   const diagnostics: CompilerDiagnostic[] = [];

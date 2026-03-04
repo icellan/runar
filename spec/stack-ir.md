@@ -172,6 +172,8 @@ The Stack IR uses a discriminated union with exactly **13 variants**:
 | `TuckOp` | `'tuck'` | — | Copy top behind second |
 | `PlaceholderOp` | `'placeholder'` | `paramIndex: number, paramName: string` | Constructor parameter slot |
 
+> **Note:** The `depth` field on `RollOp` and `PickOp` is informational only. The actual depth value is pushed as a separate `PushOp` by the stack lowerer before the `RollOp`/`PickOp`, and the emitter ignores the `depth` field when generating Bitcoin Script.
+
 ### 3.8 Placeholder Instructions
 
 | Instruction | Stack Effect | Bitcoin Opcode |
@@ -276,7 +278,7 @@ depth_after(OP_ADD)        = depth_before - 1  (2 inputs, 1 output)
 depth_after(OP_CHECKSIG)   = depth_before - 1  (2 inputs, 1 output)
 depth_after(OP_SIZE)       = depth_before + 1  (1 input, 2 outputs, input preserved)
 depth_after(OP_CAT)        = depth_before - 1  (2 inputs, 1 output)
-depth_after(OP_SPLIT)      = depth_before      (1 input, 2 outputs)
+depth_after(OP_SPLIT)      = depth_before      (2 inputs (data + position), 2 outputs (left + right), net change 0)
 depth_after(OP_VERIFY)     = depth_before - 1
 depth_after(OP_2DUP)       = depth_before + 2
 depth_after(OP_2DROP)      = depth_before - 2
@@ -352,18 +354,26 @@ Note: The compiler fuses `EQUAL + VERIFY` into `OP_EQUALVERIFY` as a peephole op
 
 ## 7. Peephole Optimizations
 
-The Stack IR phase may apply the following peephole optimizations:
+The Stack IR phase applies the following peephole optimizations. Rules are applied in a left-to-right pass, repeated until a fixed point is reached (no more changes). If-op branches are recursively optimized independently.
 
 | Pattern | Replacement | Savings |
 |---|---|---|
-| `EQUAL VERIFY` | `OP_EQUALVERIFY` | 1 byte |
-| `NUMEQUAL VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
-| `CHECKSIG VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
-| `SWAP DROP` | `NIP` | 1 byte |
-| `DUP ROLL(1)` | `DUP` (noop ROLL) | 2 bytes |
-| `PUSH_INT(0) ADD` | (remove both) | 2+ bytes |
-| `PUSH_BOOL(true) VERIFY` | (remove both) | 2 bytes |
-| `NOT NOT` | (remove both) | 2 bytes |
+| `PUSH x, DROP` | (remove both) | 2+ bytes |
+| `DUP, DROP` | (remove both) | 2 bytes |
+| `SWAP, SWAP` | (remove both) | 2 bytes |
+| `PUSH 1, OP_ADD` | `OP_1ADD` | 1+ bytes |
+| `PUSH 1, OP_SUB` | `OP_1SUB` | 1+ bytes |
+| `PUSH 0, OP_ADD` | (remove both) | 2+ bytes |
+| `PUSH 0, OP_SUB` | (remove both) | 2+ bytes |
+| `OP_NOT, OP_NOT` | (remove both) | 2 bytes |
+| `OP_NEGATE, OP_NEGATE` | (remove both) | 2 bytes |
+| `OP_EQUAL, OP_VERIFY` | `OP_EQUALVERIFY` | 1 byte |
+| `OP_CHECKSIG, OP_VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
+| `OP_NUMEQUAL, OP_VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
+| `OP_CHECKMULTISIG, OP_VERIFY` | `OP_CHECKMULTISIGVERIFY` | 1 byte |
+| `OP_DUP, OP_DROP` | (remove both) | 2 bytes |
+| `OVER, OVER` | `OP_2DUP` | 1 byte |
+| `DROP, DROP` | `OP_2DROP` | 1 byte |
 
 ---
 

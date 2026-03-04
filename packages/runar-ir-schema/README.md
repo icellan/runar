@@ -68,12 +68,14 @@ All expressions use a discriminated union on the `kind` field:
 
 ### Statement Nodes
 
+All statement nodes include an implicit `sourceLocation: SourceLocation` field (omitted from the table for brevity).
+
 | Kind | Fields | Description |
 |---|---|---|
-| `variable_decl` | `name`, `type?`, `init`, `mutable` | `const x = ...` (`mutable: false`) or `let x = ...` (`mutable: true`) |
+| `variable_decl` | `name`, `type?`, `init` | `const x = ...` or `let x = ...` |
 | `assignment` | `target`, `value` | `x = ...` or `this.x = ...` |
 | `if_statement` | `condition`, `then`, `else?` | Conditional |
-| `for_statement` | `init`, `condition`, `update`, `body` | Bounded loop |
+| `for_statement` | `init: VariableDeclStatement`, `condition`, `update`, `body` | Bounded loop (`init` is a `VariableDeclStatement`) |
 | `return_statement` | `value?` | Return from private method |
 | `expression_statement` | `expression` | Expression as statement |
 
@@ -206,6 +208,21 @@ This ensures byte-identical output across implementations. The SHA-256 of the se
 
 ```
 sha256(canonical_json(compiler_A(source))) === sha256(canonical_json(compiler_B(source)))
+```
+
+The package exports two functions for canonical serialization:
+
+```typescript
+import { canonicalJsonStringify, canonicalise } from 'runar-ir-schema';
+
+// Serialise any JSON-compatible value to canonical JSON (RFC 8785 / JCS).
+// Throws TypeError if the value contains undefined, functions, symbols, or circular references.
+// BigInt values are serialised as bare integers (no quotes).
+const json = canonicalJsonStringify(anfProgram);
+
+// Parse a JSON string and re-serialise it to canonical form.
+// Useful for normalising IR that was stored with pretty-printing.
+const normalized = canonicalise(prettyPrintedJson);
 ```
 
 ---

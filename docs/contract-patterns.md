@@ -72,7 +72,7 @@ class Escrow extends SmartContract {
 
 - **`release`**: The seller can release funds to themselves, or the arbiter can authorize release. Either signature suffices.
 - **`refund`**: The buyer can reclaim funds, or the arbiter can authorize a refund.
-- The `||` operator is short-circuit evaluated: if the first `checkSig` succeeds, the second is not executed.
+- The `||` operator uses eager evaluation: both `checkSig` calls are always executed, and their results are combined with `OP_BOOLOR`.
 
 Because this contract has two public methods, the compiler generates a dispatch table. The unlocking script includes a method index (`0n` for `release`, `1n` for `refund`) in addition to the signature.
 
@@ -304,8 +304,8 @@ A stateful auction where bidders can submit increasing bids, and the auctioneer 
 
 ```typescript
 import {
-  StatefulSmartContract, assert, PubKey, Sig, SigHashPreimage,
-  checkSig, checkPreimage, hash256, extractOutputHash, extractLocktime
+  StatefulSmartContract, assert, PubKey, Sig,
+  checkSig, extractLocktime
 } from 'runar-lang';
 
 class Auction extends StatefulSmartContract {
@@ -322,21 +322,24 @@ class Auction extends StatefulSmartContract {
     this.deadline = deadline;
   }
 
-  // Note: checkPreimage is automatically injected at method entry by
-  // StatefulSmartContract, so we do not call it manually here.
+  // StatefulSmartContract automatically injects:
+  // - checkPreimage at method entry
+  // - state continuation (hash256(getStateScript()) === extractOutputHash)
+  //   at method exit for any method that mutates state
+  // The developer only writes the business logic.
 
-  public bid(bidder: PubKey, bidAmount: bigint, txPreimage: SigHashPreimage) {
+  public bid(bidder: PubKey, bidAmount: bigint) {
     assert(bidAmount > this.highestBid);
-    assert(extractLocktime(txPreimage) < this.deadline);
+    assert(extractLocktime(this.txPreimage) < this.deadline);
     this.highestBidder = bidder;
     this.highestBid = bidAmount;
-    assert(hash256(this.getStateScript()) === extractOutputHash(txPreimage));
+    // State continuation is auto-injected because state was mutated
   }
 
-  public close(sig: Sig, txPreimage: SigHashPreimage) {
+  public close(sig: Sig) {
     assert(checkSig(sig, this.auctioneer));
-    assert(extractLocktime(txPreimage) >= this.deadline);
-    // No state continuation -- auction is done
+    assert(extractLocktime(this.txPreimage) >= this.deadline);
+    // No state continuation injected -- no state mutation
   }
 }
 ```
@@ -356,7 +359,7 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 |---------|----------|----------------|
 | P2PKH | No | `hash160`, `checkSig` |
 | Escrow | No | Multiple public methods, `\|\|` for multi-party auth |
-| Counter | Yes | OP_PUSH_TX, `getStateScript`, `extractOutputHash` |
+| Counter | Yes | OP_PUSH_TX, automatic state continuation via `StatefulSmartContract` |
 | Fungible Token | Yes | Owner transfer via state update |
 | NFT | Yes | Transfer + burn (no state continuation) |
 | Oracle | No | Rabin signatures, `verifyRabinSig`, `num2bin` |

@@ -52,7 +52,7 @@ tests/
 |   +-- expected-script.hex
 |
 +-- multi-method/
-|   +-- multi-method.runar.ts     # (+ multi-format variants)
+|   +-- multi-method.runar.ts     # (+ .sol, .move, .go, .rs variants)
 |   +-- expected-ir.json
 |   +-- expected-script.hex
 |

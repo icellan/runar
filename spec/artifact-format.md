@@ -94,27 +94,22 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
 
 - **Type**: `string` (hexadecimal)
 - **Required**: Yes
-- **Description**: The compiled locking script as a hex-encoded byte string. This is the **script template** -- it contains placeholders for constructor parameters.
-- **Example**: `"76a914<pubKeyHash>88ac"`
-- **Placeholder format**: `<paramName>` is replaced with the actual value during deployment.
+- **Description**: The compiled locking script as a hex-encoded byte string. This is the **script template** -- it contains `OP_0` (`00`) byte placeholders at positions where constructor parameter values will be spliced in during deployment.
+- **Example**: `"76a9140088ac"` (the `00` at byte offset 3 is a placeholder for `pubKeyHash`)
 
-#### Placeholder Encoding
+#### Placeholder Mechanism
 
-Placeholders appear in the hex string as:
+The compiler emits `OP_0` (hex `00`) as a 1-byte placeholder wherever a constructor parameter value belongs. The byte offset of each placeholder is recorded in the `constructorSlots` array (see section 3.10). At deployment time, the SDK replaces the 2-hex-char `00` at each recorded byte offset with the encoded argument value (push data opcode + serialized value).
 
-```
-<name>
-```
-
-Where `name` is the constructor parameter name. When deploying, the SDK replaces each placeholder with the hex-encoded push data for that parameter value.
+For example, given `constructorSlots: [{ "paramIndex": 0, "byteOffset": 3 }]`, the SDK knows to replace the `00` at byte offset 3 in the script hex with the serialized `pubKeyHash` value.
 
 ### 3.6 `asm`
 
 - **Type**: `string`
 - **Required**: Yes
 - **Description**: Human-readable assembly representation of the script. Uses standard Bitcoin Script opcode mnemonics.
-- **Example**: `"OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG"`
-- **Rules**: Opcodes are separated by single spaces. Placeholders use the same `<name>` syntax as the `script` field. Literal data is shown as hex.
+- **Example**: `"OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG"`
+- **Rules**: Opcodes are separated by single spaces. Constructor parameter placeholders appear as `OP_0` in the assembly. Literal data is shown as hex.
 
 ### 3.7 `sourceMap`
 
@@ -228,26 +223,29 @@ The SDK uses the artifact to deploy a contract as follows:
 ### Step 1: Instantiate
 
 ```typescript
+import { RunarContract } from 'runar-sdk';
+
 const artifact = JSON.parse(fs.readFileSync('P2PKH.json', 'utf8'));
-const P2PKH = buildContractClass(artifact);
-const instance = new P2PKH(pubKeyHash);
+const contract = new RunarContract(artifact, [pubKeyHash]);
 ```
 
 ### Step 2: Build Locking Script
 
-The SDK replaces placeholders in the `script` template:
+The SDK uses the `constructorSlots` array to splice constructor argument values into the `script` template at the recorded byte offsets:
 
 ```
-Template:  "76a914<pubKeyHash>88ac"
-Value:     pubKeyHash = "89abcdef01234567890abcdef01234567890abcd"
-Result:    "76a91489abcdef01234567890abcdef01234567890abcd88ac"
+Template:      "76a9140088ac"
+                       ^^ OP_0 placeholder at byteOffset 3
+constructorSlots: [{ paramIndex: 0, byteOffset: 3 }]
+Value:         pubKeyHash = "89abcdef01234567890abcdef01234567890abcd"
+Result:        "76a91489abcdef01234567890abcdef01234567890abcd88ac"
 ```
 
-For each placeholder, the SDK:
+For each constructor slot, the SDK:
 
 1. Serializes the value according to its type (see Type Encoding in `abi.md`).
 2. Wraps it with the appropriate push data opcode.
-3. Replaces the placeholder with the hex-encoded result.
+3. Replaces the 2-hex-char `00` (OP_0) at the recorded `byteOffset` with the hex-encoded result.
 
 ### Step 3: Create Transaction Output
 
@@ -289,10 +287,10 @@ For stateful contracts, the deployment and invocation flows are extended:
 
 ### Deployment
 
-The initial locking script includes the initial state:
+The initial locking script includes the initial state appended after an `OP_RETURN` separator:
 
 ```
-<initial_state_data> OP_DROP ... OP_DROP <code_part>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
 ### State Transition
@@ -333,8 +331,11 @@ The SDK handles serialization/deserialization of state using the `stateFields` d
             }
         ]
     },
-    "script": "76a914<pubKeyHash>88ac",
-    "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
+    "script": "76a9140088ac",
+    "asm": "OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG",
+    "constructorSlots": [
+        { "paramIndex": 0, "byteOffset": 3 }
+    ],
     "sourceMap": {
         "mappings": [
             { "opcodeIndex": 0, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },

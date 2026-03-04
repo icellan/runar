@@ -290,10 +290,11 @@ function arbPropertyDefs(): fc.Arbitrary<PropertyDef[]> {
 
 function arbConstructor(properties: PropertyDef[]): string {
   const params = properties.map((p) => `${p.name}: ${p.type}`).join(', ');
+  const superArgs = properties.map((p) => p.name).join(', ');
   const assignments = properties
     .map((p) => `    this.${p.name} = ${p.name};`)
     .join('\n');
-  return `  constructor(${params}) {\n${assignments}\n  }`;
+  return `  constructor(${params}) {\n    super(${superArgs});\n${assignments}\n  }`;
 }
 
 function generateContractSource(
@@ -505,6 +506,7 @@ export class ${contractName} extends SmartContract {
 ${propDecls}
 
   constructor(${ctorParams}) {
+    super(${properties.map((p) => p.name).join(', ')});
 ${ctorBody}
   }
 

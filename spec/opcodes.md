@@ -173,6 +173,8 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `0x98` | `OP_LSHIFT` | `(a b -- a<<b)` | Left shift (BSV re-enabled) |
 | `0x99` | `OP_RSHIFT` | `(a b -- a>>b)` | Right shift (BSV re-enabled) |
 
+> **Warning:** `OP_LSHIFT` and `OP_RSHIFT` in BSV operate on **raw byte arrays** (big-endian unsigned shift), NOT on Script numbers. They preserve the input byte length. This is incompatible with numeric `BigInt` shifting for multi-byte script numbers. The constant-fold optimizer skips folding `>>` for negative left operands due to this mismatch. For reliable numeric right-shift, use `OP_DIV` with a power of 2 instead (e.g., `PUSH (1<<n) OP_DIV`).
+
 ### 5.1 Rúnar Mapping
 
 | Rúnar Expression | Opcode |
@@ -187,6 +189,8 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `!a` | `OP_NOT` |
 | `a && b` (eager evaluation) | `OP_BOOLAND` |
 | `a \|\| b` (eager evaluation) | `OP_BOOLOR` |
+| `a << b` | `OP_LSHIFT` |
+| `a >> b` | `OP_RSHIFT` |
 
 ### 5.2 Bitwise Operations
 

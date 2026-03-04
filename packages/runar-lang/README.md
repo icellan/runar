@@ -101,7 +101,7 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 |---|---|---|---|---|
 | `ByteString` | `string` | variable | `toByteString(hex)` | Even-length hex |
 | `PubKey` | `string` | 33 | `PubKey(hex)` | 66 hex chars, prefix `02` or `03` |
-| `Sig` | `string` | 71-73 | `Sig(hex)` | DER prefix `30`, min 8 bytes |
+| `Sig` | `string` | variable | `Sig(hex)` | DER prefix `30`, min 8 bytes |
 | `Ripemd160` | `string` | 20 | `Ripemd160(hex)` | 40 hex chars |
 | `Sha256` | `string` | 32 | `Sha256(hex)` | 64 hex chars |
 | `Addr` | `string` | 20 | `Addr(hex)` | 40 hex chars (alias for Ripemd160) |
@@ -110,6 +110,8 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 | `RabinSig` | `bigint` | variable | literal `bigint` | -- |
 | `RabinPubKey` | `bigint` | variable | literal `bigint` | -- |
 | `SigHashType` | `bigint` | variable | `SigHash.ALL` etc. | -- |
+
+**Note on `Sig` size**: ECDSA DER signatures are typically 71-73 bytes, but this is not enforced as a hard upper bound at the type level. The `Sig` constructor only validates a minimum of 8 bytes and a DER prefix of `0x30`. Variable-length signatures (e.g. from different signing schemes) are accepted as long as they meet these minimal requirements.
 
 ### Type Hierarchy
 
@@ -188,6 +190,7 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | `gcd` | `(a: bigint, b: bigint) => bigint` | Greatest common divisor |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | Division returning quotient |
 | `log2` | `(n: bigint) => bigint` | Approximate floor(log2(n)) |
+| `bool` | `(n: bigint) => boolean` | Convert integer to boolean (0 is false, non-zero is true) |
 
 ### Control
 

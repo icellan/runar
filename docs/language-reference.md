@@ -216,7 +216,7 @@ Both `==` and `===` have identical semantics in Rúnar (no type coercion). The c
 | `&&` | Logical AND | `OP_BOOLAND` |
 | `\|\|` | Logical OR | `OP_BOOLOR` |
 
-Both operands are always evaluated (eager evaluation). At the ANF IR level, short-circuit lowering is used for control flow, but at the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
+Both operands are always evaluated (eager evaluation). At the ANF IR level, both sides are lowered as flat `bin_op` nodes -- there is no short-circuit lowering. At the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
 
 ### Bitwise (operands: `bigint`)
 
@@ -400,7 +400,6 @@ private helper(x: bigint): bigint {
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `assert` | `(cond: boolean) => void` | `OP_VERIFY` |
-| `exit` | `(success: boolean) => void` | `OP_VERIFY` |
 
 ### Preimage (Stateful Contracts)
 
