@@ -6,7 +6,9 @@ const { LEN, N } = WOTS_PARAMS;
 describe('WOTS+ reference implementation', () => {
   const seed = new Uint8Array(32);
   seed[0] = 0x42;
-  const { sk, pk } = wotsKeygen(seed);
+  const pubSeed = new Uint8Array(32);
+  pubSeed[0] = 0x01;
+  const { sk, pk } = wotsKeygen(seed, pubSeed);
 
   describe('keygen', () => {
     it('generates correct number of secret key elements', () => {
@@ -19,26 +21,37 @@ describe('WOTS+ reference implementation', () => {
       }
     });
 
-    it('generates a 32-byte public key', () => {
-      expect(pk.length).toBe(N); // 32
+    it('generates a 64-byte public key (pubSeed || pkRoot)', () => {
+      expect(pk.length).toBe(2 * N); // 64
     });
 
-    it('is deterministic with same seed', () => {
-      const { pk: pk2 } = wotsKeygen(seed);
+    it('embeds pubSeed as first 32 bytes of public key', () => {
+      expect(pk.slice(0, N)).toEqual(pubSeed);
+    });
+
+    it('is deterministic with same seed and pubSeed', () => {
+      const { pk: pk2 } = wotsKeygen(seed, pubSeed);
       expect(pk2).toEqual(pk);
     });
 
     it('produces different keys with different seeds', () => {
       const otherSeed = new Uint8Array(32);
       otherSeed[0] = 0x99;
-      const { pk: pk2 } = wotsKeygen(otherSeed);
+      const { pk: pk2 } = wotsKeygen(otherSeed, pubSeed);
+      expect(pk2).not.toEqual(pk);
+    });
+
+    it('produces different keys with different pubSeeds', () => {
+      const otherPubSeed = new Uint8Array(32);
+      otherPubSeed[0] = 0xbb;
+      const { pk: pk2 } = wotsKeygen(seed, otherPubSeed);
       expect(pk2).not.toEqual(pk);
     });
   });
 
   describe('sign + verify round-trip', () => {
     const msg = new TextEncoder().encode('hello world');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
 
     it('produces correct signature size', () => {
       expect(sig.length).toBe(LEN * N); // 67 * 32 = 2,144
@@ -50,14 +63,14 @@ describe('WOTS+ reference implementation', () => {
 
     it('verifies different messages with same key', () => {
       const msg2 = new TextEncoder().encode('different message');
-      const sig2 = wotsSign(msg2, sk);
+      const sig2 = wotsSign(msg2, sk, pubSeed);
       expect(wotsVerify(msg2, sig2, pk)).toBe(true);
     });
   });
 
   describe('rejection', () => {
     const msg = new TextEncoder().encode('test message');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
 
     it('rejects a tampered signature (flipped byte)', () => {
       const bad = new Uint8Array(sig);
@@ -79,7 +92,7 @@ describe('WOTS+ reference implementation', () => {
     it('rejects wrong public key', () => {
       const otherSeed = new Uint8Array(32);
       otherSeed[0] = 0xaa;
-      const { pk: otherPk } = wotsKeygen(otherSeed);
+      const { pk: otherPk } = wotsKeygen(otherSeed, pubSeed);
       expect(wotsVerify(msg, sig, otherPk)).toBe(false);
     });
 
@@ -92,7 +105,11 @@ describe('WOTS+ reference implementation', () => {
       expect(wotsVerify(msg, new Uint8Array(0), pk)).toBe(false);
     });
 
-    it('rejects wrong-length public key', () => {
+    it('rejects wrong-length public key (32 bytes)', () => {
+      expect(wotsVerify(msg, sig, pk.slice(0, 32))).toBe(false);
+    });
+
+    it('rejects wrong-length public key (16 bytes)', () => {
       expect(wotsVerify(msg, sig, pk.slice(0, 16))).toBe(false);
     });
   });
@@ -100,21 +117,22 @@ describe('WOTS+ reference implementation', () => {
   describe('edge cases', () => {
     it('handles empty message', () => {
       const emptyMsg = new Uint8Array(0);
-      const sig = wotsSign(emptyMsg, sk);
+      const sig = wotsSign(emptyMsg, sk, pubSeed);
       expect(wotsVerify(emptyMsg, sig, pk)).toBe(true);
     });
 
     it('handles large message', () => {
       const largeMsg = new Uint8Array(10_000);
       largeMsg.fill(0xab);
-      const sig = wotsSign(largeMsg, sk);
+      const sig = wotsSign(largeMsg, sk, pubSeed);
       expect(wotsVerify(largeMsg, sig, pk)).toBe(true);
     });
 
     it('random keypair round-trip (no seed)', () => {
       const { sk: rsk, pk: rpk } = wotsKeygen();
+      const rpubSeed = rpk.slice(0, N);
       const msg = new TextEncoder().encode('random key test');
-      const sig = wotsSign(msg, rsk);
+      const sig = wotsSign(msg, rsk, rpubSeed);
       expect(wotsVerify(msg, sig, rpk)).toBe(true);
     });
   });

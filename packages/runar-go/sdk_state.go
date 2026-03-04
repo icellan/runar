@@ -143,9 +143,9 @@ func encodeStateValue(value interface{}, fieldType string) string {
 	case "bool":
 		b, _ := value.(bool)
 		if b {
-			return "0151" // push 1 byte: 0x51 (OP_TRUE)
+			return "51" // OP_TRUE
 		}
-		return "0100" // push 1 byte: 0x00
+		return "00" // OP_FALSE
 	default:
 		// bytes, ByteString, PubKey, Addr, Ripemd160, Sha256, etc.
 		hex := fmt.Sprintf("%v", value)
@@ -159,7 +159,7 @@ func encodeStateValue(value interface{}, fieldType string) string {
 // uses OP_0/OP_1..16 opcodes.
 func EncodeScriptInt(n int64) string {
 	if n == 0 {
-		return "0100" // push 1 byte: 0x00
+		return "00" // OP_0
 	}
 
 	negative := n < 0
@@ -217,14 +217,19 @@ func EncodePushData(dataHex string) string {
 // ---------------------------------------------------------------------------
 
 func decodeStateValue(hex string, offset int, fieldType string) (interface{}, int) {
-	data, bytesRead := DecodePushData(hex, offset)
-
 	switch fieldType {
-	case "int", "bigint":
-		return DecodeScriptInt(data), bytesRead
 	case "bool":
-		return data != "00" && data != "", bytesRead
+		// Bools are bare opcodes: "51" (OP_TRUE) or "00" (OP_FALSE) — 1 byte each
+		if offset+2 > len(hex) {
+			return false, 2
+		}
+		opcode := hex[offset : offset+2]
+		return opcode == "51", 2
+	case "int", "bigint":
+		data, bytesRead := DecodePushData(hex, offset)
+		return DecodeScriptInt(data), bytesRead
 	default:
+		data, bytesRead := DecodePushData(hex, offset)
 		return data, bytesRead
 	}
 }

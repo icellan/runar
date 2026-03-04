@@ -152,22 +152,19 @@ The ANF IR is the **conformance boundary** for the multi-compiler strategy. All 
 - Temporaries are numbered sequentially per method (`t0`, `t1`, ...).
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined).
-- Short-circuit operators (`&&`, `||`) are lowered to `if` nodes.
+- Logical operators (`&&`, `||`) use eager evaluation -- both operands are always evaluated and combined with a single opcode.
 
-### Short-Circuit Lowering Example
+### Logical Operator Lowering Example
 
 `a && b` becomes:
 
 ```
 t0 = <evaluate a>
-t1 = if(t0) {
-    t2 = <evaluate b>
-    -> t2
-} else {
-    t3 = load_const(boolean, "false")
-    -> t3
-}
+t1 = <evaluate b>
+t2 = bin_op("&&", t0, t1)
 ```
+
+Both operands are always evaluated. At the Stack IR level, `bin_op("&&")` emits `OP_BOOLAND` and `bin_op("||")` emits `OP_BOOLOR`. There is no short-circuit lowering -- Bitcoin Script has no conditional branching at the expression level that would skip operand evaluation, so both sides are computed eagerly.
 
 ---
 
@@ -208,7 +205,7 @@ When a value will not be used for many instructions, the scheduler may move it t
 
 ### Depth Tracking
 
-The compiler statically verifies that the stack depth never exceeds 800 items. Both branches of an `OP_IF`/`OP_ELSE`/`OP_ENDIF` must produce the same stack depth at `OP_ENDIF`.
+The compiler statically verifies that the stack depth never exceeds 800 items (a conservative limit set in `05-stack-lower.ts`). The ScriptVM testing environment allows up to 1000 items by default. The compiler uses the lower limit to provide a safety margin. Both branches of an `OP_IF`/`OP_ELSE`/`OP_ENDIF` must produce the same stack depth at `OP_ENDIF`.
 
 ---
 

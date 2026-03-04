@@ -135,25 +135,19 @@ Note: `==` and `===` have identical semantics in Rúnar (no type coercion). The 
 
 ### 3.7 Logical Operators
 
-Short-circuit evaluation:
+Eager evaluation (both operands are always evaluated):
 
 ```
-    <e1, env, sigma> -->* VBool(false)
-    ─────────────────────────────────────────
-    <e1 && e2, env, sigma>  -->  VBool(false)
+    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
+    ────────────────────────────────────────────────────────────────────
+    <e1 && e2, env, sigma>  -->  VBool(b1 ∧ b2)
 
-    <e1, env, sigma> -->* VBool(true)    <e2, env, sigma> -->* v
-    ─────────────────────────────────────────────────────────────
-    <e1 && e2, env, sigma>  -->  v
-
-    <e1, env, sigma> -->* VBool(true)
-    ────────────────────────────────────────
-    <e1 || e2, env, sigma>  -->  VBool(true)
-
-    <e1, env, sigma> -->* VBool(false)    <e2, env, sigma> -->* v
-    ──────────────────────────────────────────────────────────────
-    <e1 || e2, env, sigma>  -->  v
+    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
+    ────────────────────────────────────────────────────────────────────
+    <e1 || e2, env, sigma>  -->  VBool(b1 ∨ b2)
 ```
+
+`&&` compiles to `OP_BOOLAND` and `||` compiles to `OP_BOOLOR`. Unlike TypeScript's short-circuit semantics, both operands are evaluated unconditionally. This is safe in Rúnar because all expressions are pure (no side effects beyond `assert`).
 
 ### 3.8 Unary Operators
 

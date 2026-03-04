@@ -134,9 +134,9 @@ fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
         }
         "bool" => {
             if value.as_bool() {
-                "0151".to_string() // push 1 byte: 0x51 (OP_TRUE)
+                "51".to_string() // OP_TRUE
             } else {
-                "0100".to_string() // push 1 byte: 0x00
+                "00".to_string() // OP_FALSE
             }
         }
         // All byte-like types: bytes, ByteString, PubKey, Addr, Ripemd160, Sha256
@@ -151,7 +151,7 @@ fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
 /// (for state encoding -- always uses push data, even for 0).
 fn encode_script_int(n: i64) -> String {
     if n == 0 {
-        return "0100".to_string(); // push 1 byte: 0x00
+        return "00".to_string(); // OP_0
     }
 
     let negative = n < 0;
@@ -213,16 +213,21 @@ fn decode_state_value(
     offset: usize,
     field_type: &str,
 ) -> (SdkValue, usize) {
-    let (data, bytes_read) = decode_push_data(hex, offset);
-
     match field_type {
+        "bool" => {
+            // Bools are bare opcodes: "51" (OP_TRUE) or "00" (OP_FALSE) — 1 byte each
+            if offset + 2 > hex.len() {
+                return (SdkValue::Bool(false), 2);
+            }
+            let opcode = &hex[offset..offset + 2];
+            (SdkValue::Bool(opcode == "51"), 2)
+        }
         "int" | "bigint" => {
+            let (data, bytes_read) = decode_push_data(hex, offset);
             (SdkValue::Int(decode_script_int(&data)), bytes_read)
         }
-        "bool" => {
-            (SdkValue::Bool(data != "00" && !data.is_empty()), bytes_read)
-        }
         _ => {
+            let (data, bytes_read) = decode_push_data(hex, offset);
             (SdkValue::Bytes(data), bytes_read)
         }
     }
@@ -394,10 +399,10 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn encodes_zero_as_0100() {
+    fn encodes_zero_as_op0() {
         let fields = make_fields(&[("v", "bigint", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(0))]));
-        assert_eq!(hex, "0100");
+        assert_eq!(hex, "00");
     }
 
     #[test]
@@ -436,14 +441,14 @@ mod tests {
     fn encodes_bool_true() {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("flag", SdkValue::Bool(true))]));
-        assert_eq!(hex, "0151");
+        assert_eq!(hex, "51");
     }
 
     #[test]
     fn encodes_bool_false() {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("flag", SdkValue::Bool(false))]));
-        assert_eq!(hex, "0100");
+        assert_eq!(hex, "00");
     }
 
     #[test]

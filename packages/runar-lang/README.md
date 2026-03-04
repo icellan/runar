@@ -101,7 +101,7 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 |---|---|---|---|---|
 | `ByteString` | `string` | variable | `toByteString(hex)` | Even-length hex |
 | `PubKey` | `string` | 33 | `PubKey(hex)` | 66 hex chars, prefix `02` or `03` |
-| `Sig` | `string` | 71-73 | `Sig(hex)` | DER prefix `30`, min 8 bytes |
+| `Sig` | `string` | variable | `Sig(hex)` | DER prefix `30`, min 8 bytes |
 | `Ripemd160` | `string` | 20 | `Ripemd160(hex)` | 40 hex chars |
 | `Sha256` | `string` | 32 | `Sha256(hex)` | 64 hex chars |
 | `Addr` | `string` | 20 | `Addr(hex)` | 40 hex chars (alias for Ripemd160) |
@@ -111,19 +111,21 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 | `RabinPubKey` | `bigint` | variable | literal `bigint` | -- |
 | `SigHashType` | `bigint` | variable | `SigHash.ALL` etc. | -- |
 
+**Note on `Sig` size**: ECDSA DER signatures are typically 71-73 bytes, but this is not enforced as a hard upper bound at the type level. The `Sig` constructor only validates a minimum of 8 bytes and a DER prefix of `0x30`. Variable-length signatures (e.g. from different signing schemes) are accepted as long as they meet these minimal requirements.
+
 ### Type Hierarchy
 
 ```
         ByteString
-       /    |     \      \         \            \
-   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage
+       /    |     \      \         \            \           \
+   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  OpCodeType
                                     ^
                                     | (alias)
                                  Ripemd160
 
         bigint
-       /      \
-  RabinSig  RabinPubKey
+       /      \       \
+  RabinSig  RabinPubKey  SigHashType
 ```
 
 Domain types widen to their parent implicitly: you can pass a `PubKey` where `ByteString` is expected. Narrowing requires an explicit constructor call.
@@ -147,7 +149,7 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | Function | Signature | Description |
 |---|---|---|
 | `checkSig` | `(sig: Sig, pubKey: PubKey) => boolean` | ECDSA signature verification |
-| `checkMultiSig` | `(sigs: FixedArray<Sig, M>, pubKeys: FixedArray<PubKey, N>) => boolean` | Multi-signature verification |
+| `checkMultiSig` | `(sigs: Sig[], pubKeys: PubKey[]) => boolean` | Multi-signature verification |
 | `hash256` | `(data: ByteString) => Sha256` | Double SHA-256 |
 | `hash160` | `(data: ByteString) => Ripemd160` | SHA-256 then RIPEMD-160 |
 | `sha256` | `(data: ByteString) => Sha256` | Single SHA-256 |
@@ -159,10 +161,15 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 |---|---|---|
 | `toByteString` | `(hex: string) => ByteString` | Construct a byte string from hex |
 | `len` | `(data: ByteString) => bigint` | Byte length |
-| `reverseByteString` | `(data: ByteString, size: bigint) => ByteString` | Reverse byte order |
-| `pack` | `(n: bigint) => ByteString` | Encode integer as Script number bytes |
-| `unpack` | `(data: ByteString) => bigint` | Decode Script number bytes to integer |
+| `cat` | `(a: ByteString, b: ByteString) => ByteString` | Concatenate two byte strings |
+| `substr` | `(data: ByteString, start: bigint, len: bigint) => ByteString` | Extract a substring |
+| `left` | `(data: ByteString, len: bigint) => ByteString` | Take the leftmost `len` bytes |
+| `right` | `(data: ByteString, len: bigint) => ByteString` | Take the rightmost `len` bytes |
+| `split` | `(data: ByteString, index: bigint) => [ByteString, ByteString]` | Split at position into two parts |
+| `reverseBytes` | `(data: ByteString) => ByteString` | Reverse byte order |
 | `num2bin` | `(n: bigint, size: bigint) => ByteString` | Encode integer with fixed byte width |
+| `bin2num` | `(data: ByteString) => bigint` | Decode byte string to script number |
+| `int2str` | `(n: bigint, size: bigint) => ByteString` | Encode integer as byte string (alias for num2bin) |
 
 ### Arithmetic
 
@@ -172,13 +179,34 @@ Supported lengths: 0-16 have direct tuple definitions. Lengths >16 use a recursi
 | `min` | `(a: bigint, b: bigint) => bigint` | Minimum |
 | `max` | `(a: bigint, b: bigint) => bigint` | Maximum |
 | `within` | `(x: bigint, lo: bigint, hi: bigint) => boolean` | Range check: lo <= x < hi |
+| `safediv` | `(a: bigint, b: bigint) => bigint` | Safe division (asserts divisor non-zero) |
+| `safemod` | `(a: bigint, b: bigint) => bigint` | Safe modulo (asserts divisor non-zero) |
+| `clamp` | `(value: bigint, lo: bigint, hi: bigint) => bigint` | Clamp value to range [lo, hi] |
+| `sign` | `(value: bigint) => bigint` | Sign of a number: returns -1, 0, or 1 |
+| `pow` | `(base: bigint, exp: bigint) => bigint` | Exponentiation |
+| `mulDiv` | `(a: bigint, b: bigint, c: bigint) => bigint` | Multiply then divide: (a * b) / c |
+| `percentOf` | `(amount: bigint, bps: bigint) => bigint` | Percentage in basis points: (amount * bps) / 10000 |
+| `sqrt` | `(n: bigint) => bigint` | Integer square root |
+| `gcd` | `(a: bigint, b: bigint) => bigint` | Greatest common divisor |
+| `divmod` | `(a: bigint, b: bigint) => bigint` | Division returning quotient |
+| `log2` | `(n: bigint) => bigint` | Approximate floor(log2(n)) |
+| `bool` | `(n: bigint) => boolean` | Convert integer to boolean (0 is false, non-zero is true) |
 
 ### Control
 
 | Function | Signature | Description |
 |---|---|---|
-| `assert` | `(cond: boolean, msg?: string) => void` | Verify condition or fail script |
-| `exit` | `(success: boolean) => void` | Terminate script immediately |
+| `assert` | `(cond: boolean, msg?: string) => asserts cond` | Verify condition or fail script |
+
+### Compiler Intrinsics (Class Methods)
+
+These are methods on the base classes that the compiler maps to inline Bitcoin Script. They cannot be called at runtime -- they only work inside compiled contracts.
+
+| Method | Available On | Signature | Description |
+|---|---|---|---|
+| `this.getStateScript()` | `SmartContract`, `StatefulSmartContract` | `() => ByteString` | Returns the serialized locking script with current state values. Used to construct expected outputs for state continuation. |
+| `this.buildP2PKH(addr)` | `SmartContract`, `StatefulSmartContract` | `(addr: Addr) => ByteString` | Builds a standard P2PKH output script (OP_DUP OP_HASH160 \<addr\> OP_EQUALVERIFY OP_CHECKSIG). Useful for enforcing payment to a specific address. |
+| `this.addOutput(satoshis, ...stateValues)` | `StatefulSmartContract` | `(satoshis: bigint, ...stateValues: unknown[]) => void` | Registers a transaction output with the given satoshi amount and state values. State values correspond to mutable properties in declaration order. At method exit, the compiler verifies all registered outputs match the transaction's hashOutputs. |
 
 ---
 
@@ -203,10 +231,19 @@ Access preimage fields via `this.txPreimage`:
 
 | Function | Signature | Description |
 |---|---|---|
-| `extractOutputHash` | `(preimage: SigHashPreimage) => Sha256` | Extract the output hash from preimage |
-| `extractLocktime` | `(preimage: SigHashPreimage) => bigint` | Extract locktime from preimage |
-| `extractAmount` | `(preimage: SigHashPreimage) => bigint` | Extract input amount from preimage |
-| `extractVersion` | `(preimage: SigHashPreimage) => bigint` | Extract tx version from preimage |
+| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verify the sighash preimage is valid |
+| `extractVersion` | `(preimage: SigHashPreimage) => bigint` | Extract 4-byte tx version (nVersion) |
+| `extractHashPrevouts` | `(preimage: SigHashPreimage) => Sha256` | Extract 32-byte hashPrevouts |
+| `extractHashSequence` | `(preimage: SigHashPreimage) => Sha256` | Extract 32-byte hashSequence |
+| `extractOutpoint` | `(preimage: SigHashPreimage) => ByteString` | Extract 36-byte outpoint (txid + vout) |
+| `extractInputIndex` | `(preimage: SigHashPreimage) => bigint` | Extract the input vout index |
+| `extractScriptCode` | `(preimage: SigHashPreimage) => ByteString` | Extract the scriptCode field |
+| `extractAmount` | `(preimage: SigHashPreimage) => bigint` | Extract 8-byte input amount (satoshis) |
+| `extractSequence` | `(preimage: SigHashPreimage) => bigint` | Extract 4-byte nSequence |
+| `extractOutputHash` | `(preimage: SigHashPreimage) => Sha256` | Extract 32-byte hashOutputs |
+| `extractOutputs` | `(preimage: SigHashPreimage) => Sha256` | Extract hashOutputs (alias) |
+| `extractLocktime` | `(preimage: SigHashPreimage) => bigint` | Extract 4-byte nLocktime |
+| `extractSigHashType` | `(preimage: SigHashPreimage) => bigint` | Extract 4-byte sighash type |
 
 ```typescript
 // Example: enforce a deadline
@@ -240,6 +277,35 @@ import { verifyRabinSig } from 'runar-lang/oracle';
 | `verifyRabinSig` | `(msg: ByteString, sig: RabinSig, padding: ByteString, pubKey: RabinPubKey) => boolean` | Rabin signature verification |
 
 Rabin signatures are used for oracle data feeds because they are cheaper to verify on-chain than ECDSA.
+
+---
+
+## Post-Quantum Signature Verification
+
+Hash-based signature schemes for quantum-resistant contract security. These are also exported from the main `runar-lang` entry point.
+
+### WOTS+ (Winternitz One-Time Signature)
+
+| Function | Signature | Description |
+|---|---|---|
+| `verifyWOTS` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean` | WOTS+ signature verification (SHA-256, w=16, n=32) |
+
+One-time use: each keypair can securely sign only one message. This is a natural fit for Bitcoin's UTXO model where each output is spent exactly once. Estimated script size: ~12 KB.
+
+### SLH-DSA (SPHINCS+, FIPS 205)
+
+Stateless hash-based signatures supporting multiple signings per keypair. Six parameter sets are available, trading off between signature size and verification speed:
+
+| Function | Security | Variant | Signature Size |
+|---|---|---|---|
+| `verifySLHDSA_SHA2_128s` | 128-bit | small | 7,856 bytes |
+| `verifySLHDSA_SHA2_128f` | 128-bit | fast | 17,088 bytes |
+| `verifySLHDSA_SHA2_192s` | 192-bit | small | 16,224 bytes |
+| `verifySLHDSA_SHA2_192f` | 192-bit | fast | 35,664 bytes |
+| `verifySLHDSA_SHA2_256s` | 256-bit | small | 29,792 bytes |
+| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
+
+All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
 
 ---
 

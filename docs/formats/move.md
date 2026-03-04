@@ -379,6 +379,6 @@ Built-in function name mapping:
 | `extract_amount` | `extractAmount` |
 | `verify_rabin_sig` | `verifyRabinSig` |
 | `num_2_bin` / `num2bin` | `num2bin` |
-| `reverse_byte_string` | `reverseByteString` |
+| `reverse_byte_string` | `reverseBytes` |
 | `to_byte_string` | `toByteString` |
 | `add_output` | `addOutput` |

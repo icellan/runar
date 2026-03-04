@@ -642,6 +642,7 @@ interface Provider {
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
   getNetwork(): 'mainnet' | 'testnet';
+  getFeeRate(): Promise<number>;  // satoshis per byte (default: 1 for BSV)
 }
 ```
 
@@ -653,7 +654,7 @@ Built-in implementations: `WhatsOnChainProvider` (production), `MockProvider` (t
 interface Signer {
   getPublicKey(): Promise<string>;
   getAddress(): Promise<string>;
-  sign(txHex: string, inputIndex: number, subscript: string, satoshis: number): Promise<string>;
+  sign(txHex: string, inputIndex: number, subscript: string, satoshis: number, sigHashType?: number): Promise<string>;
 }
 ```
 

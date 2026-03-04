@@ -94,8 +94,7 @@ Means: `b` is on top, `a` is below it. The operation consumes both and pushes `a
 | `if (cond) { ... } else { ... }` | `OP_IF ... OP_ELSE ... OP_ENDIF` |
 | `assert(cond)` (non-final) | `<cond> OP_VERIFY` |
 | `assert(cond)` (final statement) | `<cond>` (left on stack) |
-| `exit(true)` | `OP_TRUE OP_RETURN` |
-| `exit(false)` | `OP_FALSE OP_RETURN` |
+| `exit(cond)` | `<cond> OP_VERIFY` |
 
 ### 3.2 If/Else Compilation
 
@@ -174,6 +173,8 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `0x98` | `OP_LSHIFT` | `(a b -- a<<b)` | Left shift (BSV re-enabled) |
 | `0x99` | `OP_RSHIFT` | `(a b -- a>>b)` | Right shift (BSV re-enabled) |
 
+> **Warning:** `OP_LSHIFT` and `OP_RSHIFT` in BSV operate on **raw byte arrays** (big-endian unsigned shift), NOT on Script numbers. They preserve the input byte length. This is incompatible with numeric `BigInt` shifting for multi-byte script numbers. The constant-fold optimizer skips folding `>>` for negative left operands due to this mismatch. For reliable numeric right-shift, use `OP_DIV` with a power of 2 instead (e.g., `PUSH (1<<n) OP_DIV`).
+
 ### 5.1 Rúnar Mapping
 
 | Rúnar Expression | Opcode |
@@ -186,8 +187,10 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `-a` | `OP_NEGATE` |
 | `abs(a)` | `OP_ABS` |
 | `!a` | `OP_NOT` |
-| `a && b` (after short-circuit lowering) | `OP_BOOLAND` or `OP_IF`/`OP_ENDIF` |
-| `a \|\| b` (after short-circuit lowering) | `OP_BOOLOR` or `OP_IF`/`OP_ENDIF` |
+| `a && b` (eager evaluation) | `OP_BOOLAND` |
+| `a \|\| b` (eager evaluation) | `OP_BOOLOR` |
+| `a << b` | `OP_LSHIFT` |
+| `a >> b` | `OP_RSHIFT` |
 
 ### 5.2 Bitwise Operations
 
@@ -245,7 +248,7 @@ These are fully available for Rúnar on BSV. They are NOT available on BTC or BC
 |---|---|
 | `a === b` (bigint) | `OP_NUMEQUAL` |
 | `a === b` (ByteString) | `OP_EQUAL` |
-| `a !== b` (bigint) | `OP_NUMNOTEQUAL` |
+| `a !== b` (bigint) | `OP_NUMEQUAL OP_NOT` |
 | `a !== b` (ByteString) | `OP_EQUAL OP_NOT` |
 | `a < b` | `OP_LESSTHAN` |
 | `a > b` | `OP_GREATERTHAN` |
@@ -268,11 +271,11 @@ Rúnar selects the appropriate opcode based on the operand types determined duri
 
 | Hex | Name | Stack Effect | Description |
 |-----|------|-------------|-------------|
-| `0xa7` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
-| `0xa8` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
-| `0xa9` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
-| `0xaa` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
-| `0xab` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
+| `0xa6` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
+| `0xa7` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
+| `0xa8` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
+| `0xa9` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
+| `0xaa` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
 | `0xac` | `OP_CHECKSIG` | `(sig pubKey -- bool)` | Verify ECDSA signature |
 | `0xad` | `OP_CHECKSIGVERIFY` | `(sig pubKey -- )` | `OP_CHECKSIG` then `OP_VERIFY` |
 | `0xae` | `OP_CHECKMULTISIG` | `(... sigs n pubKeys m -- bool)` | Verify m-of-n multi-signature |
@@ -352,7 +355,7 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | `a + b` (ByteString) | `OP_CAT` |
 | `ByteString.slice(start, end)` | `OP_SPLIT` (twice if needed) |
 | `len(data)` | `OP_SIZE OP_NIP` |
-| `pack(n)` | `OP_NUM2BIN` |
+| `pack(n)` | No-op (type-level cast) |
 | `unpack(data)` | `OP_BIN2NUM` |
 
 ### 8.2 OP_CAT Significance
@@ -386,8 +389,8 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 |-----|------|--------|
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
-| `0xa8` | `OP_SHA1` | Not used by Rúnar (weak hash) |
-| `0xab`+ | `OP_CODESEPARATOR` | Not used by Rúnar |
+| `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
+| `0xab` | `OP_CODESEPARATOR` | Not used by Rúnar |
 
 ---
 
@@ -482,20 +485,20 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `abs(a)` | `OP_ABS` | `0x90` |
 | `a === b` (bigint) | `OP_NUMEQUAL` | `0x9c` |
 | `a === b` (bytes) | `OP_EQUAL` | `0x87` |
-| `a !== b` (bigint) | `OP_NUMNOTEQUAL` | `0x9e` |
+| `a !== b` (bigint) | `OP_NUMEQUAL OP_NOT` | `0x9c 0x91` |
 | `a < b` | `OP_LESSTHAN` | `0x9f` |
 | `a <= b` | `OP_LESSTHANOREQUAL` | `0xa1` |
 | `a > b` | `OP_GREATERTHAN` | `0xa0` |
 | `a >= b` | `OP_GREATERTHANOREQUAL` | `0xa2` |
-| `sha256(x)` | `OP_SHA256` | `0xa9` |
-| `ripemd160(x)` | `OP_RIPEMD160` | `0xa7` |
-| `hash160(x)` | `OP_HASH160` | `0xaa` |
-| `hash256(x)` | `OP_HASH256` | `0xab` |
+| `sha256(x)` | `OP_SHA256` | `0xa8` |
+| `ripemd160(x)` | `OP_RIPEMD160` | `0xa6` |
+| `hash160(x)` | `OP_HASH160` | `0xa9` |
+| `hash256(x)` | `OP_HASH256` | `0xaa` |
 | `checkSig(s, pk)` | `OP_CHECKSIG` | `0xac` |
 | `checkMultiSig(...)` | `OP_CHECKMULTISIG` | `0xae` |
 | `assert(x)` (non-final) | `OP_VERIFY` | `0x69` |
 | `len(x)` | `OP_SIZE OP_NIP` | `0x82 0x77` |
-| `pack(n)` | `OP_NUM2BIN` | `0x80` |
+| `pack(n)` | No-op (type-level cast) | — |
 | `unpack(bs)` | `OP_BIN2NUM` | `0x81` |
 | `a & b` | `OP_AND` | `0x84` |
 | `a \| b` | `OP_OR` | `0x85` |

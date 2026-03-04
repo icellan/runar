@@ -144,4 +144,9 @@ export class WhatsOnChainProvider implements Provider {
   getNetwork(): 'mainnet' | 'testnet' {
     return this.network;
   }
+
+  async getFeeRate(): Promise<number> {
+    // BSV standard minimum relay fee is 1 sat/byte and rarely changes.
+    return 1;
+  }
 }

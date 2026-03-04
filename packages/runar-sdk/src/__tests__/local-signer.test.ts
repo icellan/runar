@@ -37,6 +37,48 @@ describe('LocalSigner constructor validation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WIF key support
+// ---------------------------------------------------------------------------
+
+describe('LocalSigner WIF key support', () => {
+  // WIF for private key 1 (uncompressed): 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+  // WIF for private key 1 (compressed):   KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn
+  const WIF_COMPRESSED =
+    'KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn';
+
+  it('accepts a WIF-encoded private key', () => {
+    expect(() => new LocalSigner(WIF_COMPRESSED)).not.toThrow();
+  });
+
+  it('WIF key produces the same public key as hex key', async () => {
+    const fromHex = new LocalSigner(PRIV_KEY_1);
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const pubHex = await fromHex.getPublicKey();
+    const pubWif = await fromWif.getPublicKey();
+    expect(pubWif).toBe(pubHex);
+  });
+
+  it('WIF key produces the same address as hex key', async () => {
+    const fromHex = new LocalSigner(PRIV_KEY_1);
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const addrHex = await fromHex.getAddress();
+    const addrWif = await fromWif.getAddress();
+    expect(addrWif).toBe(addrHex);
+  });
+
+  it('getPrivateKeyHex returns the raw hex regardless of input format', () => {
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const hex = fromWif.getPrivateKeyHex();
+    expect(hex.length).toBe(64);
+    expect(/^[0-9a-f]+$/.test(hex)).toBe(true);
+  });
+
+  it('rejects invalid WIF keys', () => {
+    expect(() => new LocalSigner('5Invalid')).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Public key derivation
 // ---------------------------------------------------------------------------
 
@@ -124,5 +166,57 @@ describe('LocalSigner different keys', () => {
     const addr1 = await signer1.getAddress();
     const addr2 = await signer2.getAddress();
     expect(addr1).not.toBe(addr2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+describe('LocalSigner.sign', () => {
+  // A minimal valid transaction hex with 1 input and 1 output.
+  // version(4) + inputCount(1) + prevTxid(32) + prevIndex(4) + scriptLen(1=0) +
+  // sequence(4) + outputCount(1) + satoshis(8) + scriptLen(1) + script(1=OP_1) + locktime(4)
+  const MINIMAL_TX_HEX =
+    '01000000' + // version 1
+    '01' + // 1 input
+    '00'.repeat(32) + // prevTxid (32 zero bytes)
+    '00000000' + // prevIndex 0
+    '00' + // empty scriptSig
+    'ffffffff' + // sequence
+    '01' + // 1 output
+    '5000000000000000' + // 80 satoshis (LE)
+    '01' + // script length 1
+    '51' + // OP_1
+    '00000000'; // locktime 0
+
+  it('returns a hex string ending with sighash byte 41', async () => {
+    const signer = new LocalSigner(PRIV_KEY_1);
+    const sig = await signer.sign(MINIMAL_TX_HEX, 0, '51', 100, 0x41);
+    expect(typeof sig).toBe('string');
+    expect(/^[0-9a-f]+$/.test(sig)).toBe(true);
+    expect(sig.slice(-2)).toBe('41');
+  });
+
+  it('signature starts with DER prefix 30', async () => {
+    const signer = new LocalSigner(PRIV_KEY_1);
+    const sig = await signer.sign(MINIMAL_TX_HEX, 0, '51', 100);
+    // DER-encoded ECDSA signatures start with 0x30 (SEQUENCE tag)
+    expect(sig.slice(0, 2)).toBe('30');
+  });
+
+  it('produces deterministic signatures for the same inputs', async () => {
+    const signer = new LocalSigner(PRIV_KEY_1);
+    const sig1 = await signer.sign(MINIMAL_TX_HEX, 0, '51', 100);
+    const sig2 = await signer.sign(MINIMAL_TX_HEX, 0, '51', 100);
+    expect(sig1).toBe(sig2);
+  });
+
+  it('different keys produce different signatures', async () => {
+    const signer1 = new LocalSigner(PRIV_KEY_1);
+    const signer2 = new LocalSigner(PRIV_KEY_2);
+    const sig1 = await signer1.sign(MINIMAL_TX_HEX, 0, '51', 100);
+    const sig2 = await signer2.sign(MINIMAL_TX_HEX, 0, '51', 100);
+    expect(sig1).not.toBe(sig2);
   });
 });

@@ -110,9 +110,10 @@ export class TokenWallet {
       this.provider,
     );
 
+    const secondUtxo = utxos[1]!;
     const result = await contract.call(
       'merge',
-      [utxos[1]!],
+      [secondUtxo.txid, BigInt(secondUtxo.outputIndex)],
       this.provider,
       this.signer,
       { changeAddress: await this.signer.getAddress() },

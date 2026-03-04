@@ -32,12 +32,14 @@ class PQWallet extends SmartContract {
 describe('WOTS+ dual-oracle: interpreter vs compiled script', () => {
   const seed = new Uint8Array(32);
   seed[0] = 0x42;
-  const { sk, pk } = wotsKeygen(seed);
+  const pubSeed = new Uint8Array(32);
+  pubSeed[0] = 0x01;
+  const { sk, pk } = wotsKeygen(seed, pubSeed);
   const pkHex = toHex(pk);
 
   it('both paths accept a valid WOTS+ signature', () => {
     const msg = new TextEncoder().encode('dual oracle test');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const msgHex = toHex(msg);
     const sigHex = toHex(sig);
 
@@ -62,7 +64,7 @@ describe('WOTS+ dual-oracle: interpreter vs compiled script', () => {
 
   it('both paths reject a tampered signature', () => {
     const msg = new TextEncoder().encode('tamper test');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const badSig = new Uint8Array(sig);
     badSig[0]! ^= 0xff;
     const msgHex = toHex(msg);

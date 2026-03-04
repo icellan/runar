@@ -22,4 +22,10 @@ export interface Provider {
 
   /** Return the network this provider is connected to. */
   getNetwork(): 'mainnet' | 'testnet';
+
+  /**
+   * Get the current fee rate in satoshis per byte.
+   * Defaults to 1 sat/byte for BSV (the standard minimum relay fee).
+   */
+  getFeeRate(): Promise<number>;
 }

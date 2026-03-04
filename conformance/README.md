@@ -21,33 +21,58 @@ Each test case is a directory containing:
 ```
 tests/
 +-- basic-p2pkh/
-|   +-- basic-p2pkh.runar.ts      # Source contract
+|   +-- basic-p2pkh.runar.ts      # Source contract (TypeScript)
+|   +-- basic-p2pkh.runar.sol     # Source contract (Solidity-like)
+|   +-- basic-p2pkh.runar.move    # Source contract (Move-style)
+|   +-- basic-p2pkh.runar.go      # Source contract (Go)
+|   +-- basic-p2pkh.runar.rs      # Source contract (Rust)
+|   +-- basic-p2pkh.runar.json    # Source contract (JSON AST)
 |   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
 |   +-- expected-script.hex       # Expected compiled script (hex string)
 |
 +-- arithmetic/
 |   +-- arithmetic.runar.ts
+|   +-- arithmetic.runar.sol      # (+ .move, .go, .rs, .json variants)
 |   +-- expected-ir.json
+|   +-- expected-script.hex
 |
 +-- boolean-logic/
-|   +-- boolean-logic.runar.ts
+|   +-- boolean-logic.runar.ts    # (+ multi-format variants)
 |   +-- expected-ir.json
+|   +-- expected-script.hex
 |
 +-- if-else/
-|   +-- if-else.runar.ts
+|   +-- if-else.runar.ts          # (+ multi-format variants)
 |   +-- expected-ir.json
+|   +-- expected-script.hex
 |
 +-- bounded-loop/
-|   +-- bounded-loop.runar.ts
+|   +-- bounded-loop.runar.ts     # (+ multi-format variants)
 |   +-- expected-ir.json
+|   +-- expected-script.hex
 |
 +-- multi-method/
-|   +-- multi-method.runar.ts
+|   +-- multi-method.runar.ts     # (+ .sol, .move, .go, .rs variants)
 |   +-- expected-ir.json
+|   +-- expected-script.hex
 |
 +-- stateful/
-    +-- stateful.runar.ts
+|   +-- stateful.runar.ts         # (+ multi-format variants)
+|   +-- expected-ir.json
+|   +-- expected-script.hex
+|
++-- post-quantum-wots/
+|   +-- post-quantum-wots.runar.ts
+|   +-- expected-ir.json
+|   +-- expected-script.hex
+|
++-- post-quantum-slhdsa/
+    +-- post-quantum-slhdsa.runar.ts
+    +-- expected-ir.json
+    +-- expected-script.hex
 ```
+
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.json`). All format variants must produce the same ANF IR and script output. The post-quantum tests currently only have `.runar.ts` sources.
 
 ### File Roles
 
@@ -75,20 +100,24 @@ For each test directory:
   6. Report pass/fail.
 ```
 
-### Running for Each Compiler
+### Running the Conformance Suite
 
 ```bash
-# TypeScript reference compiler
-pnpm run conformance:ts
+# Run all conformance tests (TypeScript compiler)
+pnpm test
 
-# Go compiler
-pnpm run conformance:go
+# Output as JSON or Markdown
+pnpm run test:json
+pnpm run test:markdown
 
-# Rust compiler
-pnpm run conformance:rust
+# Filter to a specific test
+pnpm run test:filter -- arithmetic
+
+# Test all input format variants (.ts, .sol, .move, .go, .rs)
+pnpm test -- --multi-format
 ```
 
-All three commands run the same test cases against different compiler binaries.
+The runner compiles each test case with the TypeScript reference compiler and compares the output against the golden files.
 
 ---
 
@@ -109,8 +138,9 @@ mkdir conformance/tests/my-new-test
 3. Generate the expected IR using the reference compiler:
 
 ```bash
-runar compile conformance/tests/my-new-test/my-new-test.runar.ts --ir --canonical
-# Copy the canonical ANF IR to expected-ir.json
+runar compile conformance/tests/my-new-test/my-new-test.runar.ts --ir
+# Canonical JSON serialization (RFC 8785) is applied automatically.
+# Copy the ANF IR output to expected-ir.json
 ```
 
 4. Optionally generate the expected script:
@@ -123,7 +153,7 @@ runar compile conformance/tests/my-new-test/my-new-test.runar.ts
 5. Run the conformance suite to verify the new test passes:
 
 ```bash
-pnpm run conformance:ts
+pnpm test
 ```
 
 ---
@@ -157,14 +187,17 @@ If the compiler + VM produce a different result than the interpreter, a bug has 
 ### Running the Fuzzer
 
 ```bash
-# Run 10,000 random programs
-pnpm run fuzz -- --iterations 10000
+# Run 100 random programs (default)
+pnpm run fuzz
 
-# Run with a specific seed (for reproducibility)
-pnpm run fuzz -- --seed 42 --iterations 5000
+# Run 10 programs with verbose output
+pnpm run fuzz:quick
 
-# Run continuously until a mismatch is found
-pnpm run fuzz -- --until-fail
+# Run with a specific count and seed (for reproducibility)
+pnpm run fuzz -- --num 5000 --seed 42
+
+# Use fast-check property-based mode (with shrinking)
+pnpm run fuzz:property
 ```
 
 ---
@@ -178,7 +211,7 @@ Golden files (`expected-ir.json`, `expected-script.hex`) are checked into versio
 3. Regenerate all golden files:
 
 ```bash
-pnpm run conformance:update-golden
+pnpm run update-golden
 ```
 
 4. Review the diffs to verify the changes are expected.
@@ -193,9 +226,11 @@ Golden file updates should always be reviewed carefully. An unexpected change in
 | Test | Exercises | Has Script Golden |
 |---|---|---|
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
-| `arithmetic` | Binary arithmetic operations (+, -, *, /, %) | No |
-| `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | No |
-| `if-else` | Conditional branches in ANF IR | No |
-| `bounded-loop` | Loop unrolling in ANF IR | No |
-| `multi-method` | Method dispatch table generation | No |
-| `stateful` | State updates, checkPreimage, getStateScript | In progress |
+| `arithmetic` | Binary arithmetic operations (+, -, *, /, %) | Yes |
+| `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
+| `if-else` | Conditional branches in ANF IR | Yes |
+| `bounded-loop` | Loop unrolling in ANF IR | Yes |
+| `multi-method` | Method dispatch table generation | Yes |
+| `stateful` | State updates, checkPreimage, getStateScript | Yes |
+| `post-quantum-wots` | WOTS+ hash chain signature verification | Yes |
+| `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |

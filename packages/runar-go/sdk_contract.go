@@ -17,6 +17,8 @@ type RunarContract struct {
 	state           map[string]interface{}
 	codeScript      string // stored code portion from on-chain script (for reconnected contracts)
 	currentUtxo     *UTXO
+	provider        Provider
+	signer          Signer
 }
 
 // NewRunarContract creates a new contract instance from a compiled artifact
@@ -51,12 +53,29 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 	return c
 }
 
+// Connect stores a provider and signer on this contract so they don't need
+// to be passed to every Deploy() and Call() invocation.
+func (c *RunarContract) Connect(provider Provider, signer Signer) {
+	c.provider = provider
+	c.signer = signer
+}
+
 // Deploy deploys the contract by creating a UTXO with the locking script.
+// If provider or signer is nil, falls back to the ones stored via Connect().
 func (c *RunarContract) Deploy(
 	provider Provider,
 	signer Signer,
 	options DeployOptions,
 ) (string, *Transaction, error) {
+	if provider == nil {
+		provider = c.provider
+	}
+	if signer == nil {
+		signer = c.signer
+	}
+	if provider == nil || signer == nil {
+		return "", nil, fmt.Errorf("RunarContract.Deploy: no provider/signer available. Call Connect() or pass them explicitly")
+	}
 	address, err := signer.GetAddress()
 	if err != nil {
 		return "", nil, fmt.Errorf("RunarContract.Deploy: getting address: %w", err)
@@ -68,7 +87,11 @@ func (c *RunarContract) Deploy(
 	}
 	lockingScript := c.GetLockingScript()
 
-	// Fetch funding UTXOs
+	// Fetch fee rate and funding UTXOs
+	feeRate, err := provider.GetFeeRate()
+	if err != nil {
+		return "", nil, fmt.Errorf("RunarContract.Deploy: getting fee rate: %w", err)
+	}
 	allUtxos, err := provider.GetUtxos(address)
 	if err != nil {
 		return "", nil, fmt.Errorf("RunarContract.Deploy: getting UTXOs: %w", err)
@@ -76,7 +99,7 @@ func (c *RunarContract) Deploy(
 	if len(allUtxos) == 0 {
 		return "", nil, fmt.Errorf("RunarContract.Deploy: no UTXOs found for address %s", address)
 	}
-	utxos := SelectUtxos(allUtxos, options.Satoshis, len(lockingScript)/2)
+	utxos := SelectUtxos(allUtxos, options.Satoshis, len(lockingScript)/2, feeRate)
 
 	// Build the deploy transaction
 	changeScript := BuildP2PKHScript(changeAddress)
@@ -86,6 +109,7 @@ func (c *RunarContract) Deploy(
 		options.Satoshis,
 		changeAddress,
 		changeScript,
+		feeRate,
 	)
 	if err != nil {
 		return "", nil, fmt.Errorf("RunarContract.Deploy: %w", err)
@@ -95,7 +119,7 @@ func (c *RunarContract) Deploy(
 	signedTx := txHex
 	for i := 0; i < inputCount; i++ {
 		utxo := utxos[i]
-		sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis)
+		sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
 		if err != nil {
 			return "", nil, fmt.Errorf("RunarContract.Deploy: signing input %d: %w", i, err)
 		}
@@ -145,6 +169,15 @@ func (c *RunarContract) Call(
 	signer Signer,
 	options *CallOptions,
 ) (string, *Transaction, error) {
+	if provider == nil {
+		provider = c.provider
+	}
+	if signer == nil {
+		signer = c.signer
+	}
+	if provider == nil || signer == nil {
+		return "", nil, fmt.Errorf("RunarContract.Call: no provider/signer available. Call Connect() or pass them explicitly")
+	}
 	// Validate method exists
 	method := c.findMethod(methodName)
 	if method == nil {
@@ -203,7 +236,11 @@ func (c *RunarContract) Call(
 
 	changeScript := BuildP2PKHScript(changeAddress)
 
-	// Fetch additional funding UTXOs if needed
+	// Fetch fee rate and additional funding UTXOs if needed
+	feeRate, err := provider.GetFeeRate()
+	if err != nil {
+		return "", nil, fmt.Errorf("RunarContract.Call: getting fee rate: %w", err)
+	}
 	additionalUtxos, err := provider.GetUtxos(address)
 	if err != nil {
 		return "", nil, fmt.Errorf("RunarContract.Call: getting UTXOs: %w", err)
@@ -217,6 +254,7 @@ func (c *RunarContract) Call(
 		changeAddress,
 		changeScript,
 		additionalUtxos,
+		feeRate,
 	)
 
 	// Sign additional inputs (input 0 already has the unlocking script)
@@ -224,7 +262,7 @@ func (c *RunarContract) Call(
 	for i := 1; i < inputCount; i++ {
 		if i-1 < len(additionalUtxos) {
 			utxo := additionalUtxos[i-1]
-			sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis)
+			sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
 			if err != nil {
 				return "", nil, fmt.Errorf("RunarContract.Call: signing input %d: %w", i, err)
 			}
@@ -469,9 +507,9 @@ func encodeArg(value interface{}) string {
 		return encodeScriptNumber(int64(v))
 	case bool:
 		if v {
-			return "0151"
+			return "51" // OP_TRUE
 		}
-		return "0100"
+		return "00" // OP_FALSE
 	case string:
 		// Assume hex-encoded data
 		return EncodePushData(v)

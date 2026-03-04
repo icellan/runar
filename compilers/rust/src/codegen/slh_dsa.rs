@@ -1,13 +1,15 @@
 //! SLH-DSA (FIPS 205) Bitcoin Script codegen for the Rúnar Rust stack lowerer.
 //!
-//! Port of compilers/go/codegen/slh_dsa.go. All helpers are self-contained.
+//! Port of packages/runar-compiler/src/passes/slh-dsa-codegen.ts.
+//! All helpers are self-contained.
 //! Entry: `emit_verify_slh_dsa()` emits the full verification script.
 //!
-//! Alt-stack convention: pkSeedPad (64 bytes) on alt permanently.
-//! Tweakable hash pops pkSeedPad, DUPs, pushes copy back, uses original.
+//! Main-stack convention: pkSeedPad (64 bytes) tracked as '_pkSeedPad' on the
+//! main stack, accessed via PICK at known depth. Never placed on alt.
 //!
-//! Compile-time ADRS: treeAddr=0, keypair=0 where runtime values are needed.
-//! WOTS+ chain hashAddress built dynamically from a counter on the stack.
+//! Runtime ADRS: treeAddr (8-byte BE) and keypair (4-byte BE) are tracked on
+//! the main stack as 'treeAddr8' and 'keypair4', threaded into rawBlocks.
+//! ADRS is built at runtime using emit_build_adrs / emit_build_adrs18 helpers.
 
 use super::stack::{PushValue, StackOp};
 
@@ -32,6 +34,23 @@ fn emit_reverse_n(n: usize) -> Vec<StackOp> {
         ops.push(StackOp::Swap);
         ops.push(StackOp::Opcode("OP_CAT".into()));
     }
+    ops
+}
+
+/// Convert a compile-time integer to a 4-byte big-endian Vec<u8>.
+fn int4be(v: usize) -> Vec<u8> {
+    vec![
+        ((v >> 24) & 0xff) as u8,
+        ((v >> 16) & 0xff) as u8,
+        ((v >> 8) & 0xff) as u8,
+        (v & 0xff) as u8,
+    ]
+}
+
+/// Collect ops into a Vec via closure.
+fn collect_ops(f: impl FnOnce(&mut dyn FnMut(StackOp))) -> Vec<StackOp> {
+    let mut ops = Vec::new();
+    f(&mut |op| ops.push(op));
     ops
 }
 
@@ -143,6 +162,107 @@ fn slh_adrs18(opts: &SLHADRSOpts) -> Vec<u8> {
         hash: 0,
     });
     full[..18].to_vec()
+}
+
+// ===========================================================================
+// 2b. Runtime ADRS builders
+// ===========================================================================
+
+/// Hash mode for emit_build_adrs.
+enum HashMode {
+    /// Append 4 zero bytes (hash=0). Net stack effect: +1.
+    Zero,
+    /// TOS has a 4-byte BE hash value; consumed and appended. Net stack effect: 0.
+    Stack,
+}
+
+/// Emit runtime 18-byte ADRS prefix: layer(1B) || PICK(treeAddr8)(8B) ||
+/// type(1B) || PICK(keypair4)(4B) || chain(4B).
+///
+/// Net stack effect: +1 (the 18-byte result on TOS).
+///
+/// ta8_depth and kp4_depth are from TOS *before* this function pushes anything.
+fn emit_build_adrs18(
+    emit: &mut dyn FnMut(StackOp),
+    layer: usize,
+    type_: u8,
+    chain: usize,
+    ta8_depth: usize,
+    kp4_depth: Option<usize>,
+) {
+    // Push layer byte (1B)
+    emit(StackOp::Push(PushValue::Bytes(vec![(layer & 0xff) as u8])));
+    // After push: ta8 at ta8_depth+1, kp4 at kp4_depth+1
+
+    // PICK ta8: depth = ta8_depth + 1 (one extra item on stack)
+    let ta8_pick = ta8_depth + 1;
+    emit(StackOp::Push(PushValue::Int(ta8_pick as i128)));
+    emit(StackOp::Opcode("OP_PICK".into()));
+    // Stack: ... layerByte ta8Copy (2 items above original TOS)
+    emit(StackOp::Opcode("OP_CAT".into()));
+    // Stack: ... (layer||ta8)(9B) -- net +1 from start
+    // kp4 at kp4_depth + 1
+
+    // Push type byte (1B)
+    emit(StackOp::Push(PushValue::Bytes(vec![type_ & 0xff])));
+    emit(StackOp::Opcode("OP_CAT".into()));
+    // Stack: ... partial10B -- net +1
+    // kp4 at kp4_depth + 1
+
+    // keypair4: either PICK from stack or push 4 zero bytes
+    match kp4_depth {
+        Some(depth) => {
+            let kp4_pick = depth + 1;
+            emit(StackOp::Push(PushValue::Int(kp4_pick as i128)));
+            emit(StackOp::Opcode("OP_PICK".into()));
+        }
+        None => {
+            emit(StackOp::Push(PushValue::Bytes(vec![0, 0, 0, 0])));
+        }
+    }
+    emit(StackOp::Opcode("OP_CAT".into()));
+    // Stack: ... partial14B -- net +1
+
+    // Push chain (4B BE)
+    emit(StackOp::Push(PushValue::Bytes(int4be(chain))));
+    emit(StackOp::Opcode("OP_CAT".into()));
+    // Stack: ... prefix18B -- net +1
+}
+
+/// Emit runtime 22-byte ADRS.
+///
+/// hash mode:
+///   Zero  -- append 4 zero bytes (hash=0). Net stack effect = +1 (22B ADRS on TOS).
+///   Stack -- TOS has a 4-byte BE hash value; consumed and appended. Net stack effect = 0.
+///
+/// ta8_depth/kp4_depth measured from TOS before this function pushes anything.
+fn emit_build_adrs(
+    emit: &mut dyn FnMut(StackOp),
+    layer: usize,
+    type_: u8,
+    chain: usize,
+    ta8_depth: usize,
+    kp4_depth: Option<usize>,
+    hash: HashMode,
+) {
+    match hash {
+        HashMode::Stack => {
+            // Save hash4 from TOS to alt
+            emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+            // Depths shift by -1 (one item removed from main)
+            emit_build_adrs18(emit, layer, type_, chain, ta8_depth - 1, kp4_depth.map(|d| d - 1));
+            // 18-byte prefix on TOS
+            emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+            emit(StackOp::Opcode("OP_CAT".into()));
+            // 22-byte ADRS on TOS. Net: replaced hash4 with adrs22.
+        }
+        HashMode::Zero => {
+            emit_build_adrs18(emit, layer, type_, chain, ta8_depth, kp4_depth);
+            emit(StackOp::Push(PushValue::Bytes(vec![0u8; 4])));
+            emit(StackOp::Opcode("OP_CAT".into()));
+            // 22-byte ADRS on TOS. Net: +1.
+        }
+    }
 }
 
 // ===========================================================================
@@ -367,17 +487,16 @@ impl<'a> SLHTracker<'a> {
 // 4. Tweakable Hash T(pkSeed, ADRS, M)
 // ===========================================================================
 // trunc_n(SHA-256(pkSeedPad(64) || ADRSc(22) || M))
-// pkSeedPad on alt; pop, DUP, push back, use.
+// pkSeedPad on main stack, accessed via PICK.
 
-/// Emits a tracked tweakable hash.
+/// Emits a tracked tweakable hash. Accesses _pkSeedPad via copy_to_top.
 #[allow(dead_code)]
 fn emit_slh_t(t: &mut SLHTracker, n: usize, adrs: &str, msg: &str, result: &str) {
     t.to_top(adrs);
     t.to_top(msg);
     t.cat("_am");
-    t.from_alt("_psp");
-    t.dup("_psp2");
-    t.to_alt();
+    // Access pkSeedPad via PICK on main stack
+    t.copy_to_top("_pkSeedPad", "_psp");
     t.swap();
     t.cat("_pre");
     t.sha256("_h32");
@@ -390,12 +509,19 @@ fn emit_slh_t(t: &mut SLHTracker, n: usize, adrs: &str, msg: &str, result: &str)
     }
 }
 
-/// Emits a raw tweakable hash. Stack: adrsC(1) msg(0) -> result(n). pkSeedPad on alt.
-fn emit_slh_t_raw(e: &mut dyn FnMut(StackOp), n: usize) {
+/// Raw tweakable hash with pkSeedPad on main stack via PICK.
+///
+/// Stack in:  adrsC(1) msg(0), pkSeedPad at depth psp_depth from TOS
+/// After CAT: (adrsC||msg)(0), pkSeedPad at depth psp_depth-1
+/// PICK pkSeedPad, SWAP, CAT, SHA256, truncate
+/// Stack out: result(0)
+fn emit_slh_t_raw(e: &mut dyn FnMut(StackOp), n: usize, psp_depth: usize) {
     e(StackOp::Opcode("OP_CAT".into()));
-    e(StackOp::Opcode("OP_FROMALTSTACK".into()));
-    e(StackOp::Dup);
-    e(StackOp::Opcode("OP_TOALTSTACK".into()));
+    // After CAT: 2 consumed, 1 produced. pkSeedPad depth = psp_depth - 1.
+    let pick_depth = psp_depth - 1;
+    e(StackOp::Push(PushValue::Int(pick_depth as i128)));
+    e(StackOp::Opcode("OP_PICK".into()));
+    // pkSeedPad copy on TOS, original still in place
     e(StackOp::Swap);
     e(StackOp::Opcode("OP_CAT".into()));
     e(StackOp::Opcode("OP_SHA256".into()));
@@ -410,32 +536,47 @@ fn emit_slh_t_raw(e: &mut dyn FnMut(StackOp), n: usize) {
 // 5. WOTS+ One Chain (tweakable hash, dynamic hashAddress)
 // ===========================================================================
 
-/// Returns one conditional hash step (if-then body).
+/// One conditional hash step (if-then body).
 ///
 /// Entry: sigElem(2) steps(1) hashAddr(0)
+///        with ADRS prefix (18B) on alt (FROMALT/DUP/TOALT pattern)
+///        and pkSeedPad at psp_depth from TOS.
+///
 /// Exit:  newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
-fn slh_chain_step_then(adrs_prefix: &[u8], n: usize) -> Vec<StackOp> {
+fn slh_chain_step_then(n: usize, psp_depth: usize) -> Vec<StackOp> {
     let mut ops = Vec::new();
     // DUP hashAddr before consuming it in ADRS construction
     ops.push(StackOp::Dup);
+    // sigElem(3) steps(2) hashAddr(1) hashAddr_copy(0)
     // Convert copy to 4-byte big-endian
     ops.push(StackOp::Push(PushValue::Int(4)));
     ops.push(StackOp::Opcode("OP_NUM2BIN".into()));
     ops.extend(emit_reverse_n(4));
-    // Build ADRS = prefix(18) || hashAddrBE(4)
-    ops.push(StackOp::Push(PushValue::Bytes(adrs_prefix.to_vec())));
-    ops.push(StackOp::Swap);
-    ops.push(StackOp::Opcode("OP_CAT".into()));
-    // Move sigElem to top: ROLL 3
-    ops.push(StackOp::Push(PushValue::Int(3)));
-    ops.push(StackOp::Opcode("OP_ROLL".into()));
-    // CAT: adrsC || sigElem
-    ops.push(StackOp::Opcode("OP_CAT".into()));
-    // pkSeedPad from alt
+    // sigElem(3) steps(2) hashAddr(1) hashAddrBE4(0) -- 4 items above base
+
+    // Get prefix from alt: FROMALT; DUP; TOALT
     ops.push(StackOp::Opcode("OP_FROMALTSTACK".into()));
     ops.push(StackOp::Dup);
     ops.push(StackOp::Opcode("OP_TOALTSTACK".into()));
+    // sigElem(4) steps(3) hashAddr(2) hashAddrBE4(1) prefix18(0) -- 5 items
     ops.push(StackOp::Swap);
+    ops.push(StackOp::Opcode("OP_CAT".into()));
+    // sigElem(3) steps(2) hashAddr(1) adrsC22(0) -- 4 items
+
+    // Move sigElem to top: ROLL 3
+    ops.push(StackOp::Push(PushValue::Int(3)));
+    ops.push(StackOp::Opcode("OP_ROLL".into()));
+    // steps(2) hashAddr(1) adrsC22(0) sigElem(top) -- 4 items
+    // CAT: adrsC(1) || sigElem(0) -> adrsC||sigElem
+    ops.push(StackOp::Opcode("OP_CAT".into()));
+    // steps(1) hashAddr(0) (adrsC||sigElem)(top) -- 3 items
+
+    // pkSeedPad via PICK (3 items on main above base, same as entry)
+    ops.push(StackOp::Push(PushValue::Int(psp_depth as i128)));
+    ops.push(StackOp::Opcode("OP_PICK".into()));
+    // steps(2) hashAddr(1) (adrsC||sigElem)(0) pkSeedPad(top) -- 4 items
+    ops.push(StackOp::Swap);
+    // steps(2) hashAddr(1) pkSeedPad(0) (adrsC||sigElem)(top)
     ops.push(StackOp::Opcode("OP_CAT".into()));
     ops.push(StackOp::Opcode("OP_SHA256".into()));
     if n < 32 {
@@ -443,28 +584,43 @@ fn slh_chain_step_then(adrs_prefix: &[u8], n: usize) -> Vec<StackOp> {
         ops.push(StackOp::Opcode("OP_SPLIT".into()));
         ops.push(StackOp::Drop);
     }
+    // steps(2) hashAddr(1) newSigElem(0) -- 3 items
     // Rearrange -> newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
     ops.push(StackOp::Rot);
     ops.push(StackOp::Opcode("OP_1SUB".into()));
     ops.push(StackOp::Rot);
     ops.push(StackOp::Opcode("OP_1ADD".into()));
-    // Save (hashAddr+1), swap bottom two, restore
-    ops.push(StackOp::Opcode("OP_TOALTSTACK".into()));
-    ops.push(StackOp::Swap);
-    ops.push(StackOp::Opcode("OP_FROMALTSTACK".into()));
+    // newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
     ops
 }
 
 /// Emits one WOTS+ chain with tweakable hashing (raw opcodes).
 ///
 /// Input:  sig(3) csum(2) endptAcc(1) digit(0)
+///         pkSeedPad at psp_depth from TOS (digit)
+///         treeAddr8 at ta8_depth from TOS
+///         keypair4 at kp4_depth from TOS
+///
 /// Output: sigRest(2) newCsum(1) newEndptAcc(0)
-/// Alt: pkSeedPad persists. 4 internal push/pop balanced.
-fn emit_slh_one_chain(emit: &mut dyn FnMut(StackOp), n: usize, layer: usize, chain_idx: usize) {
+///         (3 items replaces 4 input items, so depths shift by -1)
+///
+/// Alt: not used for pkSeedPad. Uses alt internally (balanced).
+fn emit_slh_one_chain(
+    emit: &mut dyn FnMut(StackOp),
+    n: usize,
+    layer: usize,
+    chain_idx: usize,
+    psp_depth: usize,
+    ta8_depth: usize,
+    kp4_depth: usize,
+) {
+    // Input: sig(3) csum(2) endptAcc(1) digit(0)
+
     // steps = 15 - digit
     emit(StackOp::Push(PushValue::Int(15)));
     emit(StackOp::Swap);
     emit(StackOp::Opcode("OP_SUB".into()));
+    // sig(3) csum(2) endptAcc(1) steps(0)
 
     // Save steps_copy, endptAcc, csum to alt
     emit(StackOp::Dup);
@@ -473,28 +629,42 @@ fn emit_slh_one_chain(emit: &mut dyn FnMut(StackOp), n: usize, layer: usize, cha
     emit(StackOp::Opcode("OP_TOALTSTACK".into())); // alt: steps_copy, endptAcc
     emit(StackOp::Swap);
     emit(StackOp::Opcode("OP_TOALTSTACK".into())); // alt: steps_copy, endptAcc, csum(top)
+    // main: sig(1) steps(0)
+    // psp_d = psp_depth - 2 (4 items removed, 2 remain = -2)
+    // ta8_d = ta8_depth - 2, kp4_d = kp4_depth - 2
 
     // Split n-byte sig element
     emit(StackOp::Swap);
     emit(StackOp::Push(PushValue::Int(n as i128)));
-    emit(StackOp::Opcode("OP_SPLIT".into()));
-    emit(StackOp::Opcode("OP_TOALTSTACK".into())); // alt: ..., csum, sigRest(top)
+    emit(StackOp::Opcode("OP_SPLIT".into()));        // steps sigElem sigRest
+    emit(StackOp::Opcode("OP_TOALTSTACK".into()));   // alt: ..., csum, sigRest(top)
     emit(StackOp::Swap);
+    // main: sigElem(1) steps(0)
 
     // Compute hashAddr = 15 - steps (= digit) on main stack
     emit(StackOp::Dup);
     emit(StackOp::Push(PushValue::Int(15)));
     emit(StackOp::Swap);
     emit(StackOp::Opcode("OP_SUB".into()));
+    // main: sigElem(2) steps(1) hashAddr(0) -- 3 items
+    // psp_d_chain = psp_depth - 1
+    let psp_d_chain = psp_depth - 1;
+    let ta8_d_chain = ta8_depth - 1;
+    let kp4_d_chain = kp4_depth - 1;
 
-    // Build ADRS prefix for this chain
-    let prefix = slh_adrs18(&SLHADRSOpts {
-        layer,
-        adrs_typ: SLH_WOTS_HASH,
-        chain: chain_idx as i32,
-        ..Default::default()
-    });
-    let then_ops = slh_chain_step_then(&prefix, n);
+    // Build 18-byte ADRS prefix using runtime treeAddr8 and keypair4
+    // After emit_build_adrs18: +1 item on stack => 4 items: sigElem steps hashAddr prefix18
+    emit_build_adrs18(emit, layer, SLH_WOTS_HASH, chain_idx, ta8_d_chain, Some(kp4_d_chain));
+    // psp_d = psp_d_chain + 1 = psp_depth
+    // Save prefix18 to alt for loop reuse
+    emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+    // main: sigElem(2) steps(1) hashAddr(0) -- back to 3 items
+    // psp_d = psp_d_chain = psp_depth - 1
+
+    // Build then-ops for chain step
+    // At step entry: sigElem(2) steps(1) hashAddr(0), 3 items above base
+    // psp_d at step entry = psp_depth - 1
+    let then_ops = slh_chain_step_then(n, psp_d_chain);
 
     // 15 unrolled conditional hash iterations
     for _ in 0..15 {
@@ -509,14 +679,20 @@ fn emit_slh_one_chain(emit: &mut dyn FnMut(StackOp), n: usize, layer: usize, cha
     // endpoint(2) 0(1) finalHashAddr(0)
     emit(StackOp::Drop);
     emit(StackOp::Drop);
+    // main: endpoint
+
+    // Drop prefix from alt
+    emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+    emit(StackOp::Drop);
 
     // Restore from alt (LIFO): sigRest, csum, endptAcc, steps_copy
     emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // sigRest
     emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // csum
     emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // endptAcc
     emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // steps_copy
+    // bottom->top: endpoint sigRest csum endptAcc steps_copy
 
-    // csum += steps_copy
+    // csum += steps_copy: ROT top-3 to bring csum up
     emit(StackOp::Rot);
     emit(StackOp::Opcode("OP_ADD".into()));
 
@@ -525,28 +701,33 @@ fn emit_slh_one_chain(emit: &mut dyn FnMut(StackOp), n: usize, layer: usize, cha
     emit(StackOp::Push(PushValue::Int(3)));
     emit(StackOp::Opcode("OP_ROLL".into()));
     emit(StackOp::Opcode("OP_CAT".into()));
+    // sigRest(2) newCsum(1) newEndptAcc(0)
 }
 
 // ===========================================================================
 // Full WOTS+ Processing (all len chains)
 // ===========================================================================
-// Input:  wotsSig(len*n)(1) msg(n)(0)
-// Output: wotsPk(n)
+// Input:  psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
+// Output: psp(3) ta8(2) kp4(1) wotsPk(0)
 
 fn emit_slh_wots_all(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: usize) {
     let n = p.n;
     let len1 = p.len1;
     let len2 = p.len2;
 
-    // Rearrange: sigRem(3) csum=0(2) endptAcc=empty(1) msgRem(0)
+    // Input: psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
+    // Rearrange: psp(6) ta8(5) kp4(4) sigRem(3) csum=0(2) endptAcc=empty(1) msgRem(0)
     emit(StackOp::Swap);
     emit(StackOp::Push(PushValue::Int(0)));
     emit(StackOp::Opcode("OP_0".into()));
     emit(StackOp::Push(PushValue::Int(3)));
     emit(StackOp::Opcode("OP_ROLL".into()));
+    // psp(6) ta8(5) kp4(4) sigRem(3) csum(2) endptAcc(1) msgRem(0)
+    // pspD=6, ta8D=5, kp4D=4
 
     // Process n bytes -> 2*n message chains
     for byte_idx in 0..n {
+        // State: psp(6) ta8(5) kp4(4) sigRem(3) csum(2) endptAcc(1) msgRem(0)
         if byte_idx < n - 1 {
             emit(StackOp::Push(PushValue::Int(1)));
             emit(StackOp::Opcode("OP_SPLIT".into()));
@@ -565,36 +746,56 @@ fn emit_slh_wots_all(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer:
         emit(StackOp::Swap);
         emit(StackOp::Push(PushValue::Int(16)));
         emit(StackOp::Opcode("OP_MOD".into()));
+        // Stack: ..kp4 sig csum endptAcc [msgRest if non-last] hiNib loNib
 
         if byte_idx < n - 1 {
-            emit(StackOp::Opcode("OP_TOALTSTACK".into()));
-            emit(StackOp::Swap);
-            emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+            // Stack: psp ta8 kp4 sig csum endptAcc msgRest hiNib loNib
+            emit(StackOp::Opcode("OP_TOALTSTACK".into())); // loNib -> alt
+            emit(StackOp::Swap);                             // msgRest hiNib -> hiNib msgRest
+            emit(StackOp::Opcode("OP_TOALTSTACK".into())); // msgRest -> alt
+            // Stack: psp(6) ta8(5) kp4(4) sig(3) csum(2) endptAcc(1) hiNib(0)
+            // pspD=6, ta8D=5, kp4D=4
         } else {
-            emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+            // Stack: psp ta8 kp4 sig csum endptAcc hiNib loNib
+            emit(StackOp::Opcode("OP_TOALTSTACK".into())); // loNib -> alt
+            // Stack: psp(6) ta8(5) kp4(4) sig(3) csum(2) endptAcc(1) hiNib(0)
         }
 
-        emit_slh_one_chain(emit, n, layer, byte_idx * 2);
+        // First chain call (hiNib)
+        // sig(3) csum(2) endptAcc(1) digit=hiNib(0), pspD=6, ta8D=5, kp4D=4
+        emit_slh_one_chain(emit, n, layer, byte_idx * 2, 6, 5, 4);
+        // Output: sigRest(2) newCsum(1) newEndptAcc(0)
+        // pspD=5, ta8D=4, kp4D=3
 
         if byte_idx < n - 1 {
-            emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+            // Restore loNib and msgRest from alt
+            emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // msgRest
+            emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // loNib
             emit(StackOp::Swap);
-            emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+            emit(StackOp::Opcode("OP_TOALTSTACK".into())); // msgRest -> alt
+            // Stack: psp(6) ta8(5) kp4(4) sigRest(3) newCsum(2) newEndptAcc(1) loNib(0)
         } else {
-            emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+            emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // loNib
+            // Stack: psp(6) ta8(5) kp4(4) sigRest(3) newCsum(2) newEndptAcc(1) loNib(0)
         }
 
-        emit_slh_one_chain(emit, n, layer, byte_idx * 2 + 1);
+        // Second chain call (loNib)
+        emit_slh_one_chain(emit, n, layer, byte_idx * 2 + 1, 6, 5, 4);
+        // Output: sigRest(2) newCsum(1) newEndptAcc(0)
+        // pspD=5, ta8D=4, kp4D=3
 
         if byte_idx < n - 1 {
-            emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+            // Restore msgRest from alt
+            emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // msgRest
+            // Stack: psp(6) ta8(5) kp4(4) sigRest(3) csum(2) endptAcc(1) msgRest(0)
         }
+        // Back to shape: psp(6) ta8(5) kp4(4) sigRest(3) csum(2) endptAcc(1) msgRem(0)
     }
 
-    // sigRest(2) totalCsum(1) endptAcc(0)
+    // After all message chains: psp(5) ta8(4) kp4(3) sigRest(2) totalCsum(1) endptAcc(0)
     // Checksum digits (len2=3)
     emit(StackOp::Swap);
+    // psp(5) ta8(4) kp4(3) sigRest(2) endptAcc(1) totalCsum(0)
 
     emit(StackOp::Dup);
     emit(StackOp::Push(PushValue::Int(16)));
@@ -613,51 +814,58 @@ fn emit_slh_wots_all(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer:
     emit(StackOp::Push(PushValue::Int(16)));
     emit(StackOp::Opcode("OP_MOD".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+    // psp(4) ta8(3) kp4(2) sigRest(1) endptAcc(0) | alt: d2, d1, d0(top)
 
-    // sigRest(1) endptAcc(0) | alt: ..., d2, d1, d0(top)
     for ci in 0..len2 {
-        emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+        // psp(4) ta8(3) kp4(2) sigRest(1) endptAcc(0)
+        emit(StackOp::Opcode("OP_TOALTSTACK".into())); // endptAcc -> alt
         emit(StackOp::Push(PushValue::Int(0)));
-        emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
-        emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
+        emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // endptAcc
+        emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // digit
+        // psp(6) ta8(5) kp4(4) sigRest(3) 0(2) endptAcc(1) digit(0)
 
-        emit_slh_one_chain(emit, n, layer, len1 + ci);
+        emit_slh_one_chain(emit, n, layer, len1 + ci, 6, 5, 4);
+        // sigRest(2) newCsum(1) newEndptAcc(0) -- pspD=5, ta8D=4, kp4D=3
 
         emit(StackOp::Swap);
         emit(StackOp::Drop);
+        // psp(4) ta8(3) kp4(2) sigRest(1) newEndptAcc(0)
     }
 
-    // empty(1) endptAcc(0)
+    // psp(4) ta8(3) kp4(2) empty(1) endptAcc(0)
     emit(StackOp::Swap);
     emit(StackOp::Drop);
+    // psp(3) ta8(2) kp4(1) endptAcc(0)
 
     // Compress -> wotsPk via T(pkSeed, ADRS_WOTS_PK, endptAcc)
-    let pk_adrs = slh_adrs(&SLHADRSOpts {
-        layer,
-        adrs_typ: SLH_WOTS_PK,
-        ..Default::default()
-    });
-    emit(StackOp::Push(PushValue::Bytes(pk_adrs)));
+    // Build ADRS: ta8 at depth 2, kp4 at depth 1 (from endptAcc which is TOS)
+    emit_build_adrs(emit, layer, SLH_WOTS_PK, 0, 2, None, HashMode::Zero);
+    // psp(4) ta8(3) kp4(2) endptAcc(1) adrs22(0)
     emit(StackOp::Swap);
-    emit_slh_t_raw(emit, n);
+    // psp(4) ta8(3) kp4(2) adrs22(1) endptAcc(0)
+    emit_slh_t_raw(emit, n, 4);
+    // psp(3) ta8(2) kp4(1) wotsPk(0)
 }
 
 // ===========================================================================
 // 6. Merkle Auth Path Verification
 // ===========================================================================
-// Input:  leafIdx(2) authPath(hp*n)(1) node(n)(0)
-// Output: root(n)
+// Input:  psp(5) ta8(4) kp4(3) leafIdx(2) authPath(hp*n)(1) node(n)(0)
+// Output: psp(3) ta8(2) kp4(1) root(0)
 
 fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: usize) {
     let n = p.n;
     let hp = p.hp;
 
+    // Input: psp(5) ta8(4) kp4(3) leafIdx(2) authPath(1) node(0)
     // Move leafIdx to alt
     emit(StackOp::Push(PushValue::Int(2)));
     emit(StackOp::Opcode("OP_ROLL".into()));
     emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+    // psp(4) ta8(3) kp4(2) authPath(1) node(0) | alt: leafIdx
 
     for j in 0..hp {
+        // psp(4) ta8(3) kp4(2) authPath(1) node(0)
         emit(StackOp::Opcode("OP_TOALTSTACK".into())); // node -> alt
 
         emit(StackOp::Push(PushValue::Int(n as i128)));
@@ -665,49 +873,69 @@ fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: u
         emit(StackOp::Swap); // authPathRest authJ
 
         emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // node
+        // psp(4) ta8(3) kp4(2) authPathRest(2) authJ(1) node(0)
 
         // Get leafIdx
         emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
         emit(StackOp::Dup);
         emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+        // psp(5) ta8(4) kp4(3) authPathRest(3) authJ(2) node(1) leafIdx(0)
 
-        // bit = (leafIdx >> j) & 1
+        // bit = (leafIdx >> j) % 2
         if j > 0 {
-            emit(StackOp::Push(PushValue::Int(j as i128)));
-            emit(StackOp::Opcode("OP_RSHIFT".into()));
+            emit(StackOp::Push(PushValue::Int((1i128 << j) as i128)));
+            emit(StackOp::Opcode("OP_DIV".into()));
         }
-        emit(StackOp::Push(PushValue::Int(1)));
-        emit(StackOp::Opcode("OP_AND".into()));
+        emit(StackOp::Push(PushValue::Int(2)));
+        emit(StackOp::Opcode("OP_MOD".into()));
 
-        let adrs = slh_adrs(&SLHADRSOpts {
-            layer,
-            adrs_typ: SLH_TREE,
-            chain: (j + 1) as i32,
-            hash: 0,
-            ..Default::default()
+        // Build the tweakable hash ops for both branches.
+        // After CAT in branch: authPathRest(1) children(0)
+        // psp(3) ta8(2) kp4(1) authPathRest(1) children(0)
+        // pspD=3, ta8D=2, kp4D=1
+
+        // Need ADRS with hash = leafIdx >> (j+1) as 4-byte BE
+        // Build hash: get leafIdx from alt, shift, convert to 4B BE
+        let mk_tweak_hash: Vec<StackOp> = collect_ops(|e| {
+            // Stack in: authPathRest(1) children(0)
+            // pspD=4, ta8D=3, kp4D=2
+
+            // Get leafIdx from alt to compute hash
+            e(StackOp::Opcode("OP_FROMALTSTACK".into()));
+            e(StackOp::Dup);
+            e(StackOp::Opcode("OP_TOALTSTACK".into()));
+            // authPathRest(2) children(1) leafIdx(0); pspD=5, ta8D=4, kp4D=3
+            if j + 1 > 0 {
+                e(StackOp::Push(PushValue::Int((1i128 << (j + 1)) as i128)));
+                e(StackOp::Opcode("OP_DIV".into()));
+            }
+            // Convert to 4-byte BE
+            e(StackOp::Push(PushValue::Int(4)));
+            e(StackOp::Opcode("OP_NUM2BIN".into()));
+            for op in emit_reverse_n(4) {
+                e(op);
+            }
+            // authPathRest(2) children(1) hash4BE(0); pspD=5, ta8D=4, kp4D=3
+
+            // Build ADRS (22B) with hash=Stack
+            emit_build_adrs(e, layer, SLH_TREE, j + 1, 4, None, HashMode::Stack);
+            // Net 0 (hash4 replaced by adrs22). pspD=5, ta8D=4, kp4D=3
+            // authPathRest(2) children(1) adrs22(0)
+            e(StackOp::Swap);
+            // authPathRest(2) adrs22(1) children(0)
+            // Now tweakable hash: adrs(1) msg(0) -> result. pspD=5
+            emit_slh_t_raw(e, n, 5);
+            // authPathRest(1) result(0); pspD=4
         });
 
-        let mut mk_tweak_hash = vec![
-            StackOp::Push(PushValue::Bytes(adrs.clone())),
-            StackOp::Swap,
+        let mut then_branch = vec![
+            // bit==1: authJ||node. Stack: authJ(1) node(0). CAT -> authJ||node.
             StackOp::Opcode("OP_CAT".into()),
-            StackOp::Opcode("OP_FROMALTSTACK".into()),
-            StackOp::Dup,
-            StackOp::Opcode("OP_TOALTSTACK".into()),
-            StackOp::Swap,
-            StackOp::Opcode("OP_CAT".into()),
-            StackOp::Opcode("OP_SHA256".into()),
         ];
-        if n < 32 {
-            mk_tweak_hash.push(StackOp::Push(PushValue::Int(n as i128)));
-            mk_tweak_hash.push(StackOp::Opcode("OP_SPLIT".into()));
-            mk_tweak_hash.push(StackOp::Drop);
-        }
-
-        let mut then_branch = vec![StackOp::Opcode("OP_CAT".into())];
         then_branch.extend(mk_tweak_hash.iter().cloned());
 
         let mut else_branch = vec![
+            // bit==0: node||authJ. Stack: authJ(1) node(0). SWAP -> node(1) authJ(0). CAT -> node||authJ.
             StackOp::Swap,
             StackOp::Opcode("OP_CAT".into()),
         ];
@@ -717,13 +945,17 @@ fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: u
             then_ops: then_branch,
             else_ops: else_branch,
         });
+        // psp(3) ta8(2) kp4(1) authPathRest(1) result(0) | alt: leafIdx
     }
 
     // Drop leafIdx from alt
     emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
     emit(StackOp::Drop);
 
-    // authPathRest(empty)(1) root(0)
+    // psp ta8 kp4 authPathRest root -- 5 items after FROMALT+DROP
+    // SWAP: psp ta8 kp4 root authPathRest
+    // DROP: psp ta8 kp4 root -- 4 items
+    // psp(3) ta8(2) kp4(1) root(0)
     emit(StackOp::Swap);
     emit(StackOp::Drop);
 }
@@ -731,27 +963,33 @@ fn emit_slh_merkle(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams, layer: u
 // ===========================================================================
 // 7. FORS Verification
 // ===========================================================================
-// Input:  forsSig(k*(1+a)*n)(1) md(ceil(k*a/8))(0)
-// Output: forsPk(n)
+// Input:  psp(4) ta8(3) kp4(2) forsSig(1) md(0)
+// Output: psp(3) ta8(2) kp4(1) forsPk(0)
 
 fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
     let n = p.n;
     let a = p.a;
     let k = p.k;
 
+    // Input: psp(4) ta8(3) kp4(2) forsSig(1) md(0)
     // Save md to alt, push empty rootAcc to alt
-    emit(StackOp::Opcode("OP_TOALTSTACK".into())); // md -> alt
+    emit(StackOp::Opcode("OP_TOALTSTACK".into()));     // md -> alt
     emit(StackOp::Opcode("OP_0".into()));
-    emit(StackOp::Opcode("OP_TOALTSTACK".into())); // rootAcc(empty) -> alt
+    emit(StackOp::Opcode("OP_TOALTSTACK".into()));     // rootAcc(empty) -> alt
+    // psp(3) ta8(2) kp4(1) forsSig(0) | alt: md, rootAcc(top)
+    // pspD=3, ta8D=2, kp4D=1
 
     for i in 0..k {
+        // psp(3) ta8(2) kp4(1) forsSigRem(0) | alt: md, rootAcc
+
         // Get md: pop rootAcc, pop md, dup md, push md back, push rootAcc back
         emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // rootAcc
         emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // md
         emit(StackOp::Dup);
-        emit(StackOp::Opcode("OP_TOALTSTACK".into())); // md back
+        emit(StackOp::Opcode("OP_TOALTSTACK".into()));   // md back
         emit(StackOp::Swap);
-        emit(StackOp::Opcode("OP_TOALTSTACK".into())); // rootAcc back
+        emit(StackOp::Opcode("OP_TOALTSTACK".into()));   // rootAcc back
+        // psp(4) ta8(3) kp4(2) forsSigRem(1) md_copy(0)
 
         // Extract idx: `a` bits at position i*a from md_copy
         let bit_start = i * a;
@@ -781,92 +1019,136 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
         let total_bits = take * 8;
         let right_shift = total_bits - bit_offset - a;
         if right_shift > 0 {
-            emit(StackOp::Push(PushValue::Int(right_shift as i128)));
-            emit(StackOp::Opcode("OP_RSHIFT".into()));
+            emit(StackOp::Push(PushValue::Int((1i128 << right_shift) as i128)));
+            emit(StackOp::Opcode("OP_DIV".into()));
         }
-        emit(StackOp::Push(PushValue::Int(((1i128 << a) - 1) as i128)));
-        emit(StackOp::Opcode("OP_AND".into()));
+        // Use OP_MOD instead of OP_AND to avoid byte-length mismatch
+        emit(StackOp::Push(PushValue::Int(1i128 << a)));
+        emit(StackOp::Opcode("OP_MOD".into()));
+        // psp(4) ta8(3) kp4(2) forsSigRem(1) idx(0)
 
-        // Save idx to alt
+        // Save idx to alt (above rootAcc)
         emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+        // psp(3) ta8(2) kp4(1) forsSigRem(0) | alt: md, rootAcc, idx(top)
 
         // Split sk(n) from sigRem
         emit(StackOp::Push(PushValue::Int(n as i128)));
         emit(StackOp::Opcode("OP_SPLIT".into()));
         emit(StackOp::Swap);
+        // psp(4) ta8(3) kp4(2) sigRest(1) sk(0)
 
-        // Leaf = T(pkSeed, ADRS_FORS_TREE{h=0}, sk)
-        let leaf_adrs = slh_adrs(&SLHADRSOpts {
-            adrs_typ: SLH_FORS_TREE,
-            chain: 0,
-            hash: 0,
-            ..Default::default()
-        });
-        emit(StackOp::Push(PushValue::Bytes(leaf_adrs)));
+        // Leaf = T(pkSeed, ADRS_FORS_TREE{chain=0, hash=runtime}, sk)
+        // The FORS leaf hash index is: i * (1<<a) + idx
+        // Need to get idx from alt, compute, convert to 4B BE, build ADRS
+        // Get idx from alt (above rootAcc)
+        emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // idx
+        emit(StackOp::Dup);
+        emit(StackOp::Opcode("OP_TOALTSTACK".into())); // idx back
+        // psp(5) ta8(4) kp4(3) sigRest(2) sk(1) idx(0)
+
+        // Compute hash = i*(1<<a) + idx
+        if i > 0 {
+            emit(StackOp::Push(PushValue::Int((i * (1 << a)) as i128)));
+            emit(StackOp::Opcode("OP_ADD".into()));
+        }
+        // Convert to 4B BE
+        emit(StackOp::Push(PushValue::Int(4)));
+        emit(StackOp::Opcode("OP_NUM2BIN".into()));
+        for op in emit_reverse_n(4) {
+            emit(op);
+        }
+        // psp(5) ta8(4) kp4(3) sigRest(2) sk(1) hash4BE(0)
+
+        // Build ADRS with hash=Stack: ta8D=4, kp4D=3
+        emit_build_adrs(emit, 0, SLH_FORS_TREE, 0, 4, Some(3), HashMode::Stack);
+        // hash4 replaced by adrs22. psp(5) ta8(4) kp4(3) sigRest(2) sk(1) adrs22(0)
         emit(StackOp::Swap);
-        emit_slh_t_raw(emit, n);
+        // psp(5) ta8(4) kp4(3) sigRest(2) adrs22(1) sk(0)
+        emit_slh_t_raw(emit, n, 5);
+        // psp(4) ta8(3) kp4(2) sigRest(1) node(0)
 
         // Auth path walk: a levels
         for j in 0..a {
+            // psp(4) ta8(3) kp4(2) sigRest(1) node(0)
             emit(StackOp::Opcode("OP_TOALTSTACK".into())); // node -> alt
 
             emit(StackOp::Push(PushValue::Int(n as i128)));
             emit(StackOp::Opcode("OP_SPLIT".into()));
             emit(StackOp::Swap);
+            // sigRest authJ
 
             emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // node
+            // psp(4) ta8(3) kp4(2) sigRest(2) authJ(1) node(0)
 
-            // Get idx
+            // Get idx: pop from alt (idx is top of alt), dup, push back
             emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
             emit(StackOp::Dup);
             emit(StackOp::Opcode("OP_TOALTSTACK".into()));
+            // psp(5) ta8(4) kp4(3) sigRest(3) authJ(2) node(1) idx(0)
 
-            // bit = (idx >> j) & 1
+            // bit = (idx >> j) % 2
             if j > 0 {
-                emit(StackOp::Push(PushValue::Int(j as i128)));
-                emit(StackOp::Opcode("OP_RSHIFT".into()));
+                emit(StackOp::Push(PushValue::Int((1i128 << j) as i128)));
+                emit(StackOp::Opcode("OP_DIV".into()));
             }
-            emit(StackOp::Push(PushValue::Int(1)));
-            emit(StackOp::Opcode("OP_AND".into()));
+            emit(StackOp::Push(PushValue::Int(2)));
+            emit(StackOp::Opcode("OP_MOD".into()));
 
-            let level_adrs = slh_adrs(&SLHADRSOpts {
-                adrs_typ: SLH_FORS_TREE,
-                chain: (j + 1) as i32,
-                hash: 0,
-                ..Default::default()
+            // After if/then branches: CAT children -> children(0)
+            // psp(4) ta8(3) kp4(2) sigRest(1) children(0)
+            // Need tweakable hash with ADRS. hash = i*(1<<(a-j-1)) + (idx >> (j+1))
+            let mk_fors_auth_hash: Vec<StackOp> = collect_ops(|e| {
+                // Stack: sigRest(1) children(0)
+                // pspD=4, ta8D=3, kp4D=2
+
+                // Get idx from alt to compute hash
+                e(StackOp::Opcode("OP_FROMALTSTACK".into()));
+                e(StackOp::Dup);
+                e(StackOp::Opcode("OP_TOALTSTACK".into()));
+                // sigRest(2) children(1) idx(0); pspD=5, ta8D=4, kp4D=3
+                // hash = i*(1<<(a-j-1)) + (idx >> (j+1))
+                if j + 1 > 0 {
+                    e(StackOp::Push(PushValue::Int((1i128 << (j + 1)) as i128)));
+                    e(StackOp::Opcode("OP_DIV".into()));
+                }
+                let base = i * (1 << (a - j - 1));
+                if base > 0 {
+                    e(StackOp::Push(PushValue::Int(base as i128)));
+                    e(StackOp::Opcode("OP_ADD".into()));
+                }
+                // Convert to 4B BE
+                e(StackOp::Push(PushValue::Int(4)));
+                e(StackOp::Opcode("OP_NUM2BIN".into()));
+                for op in emit_reverse_n(4) {
+                    e(op);
+                }
+                // sigRest(2) children(1) hash4BE(0); ta8D=4, kp4D=3
+
+                // Build ADRS with hash=Stack
+                emit_build_adrs(e, 0, SLH_FORS_TREE, j + 1, 4, Some(3), HashMode::Stack);
+                // sigRest(2) children(1) adrs22(0); pspD=5, ta8D=4, kp4D=3
+                e(StackOp::Swap);
+                emit_slh_t_raw(e, n, 5);
+                // sigRest(1) result(0); pspD=4
             });
 
-            let mut hash_tail = vec![
-                StackOp::Push(PushValue::Bytes(level_adrs)),
-                StackOp::Swap,
-                StackOp::Opcode("OP_CAT".into()),
-                StackOp::Opcode("OP_FROMALTSTACK".into()),
-                StackOp::Dup,
-                StackOp::Opcode("OP_TOALTSTACK".into()),
-                StackOp::Swap,
-                StackOp::Opcode("OP_CAT".into()),
-                StackOp::Opcode("OP_SHA256".into()),
-            ];
-            if n < 32 {
-                hash_tail.push(StackOp::Push(PushValue::Int(n as i128)));
-                hash_tail.push(StackOp::Opcode("OP_SPLIT".into()));
-                hash_tail.push(StackOp::Drop);
-            }
-
             let mut then_branch = vec![StackOp::Opcode("OP_CAT".into())];
-            then_branch.extend(hash_tail.iter().cloned());
+            then_branch.extend(mk_fors_auth_hash.iter().cloned());
 
             let mut else_branch = vec![
                 StackOp::Swap,
                 StackOp::Opcode("OP_CAT".into()),
             ];
-            else_branch.extend(hash_tail.iter().cloned());
+            else_branch.extend(mk_fors_auth_hash.iter().cloned());
 
             emit(StackOp::If {
                 then_ops: then_branch,
                 else_ops: else_branch,
             });
+            // psp(4) ta8(3) kp4(2) sigRest(1) result(0)
         }
+
+        // psp(4) ta8(3) kp4(2) sigRest(1) treeRoot(0) | alt: md, rootAcc, idx
 
         // Drop idx from alt
         emit(StackOp::Opcode("OP_FROMALTSTACK".into()));
@@ -876,26 +1158,29 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
         emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // rootAcc
         emit(StackOp::Swap);
         emit(StackOp::Opcode("OP_CAT".into()));
+        // psp(3) ta8(2) kp4(1) sigRest(1) newRootAcc(0)
 
-        emit(StackOp::Opcode("OP_TOALTSTACK".into())); // rootAcc -> alt
+        emit(StackOp::Opcode("OP_TOALTSTACK".into()));   // rootAcc -> alt
+        // psp(3) ta8(2) kp4(1) sigRest(0) | alt: md, newRootAcc
     }
 
     // Drop empty sigRest
     emit(StackOp::Drop);
 
     // Get rootAcc, drop md
-    emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // rootAcc
-    emit(StackOp::Opcode("OP_FROMALTSTACK".into())); // md
+    emit(StackOp::Opcode("OP_FROMALTSTACK".into()));   // rootAcc
+    emit(StackOp::Opcode("OP_FROMALTSTACK".into()));   // md
     emit(StackOp::Drop);
+    // psp ta8 kp4 rootAcc md -> after drop md: psp ta8 kp4 rootAcc
+    // psp(3) ta8(2) kp4(1) rootAcc(0)
 
     // Compress: T(pkSeed, ADRS_FORS_ROOTS, rootAcc)
-    let fors_adrs = slh_adrs(&SLHADRSOpts {
-        adrs_typ: SLH_FORS_ROOTS,
-        ..Default::default()
-    });
-    emit(StackOp::Push(PushValue::Bytes(fors_adrs)));
+    // Build ADRS: ta8D=2, kp4D=1
+    emit_build_adrs(emit, 0, SLH_FORS_ROOTS, 0, 2, Some(1), HashMode::Zero);
+    // psp(4) ta8(3) kp4(2) rootAcc(1) adrs22(0)
     emit(StackOp::Swap);
-    emit_slh_t_raw(emit, n);
+    emit_slh_t_raw(emit, n, 4);
+    // psp(3) ta8(2) kp4(1) forsPk(0)
 }
 
 // ===========================================================================
@@ -905,7 +1190,7 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
 // Output: digest(out_len bytes)
 
 fn emit_slh_hmsg(emit: &mut dyn FnMut(StackOp), n: usize, out_len: usize) {
-    let _ = n; // n unused in Hmsg but kept for API consistency with Go
+    let _ = n; // n unused in Hmsg but kept for API consistency
 
     // CAT: R || pkSeed || pkRoot || msg
     emit(StackOp::Opcode("OP_CAT".into()));
@@ -993,7 +1278,7 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     t.push_int("", n as i128);
     t.split("pkSeed", "pkRoot");
 
-    // Build pkSeedPad = pkSeed || zeros(64-n), push to alt
+    // Build pkSeedPad = pkSeed || zeros(64-n), keep on main stack
     t.copy_to_top("pkSeed", "_psp");
     if 64 - n > 0 {
         t.push_bytes("", vec![0u8; 64 - n]);
@@ -1001,7 +1286,7 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     } else {
         t.rename("_pkSeedPad");
     }
-    t.to_alt();
+    // _pkSeedPad stays on main stack (tracked)
 
     // ---- 2. Parse R from sig ----
     t.to_top("sig");
@@ -1039,15 +1324,15 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
         e(StackOp::Opcode("OP_NUM2BIN".into()));
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
+        // Use OP_MOD instead of OP_AND to avoid byte-length mismatch
         let shift = p.h - hp;
-        // Compute mask safely: for shift >= 127, use i128::MAX
-        let mask: i128 = if shift >= 127 {
+        let modulus: i128 = if shift >= 127 {
             i128::MAX
         } else {
-            (1i128 << shift) - 1
+            1i128 << shift
         };
-        e(StackOp::Push(PushValue::Int(mask)));
-        e(StackOp::Opcode("OP_AND".into()));
+        e(StackOp::Push(PushValue::Int(modulus)));
+        e(StackOp::Opcode("OP_MOD".into()));
     });
 
     // Convert _leafBytes -> leafIdx
@@ -1063,13 +1348,35 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
         e(StackOp::Opcode("OP_NUM2BIN".into()));
         e(StackOp::Opcode("OP_CAT".into()));
         e(StackOp::Opcode("OP_BIN2NUM".into()));
-        let hp_mask: i128 = if hp >= 127 {
+        // Use OP_MOD instead of OP_AND to avoid byte-length mismatch
+        let hp_modulus: i128 = if hp >= 127 {
             i128::MAX
         } else {
-            (1i128 << hp) - 1
+            1i128 << hp
         };
-        e(StackOp::Push(PushValue::Int(hp_mask)));
-        e(StackOp::Opcode("OP_AND".into()));
+        e(StackOp::Push(PushValue::Int(hp_modulus)));
+        e(StackOp::Opcode("OP_MOD".into()));
+    });
+
+    // ---- 4b. Compute treeAddr8 and keypair4 for ADRS construction ----
+    // treeAddr8 = treeIdx as 8-byte big-endian
+    t.copy_to_top("treeIdx", "_ti8");
+    t.raw_block(&["_ti8"], "treeAddr8", |e| {
+        e(StackOp::Push(PushValue::Int(8)));
+        e(StackOp::Opcode("OP_NUM2BIN".into()));
+        for op in emit_reverse_n(8) {
+            e(op);
+        }
+    });
+
+    // keypair4 = leafIdx as 4-byte big-endian
+    t.copy_to_top("leafIdx", "_li4");
+    t.raw_block(&["_li4"], "keypair4", |e| {
+        e(StackOp::Push(PushValue::Int(4)));
+        e(StackOp::Opcode("OP_NUM2BIN".into()));
+        for op in emit_reverse_n(4) {
+            e(op);
+        }
     });
 
     // ---- 5. Parse FORS sig ----
@@ -1078,10 +1385,22 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     t.split("forsSig", "htSigRest");
 
     // ---- 6. FORS -> forsPk ----
+    // Copy psp/ta8/kp4 to top, then forsSig, md
+    t.copy_to_top("_pkSeedPad", "_psp");
+    t.copy_to_top("treeAddr8", "_ta");
+    t.copy_to_top("keypair4", "_kp");
     t.to_top("forsSig");
     t.to_top("md");
-    t.raw_block(&["forsSig", "md"], "forsPk", |e| {
+    t.raw_block(&["_psp", "_ta", "_kp", "forsSig", "md"], "forsPk", |e| {
+        // Stack: psp(4) ta8(3) kp4(2) forsSig(1) md(0)
         emit_slh_fors(e, &p);
+        // Stack: psp(3) ta8(2) kp4(1) forsPk(0)
+        // Drop psp, ta8, kp4
+        e(StackOp::Opcode("OP_TOALTSTACK".into())); // forsPk -> alt
+        e(StackOp::Drop); // kp4
+        e(StackOp::Drop); // ta8
+        e(StackOp::Drop); // psp
+        e(StackOp::Opcode("OP_FROMALTSTACK".into())); // forsPk back
     });
 
     // ---- 7. Hypertree: d layers ----
@@ -1099,45 +1418,85 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
         let auth_name = format!("auth{}", layer);
         t.split(&wsig_name, &auth_name);
 
-        // WOTS+: wotsSig + currentMsg -> wotsPk
+        // WOTS+: copy psp/ta8/kp4 + wotsSig + currentMsg -> wotsPk
         let cur_msg = if layer == 0 {
             "forsPk".to_string()
         } else {
             format!("root{}", layer - 1)
         };
+        t.copy_to_top("_pkSeedPad", "_psp");
+        t.copy_to_top("treeAddr8", "_ta");
+        t.copy_to_top("keypair4", "_kp");
         t.to_top(&wsig_name);
         t.to_top(&cur_msg);
         let wpk_name = format!("wpk{}", layer);
-        t.raw_block(&[&wsig_name, &cur_msg], &wpk_name, |e| {
+        t.raw_block(&["_psp", "_ta", "_kp", &wsig_name, &cur_msg], &wpk_name, |e| {
+            // Stack: psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
             emit_slh_wots_all(e, &p, layer);
+            // Stack: psp(3) ta8(2) kp4(1) wotsPk(0)
+            e(StackOp::Opcode("OP_TOALTSTACK".into()));
+            e(StackOp::Drop); e(StackOp::Drop); e(StackOp::Drop);
+            e(StackOp::Opcode("OP_FROMALTSTACK".into()));
         });
 
-        // Merkle: leafIdx + authPath + wotsPk -> root
+        // Merkle: copy psp/ta8/kp4 + leafIdx + authPath + wotsPk -> root
+        t.copy_to_top("_pkSeedPad", "_psp");
+        t.copy_to_top("treeAddr8", "_ta");
+        t.copy_to_top("keypair4", "_kp");
         t.to_top("leafIdx");
         t.to_top(&auth_name);
         t.to_top(&wpk_name);
         let root_name = format!("root{}", layer);
-        t.raw_block(&["leafIdx", &auth_name, &wpk_name], &root_name, |e| {
+        t.raw_block(&["_psp", "_ta", "_kp", "leafIdx", &auth_name, &wpk_name], &root_name, |e| {
+            // Stack: psp(5) ta8(4) kp4(3) leafIdx(2) authPath(1) node(0)
             emit_slh_merkle(e, &p, layer);
+            // Stack: psp(3) ta8(2) kp4(1) root(0)
+            e(StackOp::Opcode("OP_TOALTSTACK".into()));
+            e(StackOp::Drop); e(StackOp::Drop); e(StackOp::Drop);
+            e(StackOp::Opcode("OP_FROMALTSTACK".into()));
         });
 
-        // Update leafIdx, treeIdx for next layer
+        // Update leafIdx, treeIdx, treeAddr8, keypair4 for next layer
         if layer < d - 1 {
             t.to_top("treeIdx");
             t.dup("_tic");
-            let hp_mask: i128 = if hp >= 127 {
-                i128::MAX
-            } else {
-                (1i128 << hp) - 1
-            };
-            t.push_int("", hp_mask);
-            t.op("OP_AND");
-            t.rename("leafIdx");
+            // leafIdx = _tic % (1 << hp)
+            t.raw_block(&["_tic"], "leafIdx", |e| {
+                e(StackOp::Push(PushValue::Int(1i128 << hp)));
+                e(StackOp::Opcode("OP_MOD".into()));
+            });
+            // treeIdx = treeIdx >> hp
+            t.swap();
+            t.raw_block(&["treeIdx"], "treeIdx", |e| {
+                e(StackOp::Push(PushValue::Int((1i128 << hp) as i128)));
+                e(StackOp::Opcode("OP_DIV".into()));
+            });
 
-            t.to_top("_tic");
-            t.push_int("", hp as i128);
-            t.op("OP_RSHIFT");
-            t.rename("treeIdx");
+            // Update treeAddr8 = new treeIdx as 8-byte BE
+            // Drop old treeAddr8
+            t.to_top("treeAddr8");
+            t.drop();
+            t.copy_to_top("treeIdx", "_ti8");
+            t.raw_block(&["_ti8"], "treeAddr8", |e| {
+                e(StackOp::Push(PushValue::Int(8)));
+                e(StackOp::Opcode("OP_NUM2BIN".into()));
+                for op in emit_reverse_n(8) {
+                    e(op);
+                }
+            });
+
+            // Update keypair4 = new leafIdx as 4-byte BE
+            // Drop old keypair4
+            t.to_top("keypair4");
+            t.drop();
+            t.copy_to_top("leafIdx", "_li4");
+            t.raw_block(&["_li4"], "keypair4", |e| {
+                e(StackOp::Push(PushValue::Int(4)));
+                e(StackOp::Opcode("OP_NUM2BIN".into()));
+                for op in emit_reverse_n(4) {
+                    e(op);
+                }
+            });
         }
     }
 
@@ -1152,7 +1511,10 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     t.to_alt();
 
     // Drop all remaining tracked values
-    let leftover = ["msg", "R", "pkSeed", "htSigRest", "treeIdx", "leafIdx"];
+    let leftover = [
+        "msg", "R", "pkSeed", "htSigRest", "treeIdx", "leafIdx",
+        "_pkSeedPad", "treeAddr8", "keypair4",
+    ];
     for nm in &leftover {
         if t.has(nm) {
             t.to_top(nm);
@@ -1164,9 +1526,6 @@ pub fn emit_verify_slh_dsa(emit: &mut dyn FnMut(StackOp), param_key: &str) {
     }
 
     t.from_alt("_result");
-    // Pop pkSeedPad from alt
-    t.from_alt("");
-    t.drop();
 }
 
 #[cfg(test)]
@@ -1225,11 +1584,7 @@ mod tests {
 
     #[test]
     fn test_chain_step_then() {
-        let prefix = slh_adrs18(&SLHADRSOpts {
-            adrs_typ: SLH_WOTS_HASH,
-            ..Default::default()
-        });
-        let ops = slh_chain_step_then(&prefix, 16);
+        let ops = slh_chain_step_then(16, 6);
         assert!(!ops.is_empty());
     }
 }

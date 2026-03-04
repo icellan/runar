@@ -133,37 +133,54 @@ new RunarContract(artifact: RunarArtifact, constructorArgs: unknown[])
 
 Throws if the number of arguments does not match the ABI.
 
-#### `deploy(provider, signer, options)`
+#### `deploy(...)`
 
-Deploy the contract by creating a UTXO with the locking script.
+Deploy the contract by creating a UTXO with the locking script. Has two overloads:
 
 ```typescript
+// Overload 1: Use provider/signer stored via connect()
+async deploy(options: DeployOptions): Promise<{ txid: string; tx: Transaction }>
+
+// Overload 2: Pass provider and signer explicitly
 async deploy(
   provider: Provider,
   signer: Signer,
-  options: { satoshis: number; changeAddress?: string }
+  options: DeployOptions,
 ): Promise<{ txid: string; tx: Transaction }>
 ```
 
-1. Fetches funding UTXOs from the provider.
-2. Builds the deploy transaction with the locking script.
-3. Signs all inputs with the signer.
-4. Broadcasts via the provider.
-5. Tracks the deployed UTXO internally.
+`DeployOptions` is `{ satoshis: number; changeAddress?: string }`.
 
-#### `call(methodName, args, provider, signer, options?)`
+1. Fetches the fee rate from the provider via `getFeeRate()`.
+2. Fetches funding UTXOs from the provider.
+3. Builds the deploy transaction with the locking script.
+4. Signs all inputs with the signer.
+5. Broadcasts via the provider.
+6. Tracks the deployed UTXO internally.
 
-Call a public method on the contract (spend the UTXO).
+#### `call(...)`
+
+Call a public method on the contract (spend the UTXO). Has two overloads:
 
 ```typescript
+// Overload 1: Use provider/signer stored via connect()
+async call(
+  methodName: string,
+  args: unknown[],
+  options?: CallOptions,
+): Promise<{ txid: string; tx: Transaction }>
+
+// Overload 2: Pass provider and signer explicitly
 async call(
   methodName: string,
   args: unknown[],
   provider: Provider,
   signer: Signer,
-  options?: { satoshis?: number; changeAddress?: string }
+  options?: CallOptions,
 ): Promise<{ txid: string; tx: Transaction }>
 ```
+
+`CallOptions` is `{ satoshis?: number; changeAddress?: string; newState?: Record<string, unknown> }`.
 
 For stateful contracts, a new UTXO is created with the updated state. For stateless contracts, the UTXO is consumed.
 
@@ -213,8 +230,13 @@ interface Provider {
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
   getNetwork(): 'mainnet' | 'testnet';
+  getFeeRate(): Promise<number>;
 }
 ```
+
+#### `getFeeRate()`
+
+Returns the current fee rate in satoshis per byte. Defaults to 1 sat/byte for BSV (the standard minimum relay fee). The SDK calls this internally during `deploy()` and `call()` for fee estimation.
 
 ### WhatsOnChainProvider
 
@@ -264,12 +286,16 @@ interface Signer {
 
 ### LocalSigner
 
-Signs transactions using a local private key (hex-encoded).
+Signs transactions using a local private key. Accepts either a hex-encoded raw key or a WIF-encoded key.
 
 ```typescript
 import { LocalSigner } from 'runar-sdk';
 
-const signer = new LocalSigner('abc123...'); // 32-byte private key, hex
+// From a 64-char hex string (raw 32-byte private key)
+const signer = new LocalSigner('abc123...def456...');
+
+// From a WIF-encoded private key (Base58Check, starts with 5, K, or L)
+const signerWif = new LocalSigner('KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn');
 ```
 
 Suitable for server-side applications, CLI tools, and testing.
@@ -284,14 +310,14 @@ import { ExternalSigner } from 'runar-sdk';
 const signer = new ExternalSigner(
   pubKeyHex,       // 33-byte compressed public key, hex
   addressStr,      // Base58Check BSV address
-  async (txHex, inputIndex) => {
+  async (txHex, inputIndex, subscript, satoshis, sigHashType?) => {
     // Sign the transaction and return DER signature + sighash byte, hex
-    return await myHardwareWallet.sign(txHex, inputIndex);
+    return await myHardwareWallet.sign(txHex, inputIndex, subscript, satoshis, sigHashType);
   },
 );
 ```
 
-The constructor takes three parameters: the public key hex, the BSV address, and a signing callback. The callback receives the raw transaction hex and input index, and returns a DER-encoded signature. This pattern supports integration with browser wallets, hardware security modules, or custodial APIs.
+The constructor takes three parameters: the public key hex, the BSV address, and a signing callback. The callback receives the raw transaction hex, input index, the locking script being spent (hex), the satoshi value of the UTXO, and optional sighash flags (defaults to ALL | FORKID = 0x41). It returns a DER-encoded signature with the sighash byte appended. This pattern supports integration with browser wallets, hardware security modules, or custodial APIs.
 
 ---
 
@@ -408,10 +434,10 @@ interface UTXO {
 interface Transaction {
   txid: string;
   version: number;
-  inputs: TransactionInput[];
-  outputs: TransactionOutput[];
+  inputs: TxInput[];
+  outputs: TxOutput[];
   locktime: number;
-  raw: string; // hex-encoded raw transaction
+  raw?: string; // hex-encoded raw transaction (optional)
 }
 ```
 

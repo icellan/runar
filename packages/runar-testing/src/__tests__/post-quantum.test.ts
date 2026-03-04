@@ -22,11 +22,13 @@ class PQWallet extends SmartContract {
 describe('WOTS+ verification via interpreter', () => {
   const seed = new Uint8Array(32);
   seed[0] = 0x42;
-  const { sk, pk } = wotsKeygen(seed);
+  const pubSeed = new Uint8Array(32);
+  pubSeed[0] = 0x01;
+  const { sk, pk } = wotsKeygen(seed, pubSeed);
 
   it('accepts a valid WOTS+ signature', () => {
     const msg = new TextEncoder().encode('hello world');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(pk) });
     const result = contract.call('spend', { msg: toHex(msg), sig: toHex(sig) });
     expect(result.success).toBe(true);
@@ -34,7 +36,7 @@ describe('WOTS+ verification via interpreter', () => {
 
   it('rejects a tampered signature', () => {
     const msg = new TextEncoder().encode('hello world');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const badSig = new Uint8Array(sig);
     badSig[0]! ^= 0xff;
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(pk) });
@@ -44,7 +46,7 @@ describe('WOTS+ verification via interpreter', () => {
 
   it('rejects a wrong message', () => {
     const msg = new TextEncoder().encode('correct message');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const wrongMsg = new TextEncoder().encode('wrong message');
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(pk) });
     const result = contract.call('spend', { msg: toHex(wrongMsg), sig: toHex(sig) });
@@ -53,10 +55,10 @@ describe('WOTS+ verification via interpreter', () => {
 
   it('rejects a wrong public key', () => {
     const msg = new TextEncoder().encode('test');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const otherSeed = new Uint8Array(32);
     otherSeed[0] = 0xaa;
-    const { pk: otherPk } = wotsKeygen(otherSeed);
+    const { pk: otherPk } = wotsKeygen(otherSeed, pubSeed);
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(otherPk) });
     const result = contract.call('spend', { msg: toHex(msg), sig: toHex(sig) });
     expect(result.success).toBe(false);
@@ -64,7 +66,7 @@ describe('WOTS+ verification via interpreter', () => {
 
   it('works with empty message', () => {
     const msg = new Uint8Array(0);
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(pk) });
     const result = contract.call('spend', { msg: '', sig: toHex(sig) });
     expect(result.success).toBe(true);
@@ -73,9 +75,11 @@ describe('WOTS+ verification via interpreter', () => {
   it('works with a different keypair', () => {
     const seed2 = new Uint8Array(32);
     seed2[0] = 0x99;
-    const { sk: sk2, pk: pk2 } = wotsKeygen(seed2);
+    const pubSeed2 = new Uint8Array(32);
+    pubSeed2[0] = 0x02;
+    const { sk: sk2, pk: pk2 } = wotsKeygen(seed2, pubSeed2);
     const msg = new TextEncoder().encode('different key test');
-    const sig = wotsSign(msg, sk2);
+    const sig = wotsSign(msg, sk2, pubSeed2);
     const contract = TestContract.fromSource(PQ_WALLET_SOURCE, { pubkey: toHex(pk2) });
     const result = contract.call('spend', { msg: toHex(msg), sig: toHex(sig) });
     expect(result.success).toBe(true);

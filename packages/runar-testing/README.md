@@ -14,183 +14,156 @@ pnpm add runar-testing
 
 ---
 
+## Exports
+
+The package exports the following from `runar-testing`:
+
+| Export | Kind | Description |
+|---|---|---|
+| `ScriptVM` | class | Bitcoin Script virtual machine |
+| `Opcode` | enum | Opcode constants |
+| `opcodeName` | function | Opcode byte → name |
+| `encodeScriptNumber` | function | BigInt → Script number bytes |
+| `decodeScriptNumber` | function | Script number bytes → BigInt |
+| `isTruthy` | function | Check if a stack element is truthy |
+| `hexToBytes` | function | Hex string → Uint8Array |
+| `bytesToHex` | function | Uint8Array → hex string |
+| `disassemble` | function | Script hex → ASM string |
+| `RunarInterpreter` | class | Reference definitional interpreter |
+| `arbContract` | fast-check Arbitrary | Generate random valid Rúnar contracts |
+| `arbStatelessContract` | fast-check Arbitrary | Generate random stateless contracts |
+| `arbArithmeticContract` | fast-check Arbitrary | Generate random arithmetic-focused contracts |
+| `arbCryptoContract` | fast-check Arbitrary | Generate random crypto-focused contracts |
+| `TestSmartContract` | class | Test wrapper around compiled artifacts (VM-based) |
+| `TestContract` | class | Test wrapper using the interpreter (no compilation needed) |
+| `ScriptExecutionContract` | class | Script execution via BSV SDK |
+| `expectScriptSuccess` | function | Assert script executes successfully |
+| `expectScriptFailure` | function | Assert script fails |
+| `expectStackTop` | function | Assert specific value on stack top |
+| `expectStackTopNum` | function | Assert specific numeric value on stack top |
+| `VMResult` | type | VM execution result (success, stack, altStack, error, opsExecuted, maxStackDepth) |
+| `VMOptions` | type | VM configuration options (maxOps, maxStackSize, maxScriptSize, flags, checkSigCallback) |
+| `VMFlags` | type | VM behavioural flags (enableSighashForkId, enableOpCodes, strictEncoding) |
+| `RunarValue` | type | Interpreter value type |
+| `InterpreterResult` | type | Interpreter execution result |
+| `TestCallResult` | type | Result from `TestContract.call()` |
+| `OutputSnapshot` | type | Snapshot of a transaction output |
+| `MockPreimage` | type | Mock sighash preimage for testing |
+| `ScriptExecResult` | type | Result from `ScriptExecutionContract` execution |
+
+---
+
 ## Bitcoin Script VM
 
-The Script VM executes raw Bitcoin Script bytecode. It implements the BSV instruction set including all re-enabled opcodes (post-Genesis).
+The `ScriptVM` executes raw Bitcoin Script bytecode. It implements the BSV instruction set including all re-enabled opcodes (post-Genesis).
 
 ### Basic Usage
 
 ```typescript
-import { ScriptVM, VMResult } from 'runar-testing';
-
-// Create unlocking + locking script
-const unlockingScript = Buffer.from('...', 'hex');
-const lockingScript = Buffer.from('76a97c7e7e87a988ac', 'hex');
+import { ScriptVM, hexToBytes } from 'runar-testing';
 
 const vm = new ScriptVM();
-const result: VMResult = vm.execute(unlockingScript, lockingScript);
+const result = vm.execute(hexToBytes(unlockingScriptHex), hexToBytes(lockingScriptHex));
 
-console.log(result.success);     // true if stack top is truthy
-console.log(result.finalStack);  // stack state after execution
-console.log(result.error);       // error message if script failed
+console.log(result.success);        // true if stack top is truthy
+console.log(result.stack);          // stack state after execution (Uint8Array[])
+console.log(result.error);          // error message if script failed
+console.log(result.altStack);       // alt stack state after execution (Uint8Array[])
+console.log(result.opsExecuted);    // number of non-push opcodes executed
+console.log(result.maxStackDepth);  // peak stack depth during execution
 ```
-
-### Supported Opcodes
-
-The VM supports the full BSV opcode set:
-
-**Constants:** `OP_0` through `OP_16`, `OP_1NEGATE`, `OP_PUSHDATA1/2/4`
-
-**Flow Control:** `OP_NOP`, `OP_IF`, `OP_NOTIF`, `OP_ELSE`, `OP_ENDIF`, `OP_VERIFY`, `OP_RETURN`
-
-**Stack:** `OP_TOALTSTACK`, `OP_FROMALTSTACK`, `OP_DUP`, `OP_DROP`, `OP_NIP`, `OP_OVER`, `OP_PICK`, `OP_ROLL`, `OP_ROT`, `OP_SWAP`, `OP_TUCK`, `OP_2DROP`, `OP_2DUP`, `OP_3DUP`, `OP_2OVER`, `OP_2ROT`, `OP_2SWAP`, `OP_IFDUP`, `OP_DEPTH`, `OP_SIZE`
-
-**Arithmetic:** `OP_ADD`, `OP_SUB`, `OP_MUL`, `OP_DIV`, `OP_MOD`, `OP_LSHIFT`, `OP_RSHIFT`, `OP_NEGATE`, `OP_ABS`, `OP_NOT`, `OP_0NOTEQUAL`, `OP_BOOLAND`, `OP_BOOLOR`, `OP_NUMEQUAL`, `OP_NUMEQUALVERIFY`, `OP_NUMNOTEQUAL`, `OP_LESSTHAN`, `OP_GREATERTHAN`, `OP_LESSTHANOREQUAL`, `OP_GREATERTHANOREQUAL`, `OP_MIN`, `OP_MAX`, `OP_WITHIN`, `OP_1ADD`, `OP_1SUB`
-
-**Bitwise:** `OP_AND`, `OP_OR`, `OP_XOR`, `OP_INVERT`
-
-**String/Splice:** `OP_CAT`, `OP_SPLIT`, `OP_NUM2BIN`, `OP_BIN2NUM`
-
-**Crypto:** `OP_RIPEMD160`, `OP_SHA256`, `OP_HASH160`, `OP_HASH256`, `OP_CHECKSIG`, `OP_CHECKSIGVERIFY`, `OP_CHECKMULTISIG`, `OP_CHECKMULTISIGVERIFY`, `OP_CODESEPARATOR`
-
-**Re-enabled (BSV Genesis):** `OP_MUL`, `OP_LSHIFT`, `OP_RSHIFT`, `OP_INVERT`, `OP_AND`, `OP_OR`, `OP_XOR`, `OP_CAT`, `OP_SPLIT`, `OP_NUM2BIN`, `OP_BIN2NUM`
 
 ### VM Options
 
 ```typescript
+import { ScriptVM } from 'runar-testing';
+import type { VMOptions, VMFlags } from 'runar-testing';
+
 const vm = new ScriptVM({
-  maxStackSize: 800,           // maximum stack depth (default: 800)
-  maxScriptSize: 10_000_000,   // maximum script size in bytes
-  maxOpcodeCount: 500_000,     // maximum opcodes executed
-  requireMinimalPush: true,    // enforce minimal push encoding
-  requireCleanStack: true,     // require exactly one item on stack at end
-  genesisEnabled: true,        // enable post-Genesis opcodes
+  maxOps: 500_000,              // max non-push opcodes (default 500_000)
+  maxStackSize: 800,            // max main + alt stack items (default 1_000)
+  maxScriptSize: 10_000_000,   // max script size in bytes (default unlimited)
+  flags: {                      // behavioural flags
+    enableSighashForkId: false,
+    enableOpCodes: true,        // BSV re-enabled opcodes (default true)
+    strictEncoding: false,
+  },
+  checkSigCallback: (sig, pubkey) => true,  // optional; mock mode by default
 });
 ```
-
-### Limitations vs Real BSV Node
-
-The VM is designed for testing, not consensus. Known differences:
-
-- **Signature verification** uses a mock implementation that checks against pre-registered key/sig pairs rather than performing actual ECDSA. This is intentional -- real signature verification requires a full transaction context.
-- **OP_PUSH_TX / Sighash preimage** verification is simulated. The VM accepts a mock preimage context rather than computing real sighash digests.
-- **Script size limits** are configurable and may not match the exact consensus rules of a specific BSV node version.
-
-For production deployment, always test against a real BSV node (e.g., via the SDK's testnet deployment).
 
 ---
 
 ## Reference Interpreter
 
-The reference interpreter is a **definitional interpreter** in the tradition of Reynolds (1972). It evaluates the ANF IR directly by recursive descent, without compiling to Bitcoin Script. It exists to serve as a correctness oracle.
-
-### What is a Definitional Interpreter?
-
-A definitional interpreter evaluates a program by walking its AST (or IR) and computing each node's result according to the language's operational semantics. It is the most direct implementation of "what this program means" -- no compilation, no optimization, no stack scheduling. If the interpreter says a program produces `42`, then `42` is the correct answer by definition.
-
-### How it Serves as Oracle
-
-The testing strategy is:
-
-1. Compile a Rúnar source to Bitcoin Script (via the compiler).
-2. Run the compiled script in the Script VM with specific inputs.
-3. Independently evaluate the ANF IR in the reference interpreter with the same inputs.
-4. Assert that the VM result matches the interpreter result.
-
-If they disagree, there is a bug in either the compiler (passes 4-6), the VM, or the interpreter. Since the interpreter is intentionally simple (direct evaluation, no optimizations), bugs are far more likely in the compiler.
-
-### Usage
+The `RunarInterpreter` is a definitional interpreter that evaluates Rúnar contracts by walking the AST directly, without compiling to Bitcoin Script. It serves as a correctness oracle.
 
 ```typescript
-import { Interpreter, InterpreterResult } from 'runar-testing';
+import { RunarInterpreter } from 'runar-testing';
 
-const anfIR = { ... };  // ANF IR from compiler
+const interpreter = new RunarInterpreter(initialProperties);
+interpreter.setContract(contractNode);
 
-const interpreter = new Interpreter(anfIR);
-
-const result: InterpreterResult = interpreter.evaluate('unlock', {
-  sig: '3044...',
-  pubKey: '02abc...',
+const result = interpreter.executeMethod(contractNode, 'unlock', {
+  sig: { kind: 'bytes', value: sigBytes },
+  pubKey: { kind: 'bytes', value: pubKeyBytes },
 });
 
-console.log(result.success);  // true if all asserts passed
-console.log(result.state);    // final contract state (for stateful contracts)
+console.log(result.success);
 ```
 
-### Interpreter Internals
+---
 
-The interpreter maintains:
+## TestContract API
 
-- An **environment** mapping parameter and temporary names to values.
-- A **store** mapping property names to values (the contract state).
+The recommended way to test contracts. Uses the interpreter (not the VM), with mocked crypto (`checkSig` always true, `checkPreimage` always true).
 
-Each ANF binding is evaluated in sequence:
+```typescript
+import { TestContract } from 'runar-testing';
 
-| Tag | Interpreter Action |
-|---|---|
-| `load_param` | Look up parameter in the environment |
-| `load_prop` | Look up property in the store |
-| `load_const` | Parse the constant value |
-| `bin_op` | Evaluate the operation on the two operand values |
-| `call` | Dispatch to the built-in function implementation |
-| `if` | Evaluate condition, recurse into the appropriate branch |
-| `assert` | Check condition; if false, halt with failure |
-| `update_prop` | Update the property in the store |
+// From source string (TypeScript format by default)
+const counter = TestContract.fromSource(source, { count: 0n });
+counter.call('increment');
+expect(counter.state.count).toBe(1n);
+
+// Multi-format: pass fileName to select parser
+const solCounter = TestContract.fromSource(solSource, { count: 0n }, 'Counter.runar.sol');
+
+// From file path
+const contract = TestContract.fromFile('./contracts/Counter.runar.ts', { count: 0n });
+```
 
 ---
 
 ## Program Fuzzer
 
-The fuzzer generates random valid Rúnar programs for differential testing. It is inspired by CSmith (Yang et al., PLDI 2011), which found hundreds of bugs in production C compilers by generating random C programs and comparing the output of different compilers.
+The fuzzer generates random valid Rúnar programs using fast-check `Arbitrary` combinators. Inspired by CSmith (Yang et al., PLDI 2011).
 
-### CSmith-Inspired Approach
-
-The fuzzer:
-
-1. Generates a random contract with random properties (readonly and mutable).
-2. Generates random method bodies using the allowed Rúnar expression and statement forms.
-3. Ensures all generated programs are well-typed (the fuzzer tracks types as it generates).
-4. Ensures all for-loop bounds are compile-time constants.
-5. Ensures all public methods end with `assert(...)`.
-
-The generated programs are intentionally diverse -- they exercise arithmetic, conditionals, loops, nested expressions, multiple methods, stateful updates, and various built-in functions.
-
-### How to Run Differential Fuzzing
+### Usage with fast-check
 
 ```typescript
-import { Fuzzer, DifferentialTester } from 'runar-testing';
+import { arbContract, arbStatelessContract, arbArithmeticContract, arbCryptoContract } from 'runar-testing';
+import fc from 'fast-check';
+import { compile } from 'runar-compiler';
 
-const fuzzer = new Fuzzer({ seed: 12345 });
-const tester = new DifferentialTester();
-
-for (let i = 0; i < 10000; i++) {
-  const program = fuzzer.generate();
-  const result = tester.test(program);
-
-  if (!result.match) {
-    console.error(`Mismatch on program ${i}:`);
-    console.error(`Source: ${program.source}`);
-    console.error(`VM result: ${result.vmResult}`);
-    console.error(`Interpreter result: ${result.interpResult}`);
-    break;
-  }
-}
+// Property test: every generated contract compiles without errors
+fc.assert(
+  fc.property(arbContract, (source) => {
+    const result = compile(source);
+    return result.success;
+  }),
+  { numRuns: 1000 },
+);
 ```
 
-### Fuzzer Configuration
+### Available Arbitraries
 
-```typescript
-const fuzzer = new Fuzzer({
-  seed: 42,                    // deterministic seed for reproducibility
-  maxProperties: 5,            // max properties per contract
-  maxMethods: 4,               // max methods per contract
-  maxStatementsPerMethod: 10,  // max statements per method body
-  maxLoopBound: 8,             // max for-loop iteration count
-  maxNestingDepth: 3,          // max expression nesting depth
-  includeStateful: true,       // generate stateful contracts
-  includeArrays: true,         // generate FixedArray usage
-});
-```
+| Arbitrary | Description |
+|---|---|
+| `arbContract` | Contracts with 1-3 properties of mixed types, 1-3 methods |
+| `arbStatelessContract` | Contracts with no properties, methods use only parameters |
+| `arbArithmeticContract` | Contracts focused on bigint arithmetic expressions |
+| `arbCryptoContract` | Contracts using `checkSig` and `sha256` with PubKey/Sig types |
 
 ---
 
@@ -198,50 +171,37 @@ const fuzzer = new Fuzzer({
 
 ### TestSmartContract
 
-A utility for writing contract tests without the full compilation pipeline:
+A test wrapper around compiled artifacts that executes them in the Script VM:
 
 ```typescript
 import { TestSmartContract } from 'runar-testing';
 
-const contract = new TestSmartContract('P2PKH', {
-  properties: { pubKeyHash: Addr('a914...') },
-});
-
-// Test a public method call
-const result = contract.call('unlock', {
-  sig: Sig('3044...'),
-  pubKey: PubKey('02abc...'),
-});
+const contract = TestSmartContract.fromArtifact(artifact, constructorArgs);
+const result = contract.call('unlock', [sigHex, pubKeyHex]);
 
 expect(result.success).toBe(true);
 ```
 
 ### Assertion Utilities
 
-```typescript
-import { expectScriptSuccess, expectScriptFailure, expectStackTop } from 'runar-testing';
+All assertion helpers take a `VMResult` (as returned by `vm.execute()`) rather than raw script hex:
 
-// Assert script succeeds
-expectScriptSuccess(lockingScript, unlockingScript);
+```typescript
+import { ScriptVM, hexToBytes, encodeScriptNumber } from 'runar-testing';
+import { expectScriptSuccess, expectScriptFailure, expectStackTop, expectStackTopNum } from 'runar-testing';
+
+const vm = new ScriptVM();
+const result = vm.execute(hexToBytes(unlockingHex), hexToBytes(lockingHex));
+
+// Assert script succeeds (top of stack is truthy)
+expectScriptSuccess(result);
 
 // Assert script fails
-expectScriptFailure(lockingScript, unlockingScript);
+expectScriptFailure(result);
 
-// Assert specific value on stack top
-expectStackTop(lockingScript, unlockingScript, expectedValue);
-```
+// Assert specific bytes on stack top
+expectStackTop(result, new Uint8Array([0x01, 0x02]));
 
-### Script Builder
-
-```typescript
-import { ScriptBuilder } from 'runar-testing';
-
-const script = new ScriptBuilder()
-  .pushData(Buffer.from('02abc...', 'hex'))
-  .op('OP_DUP')
-  .op('OP_HASH160')
-  .pushData(Buffer.from('a914...', 'hex'))
-  .op('OP_EQUALVERIFY')
-  .op('OP_CHECKSIG')
-  .build();
+// Assert specific numeric value on stack top
+expectStackTopNum(result, 42n);
 ```

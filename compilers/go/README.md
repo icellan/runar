@@ -45,16 +45,15 @@ The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` fil
 
 Why tree-sitter instead of a custom parser? Rúnar source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
 
+Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+
 ---
 
 ## Building
 
 ```bash
 cd compilers/go
-go build -o runar-go ./cmd/runar-go
-
-# Or with make
-make build
+go build -o runar-compiler-go .
 ```
 
 ### Prerequisites
@@ -69,21 +68,33 @@ make build
 ### Phase 1: IR Consumer Mode
 
 ```bash
-# Compile from ANF IR to Bitcoin Script
-./runar-go emit --ir input-anf.json --output script.hex
+# Compile from ANF IR to Bitcoin Script (full artifact JSON)
+runar-compiler-go --ir input-anf.json
 
-# Verify against expected script
-./runar-go verify --ir input-anf.json --expected expected-script.hex
+# Output only the script hex
+runar-compiler-go --ir input-anf.json --hex
+
+# Output only the script ASM
+runar-compiler-go --ir input-anf.json --asm
+
+# Write output to a file
+runar-compiler-go --ir input-anf.json --output artifact.json
 ```
 
-### Phase 2: Full Compilation (when available)
+### Phase 2: Full Compilation
 
 ```bash
-# Full compilation from source
-./runar-go compile MyContract.runar.ts --output artifacts/MyContract.json
+# Full compilation from source (outputs artifact JSON)
+runar-compiler-go --source MyContract.runar.ts
+
+# Output only hex
+runar-compiler-go --source MyContract.runar.ts --hex
 
 # Dump ANF IR for conformance checking
-./runar-go compile MyContract.runar.ts --ir-only --output anf-ir.json
+runar-compiler-go --source MyContract.runar.ts --emit-ir
+
+# Write output to a file
+runar-compiler-go --source MyContract.runar.ts --output artifacts/MyContract.json
 ```
 
 ---
@@ -92,31 +103,21 @@ make build
 
 The Go compiler must pass the same conformance suite as the TypeScript reference compiler.
 
-### Phase 1 Conformance
-
 For each test case in `conformance/tests/`:
 
-1. Read `expected-ir.json` as input.
-2. Run stack lowering and emission.
-3. Compare output with `expected-script.hex` (if present).
+1. Read `*.runar.ts` source as input.
+2. Run the full pipeline (Passes 1-6).
+3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
+4. Compare script output with `expected-script.hex` (if present).
 
 ```bash
-# Run Phase 1 conformance from repo root
+# Run conformance from repo root
 pnpm run conformance:go
 
 # Or directly
 cd compilers/go
-go test ./conformance/...
+go test -v -run TestSourceCompile ./...
 ```
-
-### Phase 2 Conformance
-
-For each test case:
-
-1. Read `*.runar.ts` as input.
-2. Run the full pipeline (Passes 1-6).
-3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
-4. Compare script output with `expected-script.hex` (if present).
 
 ---
 
@@ -127,4 +128,4 @@ cd compilers/go
 go test ./...
 ```
 
-Unit tests cover each pass independently, using synthetic IR inputs and asserting structural properties of the output.
+Unit tests cover each pass independently, using synthetic IR inputs and asserting structural properties of the output. Source compilation tests (`TestSourceCompile_*`) verify the full pipeline against conformance test cases.

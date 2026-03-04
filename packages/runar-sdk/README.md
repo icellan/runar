@@ -1,6 +1,6 @@
 # runar-sdk
 
-**Deploy, call, and interact with compiled Rúnar smart contracts on BSV.**
+**Deploy, call, and interact with compiled Runar smart contracts on BSV.**
 
 The SDK provides the runtime layer between compiled contract artifacts and the BSV blockchain. It handles transaction construction, signing, broadcasting, state management for stateful contracts, and UTXO tracking.
 
@@ -28,67 +28,85 @@ A Rúnar contract goes through four stages:
   [3. Call]            Build an unlocking transaction to invoke a public method.
          |
          v
-  [4. Read State]      (Stateful only) Deserialize state from the UTXO.
+  [4. Read State]      (Stateful only) Read state from the contract's current UTXO.
 ```
 
 ### Full Example
 
 ```typescript
-import { ContractInstance, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
 import P2PKHArtifact from './artifacts/P2PKH.json';
 
 // 1. Instantiate
 const provider = new WhatsOnChainProvider('testnet');
-const signer = new LocalSigner('cRkL4...');  // WIF private key
+const signer = new LocalSigner('a1b2c3...');  // 32-byte hex private key or WIF
 
-const contract = new ContractInstance(P2PKHArtifact, {
-  pubKeyHash: Addr('89abcdef0123456789abcdef0123456789abcdef'),
-});
+const contract = new RunarContract(P2PKHArtifact, [
+  '89abcdef0123456789abcdef0123456789abcdef',  // pubKeyHash constructor arg
+]);
 
+// 2. Connect provider and signer (optional — avoids passing them on every call)
 contract.connect(provider, signer);
 
-// 2. Deploy
-const deployTx = await contract.deploy({ satoshis: 10000n });
-console.log('Deployed:', deployTx.txid);
+// 3. Deploy (uses connected provider/signer)
+const { txid } = await contract.deploy({ satoshis: 10000 });
+console.log('Deployed:', txid);
 
-// 3. Call a public method
-const callTx = await contract.call('unlock', {
-  sig: await signer.sign(deployTx.txid),
-  pubKey: signer.publicKey,
-});
-console.log('Spent:', callTx.txid);
+// 4. Call a public method
+const pubKey = await signer.getPublicKey();
+const result = await contract.call('unlock', [sig, pubKey]);
+console.log('Spent:', result.txid);
+
+// You can also pass provider/signer explicitly (overrides connected ones):
+// await contract.deploy(provider, signer, { satoshis: 10000 });
+// await contract.call('unlock', [sig, pubKey], provider, signer);
 ```
 
 ### Stateful Contract Example
 
 ```typescript
-import { ContractInstance, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
+import { RunarContract, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
 import CounterArtifact from './artifacts/Counter.json';
 
 const provider = new WhatsOnChainProvider('testnet');
-const signer = new LocalSigner('cRkL4...');
+const signer = new LocalSigner('KwDiBf89QgGbjEhKnhX...');  // WIF key also accepted
 
-const counter = new ContractInstance(CounterArtifact, {
-  count: 0n,
-});
-
+const counter = new RunarContract(CounterArtifact, [0n]);  // initial count
 counter.connect(provider, signer);
 
 // Deploy with initial state
-const deployTx = await counter.deploy({ satoshis: 10000n });
+const { txid } = await counter.deploy({ satoshis: 10000 });
 
-// Read current state
-const state = await counter.getState();
-console.log('Count:', state.count);  // 0n
+// Read current state (synchronous)
+console.log('Count:', counter.state.count);  // 0n
 
-// Call increment -- builds the preimage automatically
-const tx1 = await counter.call('increment', {});
-const newState = await counter.getState();
-console.log('Count after increment:', newState.count);  // 1n
+// Call increment (uses connected provider/signer)
+await counter.call('increment', [], {
+  satoshis: 9500,
+  newState: { count: 1n },
+});
+console.log('Count after increment:', counter.state.count);  // 1n
 
 // Call again
-const tx2 = await counter.call('increment', {});
-console.log('Count:', (await counter.getState()).count);  // 2n
+await counter.call('increment', [], {
+  satoshis: 9000,
+  newState: { count: 2n },
+});
+console.log('Count:', counter.state.count);  // 2n
+```
+
+### Reconnecting to a Deployed Contract
+
+```typescript
+// Reconnect to an existing on-chain contract by txid
+const contract = await RunarContract.fromTxId(
+  CounterArtifact,
+  'abc123...',    // txid
+  0,              // output index
+  provider,
+);
+
+console.log('Current state:', contract.state);
 ```
 
 ---
@@ -108,13 +126,19 @@ const mainnet = new WhatsOnChainProvider('mainnet');
 const testnet = new WhatsOnChainProvider('testnet');
 
 // Fetch UTXOs for an address
-const utxos = await testnet.getUTXOs('1A1zP1...');
+const utxos = await testnet.getUtxos('1A1zP1...');
 
 // Broadcast a raw transaction
 const txid = await testnet.broadcast(rawTxHex);
 
 // Fetch transaction details
 const tx = await testnet.getTransaction(txid);
+
+// Get the network name
+const network = testnet.getNetwork();  // 'testnet'
+
+// Get the current fee rate (sat/byte)
+const feeRate = await testnet.getFeeRate();  // 1 (BSV standard)
 ```
 
 ### MockProvider
@@ -126,17 +150,32 @@ import { MockProvider } from 'runar-sdk';
 
 const mock = new MockProvider();
 
-// Pre-register UTXOs
-mock.addUTXO({
+// Pre-register UTXOs (keyed by address)
+mock.addUtxo('1A1zP1...', {
   txid: 'abc123...',
   outputIndex: 0,
-  satoshis: 10000n,
+  satoshis: 10000,
   script: '76a914...88ac',
+});
+
+// Pre-register transactions
+mock.addTransaction({
+  txid: 'abc123...',
+  version: 1,
+  inputs: [],
+  outputs: [{ satoshis: 10000, script: '76a914...88ac' }],
+  locktime: 0,
 });
 
 // Transactions are stored in memory
 const txid = await mock.broadcast(rawTx);
 const tx = await mock.getTransaction(txid);
+
+// Inspect what was broadcast
+const broadcastedTxs = mock.getBroadcastedTxs();
+
+// Override the fee rate (default is 1 sat/byte)
+mock.setFeeRate(2);
 ```
 
 ### Custom Provider
@@ -147,7 +186,7 @@ Implement the `Provider` interface for other network APIs:
 import { Provider, UTXO, Transaction } from 'runar-sdk';
 
 class MyProvider implements Provider {
-  async getUTXOs(address: string): Promise<UTXO[]> {
+  async getUtxos(address: string): Promise<UTXO[]> {
     // Your implementation
   }
 
@@ -159,8 +198,16 @@ class MyProvider implements Provider {
     // Your implementation
   }
 
-  async getFeeRate(): Promise<bigint> {
-    // Satoshis per byte
+  async getContractUtxo(scriptHash: string): Promise<UTXO | null> {
+    // Find UTXO by script hash (for stateful contract lookup)
+  }
+
+  getNetwork(): 'mainnet' | 'testnet' {
+    // Return the network
+  }
+
+  async getFeeRate(): Promise<number> {
+    return 1;  // BSV standard: 1 sat/byte
   }
 }
 ```
@@ -173,42 +220,47 @@ Signers handle private key operations: signing transactions and deriving public 
 
 ### LocalSigner
 
-Holds a private key in memory. Suitable for development, testing, and server-side deployment:
+Holds a private key in memory. Uses `@bsv/sdk` for secp256k1 key derivation and ECDSA signing with BIP-143 sighash preimage computation. Accepts either a 64-char hex string or a WIF-encoded key:
 
 ```typescript
 import { LocalSigner } from 'runar-sdk';
 
-const signer = new LocalSigner('cRkL4...');  // WIF-encoded private key
+// From hex
+const signer = new LocalSigner('a1b2c3...');  // 32-byte hex private key
 
-console.log(signer.publicKey);   // compressed public key hex
-console.log(signer.address);     // P2PKH address
+// From WIF (Base58Check, starts with 5/K/L)
+const signerWif = new LocalSigner('KwDiBf89QgGbjEhKnhX...');
 
-// Sign a transaction
-const signature = await signer.sign(txid, inputIndex, lockingScript, amount, sigHashType);
+const pubKey = await signer.getPublicKey();    // compressed public key hex
+const address = await signer.getAddress();     // P2PKH address
+
+// Sign a transaction input
+const signature = await signer.sign(
+  txHex,          // raw transaction hex
+  inputIndex,     // which input to sign
+  subscript,      // locking script of the UTXO being spent
+  satoshis,       // value of the UTXO being spent
+  sigHashType,    // optional, defaults to SIGHASH_ALL | SIGHASH_FORKID (0x41)
+);
 ```
 
 ### ExternalSigner
 
-Interface for hardware wallets and external signing services:
+Delegates signing to a caller-provided callback. Useful for hardware wallets and browser extensions:
 
 ```typescript
-import { ExternalSigner } from 'runar-sdk';
+import { ExternalSigner, SignCallback } from 'runar-sdk';
 
-class LedgerSigner implements ExternalSigner {
-  async getPublicKey(): Promise<string> {
-    // Request public key from hardware wallet
-  }
+const signFn: SignCallback = async (txHex, inputIndex, subscript, satoshis, sigHashType?) => {
+  // Request signature from hardware wallet / browser extension
+  return derSignatureHex;
+};
 
-  async sign(
-    txid: string,
-    inputIndex: number,
-    lockingScript: string,
-    amount: bigint,
-    sigHashType: bigint,
-  ): Promise<string> {
-    // Request signature from hardware wallet
-  }
-}
+const signer = new ExternalSigner(
+  pubKeyHex,    // 33-byte compressed public key (66 hex chars)
+  addressStr,   // Base58Check BSV address
+  signFn,
+);
 ```
 
 ### Custom Signer
@@ -219,15 +271,20 @@ Implement the `Signer` interface:
 import { Signer } from 'runar-sdk';
 
 class MySigner implements Signer {
-  get publicKey(): string { ... }
-  get address(): string { ... }
+  async getPublicKey(): Promise<string> {
+    // Return compressed public key hex (66 chars)
+  }
+
+  async getAddress(): Promise<string> {
+    // Return Base58Check P2PKH address
+  }
 
   async sign(
-    txid: string,
+    txHex: string,
     inputIndex: number,
-    lockingScript: string,
-    amount: bigint,
-    sigHashType: bigint,
+    subscript: string,
+    satoshis: number,
+    sigHashType?: number,
   ): Promise<string> {
     // Return DER-encoded signature + sighash byte, hex-encoded
   }
@@ -242,67 +299,156 @@ class MySigner implements Signer {
 
 Stateful contracts maintain state across transactions using the OP_PUSH_TX pattern. The SDK manages this automatically:
 
-1. **Deploy:** The initial state is serialized and prepended to the locking script.
-2. **Call:** The SDK reads the current state from the existing UTXO, constructs the preimage, computes the new state, and builds the output with the updated locking script.
+1. **Deploy:** The initial state is serialized and appended after an OP_RETURN separator in the locking script.
+2. **Call:** The SDK reads the current state from the existing UTXO, builds the unlocking script, and creates a new output with the updated locking script containing the new state.
 3. **Read:** The SDK deserializes state from the UTXO's locking script.
 
-### State Serialization/Deserialization
+### State Serialization Format
 
-The SDK knows the contract's state schema from the artifact's `properties` array. Each mutable property is serialized in declaration order:
+The SDK knows the contract's state schema from the artifact's `stateFields` array. State is stored as a suffix of the locking script:
 
 ```
-<prop_1_bytes> <prop_2_bytes> ... <prop_n_bytes> OP_DROP^n <code_part>
+<code_part> OP_RETURN <field_0_bytes> <field_1_bytes> ... <field_n_bytes>
 ```
 
-Deserialization reverses this: the SDK strips the state prefix, decodes each property according to its type, and returns a typed state object.
+Each field is encoded as Bitcoin Script push data, ordered by the field's `index` property. Type-specific encoding:
+
+- `int`/`bigint`: minimally-encoded Script integers (with sign byte)
+- `bool`: OP_0 for false, OP_1 for true
+- `bytes`/`ByteString`/`PubKey`/`Ripemd160`/`Addr`/`Sha256`: direct pushdata
+
+Deserialization reverses this: the SDK finds the last OP_RETURN at an opcode boundary (skipping push data), extracts the suffix, and decodes each field.
 
 ### UTXO Management
 
-For stateful contracts, the SDK tracks the "current" UTXO -- the one containing the latest state. After each `call`, the SDK updates its internal pointer to the new UTXO created by the transaction.
+For stateful contracts, the SDK tracks the "current" UTXO internally. After each `call`, the SDK updates its pointer to the new UTXO created by the transaction.
 
 ```typescript
 // The SDK tracks the current UTXO automatically
-const tx1 = await counter.call('increment', {});
+const tx1 = await counter.call('increment', [], provider, signer, {
+  satoshis: 9500,
+  newState: { count: 1n },
+});
 // counter now points to the new UTXO created by tx1
 
-const tx2 = await counter.call('increment', {});
-// counter now points to the new UTXO created by tx2
-
-// You can also manually set the UTXO
-counter.setUTXO({
-  txid: 'abc...',
-  outputIndex: 0,
-  satoshis: 9500n,
+const tx2 = await counter.call('increment', [], provider, signer, {
+  satoshis: 9000,
+  newState: { count: 2n },
 });
+// counter now points to the new UTXO created by tx2
 ```
 
 ---
 
 ## Token Support
 
-The SDK provides a `TokenWallet` utility for managing token contracts:
+The SDK provides a `TokenWallet` utility for managing fungible token contracts:
 
 ```typescript
 import { TokenWallet, WhatsOnChainProvider, LocalSigner } from 'runar-sdk';
 
-const wallet = new TokenWallet(FungibleTokenArtifact, {
-  provider: new WhatsOnChainProvider('testnet'),
-  signer: new LocalSigner('cRkL4...'),
-});
+const provider = new WhatsOnChainProvider('testnet');
+const signer = new LocalSigner('a1b2c3...');
 
-// Deploy a new token
-const deployTx = await wallet.deploy({
-  owner: signer.publicKey,
-  supply: 1000000n,
-});
+const wallet = new TokenWallet(FungibleTokenArtifact, provider, signer);
 
-// Transfer ownership
-const transferTx = await wallet.transfer(recipientPubKey);
+// Get total balance across all token UTXOs
+const balance = await wallet.getBalance();
+console.log('Balance:', balance);
 
-// Get current token state
-const state = await wallet.getState();
-console.log('Owner:', state.owner);
-console.log('Supply:', state.supply);
+// Transfer tokens to a recipient
+const txid = await wallet.transfer(recipientAddress, 500n);
+
+// Merge two UTXOs into one (calls the contract's merge() method)
+const mergeTxid = await wallet.merge();
+
+// List all token UTXOs
+const utxos = await wallet.getUtxos();
+```
+
+---
+
+## Transaction Building Utilities
+
+The SDK exports lower-level functions for custom transaction construction:
+
+```typescript
+import {
+  buildDeployTransaction,
+  buildCallTransaction,
+  selectUtxos,
+  estimateDeployFee,
+  serializeState,
+  deserializeState,
+  extractStateFromScript,
+} from 'runar-sdk';
+
+// Select UTXOs (largest-first strategy)
+const selected = selectUtxos(utxos, targetSatoshis, lockingScriptByteLen, feeRate);
+
+// Estimate deployment fee (default 1 sat/byte)
+const fee = estimateDeployFee(numInputs, lockingScriptByteLen, feeRate);
+
+// Build an unsigned deploy transaction
+const { txHex, inputCount } = buildDeployTransaction(
+  lockingScript, utxos, satoshis, changeAddress, changeScript, feeRate,
+);
+
+// Build a method call transaction
+const { txHex: callTxHex, inputCount: callInputCount } = buildCallTransaction(
+  currentUtxo, unlockingScript, newLockingScript, newSatoshis,
+  changeAddress, changeScript, additionalUtxos, feeRate,
+);
+
+// State serialization
+const stateHex = serializeState(stateFields, { count: 5n });
+const stateObj = deserializeState(stateFields, stateHex);
+const extracted = extractStateFromScript(artifact, fullLockingScriptHex);
+```
+
+---
+
+## Types
+
+```typescript
+interface Transaction {
+  txid: string;
+  version: number;
+  inputs: TxInput[];
+  outputs: TxOutput[];
+  locktime: number;
+  raw?: string;
+}
+
+interface TxInput {
+  txid: string;
+  outputIndex: number;
+  script: string;     // hex
+  sequence: number;
+}
+
+interface TxOutput {
+  satoshis: number;
+  script: string;     // hex
+}
+
+interface UTXO {
+  txid: string;
+  outputIndex: number;
+  satoshis: number;
+  script: string;     // hex
+}
+
+interface DeployOptions {
+  satoshis: number;
+  changeAddress?: string;
+}
+
+interface CallOptions {
+  satoshis?: number;
+  changeAddress?: string;
+  newState?: Record<string, unknown>;
+}
 ```
 
 ---
@@ -313,9 +459,9 @@ The provider and signer are separate abstractions because they serve different t
 
 - **Provider** handles read operations (fetching UTXOs, querying transactions) and write operations (broadcasting). It does NOT hold private keys. A provider can be swapped between mainnet, testnet, and mocks without changing any contract logic.
 
-- **Signer** handles private key operations only. It never touches the network directly. This separation means you can use a `LocalSigner` for development and swap in a `LedgerSigner` for production without changing your provider configuration.
+- **Signer** handles private key operations only. It never touches the network directly. This separation means you can use a `LocalSigner` for development and swap in an `ExternalSigner` for production without changing your provider configuration.
 
-This pattern is common in blockchain SDKs (ethers.js uses the same separation) and enables:
+This pattern enables:
 
 - Testing with `MockProvider` + `LocalSigner` (no network, fast).
 - Staging with `WhatsOnChainProvider('testnet')` + `LocalSigner` (real network, test keys).

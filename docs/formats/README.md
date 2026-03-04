@@ -40,7 +40,7 @@ All formats parse into the same `ContractNode` AST. From that point forward, the
 | Stateless contracts | Yes | Yes | Yes | Yes | Yes |
 | Stateful contracts | Yes | Yes | Yes | Yes | Yes |
 | `addOutput` | Yes | Yes | Yes | Yes | Yes |
-| Ternary expressions | Yes | Yes | Yes | Yes | Yes |
+| Ternary expressions | Yes | Yes | Yes | No (use if/else) | Yes |
 | Learning curve (from TS) | None | Low | Medium | Medium | Medium |
 
 ---

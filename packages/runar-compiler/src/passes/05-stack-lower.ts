@@ -2196,71 +2196,82 @@ class LoweringContext {
   // -------------------------------------------------------------------------
 
   /**
-   * Emit one WOTS+ chain: sig(0) csum(1) endpt(2) digit(3) → sigRest(0) newCsum(1) newEndpt(2)
+   * Emit one WOTS+ chain with RFC 8391 tweakable hashing.
+   * Input:  pubSeed(bottom) sig(1) csum(2) endpt(3) digit(top)
+   * Output: pubSeed(bottom) sigRest(1) newCsum(2) newEndpt(top)
    * Alt stack pushes/pops are balanced (4 push, 4 pop).
+   *
+   * F(pubSeed, chainIdx, stepIdx, X) = SHA-256(pubSeed || byte(chainIdx) || byte(stepIdx) || X)
    */
-  private emitWOTSOneChain(): void {
-    // steps = 15 - digit
+  private emitWOTSOneChain(chainIndex: number): void {
+    // Entry stack: pubSeed(bottom) sig csum endpt digit(top)
+    // Save steps_copy = 15 - digit to alt (for checksum accumulation later)
+    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
     this.emitOp({ op: 'push', value: 15n });
     this.emitOp({ op: 'swap' });
     this.emitOp({ op: 'opcode', code: 'OP_SUB' });
-    // sig(0) csum(1) endpt(2) steps(3)
-
-    // Save to alt: steps_copy, then endpt, then csum. Leave sig+steps on main.
-    this.emitOp({ op: 'opcode', code: 'OP_DUP' });
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#1: steps_copy
-    this.emitOp({ op: 'swap' });                            // sig csum steps endpt
+    // main: pubSeed sig csum endpt digit
+
+    // Save endpt, csum to alt. Leave pubSeed+sig+digit on main.
+    this.emitOp({ op: 'swap' });
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#2: endpt
-    this.emitOp({ op: 'swap' });                            // sig steps csum
+    this.emitOp({ op: 'swap' });
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#3: csum
-    // main: sig(0) steps(1)
+    // main: pubSeed sig digit
 
     // Split 32B sig element
-    this.emitOp({ op: 'swap' });                            // steps sig
+    this.emitOp({ op: 'swap' });                            // pubSeed digit sig
     this.emitOp({ op: 'push', value: 32n });
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });       // steps sigElem sigRest
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });       // pubSeed digit sigElem sigRest
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // push#4: sigRest
-    this.emitOp({ op: 'swap' });                            // sigElem steps
+    this.emitOp({ op: 'swap' });                            // pubSeed sigElem digit
 
-    // Hash loop: hash sigElem `steps` times (max 15)
+    // Hash loop: skip first `digit` iterations, then apply F for the rest.
+    // When digit > 0: decrement (skip). When digit == 0: hash at step j.
+    // Stack at loop entry: pubSeed(depth2) sigElem(depth1) digit(depth0=top)
     for (let j = 0; j < 15; j++) {
+      const adrsBytes = new Uint8Array([chainIndex, j]);
       this.emitOp({ op: 'opcode', code: 'OP_DUP' });
       this.emitOp({ op: 'opcode', code: 'OP_0NOTEQUAL' });
       this.emitOp({
         op: 'if',
         then: [
-          { op: 'swap' },
-          { op: 'opcode', code: 'OP_SHA256' },
-          { op: 'swap' },
-          { op: 'opcode', code: 'OP_1SUB' },
+          { op: 'opcode', code: 'OP_1SUB' },                // skip: digit--
         ],
-        else: undefined,
+        else: [
+          { op: 'swap' },                                    // pubSeed digit X
+          { op: 'push', value: 2n },
+          { op: 'opcode', code: 'OP_PICK' },                // copy pubSeed from depth 2
+          { op: 'push', value: adrsBytes },                  // push ADRS [chainIndex, j]
+          { op: 'opcode', code: 'OP_CAT' },                 // pubSeed || adrs
+          { op: 'swap' },                                    // bring X to top
+          { op: 'opcode', code: 'OP_CAT' },                 // pubSeed || adrs || X
+          { op: 'opcode', code: 'OP_SHA256' },              // F result
+          { op: 'swap' },                                    // pubSeed new_X digit(=0)
+        ],
       });
     }
-    this.emitOp({ op: 'drop' }); // drop steps (now 0)
-    // main: endpoint
+    this.emitOp({ op: 'drop' }); // drop digit (now 0)
+    // main: pubSeed endpoint
 
-    // Restore from alt (LIFO): sigRest, csum, endpt, steps_copy
+    // Restore from alt (LIFO): sigRest, csum, endpt_acc, steps_copy
     this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#4: sigRest
     this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#3: csum
     this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#2: endpt_acc
     this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pop#1: steps_copy
-    // main b→t: endpoint(0) sigRest(1) csum(2) endpt_acc(3) steps_copy(4)
+    // main b→t: pubSeed endpoint sigRest csum endpt_acc steps_copy
 
-    // csum += steps_copy: ROT on top 3 brings csum to top
+    // csum += steps_copy
     this.emitOp({ op: 'opcode', code: 'OP_ROT' });
-    // endpoint(0) sigRest(1) endpt_acc(2) steps_copy(3) csum(4)
     this.emitOp({ op: 'opcode', code: 'OP_ADD' });
-    // endpoint(0) sigRest(1) endpt_acc(2) newCsum(3)
 
     // Concat endpoint to endpt_acc
     this.emitOp({ op: 'swap' });
-    // endpoint(0) sigRest(1) newCsum(2) endpt_acc(3)
     this.emitOp({ op: 'push', value: 3n });
     this.emitOp({ op: 'opcode', code: 'OP_ROLL' });
-    // sigRest(0) newCsum(1) endpt_acc(2) endpoint(3)
     this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-    // sigRest(0) newCsum(1) newEndptAcc(2)
+    // pubSeed sigRest newCsum newEndptAcc
   }
 
   private lowerVerifyWOTS(
@@ -2278,36 +2289,42 @@ class LoweringContext {
       this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
     }
     for (let i = 0; i < 3; i++) this.stackMap.pop();
-    // main: msg(0) sig(1) pubkey(2)
+    // main: msg(0) sig(1) pubkey(2)  (pubkey is 64 bytes: pubSeed||pkRoot)
 
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // pubkey → alt
-    this.emitOp({ op: 'swap' });
-    this.emitOp({ op: 'opcode', code: 'OP_SHA256' });
-    // main: sig(0) msgHash(1)
+    // Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
+    this.emitOp({ op: 'push', value: 32n });
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });         // msg sig pubSeed pkRoot
+    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });   // pkRoot → alt
 
-    // Canonical layout: sig(0) csum=0(1) endptAcc=empty(2) hashRem(3)
-    this.emitOp({ op: 'swap' });                // msgHash sig
-    this.emitOp({ op: 'push', value: 0n });     // msgHash sig 0
-    this.emitOp({ op: 'opcode', code: 'OP_0' }); // msgHash sig 0 empty
+    // Rearrange: put pubSeed at bottom, hash msg
+    // main: msg sig pubSeed
+    this.emitOp({ op: 'opcode', code: 'OP_ROT' });           // sig pubSeed msg
+    this.emitOp({ op: 'opcode', code: 'OP_ROT' });           // pubSeed msg sig
+    this.emitOp({ op: 'swap' });                               // pubSeed sig msg
+    this.emitOp({ op: 'opcode', code: 'OP_SHA256' });        // pubSeed sig msgHash
+
+    // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
+    this.emitOp({ op: 'swap' });                // pubSeed msgHash sig
+    this.emitOp({ op: 'push', value: 0n });     // pubSeed msgHash sig 0
+    this.emitOp({ op: 'opcode', code: 'OP_0' }); // pubSeed msgHash sig 0 empty
     this.emitOp({ op: 'push', value: 3n });
-    this.emitOp({ op: 'opcode', code: 'OP_ROLL' }); // sig 0 empty msgHash
+    this.emitOp({ op: 'opcode', code: 'OP_ROLL' }); // pubSeed sig 0 empty msgHash
 
     // Process 32 bytes → 64 message chains
+    // Chain indices: byteIdx*2 for high nibble, byteIdx*2+1 for low nibble
     for (let byteIdx = 0; byteIdx < 32; byteIdx++) {
-      // main: sig csum endptAcc hashRem
+      // main: pubSeed sig csum endptAcc hashRem
       if (byteIdx < 31) {
         this.emitOp({ op: 'push', value: 1n });
-        this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // sig csum endpt byte hashRest
-        this.emitOp({ op: 'swap' });                       // sig csum endpt hashRest byte
+        this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+        this.emitOp({ op: 'swap' });
       }
       // Convert 1-byte string to unsigned integer.
-      // BIN2NUM treats bit 7 as sign bit, so bytes >= 0x80 become negative.
-      // Fix: append a 0x00 byte so the 2-byte value is always positive.
       this.emitOp({ op: 'push', value: 0n });
       this.emitOp({ op: 'push', value: 1n });
-      this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // push 0x00 byte
-      this.emitOp({ op: 'opcode', code: 'OP_CAT' });     // <byte 0x00> (2 bytes)
-      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // unsigned 0-255
+      this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
+      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
       this.emitOp({ op: 'opcode', code: 'OP_DUP' });
       this.emitOp({ op: 'push', value: 16n });
       this.emitOp({ op: 'opcode', code: 'OP_DIV' });  // high
@@ -2323,9 +2340,9 @@ class LoweringContext {
       } else {
         this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // low → alt
       }
-      // main: sig csum endptAcc high
+      // main: pubSeed sig csum endptAcc high
 
-      this.emitWOTSOneChain(); // → sigRest newCsum newEndptAcc
+      this.emitWOTSOneChain(byteIdx * 2); // chain index for high nibble
 
       // Retrieve low from alt (and hashRest)
       if (byteIdx < 31) {
@@ -2336,21 +2353,21 @@ class LoweringContext {
       } else {
         this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // low
       }
-      // main: sigRest csum endptAcc low
+      // main: pubSeed sigRest csum endptAcc low
 
-      this.emitWOTSOneChain(); // → sigRest2 csum2 endptAcc2
+      this.emitWOTSOneChain(byteIdx * 2 + 1); // chain index for low nibble
 
       if (byteIdx < 31) {
         this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // hashRest
       }
     }
 
-    // main: sigRest(96B)(0) totalCsum(1) endptAcc(2)  |  alt: pubkey
+    // main: pubSeed sigRest(96B) totalCsum endptAcc  |  alt: pkRoot
 
     // Compute 3 checksum digits
-    this.emitOp({ op: 'swap' }); // sigRest endptAcc totalCsum
+    this.emitOp({ op: 'swap' }); // pubSeed sigRest endptAcc totalCsum
 
-    // d66 = csum % 16  (pushed first → bottom of 3 on alt → popped last)
+    // d66 = csum % 16
     this.emitOp({ op: 'opcode', code: 'OP_DUP' });
     this.emitOp({ op: 'push', value: 16n });
     this.emitOp({ op: 'opcode', code: 'OP_MOD' });
@@ -2364,41 +2381,49 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_MOD' });
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
 
-    // d64 = (csum/256) % 16  (pushed last → top of 3 on alt → popped first)
+    // d64 = (csum/256) % 16
     this.emitOp({ op: 'push', value: 256n });
     this.emitOp({ op: 'opcode', code: 'OP_DIV' });
     this.emitOp({ op: 'push', value: 16n });
     this.emitOp({ op: 'opcode', code: 'OP_MOD' });
     this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
-    // main: sigRest(0) endptAcc(1)  |  alt: pubkey, d66, d65, d64
+    // main: pubSeed sigRest endptAcc  |  alt: pkRoot, d66, d65, d64
 
-    // Process 3 checksum chains
+    // Process 3 checksum chains (indices 64, 65, 66)
     for (let ci = 0; ci < 3; ci++) {
-      // main: sigRest(0) endptAcc(1)
-      // Set up: sigRest(0) dummyCsum=0(1) endptAcc(2) digit(3)
+      // main: pubSeed sigRest endptAcc
+      // Set up: pubSeed sigRest dummyCsum=0 endptAcc digit
       this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' }); // endptAcc → alt (temp)
-      this.emitOp({ op: 'push', value: 0n });                // sigRest 0
-      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // sigRest 0 endptAcc
-      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // sigRest 0 endptAcc digit
+      this.emitOp({ op: 'push', value: 0n });                // pubSeed sigRest 0
+      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pubSeed sigRest 0 endptAcc
+      this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pubSeed sigRest 0 endptAcc digit
 
-      this.emitWOTSOneChain();
-      // main: sigRest(0) dummyCsum(1) newEndptAcc(2)
+      this.emitWOTSOneChain(64 + ci);
+      // main: pubSeed sigRest dummyCsum newEndptAcc
 
       // Drop dummy csum
-      this.emitOp({ op: 'swap' }); // sigRest newEndptAcc dummyCsum
-      this.emitOp({ op: 'drop' }); // sigRest newEndptAcc
+      this.emitOp({ op: 'swap' }); // pubSeed sigRest newEndptAcc dummyCsum
+      this.emitOp({ op: 'drop' }); // pubSeed sigRest newEndptAcc
     }
 
-    // main: sigRest(empty)(0) endptAcc(1)  |  alt: pubkey
+    // main: pubSeed sigRest(empty) endptAcc  |  alt: pkRoot
     this.emitOp({ op: 'swap' });
     this.emitOp({ op: 'drop' }); // drop empty sigRest
+    // main: pubSeed endptAcc
 
-    // Hash concatenated endpoints → computed public key
+    // Hash concatenated endpoints → computed pkRoot
     this.emitOp({ op: 'opcode', code: 'OP_SHA256' });
+    // main: pubSeed computedPkRoot
 
-    // Compare to pubkey
-    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pubkey
+    // Compare to pkRoot from alt
+    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // pkRoot
     this.emitOp({ op: 'opcode', code: 'OP_EQUAL' });
+    // main: pubSeed bool
+
+    // Clean up pubSeed
+    this.emitOp({ op: 'swap' });
+    this.emitOp({ op: 'drop' }); // drop pubSeed
+    // main: bool
 
     this.stackMap.push(bindingName);
     this.trackDepth();

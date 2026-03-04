@@ -26,6 +26,7 @@ export function buildCallTransaction(
   changeAddress?: string,
   changeScript?: string,
   additionalUtxos?: UTXO[],
+  feeRate: number = 1,
 ): { txHex: string; inputCount: number } {
   const allUtxos = [currentUtxo, ...(additionalUtxos ?? [])];
 
@@ -50,7 +51,7 @@ export function buildCallTransaction(
     outputsSize += 34; // P2PKH change
   }
   const estimatedSize = 10 + inputsSize + outputsSize;
-  const fee = estimatedSize; // 1 sat/byte
+  const fee = estimatedSize * feeRate;
 
   const change = totalInput - contractOutputSats - fee;
 

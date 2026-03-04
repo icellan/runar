@@ -70,7 +70,7 @@ Value labels correspond to ANF temporary names, parameter names, or property nam
 | `SWAP` | `[a, b] -> [b, a]` | `OP_SWAP` |
 | `OVER` | `[a, b] -> [a, b, a]` | `OP_OVER` (copy item 1 to top) |
 | `ROT` | `[a, b, c] -> [b, c, a]` | `OP_ROT` (rotate top 3) |
-| `TUCK` | `[a, b] -> [a, b, a]` | `OP_TUCK` (copy top behind item 1) |
+| `TUCK` | `[a, b] -> [b, a, b]` | `OP_TUCK` (copy top behind item 1) |
 | `PICK(n)` | `[...] -> [..., stack[n]]` | `<n> OP_PICK` |
 | `ROLL(n)` | `[...] -> [...]` | `<n> OP_ROLL` (move item n to top) |
 | `DEPTH` | `[] -> [depth]` | `OP_DEPTH` |
@@ -80,59 +80,112 @@ Value labels correspond to ANF temporary names, parameter names, or property nam
 | `TOALT` | `[a] -> []` (alt: `-> [a]`) | `OP_TOALTSTACK` |
 | `FROMALT` | `[]` (alt: `[a] ->`) `-> [a]` | `OP_FROMALTSTACK` |
 
-### 3.3 Arithmetic Instructions
+### 3.3 Generic Opcode Wrapper
+
+All arithmetic, comparison, cryptographic, byte string, and most flow control operations are represented using a single generic `OpcodeOp` wrapper:
+
+```typescript
+{ op: 'opcode', code: string }  // e.g. { op: 'opcode', code: 'OP_ADD' }
+```
+
+This means the Stack IR has only **13 structured operation types** (see Section 3.5), and the `opcode` variant covers everything else. The following tables show common opcodes that appear as `{ op: 'opcode', code: '...' }`:
+
+#### Arithmetic Opcodes
+
+| `code` value | Stack Effect | Description |
+|---|---|---|
+| `OP_ADD` | `[a, b] -> [a+b]` | Integer addition |
+| `OP_SUB` | `[a, b] -> [a-b]` | Integer subtraction |
+| `OP_MUL` | `[a, b] -> [a*b]` | Integer multiplication |
+| `OP_DIV` | `[a, b] -> [a/b]` | Integer division |
+| `OP_MOD` | `[a, b] -> [a%b]` | Integer modulo |
+| `OP_NEGATE` | `[a] -> [-a]` | Negate |
+| `OP_ABS` | `[a] -> [abs(a)]` | Absolute value |
+| `OP_NOT` | `[a] -> [!a]` | Boolean NOT |
+
+#### Comparison Opcodes
+
+| `code` value | Stack Effect | Description |
+|---|---|---|
+| `OP_EQUAL` | `[a, b] -> [a==b]` | Byte-for-byte equality |
+| `OP_NUMEQUAL` | `[a, b] -> [a==b]` | Numeric equality |
+| `OP_LESSTHAN` | `[a, b] -> [a<b]` | Less than |
+| `OP_LESSTHANOREQUAL` | `[a, b] -> [a<=b]` | Less than or equal |
+| `OP_GREATERTHAN` | `[a, b] -> [a>b]` | Greater than |
+| `OP_GREATERTHANOREQUAL` | `[a, b] -> [a>=b]` | Greater than or equal |
+| `OP_VERIFY` | `[cond] -> []` | Fail if falsy |
+
+Note: `!==` is compiled as `OP_NUMEQUAL OP_NOT` (two separate `opcode` ops) for bigint, or `OP_EQUAL OP_NOT` for ByteString. There is no single `OP_NUMNOTEQUAL` used.
+
+#### Crypto Opcodes
+
+| `code` value | Stack Effect | Description |
+|---|---|---|
+| `OP_SHA256` | `[data] -> [hash]` | SHA-256 hash |
+| `OP_RIPEMD160` | `[data] -> [hash]` | RIPEMD-160 hash |
+| `OP_HASH160` | `[data] -> [hash]` | SHA-256 then RIPEMD-160 |
+| `OP_HASH256` | `[data] -> [hash]` | Double SHA-256 |
+| `OP_CHECKSIG` | `[sig, pubKey] -> [bool]` | Verify ECDSA signature |
+| `OP_CHECKMULTISIG` | `[sigs..., n, pubKeys..., m] -> [bool]` | Verify m-of-n multi-signature |
+
+#### Byte String Opcodes
+
+| `code` value | Stack Effect | Description |
+|---|---|---|
+| `OP_CAT` | `[a, b] -> [a\|\|b]` | Concatenate |
+| `OP_SPLIT` | `[data, pos] -> [left, right]` | Split at position |
+| `OP_SIZE` | `[data] -> [data, size]` | Push byte length (preserves data) |
+
+#### Flow Control Opcodes
+
+| `code` value | Stack Effect | Description |
+|---|---|---|
+| `OP_RETURN` | -- | Mark output as unspendable |
+
+### 3.4 Structured IF Operation
+
+`IF`/`ELSE`/`ENDIF` are **not** three separate instructions. They are represented as a single structured `IfOp`:
+
+```typescript
+{ op: 'if', then: StackOp[], else?: StackOp[] }
+```
+
+The condition is consumed from the top of the stack. If the condition is truthy, the `then` branch executes; otherwise the optional `else` branch executes. Both branches must produce the same stack depth.
+
+### 3.5 Complete StackOp Union
+
+The Stack IR uses a discriminated union with exactly **13 variants**:
+
+| Variant | `op` tag | Key fields | Description |
+|---|---|---|---|
+| `PushOp` | `'push'` | `value: Uint8Array \| bigint \| boolean` | Push a value |
+| `DupOp` | `'dup'` | — | Duplicate top |
+| `SwapOp` | `'swap'` | — | Swap top two |
+| `RollOp` | `'roll'` | `depth: number` | Move item at depth to top |
+| `PickOp` | `'pick'` | `depth: number` | Copy item at depth to top |
+| `DropOp` | `'drop'` | — | Remove top |
+| `OpcodeOp` | `'opcode'` | `code: string` | Generic Bitcoin Script opcode |
+| `IfOp` | `'if'` | `then: StackOp[], else?: StackOp[]` | Structured conditional |
+| `NipOp` | `'nip'` | — | Remove second-from-top |
+| `OverOp` | `'over'` | — | Copy second-from-top to top |
+| `RotOp` | `'rot'` | — | Rotate top 3 |
+| `TuckOp` | `'tuck'` | — | Copy top behind second |
+| `PlaceholderOp` | `'placeholder'` | `paramIndex: number, paramName: string` | Constructor parameter slot |
+
+> **Note:** The `depth` field on `RollOp` and `PickOp` is informational only. The actual depth value is pushed as a separate `PushOp` by the stack lowerer before the `RollOp`/`PickOp`, and the emitter ignores the `depth` field when generating Bitcoin Script.
+
+### 3.8 Placeholder Instructions
 
 | Instruction | Stack Effect | Bitcoin Opcode |
 |---|---|---|
-| `ADD` | `[a, b] -> [a+b]` | `OP_ADD` |
-| `SUB` | `[a, b] -> [a-b]` | `OP_SUB` |
-| `MUL` | `[a, b] -> [a*b]` | `OP_MUL` |
-| `DIV` | `[a, b] -> [a/b]` | `OP_DIV` |
-| `MOD` | `[a, b] -> [a%b]` | `OP_MOD` |
-| `NEGATE` | `[a] -> [-a]` | `OP_NEGATE` |
-| `ABS` | `[a] -> [abs(a)]` | `OP_ABS` |
-| `NOT` | `[a] -> [!a]` | `OP_NOT` |
+| `PLACEHOLDER(paramIndex, paramName)` | `[] -> [value]` | Push data (replaced at deployment) |
 
-### 3.4 Comparison Instructions
+The `PLACEHOLDER` instruction represents a constructor parameter slot in the compiled script. During compilation, the emitter records the byte offset of each placeholder. At deployment time, the SDK replaces each placeholder with the actual serialized constructor argument value.
 
-| Instruction | Stack Effect | Bitcoin Opcode |
+| Field | Type | Description |
 |---|---|---|
-| `EQUAL` | `[a, b] -> [a==b]` | `OP_EQUAL` |
-| `NUMEQUAL` | `[a, b] -> [a==b]` | `OP_NUMEQUAL` |
-| `NUMNOTEQUAL` | `[a, b] -> [a!=b]` | `OP_NUMNOTEQUAL` |
-| `LESSTHAN` | `[a, b] -> [a<b]` | `OP_LESSTHAN` |
-| `LESSTHANOREQUAL` | `[a, b] -> [a<=b]` | `OP_LESSTHANOREQ` |
-| `GREATERTHAN` | `[a, b] -> [a>b]` | `OP_GREATERTHAN` |
-| `GREATERTHANOREQUAL` | `[a, b] -> [a>=b]` | `OP_GREATERTHANOREQ` |
-
-### 3.5 Crypto Instructions
-
-| Instruction | Stack Effect | Bitcoin Opcode |
-|---|---|---|
-| `SHA256` | `[data] -> [hash]` | `OP_SHA256` |
-| `RIPEMD160` | `[data] -> [hash]` | `OP_RIPEMD160` |
-| `HASH160` | `[data] -> [hash]` | `OP_HASH160` |
-| `HASH256` | `[data] -> [hash]` | `OP_HASH256` |
-| `CHECKSIG` | `[sig, pubKey] -> [bool]` | `OP_CHECKSIG` |
-| `CHECKMULTISIG` | `[sigs..., n, pubKeys..., m] -> [bool]` | `OP_CHECKMULTISIG` |
-
-### 3.6 Byte String Instructions
-
-| Instruction | Stack Effect | Bitcoin Opcode |
-|---|---|---|
-| `CAT` | `[a, b] -> [a\|\|b]` | `OP_CAT` |
-| `SPLIT` | `[data, pos] -> [left, right]` | `OP_SPLIT` |
-| `SIZE` | `[data] -> [data, size]` | `OP_SIZE` |
-
-### 3.7 Flow Control Instructions
-
-| Instruction | Stack Effect | Bitcoin Opcode |
-|---|---|---|
-| `IF` | `[cond] -> []` | `OP_IF` |
-| `ELSE` | -- | `OP_ELSE` |
-| `ENDIF` | -- | `OP_ENDIF` |
-| `VERIFY` | `[cond] -> []` | `OP_VERIFY` |
-| `RETURN` | -- | `OP_RETURN` |
+| `paramIndex` | `number` | Index of the constructor parameter (0-based) |
+| `paramName` | `string` | Name of the constructor parameter (for diagnostics) |
 
 ---
 
@@ -201,40 +254,49 @@ The maximum allowable stack depth is **800 items**. This provides a safety margi
 
 ### 5.2 Analysis Rules
 
+Structured ops (the 13 `StackOp` variants):
+
 ```
-depth_after(PUSH_*)       = depth_before + 1
-depth_after(DROP)          = depth_before - 1
-depth_after(DUP)           = depth_before + 1
-depth_after(SWAP)          = depth_before      (no change)
-depth_after(ROLL(n))       = depth_before      (no change)
-depth_after(PICK(n))       = depth_before + 1
-depth_after(NIP)           = depth_before - 1
-depth_after(OVER)          = depth_before + 1
-depth_after(ROT)           = depth_before      (no change)
-depth_after(TUCK)          = depth_before + 1
-depth_after(2DUP)          = depth_before + 2
-depth_after(2DROP)         = depth_before - 2
-depth_after(ADD)           = depth_before - 1  (2 inputs, 1 output)
-depth_after(CHECKSIG)      = depth_before - 1  (2 inputs, 1 output)
-depth_after(SIZE)          = depth_before + 1  (1 input, 2 outputs, input preserved)
-depth_after(CAT)           = depth_before - 1  (2 inputs, 1 output)
-depth_after(SPLIT)         = depth_before      (1 input, 2 outputs)
-depth_after(VERIFY)        = depth_before - 1
-depth_after(TOALT)         = depth_before - 1  (main stack)
-depth_after(FROMALT)       = depth_before + 1  (main stack)
+depth_after(push)          = depth_before + 1
+depth_after(drop)          = depth_before - 1
+depth_after(dup)           = depth_before + 1
+depth_after(swap)          = depth_before      (no change)
+depth_after(roll(n))       = depth_before      (no change)
+depth_after(pick(n))       = depth_before + 1
+depth_after(nip)           = depth_before - 1
+depth_after(over)          = depth_before + 1
+depth_after(rot)           = depth_before      (no change)
+depth_after(tuck)          = depth_before + 1
+depth_after(placeholder)   = depth_before + 1
+depth_after(if)            = see Branch Analysis (Section 5.3)
+```
+
+Generic opcode wrapper (`{ op: 'opcode', code: ... }`):
+
+```
+depth_after(OP_ADD)        = depth_before - 1  (2 inputs, 1 output)
+depth_after(OP_CHECKSIG)   = depth_before - 1  (2 inputs, 1 output)
+depth_after(OP_SIZE)       = depth_before + 1  (1 input, 2 outputs, input preserved)
+depth_after(OP_CAT)        = depth_before - 1  (2 inputs, 1 output)
+depth_after(OP_SPLIT)      = depth_before      (2 inputs (data + position), 2 outputs (left + right), net change 0)
+depth_after(OP_VERIFY)     = depth_before - 1
+depth_after(OP_2DUP)       = depth_before + 2
+depth_after(OP_2DROP)      = depth_before - 2
+depth_after(OP_TOALTSTACK) = depth_before - 1  (main stack)
+depth_after(OP_FROMALTSTACK) = depth_before + 1  (main stack)
 ```
 
 ### 5.3 Branch Analysis
 
-For `IF`/`ELSE`/`ENDIF` blocks:
+For the structured `IfOp` (`{ op: 'if', then: [...], else?: [...] }`):
 
 ```
-depth_at_IF = depth_before - 1     (IF consumes the condition)
-depth_at_ELSE = depth_after_then_branch
-depth_at_ENDIF = max(depth_after_then, depth_after_else)
+depth_at_entry = depth_before - 1     (the condition is consumed from the stack)
+depth_after_then = analyze(then_branch, depth_at_entry)
+depth_after_else = analyze(else_branch, depth_at_entry)
 ```
 
-Both branches MUST produce the same stack depth at `ENDIF`. If they differ, the compiler rejects the program.
+Both branches MUST produce the same stack depth. If they differ, the compiler rejects the program.
 
 ### 5.4 Rejection
 
@@ -292,18 +354,26 @@ Note: The compiler fuses `EQUAL + VERIFY` into `OP_EQUALVERIFY` as a peephole op
 
 ## 7. Peephole Optimizations
 
-The Stack IR phase may apply the following peephole optimizations:
+The Stack IR phase applies the following peephole optimizations. Rules are applied in a left-to-right pass, repeated until a fixed point is reached (no more changes). If-op branches are recursively optimized independently.
 
 | Pattern | Replacement | Savings |
 |---|---|---|
-| `EQUAL VERIFY` | `OP_EQUALVERIFY` | 1 byte |
-| `NUMEQUAL VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
-| `CHECKSIG VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
-| `SWAP DROP` | `NIP` | 1 byte |
-| `DUP ROLL(1)` | `DUP` (noop ROLL) | 2 bytes |
-| `PUSH_INT(0) ADD` | (remove both) | 2+ bytes |
-| `PUSH_BOOL(true) VERIFY` | (remove both) | 2 bytes |
-| `NOT NOT` | (remove both) | 2 bytes |
+| `PUSH x, DROP` | (remove both) | 2+ bytes |
+| `DUP, DROP` | (remove both) | 2 bytes |
+| `SWAP, SWAP` | (remove both) | 2 bytes |
+| `PUSH 1, OP_ADD` | `OP_1ADD` | 1+ bytes |
+| `PUSH 1, OP_SUB` | `OP_1SUB` | 1+ bytes |
+| `PUSH 0, OP_ADD` | (remove both) | 2+ bytes |
+| `PUSH 0, OP_SUB` | (remove both) | 2+ bytes |
+| `OP_NOT, OP_NOT` | (remove both) | 2 bytes |
+| `OP_NEGATE, OP_NEGATE` | (remove both) | 2 bytes |
+| `OP_EQUAL, OP_VERIFY` | `OP_EQUALVERIFY` | 1 byte |
+| `OP_CHECKSIG, OP_VERIFY` | `OP_CHECKSIGVERIFY` | 1 byte |
+| `OP_NUMEQUAL, OP_VERIFY` | `OP_NUMEQUALVERIFY` | 1 byte |
+| `OP_CHECKMULTISIG, OP_VERIFY` | `OP_CHECKMULTISIGVERIFY` | 1 byte |
+| `OP_DUP, OP_DROP` | (remove both) | 2 bytes |
+| `OVER, OVER` | `OP_2DUP` | 1 byte |
+| `DROP, DROP` | `OP_2DROP` | 1 byte |
 
 ---
 

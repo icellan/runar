@@ -930,12 +930,30 @@ impl LoweringContext {
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
         then_ctx.lower_bindings(then_bindings, terminal_assert);
+
+        if terminal_assert && then_ctx.sm.depth() > 1 {
+            let excess = then_ctx.sm.depth() - 1;
+            for _ in 0..excess {
+                then_ctx.emit_op(StackOp::Nip);
+                then_ctx.sm.remove_at_depth(1);
+            }
+        }
+
         let then_ops = then_ctx.ops;
 
         // Lower else-branch
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
         else_ctx.lower_bindings(else_bindings, terminal_assert);
+
+        if terminal_assert && else_ctx.sm.depth() > 1 {
+            let excess = else_ctx.sm.depth() - 1;
+            for _ in 0..excess {
+                else_ctx.emit_op(StackOp::Nip);
+                else_ctx.sm.remove_at_depth(1);
+            }
+        }
+
         let else_ops = else_ctx.ops;
 
         self.emit_op(StackOp::If {
@@ -1828,47 +1846,69 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// Emit one WOTS+ chain: sig(0) csum(1) endpt(2) digit(3) → sigRest(0) newCsum(1) newEndpt(2)
-    fn emit_wots_one_chain(&mut self) {
+    /// Emit one WOTS+ chain with RFC 8391 tweakable hash.
+    /// Stack entry: pubSeed(bottom) sig csum endpt digit(top)
+    /// Stack exit:  pubSeed(bottom) sigRest newCsum newEndpt
+    fn emit_wots_one_chain(&mut self, chain_index: usize) {
+        // Save steps_copy = 15 - digit to alt (for checksum accumulation later)
+        self.emit_op(StackOp::Opcode("OP_DUP".into()));
         self.emit_op(StackOp::Push(PushValue::Int(15)));
         self.emit_op(StackOp::Swap);
         self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        // Save: steps_copy, endpt, csum to alt
-        self.emit_op(StackOp::Opcode("OP_DUP".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#1: steps_copy
+
+        // Save endpt, csum to alt. Leave pubSeed+sig+digit on main.
         self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#2: endpt
         self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#3: csum
+        // main: pubSeed sig digit
+
         // Split 32B sig element
         self.emit_op(StackOp::Swap);
         self.emit_op(StackOp::Push(PushValue::Int(32)));
         self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // push#4: sigRest
         self.emit_op(StackOp::Swap);
-        // Hash loop: 15 conditional SHA-256 iterations
-        for _ in 0..15 {
+        // main: pubSeed sigElem digit
+
+        // Hash loop: skip first `digit` iterations, then apply F for the rest.
+        // When digit > 0: decrement (skip). When digit == 0: hash at step j.
+        // Stack: pubSeed(depth2) sigElem(depth1) digit(depth0=top)
+        for j in 0..15usize {
+            let adrs_bytes = vec![chain_index as u8, j as u8];
             self.emit_op(StackOp::Opcode("OP_DUP".into()));
             self.emit_op(StackOp::Opcode("OP_0NOTEQUAL".into()));
             self.emit_op(StackOp::If {
                 then_ops: vec![
-                    StackOp::Swap,
-                    StackOp::Opcode("OP_SHA256".into()),
-                    StackOp::Swap,
-                    StackOp::Opcode("OP_1SUB".into()),
+                    StackOp::Opcode("OP_1SUB".into()),            // skip: digit--
                 ],
-                else_ops: vec![],
+                else_ops: vec![
+                    StackOp::Swap,                                  // pubSeed digit X
+                    StackOp::Push(PushValue::Int(2)),
+                    StackOp::Opcode("OP_PICK".into()),            // copy pubSeed
+                    StackOp::Push(PushValue::Bytes(adrs_bytes)),   // ADRS [chainIndex, j]
+                    StackOp::Opcode("OP_CAT".into()),              // pubSeed || adrs
+                    StackOp::Swap,                                  // bring X to top
+                    StackOp::Opcode("OP_CAT".into()),              // pubSeed || adrs || X
+                    StackOp::Opcode("OP_SHA256".into()),           // F result
+                    StackOp::Swap,                                  // pubSeed new_X digit(=0)
+                ],
             });
         }
-        self.emit_op(StackOp::Drop);
-        // Restore: sigRest, csum, endpt_acc, steps_copy
+        self.emit_op(StackOp::Drop); // drop digit (now 0)
+        // main: pubSeed endpoint
+
+        // Restore from alt (LIFO): sigRest, csum, endpt_acc, steps_copy
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
+
         // csum += steps_copy
         self.emit_op(StackOp::Rot);
         self.emit_op(StackOp::Opcode("OP_ADD".into()));
+
         // Concat endpoint to endpt_acc
         self.emit_op(StackOp::Swap);
         self.emit_op(StackOp::Push(PushValue::Int(3)));
@@ -1876,8 +1916,9 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
     }
 
-    /// WOTS+ signature verification (post-quantum hash-based).
+    /// WOTS+ signature verification with RFC 8391 tweakable hash (post-quantum).
     /// Parameters: w=16, n=32 (SHA-256), len=67 chains.
+    /// pubkey is 64 bytes: pubSeed(32) || pkRoot(32).
     fn lower_verify_wots(
         &mut self,
         binding_name: &str,
@@ -1892,18 +1933,27 @@ impl LoweringContext {
             self.bring_to_top(arg, is_last);
         }
         for _ in 0..3 { self.sm.pop(); }
+        // main: msg sig pubkey(64B: pubSeed||pkRoot)
 
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into())); // pubkey → alt
-        self.emit_op(StackOp::Swap);
-        self.emit_op(StackOp::Opcode("OP_SHA256".into()));
+        // Split 64-byte pubkey into pubSeed(32) and pkRoot(32)
+        self.emit_op(StackOp::Push(PushValue::Int(32)));
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));          // msg sig pubSeed pkRoot
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));    // pkRoot → alt
 
-        // Canonical layout: sig(0) csum=0(1) endptAcc=empty(2) hashRem(3)
+        // Rearrange: put pubSeed at bottom, hash msg
+        self.emit_op(StackOp::Rot);                                 // sig pubSeed msg
+        self.emit_op(StackOp::Rot);                                 // pubSeed msg sig
+        self.emit_op(StackOp::Swap);                                // pubSeed sig msg
+        self.emit_op(StackOp::Opcode("OP_SHA256".into()));         // pubSeed sig msgHash
+
+        // Canonical layout: pubSeed(bottom) sig csum=0 endptAcc=empty hashRem(top)
         self.emit_op(StackOp::Swap);
         self.emit_op(StackOp::Push(PushValue::Int(0)));
         self.emit_op(StackOp::Opcode("OP_0".into()));
         self.emit_op(StackOp::Push(PushValue::Int(3)));
         self.emit_op(StackOp::Opcode("OP_ROLL".into()));
 
+        // Process 32 bytes → 64 message chains
         for byte_idx in 0..32 {
             if byte_idx < 31 {
                 self.emit_op(StackOp::Push(PushValue::Int(1)));
@@ -1932,7 +1982,7 @@ impl LoweringContext {
                 self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
             }
 
-            self.emit_wots_one_chain();
+            self.emit_wots_one_chain(byte_idx * 2); // high nibble chain
 
             if byte_idx < 31 {
                 self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
@@ -1943,7 +1993,7 @@ impl LoweringContext {
                 self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
             }
 
-            self.emit_wots_one_chain();
+            self.emit_wots_one_chain(byte_idx * 2 + 1); // low nibble chain
 
             if byte_idx < 31 {
                 self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
@@ -1971,13 +2021,13 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_MOD".into()));
         self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
 
-        // 3 checksum chains
-        for _ in 0..3 {
+        // 3 checksum chains (indices 64, 65, 66)
+        for ci in 0..3 {
             self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
             self.emit_op(StackOp::Push(PushValue::Int(0)));
             self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
             self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
-            self.emit_wots_one_chain();
+            self.emit_wots_one_chain(64 + ci);
             self.emit_op(StackOp::Swap);
             self.emit_op(StackOp::Drop);
         }
@@ -1985,9 +2035,13 @@ impl LoweringContext {
         // Final comparison
         self.emit_op(StackOp::Swap);
         self.emit_op(StackOp::Drop);
+        // main: pubSeed endptAcc
         self.emit_op(StackOp::Opcode("OP_SHA256".into()));
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
+        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into())); // pkRoot
         self.emit_op(StackOp::Opcode("OP_EQUAL".into()));
+        // Clean up pubSeed
+        self.emit_op(StackOp::Swap);
+        self.emit_op(StackOp::Drop);
 
         self.sm.push(binding_name);
         self.track_depth();

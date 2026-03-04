@@ -15,12 +15,14 @@ function toHex(bytes: Uint8Array): string {
 
 const seed = new Uint8Array(32);
 seed[0] = 0x42;
-const { sk, pk } = wotsKeygen(seed);
+const pubSeed = new Uint8Array(32);
+pubSeed[0] = 0x01;
+const { sk, pk } = wotsKeygen(seed, pubSeed);
 
 describe('PostQuantumWallet (WOTS+)', () => {
   it('accepts a valid WOTS+ signature', () => {
     const msg = new TextEncoder().encode('spend this UTXO');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const contract = TestContract.fromSource(source, { pubkey: toHex(pk) });
     const result = contract.call('spend', { msg: toHex(msg), sig: toHex(sig) });
     expect(result.success).toBe(true);
@@ -28,7 +30,7 @@ describe('PostQuantumWallet (WOTS+)', () => {
 
   it('rejects an invalid signature', () => {
     const msg = new TextEncoder().encode('spend this UTXO');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const tampered = new Uint8Array(sig);
     tampered[100]! ^= 0xff;
     const contract = TestContract.fromSource(source, { pubkey: toHex(pk) });
@@ -38,7 +40,7 @@ describe('PostQuantumWallet (WOTS+)', () => {
 
   it('rejects a wrong message', () => {
     const msg = new TextEncoder().encode('original message');
-    const sig = wotsSign(msg, sk);
+    const sig = wotsSign(msg, sk, pubSeed);
     const wrong = new TextEncoder().encode('different message');
     const contract = TestContract.fromSource(source, { pubkey: toHex(pk) });
     const result = contract.call('spend', { msg: toHex(wrong), sig: toHex(sig) });

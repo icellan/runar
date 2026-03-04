@@ -20,7 +20,7 @@ use super::signer::Signer;
 /// ```ignore
 /// let artifact: RunarArtifact = serde_json::from_str(&json)?;
 /// let contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
-/// let txid = contract.deploy(&mut provider, &signer, DeployOptions { satoshis: 10000, .. })?;
+/// let (txid, tx) = contract.deploy(&mut provider, &signer, DeployOptions { satoshis: 10000, .. })?;
 /// ```
 pub struct RunarContract {
     pub(crate) artifact: RunarArtifact,
@@ -28,6 +28,8 @@ pub struct RunarContract {
     state: HashMap<String, SdkValue>,
     code_script: Option<String>,
     current_utxo: Option<Utxo>,
+    connected_provider: Option<Box<dyn Provider>>,
+    connected_signer: Option<Box<dyn Signer>>,
 }
 
 impl std::fmt::Debug for RunarContract {
@@ -71,6 +73,60 @@ impl RunarContract {
             state,
             code_script: None,
             current_utxo: None,
+            connected_provider: None,
+            connected_signer: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Connection
+    // -----------------------------------------------------------------------
+
+    /// Store a provider and signer on this contract so they don't need to be
+    /// passed to every `deploy()` and `call()` invocation.
+    pub fn connect(&mut self, provider: Box<dyn Provider>, signer: Box<dyn Signer>) {
+        self.connected_provider = Some(provider);
+        self.connected_signer = Some(signer);
+    }
+
+    /// Deploy using the connected provider and signer.
+    pub fn deploy_connected(&mut self, options: &DeployOptions) -> Result<(String, Transaction), String> {
+        let provider = self.connected_provider.as_mut().ok_or_else(|| {
+            "No provider connected. Call connect() first.".to_string()
+        })?;
+        let signer = self.connected_signer.as_ref().ok_or_else(|| {
+            "No signer connected. Call connect() first.".to_string()
+        })?;
+        // We need to borrow provider mutably and signer immutably.
+        // Since both are behind Option<Box<...>>, we can use raw pointer tricks,
+        // but it's simpler to just take them out temporarily.
+        // Actually, let's just delegate to the explicit method.
+        let provider_ptr: *mut dyn Provider = &mut **provider;
+        let signer_ptr: *const dyn Signer = &**signer;
+        // SAFETY: We hold &mut self, so no other references exist.
+        // provider_ptr and signer_ptr are both derived from fields of self.
+        unsafe {
+            self.deploy_inner(&mut *provider_ptr, &*signer_ptr, options)
+        }
+    }
+
+    /// Call a method using the connected provider and signer.
+    pub fn call_connected(
+        &mut self,
+        method_name: &str,
+        args: &[SdkValue],
+        options: Option<&CallOptions>,
+    ) -> Result<(String, Transaction), String> {
+        let provider = self.connected_provider.as_mut().ok_or_else(|| {
+            "No provider connected. Call connect() first.".to_string()
+        })?;
+        let signer = self.connected_signer.as_ref().ok_or_else(|| {
+            "No signer connected. Call connect() first.".to_string()
+        })?;
+        let provider_ptr: *mut dyn Provider = &mut **provider;
+        let signer_ptr: *const dyn Signer = &**signer;
+        unsafe {
+            self.call_inner(&mut *provider_ptr, &*signer_ptr, method_name, args, options)
         }
     }
 
@@ -80,13 +136,22 @@ impl RunarContract {
 
     /// Deploy the contract by creating a UTXO with the locking script.
     ///
-    /// Returns the deployment txid.
+    /// Returns a tuple of (txid, Transaction).
     pub fn deploy(
         &mut self,
         provider: &mut dyn Provider,
         signer: &dyn Signer,
         options: &DeployOptions,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Transaction), String> {
+        self.deploy_inner(provider, signer, options)
+    }
+
+    fn deploy_inner(
+        &mut self,
+        provider: &mut dyn Provider,
+        signer: &dyn Signer,
+        options: &DeployOptions,
+    ) -> Result<(String, Transaction), String> {
         let address = signer.get_address()?;
         let change_address = options
             .change_address
@@ -94,7 +159,8 @@ impl RunarContract {
             .unwrap_or(&address);
         let locking_script = self.get_locking_script();
 
-        // Fetch funding UTXOs and select the minimum set needed
+        // Fetch fee rate and funding UTXOs
+        let fee_rate = provider.get_fee_rate()?;
         let all_utxos = provider.get_utxos(&address)?;
         if all_utxos.is_empty() {
             return Err(format!(
@@ -102,7 +168,7 @@ impl RunarContract {
                 address
             ));
         }
-        let utxos = select_utxos(&all_utxos, options.satoshis, locking_script.len() / 2);
+        let utxos = select_utxos(&all_utxos, options.satoshis, locking_script.len() / 2, Some(fee_rate));
 
         // Build the deploy transaction
         let change_script = build_p2pkh_script_from_address(change_address);
@@ -112,6 +178,7 @@ impl RunarContract {
             options.satoshis,
             change_address,
             &change_script,
+            Some(fee_rate),
         );
 
         // Sign all inputs
@@ -133,10 +200,25 @@ impl RunarContract {
             txid: txid.clone(),
             output_index: 0,
             satoshis: options.satoshis,
-            script: locking_script,
+            script: locking_script.clone(),
         });
 
-        Ok(txid)
+        let tx = provider.get_transaction(&txid).unwrap_or_else(|_| {
+            // Fallback: construct a minimal transaction from what we know
+            Transaction {
+                txid: txid.clone(),
+                version: 1,
+                inputs: vec![],
+                outputs: vec![TxOutput {
+                    satoshis: options.satoshis,
+                    script: locking_script,
+                }],
+                locktime: 0,
+                raw: Some(signed_tx),
+            }
+        });
+
+        Ok((txid, tx))
     }
 
     // -----------------------------------------------------------------------
@@ -146,6 +228,7 @@ impl RunarContract {
     /// Call a public method on the contract (spend the UTXO).
     ///
     /// For stateful contracts, a new UTXO is created with the updated state.
+    /// Returns a tuple of (txid, Transaction).
     pub fn call(
         &mut self,
         method_name: &str,
@@ -153,7 +236,18 @@ impl RunarContract {
         provider: &mut dyn Provider,
         signer: &dyn Signer,
         options: Option<&CallOptions>,
-    ) -> Result<String, String> {
+    ) -> Result<(String, Transaction), String> {
+        self.call_inner(provider, signer, method_name, args, options)
+    }
+
+    fn call_inner(
+        &mut self,
+        provider: &mut dyn Provider,
+        signer: &dyn Signer,
+        method_name: &str,
+        args: &[SdkValue],
+        options: Option<&CallOptions>,
+    ) -> Result<(String, Transaction), String> {
         // Validate method exists
         let method = self.find_method(method_name).ok_or_else(|| {
             format!(
@@ -209,7 +303,8 @@ impl RunarContract {
 
         let change_script = build_p2pkh_script_from_address(change_address);
 
-        // Fetch additional funding UTXOs if needed
+        // Fetch fee rate and additional funding UTXOs if needed
+        let fee_rate = provider.get_fee_rate()?;
         let additional_utxos = provider.get_utxos(&address).unwrap_or_default();
 
         let (tx_hex, input_count) = build_call_transaction(
@@ -224,6 +319,7 @@ impl RunarContract {
             } else {
                 Some(&additional_utxos)
             },
+            Some(fee_rate),
         );
 
         // Sign additional inputs (input 0 already has the unlocking script)
@@ -254,7 +350,18 @@ impl RunarContract {
             self.current_utxo = None;
         }
 
-        Ok(txid)
+        let tx = provider.get_transaction(&txid).unwrap_or_else(|_| {
+            Transaction {
+                txid: txid.clone(),
+                version: 1,
+                inputs: vec![],
+                outputs: vec![],
+                locktime: 0,
+                raw: Some(signed_tx),
+            }
+        });
+
+        Ok((txid, tx))
     }
 
     // -----------------------------------------------------------------------
@@ -476,9 +583,9 @@ fn encode_arg(value: &SdkValue) -> String {
         SdkValue::Int(n) => encode_script_number(*n),
         SdkValue::Bool(b) => {
             if *b {
-                "0151".to_string()
+                "51".to_string() // OP_TRUE
             } else {
-                "0100".to_string()
+                "00".to_string() // OP_FALSE
             }
         }
         SdkValue::Bytes(hex) => {
@@ -975,7 +1082,7 @@ mod tests {
             AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string() }], is_public: true },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
-        assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(true)]).unwrap(), "0151");
+        assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(true)]).unwrap(), "51");
     }
 
     #[test]
@@ -984,7 +1091,7 @@ mod tests {
             AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string() }], is_public: true },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
-        assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(false)]).unwrap(), "0100");
+        assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(false)]).unwrap(), "00");
     }
 
     // -----------------------------------------------------------------------
@@ -1036,7 +1143,7 @@ mod tests {
             script: format!("76a914{}88ac", "00".repeat(20)),
         });
 
-        let txid = contract.deploy(&mut provider, &signer, &DeployOptions {
+        let (txid, _tx) = contract.deploy(&mut provider, &signer, &DeployOptions {
             satoshis: 50_000,
             change_address: None,
         }).unwrap();

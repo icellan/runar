@@ -96,7 +96,7 @@ contract P2PKH is SmartContract {
 </tr>
 </table>
 
-All four produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
+All five formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
 
 ---
 
@@ -214,7 +214,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-8 example contracts demonstrate all major patterns, each available in all supported formats:
+12 example contracts demonstrate all major patterns:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -228,8 +228,10 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [SimpleNFT](examples/ts/token-nft/) | NFT with transfer/burn | Yes | Yes |
 | [PostQuantumWallet](examples/ts/post-quantum-wallet/) | WOTS+ signature verification | No | No |
 | [SPHINCSWallet](examples/ts/sphincs-wallet/) | SLH-DSA (FIPS 205) verification | No | No |
+| [FunctionPatterns](examples/ts/function-patterns/) | Public/private methods, built-ins | Yes | Yes |
+| [MathDemo](examples/ts/math-demo/) | Math built-in functions | Yes | Yes |
 
-Each contract has tests in TypeScript, Go, Rust, Solidity, and Move:
+9 contracts are available in all 5 formats (TypeScript, Go, Rust, Solidity, Move). FunctionPatterns is available in TypeScript, Go, and Rust only. PostQuantumWallet and SPHINCSWallet are TypeScript-only.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -256,7 +258,7 @@ The compiler is structured as six small, composable nanopass transforms. Each pa
 | 5 | **Stack Lower** | ANF IR | Stack IR |
 | 6 | **Emit** | Stack IR | Bitcoin Script |
 
-The optimizer (constant folding + dead binding elimination) runs between passes 4 and 5.
+The constant folding optimizer (+ dead binding elimination) is available between passes 4 and 5 but is disabled by default to preserve ANF conformance. The peephole optimizer runs between passes 5 and 6 (always enabled).
 
 ### Multi-Compiler Strategy
 

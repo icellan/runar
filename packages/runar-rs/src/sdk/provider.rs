@@ -21,8 +21,16 @@ pub trait Provider {
     /// Get all UTXOs for a given address.
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String>;
 
+    /// Find a UTXO by its script hash (for stateful contract lookup).
+    /// Returns None if no UTXO is found with the given script hash.
+    fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String>;
+
     /// Return the network this provider is connected to.
     fn get_network(&self) -> &str;
+
+    /// Get the current fee rate in satoshis per byte.
+    /// BSV standard is 1 sat/byte.
+    fn get_fee_rate(&self) -> Result<i64, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -36,9 +44,11 @@ pub trait Provider {
 pub struct MockProvider {
     transactions: HashMap<String, Transaction>,
     utxos: HashMap<String, Vec<Utxo>>,
+    contract_utxos: HashMap<String, Utxo>,
     broadcasted_txs: Vec<String>,
     network: String,
     broadcast_count: u32,
+    fee_rate: i64,
 }
 
 impl MockProvider {
@@ -47,9 +57,11 @@ impl MockProvider {
         MockProvider {
             transactions: HashMap::new(),
             utxos: HashMap::new(),
+            contract_utxos: HashMap::new(),
             broadcasted_txs: Vec::new(),
             network: network.to_string(),
             broadcast_count: 0,
+            fee_rate: 1,
         }
     }
 
@@ -75,9 +87,19 @@ impl MockProvider {
             .push(utxo);
     }
 
+    /// Add a contract UTXO for lookup by script hash.
+    pub fn add_contract_utxo(&mut self, script_hash: &str, utxo: Utxo) {
+        self.contract_utxos.insert(script_hash.to_string(), utxo);
+    }
+
     /// Get all raw tx hexes that were broadcast through this provider.
     pub fn get_broadcasted_txs(&self) -> &[String] {
         &self.broadcasted_txs
+    }
+
+    /// Set the fee rate returned by get_fee_rate() (for testing).
+    pub fn set_fee_rate(&mut self, rate: i64) {
+        self.fee_rate = rate;
     }
 }
 
@@ -105,8 +127,16 @@ impl Provider for MockProvider {
         Ok(self.utxos.get(address).cloned().unwrap_or_default())
     }
 
+    fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String> {
+        Ok(self.contract_utxos.get(script_hash).cloned())
+    }
+
     fn get_network(&self) -> &str {
         &self.network
+    }
+
+    fn get_fee_rate(&self) -> Result<i64, String> {
+        Ok(self.fee_rate)
     }
 }
 

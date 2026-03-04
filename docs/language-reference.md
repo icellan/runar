@@ -205,18 +205,18 @@ Mixing `bigint` and `ByteString` with `+` is a compile-time error.
 | Operator | Description | Opcode |
 |----------|-------------|--------|
 | `===` / `==` | Equality | `OP_NUMEQUAL` (bigint) or `OP_EQUAL` (bytes) |
-| `!==` / `!=` | Inequality | `OP_NUMNOTEQUAL` (bigint) or `OP_EQUAL OP_NOT` (bytes) |
+| `!==` / `!=` | Inequality | `OP_NUMEQUAL OP_NOT` (bigint) or `OP_EQUAL OP_NOT` (bytes) |
 
 Both `==` and `===` have identical semantics in Rúnar (no type coercion). The compiler recommends `===`.
 
 ### Logical (operands: `boolean`)
 
-| Operator | Description | Notes |
-|----------|-------------|-------|
-| `&&` | Logical AND | Short-circuit evaluated |
-| `\|\|` | Logical OR | Short-circuit evaluated |
+| Operator | Description | Opcode |
+|----------|-------------|--------|
+| `&&` | Logical AND | `OP_BOOLAND` |
+| `\|\|` | Logical OR | `OP_BOOLOR` |
 
-Short-circuit operators are lowered to `OP_IF`/`OP_ELSE`/`OP_ENDIF` in the IR.
+Both operands are always evaluated (eager evaluation). At the ANF IR level, both sides are lowered as flat `bin_op` nodes -- there is no short-circuit lowering. At the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
 
 ### Bitwise (operands: `bigint`)
 
@@ -347,7 +347,7 @@ private helper(x: bigint): bigint {
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
-| `pack` | `(n: bigint) => ByteString` | `OP_NUM2BIN` |
+| `pack` | `(n: bigint) => ByteString` | No-op (type-level cast) |
 | `unpack` | `(data: ByteString) => bigint` | `OP_BIN2NUM` |
 | `num2bin` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
 
@@ -361,7 +361,7 @@ private helper(x: bigint): bigint {
 | `min` | `(a: bigint, b: bigint) => bigint` | `OP_MIN` |
 | `max` | `(a: bigint, b: bigint) => bigint` | `OP_MAX` |
 | `within` | `(x: bigint, lo: bigint, hi: bigint) => boolean` | `OP_WITHIN` |
-| `sign` | `(n: bigint) => bigint` | `OP_DUP OP_ABS OP_SWAP OP_DIV` — returns -1, 0, or 1 |
+| `sign` | `(n: bigint) => bigint` | `OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF` — returns -1, 0, or 1 (guards against div-by-zero when n=0) |
 | `bool` | `(n: bigint) => boolean` | `OP_0NOTEQUAL` — converts integer to boolean |
 
 #### Safe Arithmetic
@@ -387,20 +387,19 @@ private helper(x: bigint): bigint {
 | `sqrt` | `(n: bigint) => bigint` | 16-iteration Newton's method: `guess = (guess + n/guess) / 2` |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
 | `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — computes both quotient and remainder, returns quotient (the remainder is discarded). Despite the name suggesting both values, only the quotient is returned to the caller. |
-| `log2` | `(n: bigint) => bigint` | `OP_SIZE OP_NIP <8> OP_MUL <8> OP_SUB` — approximate floor(log2(n)) via byte size |
+| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop — exact floor(log2(n)) |
 
 > **Note on `pow`:** For compile-time constant exponents (e.g. `pow(x, 3n)`), the constant folder evaluates the result at compile time. For runtime exponents, a bounded 32-iteration loop is emitted, supporting exponents up to 32.
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
-> **Note on `log2`:** This is an approximation based on the byte size of the script number encoding. It is exact for powers of 2 and within 7 bits of the true value otherwise.
+> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that right-shifts the input until it reaches 1, counting iterations.
 
 ### Control
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `assert` | `(cond: boolean) => void` | `OP_VERIFY` |
-| `exit` | `(success: boolean) => void` | `OP_RETURN` |
 
 ### Preimage (Stateful Contracts)
 
