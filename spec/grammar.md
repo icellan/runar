@@ -469,7 +469,7 @@ The following functions are available without import (provided by the Rúnar run
 ```ebnf
 BuiltinFunction_Assert
     = 'assert'             /* assert(condition: boolean, message?: string): void */
-    | 'exit'               /* exit(success: boolean): void -- OP_RETURN */
+    | 'exit'               /* exit(success: boolean): void -- OP_VERIFY */
     ;
 ```
 

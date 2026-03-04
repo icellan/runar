@@ -18,6 +18,7 @@ export class MockProvider implements Provider {
   private readonly broadcastedTxs: string[] = [];
   private readonly network: 'mainnet' | 'testnet';
   private broadcastCount = 0;
+  private feeRate = 1;
 
   constructor(network: 'mainnet' | 'testnet' = 'testnet') {
     this.network = network;
@@ -76,6 +77,15 @@ export class MockProvider implements Provider {
 
   getNetwork(): 'mainnet' | 'testnet' {
     return this.network;
+  }
+
+  async getFeeRate(): Promise<number> {
+    return this.feeRate;
+  }
+
+  /** Set the fee rate returned by getFeeRate() (for testing). */
+  setFeeRate(rate: number): void {
+    this.feeRate = rate;
   }
 }
 

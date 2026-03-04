@@ -21,13 +21,14 @@ pub fn build_deploy_transaction(
     satoshis: i64,
     _change_address: &str,
     change_script: &str,
+    fee_rate: Option<i64>,
 ) -> (String, usize) {
     if utxos.is_empty() {
         panic!("buildDeployTransaction: no UTXOs provided");
     }
 
     let total_input: i64 = utxos.iter().map(|u| u.satoshis).sum();
-    let fee = estimate_deploy_fee(utxos.len(), locking_script.len() / 2);
+    let fee = estimate_deploy_fee(utxos.len(), locking_script.len() / 2, fee_rate);
     let change = total_input - satoshis - fee;
 
     if change < 0 {
@@ -84,12 +85,13 @@ pub fn build_deploy_transaction(
 /// Estimate the fee for a deploy transaction given the number of P2PKH
 /// inputs and the contract locking script byte length. Assumes 1 sat/byte
 /// fee rate and includes a P2PKH change output.
-pub fn estimate_deploy_fee(num_inputs: usize, locking_script_byte_len: usize) -> i64 {
+pub fn estimate_deploy_fee(num_inputs: usize, locking_script_byte_len: usize, fee_rate: Option<i64>) -> i64 {
+    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(1);
     let inputs_size = num_inputs as i64 * P2PKH_INPUT_SIZE;
     let contract_output_size =
         8 + varint_byte_size(locking_script_byte_len) + locking_script_byte_len as i64;
     let change_output_size = P2PKH_OUTPUT_SIZE;
-    TX_OVERHEAD + inputs_size + contract_output_size + change_output_size
+    (TX_OVERHEAD + inputs_size + contract_output_size + change_output_size) * rate
 }
 
 /// Select the minimum set of UTXOs needed to fund a deployment, using a
@@ -98,6 +100,7 @@ pub fn select_utxos(
     utxos: &[Utxo],
     target_satoshis: i64,
     locking_script_byte_len: usize,
+    fee_rate: Option<i64>,
 ) -> Vec<Utxo> {
     let mut sorted: Vec<Utxo> = utxos.to_vec();
     sorted.sort_by(|a, b| b.satoshis.cmp(&a.satoshis));
@@ -109,7 +112,7 @@ pub fn select_utxos(
         selected.push(utxo);
         total += selected.last().unwrap().satoshis;
 
-        let fee = estimate_deploy_fee(selected.len(), locking_script_byte_len);
+        let fee = estimate_deploy_fee(selected.len(), locking_script_byte_len, fee_rate);
         if total >= target_satoshis + fee {
             return selected;
         }
@@ -321,7 +324,7 @@ mod tests {
         let utxos = vec![make_utxo(100_000, 0)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, input_count) =
-            build_deploy_transaction(&locking_script, &utxos, 50_000, "addr", &change_script);
+            build_deploy_transaction(&locking_script, &utxos, 50_000, "addr", &change_script, None);
 
         assert!(!tx_hex.is_empty());
         assert_eq!(input_count, 1);
@@ -334,7 +337,7 @@ mod tests {
         let utxos = vec![make_utxo(100_000, 0)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, _) =
-            build_deploy_transaction(locking_script, &utxos, 50_000, "addr", &change_script);
+            build_deploy_transaction(locking_script, &utxos, 50_000, "addr", &change_script, None);
 
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.version, 1);
@@ -352,7 +355,7 @@ mod tests {
         let utxos = vec![make_utxo(30_000, 0), make_utxo(40_000, 1), make_utxo(50_000, 2)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, input_count) =
-            build_deploy_transaction("51", &utxos, 50_000, "addr", &change_script);
+            build_deploy_transaction("51", &utxos, 50_000, "addr", &change_script, None);
 
         assert_eq!(input_count, 3);
         let parsed = parse_tx_hex(&tx_hex);
@@ -362,21 +365,21 @@ mod tests {
     #[test]
     #[should_panic(expected = "no UTXOs provided")]
     fn throws_no_utxos() {
-        build_deploy_transaction("51", &[], 50_000, "addr", "51");
+        build_deploy_transaction("51", &[], 50_000, "addr", "51", None);
     }
 
     #[test]
     #[should_panic(expected = "insufficient funds")]
     fn throws_insufficient_funds() {
         let utxos = vec![make_utxo(100, 0)];
-        build_deploy_transaction("51", &utxos, 50_000, "addr", "51");
+        build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None);
     }
 
     #[test]
     fn single_output_when_change_zero() {
         // Fee: TX_OVERHEAD(10) + 1 * P2PKH(148) + contract output(8 + 1 + 1) + change(34) = 202
         let utxos = vec![make_utxo(50_202, 0)];
-        let (tx_hex, _) = build_deploy_transaction("51", &utxos, 50_000, "addr", "51");
+        let (tx_hex, _) = build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.output_count, 1);
     }
@@ -388,7 +391,7 @@ mod tests {
             make_utxo(50_000, 1),
             make_utxo(200_000, 2),
         ];
-        let selected = select_utxos(&utxos, 50_000, 1);
+        let selected = select_utxos(&utxos, 50_000, 1, None);
         // Should pick the 200_000 UTXO first (largest), which is enough alone
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].satoshis, 200_000);
@@ -401,7 +404,7 @@ mod tests {
             make_utxo(20_000, 1),
             make_utxo(10_000, 2),
         ];
-        let selected = select_utxos(&utxos, 50_000, 1);
+        let selected = select_utxos(&utxos, 50_000, 1, None);
         // 30_000 alone not enough; 30_000 + 20_000 = 50_000, need fee too; may need all 3
         assert!(selected.len() >= 2);
     }

@@ -20,13 +20,14 @@ export function buildDeployTransaction(
   satoshis: number,
   changeAddress: string,
   changeScript: string,
+  feeRate: number = 1,
 ): { txHex: string; inputCount: number } {
   if (utxos.length === 0) {
     throw new Error('buildDeployTransaction: no UTXOs provided');
   }
 
   const totalInput = utxos.reduce((sum, u) => sum + u.satoshis, 0);
-  const fee = estimateDeployFee(utxos.length, lockingScript.length / 2);
+  const fee = estimateDeployFee(utxos.length, lockingScript.length / 2, feeRate);
   const change = totalInput - satoshis - fee;
 
   if (change < 0) {
@@ -176,6 +177,7 @@ export function selectUtxos(
   utxos: UTXO[],
   targetSatoshis: number,
   lockingScriptByteLen: number,
+  feeRate: number = 1,
 ): UTXO[] {
   const sorted = [...utxos].sort((a, b) => b.satoshis - a.satoshis);
   const selected: UTXO[] = [];
@@ -185,7 +187,7 @@ export function selectUtxos(
     selected.push(utxo);
     total += utxo.satoshis;
 
-    const fee = estimateDeployFee(selected.length, lockingScriptByteLen);
+    const fee = estimateDeployFee(selected.length, lockingScriptByteLen, feeRate);
     if (total >= targetSatoshis + fee) {
       return selected;
     }

@@ -37,6 +37,48 @@ describe('LocalSigner constructor validation', () => {
 });
 
 // ---------------------------------------------------------------------------
+// WIF key support
+// ---------------------------------------------------------------------------
+
+describe('LocalSigner WIF key support', () => {
+  // WIF for private key 1 (uncompressed): 5HueCGU8rMjxEXxiPuD5BDku4MkFqeZyd4dZ1jvhTVqvbTLvyTJ
+  // WIF for private key 1 (compressed):   KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn
+  const WIF_COMPRESSED =
+    'KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn';
+
+  it('accepts a WIF-encoded private key', () => {
+    expect(() => new LocalSigner(WIF_COMPRESSED)).not.toThrow();
+  });
+
+  it('WIF key produces the same public key as hex key', async () => {
+    const fromHex = new LocalSigner(PRIV_KEY_1);
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const pubHex = await fromHex.getPublicKey();
+    const pubWif = await fromWif.getPublicKey();
+    expect(pubWif).toBe(pubHex);
+  });
+
+  it('WIF key produces the same address as hex key', async () => {
+    const fromHex = new LocalSigner(PRIV_KEY_1);
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const addrHex = await fromHex.getAddress();
+    const addrWif = await fromWif.getAddress();
+    expect(addrWif).toBe(addrHex);
+  });
+
+  it('getPrivateKeyHex returns the raw hex regardless of input format', () => {
+    const fromWif = new LocalSigner(WIF_COMPRESSED);
+    const hex = fromWif.getPrivateKeyHex();
+    expect(hex.length).toBe(64);
+    expect(/^[0-9a-f]+$/.test(hex)).toBe(true);
+  });
+
+  it('rejects invalid WIF keys', () => {
+    expect(() => new LocalSigner('5Invalid')).toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Public key derivation
 // ---------------------------------------------------------------------------
 

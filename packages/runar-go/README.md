@@ -224,21 +224,21 @@ Type-specific encoding:
 The SDK exports lower-level functions for custom transaction construction:
 
 ```go
-// Select UTXOs (largest-first strategy)
-selected := runar.SelectUtxos(utxos, targetSatoshis, lockingScriptByteLen)
+// Select UTXOs (largest-first strategy, optional feeRate in sat/byte)
+selected := runar.SelectUtxos(utxos, targetSatoshis, lockingScriptByteLen, feeRate)
 
-// Estimate deployment fee (default 1 sat/byte)
-fee := runar.EstimateDeployFee(numInputs, lockingScriptByteLen)
+// Estimate deployment fee (optional feeRate in sat/byte, default 1)
+fee := runar.EstimateDeployFee(numInputs, lockingScriptByteLen, feeRate)
 
-// Build an unsigned deploy transaction
+// Build an unsigned deploy transaction (optional feeRate in sat/byte)
 txHex, inputCount, err := runar.BuildDeployTransaction(
-    lockingScript, utxos, satoshis, changeAddress, changeScript,
+    lockingScript, utxos, satoshis, changeAddress, changeScript, feeRate,
 )
 
-// Build a method call transaction
+// Build a method call transaction (optional feeRate in sat/byte)
 txHex, inputCount := runar.BuildCallTransaction(
     currentUtxo, unlockingScript, newLockingScript, newSatoshis,
-    changeAddress, changeScript, additionalUtxos,
+    changeAddress, changeScript, additionalUtxos, feeRate,
 )
 
 // State serialization

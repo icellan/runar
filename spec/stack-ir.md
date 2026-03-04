@@ -70,7 +70,7 @@ Value labels correspond to ANF temporary names, parameter names, or property nam
 | `SWAP` | `[a, b] -> [b, a]` | `OP_SWAP` |
 | `OVER` | `[a, b] -> [a, b, a]` | `OP_OVER` (copy item 1 to top) |
 | `ROT` | `[a, b, c] -> [b, c, a]` | `OP_ROT` (rotate top 3) |
-| `TUCK` | `[a, b] -> [a, b, a]` | `OP_TUCK` (copy top behind item 1) |
+| `TUCK` | `[a, b] -> [b, a, b]` | `OP_TUCK` (copy top behind item 1) |
 | `PICK(n)` | `[...] -> [..., stack[n]]` | `<n> OP_PICK` |
 | `ROLL(n)` | `[...] -> [...]` | `<n> OP_ROLL` (move item n to top) |
 | `DEPTH` | `[] -> [depth]` | `OP_DEPTH` |
@@ -133,6 +133,19 @@ Value labels correspond to ANF temporary names, parameter names, or property nam
 | `ENDIF` | -- | `OP_ENDIF` |
 | `VERIFY` | `[cond] -> []` | `OP_VERIFY` |
 | `RETURN` | -- | `OP_RETURN` |
+
+### 3.8 Placeholder Instructions
+
+| Instruction | Stack Effect | Bitcoin Opcode |
+|---|---|---|
+| `PLACEHOLDER(paramIndex, paramName)` | `[] -> [value]` | Push data (replaced at deployment) |
+
+The `PLACEHOLDER` instruction represents a constructor parameter slot in the compiled script. During compilation, the emitter records the byte offset of each placeholder. At deployment time, the SDK replaces each placeholder with the actual serialized constructor argument value.
+
+| Field | Type | Description |
+|---|---|---|
+| `paramIndex` | `number` | Index of the constructor parameter (0-based) |
+| `paramName` | `string` | Name of the constructor parameter (for diagnostics) |
 
 ---
 

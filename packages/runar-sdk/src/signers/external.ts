@@ -7,13 +7,17 @@ import type { Signer } from './signer.js';
 /**
  * Callback type for external signing.
  *
- * The external system receives the raw transaction hex and the input index,
- * and is responsible for computing the sighash and returning a DER-encoded
+ * The external system receives the raw transaction hex, input index, the
+ * locking script being spent, the satoshi value, and sighash flags — all the
+ * information needed to compute a BIP-143 sighash and return a DER-encoded
  * signature with the sighash byte appended.
  */
 export type SignCallback = (
   txHex: string,
   inputIndex: number,
+  subscript: string,
+  satoshis: number,
+  sigHashType?: number,
 ) => Promise<string>;
 
 /**
@@ -26,8 +30,8 @@ export type SignCallback = (
  * const signer = new ExternalSigner(
  *   myPubKeyHex,
  *   myAddress,
- *   async (txHex, inputIndex) => {
- *     return await myHardwareWallet.sign(txHex, inputIndex);
+ *   async (txHex, inputIndex, subscript, satoshis, sigHashType) => {
+ *     return await myHardwareWallet.sign(txHex, inputIndex, subscript, satoshis, sigHashType);
  *   },
  * );
  * ```
@@ -50,10 +54,10 @@ export class ExternalSigner implements Signer {
   async sign(
     txHex: string,
     inputIndex: number,
-    _subscript: string,
-    _satoshis: number,
-    _sigHashType?: number,
+    subscript: string,
+    satoshis: number,
+    sigHashType?: number,
   ): Promise<string> {
-    return this.signFn(txHex, inputIndex);
+    return this.signFn(txHex, inputIndex, subscript, satoshis, sigHashType);
   }
 }

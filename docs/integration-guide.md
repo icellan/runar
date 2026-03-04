@@ -642,6 +642,7 @@ interface Provider {
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
   getNetwork(): 'mainnet' | 'testnet';
+  getFeeRate(): Promise<number>;  // satoshis per byte (default: 1 for BSV)
 }
 ```
 

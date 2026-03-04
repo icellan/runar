@@ -94,8 +94,7 @@ Means: `b` is on top, `a` is below it. The operation consumes both and pushes `a
 | `if (cond) { ... } else { ... }` | `OP_IF ... OP_ELSE ... OP_ENDIF` |
 | `assert(cond)` (non-final) | `<cond> OP_VERIFY` |
 | `assert(cond)` (final statement) | `<cond>` (left on stack) |
-| `exit(true)` | `OP_TRUE OP_RETURN` |
-| `exit(false)` | `OP_FALSE OP_RETURN` |
+| `exit(cond)` | `<cond> OP_VERIFY` |
 
 ### 3.2 If/Else Compilation
 
@@ -268,11 +267,11 @@ Rúnar selects the appropriate opcode based on the operand types determined duri
 
 | Hex | Name | Stack Effect | Description |
 |-----|------|-------------|-------------|
-| `0xa7` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
-| `0xa8` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
-| `0xa9` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
-| `0xaa` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
-| `0xab` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
+| `0xa6` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
+| `0xa7` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
+| `0xa8` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
+| `0xa9` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
+| `0xaa` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
 | `0xac` | `OP_CHECKSIG` | `(sig pubKey -- bool)` | Verify ECDSA signature |
 | `0xad` | `OP_CHECKSIGVERIFY` | `(sig pubKey -- )` | `OP_CHECKSIG` then `OP_VERIFY` |
 | `0xae` | `OP_CHECKMULTISIG` | `(... sigs n pubKeys m -- bool)` | Verify m-of-n multi-signature |
@@ -386,8 +385,8 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 |-----|------|--------|
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
-| `0xa8` | `OP_SHA1` | Not used by Rúnar (weak hash) |
-| `0xab`+ | `OP_CODESEPARATOR` | Not used by Rúnar |
+| `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
+| `0xab` | `OP_CODESEPARATOR` | Not used by Rúnar |
 
 ---
 
@@ -487,10 +486,10 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `a <= b` | `OP_LESSTHANOREQUAL` | `0xa1` |
 | `a > b` | `OP_GREATERTHAN` | `0xa0` |
 | `a >= b` | `OP_GREATERTHANOREQUAL` | `0xa2` |
-| `sha256(x)` | `OP_SHA256` | `0xa9` |
-| `ripemd160(x)` | `OP_RIPEMD160` | `0xa7` |
-| `hash160(x)` | `OP_HASH160` | `0xaa` |
-| `hash256(x)` | `OP_HASH256` | `0xab` |
+| `sha256(x)` | `OP_SHA256` | `0xa8` |
+| `ripemd160(x)` | `OP_RIPEMD160` | `0xa6` |
+| `hash160(x)` | `OP_HASH160` | `0xa9` |
+| `hash256(x)` | `OP_HASH256` | `0xaa` |
 | `checkSig(s, pk)` | `OP_CHECKSIG` | `0xac` |
 | `checkMultiSig(...)` | `OP_CHECKMULTISIG` | `0xae` |
 | `assert(x)` (non-final) | `OP_VERIFY` | `0x69` |

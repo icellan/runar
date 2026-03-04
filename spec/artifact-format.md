@@ -30,6 +30,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
     "sourceMap": { ... },
     "ir": { ... },
     "stateFields": [ ... ],
+    "constructorSlots": [ ... ],
     "buildTimestamp": "string"
 }
 ```
@@ -83,7 +84,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -123,23 +124,18 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 
 ```json
 {
-    "file": "P2PKH.ts",
     "mappings": [
         {
-            "scriptOffset": 0,
-            "scriptLength": 1,
-            "sourceLine": 12,
-            "sourceColumn": 8,
-            "sourceLength": 25,
-            "opcode": "OP_DUP"
+            "opcodeIndex": 0,
+            "sourceFile": "P2PKH.ts",
+            "line": 12,
+            "column": 8
         },
         {
-            "scriptOffset": 1,
-            "scriptLength": 1,
-            "sourceLine": 12,
-            "sourceColumn": 8,
-            "sourceLength": 25,
-            "opcode": "OP_HASH160"
+            "opcodeIndex": 1,
+            "sourceFile": "P2PKH.ts",
+            "line": 12,
+            "column": 8
         }
     ]
 }
@@ -149,12 +145,10 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 
 | Field | Type | Description |
 |---|---|---|
-| `scriptOffset` | `number` | Byte offset in the compiled script |
-| `scriptLength` | `number` | Number of bytes for this opcode/instruction |
-| `sourceLine` | `number` | 1-based line number in source |
-| `sourceColumn` | `number` | 0-based column in source |
-| `sourceLength` | `number` | Character length of source expression |
-| `opcode` | `string` | The opcode mnemonic (for readability) |
+| `opcodeIndex` | `number` | Index of the opcode in the compiled script |
+| `sourceFile` | `string` | Source file name |
+| `line` | `number` | 1-based line number in source |
+| `column` | `number` | 0-based column in source |
 
 ### 3.8 `ir`
 
@@ -193,7 +187,31 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 
 For stateless contracts (no mutable properties), this is an empty array `[]`.
 
-### 3.10 `buildTimestamp`
+### 3.10 `constructorSlots`
+
+- **Type**: `ConstructorSlot[]`
+- **Required**: No (omitted when there are no constructor parameter placeholders)
+- **Description**: Specifies byte offsets within the `script` hex string where constructor parameter values should be spliced in during deployment. Each slot identifies which constructor parameter it corresponds to and the exact byte offset in the compiled script.
+
+```json
+[
+    {
+        "paramIndex": 0,
+        "byteOffset": 3
+    }
+]
+```
+
+#### ConstructorSlot Entry
+
+| Field | Type | Description |
+|---|---|---|
+| `paramIndex` | `number` | Index into the constructor's `params` array (0-based) |
+| `byteOffset` | `number` | Byte offset in the compiled script hex where this parameter's push data begins |
+
+The SDK uses these offsets to splice serialized constructor argument values directly into the script bytes, rather than relying on string-based placeholder replacement. This is the preferred mechanism for deployment as it is more robust than textual substitution.
+
+### 3.11 `buildTimestamp`
 
 - **Type**: `string` (ISO 8601)
 - **Required**: Yes
@@ -311,20 +329,19 @@ The SDK handles serialization/deserialization of state using the `stateFields` d
                     { "name": "sig", "type": "Sig" },
                     { "name": "pubKey", "type": "PubKey" }
                 ],
-                "index": 0
+                "isPublic": true
             }
         ]
     },
     "script": "76a914<pubKeyHash>88ac",
     "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
     "sourceMap": {
-        "file": "P2PKH.ts",
         "mappings": [
-            { "scriptOffset": 0, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_DUP" },
-            { "scriptOffset": 1, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_HASH160" },
-            { "scriptOffset": 2, "scriptLength": 22, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_PUSHDATA" },
-            { "scriptOffset": 24, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_EQUALVERIFY" },
-            { "scriptOffset": 25, "scriptLength": 1, "sourceLine": 13, "sourceColumn": 8, "sourceLength": 26, "opcode": "OP_CHECKSIG" }
+            { "opcodeIndex": 0, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 1, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 2, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 3, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 4, "sourceFile": "P2PKH.ts", "line": 13, "column": 8 }
         ]
     },
     "stateFields": [],

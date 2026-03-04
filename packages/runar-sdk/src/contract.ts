@@ -35,6 +35,8 @@ export class RunarContract {
   private _state: Record<string, unknown> = {};
   private _codeScript: string | null = null;
   private currentUtxo: UTXO | null = null;
+  private _provider: Provider | null = null;
+  private _signer: Signer | null = null;
 
   constructor(artifact: RunarArtifact, constructorArgs: unknown[]) {
     this.artifact = artifact;
@@ -62,32 +64,93 @@ export class RunarContract {
   }
 
   // -------------------------------------------------------------------------
+  // Connection
+  // -------------------------------------------------------------------------
+
+  /**
+   * Store a provider and signer on this contract so they don't need to be
+   * passed to every `deploy()` and `call()` invocation.
+   */
+  connect(provider: Provider, signer: Signer): void {
+    this._provider = provider;
+    this._signer = signer;
+  }
+
+  /**
+   * Resolve provider/signer: explicit args win, then connected, then error.
+   */
+  private resolveProviderSigner(
+    provider?: Provider,
+    signer?: Signer,
+  ): { provider: Provider; signer: Signer } {
+    const p = provider ?? this._provider;
+    const s = signer ?? this._signer;
+    if (!p || !s) {
+      throw new Error(
+        'No provider/signer available. Call connect() or pass them explicitly.',
+      );
+    }
+    return { provider: p, signer: s };
+  }
+
+  // -------------------------------------------------------------------------
   // Deployment
   // -------------------------------------------------------------------------
 
   /**
    * Deploy the contract by creating a UTXO with the locking script.
    *
-   * @param provider - Blockchain provider for UTXO lookup and broadcast.
-   * @param signer   - Signer for the funding transaction inputs.
-   * @param options  - Deployment options (satoshis, change address).
-   * @returns The deployment txid and parsed transaction.
+   * Provider and signer can be passed explicitly or omitted to use
+   * the ones stored via `connect()`.
    */
+  async deploy(options: DeployOptions): Promise<{ txid: string; tx: Transaction }>;
   async deploy(
     provider: Provider,
     signer: Signer,
     options: DeployOptions,
+  ): Promise<{ txid: string; tx: Transaction }>;
+  async deploy(
+    providerOrOptions: Provider | DeployOptions,
+    maybeSigner?: Signer,
+    maybeOptions?: DeployOptions,
   ): Promise<{ txid: string; tx: Transaction }> {
+    let provider: Provider;
+    let signer: Signer;
+    let options: DeployOptions;
+
+    if (maybeSigner !== undefined && maybeOptions !== undefined) {
+      // Explicit: deploy(provider, signer, options)
+      provider = providerOrOptions as Provider;
+      signer = maybeSigner;
+      options = maybeOptions;
+    } else if (
+      typeof providerOrOptions === 'object' &&
+      'satoshis' in providerOrOptions
+    ) {
+      // Connected: deploy(options)
+      const resolved = this.resolveProviderSigner();
+      provider = resolved.provider;
+      signer = resolved.signer;
+      options = providerOrOptions as DeployOptions;
+    } else {
+      // Explicit: deploy(provider, signer, options) — options in maybeSigner slot shouldn't happen
+      // but handle gracefully
+      throw new Error(
+        'RunarContract.deploy: invalid arguments. Pass (options) or (provider, signer, options).',
+      );
+    }
+
     const address = await signer.getAddress();
     const changeAddress = options.changeAddress ?? address;
     const lockingScript = this.getLockingScript();
 
-    // Fetch funding UTXOs and select the minimum set needed
+    // Fetch fee rate and funding UTXOs
+    const feeRate = await provider.getFeeRate();
     const allUtxos = await provider.getUtxos(address);
     if (allUtxos.length === 0) {
       throw new Error(`RunarContract.deploy: no UTXOs found for address ${address}`);
     }
-    const utxos = selectUtxos(allUtxos, options.satoshis, lockingScript.length / 2);
+    const utxos = selectUtxos(allUtxos, options.satoshis, lockingScript.length / 2, feeRate);
 
     // Build the deploy transaction
     const changeScript = buildP2PKHScriptFromAddress(changeAddress);
@@ -97,6 +160,7 @@ export class RunarContract {
       options.satoshis,
       changeAddress,
       changeScript,
+      feeRate,
     );
 
     // Sign all inputs
@@ -144,21 +208,57 @@ export class RunarContract {
    * Call a public method on the contract (spend the UTXO).
    *
    * For stateful contracts, a new UTXO is created with the updated state.
-   *
-   * @param methodName - Name of the public method to call.
-   * @param args       - Arguments matching the method's ABI.
-   * @param provider   - Blockchain provider.
-   * @param signer     - Signer for the transaction inputs.
-   * @param options    - Call options (satoshis for next output, change address).
-   * @returns The call txid and parsed transaction.
+   * Provider and signer can be passed explicitly or omitted to use
+   * the ones stored via `connect()`.
    */
+  async call(
+    methodName: string,
+    args: unknown[],
+    options?: CallOptions,
+  ): Promise<{ txid: string; tx: Transaction }>;
   async call(
     methodName: string,
     args: unknown[],
     provider: Provider,
     signer: Signer,
     options?: CallOptions,
+  ): Promise<{ txid: string; tx: Transaction }>;
+  async call(
+    methodName: string,
+    args: unknown[],
+    providerOrOptions?: Provider | CallOptions,
+    maybeSigner?: Signer,
+    maybeOptions?: CallOptions,
   ): Promise<{ txid: string; tx: Transaction }> {
+    let provider: Provider;
+    let signer: Signer;
+    let options: CallOptions | undefined;
+
+    if (maybeSigner !== undefined) {
+      // Explicit: call(name, args, provider, signer, options?)
+      provider = providerOrOptions as Provider;
+      signer = maybeSigner;
+      options = maybeOptions;
+    } else if (
+      providerOrOptions === undefined ||
+      (typeof providerOrOptions === 'object' &&
+        !('getUtxos' in providerOrOptions))
+    ) {
+      // Connected: call(name, args, options?)
+      const resolved = this.resolveProviderSigner();
+      provider = resolved.provider;
+      signer = resolved.signer;
+      options = providerOrOptions as CallOptions | undefined;
+    } else {
+      // providerOrOptions looks like a Provider but no signer — try connected signer
+      const resolved = this.resolveProviderSigner(
+        providerOrOptions as Provider,
+        undefined,
+      );
+      provider = resolved.provider;
+      signer = resolved.signer;
+      options = undefined;
+    }
     // Validate method exists
     const method = this.findMethod(methodName);
     if (!method) {
@@ -201,7 +301,8 @@ export class RunarContract {
 
     const changeScript = buildP2PKHScriptFromAddress(changeAddress);
 
-    // Fetch additional funding UTXOs if needed
+    // Fetch fee rate and additional funding UTXOs if needed
+    const feeRate = await provider.getFeeRate();
     const additionalUtxos = await provider.getUtxos(address);
 
     const { txHex, inputCount } = buildCallTransaction(
@@ -212,6 +313,7 @@ export class RunarContract {
       changeAddress,
       changeScript,
       additionalUtxos.length > 0 ? additionalUtxos : undefined,
+      feeRate,
     );
 
     // Sign additional inputs (input 0 already has the unlocking script)

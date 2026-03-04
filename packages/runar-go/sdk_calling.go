@@ -27,6 +27,7 @@ func BuildCallTransaction(
 	changeAddress string,
 	changeScript string,
 	additionalUtxos []UTXO,
+	feeRate ...int64,
 ) (txHex string, inputCount int) {
 	allUtxos := []UTXO{currentUtxo}
 	allUtxos = append(allUtxos, additionalUtxos...)
@@ -62,7 +63,11 @@ func BuildCallTransaction(
 		outputsSize += 34 // P2PKH change
 	}
 	estimatedSize := 10 + inputsSize + outputsSize
-	fee := int64(estimatedSize) // 1 sat/byte
+	rate := int64(1)
+	if len(feeRate) > 0 && feeRate[0] > 0 {
+		rate = feeRate[0]
+	}
+	fee := int64(estimatedSize) * rate
 
 	change := totalInput - contractOutputSats - fee
 

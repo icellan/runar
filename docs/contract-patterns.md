@@ -322,8 +322,10 @@ class Auction extends StatefulSmartContract {
     this.deadline = deadline;
   }
 
+  // Note: checkPreimage is automatically injected at method entry by
+  // StatefulSmartContract, so we do not call it manually here.
+
   public bid(bidder: PubKey, bidAmount: bigint, txPreimage: SigHashPreimage) {
-    assert(checkPreimage(txPreimage));
     assert(bidAmount > this.highestBid);
     assert(extractLocktime(txPreimage) < this.deadline);
     this.highestBidder = bidder;
@@ -332,7 +334,6 @@ class Auction extends StatefulSmartContract {
   }
 
   public close(sig: Sig, txPreimage: SigHashPreimage) {
-    assert(checkPreimage(txPreimage));
     assert(checkSig(sig, this.auctioneer));
     assert(extractLocktime(txPreimage) >= this.deadline);
     // No state continuation -- auction is done

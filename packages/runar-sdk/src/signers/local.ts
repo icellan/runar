@@ -22,14 +22,26 @@ export class LocalSigner implements Signer {
   private readonly bsvPrivKey: PrivateKey;
   private readonly privateKeyHex: string;
 
-  constructor(privateKeyHex: string) {
-    if (!/^[0-9a-fA-F]{64}$/.test(privateKeyHex)) {
+  /**
+   * Create a LocalSigner from a private key.
+   *
+   * @param keyInput - Either a 64-char hex string (raw 32-byte key) or a
+   *                   WIF-encoded private key (Base58Check, starts with 5/K/L).
+   */
+  constructor(keyInput: string) {
+    if (/^[0-9a-fA-F]{64}$/.test(keyInput)) {
+      // Raw hex private key
+      this.bsvPrivKey = PrivateKey.fromHex(keyInput);
+      this.privateKeyHex = keyInput;
+    } else if (/^[5KL][1-9A-HJ-NP-Za-km-z]{50,51}$/.test(keyInput)) {
+      // WIF-encoded private key
+      this.bsvPrivKey = PrivateKey.fromWif(keyInput);
+      this.privateKeyHex = this.bsvPrivKey.toHex();
+    } else {
       throw new Error(
-        'LocalSigner: expected a 32-byte hex-encoded private key (64 hex chars)',
+        'LocalSigner: expected a 64-char hex private key or a WIF-encoded key (starts with 5, K, or L)',
       );
     }
-    this.privateKeyHex = privateKeyHex;
-    this.bsvPrivKey = PrivateKey.fromHex(privateKeyHex);
   }
 
   async getPublicKey(): Promise<string> {

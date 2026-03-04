@@ -37,7 +37,7 @@ The ABI describes:
             "params": [
                 { "name": "string", "type": "string" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -117,7 +117,7 @@ ABI:
             "params": [
                 { "name": "paramName", "type": "TypeName" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -131,16 +131,14 @@ Each method entry:
 |---|---|---|
 | `name` | `string` | Method name |
 | `params` | `Param[]` | Ordered list of method parameters |
-| `index` | `number` | Method dispatch index (0-based) |
+| `isPublic` | `boolean` | Whether the method is a public entry point |
 
-### 4.3 Method Index
+### 4.3 Method Dispatch
 
-The `index` field determines how the method is selected during spending:
+For multi-method contracts, the unlocking script includes a method index as the last push data item. The locking script's dispatch table routes to the correct method based on this index. Method dispatch indices correspond to the position of the method in the `methods` array.
 
-- **Single-method contracts**: The `index` is always `0`. No method selector is pushed onto the unlocking script.
-- **Multi-method contracts**: The unlocking script includes the method index as the last push data item. The locking script's dispatch table routes to the correct method based on this index.
-
-Method indices are assigned in **declaration order** in the source file, starting from `0`.
+- **Single-method contracts**: No method selector is pushed onto the unlocking script.
+- **Multi-method contracts**: The unlocking script includes the method index as the last push data item.
 
 ### 4.4 Parameter Order and Unlocking Script Layout
 
@@ -170,7 +168,7 @@ ABI:
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         },
         {
             "name": "refund",
@@ -178,7 +176,7 @@ ABI:
                 { "name": "sig", "type": "Sig" },
                 { "name": "preimage", "type": "SigHashPreimage" }
             ],
-            "index": 1
+            "isPublic": true
         }
     ]
 }
@@ -349,7 +347,7 @@ When a stateful method modifies state, the compiler generates code to:
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -370,7 +368,7 @@ When a stateful method modifies state, the compiler generates code to:
             "params": [
                 { "name": "sigs", "type": { "array": "Sig", "size": 2 } }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -392,7 +390,7 @@ When a stateful method modifies state, the compiler generates code to:
                 { "name": "amount", "type": "bigint" },
                 { "name": "preimage", "type": "SigHashPreimage" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -414,7 +412,7 @@ A conforming ABI must satisfy:
 1. **Non-empty constructor**: The constructor must have at least one parameter (a contract with no properties is useless).
 2. **Non-empty methods**: There must be at least one public method.
 3. **Unique method names**: No two methods may share the same name.
-4. **Sequential indices**: Method indices must be `0, 1, 2, ...` with no gaps.
+4. **Public method presence**: At least one method must have `isPublic: true`.
 5. **Valid types**: All type strings must be recognized Rúnar types.
 6. **Unique parameter names**: Within each method, parameter names must be unique.
 7. **Constructor-property alignment**: Constructor parameters must correspond 1:1 to contract properties (both readonly and mutable) in declaration order.

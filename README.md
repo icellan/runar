@@ -214,7 +214,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-8 example contracts demonstrate all major patterns, each available in all supported formats:
+12 example contracts demonstrate all major patterns, each available in all supported formats:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -228,6 +228,8 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [SimpleNFT](examples/ts/token-nft/) | NFT with transfer/burn | Yes | Yes |
 | [PostQuantumWallet](examples/ts/post-quantum-wallet/) | WOTS+ signature verification | No | No |
 | [SPHINCSWallet](examples/ts/sphincs-wallet/) | SLH-DSA (FIPS 205) verification | No | No |
+| [FunctionPatterns](examples/ts/function-patterns/) | Public/private methods, built-ins | Yes | Yes |
+| [MathDemo](examples/ts/math-demo/) | Math built-in functions | Yes | Yes |
 
 Each contract has tests in TypeScript, Go, Rust, Solidity, and Move:
 ```

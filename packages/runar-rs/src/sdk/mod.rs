@@ -13,5 +13,5 @@ pub use state::{serialize_state, deserialize_state, extract_state_from_script, f
 pub use deployment::{build_deploy_transaction, select_utxos, estimate_deploy_fee};
 pub use calling::build_call_transaction;
 pub use provider::{Provider, MockProvider};
-pub use signer::{Signer, LocalSigner, ExternalSigner};
+pub use signer::{Signer, LocalSigner, ExternalSigner, MockSigner};
 pub use contract::RunarContract;

@@ -13,9 +13,9 @@ This document specifies the Administrative Normal Form (ANF) Intermediate Repres
 2. **Explicit**: All intermediate computations are named. There are no nested expressions.
 3. **Serializable**: The IR has a well-defined JSON serialization using RFC 8785 (JSON Canonicalization Scheme / JCS).
 4. **Flat**: Method bodies are flat lists of bindings -- no nested blocks except for `if` and `loop` nodes.
-5. **Typed** (planned): Per-binding type annotations are specified below but not yet emitted by the current compilers. The current IR omits the `type` field on bindings and uses `kind` as the value node discriminator instead of `tag`.
+5. **Typed** (planned): Per-binding type annotations may be added in a future version as an optional `type` field on bindings.
 
-> **Implementation note:** The current compiler output differs from this specification in two ways: (1) bindings do not carry a `type` field, and (2) the top-level `version` field is not emitted. The value node discriminator field is named `kind` in the actual output rather than `tag` as specified below. These discrepancies will be resolved as the specification and compilers converge.
+> **Implementation note:** Per-binding type annotations are a planned future extension. If added, they would appear as a `type` field on `ANFBinding`.
 
 ---
 
@@ -25,7 +25,6 @@ This document specifies the Administrative Normal Form (ANF) Intermediate Repres
 
 ```
 ANFProgram = {
-    version: string,              // IR format version, e.g. "0.1.0"
     contractName: string,         // Name of the contract class
     properties: ANFProperty[],    // Property declarations in order
     methods: ANFMethod[]          // Methods in declaration order
@@ -49,8 +48,7 @@ ANFMethod = {
     name: string,                 // Method name
     params: ANFParam[],           // Parameters in declaration order
     body: ANFBinding[],           // Flat list of bindings
-    isPublic: boolean,            // true = entry point, false = helper
-    returnType: ANFType           // Return type ("void" for public methods)
+    isPublic: boolean             // true = entry point, false = helper
 }
 ```
 
@@ -72,7 +70,6 @@ Every intermediate result in the IR is assigned to a named temporary. A method b
 ```
 ANFBinding = {
     name: string,                 // Temporary name: t0, t1, t2, ...
-    type: ANFType,                // Type of the bound value
     value: ANFValue               // The computation
 }
 ```
@@ -91,7 +88,7 @@ The numbering resets for each method. The compiler MUST use this exact naming sc
 
 ## 4. ANF Value Nodes
 
-Each `ANFValue` is a tagged union. The `tag` field determines which other fields are present.
+Each `ANFValue` is a tagged union. The `kind` field determines which other fields are present.
 
 ### 4.1 `load_param`
 
@@ -99,15 +96,15 @@ Load a method parameter.
 
 ```json
 {
-    "tag": "load_param",
-    "param": "sig"
+    "kind": "load_param",
+    "name": "sig"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"load_param"` | Node discriminator |
-| `param` | `string` | Parameter name |
+| `kind` | `"load_param"` | Node discriminator |
+| `name` | `string` | Parameter name |
 
 ### 4.2 `load_prop`
 
@@ -115,15 +112,15 @@ Load a contract property (via `this.propName`).
 
 ```json
 {
-    "tag": "load_prop",
-    "prop": "pubKeyHash"
+    "kind": "load_prop",
+    "name": "pubKeyHash"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"load_prop"` | Node discriminator |
-| `prop` | `string` | Property name |
+| `kind` | `"load_prop"` | Node discriminator |
+| `name` | `string` | Property name |
 
 ### 4.3 `load_const`
 
@@ -131,22 +128,17 @@ Load a compile-time constant.
 
 ```json
 {
-    "tag": "load_const",
-    "constType": "bigint",
+    "kind": "load_const",
     "value": "42"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"load_const"` | Node discriminator |
-| `constType` | `string` | One of: `"bigint"`, `"boolean"`, `"bytes"` |
-| `value` | `string` | String representation of the value |
+| `kind` | `"load_const"` | Node discriminator |
+| `value` | `string \| bigint \| boolean` | The constant value |
 
-Value encoding:
-- `bigint`: Decimal string, e.g. `"42"`, `"-1"`, `"0"`
-- `boolean`: `"true"` or `"false"`
-- `bytes`: Hex string (lowercase, even length), e.g. `"deadbeef"`
+The `value` field holds the constant directly. In JSON serialization, `bigint` values are represented as strings or numbers, `boolean` as JSON booleans, and byte string literals as hex strings.
 
 ### 4.4 `bin_op`
 
@@ -154,7 +146,7 @@ Binary operation on two previously-bound values.
 
 ```json
 {
-    "tag": "bin_op",
+    "kind": "bin_op",
     "op": "+",
     "left": "t0",
     "right": "t1"
@@ -163,10 +155,11 @@ Binary operation on two previously-bound values.
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"bin_op"` | Node discriminator |
+| `kind` | `"bin_op"` | Node discriminator |
 | `op` | `string` | Operator (see table below) |
 | `left` | `string` | Name of left operand binding |
 | `right` | `string` | Name of right operand binding |
+| `result_type` | `string?` | Optional operand type hint: `"bytes"` for ByteString/PubKey/Sig/Sha256 etc., omitted for numeric |
 
 Supported operators:
 
@@ -177,14 +170,19 @@ Supported operators:
 | `"*"` | bigint | Multiplication |
 | `"/"` | bigint | Truncating division |
 | `"%"` | bigint | Modulo |
-| `"=="` | any | Equality |
-| `"!="` | any | Inequality |
+| `"==="` | any | Equality |
+| `"!=="` | any | Inequality |
 | `"<"` | bigint | Less than |
 | `"<="` | bigint | Less than or equal |
 | `">"` | bigint | Greater than |
 | `">="` | bigint | Greater than or equal |
 | `"&&"` | boolean | Logical AND |
 | `"\|\|"` | boolean | Logical OR |
+| `"&"` | bigint | Bitwise AND |
+| `"\|"` | bigint | Bitwise OR |
+| `"^"` | bigint | Bitwise XOR |
+| `"<<"` | bigint | Left shift |
+| `">>"` | bigint | Right shift |
 
 ### 4.5 `unary_op`
 
@@ -192,7 +190,7 @@ Unary operation.
 
 ```json
 {
-    "tag": "unary_op",
+    "kind": "unary_op",
     "op": "!",
     "operand": "t3"
 }
@@ -200,7 +198,7 @@ Unary operation.
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"unary_op"` | Node discriminator |
+| `kind` | `"unary_op"` | Node discriminator |
 | `op` | `string` | `"!"` (logical NOT), `"-"` (negate), `"~"` (bitwise NOT) |
 | `operand` | `string` | Name of operand binding |
 
@@ -210,16 +208,16 @@ Call a built-in function.
 
 ```json
 {
-    "tag": "call",
-    "function": "checkSig",
+    "kind": "call",
+    "func": "checkSig",
     "args": ["t0", "t1"]
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"call"` | Node discriminator |
-| `function` | `string` | Built-in function name |
+| `kind` | `"call"` | Node discriminator |
+| `func` | `string` | Built-in function name |
 | `args` | `string[]` | Names of argument bindings |
 
 ### 4.7 `method_call`
@@ -228,7 +226,8 @@ Call a private method on the contract.
 
 ```json
 {
-    "tag": "method_call",
+    "kind": "method_call",
+    "object": "t1",
     "method": "square",
     "args": ["t2"]
 }
@@ -236,7 +235,8 @@ Call a private method on the contract.
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"method_call"` | Node discriminator |
+| `kind` | `"method_call"` | Node discriminator |
+| `object` | `string` | Name of the receiver binding (typically `this`) |
 | `method` | `string` | Private method name |
 | `args` | `string[]` | Names of argument bindings |
 
@@ -248,67 +248,47 @@ Conditional with two branches. Both branches are sequences of bindings that prod
 
 ```json
 {
-    "tag": "if",
-    "condition": "t5",
-    "thenBranch": [
-        { "name": "t6", "type": "bigint", "value": { "tag": "load_const", "constType": "bigint", "value": "1" } }
+    "kind": "if",
+    "cond": "t5",
+    "then": [
+        { "name": "t6", "value": { "kind": "load_const", "value": "1" } }
     ],
-    "elseBranch": [
-        { "name": "t7", "type": "bigint", "value": { "tag": "load_const", "constType": "bigint", "value": "0" } }
-    ],
-    "thenResult": "t6",
-    "elseResult": "t7"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `tag` | `"if"` | Node discriminator |
-| `condition` | `string` | Name of boolean binding |
-| `thenBranch` | `ANFBinding[]` | Bindings in the then branch |
-| `elseBranch` | `ANFBinding[]` | Bindings in the else branch |
-| `thenResult` | `string` | Name of result binding in then branch |
-| `elseResult` | `string` | Name of result binding in else branch |
-
-Branch temporary names continue the global sequence. If the `if` node is at position `k`, then `thenBranch` temporaries start at `t{k+1}`, and `elseBranch` temporaries start after the last `thenBranch` temporary.
-
-For `if` statements with no result value (side-effects only, such as property updates), `thenResult` and `elseResult` may be `null`.
-
-### 4.9 `loop`
-
-Unrolled bounded loop. The IR represents the loop after unrolling -- each iteration is explicit.
-
-```json
-{
-    "tag": "loop",
-    "iterations": [
-        {
-            "index": "0",
-            "bindings": [
-                { "name": "t10", "type": "bigint", "value": { "tag": "load_const", "constType": "bigint", "value": "0" } }
-            ]
-        },
-        {
-            "index": "1",
-            "bindings": [
-                { "name": "t11", "type": "bigint", "value": { "tag": "load_const", "constType": "bigint", "value": "1" } }
-            ]
-        }
+    "else": [
+        { "name": "t7", "value": { "kind": "load_const", "value": "0" } }
     ]
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"loop"` | Node discriminator |
-| `iterations` | `Iteration[]` | One entry per unrolled iteration |
+| `kind` | `"if"` | Node discriminator |
+| `cond` | `string` | Name of boolean binding |
+| `then` | `ANFBinding[]` | Bindings in the then branch |
+| `else` | `ANFBinding[]` | Bindings in the else branch |
 
-Each `Iteration`:
+Branch temporary names continue the global sequence. If the `if` node is at position `k`, then `then` temporaries start at `t{k+1}`, and `else` temporaries start after the last `then` temporary.
+
+### 4.9 `loop`
+
+Bounded loop with a count and body. The loop body is a sequence of bindings executed `count` times with an iteration variable.
+
+```json
+{
+    "kind": "loop",
+    "count": 3,
+    "body": [
+        { "name": "t10", "value": { "kind": "load_const", "value": "0" } }
+    ],
+    "iterVar": "i"
+}
+```
 
 | Field | Type | Description |
 |---|---|---|
-| `index` | `string` | Iteration index as decimal string |
-| `bindings` | `ANFBinding[]` | Bindings for this iteration |
+| `kind` | `"loop"` | Node discriminator |
+| `count` | `number` | Number of iterations |
+| `body` | `ANFBinding[]` | Bindings executed each iteration |
+| `iterVar` | `string` | Name of the iteration variable |
 
 ### 4.10 `assert`
 
@@ -316,15 +296,15 @@ Assert a condition.
 
 ```json
 {
-    "tag": "assert",
-    "condition": "t4"
+    "kind": "assert",
+    "value": "t4"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"assert"` | Node discriminator |
-| `condition` | `string` | Name of boolean binding |
+| `kind` | `"assert"` | Node discriminator |
+| `value` | `string` | Name of boolean binding |
 
 ### 4.11 `update_prop`
 
@@ -332,16 +312,16 @@ Update a mutable property.
 
 ```json
 {
-    "tag": "update_prop",
-    "prop": "counter",
+    "kind": "update_prop",
+    "name": "counter",
     "value": "t8"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"update_prop"` | Node discriminator |
-| `prop` | `string` | Property name |
+| `kind` | `"update_prop"` | Node discriminator |
+| `name` | `string` | Property name |
 | `value` | `string` | Name of new value binding |
 
 ### 4.12 `get_state_script`
@@ -350,7 +330,7 @@ Get the serialized state script for the current contract state.
 
 ```json
 {
-    "tag": "get_state_script"
+    "kind": "get_state_script"
 }
 ```
 
@@ -362,53 +342,33 @@ Verify the sighash preimage.
 
 ```json
 {
-    "tag": "check_preimage",
+    "kind": "check_preimage",
     "preimage": "t9"
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"check_preimage"` | Node discriminator |
+| `kind` | `"check_preimage"` | Node discriminator |
 | `preimage` | `string` | Name of preimage binding |
 
-### 4.14 `array_access`
+### 4.14 `add_output`
 
-Read from a fixed array.
+Add an output to the transaction being constructed (used by stateful contracts for multi-output patterns).
 
 ```json
 {
-    "tag": "array_access",
-    "array": "t0",
-    "index": "t1"
+    "kind": "add_output",
+    "satoshis": "t10",
+    "stateValues": ["t11", "t12"]
 }
 ```
 
 | Field | Type | Description |
 |---|---|---|
-| `tag` | `"array_access"` | Node discriminator |
-| `array` | `string` | Name of array binding |
-| `index` | `string` | Name of index binding |
-
-### 4.15 `array_update`
-
-Write to a fixed array (produces a new array).
-
-```json
-{
-    "tag": "array_update",
-    "array": "t0",
-    "index": "t1",
-    "value": "t2"
-}
-```
-
-| Field | Type | Description |
-|---|---|---|
-| `tag` | `"array_update"` | Node discriminator |
-| `array` | `string` | Name of array binding |
-| `index` | `string` | Name of index binding |
-| `value` | `string` | Name of new element binding |
+| `kind` | `"add_output"` | Node discriminator |
+| `satoshis` | `string` | Name of binding holding the satoshis amount |
+| `stateValues` | `string[]` | Names of bindings for each mutable property value, in declaration order |
 
 ---
 
@@ -475,35 +435,27 @@ To ensure deterministic output:
 - Temporaries are numbered sequentially per method.
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined into `bin_op` etc.).
-- Short-circuit operators (`&&`, `||`) are lowered to `if` nodes.
+- Logical operators (`&&`, `||`) are lowered to eager `bin_op` nodes (not short-circuit `if` nodes).
 
-### 7.3 Short-Circuit Lowering
+### 7.3 Logical Operator Lowering
 
-The expression `a && b` is lowered to:
-
-```
-t0 = <evaluate a>
-t1 = if(t0) {
-    t2 = <evaluate b>
-    -> t2
-} else {
-    t3 = load_const(boolean, "false")
-    -> t3
-}
-```
-
-Similarly, `a || b` is lowered to:
+The expression `a && b` is lowered to an eager `bin_op`:
 
 ```
 t0 = <evaluate a>
-t1 = if(t0) {
-    t2 = load_const(boolean, "true")
-    -> t2
-} else {
-    t3 = <evaluate b>
-    -> t3
-}
+t1 = <evaluate b>
+t2 = bin_op("&&", t0, t1)
 ```
+
+Similarly, `a || b` is lowered to an eager `bin_op`:
+
+```
+t0 = <evaluate a>
+t1 = <evaluate b>
+t2 = bin_op("||", t0, t1)
+```
+
+Both operands are evaluated unconditionally. This differs from TypeScript's short-circuit semantics but is safe in Rúnar because expressions are pure (no side effects beyond `assert`).
 
 ---
 
@@ -539,83 +491,74 @@ export class P2PKH extends SmartContract {
             "body": [
                 {
                     "name": "t0",
-                    "type": "PubKey",
                     "value": {
-                        "param": "pubKey",
-                        "tag": "load_param"
+                        "kind": "load_param",
+                        "name": "pubKey"
                     }
                 },
                 {
                     "name": "t1",
-                    "type": "Ripemd160",
                     "value": {
+                        "kind": "call",
+                        "func": "hash160",
                         "args": [
                             "t0"
-                        ],
-                        "function": "hash160",
-                        "tag": "call"
+                        ]
                     }
                 },
                 {
                     "name": "t2",
-                    "type": "Addr",
                     "value": {
-                        "prop": "pubKeyHash",
-                        "tag": "load_prop"
+                        "kind": "load_prop",
+                        "name": "pubKeyHash"
                     }
                 },
                 {
                     "name": "t3",
-                    "type": "boolean",
                     "value": {
+                        "kind": "bin_op",
+                        "op": "===",
                         "left": "t1",
-                        "op": "==",
-                        "right": "t2",
-                        "tag": "bin_op"
+                        "right": "t2"
                     }
                 },
                 {
                     "name": "t4",
-                    "type": "void",
                     "value": {
-                        "condition": "t3",
-                        "tag": "assert"
+                        "kind": "assert",
+                        "value": "t3"
                     }
                 },
                 {
                     "name": "t5",
-                    "type": "Sig",
                     "value": {
-                        "param": "sig",
-                        "tag": "load_param"
+                        "kind": "load_param",
+                        "name": "sig"
                     }
                 },
                 {
                     "name": "t6",
-                    "type": "PubKey",
                     "value": {
-                        "param": "pubKey",
-                        "tag": "load_param"
+                        "kind": "load_param",
+                        "name": "pubKey"
                     }
                 },
                 {
                     "name": "t7",
-                    "type": "boolean",
                     "value": {
+                        "kind": "call",
+                        "func": "checkSig",
                         "args": [
                             "t5",
                             "t6"
-                        ],
-                        "function": "checkSig",
-                        "tag": "call"
+                        ]
                     }
                 },
                 {
                     "name": "t8",
-                    "type": "void",
                     "value": {
-                        "condition": "t7",
-                        "tag": "assert"
+                        "kind": "assert",
+                        "value": "t7"
                     }
                 }
             ],
@@ -630,8 +573,7 @@ export class P2PKH extends SmartContract {
                     "name": "pubKey",
                     "type": "PubKey"
                 }
-            ],
-            "returnType": "void"
+            ]
         }
     ],
     "properties": [
@@ -640,8 +582,7 @@ export class P2PKH extends SmartContract {
             "readonly": true,
             "type": "Addr"
         }
-    ],
-    "version": "0.1.0"
+    ]
 }
 ```
 
@@ -655,13 +596,11 @@ A conforming ANF IR must satisfy:
 
 1. **Sequential naming**: Binding at index `i` in a method body has name `t{i}`.
 2. **Forward references only**: A binding may only reference temporaries with smaller indices (i.e., defined earlier in the same body or branch).
-3. **Type consistency**: The `type` field of each binding matches the result type of its `value` node.
-4. **No orphan references**: Every name referenced in an `ANFValue` must be either a method parameter, a property name, or a previously defined temporary.
-5. **Public method assertion**: The last binding in a public method's body must have tag `assert`.
-6. **Single version**: The `version` field matches the specification version.
+3. **No orphan references**: Every name referenced in an `ANFValue` must be either a method parameter, a property name, or a previously defined temporary.
+4. **Public method assertion**: The last binding in a public method's body must have kind `assert`.
 
 ---
 
 ## 10. Extensibility
 
-New `ANFValue` tags may be added in future versions. A conforming implementation MUST reject unknown tags rather than silently ignoring them. The `version` field indicates which tags are valid.
+New `ANFValue` kinds may be added in future versions. A conforming implementation MUST reject unknown kinds rather than silently ignoring them.

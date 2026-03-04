@@ -62,13 +62,11 @@ BSV re-enabled opcodes disabled in BTC, changing the feasibility picture signifi
 
 2. **Stack depth critically tight** — Each polynomial = 256 stack items. Rúnar's 800-item limit means at most 3 polynomials simultaneously with 32 slots working space. NTT butterfly operations need OP_PICK/OP_ROLL at depths up to 255.
 
-3. **FixedArray indexed access not implemented** — Rúnar's type system supports `FixedArray<T, N>` but the stack lowerer has no handler for `__array_access`. Would need implementation first.
-
-4. **Script size explosion** — Estimated 1-4 MB depending on whether matrix A is provided as witness data or derived from seed. Within BSV's 10 MB limit but enormous.
+3. **Script size explosion** — Estimated 1-4 MB depending on whether matrix A is provided as witness data or derived from seed. Within BSV's 10 MB limit but enormous.
 
 ### Verdict
 
-**Theoretically possible in BSV. Impractical for Rúnar today.** Requires implementing Keccak from scratch (~100K opcodes), dealing with polynomial operations at the stack depth limit, and building array indexing support. Multi-month effort for a ~1 MB verification script.
+**Theoretically possible in BSV. Impractical for Rúnar today.** Requires implementing Keccak from scratch (~100K opcodes) and dealing with polynomial operations at the stack depth limit. Multi-month effort for a ~1 MB verification script.
 
 ## Hash-Based Signatures: The Practical Alternative
 

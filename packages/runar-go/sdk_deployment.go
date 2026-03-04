@@ -28,6 +28,7 @@ func BuildDeployTransaction(
 	satoshis int64,
 	changeAddress string,
 	changeScript string,
+	feeRate ...int64,
 ) (txHex string, inputCount int, err error) {
 	if len(utxos) == 0 {
 		return "", 0, fmt.Errorf("buildDeployTransaction: no UTXOs provided")
@@ -38,7 +39,7 @@ func BuildDeployTransaction(
 		totalInput += u.Satoshis
 	}
 
-	fee := EstimateDeployFee(len(utxos), len(lockingScript)/2)
+	fee := EstimateDeployFee(len(utxos), len(lockingScript)/2, feeRate...)
 	change := totalInput - satoshis - fee
 
 	if change < 0 {
@@ -100,7 +101,7 @@ func BuildDeployTransaction(
 
 // SelectUtxos selects the minimum set of UTXOs needed to fund a deployment,
 // using a largest-first strategy.
-func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int) []UTXO {
+func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int, feeRate ...int64) []UTXO {
 	sorted := make([]UTXO, len(utxos))
 	copy(sorted, utxos)
 	sort.Slice(sorted, func(i, j int) bool {
@@ -114,7 +115,7 @@ func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int) [
 		selected = append(selected, utxo)
 		total += utxo.Satoshis
 
-		fee := EstimateDeployFee(len(selected), lockingScriptByteLen)
+		fee := EstimateDeployFee(len(selected), lockingScriptByteLen, feeRate...)
 		if total >= targetSatoshis+fee {
 			return selected
 		}
@@ -126,12 +127,16 @@ func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int) [
 
 // EstimateDeployFee estimates the fee for a deploy transaction given the
 // number of P2PKH inputs and the contract locking script byte length.
-// Assumes 1 sat/byte fee rate and includes a P2PKH change output.
-func EstimateDeployFee(numInputs int, lockingScriptByteLen int) int64 {
+// Includes a P2PKH change output. feeRate is in satoshis per byte (0 defaults to 1).
+func EstimateDeployFee(numInputs int, lockingScriptByteLen int, feeRate ...int64) int64 {
+	rate := int64(1)
+	if len(feeRate) > 0 && feeRate[0] > 0 {
+		rate = feeRate[0]
+	}
 	inputsSize := numInputs * p2pkhInputSize
 	contractOutputSize := 8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen
 	changeOutputSize := p2pkhOutputSize
-	return int64(txOverhead + inputsSize + contractOutputSize + changeOutputSize)
+	return int64(txOverhead+inputsSize+contractOutputSize+changeOutputSize) * rate
 }
 
 // ---------------------------------------------------------------------------

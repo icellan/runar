@@ -43,6 +43,7 @@ use runar::sdk::*;
 let artifact: RunarArtifact = serde_json::from_str(&json)?;
 
 // 2. Create the contract with constructor arguments
+//    Panics if the number of args does not match the artifact's constructor params.
 let mut contract = RunarContract::new(artifact, vec![
     SdkValue::Bytes(pub_key_hash),
 ]);
@@ -72,9 +73,38 @@ let (txid2, tx2) = contract.call("unlock", &[
 ], &mut provider, &signer, None)?;
 ```
 
+### Connected API
+
+Instead of passing the provider and signer to every `deploy()` and `call()` invocation, you can store them on the contract with `connect()` and then use `deploy_connected()` / `call_connected()`:
+
+```rust
+use runar::sdk::*;
+
+let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
+
+// Store provider and signer on the contract
+contract.connect(
+    Box::new(MockProvider::testnet()),
+    Box::new(MockSigner::new()),
+);
+
+// Deploy without passing provider/signer
+let (txid, tx) = contract.deploy_connected(&DeployOptions {
+    satoshis: 10_000,
+    change_address: None,
+})?;
+
+// Call without passing provider/signer
+let (txid2, tx2) = contract.call_connected("increment", &[], None)?;
+```
+
+If `connect()` has not been called, `deploy_connected()` and `call_connected()` return an error.
+
 ### Stateful Contract Example
 
 ```rust
+use std::collections::HashMap;
+
 // Create with initial state
 let mut contract = RunarContract::new(counter_artifact, vec![SdkValue::Int(0)]);
 
@@ -96,6 +126,11 @@ let (txid2, _) = contract.call("increment", &[], &mut provider, &signer, Some(&C
     new_state: Some(new_state),
 }))?;
 println!("Count: {:?}", contract.state().get("count")); // Some(Int(1))
+
+// Update state directly (without a call)
+let mut override_state = HashMap::new();
+override_state.insert("count".to_string(), SdkValue::Int(99));
+contract.set_state(override_state);
 ```
 
 ### Reconnecting to a Deployed Contract
@@ -104,6 +139,19 @@ println!("Count: {:?}", contract.state().get("count")); // Some(Int(1))
 // Reconnect to an existing on-chain contract by txid
 let contract = RunarContract::from_txid(artifact, &txid, 0, &provider)?;
 println!("Current state: {:?}", contract.state());
+```
+
+### Script Access
+
+```rust
+// Get the full locking script hex (code + OP_RETURN + state for stateful contracts)
+let locking_script = contract.get_locking_script();
+
+// Build an unlocking script for a method call
+let unlock = contract.build_unlocking_script("transfer", &[
+    SdkValue::Bytes(sig_hex),
+    SdkValue::Bytes(pubkey_hex),
+])?;
 ```
 
 ---
@@ -117,6 +165,9 @@ Providers handle communication with the BSV network: fetching UTXOs, broadcastin
 For unit testing without network access:
 
 ```rust
+// Create with a specific network name
+let mut provider = MockProvider::new("mainnet");
+// Or use the testnet shorthand
 let mut provider = MockProvider::testnet();
 
 // Pre-register UTXOs
@@ -133,8 +184,8 @@ provider.add_transaction(Transaction { /* ... */ });
 // Pre-register contract UTXOs for stateful lookup
 provider.add_contract_utxo("scripthash...", Utxo { /* ... */ });
 
-// Inspect broadcasts
-let broadcasted = provider.get_broadcasted_txs();
+// Inspect broadcasts after deploying/calling
+let broadcasted: &[String] = provider.get_broadcasted_txs();
 
 // Override the fee rate (default 1 sat/byte)
 provider.set_fee_rate(2);
@@ -165,18 +216,36 @@ Signers handle private key operations: signing transactions and deriving public 
 
 ### MockSigner
 
-For unit testing without real crypto:
+For unit testing without real crypto. Returns deterministic dummy values (a fixed 66-char hex public key, a fixed 40-char hex address, and a fixed mock DER signature):
 
 ```rust
 let signer = MockSigner::new();
-let pub_key = signer.get_public_key()?;  // 66-char hex
-let address = signer.get_address()?;
+let pub_key = signer.get_public_key()?;  // "0200...00" (66-char hex)
+let address = signer.get_address()?;     // "0000...00" (40-char hex)
 let sig = signer.sign(tx_hex, 0, subscript, satoshis, None)?;
+
+// Fields are public for customization in tests
+let custom = MockSigner {
+    public_key: "02aabb...".to_string(),
+    address: "myaddr".to_string(),
+};
+```
+
+`MockSigner` also implements `Default` (equivalent to `MockSigner::new()`).
+
+### LocalSigner
+
+A stub signer wrapping a hex-encoded private key. The current implementation returns mock values (not real secp256k1 signatures). For production use, prefer `ExternalSigner` with a real signing library:
+
+```rust
+let signer = LocalSigner::new("0000000000000000000000000000000000000000000000000000000000000001");
+let pub_key = signer.get_public_key()?;  // stub: returns "0200...00"
+let sig = signer.sign(tx_hex, 0, subscript, satoshis, None)?;  // stub: returns mock DER
 ```
 
 ### ExternalSigner
 
-Delegates signing to caller-provided closures. Use this to wrap real signing libraries:
+Delegates signing to caller-provided closures. Use this to wrap real signing libraries (e.g., `rust-sv`, `secp256k1`):
 
 ```rust
 let signer = ExternalSigner::new(
@@ -217,7 +286,7 @@ Stateful contracts maintain state across transactions using the OP_PUSH_TX patte
 
 1. **Deploy:** The initial state is serialized and appended after an OP_RETURN separator in the locking script.
 2. **Call:** The SDK reads the current state from the existing UTXO, builds the unlocking script, and creates a new output with the updated locking script containing the new state.
-3. **Read:** `contract.state()` returns the deserialized state from the UTXO's locking script.
+3. **Read:** `contract.state()` returns the deserialized state as `&HashMap<String, SdkValue>`.
 
 ### State Serialization Format
 
@@ -232,6 +301,8 @@ Type-specific encoding:
 - `bool`: OP_0 (`00`) for false, OP_1 (`51`) for true
 - `bytes`/`ByteString`/`PubKey`/`Addr`/`Sha256`: direct pushdata
 
+The `find_last_op_return()` function uses opcode-aware walking to locate the real OP_RETURN boundary, properly skipping `0x6a` bytes inside push data payloads.
+
 ---
 
 ## Value Types
@@ -244,6 +315,14 @@ pub enum SdkValue {
     Bool(bool),
     Bytes(String),  // hex-encoded
 }
+```
+
+Convenience accessors are available. They panic if called on the wrong variant:
+
+```rust
+let n: i64 = value.as_int();    // panics if not Int
+let b: bool = value.as_bool();  // panics if not Bool
+let s: &str = value.as_bytes(); // panics if not Bytes
 ```
 
 ---
@@ -260,7 +339,11 @@ use runar::sdk::state::*;
 // Select UTXOs (largest-first strategy)
 let selected = select_utxos(&utxos, target_satoshis, locking_script_byte_len, Some(fee_rate));
 
+// Estimate the fee for a deploy transaction
+let fee = estimate_deploy_fee(num_inputs, locking_script_byte_len, Some(fee_rate));
+
 // Build an unsigned deploy transaction
+// Panics if utxos is empty or if total funds are insufficient.
 let (tx_hex, input_count) = build_deploy_transaction(
     &locking_script, &utxos, satoshis, change_address, &change_script, Some(fee_rate),
 );
@@ -273,15 +356,34 @@ let (tx_hex, input_count) = build_call_transaction(
 
 // State serialization
 let state_hex = serialize_state(&state_fields, &values);
-let state = deserialize_state(&state_fields, &state_hex);
-let state = extract_state_from_script(&artifact, &full_script);
+let state: HashMap<String, SdkValue> = deserialize_state(&state_fields, &state_hex);
+let state: Option<HashMap<String, SdkValue>> = extract_state_from_script(&artifact, &full_script);
+
+// Opcode-aware OP_RETURN finder (returns hex-char offset or None)
+let pos: Option<usize> = find_last_op_return(&script_hex);
 ```
+
+---
+
+## Panics
+
+Several functions panic instead of returning `Result` for programmer errors:
+
+| Function | Panic condition |
+|---|---|
+| `RunarContract::new()` | Constructor arg count does not match artifact ABI |
+| `build_deploy_transaction()` | Empty UTXO slice, or insufficient funds |
+| `SdkValue::as_int()` | Called on a non-`Int` variant |
+| `SdkValue::as_bool()` | Called on a non-`Bool` variant |
+| `SdkValue::as_bytes()` | Called on a non-`Bytes` variant |
+
+All other error conditions return `Result<T, String>`.
 
 ---
 
 ## Design Decisions
 
 - **No built-in network provider:** Rust applications typically use specific async runtimes (tokio, async-std) and HTTP clients. Implement the `Provider` trait with your stack.
-- **No built-in crypto signer:** Use established crates like `rust-sv` or `secp256k1` for signing. The `ExternalSigner` closure pattern makes integration straightforward.
+- **No built-in crypto signer:** Use established crates like `rust-sv` or `secp256k1` for signing. The `ExternalSigner` closure pattern makes integration straightforward. `LocalSigner` exists as a stub but does not perform real signing.
 - **Synchronous API:** All methods are synchronous (`fn`, not `async fn`). This makes the SDK usable with any async runtime without imposing `Send`/`Sync` constraints.
 - **`SdkValue` enum:** Unlike Go's `interface{}`, Rust uses a typed enum for state values, providing exhaustive matching and type safety.
