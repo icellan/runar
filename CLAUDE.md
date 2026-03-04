@@ -171,9 +171,9 @@ All three languages have equivalent deployment SDKs for interacting with compile
 
 **TypeScript** (`packages/runar-sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `LocalSigner` (wraps @bsv/sdk for ECDSA + BIP-143), `buildDeployTransaction`, `buildCallTransaction`, state serialization.
 
-**Go** (`packages/runar-go/sdk_*.go`): `RunarContract`, `MockProvider`, `MockSignerImpl`/`ExternalSigner`, `BuildDeployTransaction`, `BuildCallTransaction`, state serialization. Signing is delegated via the `ExternalSigner` callback pattern (e.g., wrapping `github.com/bsv-blockchain/go-sdk`).
+**Go** (`packages/runar-go/sdk_*.go`): `RunarContract`, `MockProvider`, `LocalSigner` (wraps go-sdk for ECDSA + BIP-143), `MockSignerImpl`/`ExternalSigner`, `BuildDeployTransaction`, `BuildCallTransaction`, state serialization.
 
-**Rust** (`packages/runar-rs/src/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Signing is delegated via the `ExternalSigner` closure pattern (e.g., wrapping `rust-sv`).
+**Rust** (`packages/runar-rs/src/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner` (k256 ECDSA + manual BIP-143), `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization.
 
 Key SDK concepts:
 - `RunarContract` wraps a compiled artifact + constructor args, manages state and UTXO tracking

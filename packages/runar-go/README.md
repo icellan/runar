@@ -167,9 +167,27 @@ address, _ := signer.GetAddress()
 sig, _ := signer.Sign(txHex, 0, subscript, satoshis, nil)
 ```
 
+### LocalSigner
+
+Holds a private key in memory and performs real secp256k1 ECDSA signing with BIP-143 sighash computation. Uses `github.com/bsv-blockchain/go-sdk` internally. Accepts hex or WIF private keys:
+
+```go
+// From hex
+signer, err := runar.NewLocalSigner("0000...0001")
+
+// From WIF
+signer, err := runar.NewLocalSigner("KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn")
+
+pubKey, _ := signer.GetPublicKey()  // 66-char compressed pubkey hex
+address, _ := signer.GetAddress()   // mainnet P2PKH address (starts with 1)
+sig, _ := signer.Sign(txHex, 0, subscript, satoshis, nil)  // DER + sighash byte
+```
+
+Suitable for CLI tooling and testing. For production wallets, use ExternalSigner with hardware wallet callbacks.
+
 ### ExternalSigner
 
-Delegates signing to a caller-provided callback. Use this to wrap real signing libraries (e.g. `github.com/bsv-blockchain/go-sdk`):
+Delegates signing to a caller-provided callback:
 
 ```go
 signer := runar.NewExternalSigner(pubKeyHex, address,
@@ -291,6 +309,6 @@ type CallOptions struct {
 ## Design Decisions
 
 - **No built-in network provider:** Go applications typically have their own HTTP client preferences and middleware. Implement the `Provider` interface with your stack.
-- **No built-in crypto signer:** Go applications should use established libraries like `github.com/bsv-blockchain/go-sdk` for secp256k1 operations. The `ExternalSigner` callback pattern makes integration straightforward.
+- **Built-in LocalSigner:** `NewLocalSigner` provides real secp256k1 signing via `github.com/bsv-blockchain/go-sdk`. For custom signing flows, use `ExternalSigner` with callback functions.
 - **`interface{}` for state values:** Go lacks sum types, so state values use `interface{}` (int64 for bigint, bool for bool, string for hex bytes).
 - **Synchronous API:** All methods are synchronous. Use goroutines for concurrent operations.

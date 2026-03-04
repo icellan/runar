@@ -235,13 +235,21 @@ let custom = MockSigner {
 
 ### LocalSigner
 
-A stub signer wrapping a hex-encoded private key. The current implementation returns mock values (not real secp256k1 signatures). For production use, prefer `ExternalSigner` with a real signing library:
+Holds a private key in memory and performs real secp256k1 ECDSA signing with BIP-143 sighash computation. Uses the `k256` crate for ECDSA and manual BIP-143 preimage construction. Accepts hex or WIF private keys:
 
 ```rust
-let signer = LocalSigner::new("0000000000000000000000000000000000000000000000000000000000000001");
-let pub_key = signer.get_public_key()?;  // stub: returns "0200...00"
-let sig = signer.sign(tx_hex, 0, subscript, satoshis, None)?;  // stub: returns mock DER
+// From hex
+let signer = LocalSigner::new("0000...0001")?;
+
+// From WIF
+let signer = LocalSigner::new("KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn")?;
+
+let pub_key = signer.get_public_key()?;  // 66-char compressed pubkey hex
+let address = signer.get_address()?;     // mainnet P2PKH address (starts with "1")
+let sig = signer.sign(tx_hex, 0, subscript, satoshis, None)?;  // DER + sighash byte
 ```
+
+Suitable for CLI tooling and testing. For production wallets, use ExternalSigner with hardware wallet callbacks.
 
 ### ExternalSigner
 
@@ -384,6 +392,6 @@ All other error conditions return `Result<T, String>`.
 ## Design Decisions
 
 - **No built-in network provider:** Rust applications typically use specific async runtimes (tokio, async-std) and HTTP clients. Implement the `Provider` trait with your stack.
-- **No built-in crypto signer:** Use established crates like `rust-sv` or `secp256k1` for signing. The `ExternalSigner` closure pattern makes integration straightforward. `LocalSigner` exists as a stub but does not perform real signing.
+- **Built-in LocalSigner:** `LocalSigner::new()` provides real secp256k1 signing via the `k256` crate with manual BIP-143 sighash computation. For custom signing flows, use `ExternalSigner` with closure callbacks.
 - **Synchronous API:** All methods are synchronous (`fn`, not `async fn`). This makes the SDK usable with any async runtime without imposing `Send`/`Sync` constraints.
 - **`SdkValue` enum:** Unlike Go's `interface{}`, Rust uses a typed enum for state values, providing exhaustive matching and type safety.

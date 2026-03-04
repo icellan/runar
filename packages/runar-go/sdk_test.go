@@ -1883,3 +1883,177 @@ func TestSetState(t *testing.T) {
 		t.Errorf("expected count=99, got %v", state["count"])
 	}
 }
+
+// ---------------------------------------------------------------------------
+// LocalSigner
+// ---------------------------------------------------------------------------
+
+const testPrivKeyHex1 = "0000000000000000000000000000000000000000000000000000000000000001"
+const testPrivKeyHex2 = "0000000000000000000000000000000000000000000000000000000000000002"
+const testWifCompressed = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
+
+func TestLocalSigner_ConstructorHex(t *testing.T) {
+	signer, err := NewLocalSigner(testPrivKeyHex1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("expected non-nil signer")
+	}
+}
+
+func TestLocalSigner_ConstructorWif(t *testing.T) {
+	signer, err := NewLocalSigner(testWifCompressed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if signer == nil {
+		t.Fatal("expected non-nil signer")
+	}
+}
+
+func TestLocalSigner_ConstructorInvalid(t *testing.T) {
+	_, err := NewLocalSigner("not-a-key")
+	if err == nil {
+		t.Fatal("expected error for invalid key")
+	}
+}
+
+func TestLocalSigner_GetPublicKey(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	pk, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey error: %v", err)
+	}
+	// Private key 1 = secp256k1 generator point G
+	expected := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+	if pk != expected {
+		t.Errorf("expected %s, got %s", expected, pk)
+	}
+}
+
+func TestLocalSigner_GetPublicKey_66Chars(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	pk, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey error: %v", err)
+	}
+	if len(pk) != 66 {
+		t.Errorf("expected 66-char public key, got %d: %s", len(pk), pk)
+	}
+}
+
+func TestLocalSigner_GetAddress(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	addr, err := signer.GetAddress()
+	if err != nil {
+		t.Fatalf("GetAddress error: %v", err)
+	}
+	if len(addr) == 0 {
+		t.Fatal("expected non-empty address")
+	}
+	if addr[0] != '1' {
+		t.Errorf("expected mainnet address starting with 1, got %s", addr)
+	}
+}
+
+func TestLocalSigner_WifSameAsHex(t *testing.T) {
+	fromHex, _ := NewLocalSigner(testPrivKeyHex1)
+	fromWif, _ := NewLocalSigner(testWifCompressed)
+
+	pkHex, _ := fromHex.GetPublicKey()
+	pkWif, _ := fromWif.GetPublicKey()
+	if pkHex != pkWif {
+		t.Errorf("WIF and hex should produce same pubkey: %s vs %s", pkHex, pkWif)
+	}
+
+	addrHex, _ := fromHex.GetAddress()
+	addrWif, _ := fromWif.GetAddress()
+	if addrHex != addrWif {
+		t.Errorf("WIF and hex should produce same address: %s vs %s", addrHex, addrWif)
+	}
+}
+
+func TestLocalSigner_Sign(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+
+	// Minimal valid transaction: version(4) + 1 input(41 bytes) + 1 output(10 bytes) + locktime(4)
+	txHex := "01000000" + // version 1
+		"01" + // 1 input
+		strings.Repeat("00", 32) + // prevTxid
+		"00000000" + // prevIndex 0
+		"00" + // empty scriptSig
+		"ffffffff" + // sequence
+		"01" + // 1 output
+		"5000000000000000" + // 80 satoshis (LE)
+		"01" + // script length 1
+		"51" + // OP_1
+		"00000000" // locktime 0
+
+	sig, err := signer.Sign(txHex, 0, "51", 100, nil)
+	if err != nil {
+		t.Fatalf("Sign error: %v", err)
+	}
+
+	// Should be valid hex
+	for _, c := range sig {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("non-hex character in signature: %c", c)
+		}
+	}
+
+	// Should end with sighash byte 0x41
+	if sig[len(sig)-2:] != "41" {
+		t.Errorf("expected signature ending with 41, got %s", sig[len(sig)-2:])
+	}
+
+	// Should start with DER prefix 30
+	if sig[:2] != "30" {
+		t.Errorf("expected DER signature starting with 30, got %s", sig[:2])
+	}
+}
+
+func TestLocalSigner_SignDeterministic(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+
+	txHex := "01000000" +
+		"01" +
+		strings.Repeat("00", 32) +
+		"00000000" +
+		"00" +
+		"ffffffff" +
+		"01" +
+		"5000000000000000" +
+		"01" +
+		"51" +
+		"00000000"
+
+	sig1, _ := signer.Sign(txHex, 0, "51", 100, nil)
+	sig2, _ := signer.Sign(txHex, 0, "51", 100, nil)
+	if sig1 != sig2 {
+		t.Errorf("expected deterministic signatures, got %s vs %s", sig1, sig2)
+	}
+}
+
+func TestLocalSigner_DifferentKeysDifferentSigs(t *testing.T) {
+	signer1, _ := NewLocalSigner(testPrivKeyHex1)
+	signer2, _ := NewLocalSigner(testPrivKeyHex2)
+
+	txHex := "01000000" +
+		"01" +
+		strings.Repeat("00", 32) +
+		"00000000" +
+		"00" +
+		"ffffffff" +
+		"01" +
+		"5000000000000000" +
+		"01" +
+		"51" +
+		"00000000"
+
+	sig1, _ := signer1.Sign(txHex, 0, "51", 100, nil)
+	sig2, _ := signer2.Sign(txHex, 0, "51", 100, nil)
+	if sig1 == sig2 {
+		t.Error("different keys should produce different signatures")
+	}
+}
