@@ -459,7 +459,7 @@ The `<code_part>` contains the contract logic. State data is appended after an `
 
 ```
     sigma = {p1: v1, ..., pn: vn}
-    serialized = serialize(v1) ++ ... ++ serialize(vn) ++ OP_DROP^n
+    serialized = serialize(v1) ++ ... ++ serialize(vn)
     ────────────────────────────────────────────────────────────────
     <this.getStateScript(), env, sigma>  -->  VBytes(serialized)
 ```
@@ -468,18 +468,18 @@ The `<code_part>` contains the contract logic. State data is appended after an `
 
 ```
 Transaction 1 (Deploy):
-    Output[0].script = <0> OP_DROP <counter_code>
-                        ^-- initial counter value = 0
+    Output[0].script = <counter_code> OP_RETURN <0>
+                                                 ^-- initial counter value = 0
 
 Transaction 2 (Increment by 5):
     Input[0].script  = <5> <preimage>     /* amount=5, sighash preimage */
-    Output[0].script = <5> OP_DROP <counter_code>
-                        ^-- new counter value = 5
+    Output[0].script = <counter_code> OP_RETURN <5>
+                                                 ^-- new counter value = 5
 
     The increment method:
     1. Reads current state from preimage: counter = 0
     2. Computes new state: counter = 0 + 5 = 5
-    3. Constructs expected output script: <5> OP_DROP <counter_code>
+    3. Constructs expected output script: <counter_code> OP_RETURN <5>
     4. Verifies preimage matches (output contains expected script)
     5. assert succeeds -> transaction is valid
 ```

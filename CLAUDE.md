@@ -30,7 +30,7 @@ examples/
   sol/                # Solidity-like contracts + vitest tests
   move/               # Move-style contracts + vitest tests
   sdk-usage/          # SDK usage reference docs (not runnable)
-end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp)
+end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
 spec/                 # Language specification (grammar, semantics, type system)
 docs/                 # User-facing documentation
   formats/            # Format-specific guides (solidity.md, move.md, go.md, rust.md)
@@ -82,7 +82,7 @@ When adding a new ANF IR node (like `add_output`), update ALL of these:
 - `packages/runar-compiler/src/ir/anf-ir.ts` — add interface + union member
 - `packages/runar-compiler/src/passes/04-anf-lower.ts` — emit the new node
 - `packages/runar-compiler/src/passes/05-stack-lower.ts` — handle in `lowerBinding` dispatch + `collectRefs`
-- `packages/runar-compiler/src/optimizer/constant-fold.ts` — add to `foldValue`, `collectRefsInValue`, `hasSideEffects`
+- `packages/runar-compiler/src/optimizer/constant-fold.ts` — add to `foldValue`, `collectRefsFromValue`, `hasSideEffect`
 - `compilers/go/ir/types.go` — add fields to `ANFValue` struct
 - `compilers/go/ir/loader.go` — add to `knownKinds`
 - `compilers/go/codegen/stack.go` — add to `collectRefs` + `lowerBinding` dispatch

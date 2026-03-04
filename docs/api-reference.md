@@ -436,7 +436,7 @@ Get the total token balance across all UTXOs belonging to this wallet.
 const balance: bigint = await wallet.getBalance();
 ```
 
-Iterates over all UTXOs, reconnects each as a `RunarContract`, reads the state's `balance` or `amount` field, and sums them.
+Iterates over all UTXOs, reconnects each as a `RunarContract`, reads the state's `supply`, `balance`, or `amount` field (checked in that priority order), and sums them.
 
 ### `transfer(recipientAddr, amount)`
 

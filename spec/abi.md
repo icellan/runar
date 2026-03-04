@@ -142,13 +142,13 @@ For multi-method contracts, the unlocking script includes a method index as the 
 
 ### 4.4 Parameter Order and Unlocking Script Layout
 
-For a method with parameters `[p1, p2, ..., pn]`, the unlocking script pushes values in **reverse order**:
+For a method with parameters `[p1, p2, ..., pn]`, the unlocking script pushes values in **forward order** (matching declaration order):
 
 ```
-Unlocking script: <pn> <pn-1> ... <p2> <p1> [<method_index>]
+Unlocking script: <p1> <p2> ... <pn-1> <pn> [<method_index>]
 ```
 
-This results in `p1` being on top of the stack when the locking script begins execution, which matches the natural left-to-right reading of the parameter list.
+This results in `p1` at the bottom of the stack and `pn` on top when the locking script begins execution. The first parameter is pushed first (ending up deepest), and the last parameter is pushed last (ending up on top).
 
 ### 4.5 Example
 
@@ -184,13 +184,13 @@ ABI:
 
 Unlocking script to call `unlock`:
 ```
-<pubKey> <sig> OP_0
+<sig> <pubKey> OP_0
 ```
 (OP_0 is the method index for `unlock`)
 
 Unlocking script to call `refund`:
 ```
-<preimage> <sig> OP_1
+<sig> <preimage> OP_1
 ```
 (OP_1 is the method index for `refund`)
 
@@ -409,13 +409,13 @@ Stateful contract public methods have **two implicit parameters** injected by th
 | `txPreimage` | `SigHashPreimage` | The sighash preimage for BIP-143. Used by the compiler-injected `checkPreimage` call to verify the transaction context. |
 | `_opPushTxSig` | `Sig` | An ECDSA signature that validates the preimage via the OP_PUSH_TX pattern. This proves the preimage is authentic. |
 
-**Unlocking script layout:** These implicit parameters appear **before** the user-declared parameters in the unlocking script. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
+**Unlocking script layout:** The `_opPushTxSig` implicit parameter is pushed first (ending up at the bottom of the stack), followed by the user-declared parameters in declaration order, and finally `txPreimage` on top. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
 
 ```
-<txPreimage> <_opPushTxSig> <amount>
+<_opPushTxSig> <amount> <txPreimage>
 ```
 
-The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3). The `_opPushTxSig` parameter is not listed in the ABI because it is consumed internally by the OP_PUSH_TX mechanism in the locking script and is not visible at the ABI level. However, the SDK must always provide it as the bottom-most stack item when calling any stateful contract method.
+The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3). The `_opPushTxSig` parameter is not listed in the ABI because it is consumed internally by the OP_PUSH_TX mechanism in the locking script and is not visible at the ABI level. The SDK must always provide `_opPushTxSig` as the bottom-most stack item and `txPreimage` as the top-most stack item when calling any stateful contract method.
 
 **Note:** The `txPreimage` parameter name uses the compiler-internal name `txPreimage` (not `preimage`). This matches the implicit parameter registered during ANF lowering.
 

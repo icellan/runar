@@ -53,18 +53,15 @@ const { txid } = await contract.deploy({ satoshis: 10000 });
 console.log('Deployed:', txid);
 
 // 4. Call a public method
-// For P2PKH, the unlock method takes a signature and public key as arguments.
-// These are the contract's *method arguments* (pushed onto the unlocking script),
-// not the funding input signatures (which the SDK handles internally).
+// For P2PKH, the unlock method takes a public key as the contract method argument.
+// The SDK handles transaction signing internally via the connected signer.
 const pubKey = await signer.getPublicKey();
-const lockingScript = contract.getLockingScript();
-const sig = await signer.sign(rawTxHex, 0, lockingScript, 10000);
-const result = await contract.call('unlock', [sig, pubKey]);
+const result = await contract.call('unlock', [pubKey]);
 console.log('Spent:', result.txid);
 
 // You can also pass provider/signer explicitly (overrides connected ones):
 // await contract.deploy(provider, signer, { satoshis: 10000 });
-// await contract.call('unlock', [sig, pubKey], provider, signer);
+// await contract.call('unlock', [pubKey], provider, signer);
 ```
 
 ### Stateful Contract Example
@@ -134,7 +131,7 @@ const testnet = new WhatsOnChainProvider('testnet');
 const utxos = await testnet.getUtxos('1A1zP1...');
 
 // Broadcast a raw transaction
-const txid = await testnet.broadcast(rawTxHex);
+const txid = await testnet.broadcast('0100000001...');  // raw tx hex
 
 // Fetch transaction details
 const tx = await testnet.getTransaction(txid);

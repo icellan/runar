@@ -113,8 +113,8 @@ For each test case in `conformance/tests/`:
 
 1. Read `*.runar.ts` source as input.
 2. Run the full pipeline (Passes 1-6).
-3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
-4. Compare script output with `expected-script.hex` (if present).
+3. Compare script hex output with `expected-script.hex` (string equality).
+4. If `expected-ir.json` exists, also compile from IR and verify the IR-compiled script matches the source-compiled script.
 
 Most conformance tests also include multi-format variants (`.runar.sol`, `.runar.move`) that are tested through the same pipeline. The Go compiler additionally supports `.runar.go` native format via a hand-written recursive descent parser.
 

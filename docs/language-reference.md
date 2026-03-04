@@ -330,6 +330,7 @@ private helper(x: bigint): bigint {
 | `hash160` | `(data: ByteString) => Ripemd160` | `OP_HASH160` (SHA-256 then RIPEMD-160) |
 | `sha256` | `(data: ByteString) => Sha256` | `OP_SHA256` |
 | `ripemd160` | `(data: ByteString) => Ripemd160` | `OP_RIPEMD160` |
+| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
 
 ### Byte Operations
 
@@ -340,7 +341,7 @@ private helper(x: bigint): bigint {
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |
-| `split` | `(data: ByteString, pos: bigint) => [ByteString, ByteString]` | `OP_SPLIT` — produces two stack values (left and right). Note: the type checker declares the return type as `ByteString` because Runar's type system has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
+| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — produces two stack values (left and right). The type checker returns `ByteString` because the language has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
 | `left` | `(data: ByteString, n: bigint) => ByteString` | `OP_SPLIT OP_DROP` — returns the leftmost n bytes |
 | `right` | `(data: ByteString, n: bigint) => ByteString` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` — returns the rightmost n bytes |
 | `int2str` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
@@ -470,6 +471,20 @@ Exported from `runar-lang`:
 | `EC_P` | `bigint` | secp256k1 field prime: `2^256 - 2^32 - 977` |
 | `EC_N` | `bigint` | secp256k1 group order |
 | `EC_G` | `Point` | Generator point (64 bytes: `x[32] \|\| y[32]`, big-endian) |
+
+#### SigHash Constants
+
+Exported from `runar-lang`:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SigHash.ALL` | `0x01` | Sign all inputs and outputs |
+| `SigHash.NONE` | `0x02` | Sign all inputs, no outputs |
+| `SigHash.SINGLE` | `0x03` | Sign all inputs, only the output at the same index |
+| `SigHash.FORKID` | `0x40` | BSV fork ID flag (required for BSV transactions) |
+| `SigHash.ANYONECANPAY` | `0x80` | Sign only the current input |
+
+These can be combined with bitwise OR (e.g., `SigHash.ALL | SigHash.FORKID` = `0x41`).
 
 > **Note on `ecMul` and `ecMulGen`:** These use a 256-iteration double-and-add loop with Jacobian coordinates internally for efficiency, converting back to affine at the end. Each call generates substantial Bitcoin Script (~50-100 KB). For scalar multiplication by the generator G, prefer `ecMulGen(k)` over `ecMul(EC_G, k)` as the generator point is hardcoded, avoiding the need to push 64 bytes of point data.
 

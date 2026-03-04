@@ -314,12 +314,12 @@ const state = extractStateFromScript(artifact, scriptHex);
 
 State fields are encoded as Bitcoin Script push data in the order specified by `stateFields[].index`:
 
-| Type | Encoding |
-|------|----------|
-| `bigint` | 8-byte OP_NUM2BIN (little-endian, sign-magnitude) |
-| `boolean` | 1-byte OP_NUM2BIN |
-| `ByteString` | Raw push data |
-| `PubKey` | 33-byte push data (compressed) |
+| Type | External Encoding (SDK / state construction) | Internal Encoding (locking script `getStateScript`) |
+|------|-----------------------------------------------|-----------------------------------------------------|
+| `bigint` | Minimal-encoded Bitcoin Script number (variable-length, little-endian, sign-magnitude) wrapped in push data | Fixed 8-byte little-endian via `OP_NUM2BIN` |
+| `boolean` | `OP_0` (0x00) for false, `OP_1` (0x51) for true | 1-byte via `OP_NUM2BIN` |
+| `ByteString` | Raw push data | Raw push data |
+| `PubKey` | 33-byte push data (compressed) | 33-byte push data (compressed) |
 
 ---
 

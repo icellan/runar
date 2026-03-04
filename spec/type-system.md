@@ -99,7 +99,7 @@ The `Point` type is distinct from `PubKey` (33-byte compressed format). Use `ecE
 A domain type value can be **widened** to `ByteString` implicitly. The type checker also accepts `ByteString` where a domain type is expected (bidirectional compatibility), as well as cross-subtype assignments within the `ByteString` family (e.g., `PubKey` assignable to `Sig`). This permissive approach simplifies common patterns like passing concatenation results or hash outputs to domain-typed parameters.
 
 ```typescript
-const addr: Addr = pubKeyToAddr(pubKey);      // OK: built-in returns Addr
+const addr: Addr = hash160(pubKey);            // OK: hash160 returns Ripemd160, compatible with Addr
 const bs: ByteString = addr;                   // OK: widening
 const addr2: Addr = bs;                        // OK: bidirectional compatibility
 const h: Ripemd160 = addr;                     // OK: cross-subtype within ByteString family
