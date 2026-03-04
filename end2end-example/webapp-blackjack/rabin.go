@@ -163,10 +163,23 @@ func RabinSign(msgBytes []byte, keypair *RabinKeyPair) (*RabinSignature, error) 
 }
 
 func FindSignableOutcome(target int64, keypair *RabinKeyPair) (int64, *RabinSignature, error) {
+	return FindSignableOutcomeConstrained(target, keypair, 0)
+}
+
+func FindSignableOutcomeConstrained(target int64, keypair *RabinKeyPair, direction int) (int64, *RabinSignature, error) {
 	for offset := int64(0); offset <= 10000; offset++ {
-		candidates := []int64{target}
-		if offset > 0 {
-			candidates = []int64{target + offset, target - offset}
+		var candidates []int64
+		if offset == 0 {
+			candidates = []int64{target}
+		} else {
+			switch {
+			case direction > 0:
+				candidates = []int64{target + offset}
+			case direction < 0:
+				candidates = []int64{target - offset}
+			default:
+				candidates = []int64{target + offset, target - offset}
+			}
 		}
 
 		for _, val := range candidates {
@@ -190,5 +203,5 @@ func FindSignableOutcome(target int64, keypair *RabinKeyPair) (int64, *RabinSign
 		}
 	}
 
-	return 0, nil, fmt.Errorf("could not find a signable outcome near %d", target)
+	return 0, nil, fmt.Errorf("could not find a signable outcome near %d (direction=%d)", target, direction)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -8,7 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
+	"time"
 )
 
 //go:embed static
@@ -121,6 +125,7 @@ func main() {
 	mux.HandleFunc("/api/dealer", handleDealer)
 	mux.HandleFunc("/api/audit", handleAudit)
 	mux.HandleFunc("/api/new-round", handleNewRound)
+	mux.HandleFunc("/api/tx", handleTx)
 
 	staticSub, _ := fs.Sub(staticFS, "static")
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
@@ -139,8 +144,22 @@ func main() {
 		port = "8081"
 	}
 
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		log.Println("Shutting down...")
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		srv.Shutdown(ctx)
+	}()
+
 	log.Printf("Script 21 — Blackjack webapp listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, mux))
+	if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }
 
 func jsonResponse(w http.ResponseWriter, data any) {
@@ -595,7 +614,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 
 		switch outcome {
 		case "win", "blackjack":
-			winOutcome, rabinSig, err := FindSignableOutcome(playerRoundId+1, game.OracleKeys)
+			winOutcome, rabinSig, err := FindSignableOutcomeConstrained(playerRoundId+1, game.OracleKeys, 1)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: oracle signing failed: %v", p.Name, err),
@@ -625,7 +644,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 			})
 
 		case "lose":
-			loseOutcome, rabinSig, err := FindSignableOutcome(playerRoundId, game.OracleKeys)
+			loseOutcome, rabinSig, err := FindSignableOutcomeConstrained(playerRoundId, game.OracleKeys, -1)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: oracle signing failed: %v", p.Name, err),
@@ -713,6 +732,37 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	game.LastAudit = buildAuditData()
+
+	if len(game.HouseUTXOs) > 0 {
+		auditJSON, _ := json.Marshal(game.LastAudit)
+		auditTxHex, err := buildOpReturnTx(game.House, game.HouseUTXOs[0], auditJSON)
+		if err == nil {
+			auditTxid, err := broadcastTx(auditTxHex)
+			if err == nil {
+				game.LastAudit.AuditTxid = auditTxid
+				game.Log = append(game.Log, LogEntry{
+					Message: fmt.Sprintf("Round %d: Audit data published", game.Round),
+					Txid:    auditTxid,
+					Type:    "commit",
+				})
+
+				changeUTXOs, _ := findAllUTXOs(auditTxid, game.House.P2PKH)
+				if len(changeUTXOs) > 0 {
+					game.HouseUTXOs = changeUTXOs
+					game.House.Balance = int64(changeUTXOs[0].Satoshis)
+					game.HouseBal = game.House.Balance
+				}
+			}
+		}
+
+		if err := mine(1); err != nil {
+			game.Log = append(game.Log, LogEntry{
+				Message: fmt.Sprintf("Mine error: %v", err),
+				Type:    "error",
+			})
+		}
+	}
+
 	game.Phase = "settlement"
 
 	jsonResponse(w, stateResponse())
@@ -759,6 +809,23 @@ func handleAudit(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=round-%d-audit.json", game.LastAudit.RoundId))
 	json.NewEncoder(w).Encode(game.LastAudit)
+}
+
+func handleTx(w http.ResponseWriter, r *http.Request) {
+	txid := r.URL.Query().Get("txid")
+	if txid == "" {
+		jsonError(w, "missing txid query parameter", 400)
+		return
+	}
+
+	result, err := rpcCall("getrawtransaction", txid, true)
+	if err != nil {
+		jsonError(w, fmt.Sprintf("getrawtransaction: %v", err), 500)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
 }
 
 func handleNewRound(w http.ResponseWriter, r *http.Request) {

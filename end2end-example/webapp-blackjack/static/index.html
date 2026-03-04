@@ -409,9 +409,9 @@
     border: 2px solid var(--cyan);
     border-radius: 12px;
     padding: 24px;
-    max-width: 600px;
-    width: 90%;
-    max-height: 80vh;
+    max-width: 900px;
+    width: 95%;
+    max-height: 85vh;
     overflow-y: auto;
   }
 
@@ -430,7 +430,65 @@
     overflow-x: auto;
     color: var(--dim);
     line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
   }
+
+  .json-key { color: var(--cyan); }
+  .json-string { color: var(--green); }
+  .json-number { color: var(--gold); }
+  .json-bool { color: var(--red); }
+  .json-null { color: var(--dim); font-style: italic; }
+  .json-brace { color: var(--dim); }
+  .json-comma { color: var(--dim); }
+
+  .op-return-wrap {
+    position: relative;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+
+  .op-return-tip {
+    display: none;
+    position: fixed;
+    z-index: 200;
+    background: var(--surface2);
+    border: 1px solid var(--purple);
+    border-radius: 6px;
+    padding: 10px 12px;
+    min-width: 400px;
+    max-width: 800px;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 0.65rem;
+    line-height: 1.5;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  }
+
+  .op-return-tip .tip-label {
+    color: var(--purple);
+    font-weight: bold;
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+
+  .op-return-tip .tip-segment {
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .op-return-tip .tip-segment:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+  .tip-segment .seg-label { color: var(--dim); font-size: 0.55rem; margin-bottom: 2px; }
+  .tip-segment .seg-text { color: var(--green); }
+  .tip-segment .seg-hex { color: var(--gold); }
+  .tip-segment .seg-json { color: var(--text); }
 
   .loading {
     display: inline-block;
@@ -451,6 +509,23 @@
     color: var(--purple);
     opacity: 0.7;
     word-break: break-all;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .txid-link:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+
+  .log-txid {
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .log-txid:hover {
+    opacity: 1;
+    text-decoration: underline;
   }
 </style>
 </head>
@@ -566,8 +641,8 @@
                 <span class="outcome-badge" :class="player.outcome" x-text="player.outcome"></span>
               </div>
               <div class="player-balance" x-text="formatSats(player.balance)"></div>
-              <div class="txid-link" x-show="player.contractTxid" x-text="'deploy: ' + truncTxid(player.contractTxid)"></div>
-              <div class="txid-link" x-show="player.settleTxid" x-text="'settle: ' + truncTxid(player.settleTxid)"></div>
+              <div class="txid-link" x-show="player.contractTxid" @click="fetchTx(player.contractTxid)" x-text="'deploy: ' + player.contractTxid?.substring(0, 8) + '...' + player.contractTxid?.substring(56)"></div>
+              <div class="txid-link" x-show="player.settleTxid" @click="fetchTx(player.settleTxid)" x-text="'settle: ' + player.settleTxid?.substring(0, 8) + '...' + player.settleTxid?.substring(56)"></div>
             </div>
           </template>
         </div>
@@ -600,6 +675,7 @@
           <div style="display:flex;gap:12px;">
             <button class="btn btn-green" @click="newRound()" :disabled="loading">NEW ROUND</button>
             <button class="btn btn-sm" @click="showAudit = true">AUDIT</button>
+            <button class="btn btn-sm" style="border-color:var(--purple);color:var(--purple);" @click="runVerify()">VERIFY</button>
           </div>
         </template>
       </div>
@@ -607,11 +683,11 @@
       <!-- Transaction Log -->
       <div class="log-panel" x-show="state.log && state.log.length > 0">
         <h3>Transaction Log</h3>
-        <template x-for="(entry, idx) in (state.log || []).slice().reverse()" :key="idx">
+        <template x-for="(entry, idx) in (state.log || [])" :key="idx">
           <div class="log-entry">
             <span class="log-icon" :class="entry.type" x-text="logIcon(entry.type)"></span>
             <span class="log-msg" x-text="entry.message"></span>
-            <span class="log-txid" x-show="entry.txid" x-text="truncTxid(entry.txid)"></span>
+            <span class="log-txid" x-show="entry.txid" x-text="entry.txid" @click="fetchTx(entry.txid)"></span>
           </div>
         </template>
       </div>
@@ -621,10 +697,56 @@
         <div class="modal-overlay" @click.self="showAudit = false">
           <div class="modal">
             <h2>Round Audit Data</h2>
-            <pre x-text="JSON.stringify(auditData, null, 2)"></pre>
+            <pre x-html="syntaxHighlight(auditData)"></pre>
             <div style="margin-top:12px;display:flex;gap:8px;">
               <button class="btn btn-sm" @click="downloadAudit()">Download JSON</button>
               <button class="btn btn-sm btn-red" @click="showAudit = false">Close</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Verify Modal -->
+      <template x-if="showVerify">
+        <div class="modal-overlay" @click.self="showVerify = false">
+          <div class="modal">
+            <h2>Deck Integrity Verification</h2>
+            <div style="font-size:0.75rem;line-height:2;">
+              <template x-for="(step, si) in verifySteps" :key="si">
+                <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+                  <div style="display:flex;align-items:flex-start;gap:8px;">
+                    <span style="flex-shrink:0;width:20px;text-align:center;" x-text="step.pass === true ? '\u2705' : step.pass === false ? '\u274C' : '\u23F3'"></span>
+                    <div style="flex:1;">
+                      <div style="font-weight:bold;margin-bottom:4px;" :style="{ color: step.pass === true ? 'var(--green)' : step.pass === false ? 'var(--red)' : 'var(--dim)' }" x-text="'Step ' + (si + 1) + ': ' + step.title"></div>
+                      <div style="font-size:0.65rem;color:var(--dim);margin-bottom:4px;" x-text="step.description"></div>
+                      <template x-if="step.detail">
+                        <pre style="font-size:0.6rem;margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-all;" x-html="step.detailHtml || step.detail"></pre>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div style="margin-top:16px;padding:12px;border-radius:6px;text-align:center;font-weight:bold;letter-spacing:0.1em;"
+                   :style="{ background: verifyAllPass ? 'rgba(0,255,136,0.1)' : 'rgba(255,51,85,0.1)', color: verifyAllPass ? 'var(--green)' : 'var(--red)', border: '1px solid ' + (verifyAllPass ? 'var(--green)' : 'var(--red)') }"
+                   x-text="verifyAllPass ? 'DECK INTEGRITY VERIFIED' : 'VERIFICATION FAILED'">
+              </div>
+            </div>
+            <div style="margin-top:12px;">
+              <button class="btn btn-sm btn-red" @click="showVerify = false">Close</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Transaction Modal -->
+      <template x-if="showTx && txData">
+        <div class="modal-overlay" @click.self="showTx = false">
+          <div class="modal">
+            <h2>Transaction</h2>
+            <div style="font-size:0.6rem;color:var(--purple);word-break:break-all;margin-bottom:12px;" x-text="txData.txid"></div>
+            <pre x-html="syntaxHighlight(txData)"></pre>
+            <div style="margin-top:12px;">
+              <button class="btn btn-sm btn-red" @click="showTx = false">Close</button>
             </div>
           </div>
         </div>
@@ -641,6 +763,11 @@ function blackjack() {
     loading: false,
     showAudit: false,
     auditData: null,
+    showTx: false,
+    txData: null,
+    showVerify: false,
+    verifySteps: [],
+    verifyAllPass: false,
 
     async api(method, path, body) {
       const opts = { method, headers: { 'Content-Type': 'application/json' } };
@@ -706,6 +833,137 @@ function blackjack() {
       this.loading = false;
     },
 
+    async runVerify() {
+      if (!this.auditData) {
+        alert('No audit data available');
+        return;
+      }
+      const a = this.auditData;
+      const steps = [];
+
+      steps.push({
+        title: 'Retrieve on-chain deck commitment',
+        description: 'Fetch the commitment transaction broadcast before cards were dealt and extract the OP_RETURN data.',
+        detail: 'Txid: ' + (a.deckCommitTxid || 'N/A'),
+        pass: null
+      });
+
+      let onChainHash = null;
+      if (a.deckCommitTxid) {
+        try {
+          const tx = await this.api('GET', '/api/tx?txid=' + encodeURIComponent(a.deckCommitTxid));
+          const nullOut = tx.vout.find(v => v.scriptPubKey && v.scriptPubKey.type === 'nulldata');
+          if (nullOut) {
+            const hex = nullOut.scriptPubKey.hex;
+            const decoded = this.decodeOpReturnHex(hex);
+            if (decoded && decoded.length > 0) {
+              onChainHash = decoded[decoded.length - 1].display;
+              steps[0].detail = 'Txid: ' + a.deckCommitTxid + '\nOn-chain hash: ' + onChainHash;
+              steps[0].pass = true;
+            }
+          }
+          if (!onChainHash) {
+            steps[0].detail = 'Txid: ' + a.deckCommitTxid + '\nCould not extract hash from OP_RETURN';
+            steps[0].pass = false;
+          }
+        } catch (e) {
+          steps[0].detail = 'Failed to fetch tx: ' + e.message;
+          steps[0].pass = false;
+        }
+      } else {
+        steps[0].pass = false;
+      }
+
+      const salt = a.deckSalt;
+      const deckOrder = a.deckOrder;
+      let deckStr = '';
+      if (deckOrder) {
+        deckStr = deckOrder.map(c => c.rank + ':' + c.suit).join(',');
+      }
+      const preimage = salt + '|' + deckStr;
+
+      steps.push({
+        title: 'Reconstruct commitment preimage',
+        description: 'Combine the revealed salt and deck order in the same format used before dealing: SHA-256(salt | card1,card2,...)',
+        detail: 'Salt: ' + salt + '\nDeck: ' + deckStr.substring(0, 80) + '...\nPreimage: ' + preimage.substring(0, 80) + '...',
+        pass: salt && deckOrder ? true : false
+      });
+
+      let computedHash = null;
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(preimage);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        computedHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (_) {}
+
+      steps.push({
+        title: 'Compute SHA-256 hash',
+        description: 'Hash the reconstructed preimage using SHA-256.',
+        detail: 'Computed: ' + (computedHash || 'FAILED'),
+        pass: computedHash ? true : false
+      });
+
+      const auditHash = a.deckCommitment;
+      const hashMatch = computedHash && auditHash && computedHash === auditHash;
+
+      steps.push({
+        title: 'Compare computed hash with audit commitment',
+        description: 'Verify the SHA-256 output matches the commitment hash from the audit data.',
+        detail: 'Audit says: ' + (auditHash || 'N/A') + '\nComputed:   ' + (computedHash || 'N/A') + '\nMatch: ' + (hashMatch ? 'YES' : 'NO'),
+        pass: hashMatch
+      });
+
+      const chainMatch = onChainHash && computedHash && onChainHash === computedHash;
+
+      steps.push({
+        title: 'Compare computed hash with on-chain commitment',
+        description: 'Verify the SHA-256 output matches the hash stored on the blockchain BEFORE cards were dealt. This proves the deck order was locked in before the game started.',
+        detail: 'On-chain:  ' + (onChainHash || 'N/A') + '\nComputed:  ' + (computedHash || 'N/A') + '\nMatch: ' + (chainMatch ? 'YES' : 'NO'),
+        pass: chainMatch
+      });
+
+      const cardsDealt = [];
+      if (deckOrder && a.players) {
+        let pos = 0;
+        for (const p of a.players) {
+          if (p.hand) {
+            for (const c of p.hand) cardsDealt.push({ pos: pos++, expected: deckOrder[cardsDealt.length], actual: c, who: p.name });
+          }
+        }
+        if (a.dealerHand) {
+          for (const c of a.dealerHand) cardsDealt.push({ pos: pos++, expected: deckOrder[cardsDealt.length], actual: c, who: 'Dealer' });
+        }
+      }
+
+      const dealOk = cardsDealt.length > 0 && cardsDealt.every(d => d.expected && d.actual && d.expected.rank === d.actual.rank && d.expected.suit === d.actual.suit);
+      const dealDetail = cardsDealt.map(d => {
+        const ok = d.expected && d.actual && d.expected.rank === d.actual.rank && d.expected.suit === d.actual.suit;
+        return (ok ? 'OK' : 'MISMATCH') + '  deck[' + d.pos + '] = ' + d.expected.rank + ':' + d.expected.suit + '  ->  ' + d.who;
+      }).join('\n');
+
+      steps.push({
+        title: 'Verify dealt cards match committed deck order',
+        description: 'Check that every card dealt to players and the dealer matches the pre-committed deck sequence.',
+        detail: dealDetail || 'No cards to verify',
+        pass: dealOk
+      });
+
+      this.verifySteps = steps;
+      this.verifyAllPass = steps.every(s => s.pass === true);
+      this.showVerify = true;
+    },
+
+    async fetchTx(txid) {
+      if (!txid) return;
+      try {
+        this.txData = await this.api('GET', '/api/tx?txid=' + encodeURIComponent(txid));
+        this.showTx = true;
+      } catch (e) {
+        alert('Error fetching transaction: ' + e.message);
+      }
+    },
+
     downloadAudit() {
       if (!this.auditData) return;
       const blob = new Blob([JSON.stringify(this.auditData, null, 2)], { type: 'application/json' });
@@ -721,11 +979,6 @@ function blackjack() {
       if (sats === undefined || sats === null) return '-';
       if (sats >= 100000000) return (sats / 100000000).toFixed(2) + ' BSV';
       return sats.toLocaleString() + ' sats';
-    },
-
-    truncTxid(txid) {
-      if (!txid) return '';
-      return txid.substring(0, 8) + '...' + txid.substring(txid.length - 8);
     },
 
     rankName(card) {
@@ -748,6 +1001,121 @@ function blackjack() {
       return (card.suit === 1 || card.suit === 2) ? 'card-red' : 'card-black';
     },
 
+    decodeOpReturnHex(hex) {
+      const bytes = [];
+      for (let i = 0; i < hex.length; i += 2) {
+        bytes.push(Number.parseInt(hex.substr(i, 2), 16));
+      }
+      let pos = 0;
+      if (bytes[pos] === 0x00) pos++;
+      if (bytes[pos] === 0x6a) pos++;
+      else return null;
+      const segments = [];
+      while (pos < bytes.length) {
+        let len = 0;
+        const op = bytes[pos++];
+        if (op >= 0x01 && op <= 0x4b) {
+          len = op;
+        } else if (op === 0x4c) {
+          len = bytes[pos++];
+        } else if (op === 0x4d) {
+          len = bytes[pos] | (bytes[pos + 1] << 8);
+          pos += 2;
+        } else if (op === 0x4e) {
+          len = bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24);
+          pos += 4;
+        } else {
+          break;
+        }
+        const data = bytes.slice(pos, pos + len);
+        pos += len;
+        const hexStr = data.map(b => b.toString(16).padStart(2, '0')).join('');
+        let display = hexStr;
+        let isJson = false;
+        try {
+          const decoded = new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(data));
+          const printable = decoded.split('').every(c => {
+            const code = c.codePointAt(0);
+            return code >= 0x20 || code === 0x0a || code === 0x0d || code === 0x09;
+          });
+          if (printable) {
+            try {
+              const parsed = JSON.parse(decoded);
+              display = JSON.stringify(parsed, null, 2);
+              isJson = true;
+            } catch (_) {
+              display = decoded;
+            }
+          }
+        } catch (_) {}
+        segments.push({ display, hex: hexStr, len: data.length, isJson });
+      }
+      return segments.length > 0 ? segments : null;
+    },
+
+    buildOpReturnTooltip(hex) {
+      const segments = this.decodeOpReturnHex(hex);
+      if (!segments) return null;
+      let tip = '<span class="op-return-tip">';
+      tip += '<div class="tip-label">OP_RETURN decoded</div>';
+      for (let i = 0; i < segments.length; i++) {
+        const s = segments[i];
+        tip += '<div class="tip-segment">';
+        tip += '<div class="seg-label">push ' + i + ' (' + s.len + ' bytes)</div>';
+        if (s.isJson) {
+          const highlighted = this.syntaxHighlightRaw(s.display);
+          tip += '<div class="seg-json">' + highlighted + '</div>';
+        } else if (s.display !== s.hex) {
+          tip += '<div class="seg-text">' + s.display.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
+        } else {
+          tip += '<div class="seg-hex">' + s.hex + '</div>';
+        }
+        tip += '</div>';
+      }
+      tip += '</span>';
+      return tip;
+    },
+
+    syntaxHighlightRaw(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\bnull\b)/g, (match) => {
+          let cls = 'json-number';
+          if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'json-key' : 'json-string';
+          } else if (/true|false/.test(match)) {
+            cls = 'json-bool';
+          } else if (/null/.test(match)) {
+            cls = 'json-null';
+          }
+          return '<span class="' + cls + '">' + match + '</span>';
+        });
+    },
+
+    syntaxHighlight(obj) {
+      const self = this;
+      const filtered = JSON.parse(JSON.stringify(obj));
+      if (filtered && filtered.hex) delete filtered.hex;
+      const json = JSON.stringify(filtered, null, 2);
+      let html = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\bnull\b)/g, (match) => {
+          let cls = 'json-number';
+          if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'json-key' : 'json-string';
+          } else if (/true|false/.test(match)) {
+            cls = 'json-bool';
+          } else if (/null/.test(match)) {
+            cls = 'json-null';
+          }
+          return '<span class="' + cls + '">' + match + '</span>';
+        });
+      html = html.replace(/<span class="json-string">"((?:00)?6a[0-9a-f]+)"<\/span>/gi, (full, hex) => {
+        const tip = self.buildOpReturnTooltip(hex);
+        if (!tip) return full;
+        return '<span class="op-return-wrap"><span class="json-string">"' + hex + '"</span>' + tip + '</span>';
+      });
+      return html;
+    },
+
     logIcon(type) {
       const icons = {
         fund: '$', deploy: '\u25C6', settle: '\u2605', commit: '#',
@@ -757,6 +1125,31 @@ function blackjack() {
     }
   };
 }
+
+document.addEventListener('mouseover', function(e) {
+  const tip = e.target.closest('.op-return-tip');
+  if (tip) return;
+  const wrap = e.target.closest('.op-return-wrap');
+  if (!wrap) return;
+  const t = wrap.querySelector('.op-return-tip');
+  if (!t) return;
+  t.style.display = 'block';
+  const x = Math.min(e.clientX, window.innerWidth - t.offsetWidth - 16);
+  const y = e.clientY + 16;
+  t.style.left = Math.max(8, x) + 'px';
+  t.style.top = (y + t.offsetHeight > window.innerHeight ? e.clientY - t.offsetHeight - 8 : y) + 'px';
+});
+
+document.addEventListener('mouseout', function(e) {
+  const wrap = e.target.closest('.op-return-wrap');
+  const tip = e.target.closest('.op-return-tip');
+  const source = wrap || tip;
+  if (!source) return;
+  const container = source.closest('.op-return-wrap') || source;
+  if (container.contains(e.relatedTarget)) return;
+  const t = container.querySelector('.op-return-tip');
+  if (t) t.style.display = 'none';
+});
 </script>
 </body>
 </html>
