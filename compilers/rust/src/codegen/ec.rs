@@ -407,11 +407,10 @@ fn compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &st
         emit_reverse_32(e);
     });
 
-    // Cat: x_be || y_be
+    // Cat: x_be || y_be (x is below y after the two to_top calls)
     t.to_top("_cp_xb");
     t.to_top("_cp_yb");
     t.raw_block(&["_cp_xb", "_cp_yb"], Some(result_name), |e| {
-        e(StackOp::Swap);
         e(StackOp::Opcode("OP_CAT".into()));
     });
 }
@@ -680,11 +679,14 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
         // Extract bit: (k >> bit) & 1, using OP_DIV for right-shift
         t.copy_to_top("_k", "_k_copy");
         if bit > 0 {
-            // divisor = 1 << bit — this may exceed i128 for bit >= 127.
-            // Push as script-number-encoded bytes for all bit values
-            // to match the TS emitter's bigint encoding.
-            let divisor_bytes = script_number_pow2(bit);
-            t.push_bytes("_div", divisor_bytes);
+            // divisor = 1 << bit — use Int for small values (matches TS OP_1..OP_16),
+            // script-number-encoded bytes for larger values that exceed i128.
+            if bit <= 126 {
+                t.push_int("_div", 1i128 << bit);
+            } else {
+                let divisor_bytes = script_number_pow2(bit);
+                t.push_bytes("_div", divisor_bytes);
+            }
             t.raw_block(&["_k_copy", "_div"], Some("_shifted"), |e| {
                 e(StackOp::Opcode("OP_DIV".into()));
             });

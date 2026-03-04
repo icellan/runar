@@ -441,15 +441,52 @@ The `this.checkPreimage(preimage)` call in Rúnar generates the OP_PUSH_TX verif
 
 ---
 
-## 12. Chronicle Extensions (Future)
+## 12. Elliptic Curve Operations (Synthesized)
+
+EC operations (`ecAdd`, `ecMul`, `ecMulGen`, etc.) do not have dedicated Bitcoin Script opcodes. Instead, the EC codegen module synthesizes them from base arithmetic opcodes.
+
+### 12.1 Field Arithmetic Primitives
+
+All EC operations are built on secp256k1 field arithmetic over `F_p` where `p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F`:
+
+| Operation | Implementation |
+|-----------|---------------|
+| Field addition | `OP_ADD`, `OP_MOD` |
+| Field subtraction | `OP_SUB`, `OP_MOD` (with correction for negative results) |
+| Field multiplication | `OP_MUL`, `OP_MOD` |
+| Modular inverse | Extended Euclidean algorithm via bounded `OP_IF`/`OP_ELSE` loop |
+| Field division | Multiply by modular inverse |
+
+### 12.2 EC Operation Synthesis
+
+| Rúnar Function | Synthesized From | Approximate Script Size |
+|---------------|------------------|------------------------|
+| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~2-5 KB |
+| `ecMul(p, k)` | 256-iteration double-and-add loop (Jacobian coordinates) | ~50-100 KB |
+| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~50-100 KB |
+| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~100 B |
+| `ecOnCurve(p)` | Compute `y^2` and `x^3 + 7`, compare mod p | ~500 B |
+| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~20 B |
+| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~200 B |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~50 B |
+| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~20 B |
+| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~20 B |
+
+### 12.3 Jacobian Coordinate Optimization
+
+`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the 256-iteration double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+
+---
+
+## 13. Chronicle Extensions (Future)
 
 The following notes document potential future opcodes or extensions that may be available on Chronicle (BSV-derived chains) but are **not part of BSV consensus as of this specification**.
 
-### 12.1 BSV-Native (Available Now)
+### 13.1 BSV-Native (Available Now)
 
-All opcodes listed in sections 2-10 are BSV-native and available on mainnet.
+All opcodes listed in sections 2-11 are BSV-native and available on mainnet.
 
-### 12.2 Potential Chronicle Extensions
+### 13.2 Potential Chronicle Extensions
 
 | Name | Description | Status |
 |---|---|---|
@@ -467,13 +504,13 @@ All opcodes listed in sections 2-10 are BSV-native and available on mainnet.
 
 If Chronicle extensions become available, Rúnar would be able to replace the OP_PUSH_TX sighash-trick pattern with direct introspection opcodes, resulting in smaller and more efficient scripts for stateful contracts.
 
-### 12.3 Impact on Rúnar
+### 13.3 Impact on Rúnar
 
 Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preimage` and `get_state_script` IR nodes abstract over the underlying mechanism. If native introspection opcodes become available, only the code generator (Stack IR to Script) needs to change -- the ANF IR and higher-level semantics remain the same.
 
 ---
 
-## 13. Quick Reference: Rúnar Operation to Opcode
+## 14. Quick Reference: Rúnar Operation to Opcode
 
 | Rúnar Operation | Primary Opcode(s) | Hex |
 |---|---|---|
@@ -516,3 +553,13 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `split(data, index)` | `OP_SPLIT` | `0x7f` |
 | `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |
+| `ecAdd(a, b)` | Synthesized (field arithmetic) | — |
+| `ecMul(p, k)` | Synthesized (256-iter double-and-add) | — |
+| `ecMulGen(k)` | Synthesized (256-iter double-and-add) | — |
+| `ecNegate(p)` | `OP_SPLIT`, `OP_SUB` | — |
+| `ecOnCurve(p)` | Synthesized (field arithmetic) | — |
+| `ecModReduce(v, m)` | `OP_MOD`, `OP_ADD`, `OP_MOD` | — |
+| `ecEncodeCompressed(p)` | `OP_SPLIT`, `OP_MOD`, `OP_CAT` | — |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN`, `OP_CAT` | — |
+| `ecPointX(p)` | `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | — |
+| `ecPointY(p)` | `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | — |

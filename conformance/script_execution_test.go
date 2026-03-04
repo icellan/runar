@@ -1050,11 +1050,23 @@ func TestECPrimitives_CheckOnCurve(t *testing.T) {
 }
 
 func TestECPrimitives_CheckNegateY(t *testing.T) {
-	// Skip: ecNegate involves composePoint which produces bytes that go through
-	// decomposePoint again — the round-trip through NUM2BIN(33)/SPLIT(32)/reverse/BIN2NUM
-	// can produce different minimal encodings than direct BigInt comparison.
-	// The ecNegate function is validated through the TS interpreter and Script VM tests.
-	t.Skip("ecNegate round-trip encoding needs NUM2BIN/BIN2NUM normalization — validated in TS tests")
+	ptHex := fmt.Sprintf("%064x%064x", ecGenX, ecGenY)
+
+	// p - Gy
+	negY := new(big.Int).Sub(ecFieldP, ecGenY)
+
+	lockingHex, err := compileRúnar("ec-primitives", fmt.Sprintf(`{"pt":"%s"}`, ptHex))
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// checkNegateY(expectedNegY) — method index 3
+	unlockingHex := encodePushBigInt(negY) + encodePushInt(3)
+	t.Logf("negY = %064x", negY)
+	t.Logf("unlocking hex len = %d", len(unlockingHex)/2)
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
 }
 
 func TestECPrimitives_CheckModReduce(t *testing.T) {

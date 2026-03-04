@@ -24,6 +24,7 @@ Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
 | `04-anf-lower.ts` | ANF Lower | Validated AST | ANF IR |
 | `05-stack-lower.ts` | Stack Lower | ANF IR | Stack IR |
 | `slh-dsa-codegen.ts` | SLH-DSA Codegen | (called by Pass 5) | Stack IR fragment |
+| `ec-codegen.ts` | EC Codegen | (called by Pass 5) | Stack IR fragment |
 | `06-emit.ts` | Emit | Stack IR | Bitcoin Script (hex) |
 
 The key benefit of this approach: each pass can be tested and verified in isolation. You can unit-test Pass 4 without caring about Passes 1-3, and you can swap out Pass 1 entirely (as the Go and Rust compilers do) while keeping Passes 4-6.
@@ -249,6 +250,19 @@ The SLH-DSA codegen is replicated across all three compilers:
 - TypeScript: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts`
 - Go: `compilers/go/codegen/slh_dsa.go`
 - Rust: `compilers/rust/src/codegen/slh_dsa.rs`
+
+All three produce byte-identical Bitcoin Script, verified by the conformance suite.
+
+### Elliptic Curve Codegen
+
+EC built-in functions (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`) are handled by a dedicated codegen module, following the same pattern as SLH-DSA:
+
+- **EC codegen** (`ec-codegen.ts`): Synthesizes secp256k1 field arithmetic from base opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.). The most complex operations are `ecMul` and `ecMulGen`, which emit a 256-iteration double-and-add loop using Jacobian projective coordinates internally. Each scalar multiplication generates ~50-100 KB of Bitcoin Script.
+
+The EC codegen is replicated across all three compilers:
+- TypeScript: `packages/runar-compiler/src/passes/ec-codegen.ts`
+- Go: `compilers/go/codegen/ec.go`
+- Rust: `compilers/rust/src/codegen/ec.rs`
 
 All three produce byte-identical Bitcoin Script, verified by the conformance suite.
 

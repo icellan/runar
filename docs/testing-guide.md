@@ -691,6 +691,74 @@ Both paths must agree on valid signatures (accept) and invalid signatures (rejec
 
 ---
 
+## Elliptic Curve Contract Testing
+
+EC-based contracts (using `ecAdd`, `ecMul`, `ecMulGen`, etc.) are tested like any other Rúnar contract via `TestContract`, but require generating valid EC test vectors in the test harness.
+
+### Generating EC Test Vectors
+
+Since EC operations manipulate secp256k1 points, tests need to compute valid points and scalars. The test file typically includes JS helper functions for EC arithmetic:
+
+```typescript
+import { TestContract } from 'runar-testing';
+
+// secp256k1 constants
+const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+const GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+
+// JS helpers for test vector generation
+function mod(a: bigint, m: bigint): bigint { return ((a % m) + m) % m; }
+function modInv(a: bigint, m: bigint): bigint { /* extended Euclidean */ }
+function pointAdd(x1: bigint, y1: bigint, x2: bigint, y2: bigint): [bigint, bigint] { /* ... */ }
+function scalarMul(bx: bigint, by: bigint, k: bigint): [bigint, bigint] { /* ... */ }
+
+// Encode a point as a 128-char hex string (64 bytes: x[32] || y[32])
+function makePointHex(x: bigint, y: bigint): string {
+  return x.toString(16).padStart(64, '0').toUpperCase()
+       + y.toString(16).padStart(64, '0').toUpperCase();
+}
+```
+
+### Example: Testing a Schnorr ZKP Contract
+
+```typescript
+describe('SchnorrZKP contract', () => {
+  it('verifies a valid Schnorr ZKP proof', () => {
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+
+    const r = 12345n;
+    const [rX, rY] = scalarMul(GX, GY, r);
+    const rHex = makePointHex(rX, rY);
+
+    const e = 7n;
+    const s = mod(r + e * privKey, EC_N);
+
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
+    const result = c.call('verify', { rPoint: rHex, s, e });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a proof with wrong s value', () => {
+    // ... same setup but pass s + 1n ...
+    const result = c.call('verify', { rPoint: rHex, s: s + 1n, e });
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+### Key Testing Considerations for EC Contracts
+
+- **Point format**: Points are 64 bytes (128 hex chars), big-endian unsigned, no prefix. Use `makePointHex()` or equivalent to construct valid test points.
+- **Modular arithmetic**: All scalar computations in tests must use `mod(value, EC_N)` to stay within the group order, matching what the on-chain contract does.
+- **Interpreter-based**: `TestContract` uses the interpreter, which performs real EC arithmetic (not mocked). This means test results accurately reflect the contract's mathematical behavior.
+- **Script size**: EC contracts generate large scripts (~50-100 KB per `ecMul`/`ecMulGen` call). Full Script VM execution of these contracts is feasible but slower than interpreter-based testing.
+
+---
+
 ## Conformance Testing Across Compilers
 
 The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust) produce identical output.

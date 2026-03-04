@@ -391,11 +391,10 @@ func ecComposePoint(t *ECTracker, xName, yName, resultName string) {
 		ecEmitReverse32(e)
 	})
 
-	// Cat: x_be || y_be
+	// Cat: x_be || y_be (x is below y after the two toTop calls)
 	t.toTop("_cp_xb")
 	t.toTop("_cp_yb")
 	t.rawBlock([]string{"_cp_xb", "_cp_yb"}, resultName, func(e func(StackOp)) {
-		e(StackOp{Op: "swap"})
 		e(StackOp{Op: "opcode", Code: "OP_CAT"})
 	})
 }

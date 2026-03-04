@@ -142,8 +142,9 @@ private square(x: bigint): bigint {
 | `Ripemd160` | 20 | RIPEMD-160 digest |
 | `Addr` | 20 | Bitcoin address (hash160 of pubkey) |
 | `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX |
+| `Point` | 64 | secp256k1 elliptic curve point (x[32] \|\| y[32], big-endian) |
 
-All domain types (`PubKey`, `Sig`, etc.) are subtypes of `ByteString`. A domain type value can be used wherever a `ByteString` is expected (widening), but not the reverse (narrowing requires an explicit cast function).
+All domain types (`PubKey`, `Sig`, `Point`, etc.) are subtypes of `ByteString`. A domain type value can be used wherever a `ByteString` is expected (widening), but not the reverse (narrowing requires an explicit cast function).
 
 ### Rabin Types
 
@@ -442,6 +443,35 @@ In `StatefulSmartContract`, `checkPreimage` and state continuation are handled a
 | `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192f. Fast variant. Sig: 35,664 B. |
 | `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256s. 256-bit security. Sig: 29,792 B. |
 | `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 49,856 B. |
+
+### Elliptic Curve (secp256k1)
+
+On-chain elliptic curve operations over the secp256k1 curve. These are synthesized from base Bitcoin Script opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.) via field arithmetic -- there are no dedicated EC opcodes. The `Point` type is a 64-byte `ByteString` subtype encoding affine coordinates as `x[32] || y[32]` in big-endian unsigned format (no prefix byte).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ecAdd` | `(a: Point, b: Point) => Point` | Affine point addition |
+| `ecMul` | `(p: Point, k: bigint) => Point` | Scalar multiplication (256-iteration double-and-add, Jacobian coordinates internally) |
+| `ecMulGen` | `(k: bigint) => Point` | Scalar multiplication by the hardcoded generator point G |
+| `ecNegate` | `(p: Point) => Point` | Point negation: `(x, p - y)` |
+| `ecOnCurve` | `(p: Point) => boolean` | Verify point satisfies `y^2 === x^3 + 7 (mod p)` |
+| `ecModReduce` | `(value: bigint, mod: bigint) => bigint` | Modular reduction: `((value % mod) + mod) % mod` |
+| `ecEncodeCompressed` | `(p: Point) => ByteString` | Encode point as 33-byte compressed public key (02/03 prefix + x) |
+| `ecMakePoint` | `(x: bigint, y: bigint) => Point` | Construct a 64-byte Point from x and y coordinates |
+| `ecPointX` | `(p: Point) => bigint` | Extract x-coordinate from a Point |
+| `ecPointY` | `(p: Point) => bigint` | Extract y-coordinate from a Point |
+
+#### EC Constants
+
+Exported from `runar-lang`:
+
+| Constant | Type | Description |
+|----------|------|-------------|
+| `EC_P` | `bigint` | secp256k1 field prime: `2^256 - 2^32 - 977` |
+| `EC_N` | `bigint` | secp256k1 group order |
+| `EC_G` | `Point` | Generator point (64 bytes: `x[32] \|\| y[32]`, big-endian) |
+
+> **Note on `ecMul` and `ecMulGen`:** These use a 256-iteration double-and-add loop with Jacobian coordinates internally for efficiency, converting back to affine at the end. Each call generates substantial Bitcoin Script (~50-100 KB). For scalar multiplication by the generator G, prefer `ecMulGen(k)` over `ecMul(EC_G, k)` as the generator point is hardcoded, avoiding the need to push 64 bytes of point data.
 
 ---
 

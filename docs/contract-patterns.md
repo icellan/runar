@@ -353,6 +353,67 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 
 ---
 
+## Schnorr Zero-Knowledge Proof
+
+A stateless contract that verifies a Schnorr ZKP proof on-chain, demonstrating the EC (elliptic curve) builtins. The prover proves knowledge of a private key `k` such that `P = k*G` without revealing `k`.
+
+```typescript
+import {
+  SmartContract, assert,
+  ecAdd, ecMul, ecMulGen, ecPointX, ecPointY, ecOnCurve, ecModReduce,
+  EC_N,
+} from 'runar-lang';
+import type { Point } from 'runar-lang';
+
+class SchnorrZKP extends SmartContract {
+  readonly pubKey: Point;
+
+  constructor(pubKey: Point) {
+    super(pubKey);
+    this.pubKey = pubKey;
+  }
+
+  public verify(rPoint: Point, s: bigint, e: bigint) {
+    // Verify R is on the curve
+    assert(ecOnCurve(rPoint));
+
+    // Left side: s*G
+    const sG = ecMulGen(s);
+
+    // Right side: R + e*P
+    const eP = ecMul(this.pubKey, e);
+    const rhs = ecAdd(rPoint, eP);
+
+    // Verify equality
+    assert(ecPointX(sG) === ecPointX(rhs));
+    assert(ecPointY(sG) === ecPointY(rhs));
+  }
+}
+```
+
+**How it works:**
+
+The Schnorr identification protocol:
+
+1. **Prover** picks a random nonce `r`, computes `R = r*G`, and sends `R` to the verifier.
+2. **Verifier** sends a random challenge `e`.
+3. **Prover** computes `s = r + e*k (mod n)` and sends `s`.
+4. **Verifier** checks that `s*G === R + e*P`.
+
+In the Bitcoin contract context, the prover provides `(R, s, e)` in the unlocking script (scriptSig). The locking script contains the public key `P` and verifies the proof equation using on-chain EC arithmetic.
+
+**Key EC builtins used:**
+
+- `ecOnCurve(rPoint)` -- validates the commitment point is on the secp256k1 curve
+- `ecMulGen(s)` -- computes `s*G` using the hardcoded generator point
+- `ecMul(this.pubKey, e)` -- computes `e*P` (scalar multiplication of the public key)
+- `ecAdd(rPoint, eP)` -- computes `R + e*P` (point addition)
+- `ecPointX` / `ecPointY` -- extracts coordinates for comparison
+
+> **Note:** Each `ecMul`/`ecMulGen` call generates ~50-100 KB of Bitcoin Script due to the 256-iteration double-and-add loop. This contract's compiled script is substantial but well within BSV's limits (no opcode count limit, 32 MB stack memory limit).
+
+---
+
 ## Pattern Summary
 
 | Pattern | Stateful | Key Techniques |
@@ -367,3 +428,4 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 | Auction | Yes | Multiple stateful fields, locktime checks, two spending paths |
 | PostQuantumWallet | No | `verifyWOTS` — WOTS+ one-time PQ signature (~10 KB script) |
 | SPHINCSWallet | No | `verifySLHDSA_SHA2_128s` — SLH-DSA stateless PQ signature (~203 KB script) |
+| SchnorrZKP | No | `ecMulGen`, `ecMul`, `ecAdd`, `ecOnCurve` — on-chain Schnorr ZKP via EC arithmetic |

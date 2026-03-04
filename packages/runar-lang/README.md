@@ -116,6 +116,7 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 | `Addr` | `string` | 20 | `Addr(hex)` | 40 hex chars (alias for Ripemd160) |
 | `SigHashPreimage` | `string` | variable | `SigHashPreimage(hex)` | Valid hex |
 | `OpCodeType` | `string` | variable | `OpCodeType(hex)` | Valid hex |
+| `Point` | `string` | 64 | 128-char hex | Big-endian x[32] \|\| y[32], no prefix |
 | `RabinSig` | `bigint` | variable | literal `bigint` | -- |
 | `RabinPubKey` | `bigint` | variable | literal `bigint` | -- |
 | `SigHashType` | `bigint` | variable | `SigHash.ALL` etc. | -- |
@@ -126,8 +127,8 @@ All domain types are branded TypeScript types. At runtime they are strings (hex-
 
 ```
         ByteString
-       /    |     \      \         \            \           \
-   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  OpCodeType
+       /    |     \      \         \            \           \         \
+   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  OpCodeType  Point
                                     ^
                                     | (alias)
                                  Ripemd160
@@ -315,6 +316,35 @@ Stateless hash-based signatures supporting multiple signings per keypair. Six pa
 | `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
 
 All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
+
+---
+
+## Elliptic Curve (secp256k1)
+
+On-chain elliptic curve arithmetic over the secp256k1 curve. All operations are synthesized from base Bitcoin Script opcodes. Also exported from the main `runar-lang` entry point.
+
+### EC Built-in Functions
+
+| Function | Signature | Description |
+|---|---|---|
+| `ecAdd` | `(a: Point, b: Point) => Point` | Affine point addition |
+| `ecMul` | `(p: Point, k: bigint) => Point` | Scalar multiplication (256-iteration double-and-add) |
+| `ecMulGen` | `(k: bigint) => Point` | Scalar mult by hardcoded generator G |
+| `ecNegate` | `(p: Point) => Point` | Point negation: (x, p - y) |
+| `ecOnCurve` | `(p: Point) => boolean` | Verify y^2 === x^3 + 7 (mod p) |
+| `ecModReduce` | `(value: bigint, mod: bigint) => bigint` | Modular reduction: ((value % mod) + mod) % mod |
+| `ecEncodeCompressed` | `(p: Point) => ByteString` | Point to 33-byte compressed pubkey |
+| `ecMakePoint` | `(x: bigint, y: bigint) => Point` | Construct 64-byte Point from coordinates |
+| `ecPointX` | `(p: Point) => bigint` | Extract x-coordinate |
+| `ecPointY` | `(p: Point) => bigint` | Extract y-coordinate |
+
+### EC Constants
+
+| Constant | Type | Description |
+|---|---|---|
+| `EC_P` | `bigint` | secp256k1 field prime: 2^256 - 2^32 - 977 |
+| `EC_N` | `bigint` | secp256k1 group order |
+| `EC_G` | `Point` | Generator point (64 bytes: x[32] \|\| y[32], big-endian) |
 
 ---
 

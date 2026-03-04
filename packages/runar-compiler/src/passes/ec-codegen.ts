@@ -311,11 +311,10 @@ function composePoint(t: ECTracker, xName: string, yName: string, resultName: st
     emitReverse32(e);
   });
 
-  // Cat: x_be || y_be
+  // Cat: x_be || y_be (x is below y after the two toTop calls)
   t.toTop('_cp_xb');
   t.toTop('_cp_yb');
   t.rawBlock(['_cp_xb', '_cp_yb'], resultName, (e) => {
-    e({ op: 'swap' });
     e({ op: 'opcode', code: 'OP_CAT' });
   });
 }

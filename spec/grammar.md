@@ -204,6 +204,7 @@ Type
     | 'SigHashPreimage'
     | 'RabinSig'
     | 'RabinPubKey'
+    | 'Point'
     | FixedArrayType
     ;
 
@@ -227,6 +228,7 @@ FixedArrayType
 | `SigHashPreimage` | Transaction sighash preimage                   | ByteString   |
 | `RabinSig`        | Rabin signature (big integer)                  | bigint       |
 | `RabinPubKey`     | Rabin public key (big integer)                 | bigint       |
+| `Point`           | secp256k1 EC point (64 bytes: x[32] \|\| y[32]) | ByteString   |
 | `FixedArray<T,N>` | Fixed-length array of N elements of type T     | N stack items|
 
 ### Disallowed Types
@@ -514,6 +516,23 @@ BuiltinFunction_PQ
     ;
 ```
 
+### Elliptic Curve (secp256k1)
+
+```ebnf
+BuiltinFunction_EC
+    = 'ecAdd'              /* ecAdd(a: Point, b: Point): Point */
+    | 'ecMul'              /* ecMul(p: Point, k: bigint): Point */
+    | 'ecMulGen'           /* ecMulGen(k: bigint): Point */
+    | 'ecNegate'           /* ecNegate(p: Point): Point */
+    | 'ecOnCurve'          /* ecOnCurve(p: Point): boolean */
+    | 'ecModReduce'        /* ecModReduce(value: bigint, mod: bigint): bigint */
+    | 'ecEncodeCompressed' /* ecEncodeCompressed(p: Point): ByteString */
+    | 'ecMakePoint'        /* ecMakePoint(x: bigint, y: bigint): Point */
+    | 'ecPointX'           /* ecPointX(p: Point): bigint */
+    | 'ecPointY'           /* ecPointY(p: Point): bigint */
+    ;
+```
+
 ### Byte-String Operations
 
 ```ebnf
@@ -604,6 +623,7 @@ BuiltinFunction
     | BuiltinFunction_Hash
     | BuiltinFunction_Sig
     | BuiltinFunction_PQ
+    | BuiltinFunction_EC
     | BuiltinFunction_Bytes
     | BuiltinFunction_Conv
     | BuiltinFunction_Math

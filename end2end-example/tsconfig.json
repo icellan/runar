@@ -1,0 +1,28 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "baseUrl": ".",
+    "paths": {
+      "runar-sdk": ["../packages/runar-sdk/dist/index.d.ts"],
+      "runar-sdk/*": ["../packages/runar-sdk/dist/*"],
+      "runar-lang": ["../packages/runar-lang/dist/index.d.ts"],
+      "runar-lang/*": ["../packages/runar-lang/dist/*"],
+      "runar-compiler": ["../packages/runar-compiler/dist/index.d.ts"],
+      "runar-compiler/*": ["../packages/runar-compiler/dist/*"],
+      "runar-ir-schema": ["../packages/runar-ir-schema/dist/index.d.ts"],
+      "runar-ir-schema/*": ["../packages/runar-ir-schema/dist/*"],
+      "runar-testing": ["../packages/runar-testing/dist/index.d.ts"],
+      "runar-testing/*": ["../packages/runar-testing/dist/*"],
+      "@bsv/sdk": ["../node_modules/@bsv/sdk/dist/types/mod.d.ts"]
+    },
+    "noUnusedLocals": false,
+    "noUnusedParameters": false
+  },
+  "include": [
+    "**/*.runar.ts",
+    "**/*.test.ts",
+    "sdk-usage/sdk-usage-typescript.ts"
+  ]
+}

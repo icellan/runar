@@ -27,9 +27,9 @@ Rúnar uses a structural type system with the following characteristics:
      |            |
    bigint     ByteString     boolean
      |            |
-     |      +-----+-----+-----+-----+-----+
-     |      |     |      |     |     |     |
-     |   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage
+     |      +-----+-----+-----+-----+-----+-----+
+     |      |     |      |     |     |     |     |
+     |   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  Point
      |
   +--+--+
   |     |
@@ -71,13 +71,26 @@ Domain types are **subtypes of `ByteString`** with additional compile-time size 
 | `Ripemd160`| 20          | RIPEMD-160 digest                            |
 | `Addr`     | 20          | Bitcoin address (= RIPEMD-160 of SHA-256 of pubkey) |
 | `SigHashPreimage` | variable | Serialized sighash preimage for OP_PUSH_TX |
+| `Point`    | 64          | secp256k1 elliptic curve point (affine coordinates) |
+
+#### Point Encoding
+
+The `Point` type represents a secp256k1 elliptic curve point as 64 bytes of raw coordinate data:
+
+- Bytes 0-31: x-coordinate, 32 bytes, big-endian unsigned integer
+- Bytes 32-63: y-coordinate, 32 bytes, big-endian unsigned integer
+- No prefix byte (unlike compressed public keys which have a 02/03 prefix)
+
+Both coordinates are elements of the secp256k1 field `F_p` where `p = 2^256 - 2^32 - 977`. A valid point satisfies the curve equation `y^2 === x^3 + 7 (mod p)`.
+
+The `Point` type is distinct from `PubKey` (33-byte compressed format). Use `ecEncodeCompressed(p)` to convert a `Point` to a compressed `PubKey`-compatible `ByteString`.
 
 #### Subtyping Rule
 
 ```
          ByteString
-        /    |    \     \       \          \
-    PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage
+        /    |    \     \       \          \         \
+    PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  Point
 
     T <: ByteString    for all domain types T
     T <: T             reflexivity
@@ -399,6 +412,7 @@ For each method:
 | `Ripemd160` | 20 bytes pushed directly |
 | `Addr` | 20 bytes pushed directly |
 | `SigHashPreimage` | Variable-length bytes pushed directly |
+| `Point` | 64 bytes pushed directly (x[32] \|\| y[32], big-endian) |
 | `RabinSig` | Script number |
 | `RabinPubKey` | Script number |
 | `FixedArray<T,N>` | N consecutive stack items, each encoded as T |

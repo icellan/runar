@@ -198,6 +198,9 @@ Key SDK concepts:
 - `assert()` is the primary control mechanism — scripts fail if any assert is false
 - Only Rúnar built-in functions are allowed — no arbitrary function calls (Math, console, etc.)
 - Built-in math functions: `abs`, `min`, `max`, `within`, `safediv`, `safemod`, `clamp`, `sign`, `pow`, `mulDiv`, `percentOf`, `sqrt`, `gcd`, `divmod`, `log2`, `bool`
+- Built-in EC (secp256k1) functions: `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`
+- `Point` type: 64-byte ByteString subtype (x[32] || y[32], big-endian unsigned, no prefix byte). EC constants: `EC_P`, `EC_N`, `EC_G` (from `runar-lang/src/ec.ts`)
 - Shift operators `<<` and `>>` compile to `OP_LSHIFT` and `OP_RSHIFT`
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
 - SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust)
+- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust)
