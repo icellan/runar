@@ -930,12 +930,30 @@ impl LoweringContext {
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
         then_ctx.lower_bindings(then_bindings, terminal_assert);
+
+        if terminal_assert && then_ctx.sm.depth() > 1 {
+            let excess = then_ctx.sm.depth() - 1;
+            for _ in 0..excess {
+                then_ctx.emit_op(StackOp::Nip);
+                then_ctx.sm.remove_at_depth(1);
+            }
+        }
+
         let then_ops = then_ctx.ops;
 
         // Lower else-branch
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
         else_ctx.lower_bindings(else_bindings, terminal_assert);
+
+        if terminal_assert && else_ctx.sm.depth() > 1 {
+            let excess = else_ctx.sm.depth() - 1;
+            for _ in 0..excess {
+                else_ctx.emit_op(StackOp::Nip);
+                else_ctx.sm.remove_at_depth(1);
+            }
+        }
+
         let else_ops = else_ctx.ops;
 
         self.emit_op(StackOp::If {

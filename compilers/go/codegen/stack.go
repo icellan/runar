@@ -506,6 +506,8 @@ func (ctx *loweringContext) pushPropertyValue(val interface{}) {
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: v}})
 	case float64:
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(v))})
+	case *big.Int:
+		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(v)}})
 	case string:
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: hexToBytes(v)}})
 	default:
@@ -815,12 +817,30 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	thenCtx := newLoweringContext(nil, ctx.properties)
 	thenCtx.sm = ctx.sm.clone()
 	thenCtx.lowerBindings(thenBindings, ta)
+
+	if ta && thenCtx.sm.depth() > 1 {
+		excess := thenCtx.sm.depth() - 1
+		for i := 0; i < excess; i++ {
+			thenCtx.emitOp(StackOp{Op: "nip"})
+			thenCtx.sm.removeAtDepth(1)
+		}
+	}
+
 	thenOps := thenCtx.ops
 
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
 	elseCtx.sm = ctx.sm.clone()
 	elseCtx.lowerBindings(elseBindings, ta)
+
+	if ta && elseCtx.sm.depth() > 1 {
+		excess := elseCtx.sm.depth() - 1
+		for i := 0; i < excess; i++ {
+			elseCtx.emitOp(StackOp{Op: "nip"})
+			elseCtx.sm.removeAtDepth(1)
+		}
+	}
+
 	elseOps := elseCtx.ops
 
 	ifOp := StackOp{

@@ -879,12 +879,30 @@ class LoweringContext {
     const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
     thenCtx.stackMap = this.stackMap.clone();
     thenCtx.lowerBindings(thenBindings, terminalAssert);
+
+    if (terminalAssert && thenCtx.stackMap.depth > 1) {
+      const excess = thenCtx.stackMap.depth - 1;
+      for (let i = 0; i < excess; i++) {
+        thenCtx.emitOp({ op: 'nip' });
+        thenCtx.stackMap.removeAtDepth(1);
+      }
+    }
+
     const thenOps = thenCtx.result.ops;
 
     // Lower else-branch
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.lowerBindings(elseBindings, terminalAssert);
+
+    if (terminalAssert && elseCtx.stackMap.depth > 1) {
+      const excess = elseCtx.stackMap.depth - 1;
+      for (let i = 0; i < excess; i++) {
+        elseCtx.emitOp({ op: 'nip' });
+        elseCtx.stackMap.removeAtDepth(1);
+      }
+    }
+
     const elseOps = elseCtx.result.ops;
 
     this.emitOp({
