@@ -104,7 +104,7 @@ When adding a new frontend format parser:
 - Add format docs in `docs/formats/`
 
 ### Three Compilers Must Stay in Sync
-Any language feature change must be implemented in TypeScript, Go, AND Rust. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 9 golden-file tests (including WOTS+ and SLH-DSA) that all 3 compilers must pass.
+Any language feature change must be implemented in TypeScript, Go, AND Rust. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 10 golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 3 compilers must pass.
 
 ### Contract Model
 - `SmartContract` — stateless, all properties `readonly`, developer writes full logic

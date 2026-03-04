@@ -816,9 +816,9 @@ func TestLog2_BitScanning(t *testing.T) {
 		t.Errorf("log2 should use OP_GREATERTHAN for bit-scanning loop, got: %s", asm)
 	}
 
-	// Must use OP_RSHIFT for the right-shift in the bit-scanning loop
-	if !strings.Contains(asm, "OP_RSHIFT") {
-		t.Errorf("log2 should use OP_RSHIFT for bit-scanning loop, got: %s", asm)
+	// Must use OP_DIV for numeric halving in the bit-scanning loop
+	if !strings.Contains(asm, "OP_DIV") {
+		t.Errorf("log2 should use OP_DIV for bit-scanning loop, got: %s", asm)
 	}
 
 	// Must NOT use the old OP_SIZE byte-approximation approach
@@ -829,12 +829,12 @@ func TestLog2_BitScanning(t *testing.T) {
 		t.Errorf("log2 should NOT use OP_MUL (old byte approximation), got: %s", asm)
 	}
 
-	// The bit-scanning loop should have 64 if-ops with OP_RSHIFT + OP_1ADD inside
+	// The bit-scanning loop should have 64 if-ops with OP_DIV + OP_1ADD inside
 	ifCount := 0
 	for _, op := range check.Ops {
 		if op.Op == "if" {
 			thenStr := opsToString(op.Then)
-			if strings.Contains(thenStr, "OP_RSHIFT") && strings.Contains(thenStr, "OP_1ADD") {
+			if strings.Contains(thenStr, "OP_DIV") && strings.Contains(thenStr, "OP_1ADD") {
 				ifCount++
 			}
 		}

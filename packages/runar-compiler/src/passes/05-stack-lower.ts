@@ -1988,7 +1988,7 @@ class LoweringContext {
    *   result = counter
    *
    * Stack layout during loop: <input> <counter>
-   * Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_1 OP_RSHIFT OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+   * Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
    */
   private lowerLog2(
     bindingName: string,
@@ -2018,11 +2018,11 @@ class LoweringContext {
       this.emitOp({
         op: 'if',
         then: [
-          { op: 'push', value: 1n },              // counter input 1
-          { op: 'opcode', code: 'OP_RSHIFT' },    // counter (input>>1)
-          { op: 'swap' },                         // (input>>1) counter
-          { op: 'opcode', code: 'OP_1ADD' },      // (input>>1) (counter+1)
-          { op: 'swap' },                         // (counter+1) (input>>1)
+          { op: 'push', value: 2n },              // counter input 2
+          { op: 'opcode', code: 'OP_DIV' },       // counter (input/2)
+          { op: 'swap' },                         // (input/2) counter
+          { op: 'opcode', code: 'OP_1ADD' },      // (input/2) (counter+1)
+          { op: 'swap' },                         // (counter+1) (input/2)
         ],
         else: undefined,
       });

@@ -28,12 +28,13 @@ Contracts available in TypeScript, Go, and Rust only:
 |---|---|---|---|---|
 | **Function Patterns** | `{ts,go,rust}/function-patterns/` | Stateful (OP_PUSH_TX) | Intermediate | Demonstrates private helper methods and function call patterns. |
 
-TypeScript-only contracts (post-quantum):
+TypeScript-only contracts (post-quantum and EC):
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
 | **Post-Quantum Wallet** | `ts/post-quantum-wallet/` | Stateless, PQ | Advanced | WOTS+ (Winternitz One-Time Signature) wallet for post-quantum security. |
 | **SPHINCS+ Wallet** | `ts/sphincs-wallet/` | Stateless, PQ | Advanced | SLH-DSA-SHA2-128s (SPHINCS+) wallet for stateless post-quantum signatures. |
+| **SchnorrZKP** | `ts/schnorr-zkp/` | Stateless, EC | Advanced | Schnorr zero-knowledge proof using EC point operations. |
 
 ---
 

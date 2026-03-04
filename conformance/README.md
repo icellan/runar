@@ -67,12 +67,17 @@ tests/
 |   +-- expected-script.hex
 |
 +-- post-quantum-slhdsa/
-    +-- post-quantum-slhdsa.runar.ts
+|   +-- post-quantum-slhdsa.runar.ts
+|   +-- expected-ir.json
+|   +-- expected-script.hex
+|
++-- ec-primitives/
+    +-- ec-primitives.runar.ts
     +-- expected-ir.json
     +-- expected-script.hex
 ```
 
-> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All format variants must produce the same ANF IR and script output. The post-quantum tests currently only have `.runar.ts` sources. Six of the nine test directories (`basic-p2pkh`, `arithmetic`, `boolean-logic`, `if-else`, `bounded-loop`, `stateful`) also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All format variants must produce the same ANF IR and script output. The post-quantum and ec-primitives tests currently only have `.runar.ts` sources. Six of the ten test directories (`basic-p2pkh`, `arithmetic`, `boolean-logic`, `if-else`, `bounded-loop`, `stateful`) also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
 
 ### File Roles
 
@@ -234,3 +239,4 @@ Golden file updates should always be reviewed carefully. An unexpected change in
 | `stateful` | State updates, checkPreimage, getStateScript | Yes |
 | `post-quantum-wots` | WOTS+ hash chain signature verification | Yes |
 | `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
+| `ec-primitives` | EC point operations (ecAdd, ecMul, ecMulGen, etc.) | Yes |

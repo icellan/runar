@@ -104,6 +104,8 @@ const bs: ByteString = addr;                   // OK: widening
 const addr2: Addr = bs;                        // ERROR: narrowing without cast
 ```
 
+> **Implementation note:** The current type checker accepts `ByteString` where a domain type is expected (bidirectional compatibility). This is more permissive than the spec's stated narrowing restriction. This relaxation simplifies common patterns like passing concatenation results to domain-typed parameters.
+
 ### 2.3 Rabin Types
 
 These are subtypes of `bigint` used for Rabin signature verification:

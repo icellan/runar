@@ -220,6 +220,15 @@ interface TypeCheckResult {
 
 The peephole optimizer runs on Stack IR between passes 5 and 6 (always enabled). The constant folding optimizer is available between passes 4 and 5 but disabled by default to preserve ANF conformance.
 
+### Dedicated Codegen Modules
+
+Certain operations have specialized code generators that produce optimized Bitcoin Script sequences:
+
+- `src/passes/ec-codegen.ts` — EC point operations (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, etc.)
+- `src/passes/slh-dsa-codegen.ts` — SLH-DSA (SPHINCS+) signature verification (`verifySLHDSA_SHA2_*` for all 6 FIPS 205 parameter sets)
+
+These modules are invoked by the stack lowering pass (Pass 5) when the corresponding built-in calls are encountered.
+
 ---
 
 ## Error Reporting

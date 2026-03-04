@@ -313,11 +313,20 @@ fee := runar.EstimateDeployFee(numInputs, lockingScriptByteLen, feeRate)  // exp
 // Build an unsigned deploy transaction
 // feeRate is variadic ...int64; defaults to 1 sat/byte when omitted
 txHex, inputCount, err := runar.BuildDeployTransaction(
+    lockingScript, utxos, satoshis, changeAddress, changeScript,
+)
+// Or with explicit fee rate:
+txHex, inputCount, err := runar.BuildDeployTransaction(
     lockingScript, utxos, satoshis, changeAddress, changeScript, feeRate,
 )
 
 // Build a method call transaction
 // feeRate is variadic ...int64; defaults to 1 sat/byte when omitted
+txHex, inputCount := runar.BuildCallTransaction(
+    currentUtxo, unlockingScript, newLockingScript, newSatoshis,
+    changeAddress, changeScript, additionalUtxos,
+)
+// Or with explicit fee rate:
 txHex, inputCount := runar.BuildCallTransaction(
     currentUtxo, unlockingScript, newLockingScript, newSatoshis,
     changeAddress, changeScript, additionalUtxos, feeRate,
@@ -341,6 +350,18 @@ type Transaction struct {
     Outputs  []TxOutput
     Locktime int
     Raw      string
+}
+
+type TxInput struct {
+    Txid        string
+    OutputIndex int
+    Script      string
+    Sequence    uint32
+}
+
+type TxOutput struct {
+    Script   string
+    Satoshis int64
 }
 
 type UTXO struct {

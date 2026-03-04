@@ -303,7 +303,7 @@ function generateContractSource(
   methods: string[],
 ): string {
   const propDecls = properties
-    .map((p) => `  ${p.name}: ${p.type};`)
+    .map((p) => `  readonly ${p.name}: ${p.type};`)
     .join('\n');
 
   const ctor = arbConstructor(properties);
@@ -492,7 +492,7 @@ export const arbCryptoContract: fc.Arbitrary<string> = fc
       )
       .map((methods) => {
         const propDecls = properties
-          .map((p) => `  ${p.name}: ${p.type};`)
+          .map((p) => `  readonly ${p.name}: ${p.type};`)
           .join('\n');
         const ctorParams = properties.map((p) => `${p.name}: ${p.type}`).join(', ');
         const ctorBody = properties

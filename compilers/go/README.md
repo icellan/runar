@@ -20,8 +20,8 @@ Phase 1 validates that the Go implementation can produce identical Bitcoin Scrip
 ### Phase 1: IR Consumer
 
 ```
-  ANF IR (JSON)  -->  [Stack Lower]  -->  [Emit]  -->  Bitcoin Script
-                      Go pass 5          Go pass 6
+  ANF IR (JSON)  -->  [Stack Lower]  -->  [Peephole]  -->  [Emit]  -->  Bitcoin Script
+                      Go pass 5         Optimize        Go pass 6
 ```
 
 The Go compiler reads the canonical ANF IR JSON (produced by the TS reference compiler or any other conforming compiler) and performs stack scheduling and opcode emission. This is the simplest path to a working alternative backend.
@@ -37,8 +37,8 @@ The Go compiler reads the canonical ANF IR JSON (produced by the TS reference co
                                                                  ANF IR (JSON)
                                                                      |
                                                                      v
-            [Stack Lower]  -->  [Emit]  -->  Bitcoin Script
-            Go pass 5          Go pass 6
+            [Stack Lower]  -->  [Peephole]  -->  [Emit]  -->  Bitcoin Script
+            Go pass 5          Optimize        Go pass 6
 ```
 
 The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` files. tree-sitter provides a concrete syntax tree (CST) that the Go code walks to build the Rúnar AST. This avoids depending on the TypeScript compiler.
@@ -46,6 +46,12 @@ The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` fil
 Why tree-sitter instead of a custom parser? Rúnar source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
 
 Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+
+### Dedicated Codegen Modules
+
+- `codegen/ec.go` — EC point operations (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, etc.)
+- `codegen/slh_dsa.go` — SLH-DSA (SPHINCS+) signature verification
+- `codegen/optimizer.go` — Peephole optimizer (runs on Stack IR between stack lowering and emit)
 
 ---
 
@@ -59,7 +65,7 @@ go build -o runar-compiler-go .
 ### Prerequisites
 
 - Go 1.26+
-- tree-sitter C library (for Phase 2 frontend)
+- cgo support (for tree-sitter TypeScript parser, bundled via go-tree-sitter)
 
 ---
 
@@ -109,6 +115,8 @@ For each test case in `conformance/tests/`:
 2. Run the full pipeline (Passes 1-6).
 3. Compare ANF IR output with `expected-ir.json` (byte-identical SHA-256).
 4. Compare script output with `expected-script.hex` (if present).
+
+Most conformance tests also include multi-format variants (`.runar.sol`, `.runar.move`) that are tested through the same pipeline. The Go compiler additionally supports `.runar.go` native format via a hand-written recursive descent parser.
 
 ```bash
 # Run conformance from repo root

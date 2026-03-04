@@ -382,3 +382,23 @@ Built-in function name mapping:
 | `reverse_byte_string` | `reverseBytes` |
 | `to_byte_string` | `toByteString` |
 | `add_output` | `addOutput` |
+| `ec_add` | `ecAdd` |
+| `ec_mul` | `ecMul` |
+| `ec_mul_gen` | `ecMulGen` |
+| `ec_negate` | `ecNegate` |
+| `ec_on_curve` | `ecOnCurve` |
+| `ec_mod_reduce` | `ecModReduce` |
+| `ec_encode_compressed` | `ecEncodeCompressed` |
+| `ec_make_point` | `ecMakePoint` |
+| `ec_point_x` | `ecPointX` |
+| `ec_point_y` | `ecPointY` |
+
+EC constants use UPPER_SNAKE_CASE:
+
+| Move constant | Rúnar constant |
+|--------------|---------------|
+| `EC_P` | `EC_P` |
+| `EC_N` | `EC_N` |
+| `EC_G` | `EC_G` |
+
+The `Point` type (64-byte ByteString subtype) is available directly as `Point` in Move syntax.

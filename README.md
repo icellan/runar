@@ -235,7 +235,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-12 example contracts demonstrate all major patterns:
+13 example contracts demonstrate all major patterns:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -249,10 +249,11 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [SimpleNFT](examples/ts/token-nft/) | NFT with transfer/burn | Yes | Yes |
 | [PostQuantumWallet](examples/ts/post-quantum-wallet/) | WOTS+ signature verification | No | No |
 | [SPHINCSWallet](examples/ts/sphincs-wallet/) | SLH-DSA (FIPS 205) verification | No | No |
+| [SchnorrZKP](examples/ts/schnorr-zkp/) | Schnorr zero-knowledge proof (EC ops) | No | No |
 | [FunctionPatterns](examples/ts/function-patterns/) | Public/private methods, built-ins | Yes | Yes |
 | [MathDemo](examples/ts/math-demo/) | Math built-in functions | Yes | Yes |
 
-9 contracts are available in all 5 formats (TypeScript, Go, Rust, Solidity, Move). FunctionPatterns is available in TypeScript, Go, and Rust only. PostQuantumWallet and SPHINCSWallet are TypeScript-only.
+9 contracts are available in all 5 formats (TypeScript, Go, Rust, Solidity, Move). FunctionPatterns is available in TypeScript, Go, and Rust only. PostQuantumWallet, SPHINCSWallet, and SchnorrZKP are TypeScript-only.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -289,7 +290,7 @@ Rúnar defines a **canonical IR conformance boundary** at the ANF level. Any com
 - The **Go compiler** produces identical output for all example contracts including post-quantum
 - The **Rust compiler** produces identical output for all example contracts including post-quantum
 
-The conformance suite in `conformance/` contains 9 golden-file tests (including WOTS+ and SLH-DSA). All three compilers must pass the same suite.
+The conformance suite in `conformance/` contains 10 golden-file tests (including WOTS+, SLH-DSA, and EC primitives). All three compilers must pass the same suite.
 
 ### Contract Model
 
@@ -318,8 +319,8 @@ packages/
   runar-testing/       # TestContract API, Script VM, interpreter
   runar-sdk/           # Deployment SDK (providers, signers)
   runar-cli/           # CLI tool
-  runar-go/            # Go mock package (types, mock crypto, CompileCheck)
-  runar-rs/            # Rust mock crate (prelude types, compile_check)
+  runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
+  runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
 compilers/
   go/                 # Go compiler (tree-sitter + native Go frontend)

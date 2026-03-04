@@ -212,6 +212,7 @@ PrimitiveTypeName =
     | "Ripemd160"
     | "Addr"
     | "SigHashPreimage"
+    | "Point"
     | "RabinSig"
     | "RabinPubKey"
     | "void"

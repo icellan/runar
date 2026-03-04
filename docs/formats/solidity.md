@@ -345,5 +345,37 @@ contract SimpleNFT is StatefulSmartContract {
 | `SigHashPreimage` | `SigHashPreimage` |
 | `RabinSig` | `RabinSig` |
 | `RabinPubKey` | `RabinPubKey` |
+| `Point` | `Point` |
 
 Both Solidity-style names (`int256`, `bool`, `bytes`, `address`) and Rúnar-native names (`bigint`, `boolean`, `ByteString`, `Addr`) are accepted. The parser normalizes to Rúnar types.
+
+---
+
+## Built-in Functions
+
+All Rúnar built-in functions are available using their standard names. The Solidity-like format does not rename builtins — use the same names as in TypeScript Rúnar (e.g. `sha256`, `checkSig`, `assert`/`require`).
+
+### EC Point Operations
+
+Elliptic curve operations on secp256k1 points are available:
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ecAdd` | `(a: Point, b: Point) => Point` | Point addition |
+| `ecMul` | `(p: Point, k: int256) => Point` | Scalar multiplication |
+| `ecMulGen` | `(k: int256) => Point` | Generator multiplication |
+| `ecNegate` | `(p: Point) => Point` | Point negation |
+| `ecOnCurve` | `(p: Point) => bool` | Curve membership check |
+| `ecModReduce` | `(value: int256, mod: int256) => int256` | Modular reduction |
+| `ecEncodeCompressed` | `(p: Point) => bytes` | Compress to 33-byte pubkey |
+| `ecMakePoint` | `(x: int256, y: int256) => Point` | Construct point from coordinates |
+| `ecPointX` | `(p: Point) => int256` | Extract x-coordinate |
+| `ecPointY` | `(p: Point) => int256` | Extract y-coordinate |
+
+### EC Constants
+
+| Constant | Description |
+|----------|-------------|
+| `EC_P` | secp256k1 field prime |
+| `EC_N` | secp256k1 group order |
+| `EC_G` | Generator point |

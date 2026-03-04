@@ -193,7 +193,7 @@ fc.assert(
 
 | Arbitrary | Description |
 |---|---|
-| `arbContract` | Contracts extending `SmartContract` with 1-3 mutable (non-`readonly`) properties of mixed types, 1-3 methods |
+| `arbContract` | Contracts extending `SmartContract` with 1-3 `readonly` properties of mixed types, 1-3 methods |
 | `arbStatelessContract` | Contracts with no properties, methods use only parameters |
 | `arbArithmeticContract` | Contracts focused on bigint arithmetic expressions |
 | `arbCryptoContract` | Contracts using `checkSig` and `sha256` with PubKey/Sig types |
@@ -238,3 +238,16 @@ expectStackTop(result, new Uint8Array([0x01, 0x02]));
 // Assert specific numeric value on stack top
 expectStackTopNum(result, 42n);
 ```
+
+---
+
+## Crypto Reference Implementations (Internal)
+
+The package includes internal reference implementations of post-quantum signature schemes used by the compiler's codegen tests. These are **not exported** from the package — they exist in `src/crypto/` and are used by the test suite to generate valid signatures for verifying compiled WOTS+ and SLH-DSA scripts.
+
+| Module | Description |
+|--------|-------------|
+| `src/crypto/wots.ts` | WOTS+ (Winternitz One-Time Signature) keygen, sign, verify |
+| `src/crypto/slh-dsa.ts` | SLH-DSA (SPHINCS+, FIPS 205) keygen, sign, verify for all 6 parameter sets |
+
+These are used internally by tests like `post-quantum.test.ts` and `post-quantum-slh-dual-oracle.test.ts` to generate real signatures that the compiled Bitcoin Script then verifies.

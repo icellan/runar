@@ -357,14 +357,14 @@ Deserialization reverses this: the SDK finds the last OP_RETURN at an opcode bou
 For stateful contracts, the SDK tracks the "current" UTXO internally. After each `call`, the SDK updates its pointer to the new UTXO created by the transaction.
 
 ```typescript
-// The SDK tracks the current UTXO automatically
-const tx1 = await counter.call('increment', [], provider, signer, {
+// The SDK tracks the current UTXO automatically (uses connected provider/signer)
+const tx1 = await counter.call('increment', [], {
   satoshis: 9500,
   newState: { count: 1n },
 });
 // counter now points to the new UTXO created by tx1
 
-const tx2 = await counter.call('increment', [], provider, signer, {
+const tx2 = await counter.call('increment', [], {
   satoshis: 9000,
   newState: { count: 2n },
 });

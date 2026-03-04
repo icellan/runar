@@ -177,6 +177,7 @@ let x = if cond { a } else { b };
 | `SigHashPreimage` | `SigHashPreimage` |
 | `RabinSig` | `RabinSig` |
 | `RabinPubKey` | `RabinPubKey` |
+| `Point` | `Point` |
 
 All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
 
@@ -213,6 +214,24 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `divmod(a, b)` | `divmod(a, b)` |
 | `log2(n)` | `log2(n)` |
 | `bool_cast(n)` | `bool(n)` |
+| `ec_add(&a, &b)` | `ecAdd(a, b)` |
+| `ec_mul(&p, k)` | `ecMul(p, k)` |
+| `ec_mul_gen(k)` | `ecMulGen(k)` |
+| `ec_negate(&p)` | `ecNegate(p)` |
+| `ec_on_curve(&p)` | `ecOnCurve(p)` |
+| `ec_mod_reduce(value, modulus)` | `ecModReduce(value, mod)` |
+| `ec_encode_compressed(&p)` | `ecEncodeCompressed(p)` |
+| `ec_make_point(x, y)` | `ecMakePoint(x, y)` |
+| `ec_point_x(&p)` | `ecPointX(p)` |
+| `ec_point_y(&p)` | `ecPointY(p)` |
+
+EC constants are available from `runar::prelude`:
+
+| Rust constant | Rúnar constant |
+|--------------|---------------|
+| `EC_P` | `EC_P` |
+| `EC_N` | `EC_N` |
+| `EC_G` | `EC_G` |
 
 ---
 

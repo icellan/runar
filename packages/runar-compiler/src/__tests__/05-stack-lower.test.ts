@@ -864,7 +864,7 @@ describe('Pass 5: Stack Lower', () => {
   // ---------------------------------------------------------------------------
 
   describe('log2() bit-scanning (Fix #5)', () => {
-    it('emits OP_RSHIFT and OP_GREATERTHAN for proper bit scanning', () => {
+    it('emits OP_DIV and OP_GREATERTHAN for proper bit scanning', () => {
       const source = `
         class C extends SmartContract {
           readonly x: bigint;
@@ -880,8 +880,8 @@ describe('Pass 5: Stack Lower', () => {
       const allOps = flattenOps(method.ops);
       const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
 
-      // The bit-scanning loop should use OP_RSHIFT and OP_GREATERTHAN
-      expect(opcodes).toContain('OP_RSHIFT');
+      // The bit-scanning loop should use OP_DIV and OP_GREATERTHAN
+      expect(opcodes).toContain('OP_DIV');
       expect(opcodes).toContain('OP_GREATERTHAN');
       expect(opcodes).toContain('OP_1ADD');
 

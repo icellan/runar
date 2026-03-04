@@ -350,8 +350,8 @@ private helper(x: bigint): bigint {
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
-| `pack` | `(n: bigint) => ByteString` | No-op (type-level cast) |
-| `unpack` | `(data: ByteString) => bigint` | `OP_BIN2NUM` |
+| `pack` | `(n: bigint) => ByteString` | No-op (type-level cast). *Compiler-internal — not importable by contract authors.* |
+| `unpack` | `(data: ByteString) => bigint` | `OP_BIN2NUM`. *Compiler-internal — not importable by contract authors.* |
 | `num2bin` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
 
 ### Math
@@ -389,14 +389,14 @@ private helper(x: bigint): bigint {
 | `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop |
 | `sqrt` | `(n: bigint) => bigint` | 16-iteration Newton's method: `guess = (guess + n/guess) / 2` |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
-| `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — computes both quotient and remainder, returns quotient (the remainder is discarded). Despite the name suggesting both values, only the quotient is returned to the caller. |
-| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop — exact floor(log2(n)) |
+| `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
+| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
 
 > **Note on `pow`:** For compile-time constant exponents (e.g. `pow(x, 3n)`), the constant folder evaluates the result at compile time. For runtime exponents, a bounded 32-iteration loop is emitted, supporting exponents up to 32.
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
-> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that right-shifts the input until it reaches 1, counting iterations.
+> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that halves the input (via `PUSH 2 OP_DIV`) until it reaches 1, counting iterations. Uses `OP_DIV` rather than `OP_RSHIFT` because `OP_RSHIFT` has byte-array semantics on BSV that are incompatible with script number halving.
 
 ### Control
 

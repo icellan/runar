@@ -2489,7 +2489,7 @@ impl LoweringContext {
     ///   result = counter
     ///
     /// Stack layout during loop: <input> <counter>
-    /// Each iteration: OP_SWAP OP_DUP 1 OP_GREATERTHAN OP_IF 1 OP_RSHIFT OP_SWAP OP_1ADD OP_SWAP OP_ENDIF OP_SWAP
+    /// Each iteration: OP_SWAP OP_DUP 1 OP_GREATERTHAN OP_IF 2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF OP_SWAP
     fn lower_log2(
         &mut self,
         binding_name: &str,
@@ -2518,11 +2518,11 @@ impl LoweringContext {
             self.emit_op(StackOp::Opcode("OP_GREATERTHAN".to_string()));     // counter input (input>1)
             self.emit_op(StackOp::If {
                 then_ops: vec![
-                    StackOp::Push(PushValue::Int(1)),                        // counter input 1
-                    StackOp::Opcode("OP_RSHIFT".to_string()),                // counter (input>>1)
-                    StackOp::Swap,                                           // (input>>1) counter
-                    StackOp::Opcode("OP_1ADD".to_string()),                  // (input>>1) (counter+1)
-                    StackOp::Swap,                                           // (counter+1) (input>>1)
+                    StackOp::Push(PushValue::Int(2)),                        // counter input 2
+                    StackOp::Opcode("OP_DIV".to_string()),                   // counter (input/2)
+                    StackOp::Swap,                                           // (input/2) counter
+                    StackOp::Opcode("OP_1ADD".to_string()),                  // (input/2) (counter+1)
+                    StackOp::Swap,                                           // (counter+1) (input/2)
                 ],
                 else_ops: vec![],
             });
@@ -3373,7 +3373,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // log2 uses bit-scanning (OP_RSHIFT + OP_GREATERTHAN), not byte approx
+    // log2 uses bit-scanning (OP_DIV + OP_GREATERTHAN), not byte approx
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3425,10 +3425,10 @@ mod tests {
         let methods = lower_to_stack(&program).expect("stack lowering should succeed");
         let opcodes = collect_all_opcodes(&methods[0].ops);
 
-        // The bit-scanning implementation must use OP_RSHIFT and OP_GREATERTHAN
+        // The bit-scanning implementation must use OP_DIV and OP_GREATERTHAN
         assert!(
-            opcodes.contains(&"OP_RSHIFT".to_string()),
-            "log2 should use OP_RSHIFT (bit-scanning), got: {:?}",
+            opcodes.contains(&"OP_DIV".to_string()),
+            "log2 should use OP_DIV (bit-scanning), got: {:?}",
             opcodes
         );
         assert!(

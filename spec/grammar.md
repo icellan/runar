@@ -563,6 +563,8 @@ BuiltinFunction_Conv
     ;
 ```
 
+> **Note:** `pack` and `unpack` are compiler-internal builtins. They are NOT exported from `runar-lang` and cannot be imported by contract authors. The compiler uses them internally for type-level casts between `bigint` and `ByteString`.
+
 ### Math
 
 ```ebnf
@@ -594,7 +596,7 @@ BuiltinFunction_Preimage
     | 'extractHashPrevouts'  /* extractHashPrevouts(txPreimage: SigHashPreimage): Sha256 */
     | 'extractHashSequence'  /* extractHashSequence(txPreimage: SigHashPreimage): Sha256 */
     | 'extractOutpoint'    /* extractOutpoint(txPreimage: SigHashPreimage): ByteString */
-    | 'extractInputIndex'  /* extractInputIndex(txPreimage: SigHashPreimage): bigint */
+    | 'extractInputIndex'  /* extractInputIndex(txPreimage: SigHashPreimage): bigint -- see note below */
     | 'extractScriptCode'  /* extractScriptCode(txPreimage: SigHashPreimage): ByteString */
     | 'extractAmount'      /* extractAmount(txPreimage: SigHashPreimage): bigint */
     | 'extractSequence'    /* extractSequence(txPreimage: SigHashPreimage): bigint */
@@ -604,6 +606,8 @@ BuiltinFunction_Preimage
     | 'extractSigHashType' /* extractSigHashType(txPreimage: SigHashPreimage): bigint */
     ;
 ```
+
+> **Note:** Despite the name, `extractInputIndex` returns the **prevout output index** (the index of the output in the *previous* transaction that created the UTXO being spent), NOT the spending input's position in the current transaction's input list.
 
 ### State Management (StatefulSmartContract only)
 

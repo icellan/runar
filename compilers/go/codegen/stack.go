@@ -2012,7 +2012,7 @@ func (ctx *loweringContext) lowerDivmod(bindingName string, args []string, bindi
 //	result = counter
 //
 // Stack layout during loop: <input> <counter>
-// Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_1 OP_RSHIFT OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+// Each iteration: OP_SWAP OP_DUP OP_1 OP_GREATERTHAN OP_IF OP_2 OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
 func (ctx *loweringContext) lowerLog2(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
 	if len(args) < 1 {
 		panic("log2 requires 1 argument")
@@ -2038,11 +2038,11 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 		ctx.emitOp(StackOp{
 			Op: "if",
 			Then: []StackOp{
-				{Op: "push", Value: bigIntPush(1)},       // counter input 1
-				{Op: "opcode", Code: "OP_RSHIFT"},        // counter (input>>1)
-				{Op: "swap"},                             // (input>>1) counter
-				{Op: "opcode", Code: "OP_1ADD"},          // (input>>1) (counter+1)
-				{Op: "swap"},                             // (counter+1) (input>>1)
+				{Op: "push", Value: bigIntPush(2)},       // counter input 2
+				{Op: "opcode", Code: "OP_DIV"},           // counter (input/2)
+				{Op: "swap"},                             // (input/2) counter
+				{Op: "opcode", Code: "OP_1ADD"},          // (input/2) (counter+1)
+				{Op: "swap"},                             // (counter+1) (input/2)
 			},
 		})
 		// Stack: counter input (or input counter if swapped back)

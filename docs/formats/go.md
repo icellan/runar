@@ -153,6 +153,7 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.SigHashPreimage` | `SigHashPreimage` |
 | `runar.RabinSig` | `RabinSig` |
 | `runar.RabinPubKey` | `RabinPubKey` |
+| `runar.Point` | `Point` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
 
@@ -196,6 +197,24 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 | `runar.ExtractOutputHash(pre)` | `extractOutputHash(pre)` |
 | `runar.ExtractAmount(pre)` | `extractAmount(pre)` |
 | `runar.VerifyRabinSig(msg, sig, pad, pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
+| `runar.EcAdd(a, b)` | `ecAdd(a, b)` |
+| `runar.EcMul(p, k)` | `ecMul(p, k)` |
+| `runar.EcMulGen(k)` | `ecMulGen(k)` |
+| `runar.EcNegate(p)` | `ecNegate(p)` |
+| `runar.EcOnCurve(p)` | `ecOnCurve(p)` |
+| `runar.EcModReduce(value, mod)` | `ecModReduce(value, mod)` |
+| `runar.EcEncodeCompressed(p)` | `ecEncodeCompressed(p)` |
+| `runar.EcMakePoint(x, y)` | `ecMakePoint(x, y)` |
+| `runar.EcPointX(p)` | `ecPointX(p)` |
+| `runar.EcPointY(p)` | `ecPointY(p)` |
+
+EC constants are available as package-level variables:
+
+| Go constant | Rúnar constant |
+|------------|---------------|
+| `runar.EC_P` | `EC_P` |
+| `runar.EC_N` | `EC_N` |
+| `runar.EC_G` | `EC_G` |
 
 ---
 

@@ -381,21 +381,22 @@ Add an output to the transaction being constructed (used by stateful contracts f
 
 Types are represented as strings or objects in the IR:
 
-| Rúnar Type | ANF Type Representation |
-|---|---|
-| `bigint` | `"bigint"` |
-| `boolean` | `"boolean"` |
-| `ByteString` | `"ByteString"` |
-| `PubKey` | `"PubKey"` |
-| `Sig` | `"Sig"` |
-| `Sha256` | `"Sha256"` |
-| `Ripemd160` | `"Ripemd160"` |
-| `Addr` | `"Addr"` |
-| `SigHashPreimage` | `"SigHashPreimage"` |
-| `RabinSig` | `"RabinSig"` |
-| `RabinPubKey` | `"RabinPubKey"` |
-| `void` | `"void"` |
-| `FixedArray<T, N>` | `{ "array": T, "size": N }` |
+| Rúnar Type | ANF Type Representation | Description |
+|---|---|---|
+| `bigint` | `"bigint"` | Arbitrary-precision integer |
+| `boolean` | `"boolean"` | Boolean value |
+| `ByteString` | `"ByteString"` | Raw byte sequence |
+| `PubKey` | `"PubKey"` | 33-byte compressed public key |
+| `Sig` | `"Sig"` | DER-encoded ECDSA signature |
+| `Sha256` | `"Sha256"` | 32-byte SHA-256 hash |
+| `Ripemd160` | `"Ripemd160"` | 20-byte RIPEMD-160 hash |
+| `Addr` | `"Addr"` | 20-byte address (RIPEMD-160 of SHA-256) |
+| `SigHashPreimage` | `"SigHashPreimage"` | BIP-143 sighash preimage |
+| `Point` | `"Point"` | 64-byte EC point (x[32] \|\| y[32], big-endian) |
+| `RabinSig` | `"RabinSig"` | Rabin signature value |
+| `RabinPubKey` | `"RabinPubKey"` | Rabin public key |
+| `void` | `"void"` | No value |
+| `FixedArray<T, N>` | `{ "array": T, "size": N }` | Fixed-length array of element type T |
 
 ---
 

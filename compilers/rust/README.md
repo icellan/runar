@@ -20,8 +20,8 @@ Phase 1 validates that the Rust implementation can produce identical Bitcoin Scr
 ### Phase 1: IR Consumer
 
 ```
-  ANF IR (JSON)  -->  [Stack Lower]  -->  [Emit]  -->  Bitcoin Script
-                      Rust pass 5        Rust pass 6
+  ANF IR (JSON)  -->  [Stack Lower]  -->  [Peephole]  -->  [Emit]  -->  Bitcoin Script
+                      Rust pass 5        Optimize        Rust pass 6
 ```
 
 The Rust compiler reads canonical ANF IR JSON and performs stack scheduling and opcode emission.
@@ -37,8 +37,8 @@ The Rust compiler reads canonical ANF IR JSON and performs stack scheduling and 
                                                                  ANF IR (JSON)
                                                                      |
                                                                      v
-            [Stack Lower]  -->  [Emit]  -->  Bitcoin Script
-            Rust pass 5        Rust pass 6
+            [Stack Lower]  -->  [Peephole]  -->  [Emit]  -->  Bitcoin Script
+            Rust pass 5        Optimize        Rust pass 6
 ```
 
 The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.runar.ts` files. SWC is a Rust-native TypeScript/JavaScript parser that provides a full AST. Since SWC is already written in Rust, it integrates naturally as a library dependency.
@@ -46,6 +46,12 @@ The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.runar.ts` 
 Why SWC instead of tree-sitter or a custom parser? SWC provides a typed Rust AST rather than a generic CST, reducing the amount of manual tree-walking needed. It is also the fastest TypeScript parser available, which matters for large projects. The Rust ecosystem already depends heavily on SWC for tooling (Next.js, Parcel, Deno), so it is well-maintained.
 
 Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.rs`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+
+### Dedicated Codegen Modules
+
+- `src/codegen/ec.rs` — EC point operations (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, etc.)
+- `src/codegen/slh_dsa.rs` — SLH-DSA (SPHINCS+) signature verification
+- `src/codegen/optimizer.rs` — Peephole optimizer (runs on Stack IR between stack lowering and emit)
 
 ---
 
