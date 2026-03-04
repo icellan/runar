@@ -111,6 +111,7 @@ function runGoCompiler(irFilePath: string): string | null {
         cwd: GO_COMPILER_DIR,
         timeout: 30000,
         stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
       },
     );
     return result.toString().trim();
@@ -132,6 +133,7 @@ function runRustCompiler(irFilePath: string): string | null {
         cwd: RUST_COMPILER_DIR,
         timeout: 30000,
         stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
       },
     );
     return result.toString().trim();

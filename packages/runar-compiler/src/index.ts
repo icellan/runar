@@ -44,7 +44,7 @@ import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
 // ---------------------------------------------------------------------------
 
 export interface CompileOptions {
-  /** Source file name for error messages. Defaults to "contract.ts". */
+  /** Source file name for error messages and parser dispatch. Defaults to "contract.ts". */
   fileName?: string;
 
   /** If true, stop after parsing (Pass 1). */
@@ -113,8 +113,21 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   const opts = options ?? {};
 
   // Pass 1: Parse
-  const parseResult = parse(source, opts.fileName);
-  diagnostics.push(...parseResult.errors);
+  // parse() uses asKindOrThrow() in 20+ places and can throw on malformed input.
+  let parseResult: ReturnType<typeof parse>;
+  try {
+    parseResult = parse(source, opts.fileName);
+    diagnostics.push(...parseResult.errors);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: null,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (!parseResult.contract || hasErrors(diagnostics)) {
     return {
@@ -135,9 +148,21 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 2: Validate
-  const validationResult = validate(parseResult.contract);
-  diagnostics.push(...validationResult.errors);
-  diagnostics.push(...validationResult.warnings);
+  let validationResult: ReturnType<typeof validate>;
+  try {
+    validationResult = validate(parseResult.contract);
+    diagnostics.push(...validationResult.errors);
+    diagnostics.push(...validationResult.warnings);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (hasErrors(diagnostics)) {
     return {
@@ -158,8 +183,20 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 3: Type-Check
-  const typeCheckResult = typecheck(parseResult.contract);
-  diagnostics.push(...typeCheckResult.errors);
+  let typeCheckResult: ReturnType<typeof typecheck>;
+  try {
+    typeCheckResult = typecheck(parseResult.contract);
+    diagnostics.push(...typeCheckResult.errors);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (hasErrors(diagnostics)) {
     return {
@@ -180,7 +217,19 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 4: ANF Lower
-  const anf = lowerToANF(parseResult.contract);
+  let anf: ANFProgram;
+  try {
+    anf = lowerToANF(parseResult.contract);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.

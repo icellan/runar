@@ -133,6 +133,39 @@ const solCounter = TestContract.fromSource(solSource, { count: 0n }, 'Counter.ru
 const contract = TestContract.fromFile('./contracts/Counter.runar.ts', { count: 0n });
 ```
 
+### Mock Preimage
+
+For testing time-locked or amount-constrained stateful contracts, use `setMockPreimage` to override the sighash preimage fields seen by `checkPreimage`:
+
+```typescript
+import { TestContract } from 'runar-testing';
+
+const contract = TestContract.fromSource(source, { deadline: 1000n });
+
+// Override mock preimage fields (all fields are bigint)
+contract.setMockPreimage({
+  locktime: 500n,
+  amount: 10000n,
+});
+
+// Subsequent calls will see the overridden preimage values
+const result = contract.call('withdraw');
+expect(result.success).toBe(true);
+```
+
+The `MockPreimage` type has four optional fields:
+
+```typescript
+interface MockPreimage {
+  locktime: bigint;
+  amount: bigint;
+  version: bigint;
+  sequence: bigint;
+}
+```
+
+`setMockPreimage` accepts a `Partial<MockPreimage>` -- only the fields you provide are overridden; the rest keep their defaults.
+
 ---
 
 ## Program Fuzzer
@@ -160,7 +193,7 @@ fc.assert(
 
 | Arbitrary | Description |
 |---|---|
-| `arbContract` | Contracts with 1-3 properties of mixed types, 1-3 methods |
+| `arbContract` | Contracts extending `SmartContract` with 1-3 mutable (non-`readonly`) properties of mixed types, 1-3 methods |
 | `arbStatelessContract` | Contracts with no properties, methods use only parameters |
 | `arbArithmeticContract` | Contracts focused on bigint arithmetic expressions |
 | `arbCryptoContract` | Contracts using `checkSig` and `sha256` with PubKey/Sig types |

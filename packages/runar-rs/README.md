@@ -307,7 +307,7 @@ State is stored as a suffix of the locking script:
 Type-specific encoding:
 - `int`/`bigint`: OP_0 for zero, otherwise minimally-encoded Script integers (with sign byte)
 - `bool`: OP_0 (`00`) for false, OP_1 (`51`) for true
-- `bytes`/`ByteString`/`PubKey`/`Addr`/`Sha256`: direct pushdata
+- `bytes`/`ByteString`/`PubKey`/`Addr`/`Sha256`/`Ripemd160`: direct pushdata
 
 The `find_last_op_return()` function uses opcode-aware walking to locate the real OP_RETURN boundary, properly skipping `0x6a` bytes inside push data payloads.
 

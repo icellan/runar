@@ -30,11 +30,11 @@ examples/
   sol/                # Solidity-like contracts + vitest tests
   move/               # Move-style contracts + vitest tests
   sdk-usage/          # SDK usage reference docs (not runnable)
-end2end-example/      # End-to-end example (ts, go, rust, sol, move)
+end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp)
 spec/                 # Language specification (grammar, semantics, type system)
 docs/                 # User-facing documentation
   formats/            # Format-specific guides (solidity.md, move.md, go.md, rust.md)
-go.work              # Go workspace: compilers/go + conformance + end2end-example/go + examples/go + packages/runar-go
+go.work              # Go workspace: compilers/go + conformance + end2end-example/go + end2end-example/webapp + examples/go + packages/runar-go
 ```
 
 ## Build & Test

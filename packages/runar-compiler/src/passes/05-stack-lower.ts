@@ -20,6 +20,11 @@ import type {
   StackOp,
 } from '../ir/index.js';
 import { emitVerifySLHDSA } from './slh-dsa-codegen.js';
+import {
+  emitEcAdd, emitEcMul, emitEcMulGen, emitEcNegate,
+  emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
+  emitEcMakePoint, emitEcPointX, emitEcPointY,
+} from './ec-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -38,6 +43,9 @@ const BUILTIN_OPCODES: Record<string, string[]> = {
   hash256: ['OP_HASH256'],
   checkSig: ['OP_CHECKSIG'],
   checkMultiSig: ['OP_CHECKMULTISIG'],
+  // Note: `len` maps to OP_SIZE but has special stack handling below
+  // because OP_SIZE leaves the original value on stack (stack: [original, size]).
+  // The handler emits OP_NIP to remove the original, keeping only the size.
   len: ['OP_SIZE'],
   cat: ['OP_CAT'],
   num2bin: ['OP_NUM2BIN'],
@@ -693,6 +701,15 @@ class LoweringContext {
     if (func.startsWith('verifySLHDSA_SHA2_')) {
       const paramKey = func.replace('verifySLHDSA_', '');
       this.lowerVerifySLHDSA(bindingName, paramKey, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // EC builtins
+    if (func === 'ecAdd' || func === 'ecMul' || func === 'ecMulGen' ||
+        func === 'ecNegate' || func === 'ecOnCurve' || func === 'ecModReduce' ||
+        func === 'ecEncodeCompressed' || func === 'ecMakePoint' ||
+        func === 'ecPointX' || func === 'ecPointY') {
+      this.lowerEcBuiltin(bindingName, func, args, bindingIndex, lastUses);
       return;
     }
 
@@ -2449,6 +2466,43 @@ class LoweringContext {
     for (let i = 0; i < 3; i++) this.stackMap.pop();
 
     emitVerifySLHDSA((op) => this.emitOp(op), paramKey);
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // EC builtins — delegates to ec-codegen.ts
+  // =========================================================================
+
+  private lowerEcBuiltin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring all args to stack top
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'ecAdd':              emitEcAdd(emitFn); break;
+      case 'ecMul':              emitEcMul(emitFn); break;
+      case 'ecMulGen':           emitEcMulGen(emitFn); break;
+      case 'ecNegate':           emitEcNegate(emitFn); break;
+      case 'ecOnCurve':          emitEcOnCurve(emitFn); break;
+      case 'ecModReduce':        emitEcModReduce(emitFn); break;
+      case 'ecEncodeCompressed': emitEcEncodeCompressed(emitFn); break;
+      case 'ecMakePoint':        emitEcMakePoint(emitFn); break;
+      case 'ecPointX':           emitEcPointX(emitFn); break;
+      case 'ecPointY':           emitEcPointY(emitFn); break;
+      default: throw new Error(`Unknown EC builtin: ${func}`);
+    }
 
     this.stackMap.push(bindingName);
     this.trackDepth();

@@ -265,23 +265,25 @@ If there is no `else` clause and the condition is false, the environment and sto
 
 ### 4.4 For Loop (Bounded, Unrolled)
 
-For loops are unrolled at compile time. The semantics describe the unrolled version:
+For loops are unrolled at compile time. The ANF IR `loop` node stores only a `count` (number of iterations) and an `iterVar` name -- it does not store the original start value. The stack lowerer always assigns iteration variable values starting from `0`:
 
 ```
     bound = evaluate_const(e_bound)
     init = evaluate_const(e_init)
-    iterations = [init, init+1, ..., bound-1]   /* for i < bound, ++ */
+    count = bound - init                        /* for i < bound, ++ */
 
-    <S_body[i := iterations[0]], env, sigma> ==> <env_1, sigma_1>
-    <S_body[i := iterations[1]], env_1, sigma_1> ==> <env_2, sigma_2>
+    <S_body[i := 0], env, sigma> ==> <env_1, sigma_1>
+    <S_body[i := 1], env_1, sigma_1> ==> <env_2, sigma_2>
     ...
-    <S_body[i := iterations[k]], env_k, sigma_k> ==> <env_final, sigma_final>
+    <S_body[i := count-1], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
     ──────────────────────────────────────────────────────────────────────────────
     <for (let i = e_init; i < e_bound; i++) S_body, env, sigma>
         ==>  <env_final, sigma_final>
 ```
 
 The loop variable `i` is substituted with the concrete iteration value in each unrolled copy of the body. This means the loop variable is effectively a compile-time constant within each iteration.
+
+> **Limitation:** Although the compiler correctly computes the iteration *count* for non-zero start values (e.g., `for (let i = 3n; i < 8n; i++)` produces `count = 5`), the iteration variable is always assigned values `[0, 1, ..., count-1]` rather than `[init, init+1, ..., bound-1]`. If the loop body depends on the iteration variable's absolute value (not just the iteration index), developers must use a 0-based loop and add the start offset manually (e.g., `const j = i + 3n`).
 
 ### 4.5 Expression Statement
 
@@ -417,16 +419,10 @@ Stateful contracts use the **OP_PUSH_TX** pattern to carry state across transact
 A stateful contract's locking script has the form:
 
 ```
-<state_data> <locking_code>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-Where `<state_data>` is the serialized mutable properties followed by `OP_DROP` instructions to remove them from the stack before `<locking_code>` executes (the code reads them via the preimage instead).
-
-More precisely:
-
-```
-<prop_n> <prop_n-1> ... <prop_1> OP_DROP ... OP_DROP <code_part>
-```
+The `<code_part>` contains the contract logic. State data is appended after an `OP_RETURN` separator, which terminates script execution so the state fields are never executed as opcodes. The contract reads its current state from the sighash preimage (which includes the full scriptCode) rather than from the stack.
 
 ### 7.2 State Transition Rule
 
@@ -435,7 +431,7 @@ More precisely:
     <method_body, env, sigma_old> ==> <env', sigma_new>
     sigma_new = {p1: v1', ..., pn: vn'}   /* new state */
 
-    new_locking_script = serialize_state(sigma_new) ++ code_part
+    new_locking_script = code_part ++ OP_RETURN ++ serialize_state(sigma_new)
     preimage contains output with new_locking_script
     checkPreimage(preimage) succeeds
     ──────────────────────────────────────────────────────────────

@@ -162,10 +162,12 @@ func (s *MockSignerImpl) GetAddress() (string, error) {
 	return s.address, nil
 }
 
-// Sign returns a mock DER-encoded signature (72 zero bytes as hex).
+// Sign returns a mock DER-encoded signature (72 bytes as hex).
+// The format is 0x30 (DER SEQUENCE tag) + 70 zero bytes + 0x41 (sighash byte),
+// consistent with the Rust SDK's MockSigner output.
 func (s *MockSignerImpl) Sign(txHex string, inputIndex int, subscript string, satoshis int64, sigHashType *int) (string, error) {
-	// Return a deterministic 72-byte mock signature (all zeros) + sighash byte 0x41
-	return repeatHex("00", 71) + "41", nil
+	// Return a deterministic 72-byte mock signature: DER prefix 0x30 + 70 zero bytes + sighash byte 0x41
+	return "30" + repeatHex("00", 70) + "41", nil
 }
 
 // ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * Lower a type-checked Rúnar AST to ANF IR.
+ * Lower a validated Rúnar AST to ANF IR.
  */
 export function lowerToANF(contract: ContractNode): ANFProgram {
   const properties = lowerProperties(contract);
@@ -753,13 +753,14 @@ function lowerDecrementExpr(
 
 /** Byte-typed primitive names — values that are already byte sequences. */
 const BYTE_TYPES = new Set([
-  'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage',
+  'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage', 'Point',
 ]);
 
 /** Builtin functions that return byte-typed values. */
 const BYTE_RETURNING_FUNCTIONS = new Set([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
+  'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
 ]);
 
 /**

@@ -49,7 +49,7 @@ The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to p
 
 ### Alternative Frontends
 
-The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, and `.runar.go`. The Rust compiler similarly uses tree-sitter for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, and `.runar.rs`. All three frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
+The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, and `.runar.go`. The Rust compiler uses **SWC** (`swc_ecma_parser`) for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, and `.runar.rs`. All three frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
 
 ---
 
@@ -283,22 +283,23 @@ The final output of compilation is a JSON artifact (specified in `spec/artifact-
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "runar-v0.1.0",
   "compilerVersion": "0.1.0",
   "contractName": "P2PKH",
   "abi": {
     "constructor": { "params": [{ "name": "pubKeyHash", "type": "Addr" }] },
-    "methods": [{ "name": "unlock", "params": [...], "index": 0 }]
+    "methods": [{ "name": "unlock", "params": [...], "isPublic": true }]
   },
   "script": "76a914<pubKeyHash>88ac",
   "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
   "sourceMap": { "file": "P2PKH.ts", "mappings": [...] },
   "stateFields": [],
+  "constructorSlots": [{ "paramIndex": 0, "byteOffset": 3 }],
   "buildTimestamp": "2025-06-15T10:30:00Z"
 }
 ```
 
-Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-readable opcodes), `abi` (method signatures for the SDK), `stateFields` (mutable property descriptors for stateful contracts).
+Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-readable opcodes), `abi` (method signatures for the SDK), `stateFields` (mutable property descriptors for stateful contracts), `constructorSlots` (byte offsets where the SDK splices constructor arguments into the script template).
 
 ---
 
@@ -310,7 +311,7 @@ Rúnar defines a canonical IR conformance boundary at the ANF level. Any compile
 |----------|----------|--------|
 | **TypeScript** (reference) | ts-morph (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`) | Complete |
 | **Go** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.go`) | Complete |
-| **Rust** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`) | Complete |
+| **Rust** | SWC (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`) | Complete |
 
 All three compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The Go and Rust compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR. Each compiler supports multi-format parsing: TypeScript, Solidity-like, Move-style, and its own native syntax (Go or Rust DSL).
 

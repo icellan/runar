@@ -53,7 +53,12 @@ const { txid } = await contract.deploy({ satoshis: 10000 });
 console.log('Deployed:', txid);
 
 // 4. Call a public method
+// For P2PKH, the unlock method takes a signature and public key as arguments.
+// These are the contract's *method arguments* (pushed onto the unlocking script),
+// not the funding input signatures (which the SDK handles internally).
 const pubKey = await signer.getPublicKey();
+const lockingScript = contract.getLockingScript();
+const sig = await signer.sign(rawTxHex, 0, lockingScript, 10000);
 const result = await contract.call('unlock', [sig, pubKey]);
 console.log('Spent:', result.txid);
 
@@ -158,7 +163,7 @@ mock.addUtxo('1A1zP1...', {
   script: '76a914...88ac',
 });
 
-// Pre-register transactions
+// Pre-register transactions (for getTransaction() lookups)
 mock.addTransaction({
   txid: 'abc123...',
   version: 1,
@@ -167,11 +172,14 @@ mock.addTransaction({
   locktime: 0,
 });
 
-// Transactions are stored in memory
+// broadcast() returns a deterministic fake txid but does NOT register the
+// transaction in the mock store. Calling getTransaction() with the returned
+// txid will throw unless you pre-register it with addTransaction().
 const txid = await mock.broadcast(rawTx);
-const tx = await mock.getTransaction(txid);
+// mock.getTransaction(txid) would throw -- the broadcast is recorded but
+// the transaction is not stored. Use addTransaction() to pre-populate.
 
-// Inspect what was broadcast
+// Inspect what was broadcast (raw tx hex strings)
 const broadcastedTxs = mock.getBroadcastedTxs();
 
 // Override the fee rate (default is 1 sat/byte)
@@ -290,6 +298,31 @@ class MySigner implements Signer {
   }
 }
 ```
+
+---
+
+## Script Access
+
+Methods on `RunarContract` for direct script and state manipulation:
+
+```typescript
+// Get the full locking script hex (code + OP_RETURN + state for stateful contracts)
+const lockingScript = contract.getLockingScript();
+
+// Build an unlocking script for a method call
+const unlock = contract.buildUnlockingScript('transfer', [sigHex, pubKeyHex]);
+
+// Update state directly (useful for testing)
+contract.setState({ count: 5n });
+```
+
+### Signatures
+
+| Method | Signature |
+|---|---|
+| `getLockingScript` | `getLockingScript(): string` |
+| `buildUnlockingScript` | `buildUnlockingScript(methodName: string, args: unknown[]): string` |
+| `setState` | `setState(newState: Record<string, unknown>): void` |
 
 ---
 

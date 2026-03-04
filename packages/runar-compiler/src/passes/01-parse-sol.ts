@@ -330,7 +330,7 @@ class SolParser {
   private makePrimitiveOrCustom(name: string): TypeNode {
     const primitives = new Set([
       'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'void',
+      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
     ]);
     if (primitives.has(name)) {
       return { kind: 'primitive_type', name: name as PrimitiveTypeName };

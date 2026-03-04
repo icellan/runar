@@ -174,27 +174,35 @@ fn varint_byte_size(n: usize) -> i64 {
 }
 
 /// Build a P2PKH locking script from an address.
+///
+///   OP_DUP OP_HASH160 OP_PUSH20 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+///   76      a9         14        <20 bytes>    88              ac
+///
 /// If the address is 40-char hex, treat as raw pubkey hash.
-/// Otherwise, use a deterministic placeholder hash.
+/// Otherwise, decode the Base58Check address to extract the 20-byte pubkey hash.
 pub(crate) fn build_p2pkh_script_from_address(address: &str) -> String {
     let pub_key_hash = if is_hex_40(address) {
         address.to_string()
     } else {
-        deterministic_hash20(address)
+        // Decode Base58Check address: version(1) + pubKeyHash(20) + checksum(4)
+        let decoded = bs58::decode(address)
+            .with_check(None)
+            .into_vec()
+            .unwrap_or_else(|e| panic!("build_p2pkh_script_from_address: invalid address {:?}: {}", address, e));
+        if decoded.len() != 21 {
+            panic!(
+                "build_p2pkh_script_from_address: unexpected decoded length {} for address {:?}",
+                decoded.len(), address
+            );
+        }
+        // Skip version byte (0x00 for mainnet, 0x6f for testnet), take 20-byte hash
+        decoded[1..].iter().map(|b| format!("{:02x}", b)).collect()
     };
     format!("76a914{}88ac", pub_key_hash)
 }
 
 fn is_hex_40(s: &str) -> bool {
     s.len() == 40 && s.chars().all(|c| c.is_ascii_hexdigit())
-}
-
-fn deterministic_hash20(input: &str) -> String {
-    let mut bytes = [0u8; 20];
-    for (i, c) in input.bytes().enumerate() {
-        bytes[i % 20] = ((bytes[i % 20] ^ c).wrapping_mul(31).wrapping_add(17)) & 0xff;
-    }
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 // ---------------------------------------------------------------------------

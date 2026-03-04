@@ -234,6 +234,8 @@ Both operands are always evaluated (eager evaluation). At the ANF IR level, both
 | `a << b` | Left shift | `OP_LSHIFT` |
 | `a >> b` | Right shift | `OP_RSHIFT` |
 
+> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) is planned for the BSV 2026 CHRONICLE upgrade but is not yet widely available.
+
 ### Unary
 
 | Operator | Description | Opcode |
@@ -337,7 +339,7 @@ private helper(x: bigint): bigint {
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |
-| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — returns two values on the stack (left and right) |
+| `split` | `(data: ByteString, pos: bigint) => [ByteString, ByteString]` | `OP_SPLIT` — produces two stack values (left and right). Note: the type checker declares the return type as `ByteString` because Runar's type system has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
 | `left` | `(data: ByteString, n: bigint) => ByteString` | `OP_SPLIT OP_DROP` — returns the leftmost n bytes |
 | `right` | `(data: ByteString, n: bigint) => ByteString` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` — returns the rightmost n bytes |
 | `int2str` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |

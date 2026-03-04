@@ -19,6 +19,7 @@ declare const Ripemd160Brand: unique symbol;
 declare const Sha256Brand: unique symbol;
 declare const SigHashPreimageBrand: unique symbol;
 declare const OpCodeTypeBrand: unique symbol;
+declare const PointBrand: unique symbol;
 
 // ---------------------------------------------------------------------------
 // Core branded types
@@ -61,6 +62,9 @@ export type RabinPubKey = bigint;
 
 /** Opcode encoded as a single-byte hex string. */
 export type OpCodeType = ByteString & { readonly [OpCodeTypeBrand]: 'OpCodeType' };
+
+/** Elliptic curve point — 64 bytes (x[32] || y[32], big-endian unsigned, no prefix). */
+export type Point = ByteString & { readonly [PointBrand]: 'Point' };
 
 // ---------------------------------------------------------------------------
 // FixedArray<T, N> — compile-time fixed-size tuple
@@ -217,6 +221,14 @@ export function SigHashPreimage(hex: string): SigHashPreimage {
 export function OpCodeType(hex: string): OpCodeType {
   assertValidHex(hex, 'OpCodeType');
   return hex as unknown as OpCodeType;
+}
+
+/**
+ * Cast a hex string to `Point`. Validates 64 bytes (128 hex chars).
+ */
+export function Point(hex: string): Point {
+  assertHexLength(hex, 64, 'Point');
+  return hex as unknown as Point;
 }
 
 // ---------------------------------------------------------------------------

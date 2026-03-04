@@ -1855,7 +1855,7 @@ func TestMockSigner_Sign(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign error: %v", err)
 	}
-	// 71 zero bytes + sighash 0x41 = 144 hex chars
+	// DER prefix 0x30 + 70 zero bytes + sighash 0x41 = 144 hex chars
 	if len(sig) != 144 {
 		t.Errorf("expected 144-char signature, got %d: %s", len(sig), sig)
 	}

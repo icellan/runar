@@ -70,6 +70,22 @@ pub struct StackMethod {
 // Builtin function -> opcode mapping
 // ---------------------------------------------------------------------------
 
+fn is_ec_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "ecAdd"
+            | "ecMul"
+            | "ecMulGen"
+            | "ecNegate"
+            | "ecOnCurve"
+            | "ecModReduce"
+            | "ecEncodeCompressed"
+            | "ecMakePoint"
+            | "ecPointX"
+            | "ecPointY"
+    )
+}
+
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "sha256" => Some(vec!["OP_SHA256"]),
@@ -733,6 +749,11 @@ impl LoweringContext {
         if func_name.starts_with("verifySLHDSA_") {
             let param_key = func_name.trim_start_matches("verifySLHDSA_");
             self.lower_verify_slh_dsa(binding_name, param_key, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_ec_builtin(func_name) {
+            self.lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses);
             return;
         }
 
@@ -2074,6 +2095,43 @@ impl LoweringContext {
 
         // Delegate to slh_dsa module
         super::slh_dsa::emit_verify_slh_dsa(&mut |op| self.ops.push(op), param_key);
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_ec_builtin(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // Bring args to top in order
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in args {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "ecAdd" => super::ec::emit_ec_add(emit),
+            "ecMul" => super::ec::emit_ec_mul(emit),
+            "ecMulGen" => super::ec::emit_ec_mul_gen(emit),
+            "ecNegate" => super::ec::emit_ec_negate(emit),
+            "ecOnCurve" => super::ec::emit_ec_on_curve(emit),
+            "ecModReduce" => super::ec::emit_ec_mod_reduce(emit),
+            "ecEncodeCompressed" => super::ec::emit_ec_encode_compressed(emit),
+            "ecMakePoint" => super::ec::emit_ec_make_point(emit),
+            "ecPointX" => super::ec::emit_ec_point_x(emit),
+            "ecPointY" => super::ec::emit_ec_point_y(emit),
+            _ => panic!("unknown EC builtin: {}", func_name),
+        }
 
         self.sm.push(binding_name);
         self.track_depth();

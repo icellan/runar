@@ -83,7 +83,9 @@ Temporaries are named sequentially starting from `t0` within each method body:
 t0, t1, t2, t3, ...
 ```
 
-The numbering resets for each method. The compiler MUST use this exact naming scheme -- no gaps, no reordering. The numbering corresponds to the binding's position in the `body` array (the binding at index `i` has name `t{i}`).
+The numbering resets for each method. The compiler MUST use sequential `t{i}` names for intermediate computations -- no gaps, no reordering.
+
+**Exception: variable declarations and reassignments.** When the source code declares a variable (e.g., `let x = ...`) or reassigns one, the compiler emits a binding using the original variable name (e.g., `x`) instead of a sequential temp name. These named bindings are interleaved with the `t{i}` temporaries and do not affect the sequential numbering of temp names. For example, a method body might contain: `t0, t1, x, t2, t3, counter, t4, ...`.
 
 ---
 
@@ -597,7 +599,7 @@ Note: The above is pretty-printed for readability. The canonical form (per RFC 8
 
 A conforming ANF IR must satisfy:
 
-1. **Sequential naming**: Binding at index `i` in a method body has name `t{i}`.
+1. **Sequential naming**: Bindings use sequential `t{i}` names for compiler-generated temporaries, except for user-declared variables (e.g., `let x = ...` or reassignments) which retain their original names. Named bindings are interleaved with the `t{i}` sequence and do not affect the sequential numbering of temporaries (see Section 3, Naming Convention).
 2. **Forward references only**: A binding may only reference temporaries with smaller indices (i.e., defined earlier in the same body or branch).
 3. **No orphan references**: Every name referenced in an `ANFValue` must be either a method parameter, a property name, or a previously defined temporary.
 4. **Public method assertion**: The last binding in a public method's body must have kind `assert`.

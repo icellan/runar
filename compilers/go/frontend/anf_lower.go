@@ -35,6 +35,7 @@ var byteTypes = map[string]bool{
 	"SigHashPreimage": true,
 	"RabinSig":        true,
 	"RabinPubKey":     true,
+	"Point":           true,
 }
 
 var byteReturningFunctions = map[string]bool{
@@ -49,8 +50,14 @@ var byteReturningFunctions = map[string]bool{
 	"left":         true,
 	"right":        true,
 	"int2str":      true,
-	"toByteString": true,
-	"pack":         true,
+	"toByteString":       true,
+	"pack":               true,
+	"ecAdd":              true,
+	"ecMul":              true,
+	"ecMulGen":           true,
+	"ecNegate":           true,
+	"ecMakePoint":        true,
+	"ecEncodeCompressed": true,
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {

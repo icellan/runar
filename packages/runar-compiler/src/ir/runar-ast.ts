@@ -32,6 +32,7 @@ export type PrimitiveTypeName =
   | 'SigHashPreimage'
   | 'RabinSig'
   | 'RabinPubKey'
+  | 'Point'
   | 'void';
 
 export interface PrimitiveTypeNode {

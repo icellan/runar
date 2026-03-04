@@ -701,14 +701,14 @@ contract := runar.NewRunarContract(&artifact, []interface{}{pubKeyHash})
 
 // Deploy
 provider := runar.NewMockProvider("testnet")
-signer := runar.NewExternalSigner(pubKeyHex, address, signFunc)
+signer, err := runar.NewLocalSigner(wifKey) // WIF or 64-char hex private key
 txid, tx, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 50000})
 
 // Call
 txid, tx, err = contract.Call("unlock", []interface{}{sig, pubKey}, provider, signer, nil)
 ```
 
-Signing is delegated via the `ExternalSigner` callback pattern. For real ECDSA signing, wrap `github.com/bsv-blockchain/go-sdk` in an `ExternalSigner`.
+The Go SDK provides `LocalSigner` which wraps `github.com/bsv-blockchain/go-sdk` for real ECDSA signing with BIP-143 sighash computation. It accepts either a WIF-encoded key or a 64-char hex private key. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a callback instead.
 
 ### Rust SDK (`packages/runar-rs/src/sdk/`)
 
@@ -733,4 +733,4 @@ let txid = contract.deploy(&mut provider, &signer, &DeployOptions {
 let txid = contract.call("unlock", &[sig, pub_key], &mut provider, &signer, None)?;
 ```
 
-Signing is delegated via the `ExternalSigner` closure pattern. For real ECDSA signing, wrap `rust-sv` in an `ExternalSigner`.
+The Rust SDK provides `LocalSigner` which uses `k256` for real ECDSA signing with manual BIP-143 sighash computation. It accepts either a WIF-encoded key or a 64-char hex private key. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a closure instead.

@@ -947,6 +947,53 @@ export class RunarInterpreter {
       case 'extractSigHashType':
         return { kind: 'bigint', value: 0x41n };
 
+      // EC builtins
+      case 'ecAdd': {
+        const pa = this.toBytes(args[0]!);
+        const pb = this.toBytes(args[1]!);
+        return { kind: 'bytes', value: ecAddImpl(pa, pb) };
+      }
+      case 'ecMul': {
+        const pt = this.toBytes(args[0]!);
+        const k = this.toBigInt(args[1]!);
+        return { kind: 'bytes', value: ecMulImpl(pt, k) };
+      }
+      case 'ecMulGen': {
+        const k = this.toBigInt(args[0]!);
+        return { kind: 'bytes', value: ecMulGenImpl(k) };
+      }
+      case 'ecNegate': {
+        const pt = this.toBytes(args[0]!);
+        return { kind: 'bytes', value: ecNegateImpl(pt) };
+      }
+      case 'ecOnCurve': {
+        const pt = this.toBytes(args[0]!);
+        return { kind: 'boolean', value: ecOnCurveImpl(pt) };
+      }
+      case 'ecModReduce': {
+        const val = this.toBigInt(args[0]!);
+        const mod = this.toBigInt(args[1]!);
+        const r = ((val % mod) + mod) % mod;
+        return { kind: 'bigint', value: r };
+      }
+      case 'ecEncodeCompressed': {
+        const pt = this.toBytes(args[0]!);
+        return { kind: 'bytes', value: ecEncodeCompressedImpl(pt) };
+      }
+      case 'ecMakePoint': {
+        const x = this.toBigInt(args[0]!);
+        const y = this.toBigInt(args[1]!);
+        return { kind: 'bytes', value: ecMakePointImpl(x, y) };
+      }
+      case 'ecPointX': {
+        const pt = this.toBytes(args[0]!);
+        return { kind: 'bigint', value: ecPointXImpl(pt) };
+      }
+      case 'ecPointY': {
+        const pt = this.toBytes(args[0]!);
+        return { kind: 'bigint', value: ecPointYImpl(pt) };
+      }
+
       default: {
         // Try to find a private method in the contract.
         const method = methods.find((m) => m.name === funcName);
@@ -1111,4 +1158,155 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
     if (a[i] !== b[i]) return false;
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// EC (secp256k1) interpreter helpers
+// ---------------------------------------------------------------------------
+
+const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const EC_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+const EC_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+
+function ecMod(a: bigint, m: bigint): bigint {
+  return ((a % m) + m) % m;
+}
+
+function ecModInv(a: bigint, m: bigint): bigint {
+  // Extended Euclidean algorithm
+  let [old_r, r] = [ecMod(a, m), m];
+  let [old_s, s] = [1n, 0n];
+  while (r !== 0n) {
+    const q = old_r / r;
+    [old_r, r] = [r, old_r - q * r];
+    [old_s, s] = [s, old_s - q * s];
+  }
+  return ecMod(old_s, m);
+}
+
+function ecDecodePoint(bytes: Uint8Array): [bigint, bigint] {
+  if (bytes.length !== 64) throw new Error(`EC point must be 64 bytes, got ${bytes.length}`);
+  let x = 0n;
+  let y = 0n;
+  for (let i = 0; i < 32; i++) {
+    x = (x << 8n) | BigInt(bytes[i]!);
+  }
+  for (let i = 32; i < 64; i++) {
+    y = (y << 8n) | BigInt(bytes[i]!);
+  }
+  return [x, y];
+}
+
+function ecEncodePoint(x: bigint, y: bigint): Uint8Array {
+  const bytes = new Uint8Array(64);
+  let vx = x;
+  let vy = y;
+  for (let i = 31; i >= 0; i--) {
+    bytes[i] = Number(vx & 0xFFn);
+    vx >>= 8n;
+  }
+  for (let i = 63; i >= 32; i--) {
+    bytes[i] = Number(vy & 0xFFn);
+    vy >>= 8n;
+  }
+  return bytes;
+}
+
+function ecPointAddCoords(
+  x1: bigint, y1: bigint, x2: bigint, y2: bigint,
+): [bigint, bigint] {
+  const p = EC_P;
+  if (x1 === x2 && y1 === y2) {
+    // Point doubling
+    const s = ecMod(3n * x1 * x1 * ecModInv(2n * y1, p), p);
+    const rx = ecMod(s * s - 2n * x1, p);
+    const ry = ecMod(s * (x1 - rx) - y1, p);
+    return [rx, ry];
+  }
+  const s = ecMod((y2 - y1) * ecModInv(x2 - x1, p), p);
+  const rx = ecMod(s * s - x1 - x2, p);
+  const ry = ecMod(s * (x1 - rx) - y1, p);
+  return [rx, ry];
+}
+
+function ecScalarMul(x: bigint, y: bigint, k: bigint): [bigint, bigint] {
+  const n = EC_N;
+  k = ecMod(k, n);
+  if (k === 0n) throw new Error('ecMul: scalar is 0');
+  let rx = x;
+  let ry = y;
+  let started = false;
+  for (let i = 255; i >= 0; i--) {
+    if (started) {
+      [rx, ry] = ecPointAddCoords(rx, ry, rx, ry); // double
+    }
+    if ((k >> BigInt(i)) & 1n) {
+      if (!started) {
+        rx = x;
+        ry = y;
+        started = true;
+      } else {
+        [rx, ry] = ecPointAddCoords(rx, ry, x, y); // add
+      }
+    }
+  }
+  return [rx, ry];
+}
+
+function ecAddImpl(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const [ax, ay] = ecDecodePoint(a);
+  const [bx, by] = ecDecodePoint(b);
+  const [rx, ry] = ecPointAddCoords(ax, ay, bx, by);
+  return ecEncodePoint(rx, ry);
+}
+
+function ecMulImpl(pt: Uint8Array, k: bigint): Uint8Array {
+  const [x, y] = ecDecodePoint(pt);
+  const [rx, ry] = ecScalarMul(x, y, k);
+  return ecEncodePoint(rx, ry);
+}
+
+function ecMulGenImpl(k: bigint): Uint8Array {
+  const [rx, ry] = ecScalarMul(EC_GX, EC_GY, k);
+  return ecEncodePoint(rx, ry);
+}
+
+function ecNegateImpl(pt: Uint8Array): Uint8Array {
+  const [x, y] = ecDecodePoint(pt);
+  return ecEncodePoint(x, ecMod(EC_P - y, EC_P));
+}
+
+function ecOnCurveImpl(pt: Uint8Array): boolean {
+  const [x, y] = ecDecodePoint(pt);
+  const lhs = ecMod(y * y, EC_P);
+  const rhs = ecMod(x * x * x + 7n, EC_P);
+  return lhs === rhs;
+}
+
+function ecEncodeCompressedImpl(pt: Uint8Array): Uint8Array {
+  const [x, y] = ecDecodePoint(pt);
+  const prefix = (y & 1n) === 0n ? 0x02 : 0x03;
+  const result = new Uint8Array(33);
+  result[0] = prefix;
+  let vx = x;
+  for (let i = 32; i >= 1; i--) {
+    result[i] = Number(vx & 0xFFn);
+    vx >>= 8n;
+  }
+  return result;
+}
+
+function ecMakePointImpl(x: bigint, y: bigint): Uint8Array {
+  return ecEncodePoint(x, y);
+}
+
+function ecPointXImpl(pt: Uint8Array): bigint {
+  const [x] = ecDecodePoint(pt);
+  return x;
+}
+
+function ecPointYImpl(pt: Uint8Array): bigint {
+  const [, y] = ecDecodePoint(pt);
+  return y;
 }

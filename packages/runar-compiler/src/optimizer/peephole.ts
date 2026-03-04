@@ -323,7 +323,7 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
   while (i < ops.length) {
     let matched = false;
 
-    // Try each rule, largest window first
+    // Apply rules to current window position
     for (const rule of rules) {
       if (i + rule.windowSize > ops.length) continue;
 

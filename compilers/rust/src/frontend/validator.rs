@@ -46,7 +46,8 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
         | PrimitiveTypeName::Addr
         | PrimitiveTypeName::SigHashPreimage
         | PrimitiveTypeName::RabinSig
-        | PrimitiveTypeName::RabinPubKey => true,
+        | PrimitiveTypeName::RabinPubKey
+        | PrimitiveTypeName::Point => true,
         PrimitiveTypeName::Void => false,
     }
 }

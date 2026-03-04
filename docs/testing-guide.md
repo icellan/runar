@@ -111,6 +111,29 @@ counter.call('increment');
 expect(counter.state.count).toBe(1n);
 ```
 
+### Configuring Mock Preimage
+
+For stateful contracts that inspect transaction preimage fields (e.g., time locks, input amounts), use `setMockPreimage()` to override the default mock values:
+
+```typescript
+const contract = TestContract.fromSource(source, { deadline: 1000n });
+
+// Override the locktime preimage field for this test
+contract.setMockPreimage({ locktime: 2000n });
+
+const result = contract.call('spend', { sig, pubKey });
+expect(result.success).toBe(true);
+```
+
+`setMockPreimage` accepts a partial `MockPreimage` object with the following optional fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `locktime` | `bigint` | Mock nLocktime value |
+| `amount` | `bigint` | Mock input amount (satoshis) |
+| `version` | `bigint` | Mock transaction version |
+| `sequence` | `bigint` | Mock input nSequence |
+
 ---
 
 ## Script VM Testing
@@ -168,7 +191,7 @@ import { compile } from 'runar-compiler';
 
 // Compile the contract to get the AST (ContractNode)
 const result = compile(source, { fileName: 'P2PKH.runar.ts' });
-const contractNode = result.artifact!.ast; // ContractNode
+const contractNode = result.contract!; // ContractNode (from CompileResult, not artifact)
 
 // Create interpreter with property values (constructor args).
 // Unlike TestContract (which accepts plain JS values), RunarInterpreter
@@ -608,7 +631,7 @@ cargo test --test counter -- --nocapture  # Verbose output
 | Aspect | TypeScript | Go | Rust |
 |--------|-----------|----|----|
 | **Test framework** | vitest | `testing.T` | `#[test]` |
-| **Failure assertion** | `expectScriptFailure(result)` | `defer/recover` | `#[should_panic]` |
+| **Failure assertion** | `expectScriptFailure(result)` (see note below) | `defer/recover` | `#[should_panic]` |
 | **Contract loading** | `TestContract.fromSource(source, state)` | Struct literal in same package | `#[path = "..."] mod contract;` |
 | **Type imports** | `import { ... } from 'runar-testing'` | `import "runar"` | `use runar::prelude::*;` |
 | **Byte types** | Hex strings / `Uint8Array` | `string` (for `==`) | `Vec<u8>` (for `==` via `PartialEq`) |
@@ -617,6 +640,12 @@ cargo test --test counter -- --nocapture  # Verbose output
 | **Compile check** | Built into `fromArtifact` / `fromSource` | `runar.CompileCheck("file.runar.go")` | `runar::compile_check(include_str!("file"), "file")` |
 | **Borrow workarounds** | N/A | None needed | `.clone()` for owned fields in `add_output` |
 | **Run command** | `npx vitest run` | `go test ./...` | `cargo test` |
+
+> **`expectScriptFailure`**: A convenience assertion exported from `runar-testing`. It takes a `VMResult` from `TestSmartContract.call()` or `ScriptVM.execute()` and throws if the script execution succeeded (i.e., it asserts that the script failed). Its counterpart is `expectScriptSuccess`. Both are imported from `runar-testing`:
+>
+> ```typescript
+> import { expectScriptFailure, expectScriptSuccess } from 'runar-testing';
+> ```
 
 ---
 
@@ -726,7 +755,7 @@ Rúnar employs a layered testing strategy:
 |-------|--------------|------|
 | **Unit tests per pass** | Each compiler pass in isolation | vitest |
 | **End-to-end compilation** | Full pipeline: source to script | vitest + conformance golden files |
-| **VM execution** | Compiled script with specific inputs | `TestSmartContract` + `ScriptVM` |
+| **VM execution** | Compiled script with specific inputs | `TestContract` + `ScriptVM` (note: `TestSmartContract` is the lower-level VM-based wrapper for compiled artifacts) |
 | **Interpreter oracle** | ANF IR evaluation matches VM execution | `RunarInterpreter` vs `ScriptVM` |
 | **Property-based fuzzing** | Random valid programs compile correctly | fast-check generators |
 | **Differential fuzzing** | Compiler + VM agree with interpreter | `conformance/fuzzer` |

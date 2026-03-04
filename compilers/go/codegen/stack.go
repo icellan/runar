@@ -645,6 +645,11 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if isEcBuiltin(funcName) {
+		ctx.lowerEcBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if funcName == "safediv" || funcName == "safemod" {
 		ctx.lowerSafeDivMod(bindingName, funcName, args, bindingIndex, lastUses)
 		return
@@ -2397,6 +2402,62 @@ func (ctx *loweringContext) lowerVerifySLHDSA(bindingName, paramKey string, args
 	}
 
 	EmitVerifySLHDSA(func(op StackOp) { ctx.emitOp(op) }, paramKey)
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// EC builtin helpers
+// ---------------------------------------------------------------------------
+
+var ecBuiltinNames = map[string]bool{
+	"ecAdd": true, "ecMul": true, "ecMulGen": true,
+	"ecNegate": true, "ecOnCurve": true, "ecModReduce": true,
+	"ecEncodeCompressed": true, "ecMakePoint": true,
+	"ecPointX": true, "ecPointY": true,
+}
+
+func isEcBuiltin(name string) bool {
+	return ecBuiltinNames[name]
+}
+
+func (ctx *loweringContext) lowerEcBuiltin(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Bring args to top in order
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	for range args {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	switch funcName {
+	case "ecAdd":
+		EmitEcAdd(emitFn)
+	case "ecMul":
+		EmitEcMul(emitFn)
+	case "ecMulGen":
+		EmitEcMulGen(emitFn)
+	case "ecNegate":
+		EmitEcNegate(emitFn)
+	case "ecOnCurve":
+		EmitEcOnCurve(emitFn)
+	case "ecModReduce":
+		EmitEcModReduce(emitFn)
+	case "ecEncodeCompressed":
+		EmitEcEncodeCompressed(emitFn)
+	case "ecMakePoint":
+		EmitEcMakePoint(emitFn)
+	case "ecPointX":
+		EmitEcPointX(emitFn)
+	case "ecPointY":
+		EmitEcPointY(emitFn)
+	default:
+		panic(fmt.Sprintf("unknown EC builtin: %s", funcName))
+	}
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

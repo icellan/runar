@@ -173,7 +173,7 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `0x98` | `OP_LSHIFT` | `(a b -- a<<b)` | Left shift (BSV re-enabled) |
 | `0x99` | `OP_RSHIFT` | `(a b -- a>>b)` | Right shift (BSV re-enabled) |
 
-> **Warning:** `OP_LSHIFT` and `OP_RSHIFT` in BSV operate on **raw byte arrays** (big-endian unsigned shift), NOT on Script numbers. They preserve the input byte length. This is incompatible with numeric `BigInt` shifting for multi-byte script numbers. The constant-fold optimizer skips folding `>>` for negative left operands due to this mismatch. For reliable numeric right-shift, use `OP_DIV` with a power of 2 instead (e.g., `PUSH (1<<n) OP_DIV`).
+> **Warning:** `OP_LSHIFT` and `OP_RSHIFT` in BSV operate on **raw byte arrays** (big-endian unsigned shift), NOT on Script numbers. They preserve the input byte length. This is incompatible with numeric `BigInt` shifting for multi-byte script numbers. The constant-fold optimizer skips folding `>>` for negative left operands due to this mismatch; however, `<<` is currently folded unconditionally, which may produce results at compile time that differ from runtime `OP_LSHIFT` behavior for negative or multi-byte operands. For reliable numeric shifting, use `OP_DIV` or `OP_MUL` with a power of 2 instead (e.g., `PUSH (1<<n) OP_DIV` for right-shift, `PUSH (1<<n) OP_MUL` for left-shift).
 
 ### 5.1 Rúnar Mapping
 
@@ -353,7 +353,10 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | Rúnar Operation | Opcode |
 |---|---|
 | `a + b` (ByteString) | `OP_CAT` |
-| `ByteString.slice(start, end)` | `OP_SPLIT` (twice if needed) |
+| `split(data, index)` | `OP_SPLIT` |
+| `left(data, len)` | `OP_SPLIT OP_DROP` |
+| `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` |
+| `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` |
 | `len(data)` | `OP_SIZE OP_NIP` |
 | `pack(n)` | No-op (type-level cast) |
 | `unpack(data)` | `OP_BIN2NUM` |
@@ -505,4 +508,11 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `a ^ b` | `OP_XOR` | `0x86` |
 | `~a` | `OP_INVERT` | `0x83` |
 | `reverseBytes(x)` | `OP_SPLIT` / `OP_CAT` loop | — |
+| `num2bin(n, size)` | `OP_NUM2BIN` | `0x80` |
+| `int2str(n, size)` | `OP_NUM2BIN` | `0x80` |
+| `bool(n)` | `OP_0NOTEQUAL` | `0x92` |
+| `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` | `0x7f 0x77 ... 0x7f 0x75` |
+| `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` | `0x7c 0x82 0x7b 0x94 0x7f 0x77` |
+| `split(data, index)` | `OP_SPLIT` | `0x7f` |
+| `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |

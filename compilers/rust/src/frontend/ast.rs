@@ -33,6 +33,7 @@ pub enum PrimitiveTypeName {
     SigHashPreimage,
     RabinSig,
     RabinPubKey,
+    Point,
     Void,
 }
 
@@ -51,6 +52,7 @@ impl PrimitiveTypeName {
             "SigHashPreimage" => Some(PrimitiveTypeName::SigHashPreimage),
             "RabinSig" => Some(PrimitiveTypeName::RabinSig),
             "RabinPubKey" => Some(PrimitiveTypeName::RabinPubKey),
+            "Point" => Some(PrimitiveTypeName::Point),
             "void" => Some(PrimitiveTypeName::Void),
             _ => None,
         }
@@ -70,6 +72,7 @@ impl PrimitiveTypeName {
             PrimitiveTypeName::SigHashPreimage => "SigHashPreimage",
             PrimitiveTypeName::RabinSig => "RabinSig",
             PrimitiveTypeName::RabinPubKey => "RabinPubKey",
+            PrimitiveTypeName::Point => "Point",
             PrimitiveTypeName::Void => "void",
         }
     }

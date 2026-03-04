@@ -9,6 +9,7 @@ import type { Transaction, UTXO, DeployOptions, CallOptions } from './types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
+import { Utils } from '@bsv/sdk';
 
 /**
  * Runtime wrapper for a compiled Runar contract.
@@ -616,23 +617,23 @@ function encodePushData(dataHex: string): string {
 /**
  * Build a P2PKH locking script from an address string.
  * If the address is 40-char hex, treat as raw pubkey hash.
- * Otherwise, use a deterministic placeholder hash.
+ * Otherwise, decode the Base58Check address to extract the 20-byte pubkey hash.
  */
 function buildP2PKHScriptFromAddress(address: string): string {
-  const pubKeyHash = /^[0-9a-fA-F]{40}$/.test(address)
-    ? address
-    : deterministicHash20(address);
-  return '76a914' + pubKeyHash + '88ac';
-}
+  let pubKeyHash: string;
 
-function deterministicHash20(input: string): string {
-  const bytes = new Uint8Array(20);
-  for (let i = 0; i < input.length; i++) {
-    bytes[i % 20] = ((bytes[i % 20]! ^ input.charCodeAt(i)) * 31 + 17) & 0xff;
+  if (/^[0-9a-fA-F]{40}$/.test(address)) {
+    // Already a raw 20-byte pubkey hash in hex
+    pubKeyHash = address;
+  } else {
+    // Decode Base58Check address to extract the 20-byte pubkey hash
+    const decoded = Utils.fromBase58Check(address);
+    pubKeyHash = typeof decoded.data === 'string'
+      ? decoded.data
+      : Utils.toHex(decoded.data);
   }
-  return Array.from(bytes)
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+
+  return '76a914' + pubKeyHash + '88ac';
 }
 
 /**

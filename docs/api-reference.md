@@ -184,6 +184,29 @@ async call(
 
 For stateful contracts, a new UTXO is created with the updated state. For stateless contracts, the UTXO is consumed.
 
+#### `connect(provider, signer)`
+
+Store a provider and signer on the contract instance so they do not need to be passed to every `deploy()` and `call()` invocation.
+
+```typescript
+contract.connect(provider, signer);
+
+// Now deploy/call without passing provider and signer explicitly:
+await contract.deploy({ satoshis: 10000 });
+await contract.call('increment', []);
+```
+
+#### `setState(newState)`
+
+Directly update the contract's in-memory state (for stateful contracts). Merges the provided key-value pairs into the existing state. This is useful for testing or for manually correcting state before building a call transaction.
+
+```typescript
+contract.setState({ count: 42n });
+// contract.state.count is now 42n
+```
+
+Does not broadcast anything -- it only modifies the local state representation. The updated state will be used the next time `getLockingScript()` is called (e.g., during `call()`).
+
 #### `state`
 
 Read the current contract state (for stateful contracts).
@@ -263,6 +286,36 @@ const provider = new MockProvider('testnet');
 ```
 
 Useful for unit testing contract deployment and method calls without touching a real network. Stores transactions in memory and returns them from `getTransaction`.
+
+#### Test Data Injection
+
+```typescript
+// Inject a transaction (returned by getTransaction)
+provider.addTransaction(tx);
+
+// Inject a UTXO for an address (returned by getUtxos)
+provider.addUtxo('mxyz...', { txid: '...', outputIndex: 0, satoshis: 50000, script: '...' });
+
+// Inject a contract UTXO by script hash (returned by getContractUtxo)
+provider.addContractUtxo('scripthash...', utxo);
+```
+
+#### `setFeeRate(rate)`
+
+Set the fee rate (in satoshis per byte) returned by `getFeeRate()`. Defaults to 1. Useful for testing fee estimation logic with different fee environments.
+
+```typescript
+provider.setFeeRate(5); // 5 sat/byte
+```
+
+#### `getBroadcastedTxs()`
+
+Returns a readonly array of all raw transaction hex strings that were broadcast through this provider. Useful for asserting that deploy/call operations produced the expected transactions.
+
+```typescript
+const txs = provider.getBroadcastedTxs();
+expect(txs.length).toBe(1);
+```
 
 ---
 
@@ -450,3 +503,148 @@ The compiled contract artifact. See `spec/artifact-format.md` for the full schem
 - `script: string` (hex template)
 - `asm: string`
 - `stateFields: StateField[]`
+
+---
+
+## Low-Level Transaction Building
+
+These functions give you direct control over transaction construction, bypassing the `RunarContract` high-level API. Useful for custom workflows, batching, or integration with existing transaction pipelines.
+
+### `buildDeployTransaction(...)`
+
+Build a raw unsigned transaction that creates a UTXO with the given locking script.
+
+```typescript
+import { buildDeployTransaction } from 'runar-sdk';
+
+function buildDeployTransaction(
+  lockingScript: string,
+  utxos: UTXO[],
+  satoshis: number,
+  changeAddress: string,
+  changeScript: string,
+  feeRate?: number,          // default: 1 sat/byte
+): { txHex: string; inputCount: number }
+```
+
+- **`lockingScript`** -- The contract locking script hex (from `RunarContract.getLockingScript()`).
+- **`utxos`** -- Funding UTXOs to consume as inputs.
+- **`satoshis`** -- Amount to lock in the contract output.
+- **`changeAddress`** -- BSV address (Base58Check) or 40-char hex pubkey hash for the change output.
+- **`changeScript`** -- Pre-built change output locking script hex. If empty, a P2PKH script is built from `changeAddress`.
+- **`feeRate`** -- Fee rate in satoshis per byte (default: 1).
+
+Returns the unsigned transaction hex and the number of inputs (so the caller knows how many signatures are needed). The contract output is always output index 0; change (if any) is output index 1.
+
+Throws if no UTXOs are provided or if the total input value is insufficient to cover `satoshis + fee`.
+
+### `buildCallTransaction(...)`
+
+Build a raw transaction that spends a contract UTXO (method call).
+
+```typescript
+import { buildCallTransaction } from 'runar-sdk';
+
+function buildCallTransaction(
+  currentUtxo: UTXO,
+  unlockingScript: string,
+  newLockingScript?: string,
+  newSatoshis?: number,
+  changeAddress?: string,
+  changeScript?: string,
+  additionalUtxos?: UTXO[],
+  feeRate?: number,          // default: 1 sat/byte
+): { txHex: string; inputCount: number }
+```
+
+- **`currentUtxo`** -- The contract UTXO being spent (input 0).
+- **`unlockingScript`** -- The unlocking script hex for input 0 (from `RunarContract.buildUnlockingScript()`).
+- **`newLockingScript`** -- For stateful contracts, the updated locking script for the continuation output. Omit for stateless contracts (the UTXO is consumed with no contract output).
+- **`newSatoshis`** -- Satoshis for the new contract output. Defaults to the current UTXO's satoshis if omitted.
+- **`changeAddress`** -- BSV address for the change output.
+- **`changeScript`** -- Pre-built change output locking script hex.
+- **`additionalUtxos`** -- Extra funding UTXOs (inputs 1..N, unsigned).
+- **`feeRate`** -- Fee rate in satoshis per byte (default: 1).
+
+Returns the transaction hex (with input 0's unlocking script already placed) and the total input count. Additional inputs (index 1+) have empty scriptSigs and need to be signed separately.
+
+### `selectUtxos(...)`
+
+Select the minimum set of UTXOs needed to fund a deployment, using a largest-first strategy.
+
+```typescript
+import { selectUtxos } from 'runar-sdk';
+
+function selectUtxos(
+  utxos: UTXO[],
+  targetSatoshis: number,
+  lockingScriptByteLen: number,
+  feeRate?: number,          // default: 1 sat/byte
+): UTXO[]
+```
+
+- **`utxos`** -- Available UTXOs to select from.
+- **`targetSatoshis`** -- The amount that needs to be funded (contract output value).
+- **`lockingScriptByteLen`** -- Byte length of the contract locking script (used for fee estimation).
+- **`feeRate`** -- Fee rate in satoshis per byte (default: 1).
+
+Returns the selected subset of UTXOs. If the total is still insufficient, returns all UTXOs (the caller should check or let `buildDeployTransaction` throw).
+
+### `estimateDeployFee(...)`
+
+Estimate the fee for a deployment transaction.
+
+```typescript
+import { estimateDeployFee } from 'runar-sdk';
+
+function estimateDeployFee(
+  numInputs: number,
+  lockingScriptByteLen: number,
+  feeRate?: number,          // default: 1 sat/byte
+): number
+```
+
+- **`numInputs`** -- Number of P2PKH funding inputs.
+- **`lockingScriptByteLen`** -- Byte length of the contract locking script.
+- **`feeRate`** -- Fee rate in satoshis per byte (default: 1).
+
+Returns the estimated fee in satoshis. Assumes P2PKH inputs (148 bytes each), includes the contract output (8 bytes + varint + script) and a P2PKH change output (34 bytes), plus 10 bytes of transaction overhead.
+
+### `RunarContract.buildUnlockingScript(...)`
+
+Build the unlocking script for a contract method call.
+
+```typescript
+buildUnlockingScript(methodName: string, args: unknown[]): string
+```
+
+- **`methodName`** -- The name of the public method to call.
+- **`args`** -- The method arguments, matching the ABI parameter types in order.
+
+Returns the unlocking script hex. Each argument is encoded as a Bitcoin Script push data element. If the contract has multiple public methods, a method selector (the method's index among public methods) is appended.
+
+This is called internally by `RunarContract.call()`, but is exposed for use with `buildCallTransaction()` when building transactions manually.
+
+### `SignCallback` Type
+
+The callback type used by `ExternalSigner` for delegated signing.
+
+```typescript
+import type { SignCallback } from 'runar-sdk';
+
+type SignCallback = (
+  txHex: string,
+  inputIndex: number,
+  subscript: string,
+  satoshis: number,
+  sigHashType?: number,
+) => Promise<string>;
+```
+
+- **`txHex`** -- The raw transaction hex to sign.
+- **`inputIndex`** -- The index of the input being signed.
+- **`subscript`** -- The locking script hex of the UTXO being spent (used for BIP-143 sighash computation).
+- **`satoshis`** -- The satoshi value of the UTXO being spent (used for BIP-143 sighash computation).
+- **`sigHashType`** -- Optional sighash flags. Defaults to `SIGHASH_ALL | SIGHASH_FORKID` (0x41).
+
+Returns a hex-encoded DER signature with the sighash byte appended.

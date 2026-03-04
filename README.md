@@ -94,6 +94,27 @@ contract P2PKH is SmartContract {
 ```
 </td>
 </tr>
+<tr>
+<td colspan="2">
+
+**Move-style**
+```move
+module P2PKH {
+    use runar::types::{Addr, PubKey, Sig};
+    use runar::crypto::{hash160, check_sig};
+
+    resource struct P2PKH {
+        pub_key_hash: Addr,
+    }
+
+    public fun unlock(contract: &P2PKH, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(pub_key) == contract.pub_key_hash, 0);
+        assert!(check_sig(sig, pub_key), 0);
+    }
+}
+```
+</td>
+</tr>
 </table>
 
 All five formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
@@ -120,7 +141,7 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 
 ```bash
 pnpm add runar-lang runar-compiler runar-cli
-runar compile MyContract.runar.ts    # => artifacts/MyContract.json
+runar compile MyContract.runar.ts    # => artifacts/MyContract.runar.json
 ```
 
 ### Go
@@ -310,6 +331,8 @@ examples/
   rust/               # Rust contracts + tests
   sol/                # Solidity-like contracts + tests
   move/               # Move-style contracts + tests
+  sdk-usage/          # SDK usage reference docs (not runnable)
+end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp)
 spec/                 # Language specification
 docs/                 # Documentation + format guides
 ```

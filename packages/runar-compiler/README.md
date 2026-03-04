@@ -109,11 +109,13 @@ interface CompileResult {
 interface CompilerDiagnostic {
   message: string;
   loc?: SourceLocation;
-  severity: 'error' | 'warning';
+  severity: Severity;
 }
+
+type Severity = 'error' | 'warning';
 ```
 
-No error code system — diagnostics use plain-text messages with optional source locations.
+Both `CompilerDiagnostic` and the `Severity` type alias are exported from `runar-compiler`. No error code system — diagnostics use plain-text messages with optional source locations.
 
 ### Constructor Slots and Argument Baking
 
@@ -132,7 +134,7 @@ When `constructorArgs` are provided in `CompileOptions`, the compiler replaces A
 
 ## Individual Pass Functions
 
-Each pass is also exported individually for fine-grained use:
+Passes 1--4 are also exported individually for fine-grained use (passes 5--6 are internal):
 
 ```typescript
 import { parse, validate, typecheck, lowerToANF } from 'runar-compiler';
@@ -141,15 +143,43 @@ import { parseSolSource, parseMoveSource } from 'runar-compiler';
 // Pass 1: Parse
 const parseResult = parse(source, 'MyContract.runar.ts');
 
-// Pass 2: Validate
-const validationResult = validate(parseResult.contract);
+// parse() may return null on fatal parse errors
+if (!parseResult.contract) {
+  console.error('Parse failed:', parseResult.diagnostics);
+} else {
+  // Pass 2: Validate
+  const validationResult = validate(parseResult.contract);
 
-// Pass 3: Type-check
-const typeCheckResult = typecheck(parseResult.contract);
+  // Pass 3: Type-check
+  const typeCheckResult = typecheck(parseResult.contract);
 
-// Pass 4: ANF Lower
-const anf = lowerToANF(parseResult.contract);
+  // Pass 4: ANF Lower
+  const anf = lowerToANF(parseResult.contract);
+}
 ```
+
+### Pass Return Types
+
+Each pass function returns a structured result type (all exported from `runar-compiler`):
+
+```typescript
+interface ParseResult {
+  contract: ContractNode | null;   // null on fatal parse errors
+  errors: CompilerDiagnostic[];
+}
+
+interface ValidationResult {
+  errors: CompilerDiagnostic[];
+  warnings: CompilerDiagnostic[];
+}
+
+interface TypeCheckResult {
+  typedContract: ContractNode;     // same AST, types verified
+  errors: CompilerDiagnostic[];
+}
+```
+
+`lowerToANF` returns an `ANFProgram` directly (throws on internal errors rather than returning diagnostics).
 
 ---
 
@@ -192,17 +222,22 @@ The peephole optimizer runs on Stack IR between passes 5 and 6 (always enabled).
 
 ---
 
-## Error Classes
+## Error Reporting
+
+The compiler pipeline does **not** throw exceptions. All passes report errors by pushing `CompilerDiagnostic` objects into `CompileResult.diagnostics` via `makeDiagnostic()`.
 
 ```typescript
-import { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic } from 'runar-compiler';
+import { compile } from 'runar-compiler';
+
+const result = compile(source);
+if (result.diagnostics.length > 0) {
+  for (const d of result.diagnostics) {
+    console.error(`${d.severity}: ${d.message}`);
+  }
+}
 ```
 
-| Class | Thrown During |
-|---|---|
-| `ParseError` | Pass 1 — source cannot be parsed into Rúnar AST |
-| `ValidationError` | Pass 2 — AST violates language subset constraints |
-| `TypeError` | Pass 3 — expressions have incompatible types |
+The exported error classes (`CompilerError`, `ParseError`, `ValidationError`, `TypeError`) are available as types for consumer code but are never instantiated by the pipeline itself.
 
 ---
 
@@ -210,7 +245,7 @@ import { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic }
 
 ### Why Nanopass
 
-Each pass is ~100-200 lines and does exactly one transformation. Bugs are localized: if the ANF IR is correct but the script is wrong, the problem is in Pass 5 or 6.
+Each pass is a self-contained module doing exactly one transformation. Bugs are localized: if the ANF IR is correct but the script is wrong, the problem is in Pass 5 or 6.
 
 ### Why ANF over CPS/SSA
 

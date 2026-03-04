@@ -102,16 +102,18 @@ NIST-standardized, stateless, multi-use. Three-tier architecture:
 - **WOTS+** — one-time signature (used internally)
 - **Hypertree** — layers of Merkle trees
 
-Six SHA-256 parameter sets:
+Six SHA-256 parameter sets (pre-implementation projections):
 
-| Parameter set | Sig size | SHA-256 ops | Script est. | Security |
-|--------------|----------|-------------|-------------|----------|
-| SLH-DSA-SHA2-128s | 7,856 B | ~2,100 | ~25 KB | 128-bit |
-| SLH-DSA-SHA2-128f | 17,088 B | ~1,400 | ~40 KB | 128-bit |
-| SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | 192-bit |
-| SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | 192-bit |
-| SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | 256-bit |
-| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | 256-bit |
+| Parameter set | Sig size | SHA-256 ops | Script est. | Measured script | Security |
+|--------------|----------|-------------|-------------|-----------------|----------|
+| SLH-DSA-SHA2-128s | 7,856 B | ~2,100 | ~25 KB | 203 KB | 128-bit |
+| SLH-DSA-SHA2-128f | 17,088 B | ~1,400 | ~40 KB | 612 KB | 128-bit |
+| SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | 306 KB | 192-bit |
+| SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | 905 KB | 192-bit |
+| SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | 417 KB | 256-bit |
+| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
+
+> **Note:** The "Script est." column contains pre-implementation projections that significantly underestimated the actual script sizes. The "Measured script" column shows the real sizes after implementation. The 4-10x difference is due to the overhead of tweakable hashing (each SHA-256 call requires constructing a 22-byte ADRS for domain separation, adding ~7 opcodes per hash) and the stack management code needed to track named positions across thousands of operations. See the Implementation Status section below for exact byte counts.
 
 Each "hash" is actually a tweakable hash: `SHA-256(PK.seed || pad || ADRS || M)` truncated to n bytes. This adds ~7 opcodes overhead per hash vs plain OP_SHA256.
 

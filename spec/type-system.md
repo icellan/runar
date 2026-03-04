@@ -57,7 +57,7 @@ RabinSig RabinPubKey
 - Immutable sequence of bytes.
 - No character encoding semantics -- purely binary data.
 - Constructed via `toByteString('hex...')`.
-- Supports concatenation (`+` operator maps to `OP_CAT`), slicing (via `ByteString.slice()`), and length (`len()`).
+- Supports concatenation (`+` operator maps to `OP_CAT`), slicing (via built-in functions `split(data, index)`, `left(data, len)`, `right(data, len)`, `substr(data, start, len)`), and length (`len()`).
 
 ### 2.2 Domain Types
 
@@ -307,18 +307,18 @@ counter: bigint;
 
 ### 5.3 State Serialization
 
-For stateful contracts, the compiler generates a **state script** that encodes all mutable properties:
+For stateful contracts, the compiler generates a locking script with state data appended after an `OP_RETURN` separator:
 
 ```
-<prop_1> <prop_2> ... <prop_n> OP_DROP OP_DROP ... <locking_code>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-The state is prepended to the locking script. When a stateful method executes, it:
+The `OP_RETURN` terminates script execution so the state fields are never executed as opcodes. When a stateful method executes, it:
 
-1. Reads current state from the script itself (via `OP_PUSH_TX` preimage).
+1. Reads current state from the sighash preimage (which includes the full scriptCode with the state data).
 2. Executes the method logic, potentially modifying state properties.
-3. Constructs the new state script with updated values.
-4. Verifies (via `checkPreimage`) that the transaction output contains the new state script.
+3. Constructs the new locking script with `<code_part> OP_RETURN <updated_fields>`.
+4. Verifies (via `checkPreimage`) that the transaction output contains the new locking script.
 
 ---
 

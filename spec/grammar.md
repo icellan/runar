@@ -75,7 +75,7 @@ BaseClass
 
 - Exactly one class per file.
 - The class MUST extend `SmartContract` (stateless) or `StatefulSmartContract` (stateful).
-- `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods.
+- `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods. Specifically, the ANF lowerer implicitly injects a `txPreimage: SigHashPreimage` parameter, a `checkPreimage(txPreimage)` assertion at method entry, and state continuation code (via `addOutput`) at method exit. Developers do not need to write these explicitly.
 - Decorators are **disallowed**.
 - Generic type parameters on the class are **disallowed**.
 
@@ -260,7 +260,11 @@ VariableDeclaration
     ;
 
 AssignmentStatement
-    = AssignmentTarget '=' Expression ';'
+    = AssignmentTarget AssignmentOperator Expression ';'
+    ;
+
+AssignmentOperator
+    = '=' | '+=' | '-=' | '*=' | '/=' | '%='
     ;
 
 AssignmentTarget
@@ -296,6 +300,8 @@ ReturnStatement
     = 'return' [ Expression ] ';'
     ;
 ```
+
+> **Compound assignment desugaring:** Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`) are desugared by the parser into simple assignments. For example, `x += e` becomes `x = x + e`, and `this.p -= e` becomes `this.p = this.p - e`. The resulting AST contains only plain `=` assignments with a binary expression on the right-hand side. This desugaring happens at parse time (pass 01) and is transparent to all subsequent compiler passes.
 
 ### Statement Restrictions
 
@@ -517,11 +523,13 @@ BuiltinFunction_Bytes
     | 'substr'             /* substr(data: ByteString, start: bigint, len: bigint): ByteString */
     | 'left'               /* left(data: ByteString, len: bigint): ByteString */
     | 'right'              /* right(data: ByteString, len: bigint): ByteString */
-    | 'split'              /* split(data: ByteString, index: bigint): [ByteString, ByteString] */
+    | 'split'              /* split(data: ByteString, index: bigint): ByteString */
     | 'reverseBytes'       /* reverseBytes(data: ByteString): ByteString */
     | 'toByteString'       /* toByteString(hex: string): ByteString */
     ;
 ```
+
+> **Note on `split`:** At the Bitcoin Script level, `OP_SPLIT` leaves two values on the stack (left part and right part). However, the Rúnar type checker treats the return type as `ByteString` (the right/top part). The left part remains on the stack but is not directly accessible through normal Rúnar expressions. Use `left(data, len)` or `right(data, len)` for explicit single-value extraction.
 
 ### Conversion
 
@@ -530,7 +538,7 @@ BuiltinFunction_Conv
     = 'num2bin'            /* num2bin(value: bigint, byteLen: bigint): ByteString */
     | 'bin2num'            /* bin2num(data: ByteString): bigint */
     | 'int2str'            /* int2str(value: bigint, byteLen: bigint): ByteString */
-    | 'pack'               /* pack(n: bigint): ByteString -- encode integer as Script number */
+    | 'pack'               /* pack(n: bigint): ByteString -- type-level cast from bigint to ByteString (no-op at script level) */
     | 'unpack'             /* unpack(data: ByteString): bigint -- decode Script number */
     | 'bool'               /* bool(n: bigint): boolean -- convert integer to boolean */
     ;
@@ -572,7 +580,7 @@ BuiltinFunction_Preimage
     | 'extractAmount'      /* extractAmount(txPreimage: SigHashPreimage): bigint */
     | 'extractSequence'    /* extractSequence(txPreimage: SigHashPreimage): bigint */
     | 'extractOutputHash'  /* extractOutputHash(txPreimage: SigHashPreimage): Sha256 */
-    | 'extractOutputs'     /* extractOutputs(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractOutputs'     /* extractOutputs(txPreimage: SigHashPreimage): Sha256 -- alias for extractOutputHash */
     | 'extractLocktime'    /* extractLocktime(txPreimage: SigHashPreimage): bigint */
     | 'extractSigHashType' /* extractSigHashType(txPreimage: SigHashPreimage): bigint */
     ;
@@ -585,6 +593,8 @@ BuiltinFunction_State
     = 'addOutput'          /* this.addOutput(satoshis: bigint, ...stateValues): void */
     ;
 ```
+
+**Constraint:** The type checker enforces that `addOutput` receives exactly `1 + N` arguments, where `N` is the number of mutable (non-`readonly`) properties on the contract. The first argument is the satoshi amount (`bigint`). The remaining `N` arguments are the new state values, which must match the types of the mutable properties in declaration order.
 
 The complete set of built-in functions is:
 

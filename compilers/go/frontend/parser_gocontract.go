@@ -309,6 +309,7 @@ func mapGoType(name string) TypeNode {
 		"SigHashPreimage": "SigHashPreimage",
 		"RabinSig":        "RabinSig",
 		"RabinPubKey":     "RabinPubKey",
+		"Point":           "Point",
 	}
 	if mapped, ok := typeMap[name]; ok {
 		if IsPrimitiveType(mapped) {

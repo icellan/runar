@@ -75,7 +75,7 @@ All statement nodes include an implicit `sourceLocation: SourceLocation` field (
 | `variable_decl` | `name`, `type?`, `init` | `const x = ...` or `let x = ...` |
 | `assignment` | `target`, `value` | `x = ...` or `this.x = ...` |
 | `if_statement` | `condition`, `then`, `else?` | Conditional |
-| `for_statement` | `init: VariableDeclStatement`, `condition`, `update`, `body` | Bounded loop (`init` is a `VariableDeclStatement`) |
+| `for_statement` | `init: VariableDeclStatement`, `condition: Expression`, `update: Statement`, `body: Statement[]` | Bounded loop |
 | `return_statement` | `value?` | Return from private method |
 | `expression_statement` | `expression` | Expression as statement |
 
@@ -197,7 +197,7 @@ Fields `sourceMap`, `ir`, `stateFields`, and `constructorSlots` are optional.
 
 The ANF IR is serialized according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**:
 
-1. Object keys sorted lexicographically by Unicode code point.
+1. Object keys sorted by UTF-16 code-unit order (per RFC 8785).
 2. No whitespace between tokens.
 3. Numbers in shortest representation, no trailing zeros.
 4. Strings use minimal escaping.

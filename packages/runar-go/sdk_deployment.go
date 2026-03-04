@@ -1,8 +1,11 @@
 package runar
 
 import (
+	"encoding/hex"
 	"fmt"
 	"sort"
+
+	"github.com/bsv-blockchain/go-sdk/script"
 )
 
 // ---------------------------------------------------------------------------
@@ -200,12 +203,21 @@ func varIntByteSize(n int) int {
 }
 
 // BuildP2PKHScript builds a standard P2PKH locking script from an address.
+//
+//	OP_DUP OP_HASH160 OP_PUSH20 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG
+//	76      a9         14        <20 bytes>    88              ac
+//
 // If the address is a 40-char hex string, it's treated as a raw pubkey hash.
-// Otherwise, a deterministic placeholder hash is used.
+// Otherwise, the address is decoded as a Base58Check P2PKH address using go-sdk.
 func BuildP2PKHScript(address string) string {
 	pubKeyHash := address
 	if len(address) != 40 || !isHex(address) {
-		pubKeyHash = deterministicHash20(address)
+		// Decode Base58Check address to extract the 20-byte pubkey hash
+		addr, err := script.NewAddressFromString(address)
+		if err != nil {
+			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: %v", address, err))
+		}
+		pubKeyHash = hex.EncodeToString(addr.PublicKeyHash)
 	}
 	return "76a914" + pubKeyHash + "88ac"
 }
@@ -217,12 +229,4 @@ func isHex(s string) bool {
 		}
 	}
 	return true
-}
-
-func deterministicHash20(input string) string {
-	bytes := make([]byte, 20)
-	for i := 0; i < len(input); i++ {
-		bytes[i%20] = byte(((int(bytes[i%20]) ^ int(input[i])) * 31 + 17) & 0xff)
-	}
-	return bytesToHex(bytes)
 }

@@ -303,15 +303,13 @@ State fields are described separately from the ABI but are included in the artif
 
 ### 6.3 State Serialization Format
 
-State is encoded in the locking script as:
+State is encoded in the locking script after an `OP_RETURN` separator:
 
 ```
-<field_0> <field_1> ... <field_n> OP_DROP OP_DROP ... OP_DROP <code_part>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-Each field is pushed as a data item using the type encoding rules above. Fields are pushed in **index order** (field 0 first). The `OP_DROP` sequence removes the state data from the stack before the contract code executes.
-
-The number of `OP_DROP` opcodes equals the number of state fields.
+Each field is pushed as a data item using the type encoding rules above. Fields are appended in **index order** (field 0 first). The `OP_RETURN` opcode terminates script execution, so the state fields are never executed as opcodes. The contract reads its state from the sighash preimage (which includes the full scriptCode).
 
 ### 6.4 State Reading
 
@@ -322,10 +320,9 @@ The contract reads its current state from the **sighash preimage** rather than f
 When a stateful method modifies state, the compiler generates code to:
 
 1. Serialize the new state values.
-2. Concatenate them with `OP_DROP` opcodes.
-3. Append the code part (which is constant).
-4. Place the result in the expected output.
-5. Use `checkPreimage` to verify the output matches.
+2. Construct the new locking script: `<code_part> OP_RETURN <field_0> ... <field_n>`.
+3. Place the result in the expected output.
+4. Use `checkPreimage` to verify the output matches.
 
 ---
 
@@ -388,7 +385,7 @@ When a stateful method modifies state, the compiler generates code to:
             "name": "increment",
             "params": [
                 { "name": "amount", "type": "bigint" },
-                { "name": "preimage", "type": "SigHashPreimage" }
+                { "name": "txPreimage", "type": "SigHashPreimage" }
             ],
             "isPublic": true
         }
@@ -403,13 +400,32 @@ State fields:
 ]
 ```
 
+### 7.4 Implicit Parameters for Stateful Contracts
+
+Stateful contract public methods have **two implicit parameters** injected by the compiler that do not appear in the source code but **must** be provided by the SDK/caller when constructing the unlocking script:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `txPreimage` | `SigHashPreimage` | The sighash preimage for BIP-143. Used by the compiler-injected `checkPreimage` call to verify the transaction context. |
+| `_opPushTxSig` | `Sig` | An ECDSA signature that validates the preimage via the OP_PUSH_TX pattern. This proves the preimage is authentic. |
+
+**Unlocking script layout:** These implicit parameters appear **before** the user-declared parameters in the unlocking script. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
+
+```
+<txPreimage> <_opPushTxSig> <amount>
+```
+
+The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3). The `_opPushTxSig` parameter is not listed in the ABI because it is consumed internally by the OP_PUSH_TX mechanism in the locking script and is not visible at the ABI level. However, the SDK must always provide it as the bottom-most stack item when calling any stateful contract method.
+
+**Note:** The `txPreimage` parameter name uses the compiler-internal name `txPreimage` (not `preimage`). This matches the implicit parameter registered during ANF lowering.
+
 ---
 
 ## 8. ABI Validation Rules
 
 A conforming ABI must satisfy:
 
-1. **Non-empty constructor**: The constructor must have at least one parameter (a contract with no properties is useless).
+1. **Non-empty constructor**: The constructor should typically have at least one parameter. Note: this is a recommendation, not enforced by the validator.
 2. **Non-empty methods**: There must be at least one public method.
 3. **Unique method names**: No two methods may share the same name.
 4. **Public method presence**: At least one method must have `isPublic: true`.

@@ -274,6 +274,7 @@ var primitiveTypeNames = map[string]bool{
 	"RabinSig":       true,
 	"RabinPubKey":    true,
 	"void":           true,
+	"Point":          true,
 }
 
 // IsPrimitiveType returns true if the name is a recognized Rúnar primitive type.

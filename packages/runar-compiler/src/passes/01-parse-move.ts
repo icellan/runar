@@ -331,7 +331,7 @@ class MoveParser {
 
     const primitives = new Set([
       'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'void',
+      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
     ]);
     if (primitives.has(mapped)) {
       return { kind: 'primitive_type', name: mapped as PrimitiveTypeName };

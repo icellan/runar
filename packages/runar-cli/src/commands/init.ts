@@ -35,7 +35,7 @@ export async function initCommand(name?: string): Promise<void> {
     description: `Rúnar smart contract project: ${projectName}`,
     private: true,
     scripts: {
-      compile: 'runar compile src/contracts/*.ts',
+      compile: 'runar compile src/contracts/*.runar.ts',
       test: 'runar test',
       deploy: 'runar deploy',
     },
@@ -100,14 +100,14 @@ class P2PKH extends SmartContract {
 }
 `;
   fs.writeFileSync(
-    path.join(projectDir, 'src', 'contracts', 'P2PKH.ts'),
+    path.join(projectDir, 'src', 'contracts', 'P2PKH.runar.ts'),
     sampleContract,
   );
 
   // Generate sample test
   const sampleTest = `import { describe, it, expect } from 'vitest';
 // import { RunarContract, MockProvider, LocalSigner } from 'runar-sdk';
-// import artifact from '../artifacts/P2PKH.json';
+// import artifact from '../artifacts/P2PKH.runar.json';
 
 describe('P2PKH', () => {
   it('should compile without errors', () => {
@@ -138,7 +138,7 @@ artifacts/*.json
   console.log('');
   console.log('Next steps:');
   console.log(`  cd ${projectName}`);
-  console.log('  npm install');
-  console.log('  runar compile src/contracts/*.ts');
+  console.log('  pnpm install');
+  console.log('  runar compile src/contracts/*.runar.ts');
   console.log('  runar test');
 }

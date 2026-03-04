@@ -5,6 +5,7 @@
 //! - `opcodes`: Complete BSV opcode table
 //! - `optimizer`: Peephole optimizer for Stack IR
 
+pub mod ec;
 pub mod emit;
 pub mod opcodes;
 pub mod optimizer;

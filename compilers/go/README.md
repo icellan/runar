@@ -58,7 +58,7 @@ go build -o runar-compiler-go .
 
 ### Prerequisites
 
-- Go 1.22+
+- Go 1.26+
 - tree-sitter C library (for Phase 2 frontend)
 
 ---

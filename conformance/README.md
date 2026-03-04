@@ -26,13 +26,13 @@ tests/
 |   +-- basic-p2pkh.runar.move    # Source contract (Move-style)
 |   +-- basic-p2pkh.runar.go      # Source contract (Go)
 |   +-- basic-p2pkh.runar.rs      # Source contract (Rust)
-|   +-- basic-p2pkh.runar.json    # Source contract (JSON AST)
+|   +-- basic-p2pkh.runar.json    # Reference artifact (JSON AST, not tested by runner)
 |   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
 |   +-- expected-script.hex       # Expected compiled script (hex string)
 |
 +-- arithmetic/
 |   +-- arithmetic.runar.ts
-|   +-- arithmetic.runar.sol      # (+ .move, .go, .rs, .json variants)
+|   +-- arithmetic.runar.sol      # (+ .move, .go, .rs variants; .json is a reference artifact)
 |   +-- expected-ir.json
 |   +-- expected-script.hex
 |
@@ -72,7 +72,7 @@ tests/
     +-- expected-script.hex
 ```
 
-> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.json`). All format variants must produce the same ANF IR and script output. The post-quantum tests currently only have `.runar.ts` sources.
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All format variants must produce the same ANF IR and script output. The post-quantum tests currently only have `.runar.ts` sources. Six of the nine test directories (`basic-p2pkh`, `arithmetic`, `boolean-logic`, `if-else`, `bounded-loop`, `stateful`) also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
 
 ### File Roles
 

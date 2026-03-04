@@ -128,7 +128,7 @@ A simple fungible token where ownership can be transferred. The total supply is 
 
 ```typescript
 import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
-import type { PubKey, Sig } from 'runar-lang';
+import type { PubKey, Sig, ByteString } from 'runar-lang';
 
 class FungibleToken extends StatefulSmartContract {
   owner: PubKey;           // stateful: current token owner

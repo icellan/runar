@@ -237,6 +237,64 @@ Type-specific encoding:
 
 ---
 
+## Script Access
+
+Methods on `RunarContract` for direct script and state manipulation:
+
+```go
+// Get the full locking script hex (code + OP_RETURN + state for stateful contracts)
+lockingScript := contract.GetLockingScript()
+
+// Build an unlocking script for a method call
+unlock := contract.BuildUnlockingScript("transfer", []interface{}{sigHex, pubKeyHex})
+
+// Update state directly (useful for testing)
+contract.SetState(map[string]interface{}{"count": int64(5)})
+```
+
+---
+
+## Script Utilities
+
+Low-level helpers exported for custom transaction and script manipulation:
+
+```go
+// Build a P2PKH locking script from an address.
+// Accepts a 40-char hex pubkey hash or a Base58Check P2PKH address.
+// Panics if the address is invalid.
+script := runar.BuildP2PKHScript(address)
+
+// Insert an unlocking script into a raw transaction at a specific input.
+// Parses the tx hex, replaces the scriptSig at inputIndex, and returns
+// the modified transaction hex. Panics if inputIndex is out of range.
+modifiedTx := runar.InsertUnlockingScript(txHex, inputIndex, unlockingScript)
+
+// Encode a hex byte string as a Bitcoin Script push data opcode.
+// Selects the minimal encoding (direct push, OP_PUSHDATA1/2/4).
+pushData := runar.EncodePushData(dataHex)
+
+// Encode an integer as a minimally-encoded Bitcoin Script number push.
+// Uses push-data format (for state serialization).
+encoded := runar.EncodeScriptInt(n)
+
+// Find the hex-char offset of the last OP_RETURN in a script.
+// Walks the script as opcodes (properly skips push data).
+// Returns -1 if no OP_RETURN is found.
+pos := runar.FindLastOpReturn(scriptHex)
+```
+
+### Signatures
+
+| Function | Signature |
+|---|---|
+| `BuildP2PKHScript` | `func BuildP2PKHScript(address string) string` |
+| `InsertUnlockingScript` | `func InsertUnlockingScript(txHex string, inputIndex int, unlockScript string) string` |
+| `EncodePushData` | `func EncodePushData(dataHex string) string` |
+| `EncodeScriptInt` | `func EncodeScriptInt(n int64) string` |
+| `FindLastOpReturn` | `func FindLastOpReturn(scriptHex string) int` |
+
+---
+
 ## Transaction Building Utilities
 
 The SDK exports lower-level functions for custom transaction construction:
@@ -303,6 +361,21 @@ type CallOptions struct {
     NewState      map[string]interface{}
 }
 ```
+
+---
+
+## Panics
+
+Several SDK functions panic instead of returning errors for programmer mistakes (misuse of the API, not runtime failures). These panics indicate bugs in the calling code, not recoverable conditions:
+
+| Function | Condition | Message |
+|---|---|---|
+| `NewRunarContract` | Constructor arg count does not match the artifact's ABI | `RunarContract: expected N constructor args for ContractName, got M` |
+| `BuildUnlockingScript` | Method name not found among public methods | `buildUnlockingScript: public method 'name' not found` |
+| `InsertUnlockingScript` | Input index out of range for the raw transaction | `insertUnlockingScript: input index N out of range` |
+| `BuildP2PKHScript` | Address is not valid 40-char hex and not a valid Base58Check address | `BuildP2PKHScript: invalid address "...": ...` |
+
+All other SDK functions (`Deploy`, `Call`, `FromTxId`, `BuildDeployTransaction`, etc.) return errors for runtime failures (network issues, insufficient funds, etc.).
 
 ---
 

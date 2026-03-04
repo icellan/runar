@@ -42,15 +42,24 @@ Every Rúnar contract extends `SmartContract`. The base class defines the struct
 
 Properties are declared as class fields. Their role is determined by the `readonly` modifier:
 
-| Modifier | Semantics | Script Representation |
-|---|---|---|
-| `readonly` | Immutable. Set in constructor, embedded in locking script at deploy time. Cannot be reassigned. | Push data in the locking script |
-| _(none)_ | Mutable (stateful). Can be reassigned in public methods. New values propagated via OP_PUSH_TX. | State prefix in the locking script |
+| Modifier | Semantics | Available On | Script Representation |
+|---|---|---|---|
+| `readonly` | Immutable. Set in constructor, embedded in locking script at deploy time. Cannot be reassigned. | `SmartContract`, `StatefulSmartContract` | Push data in the locking script |
+| _(none)_ | Mutable (stateful). Can be reassigned in public methods. New values propagated via OP_PUSH_TX. | `StatefulSmartContract` only | State suffix in the locking script (after OP_RETURN) |
+
+**Important:** Mutable (non-`readonly`) properties with state propagation via OP_PUSH_TX are only available on `StatefulSmartContract`. The base `SmartContract` class is stateless and all its properties should be declared `readonly`.
 
 ```typescript
-class MyContract extends SmartContract {
-  readonly fixedValue: Addr;     // immutable -- baked into the script
-  counter: bigint;               // mutable -- carried across transactions
+// Stateless contract: all properties must be readonly
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;     // immutable -- baked into the script
+  // ...
+}
+
+// Stateful contract: mutable properties are carried across transactions
+class Counter extends StatefulSmartContract {
+  readonly owner: Addr;          // immutable -- baked into the script
+  count: bigint;                 // mutable -- carried across transactions
   // ...
 }
 ```
@@ -260,7 +269,7 @@ Import from `runar-lang/tokens`:
 import { FungibleToken, NonFungibleToken } from 'runar-lang/tokens';
 ```
 
-These provide standard base classes for token contracts with built-in transfer, mint, and burn methods. Your contract extends the appropriate base and adds custom logic.
+`FungibleToken` provides `transfer`, `merge`, and `split` methods. `NonFungibleToken` provides `transfer` and `burn` methods. Your contract extends the appropriate base and adds custom logic.
 
 ---
 

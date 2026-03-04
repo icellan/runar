@@ -111,6 +111,18 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['pack',         { params: ['bigint'], returnType: 'ByteString' }],
   ['unpack',       { params: ['ByteString'], returnType: 'bigint' }],
 
+  // Elliptic curve operations (secp256k1)
+  ['ecAdd',              { params: ['Point', 'Point'], returnType: 'Point' }],
+  ['ecMul',              { params: ['Point', 'bigint'], returnType: 'Point' }],
+  ['ecMulGen',           { params: ['bigint'], returnType: 'Point' }],
+  ['ecNegate',           { params: ['Point'], returnType: 'Point' }],
+  ['ecOnCurve',          { params: ['Point'], returnType: 'boolean' }],
+  ['ecModReduce',        { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['ecEncodeCompressed', { params: ['Point'], returnType: 'ByteString' }],
+  ['ecMakePoint',        { params: ['bigint', 'bigint'], returnType: 'Point' }],
+  ['ecPointX',           { params: ['Point'], returnType: 'bigint' }],
+  ['ecPointY',           { params: ['Point'], returnType: 'bigint' }],
+
   // Preimage extractors — numeric fields return bigint, byte fields return ByteString/Sha256
   ['extractVersion',       { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractHashPrevouts',  { params: ['SigHashPreimage'], returnType: 'Sha256' }],
@@ -136,7 +148,7 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
  */
 const BYTESTRING_SUBTYPES = new Set<TType>([
   'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160',
-  'Addr', 'SigHashPreimage',
+  'Addr', 'SigHashPreimage', 'Point',
 ]);
 
 /**

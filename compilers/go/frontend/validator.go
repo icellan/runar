@@ -60,6 +60,7 @@ var validPropTypes = map[string]bool{
 	"SigHashPreimage": true,
 	"RabinSig":       true,
 	"RabinPubKey":    true,
+	"Point":          true,
 }
 
 func (ctx *validationContext) validateProperties() {
