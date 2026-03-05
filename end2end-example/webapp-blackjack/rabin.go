@@ -162,46 +162,34 @@ func RabinSign(msgBytes []byte, keypair *RabinKeyPair) (*RabinSignature, error) 
 	return nil, fmt.Errorf("failed to generate Rabin signature (no QR found within 1000 padding values)")
 }
 
-func FindSignableOutcome(target int64, keypair *RabinKeyPair) (int64, *RabinSignature, error) {
-	return FindSignableOutcomeConstrained(target, keypair, 0)
-}
+// RabinSignOutcome signs outcomeType || oracleThreshold || nonce (24 bytes total).
+// outcomeType: 0 = loss, 1 = regular win, 2 = blackjack.
+// Iterates nonce values until the SHA-256 hash is safe for CScriptNum comparison
+// (last byte != 0x00 and < 0x80), then signs with Rabin.
+func RabinSignOutcome(outcomeType int64, oracleThreshold int64, keypair *RabinKeyPair) (int64, *RabinSignature, error) {
+	typeBytes := num2binLE(big.NewInt(outcomeType), 8)
+	thresholdBytes := num2binLE(big.NewInt(oracleThreshold), 8)
 
-func FindSignableOutcomeConstrained(target int64, keypair *RabinKeyPair, direction int) (int64, *RabinSignature, error) {
-	for offset := int64(0); offset <= 10000; offset++ {
-		var candidates []int64
-		if offset == 0 {
-			candidates = []int64{target}
-		} else {
-			switch {
-			case direction > 0:
-				candidates = []int64{target + offset}
-			case direction < 0:
-				candidates = []int64{target - offset}
-			default:
-				candidates = []int64{target + offset, target - offset}
-			}
+	for nonce := int64(0); nonce <= 10000; nonce++ {
+		nonceBytes := num2binLE(big.NewInt(nonce), 8)
+		msg := make([]byte, 0, 24)
+		msg = append(msg, typeBytes...)
+		msg = append(msg, thresholdBytes...)
+		msg = append(msg, nonceBytes...)
+
+		h := sha256.Sum256(msg)
+		lastByte := h[31]
+		if lastByte == 0 || lastByte >= 0x80 {
+			continue
 		}
 
-		for _, val := range candidates {
-			if val <= 0 {
-				continue
-			}
-
-			msgBytes := num2binLE(big.NewInt(val), 8)
-
-			h := sha256.Sum256(msgBytes)
-			lastByte := h[31]
-			if lastByte == 0 || lastByte >= 0x80 {
-				continue
-			}
-
-			sig, err := RabinSign(msgBytes, keypair)
-			if err != nil {
-				continue
-			}
-			return val, sig, nil
+		sig, err := RabinSign(msg, keypair)
+		if err != nil {
+			continue
 		}
+
+		return nonce, sig, nil
 	}
 
-	return 0, nil, fmt.Errorf("could not find a signable outcome near %d (direction=%d)", target, direction)
+	return 0, nil, fmt.Errorf("could not find a signable outcome for type=%d threshold=%d", outcomeType, oracleThreshold)
 }

@@ -1295,6 +1295,7 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
 		ctx.sm.pop()
+		ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
@@ -2130,6 +2131,18 @@ func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProp
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
 
+	// For public methods, ensure the script leaves a single truthy value on
+	// the main stack. Any additional values below the top are implementation
+	// artifacts and must be removed to satisfy CLEANSTACK policy.
+	if method.IsPublic {
+		for ctx.sm.depth() > 1 {
+			// NIP removes the second item from the top of the stack, preserving
+			// the final assertion value.
+			ctx.emitOp(StackOp{Op: "nip"})
+			ctx.sm.removeAtDepth(1)
+		}
+	}
+
 	if ctx.maxDepth > maxStackDepth {
 		return nil, fmt.Errorf(
 			"method '%s' exceeds maximum stack depth of %d (actual: %d). Simplify the contract logic",
@@ -2159,6 +2172,15 @@ func lowerMethod(method *ir.ANFMethod, properties []ir.ANFProperty) (*StackMetho
 	// Pass terminalAssert=true for public methods so the last assert leaves
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
+
+	// For public methods, enforce CLEANSTACK by dropping any residual
+	// values below the final assertion result.
+	if method.IsPublic {
+		for ctx.sm.depth() > 1 {
+			ctx.emitOp(StackOp{Op: "nip"})
+			ctx.sm.removeAtDepth(1)
+		}
+	}
 
 	if ctx.maxDepth > maxStackDepth {
 		return nil, fmt.Errorf(

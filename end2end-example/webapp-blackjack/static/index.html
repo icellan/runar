@@ -565,7 +565,8 @@
       <div class="info-bar">
         <div class="info-item">Round: <span x-text="state.round || '-'"></span></div>
         <div class="info-item">House: <span x-text="formatSats(state.houseBalance)"></span></div>
-        <div class="info-item">Bet: <span>1000 sats</span></div>
+        <div class="info-item">Bet: <span>1,000 sats</span></div>
+        <div class="info-item">BJ pays: <span>3:2</span></div>
       </div>
 
       <!-- Game Table -->
@@ -977,7 +978,6 @@ function blackjack() {
 
     formatSats(sats) {
       if (sats === undefined || sats === null) return '-';
-      if (sats >= 100000000) return (sats / 100000000).toFixed(2) + ' BSV';
       return sats.toLocaleString() + ' sats';
     },
 

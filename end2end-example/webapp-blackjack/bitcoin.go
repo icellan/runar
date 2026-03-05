@@ -20,6 +20,35 @@ import (
 
 var rpcID atomic.Int64
 
+// OP_PUSH_TX uses a well-known keypair (private key = 1, public key = G)
+// to prove a pushed BIP-143 preimage matches the spending transaction.
+var (
+	opPushTxKey *ec.PrivateKey
+)
+
+func init() {
+	keyBytes := make([]byte, 32)
+	keyBytes[31] = 1
+	opPushTxKey, _ = ec.PrivateKeyFromBytes(keyBytes)
+}
+
+func signOpPushTx(tx *transaction.Transaction, inputIdx uint32) (sigBytes []byte, preimage []byte, err error) {
+	preimage, err = tx.CalcInputPreimage(inputIdx, sighash.AllForkID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("calc preimage: %w", err)
+	}
+
+	hash := crypto.Sha256d(preimage)
+
+	sig, err := opPushTxKey.Sign(hash)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sign: %w", err)
+	}
+
+	sigBytes = append(sig.Serialize(), byte(sighash.AllForkID))
+	return sigBytes, preimage, nil
+}
+
 func rpcURL() string {
 	if v := os.Getenv("RPC_URL"); v != "" {
 		return v
@@ -316,29 +345,31 @@ func buildDualFundingTx(player, house *Wallet, playerUTXO, houseUTXO *UTXO, lock
 	return tx.String(), nil
 }
 
-func buildCancelSpendingTx(player, house *Wallet, contractUTXO *UTXO, playerP2PKH, houseP2PKH string, betSats uint64) (string, error) {
+func buildCancelSpendingTx(player, house *Wallet, contractUTXO *UTXO, playerP2PKH, houseP2PKH string, playerRefund, houseRefund uint64, methodIndex byte) (string, error) {
 	tx := transaction.NewTransaction()
 
 	if err := tx.AddInputFrom(contractUTXO.Txid, contractUTXO.Vout, contractUTXO.Script, contractUTXO.Satoshis, nil); err != nil {
 		return "", fmt.Errorf("add contract input: %w", err)
 	}
 
-	playerScript, _ := script.NewFromHex(playerP2PKH)
+	playerP2PKHScript, _ := script.NewFromHex(playerP2PKH)
 	tx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      betSats,
-		LockingScript: playerScript,
+		Satoshis:      playerRefund,
+		LockingScript: playerP2PKHScript,
 	})
 
-	houseScript, _ := script.NewFromHex(houseP2PKH)
+	houseP2PKHScript, _ := script.NewFromHex(houseP2PKH)
 	tx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      betSats,
-		LockingScript: houseScript,
+		Satoshis:      houseRefund,
+		LockingScript: houseP2PKHScript,
 	})
 
-	sigHash, err := tx.CalcInputSignatureHash(0, sighash.AllForkID)
+	opPushTxSigBytes, preimage, err := signOpPushTx(tx, 0)
 	if err != nil {
-		return "", fmt.Errorf("calc sighash: %w", err)
+		return "", fmt.Errorf("op_push_tx: %w", err)
 	}
+
+	sigHash := crypto.Sha256d(preimage)
 
 	playerSig, err := player.PrivKey.Sign(sigHash)
 	if err != nil {
@@ -352,17 +383,20 @@ func buildCancelSpendingTx(player, house *Wallet, contractUTXO *UTXO, playerP2PK
 	}
 	houseSigBytes := append(houseSig.Serialize(), byte(sighash.AllForkID))
 
+	// Stack order (bottom to top): [opPushTxSig] [playerSig] [houseSig] [preimage] [methodIndex]
 	unlockScript := &script.Script{}
+	_ = unlockScript.AppendPushData(opPushTxSigBytes)
 	_ = unlockScript.AppendPushData(playerSigBytes)
 	_ = unlockScript.AppendPushData(houseSigBytes)
-	_ = unlockScript.AppendOpcodes(script.Op1)
+	_ = unlockScript.AppendPushData(preimage)
+	appendMethodIndex(unlockScript, methodIndex)
 
 	tx.Inputs[0].UnlockingScript = unlockScript
 
 	return tx.String(), nil
 }
 
-func buildSpendingTxWithUnlockScript(contractUTXO *UTXO, outputs []*transaction.TransactionOutput, buildUnlock func(sigHash []byte) (*script.Script, error)) (string, error) {
+func buildSpendingTxWithUnlockScript(contractUTXO *UTXO, outputs []*transaction.TransactionOutput, buildUnlock func(tx *transaction.Transaction) (*script.Script, error)) (string, error) {
 	tx := transaction.NewTransaction()
 
 	if err := tx.AddInputFrom(contractUTXO.Txid, contractUTXO.Vout, contractUTXO.Script, contractUTXO.Satoshis, nil); err != nil {
@@ -373,12 +407,7 @@ func buildSpendingTxWithUnlockScript(contractUTXO *UTXO, outputs []*transaction.
 		tx.AddOutput(out)
 	}
 
-	sigHash, err := tx.CalcInputSignatureHash(0, sighash.AllForkID)
-	if err != nil {
-		return "", fmt.Errorf("calc sighash: %w", err)
-	}
-
-	unlockScript, err := buildUnlock(sigHash)
+	unlockScript, err := buildUnlock(tx)
 	if err != nil {
 		return "", fmt.Errorf("build unlock script: %w", err)
 	}
@@ -390,6 +419,14 @@ func buildSpendingTxWithUnlockScript(contractUTXO *UTXO, outputs []*transaction.
 
 func signSighash(w *Wallet, sigHash []byte) ([]byte, error) {
 	sig, err := w.PrivKey.Sign(sigHash)
+	if err != nil {
+		return nil, err
+	}
+	return append(sig.Serialize(), byte(sighash.AllForkID)), nil
+}
+
+func signWithHash(w *Wallet, hash []byte) ([]byte, error) {
+	sig, err := w.PrivKey.Sign(hash)
 	if err != nil {
 		return nil, err
 	}

@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"math/big"
 
+	crypto "github.com/bsv-blockchain/go-sdk/primitives/hash"
 	"github.com/bsv-blockchain/go-sdk/script"
 	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 const betSats = 1000
-const contractSats = betSats * 2
+const blackjackPayout = betSats * 3 / 2  // 3:2 payout for blackjack
+const houseSats = blackjackPayout        // house stakes enough to cover a blackjack win
+const contractSats = betSats + houseSats // total locked in the contract
 
 type ContractState struct {
 	PlayerIndex   int    `json:"playerIndex"`
@@ -73,8 +76,24 @@ func appendScriptNumber(s *script.Script, n *big.Int) {
 	_ = s.AppendPushData(bytes)
 }
 
-func deployPlayerContract(player *Wallet, playerUTXO *UTXO, house *Wallet, houseUTXO *UTXO, oraclePubKey *big.Int, roundId int64) (*ContractState, *UTXO, *UTXO, error) {
-	scriptHex, _, err := compileBlackjackBet(player.PubKeyHex, house.PubKeyHex, oraclePubKey, roundId)
+func appendMethodIndex(s *script.Script, idx byte) {
+	if idx == 0 {
+		_ = s.AppendOpcodes(script.Op0)
+	} else {
+		_ = s.AppendOpcodes(0x50 + idx)
+	}
+}
+
+// Method indices (declaration order in BlackjackBet.runar.ts)
+const (
+	methodSettleBlackjack = 0
+	methodSettleWin       = 1
+	methodSettleLoss      = 2
+	methodCancel          = 3
+)
+
+func deployPlayerContract(player *Wallet, playerUTXO *UTXO, house *Wallet, houseUTXO *UTXO, oraclePubKey *big.Int, oracleThreshold int64) (*ContractState, *UTXO, *UTXO, error) {
+	scriptHex, _, err := compileBlackjackBet(player.PubKeyHex, house.PubKeyHex, oraclePubKey, oracleThreshold, betSats)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("compile: %w", err)
 	}
@@ -110,7 +129,29 @@ func deployPlayerContract(player *Wallet, playerUTXO *UTXO, house *Wallet, house
 	return cs, newPlayerUTXO, newHouseUTXO, nil
 }
 
-func settlePlayerWin(cs *ContractState, player *Wallet, _ *Wallet, outcome int64, rabinSig *RabinSignature) (string, error) {
+func debugOutputHash(label string, tx *transaction.Transaction, preimage []byte) {
+	// Compute hashOutputs from the actual transaction outputs
+	var outputBuf []byte
+	for _, out := range tx.Outputs {
+		// Serialize: value(8 LE) + varint(scriptLen) + script
+		val := make([]byte, 8)
+		v := out.Satoshis
+		for i := 0; i < 8; i++ {
+			val[i] = byte(v & 0xff)
+			v >>= 8
+		}
+		outputBuf = append(outputBuf, val...)
+		scriptBytes := *out.LockingScript
+		// varint
+		if len(scriptBytes) < 0xfd {
+			outputBuf = append(outputBuf, byte(len(scriptBytes)))
+		}
+		outputBuf = append(outputBuf, scriptBytes...)
+	}
+}
+
+// settleBlackjack: player gets all contractSats (3:2 payout). Method index 0.
+func settleBlackjack(cs *ContractState, player *Wallet, outcomeType int64, nonce int64, rabinSig *RabinSignature) (string, error) {
 	contractUTXO := &UTXO{
 		Txid:     cs.ContractTxid,
 		Vout:     cs.ContractVout,
@@ -118,25 +159,36 @@ func settlePlayerWin(cs *ContractState, player *Wallet, _ *Wallet, outcome int64
 		Script:   cs.LockingScript,
 	}
 
-	winnerScript, _ := script.NewFromHex(player.P2PKH)
+	playerScript, _ := script.NewFromHex(player.P2PKH)
 	outputs := []*transaction.TransactionOutput{
-		{Satoshis: contractSats, LockingScript: winnerScript},
+		{Satoshis: contractSats, LockingScript: playerScript},
 	}
 
-	txHex, err := buildSpendingTxWithUnlockScript(contractUTXO, outputs, func(sigHash []byte) (*script.Script, error) {
-		playerSigBytes, err := signSighash(player, sigHash)
+	txHex, err := buildSpendingTxWithUnlockScript(contractUTXO, outputs, func(tx *transaction.Transaction) (*script.Script, error) {
+		opPushTxSigBytes, preimage, err := signOpPushTx(tx, 0)
 		if err != nil {
 			return nil, err
 		}
 
-		unlockScript := &script.Script{}
-		appendScriptNumber(unlockScript, big.NewInt(outcome))
-		appendScriptNumber(unlockScript, rabinSig.Sig)
-		appendScriptNumber(unlockScript, rabinSig.Padding)
-		_ = unlockScript.AppendPushData(playerSigBytes)
-		_ = unlockScript.AppendPushData([]byte{0x00})
-		_ = unlockScript.AppendOpcodes(script.Op0)
-		return unlockScript, nil
+		sigHash := crypto.Sha256d(preimage)
+		playerSigBytes, err := signWithHash(player, sigHash)
+		if err != nil {
+			return nil, err
+		}
+
+		// Stack order (bottom to top): [opPushTxSig] [outcomeType] [nonce] [rabinSig] [padding] [playerSig] [preimage] [methodIndex]
+		s := &script.Script{}
+		_ = s.AppendPushData(opPushTxSigBytes)
+		appendScriptNumber(s, big.NewInt(outcomeType))
+		appendScriptNumber(s, big.NewInt(nonce))
+		appendScriptNumber(s, rabinSig.Sig)
+		appendScriptNumber(s, rabinSig.Padding)
+		_ = s.AppendPushData(playerSigBytes)
+		_ = s.AppendPushData(preimage)
+		appendMethodIndex(s, methodSettleBlackjack)
+
+		debugOutputHash("settleBlackjack", tx, preimage)
+		return s, nil
 	})
 	if err != nil {
 		return "", err
@@ -154,7 +206,8 @@ func settlePlayerWin(cs *ContractState, player *Wallet, _ *Wallet, outcome int64
 	return txid, nil
 }
 
-func settleHouseWin(cs *ContractState, _ *Wallet, house *Wallet, outcome int64, rabinSig *RabinSignature) (string, error) {
+// settleWin: player gets 2*bet, house gets remainder. Method index 1.
+func settleWin(cs *ContractState, player, house *Wallet, outcomeType int64, nonce int64, rabinSig *RabinSignature) (string, error) {
 	contractUTXO := &UTXO{
 		Txid:     cs.ContractTxid,
 		Vout:     cs.ContractVout,
@@ -162,25 +215,36 @@ func settleHouseWin(cs *ContractState, _ *Wallet, house *Wallet, outcome int64, 
 		Script:   cs.LockingScript,
 	}
 
-	winnerScript, _ := script.NewFromHex(house.P2PKH)
+	playerScript, _ := script.NewFromHex(player.P2PKH)
+	houseScript, _ := script.NewFromHex(house.P2PKH)
 	outputs := []*transaction.TransactionOutput{
-		{Satoshis: contractSats, LockingScript: winnerScript},
+		{Satoshis: betSats * 2, LockingScript: playerScript},
+		{Satoshis: contractSats - betSats*2, LockingScript: houseScript},
 	}
 
-	txHex, err := buildSpendingTxWithUnlockScript(contractUTXO, outputs, func(sigHash []byte) (*script.Script, error) {
-		houseSigBytes, err := signSighash(house, sigHash)
+	txHex, err := buildSpendingTxWithUnlockScript(contractUTXO, outputs, func(tx *transaction.Transaction) (*script.Script, error) {
+		opPushTxSigBytes, preimage, err := signOpPushTx(tx, 0)
 		if err != nil {
 			return nil, err
 		}
 
-		unlockScript := &script.Script{}
-		appendScriptNumber(unlockScript, big.NewInt(outcome))
-		appendScriptNumber(unlockScript, rabinSig.Sig)
-		appendScriptNumber(unlockScript, rabinSig.Padding)
-		_ = unlockScript.AppendPushData([]byte{0x00})
-		_ = unlockScript.AppendPushData(houseSigBytes)
-		_ = unlockScript.AppendOpcodes(script.Op0)
-		return unlockScript, nil
+		sigHash := crypto.Sha256d(preimage)
+		playerSigBytes, err := signWithHash(player, sigHash)
+		if err != nil {
+			return nil, err
+		}
+
+		s := &script.Script{}
+		_ = s.AppendPushData(opPushTxSigBytes)
+		appendScriptNumber(s, big.NewInt(outcomeType))
+		appendScriptNumber(s, big.NewInt(nonce))
+		appendScriptNumber(s, rabinSig.Sig)
+		appendScriptNumber(s, rabinSig.Padding)
+		_ = s.AppendPushData(playerSigBytes)
+		_ = s.AppendPushData(preimage)
+		appendMethodIndex(s, methodSettleWin)
+		debugOutputHash("settleWin", tx, preimage)
+		return s, nil
 	})
 	if err != nil {
 		return "", err
@@ -198,6 +262,61 @@ func settleHouseWin(cs *ContractState, _ *Wallet, house *Wallet, outcome int64, 
 	return txid, nil
 }
 
+// settleLoss: house takes all contractSats. Method index 2.
+func settleLoss(cs *ContractState, house *Wallet, outcomeType int64, nonce int64, rabinSig *RabinSignature) (string, error) {
+	contractUTXO := &UTXO{
+		Txid:     cs.ContractTxid,
+		Vout:     cs.ContractVout,
+		Satoshis: contractSats,
+		Script:   cs.LockingScript,
+	}
+
+	houseScript, _ := script.NewFromHex(house.P2PKH)
+	outputs := []*transaction.TransactionOutput{
+		{Satoshis: contractSats, LockingScript: houseScript},
+	}
+
+	txHex, err := buildSpendingTxWithUnlockScript(contractUTXO, outputs, func(tx *transaction.Transaction) (*script.Script, error) {
+		opPushTxSigBytes, preimage, err := signOpPushTx(tx, 0)
+		if err != nil {
+			return nil, err
+		}
+
+		sigHash := crypto.Sha256d(preimage)
+		houseSigBytes, err := signWithHash(house, sigHash)
+		if err != nil {
+			return nil, err
+		}
+
+		s := &script.Script{}
+		_ = s.AppendPushData(opPushTxSigBytes)
+		appendScriptNumber(s, big.NewInt(outcomeType))
+		appendScriptNumber(s, big.NewInt(nonce))
+		appendScriptNumber(s, rabinSig.Sig)
+		appendScriptNumber(s, rabinSig.Padding)
+		_ = s.AppendPushData(houseSigBytes)
+		_ = s.AppendPushData(preimage)
+		appendMethodIndex(s, methodSettleLoss)
+		debugOutputHash("settleLoss", tx, preimage)
+		return s, nil
+	})
+	if err != nil {
+		return "", err
+	}
+
+	txid, err := broadcastTx(txHex)
+	if err != nil {
+		return "", fmt.Errorf("broadcast settle: %w", err)
+	}
+
+	cs.SettleTxid = txid
+	cs.RabinSigHex = hex.EncodeToString(rabinSig.Sig.Bytes())
+	cs.RabinPadHex = hex.EncodeToString(rabinSig.Padding.Bytes())
+
+	return txid, nil
+}
+
+// settlePush: both parties sign cancel, each gets their stake back. Method index 3.
 func settlePush(cs *ContractState, player, house *Wallet) (string, error) {
 	contractUTXO := &UTXO{
 		Txid:     cs.ContractTxid,
@@ -206,7 +325,7 @@ func settlePush(cs *ContractState, player, house *Wallet) (string, error) {
 		Script:   cs.LockingScript,
 	}
 
-	txHex, err := buildCancelSpendingTx(player, house, contractUTXO, player.P2PKH, house.P2PKH, betSats)
+	txHex, err := buildCancelSpendingTx(player, house, contractUTXO, player.P2PKH, house.P2PKH, betSats, houseSats, methodCancel)
 	if err != nil {
 		return "", err
 	}

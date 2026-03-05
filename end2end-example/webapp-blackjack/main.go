@@ -256,12 +256,12 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 	game.House = house
 	game.HouseAddr = house.Address
 
-	houseTxid, err := fundWallet(house.Address, 10.0)
+	houseTxid, err := fundWallet(house.Address, 0.01)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("fund house: %v", err), 500)
 		return
 	}
-	game.Log = append(game.Log, LogEntry{Message: "House funded: 10 BSV", Txid: houseTxid, Type: "fund"})
+	game.Log = append(game.Log, LogEntry{Message: "House funded: 1,000,000 sats", Txid: houseTxid, Type: "fund"})
 
 	game.PlayerWallets = make([]*Wallet, req.NumPlayers)
 	game.PlayerUTXOs = make([]*UTXO, req.NumPlayers)
@@ -275,7 +275,7 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 		}
 		game.PlayerWallets[i] = pw
 
-		txid, err := fundWallet(pw.Address, 1.0)
+		txid, err := fundWallet(pw.Address, 0.001)
 		if err != nil {
 			jsonError(w, fmt.Sprintf("fund player %d: %v", i+1, err), 500)
 			return
@@ -288,7 +288,7 @@ func handleNewGame(w http.ResponseWriter, r *http.Request) {
 		}
 
 		game.Log = append(game.Log, LogEntry{
-			Message: fmt.Sprintf("%s funded: 1 BSV", game.Players[i].Name),
+			Message: fmt.Sprintf("%s funded: 100,000 sats", game.Players[i].Name),
 			Txid:    txid,
 			Type:    "fund",
 		})
@@ -392,7 +392,7 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 	}
 
 	game.Contracts = make([]ContractState, game.NumPlayers)
-	roundId := int64(game.Round * 1000)
+	baseThreshold := int64(game.Round * 1000)
 
 	for i := 0; i < game.NumPlayers; i++ {
 		if game.PlayerUTXOs[i] == nil || len(game.HouseUTXOs) == 0 {
@@ -403,7 +403,7 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 		cs, newPlayerUTXO, newHouseUTXO, err := deployPlayerContract(
 			game.PlayerWallets[i], game.PlayerUTXOs[i],
 			game.House, game.HouseUTXOs[0],
-			game.OracleKeys.N, roundId+int64(i),
+			game.OracleKeys.N, baseThreshold+int64(i),
 		)
 		if err != nil {
 			jsonError(w, fmt.Sprintf("deploy contract for player %d: %v", i+1, err), 500)
@@ -432,12 +432,12 @@ func handleDeal(w http.ResponseWriter, r *http.Request) {
 			} else {
 				game.HouseUTXOs = nil
 			}
-			game.House.Balance -= betSats
+			game.House.Balance -= houseSats
 		}
 		game.HouseBal = game.House.Balance
 
 		game.Log = append(game.Log, LogEntry{
-			Message: fmt.Sprintf("Round %d: %s contract deployed (%d sats)", game.Round, game.Players[i].Name, contractSats),
+			Message: fmt.Sprintf("Round %d: %s contract deployed (%d sats: %d player + %d house)", game.Round, game.Players[i].Name, contractSats, betSats, houseSats),
 			Txid:    cs.ContractTxid,
 			Type:    "deploy",
 		})
@@ -602,7 +602,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 		Type:    "dealer",
 	})
 
-	roundId := int64(game.Round * 1000)
+	baseThreshold := int64(game.Round * 1000)
 
 	for i := 0; i < game.NumPlayers; i++ {
 		p := &game.Players[i]
@@ -610,11 +610,12 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 		p.Outcome = outcome
 
 		cs := &game.Contracts[i]
-		playerRoundId := roundId + int64(i)
+		oracleThreshold := baseThreshold + int64(i)
 
+		// Map game result to oracle outcomeType: 0=loss, 1=win, 2=blackjack
 		switch outcome {
-		case "win", "blackjack":
-			winOutcome, rabinSig, err := FindSignableOutcomeConstrained(playerRoundId+1, game.OracleKeys, 1)
+		case "blackjack":
+			nonce, rabinSig, err := RabinSignOutcome(2, oracleThreshold, game.OracleKeys)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: oracle signing failed: %v", p.Name, err),
@@ -623,7 +624,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			txid, err := settlePlayerWin(cs, game.PlayerWallets[i], game.House, winOutcome, rabinSig)
+			txid, err := settleBlackjack(cs, game.PlayerWallets[i], int64(2), nonce, rabinSig)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: settle failed: %v", p.Name, err),
@@ -638,13 +639,13 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 			p.Balance = game.PlayerWallets[i].Balance
 
 			game.Log = append(game.Log, LogEntry{
-				Message: fmt.Sprintf("%s wins! +%d sats", p.Name, contractSats),
+				Message: fmt.Sprintf("%s blackjack! +%d sats (3:2)", p.Name, contractSats),
 				Txid:    txid,
 				Type:    "settle",
 			})
 
-		case "lose":
-			loseOutcome, rabinSig, err := FindSignableOutcomeConstrained(playerRoundId, game.OracleKeys, -1)
+		case "win":
+			nonce, rabinSig, err := RabinSignOutcome(1, oracleThreshold, game.OracleKeys)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: oracle signing failed: %v", p.Name, err),
@@ -653,7 +654,39 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			txid, err := settleHouseWin(cs, game.PlayerWallets[i], game.House, loseOutcome, rabinSig)
+			txid, err := settleWin(cs, game.PlayerWallets[i], game.House, int64(1), nonce, rabinSig)
+			if err != nil {
+				game.Log = append(game.Log, LogEntry{
+					Message: fmt.Sprintf("%s: settle failed: %v", p.Name, err),
+					Type:    "error",
+				})
+				continue
+			}
+
+			p.SettleTxid = txid
+			cs.Outcome = outcome
+			game.PlayerWallets[i].Balance += betSats * 2
+			p.Balance = game.PlayerWallets[i].Balance
+			game.House.Balance += int64(contractSats - betSats*2)
+			game.HouseBal = game.House.Balance
+
+			game.Log = append(game.Log, LogEntry{
+				Message: fmt.Sprintf("%s wins! +%d sats", p.Name, betSats*2),
+				Txid:    txid,
+				Type:    "settle",
+			})
+
+		case "lose":
+			nonce, rabinSig, err := RabinSignOutcome(0, oracleThreshold, game.OracleKeys)
+			if err != nil {
+				game.Log = append(game.Log, LogEntry{
+					Message: fmt.Sprintf("%s: oracle signing failed: %v", p.Name, err),
+					Type:    "error",
+				})
+				continue
+			}
+
+			txid, err := settleLoss(cs, game.House, int64(0), nonce, rabinSig)
 			if err != nil {
 				game.Log = append(game.Log, LogEntry{
 					Message: fmt.Sprintf("%s: settle failed: %v", p.Name, err),
@@ -687,7 +720,7 @@ func handleDealer(w http.ResponseWriter, r *http.Request) {
 			cs.Outcome = outcome
 			game.PlayerWallets[i].Balance += betSats
 			p.Balance = game.PlayerWallets[i].Balance
-			game.House.Balance += betSats
+			game.House.Balance += houseSats
 			game.HouseBal = game.House.Balance
 
 			game.Log = append(game.Log, LogEntry{

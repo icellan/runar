@@ -11,7 +11,7 @@ import (
 	"github.com/icellan/runar/compilers/go/frontend"
 )
 
-func compileBlackjackBet(playerPubKeyHex, housePubKeyHex string, oraclePubKey *big.Int, roundId int64) (scriptHex string, scriptAsm string, err error) {
+func compileBlackjackBet(playerPubKeyHex, housePubKeyHex string, oraclePubKey *big.Int, oracleThreshold int64, betAmount int64) (scriptHex string, scriptAsm string, err error) {
 	source, err := readContractSource()
 	if err != nil {
 		return "", "", fmt.Errorf("read contract: %w", err)
@@ -42,8 +42,14 @@ func compileBlackjackBet(playerPubKeyHex, housePubKeyHex string, oraclePubKey *b
 			program.Properties[i].InitialValue = housePubKeyHex
 		case "oraclePubKey":
 			program.Properties[i].InitialValue = new(big.Int).Set(oraclePubKey)
-		case "roundId":
-			program.Properties[i].InitialValue = float64(roundId)
+		case "oracleThreshold":
+			program.Properties[i].InitialValue = float64(oracleThreshold)
+		case "betAmount":
+			program.Properties[i].InitialValue = float64(betAmount)
+		case "p2pkhPrefix":
+			program.Properties[i].InitialValue = "1976a914"
+		case "p2pkhSuffix":
+			program.Properties[i].InitialValue = "88ac"
 		}
 	}
 
@@ -64,8 +70,13 @@ func readContractSource() ([]byte, error) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(thisFile)
 
+	exe, _ := os.Executable()
+	exeDir := filepath.Dir(exe)
+
 	candidates := []string{
 		filepath.Join(dir, "BlackjackBet.runar.ts"),
+		filepath.Join(exeDir, "BlackjackBet.runar.ts"),
+		"BlackjackBet.runar.ts",
 	}
 
 	for _, path := range candidates {
