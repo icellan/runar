@@ -56,9 +56,20 @@ jobs:
           name: runar-rust
           path: compilers/rust/target/release/runar-compiler-rust
 
+  python:
+    name: Python Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest
+      - run: cd compilers/python && python -m pytest tests/ -v
+
   conformance:
     name: Conformance Tests
-    needs: [typescript, go, rust]
+    needs: [typescript, go, rust, python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
