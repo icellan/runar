@@ -51,6 +51,27 @@ fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
     let mut i = 0;
 
     while i < ops.len() {
+        // Try 4-op window
+        if i + 3 < ops.len() {
+            if let Some(replacement) =
+                match_window_4(&ops[i], &ops[i + 1], &ops[i + 2], &ops[i + 3])
+            {
+                result.extend(replacement);
+                i += 4;
+                changed = true;
+                continue;
+            }
+        }
+        // Try 3-op window
+        if i + 2 < ops.len() {
+            if let Some(replacement) = match_window_3(&ops[i], &ops[i + 1], &ops[i + 2]) {
+                result.extend(replacement);
+                i += 3;
+                changed = true;
+                continue;
+            }
+        }
+        // Existing 2-op window
         if i + 1 < ops.len() {
             if let Some(replacement) = match_window_2(&ops[i], &ops[i + 1]) {
                 result.extend(replacement);
@@ -65,6 +86,54 @@ fn apply_one_pass(ops: &[StackOp]) -> (Vec<StackOp>, bool) {
     }
 
     (result, changed)
+}
+
+fn match_window_3(a: &StackOp, b: &StackOp, c: &StackOp) -> Option<Vec<StackOp>> {
+    // Constant folding: PUSH(a) PUSH(b) ADD → PUSH(a+b)
+    if let (StackOp::Push(PushValue::Int(va)), StackOp::Push(PushValue::Int(vb))) = (a, b) {
+        if is_opcode(c, "OP_ADD") {
+            return Some(vec![StackOp::Push(PushValue::Int(va + vb))]);
+        }
+        if is_opcode(c, "OP_SUB") {
+            return Some(vec![StackOp::Push(PushValue::Int(va - vb))]);
+        }
+        if is_opcode(c, "OP_MUL") {
+            return Some(vec![StackOp::Push(PushValue::Int(va * vb))]);
+        }
+    }
+    None
+}
+
+fn match_window_4(
+    a: &StackOp,
+    b: &StackOp,
+    c: &StackOp,
+    d: &StackOp,
+) -> Option<Vec<StackOp>> {
+    // Chain folding: PUSH(a) ADD PUSH(b) ADD → PUSH(a+b) ADD
+    if let StackOp::Push(PushValue::Int(va)) = a {
+        if is_opcode(b, "OP_ADD") {
+            if let StackOp::Push(PushValue::Int(vb)) = c {
+                if is_opcode(d, "OP_ADD") {
+                    return Some(vec![
+                        StackOp::Push(PushValue::Int(va + vb)),
+                        StackOp::Opcode("OP_ADD".to_string()),
+                    ]);
+                }
+            }
+        }
+        if is_opcode(b, "OP_SUB") {
+            if let StackOp::Push(PushValue::Int(vb)) = c {
+                if is_opcode(d, "OP_SUB") {
+                    return Some(vec![
+                        StackOp::Push(PushValue::Int(va + vb)),
+                        StackOp::Opcode("OP_SUB".to_string()),
+                    ]);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
@@ -148,6 +217,58 @@ fn match_window_2(a: &StackOp, b: &StackOp) -> Option<Vec<StackOp>> {
     // OP_DROP, OP_DROP -> OP_2DROP
     if matches!(a, StackOp::Drop) && matches!(b, StackOp::Drop) {
         return Some(vec![StackOp::Opcode("OP_2DROP".to_string())]);
+    }
+
+    // PUSH(0) + Roll{depth:0} → remove both
+    if is_push_int(a, 0) && matches!(b, StackOp::Roll { depth: 0 }) {
+        return Some(vec![]);
+    }
+
+    // PUSH(1) + Roll{depth:1} → Swap
+    if is_push_int(a, 1) && matches!(b, StackOp::Roll { depth: 1 }) {
+        return Some(vec![StackOp::Swap]);
+    }
+
+    // PUSH(2) + Roll{depth:2} → Rot
+    if is_push_int(a, 2) && matches!(b, StackOp::Roll { depth: 2 }) {
+        return Some(vec![StackOp::Rot]);
+    }
+
+    // PUSH(0) + Pick{depth:0} → Dup
+    if is_push_int(a, 0) && matches!(b, StackOp::Pick { depth: 0 }) {
+        return Some(vec![StackOp::Dup]);
+    }
+
+    // PUSH(1) + Pick{depth:1} → Over
+    if is_push_int(a, 1) && matches!(b, StackOp::Pick { depth: 1 }) {
+        return Some(vec![StackOp::Over]);
+    }
+
+    // Also match Push + Opcode("OP_ROLL"/"OP_PICK") (used by SLH-DSA codegen)
+    if is_push_int(a, 0) && is_opcode(b, "OP_ROLL") {
+        return Some(vec![]);
+    }
+    if is_push_int(a, 1) && is_opcode(b, "OP_ROLL") {
+        return Some(vec![StackOp::Swap]);
+    }
+    if is_push_int(a, 2) && is_opcode(b, "OP_ROLL") {
+        return Some(vec![StackOp::Rot]);
+    }
+    if is_push_int(a, 0) && is_opcode(b, "OP_PICK") {
+        return Some(vec![StackOp::Dup]);
+    }
+    if is_push_int(a, 1) && is_opcode(b, "OP_PICK") {
+        return Some(vec![StackOp::Over]);
+    }
+
+    // SHA256 + SHA256 → HASH256
+    if is_opcode(a, "OP_SHA256") && is_opcode(b, "OP_SHA256") {
+        return Some(vec![StackOp::Opcode("OP_HASH256".to_string())]);
+    }
+
+    // PUSH 0 + NUMEQUAL → NOT
+    if is_push_int(a, 0) && is_opcode(b, "OP_NUMEQUAL") {
+        return Some(vec![StackOp::Opcode("OP_NOT".to_string())]);
     }
 
     None

@@ -15,13 +15,12 @@ use super::stack::{PushValue, StackOp};
 /// Low 32 bits of (p - 2) = 0xFFFFFC2D.
 const FIELD_P_MINUS_2_LOW32: u32 = 0xFFFF_FC2D;
 
-/// secp256k1 curve order n as a Bitcoin script number (little-endian sign-magnitude).
-/// n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-/// Reversed to LE with 0x00 sign byte appended (MSB 0xff has bit 7 set).
-const CURVE_N_SCRIPT_NUM: [u8; 33] = [
-    0x41, 0x41, 0x36, 0xd0, 0x8c, 0x5e, 0xd2, 0xbf, 0x3b, 0xa0, 0x48, 0xaf,
-    0xe6, 0xdc, 0xae, 0xba, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+/// 3 * secp256k1 curve order as a script number (little-endian sign-magnitude).
+/// Pre-computed to match TS constant-fold output (TS folds N+N+N → 3*N).
+const THREE_CURVE_N_SCRIPT_NUM: [u8; 33] = [
+    0xc3, 0xc3, 0xa2, 0x70, 0xa6, 0x1b, 0x77, 0x3f, 0xb3, 0xe0, 0xd9, 0x0d,
+    0xb4, 0x96, 0x0c, 0x30, 0xfc, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02,
 ];
 
 /// secp256k1 generator x-coordinate (32 bytes, big-endian).
@@ -683,17 +682,10 @@ pub fn emit_ec_mul(emit: &mut dyn FnMut(StackOp)) {
     // k' = k + 3n: guarantees bit 257 is set.
     // k ∈ [1, n-1], so k+3n ∈ [3n+1, 4n-1]. Since 3n > 2^257, bit 257
     // is always 1. Adding 3n (≡ 0 mod n) preserves the EC point: k*G = (k+3n)*G.
+    // Push 3*N directly (matches TS constant-fold output).
     t.to_top("_k");
-    t.push_bytes("_n", CURVE_N_SCRIPT_NUM.to_vec());
-    t.raw_block(&["_k", "_n"], Some("_kn"), |e| {
-        e(StackOp::Opcode("OP_ADD".into()));
-    });
-    t.push_bytes("_n2", CURVE_N_SCRIPT_NUM.to_vec());
-    t.raw_block(&["_kn", "_n2"], Some("_kn2"), |e| {
-        e(StackOp::Opcode("OP_ADD".into()));
-    });
-    t.push_bytes("_n3", CURVE_N_SCRIPT_NUM.to_vec());
-    t.raw_block(&["_kn2", "_n3"], Some("_kn3"), |e| {
+    t.push_bytes("_3n", THREE_CURVE_N_SCRIPT_NUM.to_vec());
+    t.raw_block(&["_k", "_3n"], Some("_k3n"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
     t.rename("_k");

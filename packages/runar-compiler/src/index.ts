@@ -36,6 +36,7 @@ import { lowerToANF } from './passes/04-anf-lower.js';
 import { lowerToStack } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
+import { optimizeEC } from './optimizer/anf-ec.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
@@ -242,9 +243,8 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     }
   }
 
-  // Keep ANF canonical for conformance: do not apply ANF optimizations in
-  // the default compile path.
-  const optimizedAnf = anf;
+  // Pass 4.5: ANF EC Optimizer (always-on)
+  const optimizedAnf = optimizeEC(anf);
 
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {

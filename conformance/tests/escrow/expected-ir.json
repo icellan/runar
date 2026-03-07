@@ -1,0 +1,296 @@
+{
+  "contractName": "Escrow",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "buyer"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "seller"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "arbiter"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "buyer"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "buyer",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "seller"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "seller",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "arbiter"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "arbiter",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "buyer",
+          "type": "PubKey"
+        },
+        {
+          "name": "seller",
+          "type": "PubKey"
+        },
+        {
+          "name": "arbiter",
+          "type": "PubKey"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "seller"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "releaseBySeller",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "arbiter"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "releaseByArbiter",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "buyer"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "refundToBuyer",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "arbiter"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "refundByArbiter",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "buyer",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "seller",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "arbiter",
+      "readonly": true,
+      "type": "PubKey"
+    }
+  ]
+}

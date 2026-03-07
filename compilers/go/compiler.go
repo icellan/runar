@@ -94,6 +94,9 @@ func CompileFromIRBytes(data []byte) (*Artifact, error) {
 
 // CompileFromProgram compiles a parsed ANF program to a Rúnar artifact.
 func CompileFromProgram(program *ir.ANFProgram) (*Artifact, error) {
+	// EC optimization — algebraic simplification of EC calls
+	program = frontend.OptimizeEC(program)
+
 	// Pass 5: Stack lowering
 	stackMethods, err := codegen.LowerToStack(program)
 	if err != nil {
@@ -196,6 +199,9 @@ func CompileFromSource(sourcePath string) (*Artifact, error) {
 	// Pass 4: ANF lowering
 	program := frontend.LowerToANF(parseResult.Contract)
 
+	// EC optimization — algebraic simplification of EC calls
+	program = frontend.OptimizeEC(program)
+
 	// Feed into existing compilation pipeline (passes 5-6)
 	return CompileFromProgram(program)
 }
@@ -225,7 +231,9 @@ func CompileSourceToIR(sourcePath string) (*ir.ANFProgram, error) {
 		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.Errors, "\n  "))
 	}
 
-	return frontend.LowerToANF(parseResult.Contract), nil
+	program := frontend.LowerToANF(parseResult.Contract)
+	program = frontend.OptimizeEC(program)
+	return program, nil
 }
 
 // ArtifactToJSON serialises an artifact to pretty-printed JSON.

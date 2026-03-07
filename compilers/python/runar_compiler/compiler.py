@@ -150,6 +150,12 @@ def _lower_to_anf(contract: Any) -> ANFProgram:
 # Backend stub imports
 # ---------------------------------------------------------------------------
 
+def _optimize_ec(program: ANFProgram) -> ANFProgram:
+    """Optimize EC operations in ANF IR (Pass 4.5)."""
+    from runar_compiler.frontend.anf_optimize import optimize_ec
+    return optimize_ec(program)
+
+
 def _lower_to_stack(program: ANFProgram) -> list[Any]:
     """Stack lowering: ANF -> Stack IR."""
     from runar_compiler.codegen.stack import lower_to_stack
@@ -198,6 +204,9 @@ def compile_from_ir_bytes(data: bytes) -> Artifact:
 
 def compile_from_program(program: ANFProgram) -> Artifact:
     """Compile a parsed ANF program to a Runar artifact."""
+    # Pass 4.5: EC optimization
+    program = _optimize_ec(program)
+
     # Pass 5: Stack lowering
     stack_methods = _lower_to_stack(program)
 
@@ -244,6 +253,9 @@ def compile_from_source(source_path: str) -> Artifact:
     # Pass 4: ANF lowering
     program = _lower_to_anf(parse_result.contract)
 
+    # Pass 4.5: EC optimization
+    program = _optimize_ec(program)
+
     # Feed into existing compilation pipeline (passes 5-6)
     return compile_from_program(program)
 
@@ -266,7 +278,12 @@ def compile_source_to_ir(source_path: str) -> ANFProgram:
     if tc_result.errors:
         raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.errors))
 
-    return _lower_to_anf(parse_result.contract)
+    program = _lower_to_anf(parse_result.contract)
+
+    # Pass 4.5: EC optimization
+    program = _optimize_ec(program)
+
+    return program
 
 
 # ---------------------------------------------------------------------------

@@ -2,62 +2,32 @@ package contract
 
 import runar "github.com/icellan/runar/packages/runar-go"
 
-// SchnorrSig is the non-interactive Schnorr proof tuple sent by the prover.
-// (R = r·G, s = r + e·k mod n)
-type SchnorrSig struct {
-	R runar.Point  `runar:"public"` // commitment point
-	S runar.Bigint `runar:"public"` // response scalar
-}
-
-// SchnorrOwnershipVerifier is a complete, production-ready Runar contract.
+// SchnorrZKP verifies a Schnorr zero-knowledge proof.
 //
-// It proves knowledge of the private key belonging to `PubKey` (without revealing it)
-// and binds the proof to the exact transaction being spent via OP_PUSH_TX
-// (perfect replay protection). This is the pattern used in real BSV covenants.
-type SchnorrOwnershipVerifier struct {
-	runar.StatefulSmartContract             // gives automatic TxPreimage (validated via OP_PUSH_TX)
-	PubKey                      runar.Point `runar:"readonly"` // the identity/public key
+// Proves knowledge of a private key k such that P = k*G without revealing k.
+// Uses the Schnorr identification protocol:
+//
+//	Prover: picks random r, sends R = r*G
+//	Verifier: sends challenge e
+//	Prover: sends s = r + e*k (mod n)
+//	Verifier: checks s*G === R + e*P
+type SchnorrZKP struct {
+	runar.SmartContract
+	PubKey runar.Point `runar:"readonly"`
 }
 
-// Authorize is the public entry point.
-// The spender provides the Schnorr proof + any business context.
-// The proof is cryptographically bound to this exact transaction.
-func (c *SchnorrOwnershipVerifier) Authorize(sig SchnorrSig, actionData runar.Bytes) {
-	// TxPreimage is automatically pushed and validated by StatefulSmartContract
+// Verify checks a Schnorr ZKP proof.
+func (c *SchnorrZKP) Verify(rPoint runar.Point, s runar.Bigint, e runar.Bigint) {
+	runar.Assert(runar.EcOnCurve(rPoint))
 
-	// Bind the proof to this specific transaction (perfect replay protection)
-	txBinding := runar.SHA256(c.TxPreimage)
-	fullMessage := runar.Concat(actionData, txBinding)
+	// Left side: s*G
+	sG := runar.EcMulGen(s)
 
-	// Perform the actual Schnorr verification
-	c.verifySchnorr(sig, fullMessage)
-
-	// === Protected business logic goes here ===
-	// (e.g. update state, spend outputs, create new covenants, etc.)
-	// If you need to "log" data, push an OP_RETURN output with runar.addOutput
-}
-
-// verifySchnorr is the reusable core verification logic.
-// Drop this into any other contract that needs Schnorr ownership proofs.
-func (c *SchnorrOwnershipVerifier) verifySchnorr(sig SchnorrSig, message runar.Bytes) {
-	// 1. Basic curve membership check
-	runar.Assert(runar.EcOnCurve(sig.R))
-
-	// 2. Fiat-Shamir heuristic – compute challenge on-chain
-	//    e = SHA256(Rx || Px || message)
-	rX := runar.EcPointX(sig.R)
-	pX := runar.EcPointX(c.PubKey)
-	challengePreimage := runar.Concat(rX.Bytes(), pX.Bytes(), message)
-
-	eBytes := runar.SHA256(challengePreimage)
-	e := runar.BigintFromBytes(eBytes) // hash interpreted as scalar
-
-	// 3. Core Schnorr equation: s·G == R + e·P
-	sG := runar.EcMulGen(sig.S)
+	// Right side: R + e*P
 	eP := runar.EcMul(c.PubKey, e)
-	rhs := runar.EcAdd(sig.R, eP)
+	rhs := runar.EcAdd(rPoint, eP)
 
-	// Verify points are identical
+	// Verify equality
 	runar.Assert(runar.EcPointX(sG) == runar.EcPointX(rhs))
 	runar.Assert(runar.EcPointY(sG) == runar.EcPointY(rhs))
 }

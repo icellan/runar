@@ -80,6 +80,9 @@ pub fn compile_from_source_str(
     // Pass 4: ANF Lower
     let anf_program = frontend::anf_lower::lower_to_anf(&contract);
 
+    // Pass 4.5: EC optimization
+    let anf_program = frontend::anf_optimize::optimize_ec(anf_program);
+
     // Passes 5-6: Backend (stack lowering + emit)
     compile_from_program(&anf_program)
 }
@@ -126,13 +129,17 @@ pub fn compile_source_str_to_ir(
         ));
     }
 
-    Ok(frontend::anf_lower::lower_to_anf(&contract))
+    let anf_program = frontend::anf_lower::lower_to_anf(&contract);
+    Ok(frontend::anf_optimize::optimize_ec(anf_program))
 }
 
 /// Compile a parsed ANF program to a Rúnar artifact.
 pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
+    // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR)
+    let optimized = frontend::anf_optimize::optimize_ec(program.clone());
+
     // Pass 5: Stack lowering
-    let mut stack_methods = lower_to_stack(program)?;
+    let mut stack_methods = lower_to_stack(&optimized)?;
 
     // Peephole optimization — runs on Stack IR before emission.
     for method in &mut stack_methods {
@@ -143,7 +150,7 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
     let emit_result = emit(&stack_methods)?;
 
     let artifact = assemble_artifact(
-        program,
+        &optimized,
         &emit_result.script_hex,
         &emit_result.script_asm,
         emit_result.constructor_slots,

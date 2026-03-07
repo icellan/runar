@@ -1,0 +1,34 @@
+[
+  {"name": "push-drop",       "match": [{"op":"push","any":true}, {"op":"drop"}],           "replace": []},
+  {"name": "dup-drop",        "match": [{"op":"dup"}, {"op":"drop"}],                       "replace": []},
+  {"name": "swap-swap",       "match": [{"op":"swap"}, {"op":"swap"}],                      "replace": []},
+  {"name": "1-add-to-1add",   "match": [{"op":"push","int":1}, {"op":"opcode","code":"OP_ADD"}], "replace": [{"op":"opcode","code":"OP_1ADD"}]},
+  {"name": "1-sub-to-1sub",   "match": [{"op":"push","int":1}, {"op":"opcode","code":"OP_SUB"}], "replace": [{"op":"opcode","code":"OP_1SUB"}]},
+  {"name": "0-add-identity",  "match": [{"op":"push","int":0}, {"op":"opcode","code":"OP_ADD"}], "replace": []},
+  {"name": "0-sub-identity",  "match": [{"op":"push","int":0}, {"op":"opcode","code":"OP_SUB"}], "replace": []},
+  {"name": "not-not",         "match": [{"op":"opcode","code":"OP_NOT"}, {"op":"opcode","code":"OP_NOT"}],         "replace": []},
+  {"name": "negate-negate",   "match": [{"op":"opcode","code":"OP_NEGATE"}, {"op":"opcode","code":"OP_NEGATE"}],   "replace": []},
+  {"name": "equal-verify",    "match": [{"op":"opcode","code":"OP_EQUAL"}, {"op":"opcode","code":"OP_VERIFY"}],    "replace": [{"op":"opcode","code":"OP_EQUALVERIFY"}]},
+  {"name": "checksig-verify", "match": [{"op":"opcode","code":"OP_CHECKSIG"}, {"op":"opcode","code":"OP_VERIFY"}], "replace": [{"op":"opcode","code":"OP_CHECKSIGVERIFY"}]},
+  {"name": "numequal-verify", "match": [{"op":"opcode","code":"OP_NUMEQUAL"}, {"op":"opcode","code":"OP_VERIFY"}], "replace": [{"op":"opcode","code":"OP_NUMEQUALVERIFY"}]},
+  {"name": "checkmultisig-verify", "match": [{"op":"opcode","code":"OP_CHECKMULTISIG"}, {"op":"opcode","code":"OP_VERIFY"}], "replace": [{"op":"opcode","code":"OP_CHECKMULTISIGVERIFY"}]},
+  {"name": "op-dup-op-drop",  "match": [{"op":"opcode","code":"OP_DUP"}, {"op":"opcode","code":"OP_DROP"}],       "replace": []},
+  {"name": "over-over-to-2dup","match": [{"op":"over"}, {"op":"over"}],                     "replace": [{"op":"opcode","code":"OP_2DUP"}]},
+  {"name": "drop-drop-to-2drop","match": [{"op":"drop"}, {"op":"drop"}],                    "replace": [{"op":"opcode","code":"OP_2DROP"}]},
+
+  {"name": "roll0-noop",      "match": [{"op":"push","int":0}, {"op":"roll","depth":0}],    "replace": []},
+  {"name": "roll1-to-swap",   "match": [{"op":"push","int":1}, {"op":"roll","depth":1}],    "replace": [{"op":"swap"}]},
+  {"name": "roll2-to-rot",    "match": [{"op":"push","int":2}, {"op":"roll","depth":2}],    "replace": [{"op":"rot"}]},
+  {"name": "pick0-to-dup",    "match": [{"op":"push","int":0}, {"op":"pick","depth":0}],    "replace": [{"op":"dup"}]},
+  {"name": "pick1-to-over",   "match": [{"op":"push","int":1}, {"op":"pick","depth":1}],    "replace": [{"op":"over"}]},
+
+  {"name": "sha256-sha256",   "match": [{"op":"opcode","code":"OP_SHA256"}, {"op":"opcode","code":"OP_SHA256"}], "replace": [{"op":"opcode","code":"OP_HASH256"}]},
+  {"name": "0-numequal-to-not","match": [{"op":"push","int":0}, {"op":"opcode","code":"OP_NUMEQUAL"}], "replace": [{"op":"opcode","code":"OP_NOT"}]},
+
+  {"name": "const-fold-add",  "match": [{"op":"push","int":"$a"}, {"op":"push","int":"$b"}, {"op":"opcode","code":"OP_ADD"}], "replace": [{"op":"push","int":"$a+$b"}], "type": "const-fold"},
+  {"name": "const-fold-sub",  "match": [{"op":"push","int":"$a"}, {"op":"push","int":"$b"}, {"op":"opcode","code":"OP_SUB"}], "replace": [{"op":"push","int":"$a-$b"}], "type": "const-fold"},
+  {"name": "const-fold-mul",  "match": [{"op":"push","int":"$a"}, {"op":"push","int":"$b"}, {"op":"opcode","code":"OP_MUL"}], "replace": [{"op":"push","int":"$a*$b"}], "type": "const-fold"},
+
+  {"name": "add-chain-fold",  "match": [{"op":"push","int":"$a"}, {"op":"opcode","code":"OP_ADD"}, {"op":"push","int":"$b"}, {"op":"opcode","code":"OP_ADD"}], "replace": [{"op":"push","int":"$a+$b"}, {"op":"opcode","code":"OP_ADD"}], "type": "const-fold"},
+  {"name": "sub-chain-fold",  "match": [{"op":"push","int":"$a"}, {"op":"opcode","code":"OP_SUB"}, {"op":"push","int":"$b"}, {"op":"opcode","code":"OP_SUB"}], "replace": [{"op":"push","int":"$a+$b"}, {"op":"opcode","code":"OP_SUB"}], "type": "const-fold"}
+]

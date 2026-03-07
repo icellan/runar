@@ -1057,3 +1057,17 @@ fn test_conformance_golden_post_quantum_wots() {
 fn test_conformance_golden_post_quantum_slhdsa() {
     conformance_golden_test("post-quantum-slhdsa");
 }
+
+#[test]
+fn test_optimizer_roll2_to_rot() {
+    use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
+    use runar_compiler_rust::codegen::stack::{PushValue, StackOp};
+
+    let ops = vec![
+        StackOp::Push(PushValue::Int(2)),
+        StackOp::Roll { depth: 2 },
+    ];
+    let optimized = optimize_stack_ops(&ops);
+    assert_eq!(optimized.len(), 1, "Should reduce to 1 op: {:?}", optimized);
+    assert!(matches!(&optimized[0], StackOp::Rot), "Should be Rot: {:?}", optimized);
+}

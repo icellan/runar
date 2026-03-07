@@ -264,6 +264,172 @@ const rules: PeepholeRule[] = [
   // SWAP, ROT → equivalent to a single ROT, SWAP in some patterns.
   // This is left as a future optimization.
   // -------------------------------------------------------------------------
+
+  // =========================================================================
+  // New 2-op rules: Roll/Pick depth simplification
+  // The stack lowerer emits PUSH(depth) + Roll/Pick pairs. These rules
+  // consume both the push and the roll/pick, replacing with a single opcode.
+  // =========================================================================
+
+  // PUSH 0, Roll{0} → remove both (no-op)
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'roll' && ops[1]!.depth === 0) return [];
+      return null;
+    },
+  },
+
+  // PUSH 1, Roll{1} → Swap
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'roll' && ops[1]!.depth === 1) return [{ op: 'swap' }];
+      return null;
+    },
+  },
+
+  // PUSH 2, Roll{2} → Rot
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushBigInt(ops[0]!, 2n) && ops[1]!.op === 'roll' && ops[1]!.depth === 2) return [{ op: 'rot' }];
+      return null;
+    },
+  },
+
+  // PUSH 0, Pick{0} → Dup
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushBigInt(ops[0]!, 0n) && ops[1]!.op === 'pick' && ops[1]!.depth === 0) return [{ op: 'dup' }];
+      return null;
+    },
+  },
+
+  // PUSH 1, Pick{1} → Over
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushBigInt(ops[0]!, 1n) && ops[1]!.op === 'pick' && ops[1]!.depth === 1) return [{ op: 'over' }];
+      return null;
+    },
+  },
+
+  // =========================================================================
+  // New 2-op rules
+  // =========================================================================
+
+  // SHA256, SHA256 → HASH256
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isOpcode(ops[0]!, 'OP_SHA256') && isOpcode(ops[1]!, 'OP_SHA256')) {
+        return [{ op: 'opcode', code: 'OP_HASH256' }];
+      }
+      return null;
+    },
+  },
+
+  // PUSH 0, NUMEQUAL → NOT
+  {
+    windowSize: 2,
+    match(ops) {
+      if (isPushZero(ops[0]!) && isOpcode(ops[1]!, 'OP_NUMEQUAL')) {
+        return [{ op: 'opcode', code: 'OP_NOT' }];
+      }
+      return null;
+    },
+  },
+
+  // NOTE: PUSH 1, MUL identity rule is intentionally omitted.
+  // In Bitcoin Script, PUSH 1 OP_MUL forces byte-to-number coercion.
+  // SLH-DSA codegen relies on this behavior.
+
+  // =========================================================================
+  // New 3-op rules: constant folding
+  // =========================================================================
+
+  // PUSH(a), PUSH(b), ADD → PUSH(a+b)
+  {
+    windowSize: 3,
+    match(ops) {
+      if (isPush(ops[0]!) && typeof ops[0]!.value === 'bigint' &&
+          isPush(ops[1]!) && typeof ops[1]!.value === 'bigint' &&
+          isOpcode(ops[2]!, 'OP_ADD')) {
+        const a = (ops[0]! as PushOp).value as bigint;
+        const b = (ops[1]! as PushOp).value as bigint;
+        return [{ op: 'push', value: a + b }];
+      }
+      return null;
+    },
+  },
+
+  // PUSH(a), PUSH(b), SUB → PUSH(a-b)
+  {
+    windowSize: 3,
+    match(ops) {
+      if (isPush(ops[0]!) && typeof ops[0]!.value === 'bigint' &&
+          isPush(ops[1]!) && typeof ops[1]!.value === 'bigint' &&
+          isOpcode(ops[2]!, 'OP_SUB')) {
+        const a = (ops[0]! as PushOp).value as bigint;
+        const b = (ops[1]! as PushOp).value as bigint;
+        return [{ op: 'push', value: a - b }];
+      }
+      return null;
+    },
+  },
+
+  // PUSH(a), PUSH(b), MUL → PUSH(a*b)
+  {
+    windowSize: 3,
+    match(ops) {
+      if (isPush(ops[0]!) && typeof ops[0]!.value === 'bigint' &&
+          isPush(ops[1]!) && typeof ops[1]!.value === 'bigint' &&
+          isOpcode(ops[2]!, 'OP_MUL')) {
+        const a = (ops[0]! as PushOp).value as bigint;
+        const b = (ops[1]! as PushOp).value as bigint;
+        return [{ op: 'push', value: a * b }];
+      }
+      return null;
+    },
+  },
+
+  // =========================================================================
+  // New 4-op rules: chain folding
+  // =========================================================================
+
+  // PUSH(a), ADD, PUSH(b), ADD → PUSH(a+b), ADD
+  {
+    windowSize: 4,
+    match(ops) {
+      if (isPush(ops[0]!) && typeof ops[0]!.value === 'bigint' &&
+          isOpcode(ops[1]!, 'OP_ADD') &&
+          isPush(ops[2]!) && typeof ops[2]!.value === 'bigint' &&
+          isOpcode(ops[3]!, 'OP_ADD')) {
+        const a = (ops[0]! as PushOp).value as bigint;
+        const b = (ops[2]! as PushOp).value as bigint;
+        return [{ op: 'push', value: a + b }, { op: 'opcode', code: 'OP_ADD' }];
+      }
+      return null;
+    },
+  },
+
+  // PUSH(a), SUB, PUSH(b), SUB → PUSH(a+b), SUB
+  {
+    windowSize: 4,
+    match(ops) {
+      if (isPush(ops[0]!) && typeof ops[0]!.value === 'bigint' &&
+          isOpcode(ops[1]!, 'OP_SUB') &&
+          isPush(ops[2]!) && typeof ops[2]!.value === 'bigint' &&
+          isOpcode(ops[3]!, 'OP_SUB')) {
+        const a = (ops[0]! as PushOp).value as bigint;
+        const b = (ops[2]! as PushOp).value as bigint;
+        return [{ op: 'push', value: a + b }, { op: 'opcode', code: 'OP_SUB' }];
+      }
+      return null;
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -314,29 +480,50 @@ function optimizeNestedIf(op: StackOp): StackOp {
 
 /**
  * Apply all peephole rules in a single left-to-right scan.
+ * Tries wider windows first (greedy) for maximum reduction.
  */
 function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
   const result: StackOp[] = [];
   let changed = false;
   let i = 0;
 
+  // Organize rules by window size for efficient matching
+  const rulesBySize = new Map<number, PeepholeRule[]>();
+  for (const rule of rules) {
+    const list = rulesBySize.get(rule.windowSize) ?? [];
+    list.push(rule);
+    rulesBySize.set(rule.windowSize, list);
+  }
+  const windowSizes = [...rulesBySize.keys()].sort((a, b) => b - a); // largest first
+
   while (i < ops.length) {
+    // Altstack round-trip elimination is disabled for now.
+    // The safety check (net stack effect = 0) is necessary but not sufficient:
+    // removing DUP+TOALTSTACK shifts items on the main stack, which invalidates
+    // PICK/ROLL depths in the middle ops. Enabling this requires full stack
+    // depth simulation which is future work.
+
     let matched = false;
 
-    // Apply rules to current window position
-    for (const rule of rules) {
-      if (i + rule.windowSize > ops.length) continue;
+    // Try rules from largest window to smallest
+    for (const size of windowSizes) {
+      if (i + size > ops.length) continue;
 
-      const window = ops.slice(i, i + rule.windowSize);
-      const replacement = rule.match(window);
+      const sizeRules = rulesBySize.get(size)!;
+      const window = ops.slice(i, i + size);
 
-      if (replacement !== null) {
-        result.push(...replacement);
-        i += rule.windowSize;
-        changed = true;
-        matched = true;
-        break;
+      for (const rule of sizeRules) {
+        const replacement = rule.match(window);
+        if (replacement !== null) {
+          result.push(...replacement);
+          i += size;
+          changed = true;
+          matched = true;
+          break;
+        }
       }
+
+      if (matched) break;
     }
 
     if (!matched) {
@@ -347,3 +534,10 @@ function applyOnePass(ops: StackOp[]): { ops: StackOp[]; changed: boolean } {
 
   return { ops: result, changed };
 }
+
+// ---------------------------------------------------------------------------
+// Altstack round-trip elimination — DISABLED pending full stack simulation.
+// See plan for details on implementing safe DUP TOALTSTACK <middle> FROMALTSTACK
+// elimination. Requires precise stack depth tracking to avoid corrupting
+// SLH-DSA and EC codegen patterns.
+// ---------------------------------------------------------------------------

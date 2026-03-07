@@ -48,7 +48,25 @@ def _apply_one_pass(ops: list[StackOp]) -> tuple[list[StackOp], bool]:
     i = 0
 
     while i < len(ops):
-        # Try window-2 rules first
+        # Try 4-op window
+        if i + 3 < len(ops):
+            replacement = _match_window4(ops[i], ops[i + 1], ops[i + 2], ops[i + 3])
+            if replacement is not None:
+                result.extend(replacement)
+                i += 4
+                changed = True
+                continue
+
+        # Try 3-op window
+        if i + 2 < len(ops):
+            replacement = _match_window3(ops[i], ops[i + 1], ops[i + 2])
+            if replacement is not None:
+                result.extend(replacement)
+                i += 3
+                changed = True
+                continue
+
+        # Try 2-op window
         if i + 1 < len(ops):
             replacement = _match_window2(ops[i], ops[i + 1])
             if replacement is not None:
@@ -130,7 +148,77 @@ def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
     if a.op == "drop" and b.op == "drop":
         return [StackOp(op="opcode", code="OP_2DROP")]
 
+    # PUSH(0) + Roll(0) → remove both
+    if _is_push_bigint(a, 0) and b.op == "roll" and b.depth == 0:
+        return []
+
+    # PUSH(1) + Roll(1) → Swap
+    if _is_push_bigint(a, 1) and b.op == "roll" and b.depth == 1:
+        return [StackOp(op="swap")]
+
+    # PUSH(2) + Roll(2) → Rot
+    if _is_push_bigint(a, 2) and b.op == "roll" and b.depth == 2:
+        return [StackOp(op="rot")]
+
+    # PUSH(0) + Pick(0) → Dup
+    if _is_push_bigint(a, 0) and b.op == "pick" and b.depth == 0:
+        return [StackOp(op="dup")]
+
+    # PUSH(1) + Pick(1) → Over
+    if _is_push_bigint(a, 1) and b.op == "pick" and b.depth == 1:
+        return [StackOp(op="over")]
+
+    # SHA256 + SHA256 → HASH256
+    if _is_opcode_op(a, "OP_SHA256") and _is_opcode_op(b, "OP_SHA256"):
+        return [StackOp(op="opcode", code="OP_HASH256")]
+
+    # PUSH 0 + NUMEQUAL → NOT
+    if _is_push_bigint(a, 0) and _is_opcode_op(b, "OP_NUMEQUAL"):
+        return [StackOp(op="opcode", code="OP_NOT")]
+
     return None
+
+
+def _match_window3(a: StackOp, b: StackOp, c: StackOp) -> Optional[list[StackOp]]:
+    """Try to match a window-3 peephole rule."""
+    a_val = _push_bigint_value(a)
+    b_val = _push_bigint_value(b)
+    if a_val is not None and b_val is not None:
+        if _is_opcode_op(c, "OP_ADD"):
+            return [StackOp(op="push", value=PushValue(kind="bigint", big_int=a_val + b_val))]
+        if _is_opcode_op(c, "OP_SUB"):
+            return [StackOp(op="push", value=PushValue(kind="bigint", big_int=a_val - b_val))]
+        if _is_opcode_op(c, "OP_MUL"):
+            return [StackOp(op="push", value=PushValue(kind="bigint", big_int=a_val * b_val))]
+    return None
+
+
+def _match_window4(
+    a: StackOp, b: StackOp, c: StackOp, d: StackOp
+) -> Optional[list[StackOp]]:
+    """Try to match a window-4 peephole rule."""
+    a_val = _push_bigint_value(a)
+    c_val = _push_bigint_value(c)
+    if a_val is not None and c_val is not None:
+        if _is_opcode_op(b, "OP_ADD") and _is_opcode_op(d, "OP_ADD"):
+            return [
+                StackOp(op="push", value=PushValue(kind="bigint", big_int=a_val + c_val)),
+                StackOp(op="opcode", code="OP_ADD"),
+            ]
+        if _is_opcode_op(b, "OP_SUB") and _is_opcode_op(d, "OP_SUB"):
+            return [
+                StackOp(op="push", value=PushValue(kind="bigint", big_int=a_val + c_val)),
+                StackOp(op="opcode", code="OP_SUB"),
+            ]
+    return None
+
+
+def _push_bigint_value(op: StackOp) -> Optional[int]:
+    if op.op != "push" or op.value is None:
+        return None
+    if op.value.kind != "bigint" or op.value.big_int is None:
+        return None
+    return op.value.big_int
 
 
 def _is_push_bigint(op: StackOp, n: int) -> bool:

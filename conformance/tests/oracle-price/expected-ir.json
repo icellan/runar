@@ -1,0 +1,247 @@
+{
+  "contractName": "OraclePriceFeed",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "receiver"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "update_prop",
+            "name": "oraclePubKey",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "receiver"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "receiver",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "oraclePubKey",
+          "type": "RabinPubKey"
+        },
+        {
+          "name": "receiver",
+          "type": "PubKey"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "price"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_const",
+            "value": 8
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "num2bin",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "msg",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "rabinSig"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "padding"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "oraclePubKey"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "msg",
+              "t3",
+              "t4",
+              "t5"
+            ],
+            "func": "verifyRabinSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "price"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_const",
+            "value": 50000
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "bin_op",
+            "left": "t8",
+            "op": ">",
+            "right": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "assert",
+            "value": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_prop",
+            "name": "receiver"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "args": [
+              "t12",
+              "t13"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "assert",
+            "value": "t14"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "settle",
+      "params": [
+        {
+          "name": "price",
+          "type": "bigint"
+        },
+        {
+          "name": "rabinSig",
+          "type": "RabinSig"
+        },
+        {
+          "name": "padding",
+          "type": "ByteString"
+        },
+        {
+          "name": "sig",
+          "type": "Sig"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "oraclePubKey",
+      "readonly": true,
+      "type": "RabinPubKey"
+    },
+    {
+      "name": "receiver",
+      "readonly": true,
+      "type": "PubKey"
+    }
+  ]
+}

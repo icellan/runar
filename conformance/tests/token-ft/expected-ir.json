@@ -1,0 +1,806 @@
+{
+  "contractName": "FungibleToken",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "tokenId"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "owner",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "balance",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "tokenId"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "tokenId",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "owner",
+          "type": "PubKey"
+        },
+        {
+          "name": "balance",
+          "type": "bigint"
+        },
+        {
+          "name": "tokenId",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "amount"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t9",
+            "op": ">",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "amount"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "bin_op",
+            "left": "t13",
+            "op": "<=",
+            "right": "t14"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "assert",
+            "value": "t15"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_param",
+            "name": "outputSatoshis"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "load_param",
+            "name": "to"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "amount"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "add_output",
+            "preimage": "t20",
+            "satoshis": "t17",
+            "stateValues": [
+              "t18",
+              "t19"
+            ]
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "load_param",
+            "name": "outputSatoshis"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "kind": "load_param",
+            "name": "amount"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "bin_op",
+            "left": "t24",
+            "op": "-",
+            "right": "t25"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "add_output",
+            "preimage": "t27",
+            "satoshis": "t22",
+            "stateValues": [
+              "t23",
+              "t26"
+            ]
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "args": [
+              "t21",
+              "t28"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "args": [
+              "t29"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "args": [
+              "t31"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "bin_op",
+            "left": "t30",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t32"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "kind": "assert",
+            "value": "t33"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "transfer",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "to",
+          "type": "PubKey"
+        },
+        {
+          "name": "amount",
+          "type": "bigint"
+        },
+        {
+          "name": "outputSatoshis",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "outputSatoshis"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "to"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "add_output",
+            "preimage": "t12",
+            "satoshis": "t9",
+            "stateValues": [
+              "t10",
+              "t11"
+            ]
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "args": [
+              "t13"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "args": [
+              "t15"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t16"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "assert",
+            "value": "t17"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "send",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "to",
+          "type": "PubKey"
+        },
+        {
+          "name": "outputSatoshis",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "totalBalance"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_prop",
+            "name": "balance"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t9",
+            "op": ">=",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "outputSatoshis"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "load_param",
+            "name": "totalBalance"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "add_output",
+            "preimage": "t16",
+            "satoshis": "t13",
+            "stateValues": [
+              "t14",
+              "t15"
+            ]
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "args": [
+              "t17"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "args": [
+              "t19"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "bin_op",
+            "left": "t18",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t20"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "assert",
+            "value": "t21"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "merge",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "totalBalance",
+          "type": "bigint"
+        },
+        {
+          "name": "outputSatoshis",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "owner",
+      "readonly": false,
+      "type": "PubKey"
+    },
+    {
+      "name": "balance",
+      "readonly": false,
+      "type": "bigint"
+    },
+    {
+      "name": "tokenId",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}

@@ -1,0 +1,481 @@
+{
+  "contractName": "Auction",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "auctioneer"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "highestBidder"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "highestBid"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "deadline"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2",
+              "t3"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "auctioneer"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "auctioneer",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_prop",
+            "name": "highestBidder"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "update_prop",
+            "name": "highestBidder",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_prop",
+            "name": "highestBid"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "update_prop",
+            "name": "highestBid",
+            "value": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "deadline"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "update_prop",
+            "name": "deadline",
+            "value": "t11"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "auctioneer",
+          "type": "PubKey"
+        },
+        {
+          "name": "highestBidder",
+          "type": "PubKey"
+        },
+        {
+          "name": "highestBid",
+          "type": "bigint"
+        },
+        {
+          "name": "deadline",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "bidAmount"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "highestBid"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "bin_op",
+            "left": "t5",
+            "op": ">",
+            "right": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t9"
+            ],
+            "func": "extractLocktime",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "deadline"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "t10",
+            "op": "<",
+            "right": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "assert",
+            "value": "t12"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "bidder"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "update_prop",
+            "name": "highestBidder",
+            "value": "t14"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "bidAmount"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "update_prop",
+            "name": "highestBid",
+            "value": "t16"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "args": [
+              "t19",
+              "t18"
+            ],
+            "func": "computeStateOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "args": [
+              "t19"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "bin_op",
+            "left": "t20",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t21"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "kind": "assert",
+            "value": "t22"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "bid",
+      "params": [
+        {
+          "name": "bidder",
+          "type": "PubKey"
+        },
+        {
+          "name": "bidAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "auctioneer"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t9"
+            ],
+            "func": "extractLocktime",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "deadline"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "t10",
+            "op": ">=",
+            "right": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "assert",
+            "value": "t12"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "close",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "auctioneer",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "highestBidder",
+      "readonly": false,
+      "type": "PubKey"
+    },
+    {
+      "name": "highestBid",
+      "readonly": false,
+      "type": "bigint"
+    },
+    {
+      "name": "deadline",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}

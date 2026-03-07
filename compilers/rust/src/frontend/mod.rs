@@ -7,6 +7,7 @@
 //!   4. ANF Lower — flatten to ANF IR consumed by the backend
 
 pub mod anf_lower;
+pub mod anf_optimize;
 pub mod ast;
 pub mod parser;
 pub mod parser_move;
