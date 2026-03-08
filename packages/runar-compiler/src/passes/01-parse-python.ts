@@ -660,7 +660,14 @@ class PyParser {
       isReadonly = true;
     }
 
-    // Skip rest of line (possible default value)
+    // Check for initializer: = value
+    let initializer: Expression | undefined;
+    if (this.peek().type === '=') {
+      this.advance(); // '='
+      initializer = this.parseExpression();
+    }
+
+    // Skip rest of line
     while (this.peek().type !== 'NEWLINE' && this.peek().type !== 'eof' && this.peek().type !== 'DEDENT') {
       this.advance();
     }
@@ -670,6 +677,7 @@ class PyParser {
       name: snakeToCamel(rawName),
       type: typeNode,
       readonly: isReadonly,
+      initializer,
       sourceLocation: loc,
     };
   }
@@ -777,7 +785,9 @@ class PyParser {
   }
 
   private autoGenerateConstructor(properties: PropertyNode[]): MethodNode {
-    const params: ParamNode[] = properties.map(p => ({
+    // Only non-initialized properties become constructor params
+    const uninitProps = properties.filter(p => !p.initializer);
+    const params: ParamNode[] = uninitProps.map(p => ({
       kind: 'param' as const,
       name: p.name,
       type: p.type,
@@ -798,7 +808,7 @@ class PyParser {
       sourceLocation: { file: this.file, line: 1, column: 0 },
     };
 
-    const assignments: Statement[] = properties.map(p => ({
+    const assignments: Statement[] = uninitProps.map(p => ({
       kind: 'assignment' as const,
       target: { kind: 'property_access' as const, property: p.name },
       value: { kind: 'identifier' as const, name: p.name },

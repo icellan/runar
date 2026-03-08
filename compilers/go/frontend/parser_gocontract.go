@@ -228,15 +228,46 @@ func (p *goContractParser) extractContract() *ContractNode {
 		})
 	}
 
-	// Build constructor
-	constructorParams := make([]ParamNode, len(properties))
-	for i, prop := range properties {
+	// Extract Init() method as property initializers, if present.
+	// Init() is a special method that sets default values on properties.
+	var finalMethods []MethodNode
+	for _, m := range methods {
+		if m.Name == "init" && len(m.Params) == 0 {
+			// Extract property assignments as initializers
+			for _, stmt := range m.Body {
+				if assign, ok := stmt.(AssignmentStmt); ok {
+					if pa, ok := assign.Target.(PropertyAccessExpr); ok {
+						for i := range properties {
+							if properties[i].Name == pa.Property {
+								properties[i].Initializer = assign.Value
+								break
+							}
+						}
+					}
+				}
+			}
+		} else {
+			finalMethods = append(finalMethods, m)
+		}
+	}
+	methods = finalMethods
+
+	// Build constructor (only non-initialized properties)
+	var uninitProps []PropertyNode
+	for _, prop := range properties {
+		if prop.Initializer == nil {
+			uninitProps = append(uninitProps, prop)
+		}
+	}
+
+	constructorParams := make([]ParamNode, len(uninitProps))
+	for i, prop := range uninitProps {
 		constructorParams[i] = ParamNode{Name: prop.Name, Type: prop.Type}
 	}
 
 	// super(...) call as first statement
-	superArgs := make([]Expression, len(properties))
-	for i, prop := range properties {
+	superArgs := make([]Expression, len(uninitProps))
+	for i, prop := range uninitProps {
 		superArgs[i] = Identifier{Name: prop.Name}
 	}
 	superCall := ExpressionStmt{
@@ -248,9 +279,9 @@ func (p *goContractParser) extractContract() *ContractNode {
 	}
 
 	// Property assignments
-	constructorBody := make([]Statement, 0, 1+len(properties))
+	constructorBody := make([]Statement, 0, 1+len(uninitProps))
 	constructorBody = append(constructorBody, superCall)
-	for _, prop := range properties {
+	for _, prop := range uninitProps {
 		constructorBody = append(constructorBody, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: prop.Name},
 			Value:          Identifier{Name: prop.Name},

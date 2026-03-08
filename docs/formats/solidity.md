@@ -59,6 +59,20 @@ The `immutable` keyword replaces TypeScript's `readonly`. Properties without `im
 
 Types are written before the name (Solidity style), not after with a colon (TypeScript style).
 
+### Property Initializers
+
+Properties can have default values using `= value` syntax:
+
+```solidity
+contract GameBoard is StatefulSmartContract {
+    int256 count = 0;                    // mutable with default
+    bool immutable active = true;        // readonly with default
+    PubKey immutable owner;              // no default — required in constructor
+}
+```
+
+Properties with initializers are excluded from the auto-generated constructor. Only properties without defaults need to be passed as constructor arguments. Initializers must be literal values (`0`, `true`, `false`, hex byte strings).
+
 ### Methods
 
 ```solidity

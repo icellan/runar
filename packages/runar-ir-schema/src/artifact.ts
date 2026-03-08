@@ -58,6 +58,7 @@ export interface StateField {
   name: string;
   type: string;
   index: number;
+  initialValue?: string | bigint | boolean;
 }
 
 // ---------------------------------------------------------------------------

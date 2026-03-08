@@ -610,12 +610,19 @@ class _TsParser:
             if parent_class == "SmartContract":
                 is_readonly = True
 
+            # Parse optional initializer: = value
+            initializer = None
+            if self.check(TOK_ASSIGN):
+                self.advance()  # consume '='
+                initializer = self._parse_expression()
+
             self.skip_semicolons()
 
             return PropertyNode(
                 name=member_name,
                 type=type_node,
                 readonly=is_readonly,
+                initializer=initializer,
                 source_location=location,
             )
 

@@ -54,11 +54,39 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
 // ---------------------------------------------------------------------------
 
 function lowerProperties(contract: ContractNode): ANFProperty[] {
-  return contract.properties.map(prop => ({
-    name: prop.name,
-    type: typeNodeToString(prop.type),
-    readonly: prop.readonly,
-  }));
+  return contract.properties.map(prop => {
+    const anfProp: ANFProperty = {
+      name: prop.name,
+      type: typeNodeToString(prop.type),
+      readonly: prop.readonly,
+    };
+
+    // Extract literal value from property initializer
+    if (prop.initializer) {
+      anfProp.initialValue = extractLiteralValue(prop.initializer);
+    }
+
+    return anfProp;
+  });
+}
+
+/** Extract a literal value from an Expression for ANFProperty.initialValue. */
+function extractLiteralValue(expr: Expression): string | bigint | boolean | undefined {
+  switch (expr.kind) {
+    case 'bigint_literal':
+      return expr.value;
+    case 'bool_literal':
+      return expr.value;
+    case 'bytestring_literal':
+      return expr.value;
+    case 'unary_expr':
+      if (expr.op === '-' && expr.operand.kind === 'bigint_literal') {
+        return -expr.operand.value;
+      }
+      return undefined;
+    default:
+      return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------

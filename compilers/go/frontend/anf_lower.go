@@ -119,8 +119,29 @@ func lowerProperties(contract *ContractNode) []ir.ANFProperty {
 			Type:     typeNodeToString(prop.Type),
 			Readonly: prop.Readonly,
 		}
+		if prop.Initializer != nil {
+			props[i].InitialValue = extractLiteralValue(prop.Initializer)
+		}
 	}
 	return props
+}
+
+func extractLiteralValue(expr Expression) interface{} {
+	switch e := expr.(type) {
+	case BigIntLiteral:
+		return e.Value
+	case BoolLiteral:
+		return e.Value
+	case ByteStringLiteral:
+		return e.Value
+	case UnaryExpr:
+		if e.Op == "-" {
+			if lit, ok := e.Operand.(BigIntLiteral); ok {
+				return -lit.Value
+			}
+		}
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------

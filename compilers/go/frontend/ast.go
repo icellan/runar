@@ -63,6 +63,7 @@ type PropertyNode struct {
 	Name           string
 	Type           TypeNode
 	Readonly       bool
+	Initializer    Expression // may be nil — literal default value
 	SourceLocation SourceLocation
 }
 

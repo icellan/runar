@@ -86,11 +86,10 @@ A contract whose state persists across transactions. The counter can be incremen
 import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
-  count: bigint; // non-readonly = stateful
+  count: bigint = 0n; // mutable with default — excluded from constructor
 
-  constructor(count: bigint) {
-    super(count);
-    this.count = count;
+  constructor() {
+    super();
   }
 
   public increment() {
@@ -106,10 +105,12 @@ class Counter extends StatefulSmartContract {
 
 **How it works:**
 
-1. The `count` property is mutable (no `readonly`), making this a stateful contract.
+1. The `count` property is mutable (no `readonly`), making this a stateful contract. The `= 0n` initializer gives it a default value, so it doesn't need to be passed as a constructor argument.
 2. Extending `StatefulSmartContract` tells the compiler to automatically handle the OP_PUSH_TX pattern. For every public method, the compiler injects a preimage check at entry.
 3. `this.count++` / `this.count--` updates the in-memory state.
 4. Because these methods mutate state, the compiler automatically appends a state continuation assertion at the end — it serializes the updated state, hashes it, and verifies the transaction output carries the new state forward.
+
+> **Property Initializers:** Properties with `= value` defaults are excluded from the constructor. Only properties without initializers need to be passed as constructor arguments. This significantly simplifies constructors for contracts with many default values. Initializers must be literal values (`0n`, `true`, `false`, or hex byte strings).
 
 **State lifecycle:**
 
@@ -310,15 +311,14 @@ import {
 
 class Auction extends StatefulSmartContract {
   readonly auctioneer: PubKey;
-  highestBidder: PubKey;      // stateful
-  highestBid: bigint;          // stateful
+  highestBidder: PubKey;       // stateful
+  highestBid: bigint = 0n;     // stateful with default — excluded from constructor
   readonly deadline: bigint;   // block height deadline
 
-  constructor(auctioneer: PubKey, highestBidder: PubKey, highestBid: bigint, deadline: bigint) {
-    super(auctioneer, highestBidder, highestBid, deadline);
+  constructor(auctioneer: PubKey, highestBidder: PubKey, deadline: bigint) {
+    super(auctioneer, highestBidder, deadline);
     this.auctioneer = auctioneer;
     this.highestBidder = highestBidder;
-    this.highestBid = highestBid;
     this.deadline = deadline;
   }
 

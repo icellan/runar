@@ -110,6 +110,7 @@ pub struct PropertyNode {
     pub name: String,
     pub prop_type: TypeNode,
     pub readonly: bool,
+    pub initializer: Option<Expression>,
     pub source_location: SourceLocation,
 }
 

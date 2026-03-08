@@ -112,8 +112,16 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<String>) {
         }
     }
 
+    // Properties with initializers don't need constructor assignments
+    let props_with_init: HashSet<String> = contract
+        .properties
+        .iter()
+        .filter(|p| p.initializer.is_some())
+        .map(|p| p.name.clone())
+        .collect();
+
     for prop_name in &prop_names {
-        if !assigned_props.contains(prop_name) {
+        if !assigned_props.contains(prop_name) && !props_with_init.contains(prop_name) {
             errors.push(format!(
                 "Property '{}' must be assigned in the constructor",
                 prop_name

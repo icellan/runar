@@ -248,11 +248,19 @@ class MoveParser {
           const typeName = this.parseMoveType();
           if (!readonly) hasMutableField = true;
 
+          // Optional initializer: = value
+          let initializer: Expression | undefined;
+          if (this.current().type === '=') {
+            this.advance();
+            initializer = this.parseExpression();
+          }
+
           properties.push({
             kind: 'property',
             name: propName,
             type: typeName,
             readonly,
+            initializer,
             sourceLocation: propLoc,
           });
 
@@ -276,12 +284,13 @@ class MoveParser {
     const hasMutable = properties.some(p => !p.readonly);
     if (hasMutable) parentClass = 'StatefulSmartContract';
 
-    // Build constructor
+    // Build constructor — only non-initialized properties become params
     const loc = { file: this.file, line: 1, column: 1 };
+    const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
       name: 'constructor',
-      params: properties.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
+      params: uninitProps.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
       body: [
         // super(...) as first statement
         {
@@ -289,11 +298,11 @@ class MoveParser {
           expression: {
             kind: 'call_expr' as const,
             callee: { kind: 'identifier' as const, name: 'super' },
-            args: properties.map(p => ({ kind: 'identifier' as const, name: p.name })),
+            args: uninitProps.map(p => ({ kind: 'identifier' as const, name: p.name })),
           },
           sourceLocation: loc,
         },
-        ...properties.map(p => ({
+        ...uninitProps.map(p => ({
           kind: 'assignment' as const,
           target: { kind: 'property_access' as const, property: p.name },
           value: { kind: 'identifier' as const, name: p.name },

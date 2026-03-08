@@ -743,12 +743,19 @@ class _PyParser:
             is_readonly = True
 
         typ_node = self.parse_type_annotation()
+
+        # Parse optional initializer: = value
+        initializer = None
+        if self.match(TOK_ASSIGN):
+            initializer = self.parse_expression()
+
         self.skip_newlines()
 
         return PropertyNode(
             name=prop_name,
             type=typ_node,
             readonly=is_readonly,
+            initializer=initializer,
             source_location=location,
         )
 

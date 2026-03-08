@@ -615,12 +615,28 @@ class _RustParser:
                 source_file=self.file_name,
             )
 
-        # Build auto-generated constructor
+        # Extract init() method as property initializers, if present.
+        # init() is a special private method that sets default values.
+        final_methods: list[MethodNode] = []
+        for m in methods:
+            if m.name == "init" and len(m.params) == 0:
+                for stmt in m.body:
+                    if isinstance(stmt, AssignmentStmt) and isinstance(stmt.target, PropertyAccessExpr):
+                        for prop in properties:
+                            if prop.name == stmt.target.property:
+                                prop.initializer = stmt.value
+                                break
+            else:
+                final_methods.append(m)
+        methods = final_methods
+
+        # Build auto-generated constructor (only non-initialized properties)
+        uninit_props = [p for p in properties if p.initializer is None]
         ctor_loc = SourceLocation(file=self.file_name, line=1, column=1)
 
         # super(...) call as first statement
         super_args: list[Expression] = [
-            Identifier(name=p.name) for p in properties
+            Identifier(name=p.name) for p in uninit_props
         ]
         super_call = ExpressionStmt(
             expr=CallExpr(
@@ -630,9 +646,9 @@ class _RustParser:
             source_location=ctor_loc,
         )
 
-        # Property assignments: this.x = x
+        # Property assignments: this.x = x (only non-initialized)
         ctor_body: list[Statement] = [super_call]
-        for p in properties:
+        for p in uninit_props:
             ctor_body.append(AssignmentStmt(
                 target=PropertyAccessExpr(property=p.name),
                 value=Identifier(name=p.name),
@@ -641,7 +657,7 @@ class _RustParser:
 
         constructor = MethodNode(
             name="constructor",
-            params=[ParamNode(name=p.name, type=p.type) for p in properties],
+            params=[ParamNode(name=p.name, type=p.type) for p in uninit_props],
             body=ctor_body,
             visibility="public",
             source_location=ctor_loc,

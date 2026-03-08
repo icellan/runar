@@ -52,9 +52,32 @@ fn lower_properties(contract: &ContractNode) -> Vec<ANFProperty> {
             name: prop.name.clone(),
             prop_type: type_node_to_string(&prop.prop_type),
             readonly: prop.readonly,
-            initial_value: None,
+            initial_value: prop.initializer.as_ref().and_then(extract_literal_value),
         })
         .collect()
+}
+
+fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
+    match expr {
+        Expression::BigIntLiteral { value } => Some(serde_json::Value::Number(
+            serde_json::Number::from(*value),
+        )),
+        Expression::BoolLiteral { value } => Some(serde_json::Value::Bool(*value)),
+        Expression::ByteStringLiteral { value } => {
+            Some(serde_json::Value::String(value.clone()))
+        }
+        Expression::UnaryExpr {
+            op: UnaryOp::Neg,
+            operand,
+        } => {
+            if let Expression::BigIntLiteral { value } = operand.as_ref() {
+                Some(serde_json::Value::Number(serde_json::Number::from(-*value)))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

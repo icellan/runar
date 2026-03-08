@@ -59,6 +59,7 @@ export interface StateField {
   name: string;
   type: string;
   index: number;
+  initialValue?: string | bigint | boolean;
 }
 
 export interface ConstructorSlot {
@@ -215,18 +216,30 @@ function paramToABI(param: ParamNode): ABIParam {
  * State fields are non-readonly properties. They can be mutated during
  * contract execution and must be serialized into the next UTXO's locking
  * script for stateful contracts.
+ *
+ * If ANF properties are provided, initialValue is read from them.
  */
-function extractStateFields(properties: PropertyNode[]): StateField[] {
+function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram): StateField[] {
   const stateFields: StateField[] = [];
 
   for (let i = 0; i < properties.length; i++) {
     const prop = properties[i]!;
     if (!prop.readonly) {
-      stateFields.push({
+      const field: StateField = {
         name: prop.name,
         type: typeToString(prop.type),
         index: i, // property position = constructor arg index
-      });
+      };
+
+      // Include initialValue from ANF property if present
+      if (anfProgram) {
+        const anfProp = anfProgram.properties.find(p => p.name === prop.name);
+        if (anfProp?.initialValue !== undefined) {
+          field.initialValue = anfProp.initialValue;
+        }
+      }
+
+      stateFields.push(field);
     }
   }
 
@@ -257,7 +270,7 @@ export function assembleArtifact(
   options?: AssembleOptions,
 ): RunarArtifact {
   const abi = extractABI(contract);
-  const stateFields = extractStateFields(contract.properties);
+  const stateFields = extractStateFields(contract.properties, anfProgram);
   const compilerVersion = options?.compilerVersion ?? DEFAULT_COMPILER_VERSION;
 
   const artifact: RunarArtifact = {

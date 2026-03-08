@@ -635,12 +635,28 @@ class _GoParser:
         if not struct_found:
             return None
 
-        # Build auto-generated constructor
+        # Extract init() method as property initializers, if present.
+        # init() is a special private method that sets default values.
+        final_methods: list[MethodNode] = []
+        for m in methods:
+            if m.name == "init" and len(m.params) == 0:
+                for stmt in m.body:
+                    if isinstance(stmt, AssignmentStmt) and isinstance(stmt.target, PropertyAccessExpr):
+                        for prop in properties:
+                            if prop.name == stmt.target.property:
+                                prop.initializer = stmt.value
+                                break
+            else:
+                final_methods.append(m)
+        methods = final_methods
+
+        # Build auto-generated constructor (only non-initialized properties)
+        uninit_props = [p for p in properties if p.initializer is None]
         constructor_params = [
-            ParamNode(name=p.name, type=p.type) for p in properties
+            ParamNode(name=p.name, type=p.type) for p in uninit_props
         ]
         super_args: list[Expression] = [
-            Identifier(name=p.name) for p in properties
+            Identifier(name=p.name) for p in uninit_props
         ]
         constructor_body: list[Statement] = [
             ExpressionStmt(
@@ -651,7 +667,7 @@ class _GoParser:
                 source_location=SourceLocation(file=self.file_name, line=1, column=1),
             ),
         ]
-        for prop in properties:
+        for prop in uninit_props:
             constructor_body.append(
                 AssignmentStmt(
                     target=PropertyAccessExpr(property=prop.name),

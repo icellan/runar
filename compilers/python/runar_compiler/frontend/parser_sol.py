@@ -451,12 +451,18 @@ class _SolParser:
         name_tok = self.expect(TOK_IDENT)
         prop_name = name_tok.value
 
+        # Parse optional initializer: = value
+        initializer = None
+        if self.match(TOK_ASSIGN):
+            initializer = self.parse_expression()
+
         self.expect(TOK_SEMICOLON)
 
         return PropertyNode(
             name=prop_name,
             type=_parse_sol_type(type_name),
             readonly=is_readonly,
+            initializer=initializer,
             source_location=location,
         )
 

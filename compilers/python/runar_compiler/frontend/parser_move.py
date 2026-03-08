@@ -509,10 +509,16 @@ class _MoveParser:
             # &mut fields are mutable; all others are readonly
             readonly = not is_mut
 
+            # Parse optional initializer: = value
+            initializer = None
+            if self.match(TOK_ASSIGN):
+                initializer = self.parse_expression()
+
             props.append(PropertyNode(
                 name=field_name,
                 type=type_node,
                 readonly=readonly,
+                initializer=initializer,
                 source_location=self.loc(),
             ))
 
@@ -1098,12 +1104,15 @@ class _MoveParser:
     # -- Constructor builder -------------------------------------------------
 
     def _build_move_constructor(self, properties: list[PropertyNode]) -> MethodNode:
+        # Only include properties without initializers as constructor params
+        uninit_props = [p for p in properties if p.initializer is None]
+
         params: list[ParamNode] = []
-        for prop in properties:
+        for prop in uninit_props:
             params.append(ParamNode(name=prop.name, type=prop.type))
 
         super_args: list[Expression] = [
-            Identifier(name=prop.name) for prop in properties
+            Identifier(name=prop.name) for prop in uninit_props
         ]
 
         loc = SourceLocation(file=self.file_name, line=1, column=0)
@@ -1116,8 +1125,8 @@ class _MoveParser:
                 source_location=loc,
             ),
         ]
-        # Add property assignments: this.prop = prop
-        for prop in properties:
+        # Add property assignments: this.prop = prop (only non-initialized)
+        for prop in uninit_props:
             body.append(
                 AssignmentStmt(
                     target=PropertyAccessExpr(property=prop.name),

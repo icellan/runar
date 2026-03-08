@@ -40,6 +40,26 @@ type P2PKH struct {
 - The `runar:"readonly"` struct tag marks immutable properties.
 - Fields without the `readonly` tag are mutable (stateful).
 
+### Property Initializers
+
+Properties can have default values using a private `init()` method on the struct. The `init()` method must be unexported (lowercase), take no parameters, and contain only `self.Property = value` assignments with literal values:
+
+```go
+type GameBoard struct {
+    runar.StatefulSmartContract
+    Count    int64
+    Active   runar.Bool `runar:"readonly"`
+    Owner    runar.PubKey `runar:"readonly"`
+}
+
+func (c *GameBoard) init() {
+    c.Count = 0
+    c.Active = true
+}
+```
+
+Properties assigned in `init()` are excluded from the auto-generated constructor. Only properties without defaults (`Owner` above) need to be passed as constructor arguments. The `init()` method is consumed by the parser and does not appear in the compiled output.
+
 ### Exported vs. Unexported
 
 Go's visibility rules map to Rúnar method visibility:
@@ -464,8 +484,8 @@ Unexported identifiers (lowercase first letter) are kept as-is.
 ### Constructor
 
 The constructor is auto-generated from the struct fields. The parser creates a constructor that:
-1. Accepts all fields as parameters (in declaration order).
+1. Accepts fields **without initializers** as parameters (in declaration order).
 2. Calls `super(...)` with all parameters.
 3. Assigns each parameter to the corresponding property.
 
-There is no explicit constructor syntax in the Go format.
+Properties with defaults (set via the `init()` method) are excluded from the constructor parameters. There is no explicit constructor syntax in the Go format.

@@ -233,6 +233,8 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 	var nameStr string
 	var typeNode TypeNode
 
+	var initializer Expression
+
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
@@ -242,6 +244,11 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 			nameStr = p.nodeText(child)
 		case "type_annotation":
 			typeNode = p.parseTypeAnnotation(child)
+		default:
+			// SWC tree-sitter may expose the initializer as a child expression node
+			if nameStr != "" && typeNode != nil && initializer == nil {
+				initializer = p.parseExpression(child)
+			}
 		}
 	}
 
@@ -258,6 +265,7 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 		Name:           nameStr,
 		Type:           typeNode,
 		Readonly:       isReadonly,
+		Initializer:    initializer,
 		SourceLocation: p.loc(node),
 	}
 }

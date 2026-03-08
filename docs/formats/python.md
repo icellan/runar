@@ -58,6 +58,19 @@ class Auction(StatefulSmartContract):
 - In `StatefulSmartContract`, wrap readonly properties with `Readonly[T]`
 - Properties without `Readonly` are mutable state fields
 
+### Property Initializers
+
+Properties can have default values using `= value` syntax after the type annotation:
+
+```python
+class GameBoard(StatefulSmartContract):
+    count: Bigint = 0                    # mutable with default
+    active: Readonly[bool] = True        # readonly with default
+    owner: Readonly[PubKey]              # no default — required in constructor
+```
+
+Properties with initializers are excluded from the auto-generated constructor. Only properties without defaults need to be passed as constructor arguments. Initializers must be literal values (`0`, `True`, `False`, `b'\xde\xad'`).
+
 ### Method Visibility
 
 | Python syntax | Runar visibility |

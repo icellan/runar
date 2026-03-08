@@ -323,6 +323,7 @@ impl RustDslParser {
                                 name: snake_to_camel(&field_name),
                                 prop_type: field_type,
                                 readonly,
+                                initializer: None,
                                 source_location: loc,
                             });
                         } else {
@@ -370,11 +371,38 @@ impl RustDslParser {
             return ParseResult { contract: None, errors: self.errors };
         }
 
-        // Build constructor
+        // Extract init() method as property initializers, if present.
+        // init() is a special private method that sets default values on properties.
+        let mut final_methods = Vec::new();
+        for m in methods {
+            if m.name == "init" && m.params.is_empty() {
+                for stmt in &m.body {
+                    if let Statement::Assignment { target, value, .. } = stmt {
+                        if let Expression::PropertyAccess { property } = target {
+                            for p in properties.iter_mut() {
+                                if p.name == *property {
+                                    p.initializer = Some(value.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                final_methods.push(m);
+            }
+        }
+        let methods = final_methods;
+
+        // Build constructor (only non-initialized properties)
+        let uninit_props: Vec<&PropertyNode> = properties.iter()
+            .filter(|p| p.initializer.is_none())
+            .collect();
+
         let loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
 
         // super(...) call as first statement
-        let super_args: Vec<Expression> = properties.iter()
+        let super_args: Vec<Expression> = uninit_props.iter()
             .map(|p| Expression::Identifier { name: p.name.clone() })
             .collect();
         let super_call = Statement::ExpressionStatement {
@@ -387,7 +415,7 @@ impl RustDslParser {
 
         // Property assignments
         let mut ctor_body = vec![super_call];
-        for p in &properties {
+        for p in &uninit_props {
             ctor_body.push(Statement::Assignment {
                 target: Expression::PropertyAccess { property: p.name.clone() },
                 value: Expression::Identifier { name: p.name.clone() },
@@ -397,7 +425,7 @@ impl RustDslParser {
 
         let constructor = MethodNode {
             name: "constructor".to_string(),
-            params: properties.iter().map(|p| ParamNode {
+            params: uninit_props.iter().map(|p| ParamNode {
                 name: p.name.clone(),
                 param_type: p.prop_type.clone(),
             }).collect(),

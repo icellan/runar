@@ -919,7 +919,15 @@ impl<'a> PyParser<'a> {
             is_readonly = true;
         }
 
-        // Skip rest of line (possible default value)
+        // Parse optional initializer: = value
+        let initializer = if *self.peek() == Token::Eq {
+            self.advance(); // consume '='
+            Some(self.parse_expression())
+        } else {
+            None
+        };
+
+        // Skip rest of line
         while *self.peek() != Token::Newline
             && *self.peek() != Token::Eof
             && *self.peek() != Token::Dedent
@@ -931,6 +939,7 @@ impl<'a> PyParser<'a> {
             name: snake_to_camel(&raw_name),
             prop_type: type_node,
             readonly: is_readonly,
+            initializer,
             source_location: self.loc(),
         })
     }
@@ -2017,7 +2026,13 @@ impl<'a> PyParser<'a> {
 // ---------------------------------------------------------------------------
 
 fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
-    let params: Vec<ParamNode> = properties
+    // Only include properties without initializers as constructor params
+    let uninit_props: Vec<&PropertyNode> = properties
+        .iter()
+        .filter(|p| p.initializer.is_none())
+        .collect();
+
+    let params: Vec<ParamNode> = uninit_props
         .iter()
         .map(|p| ParamNode {
             name: p.name.clone(),
@@ -2027,8 +2042,8 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
 
     let mut body: Vec<Statement> = Vec::new();
 
-    // super(...) call
-    let super_args: Vec<Expression> = properties
+    // super(...) call — only non-initialized property names as args
+    let super_args: Vec<Expression> = uninit_props
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
@@ -2048,8 +2063,8 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         },
     });
 
-    // this.x = x for each property
-    for p in properties {
+    // this.x = x for each non-initialized property
+    for p in &uninit_props {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),

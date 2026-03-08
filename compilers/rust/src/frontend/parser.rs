@@ -203,10 +203,14 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<
                 TypeNode::Custom("unknown".to_string())
             };
 
+            // Parse initializer if present (SWC ClassProp.value)
+            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors));
+
             result.push(PropertyNode {
                 name,
                 prop_type,
                 readonly,
+                initializer,
                 source_location: default_loc(file),
             });
         }

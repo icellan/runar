@@ -56,13 +56,22 @@ export class RunarContract {
     }
 
     // Initialize state from constructor args for stateful contracts.
-    // State fields are matched to constructor args by their declaration
-    // index, not by name, since the constructor param name may differ
-    // from the state field name (e.g., `initialHash` -> `rollingHash`).
+    // Properties with initialValue use their default; others are matched
+    // to constructor args by name lookup in the ABI constructor params.
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       for (const field of artifact.stateFields) {
-        if (field.index < constructorArgs.length) {
-          this._state[field.name] = constructorArgs[field.index];
+        if ((field as { initialValue?: unknown }).initialValue !== undefined) {
+          // Property has a compile-time default value
+          this._state[field.name] = (field as { initialValue: unknown }).initialValue;
+        } else {
+          // Match by name to constructor params
+          const paramIdx = artifact.abi.constructor.params.findIndex(p => p.name === field.name);
+          if (paramIdx >= 0 && paramIdx < constructorArgs.length) {
+            this._state[field.name] = constructorArgs[paramIdx];
+          } else if (field.index < constructorArgs.length) {
+            // Fallback: use declaration index for backward compatibility
+            this._state[field.name] = constructorArgs[field.index];
+          }
         }
       }
     }

@@ -82,7 +82,7 @@ class P2PKH extends SmartContract {
 
 3. **`readonly pubKeyHash: Addr`**: The `readonly` keyword marks this property as immutable. It is embedded in the locking script at deploy time. `Addr` is a 20-byte address type (the result of `hash160` on a public key).
 
-4. **Constructor**: The constructor must call `super(...)` first, passing all properties in declaration order. Then it assigns each property with `this.x = x`.
+4. **Constructor**: The constructor must call `super(...)` first, passing all properties in declaration order. Then it assigns each property with `this.x = x`. Properties with initializers (`= value`) are excluded from the constructor — see the [Language Reference](./language-reference.md) for details.
 
 5. **`public unlock(...)`**: Public methods are spending entry points. When someone wants to spend the UTXO locked by this contract, they provide arguments to `unlock` in the unlocking script (scriptSig).
 

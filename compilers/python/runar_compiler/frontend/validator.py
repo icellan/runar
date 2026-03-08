@@ -149,8 +149,13 @@ class _ValidationContext:
                 if isinstance(stmt.target, PropertyAccessExpr):
                     assigned_props.add(stmt.target.property)
 
+        # Properties with initializers don't need constructor assignments
+        props_with_init = {
+            p.name for p in self.contract.properties if p.initializer is not None
+        }
+
         for name in prop_names:
-            if name not in assigned_props:
+            if name not in assigned_props and name not in props_with_init:
                 self._add_error(
                     f"property '{name}' must be assigned in the constructor"
                 )

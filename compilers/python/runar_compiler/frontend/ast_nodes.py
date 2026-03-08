@@ -269,6 +269,7 @@ class PropertyNode:
     name: str = ""
     type: TypeNode | None = None
     readonly: bool = False
+    initializer: Expression | None = None
     source_location: SourceLocation = field(default_factory=SourceLocation)
 
 

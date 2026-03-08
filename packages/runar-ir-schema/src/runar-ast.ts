@@ -71,6 +71,7 @@ export interface PropertyNode {
   name: string;
   type: TypeNode;
   readonly: boolean;
+  initializer?: Expression;
   sourceLocation: SourceLocation;
 }
 

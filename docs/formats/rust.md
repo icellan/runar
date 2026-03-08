@@ -37,6 +37,36 @@ pub struct P2PKH {
 - Fields should be `pub` so tests can construct the struct directly.
 - All fields use snake_case; the Rúnar parser converts to camelCase for the AST.
 
+### Property Initializers
+
+Properties can have default values using a private `init()` method in the `impl` block. The `init()` method must take only `&mut self`, have no `#[public]` attribute, and contain only `self.property = value` assignments with literal values:
+
+```rust
+#[runar::contract]
+pub struct GameBoard {
+    pub count: Bigint,
+    #[readonly]
+    pub active: Bool,
+    #[readonly]
+    pub owner: PubKey,
+}
+
+#[runar::methods(GameBoard)]
+impl GameBoard {
+    fn init(&mut self) {
+        self.count = 0;
+        self.active = true;
+    }
+
+    #[public]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+Properties assigned in `init()` are excluded from the auto-generated constructor. Only properties without defaults (`owner` above) need to be passed as constructor arguments. The `init()` method is consumed by the parser and does not appear in the compiled output.
+
 ### Method Blocks
 
 ```rust
@@ -465,7 +495,7 @@ Type names and struct names remain PascalCase (unchanged).
 
 ### Constructor
 
-The constructor is auto-generated from the struct fields. There is no explicit constructor syntax.
+The constructor is auto-generated from the struct fields. Properties with defaults (set via the `init()` method) are excluded from the constructor parameters. There is no explicit constructor syntax.
 
 ---
 

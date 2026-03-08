@@ -82,7 +82,54 @@ count: bigint;
 - Changes are propagated across transactions using the OP_PUSH_TX pattern.
 - Having any mutable property makes the contract **stateful**. Use `StatefulSmartContract` as the base class.
 
-Properties must not have initializers at the declaration site. All initialization happens in the constructor.
+### Property Initializers
+
+Properties may have optional initializers at the declaration site:
+
+```typescript
+count: bigint = 0n;
+readonly active: boolean = true;
+```
+
+- Initializers must be literal values (`bigint`, `boolean`, or `ByteString`).
+- Properties with initializers do not need to be passed as constructor parameters.
+- This reduces constructor bloat when many properties have known defaults.
+
+The equivalent in other formats:
+
+```solidity
+// Solidity
+int count = 0;
+bool immutable active = true;
+```
+
+```move
+// Move
+count: &mut Int = 0,
+active: Bool = true,
+```
+
+```python
+# Python
+count: Bigint = 0
+active: Readonly[Bool] = True
+```
+
+```go
+// Go — use a private init() method
+func (c *MyContract) init() {
+    c.Count = 0
+    c.Active = true
+}
+```
+
+```rust
+// Rust — use a private init() method
+fn init(&mut self) {
+    self.count = 0;
+    self.active = true;
+}
+```
 
 ---
 

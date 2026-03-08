@@ -499,12 +499,22 @@ impl<'a> SolParser<'a> {
 
         let type_node = self.parse_type();
         let name = self.expect_ident();
+
+        // Parse optional initializer: = value
+        let initializer = if *self.peek() == Token::Eq {
+            self.advance(); // consume '='
+            Some(self.parse_expression())
+        } else {
+            None
+        };
+
         self.expect(&Token::Semicolon);
 
         PropertyNode {
             name,
             prop_type: type_node,
             readonly: is_immutable,
+            initializer,
             source_location: self.loc(),
         }
     }

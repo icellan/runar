@@ -66,3 +66,7 @@ path = "sphincs-wallet/SPHINCSWallet_test.rs"
 [[test]]
 name = "ec_demo"
 path = "ec-demo/ECDemo_test.rs"
+
+[[test]]
+name = "bounded_counter"
+path = "property-initializers/BoundedCounter_test.rs"

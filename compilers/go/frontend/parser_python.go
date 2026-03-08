@@ -914,8 +914,41 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 	p.match(pyTokDedent)
 
 	if constructor == nil {
+		// Only non-initialized properties become constructor params
+		var uninitProps []PropertyNode
+		for _, prop := range properties {
+			if prop.Initializer == nil {
+				uninitProps = append(uninitProps, prop)
+			}
+		}
+		params := make([]ParamNode, len(uninitProps))
+		for i, prop := range uninitProps {
+			params[i] = ParamNode{Name: prop.Name, Type: prop.Type}
+		}
+		superArgs := make([]Expression, len(uninitProps))
+		for i, prop := range uninitProps {
+			superArgs[i] = Identifier{Name: prop.Name}
+		}
+		body := []Statement{
+			ExpressionStmt{
+				Expr: CallExpr{
+					Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+					Args:   superArgs,
+				},
+				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			},
+		}
+		for _, prop := range uninitProps {
+			body = append(body, AssignmentStmt{
+				Target:         PropertyAccessExpr{Property: prop.Name},
+				Value:          Identifier{Name: prop.Name},
+				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			})
+		}
 		constructor = &MethodNode{
 			Name:       "constructor",
+			Params:     params,
+			Body:       body,
 			Visibility: "public",
 			SourceLocation: SourceLocation{
 				File: p.fileName, Line: 1, Column: 0,
@@ -966,12 +999,19 @@ func (p *pyParser) parsePyProperty(parentClass string) *PropertyNode {
 
 	typNode := p.parsePyTypeAnnotation()
 
+	// Optional initializer: = value
+	var initializer Expression
+	if p.match(pyTokAssign) {
+		initializer = p.parsePyExpression()
+	}
+
 	p.skipNewlines()
 
 	return &PropertyNode{
 		Name:           propName,
 		Type:           typNode,
 		Readonly:       isReadonly,
+		Initializer:    initializer,
 		SourceLocation: loc,
 	}
 }

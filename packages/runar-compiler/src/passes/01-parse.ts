@@ -190,11 +190,19 @@ function parseProperties(
       type = { kind: 'custom_type', name: 'unknown' };
     }
 
+    // Parse property initializer (e.g. `count: bigint = 0n`)
+    let initializer: Expression | undefined;
+    const initExpr = prop.getInitializer();
+    if (initExpr) {
+      initializer = parseExpression(initExpr, file, errors);
+    }
+
     result.push({
       kind: 'property',
       name,
       type,
       readonly: isReadonly,
+      initializer,
       sourceLocation: locFromNode(prop, file),
     });
   }

@@ -61,6 +61,20 @@ resource struct P2PKH {
 
 Properties are declared inside the resource struct. The `readonly` modifier after the type marks immutable properties.
 
+### Property Initializers
+
+Properties can have default values using `= value` syntax in the resource struct:
+
+```move
+resource struct GameBoard {
+    count: bigint = 0,                     // mutable with default
+    active: Bool readonly = true,          // readonly with default
+    owner: PubKey readonly,                // no default — required in constructor
+}
+```
+
+Properties with initializers are excluded from the auto-generated constructor. Only properties without defaults need to be passed as constructor arguments. Initializers must be literal values (`0`, `true`, `false`, hex byte strings).
+
 **snake_case convention:** Move uses snake_case for identifiers. The parser automatically converts snake_case field names and function names to camelCase for the AST:
 
 | Move (snake_case) | AST (camelCase) |

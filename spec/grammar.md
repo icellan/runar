@@ -85,7 +85,7 @@ BaseClass
 
 ```ebnf
 PropertyDeclaration
-    = [ 'readonly' ] Identifier ':' Type ';'
+    = [ 'readonly' ] Identifier ':' Type [ '=' Literal ] ';'
     ;
 ```
 
@@ -93,7 +93,7 @@ PropertyDeclaration
 
 - **`readonly`** properties are immutable. They are set in the constructor and cannot be reassigned. They are embedded in the locking script at deployment time.
 - **Non-`readonly`** properties are stateful. They can be modified within public methods and their new values are propagated across transactions via `OP_PUSH_TX`. Contracts with mutable properties should extend `StatefulSmartContract`, which automatically handles preimage verification and state continuation.
-- Properties MUST NOT have initializers at the declaration site; all initialization happens in the constructor.
+- Properties MAY have literal initializers at the declaration site (e.g., `count: bigint = 0n`). Properties with initializers do not need to be passed as constructor parameters or assigned in the constructor body. Only literal values are allowed as initializers (`bigint`, `boolean`, `ByteString`).
 - Access modifiers (`public`, `private`, `protected`) on properties are **optional** but have no semantic effect in Rúnar -- all properties are accessible within the contract.
 
 ---

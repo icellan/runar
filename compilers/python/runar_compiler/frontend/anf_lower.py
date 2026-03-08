@@ -157,14 +157,31 @@ def _is_byte_typed_expr(expr: Expression | None, ctx: _LowerCtx) -> bool:
 # ---------------------------------------------------------------------------
 
 def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
-    return [
-        ANFProperty(
+    result = []
+    for prop in contract.properties:
+        anf_prop = ANFProperty(
             name=prop.name,
             type=_type_node_to_string(prop.type),
             readonly=prop.readonly,
         )
-        for prop in contract.properties
-    ]
+        if prop.initializer is not None:
+            anf_prop.initial_value = _extract_literal_value(prop.initializer)
+        result.append(anf_prop)
+    return result
+
+
+def _extract_literal_value(expr: Expression) -> str | int | bool | None:
+    """Extract a literal value from an expression for property initializers."""
+    if isinstance(expr, BigIntLiteral):
+        return expr.value
+    if isinstance(expr, BoolLiteral):
+        return expr.value
+    if isinstance(expr, ByteStringLiteral):
+        return expr.value
+    if isinstance(expr, UnaryExpr) and expr.op == "-":
+        if isinstance(expr.operand, BigIntLiteral):
+            return -expr.operand.value
+    return None
 
 
 # ---------------------------------------------------------------------------

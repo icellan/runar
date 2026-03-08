@@ -62,6 +62,7 @@ PropertyNode = {
     name: string,                    // camelCase property name
     type: TypeNode,                  // the property's type
     readonly: boolean,               // true = immutable, false = mutable (stateful)
+    initializer?: Expression,        // optional literal default value
     sourceLocation: SourceLocation
 }
 ```
@@ -71,17 +72,18 @@ PropertyNode = {
 - `name` must be camelCase.
 - For `SmartContract`, all properties should have `readonly: true`.
 - For `StatefulSmartContract`, at least one property should have `readonly: false`.
-- Properties must not have initializer expressions; initialization happens in the constructor.
+- Properties MAY have literal initializer expressions. Properties with initializers do not need to be assigned in the constructor. Only literal values are allowed (`BigIntLiteral`, `BoolLiteral`, `ByteStringLiteral`, or negated `BigIntLiteral`).
 
 ### Format Mapping
 
-| Format | Property syntax | Readonly marker |
-|--------|----------------|-----------------|
-| TypeScript | `readonly name: Type;` / `name: Type;` | `readonly` keyword |
-| Solidity | `Type immutable name;` / `Type name;` | `immutable` keyword |
-| Move | `name: Type readonly,` / `name: Type,` | `readonly` suffix |
-| Go | `Name runar.Type \`runar:"readonly"\`` | struct tag |
-| Rust | `#[readonly] name: Type` / `name: Type` | `#[readonly]` attribute |
+| Format | Property syntax | Readonly marker | Initializer syntax |
+|--------|----------------|-----------------|-------------------|
+| TypeScript | `readonly name: Type;` / `name: Type;` | `readonly` keyword | `= value` after type |
+| Solidity | `Type immutable name;` / `Type name;` | `immutable` keyword | `= value` before `;` |
+| Move | `name: Type readonly,` / `name: Type,` | `readonly` suffix | `= value` before `,` |
+| Python | `name: Type` / `name: Readonly[Type]` | `Readonly[T]` wrapper | `= value` after type |
+| Go | `Name runar.Type \`runar:"readonly"\`` | struct tag | `init()` method |
+| Rust | `#[readonly] name: Type` / `name: Type` | `#[readonly]` attribute | `init()` method |
 
 ---
 
