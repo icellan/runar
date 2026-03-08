@@ -17,3 +17,6 @@ __pycache__/
 *.egg-info/
 .venv/
 runar*-go
+
+# runar-rb
+/packages/runar-rb/tmp/
