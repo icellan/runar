@@ -6,17 +6,37 @@ use super::deployment::{
     build_p2pkh_script_from_address,
 };
 
+/// A contract output specification (script + satoshis).
+pub struct ContractOutput {
+    pub script: String,
+    pub satoshis: i64,
+}
+
+/// An additional contract input with its own unlocking script (for merge).
+pub struct AdditionalContractInput {
+    pub utxo: Utxo,
+    pub unlocking_script: String,
+}
+
+/// Extended options for `build_call_transaction`.
+pub struct CallTxOptions {
+    /// Multiple contract outputs (replaces single newLockingScript).
+    pub contract_outputs: Option<Vec<ContractOutput>>,
+    /// Additional contract inputs with their own unlocking scripts (for merge).
+    pub additional_contract_inputs: Option<Vec<AdditionalContractInput>>,
+}
+
 /// Build a raw transaction that spends a contract UTXO (method call).
 ///
 /// The transaction:
 /// - Input 0: the current contract UTXO with the given unlocking script.
-/// - Additional inputs: funding UTXOs if provided.
-/// - Output 0 (optional): new contract UTXO with updated locking script
-///   (for stateful contracts).
+/// - Additional contract inputs (if provided via options): with their own unlock scripts.
+/// - Additional P2PKH funding inputs if provided.
+/// - Contract outputs (multi-output or single continuation).
 /// - Last output (optional): change.
 ///
 /// Returns the transaction hex (with unlocking script for input 0 already
-/// placed) and the total input count.
+/// placed), the total input count, and the change amount.
 pub fn build_call_transaction(
     current_utxo: &Utxo,
     unlocking_script: &str,
@@ -26,31 +46,78 @@ pub fn build_call_transaction(
     change_script: Option<&str>,
     additional_utxos: Option<&[Utxo]>,
     fee_rate: Option<i64>,
-) -> (String, usize) {
-    let additional = additional_utxos.unwrap_or(&[]);
+) -> (String, usize, i64) {
+    build_call_transaction_ext(
+        current_utxo,
+        unlocking_script,
+        new_locking_script,
+        new_satoshis,
+        change_address,
+        change_script,
+        additional_utxos,
+        fee_rate,
+        None,
+    )
+}
+
+/// Extended version of `build_call_transaction` with support for multi-output
+/// and additional contract inputs.
+pub fn build_call_transaction_ext(
+    current_utxo: &Utxo,
+    unlocking_script: &str,
+    new_locking_script: Option<&str>,
+    new_satoshis: Option<i64>,
+    change_address: Option<&str>,
+    change_script: Option<&str>,
+    additional_utxos: Option<&[Utxo]>,
+    fee_rate: Option<i64>,
+    options: Option<&CallTxOptions>,
+) -> (String, usize, i64) {
+    let extra_contract_inputs = options
+        .and_then(|o| o.additional_contract_inputs.as_ref())
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
+    let p2pkh_utxos = additional_utxos.unwrap_or(&[]);
+
+    // Collect all input UTXOs for total calculation
     let mut all_utxos = vec![current_utxo.clone()];
-    all_utxos.extend_from_slice(additional);
+    for ci in extra_contract_inputs {
+        all_utxos.push(ci.utxo.clone());
+    }
+    all_utxos.extend_from_slice(p2pkh_utxos);
 
     let total_input: i64 = all_utxos.iter().map(|u| u.satoshis).sum();
 
-    // Calculate outputs total
-    let contract_output_sats = if new_locking_script.is_some() {
-        new_satoshis.unwrap_or(current_utxo.satoshis)
+    // Determine contract outputs: multi-output takes priority over single
+    let contract_outputs: Vec<ContractOutput> = if let Some(cos) = options.and_then(|o| o.contract_outputs.as_ref()) {
+        // Already provided externally — borrow as references for output
+        cos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
+    } else if let Some(nls) = new_locking_script {
+        vec![ContractOutput {
+            script: nls.to_string(),
+            satoshis: new_satoshis.unwrap_or(current_utxo.satoshis),
+        }]
     } else {
-        0
+        vec![]
     };
 
+    let contract_output_sats: i64 = contract_outputs.iter().map(|o| o.satoshis).sum();
+
     // Estimate fee using actual script sizes
-    // Input 0 is the contract UTXO with a known unlocking script
     let unlock_byte_len = unlocking_script.len() / 2;
     let input0_size = 32 + 4 + varint_byte_size(unlock_byte_len) + unlock_byte_len as i64 + 4;
-    let additional_inputs_size = (all_utxos.len() as i64 - 1) * 148; // P2PKH
-    let inputs_size = input0_size + additional_inputs_size;
+    let mut extra_contract_inputs_size: i64 = 0;
+    for ci in extra_contract_inputs {
+        let ci_byte_len = ci.unlocking_script.len() / 2;
+        extra_contract_inputs_size += 32 + 4 + varint_byte_size(ci_byte_len) + ci_byte_len as i64 + 4;
+    }
+    let p2pkh_inputs_size = p2pkh_utxos.len() as i64 * 148;
+    let inputs_size = input0_size + extra_contract_inputs_size + p2pkh_inputs_size;
 
     let mut outputs_size: i64 = 0;
-    if let Some(nls) = new_locking_script {
-        let nls_byte_len = nls.len() / 2;
-        outputs_size += 8 + varint_byte_size(nls_byte_len) + nls_byte_len as i64;
+    for co in &contract_outputs {
+        let co_byte_len = co.script.len() / 2;
+        outputs_size += 8 + varint_byte_size(co_byte_len) + co_byte_len as i64;
     }
     let has_change_target = change_address.is_some() || change_script.is_some();
     if has_change_target {
@@ -71,15 +138,25 @@ pub fn build_call_transaction(
     // Input count
     tx.push_str(&encode_varint(all_utxos.len() as u64));
 
-    // Input 0: contract UTXO with unlocking script
+    // Input 0: primary contract UTXO with unlocking script
     tx.push_str(&reverse_hex(&current_utxo.txid));
     tx.push_str(&to_little_endian_32(current_utxo.output_index));
     tx.push_str(&encode_varint(unlock_byte_len as u64));
     tx.push_str(unlocking_script);
     tx.push_str("ffffffff");
 
-    // Additional inputs (unsigned)
-    for utxo in additional {
+    // Additional contract inputs (with their own unlocking scripts)
+    for ci in extra_contract_inputs {
+        tx.push_str(&reverse_hex(&ci.utxo.txid));
+        tx.push_str(&to_little_endian_32(ci.utxo.output_index));
+        let ci_byte_len = ci.unlocking_script.len() / 2;
+        tx.push_str(&encode_varint(ci_byte_len as u64));
+        tx.push_str(&ci.unlocking_script);
+        tx.push_str("ffffffff");
+    }
+
+    // P2PKH funding inputs (unsigned)
+    for utxo in p2pkh_utxos {
         tx.push_str(&reverse_hex(&utxo.txid));
         tx.push_str(&to_little_endian_32(utxo.output_index));
         tx.push_str("00"); // empty scriptSig
@@ -87,20 +164,17 @@ pub fn build_call_transaction(
     }
 
     // Output count
-    let mut num_outputs = 0u64;
-    if new_locking_script.is_some() {
-        num_outputs += 1;
-    }
+    let mut num_outputs = contract_outputs.len() as u64;
     if change > 0 && has_change_target {
         num_outputs += 1;
     }
     tx.push_str(&encode_varint(num_outputs));
 
-    // Output 0: new contract state (if stateful)
-    if let Some(nls) = new_locking_script {
-        tx.push_str(&to_little_endian_64(contract_output_sats));
-        tx.push_str(&encode_varint((nls.len() / 2) as u64));
-        tx.push_str(nls);
+    // Contract outputs
+    for co in &contract_outputs {
+        tx.push_str(&to_little_endian_64(co.satoshis));
+        tx.push_str(&encode_varint((co.script.len() / 2) as u64));
+        tx.push_str(&co.script);
     }
 
     // Change output
@@ -120,7 +194,8 @@ pub fn build_call_transaction(
     // Locktime
     tx.push_str(&to_little_endian_32(0));
 
-    (tx, all_utxos.len())
+    let change_amount = if change > 0 { change } else { 0 };
+    (tx, all_utxos.len(), change_amount)
 }
 
 fn varint_byte_size(n: usize) -> i64 {
@@ -259,7 +334,7 @@ mod tests {
     #[test]
     fn version_1_locktime_0() {
         let utxo = make_utxo(100_000, 0);
-        let (tx_hex, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
+        let (tx_hex, _, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.version, 1);
         assert_eq!(parsed.locktime, 0);
@@ -268,7 +343,7 @@ mod tests {
     #[test]
     fn valid_hex_output() {
         let utxo = make_utxo(100_000, 0);
-        let (tx_hex, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
+        let (tx_hex, _, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         assert!(!tx_hex.is_empty());
         assert!(tx_hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -276,7 +351,7 @@ mod tests {
     #[test]
     fn embeds_unlocking_script_in_input_0() {
         let utxo = make_utxo(100_000, 0);
-        let (tx_hex, _) = build_call_transaction(&utxo, "aabb", None, None, None, None, None, None);
+        let (tx_hex, _, _) = build_call_transaction(&utxo, "aabb", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.inputs[0].script, "aabb");
     }
@@ -286,7 +361,7 @@ mod tests {
         let utxo = make_utxo(100_000, 0);
         let additional = vec![make_utxo(50_000, 1), make_utxo(30_000, 2)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), Some(&additional), None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -298,7 +373,7 @@ mod tests {
     #[test]
     fn reversed_txid_in_wire_format() {
         let utxo = make_utxo(100_000, 0);
-        let (tx_hex, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
+        let (tx_hex, _, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.inputs[0].prev_txid, reverse_hex_helper(&utxo.txid));
     }
@@ -306,7 +381,7 @@ mod tests {
     #[test]
     fn single_input_no_additional() {
         let utxo = make_utxo(100_000, 0);
-        let (tx_hex, input_count) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
+        let (tx_hex, input_count, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(input_count, 1);
         assert_eq!(parsed.input_count, 1);
@@ -317,7 +392,7 @@ mod tests {
         let utxo = make_utxo(100_000, 0);
         let additional = vec![make_utxo(50_000, 1), make_utxo(30_000, 2)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, input_count) = build_call_transaction(
+        let (tx_hex, input_count, _) = build_call_transaction(
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), Some(&additional), None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -330,7 +405,7 @@ mod tests {
     #[test]
     fn correct_output_index_reference() {
         let utxo = make_utxo(100_000, 3);
-        let (tx_hex, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
+        let (tx_hex, _, _) = build_call_transaction(&utxo, "51", None, None, None, None, None, None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.inputs[0].prev_index, 3);
     }
@@ -340,7 +415,7 @@ mod tests {
         let utxo = make_utxo(100_000, 0);
         let new_ls = format!("76a914{}88ac", "dd".repeat(20));
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "51", Some(&new_ls), Some(50_000), Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -352,7 +427,7 @@ mod tests {
     fn defaults_to_current_utxo_satoshis() {
         let utxo = make_utxo(75_000, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "00", Some("51"), None, Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -363,7 +438,7 @@ mod tests {
     fn change_calculation() {
         let utxo = make_utxo(100_000, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "00", Some("51"), Some(50_000), Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -380,7 +455,7 @@ mod tests {
         // Fee: input0(42) + contractOut(10) + changeOut(34) + overhead(10) = 96
         let utxo = make_utxo(50_096, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "00", Some("51"), Some(50_000), Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -392,7 +467,7 @@ mod tests {
     fn stateless_change_only() {
         let utxo = make_utxo(100_000, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -408,7 +483,7 @@ mod tests {
         // Fee: input0(42) + changeOut(34) + overhead(10) = 86
         let utxo = make_utxo(86, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
@@ -420,7 +495,7 @@ mod tests {
         let utxo = make_utxo(50_000, 0);
         let additional = vec![make_utxo(30_000, 1)];
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
-        let (tx_hex, _) = build_call_transaction(
+        let (tx_hex, _, _) = build_call_transaction(
             &utxo, "00", Some("51"), Some(40_000), Some("changeaddr"), Some(&change_script), Some(&additional), None,
         );
         let parsed = parse_tx_hex(&tx_hex);

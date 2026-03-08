@@ -11,7 +11,6 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 
 	"github.com/bsv-blockchain/go-sdk/script"
-	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 func TestNFT_Compile(t *testing.T) {
@@ -167,13 +166,12 @@ func TestNFT_DeployLongMetadata(t *testing.T) {
 
 func TestNFT_Transfer(t *testing.T) {
 	// SimpleNFT: StatefulSmartContract with addOutput
-	// transfer(sig, newOwner, outputSatoshis) — transfers NFT to new owner
+	// transfer(sig, newOwner, outputSatoshis) — transfers NFT to new owner via SDK
 	owner := helpers.NewWallet()
 	newOwner := helpers.NewWallet()
 	tokenIdHex := hex.EncodeToString([]byte("NFT-001"))
 	metadataHex := hex.EncodeToString([]byte("My First NFT"))
 
-	// Compile using SDK artifact path
 	artifact, err := helpers.CompileToSDKArtifact(
 		"examples/ts/token-nft/NFTExample.runar.ts",
 		map[string]interface{}{},
@@ -183,14 +181,12 @@ func TestNFT_Transfer(t *testing.T) {
 	}
 	t.Logf("SimpleNFT script: %d bytes", len(artifact.Script)/2)
 
-	// Create contract with constructor args: owner, tokenId, metadata
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		owner.PubKeyHex(),
 		tokenIdHex,
 		metadataHex,
 	})
 
-	// Fund wallet and deploy via SDK
 	helpers.RPCCall("importaddress", owner.Address, "", false)
 	_, err = helpers.FundWallet(owner, 0.01)
 	if err != nil {
@@ -209,65 +205,29 @@ func TestNFT_Transfer(t *testing.T) {
 	}
 	t.Logf("deployed: %s", deployTxid)
 
-	// --- Raw spending path (sig depends on final tx) ---
-
-	// Get the deployed UTXO from the SDK contract
-	contractUTXO := contract.GetCurrentUtxo()
-	if contractUTXO == nil {
-		t.Fatalf("no current UTXO after deploy")
-	}
-
-	// Build continuation script by updating state on the contract
-	// and getting the new locking script
-	contract.SetState(map[string]interface{}{"owner": newOwner.PubKeyHex()})
-	continuationScript := contract.GetLockingScript()
-
+	// Transfer via SDK Call with multi-output
 	outputSatoshis := int64(4500)
-
-	lockScript, _ := script.NewFromHex(contractUTXO.Script)
-	contScript, _ := script.NewFromHex(continuationScript)
-
-	spendTx := transaction.NewTransaction()
-	spendTx.AddInputWithOutput(&transaction.TransactionInput{
-		SourceTXID:       helpers.TxidToChainHash(contractUTXO.Txid),
-		SourceTxOutIndex: uint32(contractUTXO.OutputIndex),
-		SequenceNumber:   transaction.DefaultSequenceNumber,
-	}, &transaction.TransactionOutput{
-		Satoshis:      uint64(contractUTXO.Satoshis),
-		LockingScript: lockScript,
-	})
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      uint64(outputSatoshis),
-		LockingScript: contScript,
-	})
-
-	sigHex, err := helpers.SignInput(spendTx, 0, owner.PrivKey)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	callOpts := &runar.CallOptions{
+		Outputs: []runar.OutputSpec{
+			{
+				Satoshis: outputSatoshis,
+				State: map[string]interface{}{
+					"owner":    newOwner.PubKeyHex(),
+					"tokenId":  tokenIdHex,
+					"metadata": metadataHex,
+				},
+			},
+		},
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
+	txid, _, err := contract.Call(
+		"transfer",
+		[]interface{}{nil, newOwner.PubKeyHex(), outputSatoshis},
+		provider, signer, callOpts,
+	)
 	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
+		t.Fatalf("transfer failed: %v", err)
 	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// transfer is method 0, burn is method 1
-	// Unlocking: <opPushTxSig> <sig> <newOwner:PubKey> <outputSatoshis> <txPreimage> <methodIdx>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(newOwner.PubKeyBytes) +
-		helpers.EncodePushInt(outputSatoshis) +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(0) // transfer
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid := helpers.AssertTxAccepted(t, spendTx.Hex())
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("transfer TX: %s", txid)
 }
 
 func TestNFT_Burn(t *testing.T) {

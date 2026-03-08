@@ -23,7 +23,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test
-      - run: npx vitest run examples/ts/
+      - name: Example tests (TS + Sol + Move)
+        run: npx vitest run examples/ts/ examples/sol/ examples/move/
       - run: pnpm run typecheck
 
   go:
@@ -38,6 +39,8 @@ jobs:
       - run: cd compilers/go && go build ./...
       - run: cd compilers/go && go build -o runar-go .
       - run: cd compilers/go && go test -race -v ./...
+      - name: Go example tests
+        run: cd examples/go && go test ./...
       - uses: actions/upload-artifact@v4
         with:
           name: runar-go
@@ -51,6 +54,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cd compilers/rust && cargo build --release
       - run: cd compilers/rust && cargo test
+      - name: Rust example tests
+        run: cd examples/rust && cargo test
+      - name: Rust SDK tests
+        run: cd packages/runar-rs && cargo test
       - uses: actions/upload-artifact@v4
         with:
           name: runar-rust
@@ -66,6 +73,10 @@ jobs:
           python-version: '3.12'
       - run: pip install pytest
       - run: cd compilers/python && python -m pytest tests/ -v
+      - name: Python SDK tests
+        run: cd packages/runar-py && python -m pytest
+      - name: Python example tests
+        run: cd examples/python && PYTHONPATH=../../packages/runar-py python -m pytest
 
   conformance:
     name: Conformance Tests

@@ -34,8 +34,7 @@ fn test_counter_increment() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(new_state),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("call increment failed");
@@ -70,8 +69,7 @@ fn test_counter_chain() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state1),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("call increment 0->1 failed");
@@ -87,8 +85,7 @@ fn test_counter_chain() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state2),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("call increment 1->2 failed");
@@ -122,8 +119,7 @@ fn test_counter_decrement() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state1),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("call increment failed");
@@ -139,8 +135,7 @@ fn test_counter_decrement() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state0),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("call decrement failed");
@@ -174,8 +169,7 @@ fn test_counter_wrong_state() {
         &*signer,
         Some(&CallOptions {
             new_state: Some(wrong_state),
-            satoshis: None,
-            change_address: None,
+            ..Default::default()
         }),
     );
     assert!(result.is_err(), "expected wrong state to fail");
@@ -209,8 +203,7 @@ fn test_counter_underflow() {
         &*signer,
         Some(&CallOptions {
             new_state: Some(bad_state),
-            satoshis: None,
-            change_address: None,
+            ..Default::default()
         }),
     );
     assert!(result.is_err(), "expected underflow to fail");

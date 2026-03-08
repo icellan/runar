@@ -165,8 +165,7 @@ fn test_function_patterns_deposit() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(new_state),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("deposit failed");
@@ -205,8 +204,7 @@ fn test_function_patterns_deposit_then_withdraw() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state1),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("deposit failed");
@@ -222,8 +220,7 @@ fn test_function_patterns_deposit_then_withdraw() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(state2),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("withdraw failed");
@@ -263,8 +260,7 @@ fn test_function_patterns_wrong_owner_rejected() {
         &*signer_b,
         Some(&CallOptions {
             new_state: Some(new_state),
-            satoshis: None,
-            change_address: None,
+            ..Default::default()
         }),
     );
     assert!(result.is_err(), "deposit with wrong owner should be rejected");

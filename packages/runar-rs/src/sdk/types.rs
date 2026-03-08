@@ -55,13 +55,34 @@ pub struct DeployOptions {
 }
 
 /// Options for calling a contract method.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CallOptions {
     /// Satoshis for the next output (stateful contracts).
     pub satoshis: Option<i64>,
     pub change_address: Option<String>,
     /// New state values for the continuation output (stateful contracts).
     pub new_state: Option<HashMap<String, SdkValue>>,
+    /// Multiple continuation outputs for multi-output methods (e.g., transfer).
+    /// When provided, replaces the single continuation output from `new_state`.
+    pub outputs: Option<Vec<OutputSpec>>,
+    /// Additional contract UTXOs as inputs (e.g., merge, swap).
+    /// Each input is signed with the same method and args as the primary call,
+    /// with OP_PUSH_TX and Sig auto-computed per input.
+    pub additional_contract_inputs: Option<Vec<Utxo>>,
+    /// Per-input args for additional contract inputs. When provided,
+    /// `additional_contract_input_args[i]` overrides args for
+    /// `additional_contract_inputs[i]`. Sig params (Auto) are still auto-computed.
+    pub additional_contract_input_args: Option<Vec<Vec<SdkValue>>>,
+    /// Override the public key used for the change output (hex-encoded).
+    /// Defaults to the signer's public key.
+    pub change_pub_key: Option<String>,
+}
+
+/// Specification for a single continuation output in multi-output calls.
+#[derive(Debug, Clone)]
+pub struct OutputSpec {
+    pub satoshis: i64,
+    pub state: HashMap<String, SdkValue>,
 }
 
 // ---------------------------------------------------------------------------

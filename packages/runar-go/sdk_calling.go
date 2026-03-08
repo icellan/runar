@@ -4,6 +4,26 @@ import (
 	"fmt"
 )
 
+// BuildCallOptions provides optional parameters for BuildCallTransaction.
+type BuildCallOptions struct {
+	// Multiple contract outputs (replaces single newLockingScript).
+	ContractOutputs []ContractOutput
+	// Additional contract inputs with their own unlocking scripts (for merge).
+	AdditionalContractInputs []AdditionalContractInput
+}
+
+// ContractOutput describes one contract continuation output.
+type ContractOutput struct {
+	Script   string
+	Satoshis int64
+}
+
+// AdditionalContractInput describes an extra contract input with its unlocking script.
+type AdditionalContractInput struct {
+	Utxo            UTXO
+	UnlockingScript string
+}
+
 // ---------------------------------------------------------------------------
 // Transaction construction for method invocation
 // ---------------------------------------------------------------------------
@@ -27,9 +47,21 @@ func BuildCallTransaction(
 	changeAddress string,
 	changeScript string,
 	additionalUtxos []UTXO,
-	feeRate ...int64,
-) (txHex string, inputCount int) {
+	feeRate int64,
+	opts ...*BuildCallOptions,
+) (txHex string, inputCount int, changeAmount int64) {
+	var extraContractInputs []AdditionalContractInput
+	var contractOutputs []ContractOutput
+	if len(opts) > 0 && opts[0] != nil {
+		extraContractInputs = opts[0].AdditionalContractInputs
+		contractOutputs = opts[0].ContractOutputs
+	}
+
+	// Build full input list: primary contract, extra contract inputs, P2PKH funding
 	allUtxos := []UTXO{currentUtxo}
+	for _, ci := range extraContractInputs {
+		allUtxos = append(allUtxos, ci.Utxo)
+	}
 	allUtxos = append(allUtxos, additionalUtxos...)
 
 	var totalInput int64
@@ -37,35 +69,43 @@ func BuildCallTransaction(
 		totalInput += u.Satoshis
 	}
 
-	// Calculate outputs total
-	contractOutputSats := int64(0)
-	if newLockingScript != "" {
-		if newSatoshis > 0 {
-			contractOutputSats = newSatoshis
-		} else {
-			contractOutputSats = currentUtxo.Satoshis
+	// Determine contract outputs: explicit multi-output takes priority over single
+	if len(contractOutputs) == 0 && newLockingScript != "" {
+		sats := newSatoshis
+		if sats <= 0 {
+			sats = currentUtxo.Satoshis
 		}
+		contractOutputs = []ContractOutput{{Script: newLockingScript, Satoshis: sats}}
+	}
+
+	contractOutputSats := int64(0)
+	for _, co := range contractOutputs {
+		contractOutputSats += co.Satoshis
 	}
 
 	// Estimate fee using actual script sizes
-	// Input 0 is the contract UTXO with a known unlocking script
 	input0Size := 32 + 4 + varIntByteSize(len(unlockingScript)/2) +
 		len(unlockingScript)/2 + 4
-	additionalInputsSize := (len(allUtxos) - 1) * 148 // P2PKH
-	inputsSize := input0Size + additionalInputsSize
+	extraContractInputsSize := 0
+	for _, ci := range extraContractInputs {
+		extraContractInputsSize += 32 + 4 +
+			varIntByteSize(len(ci.UnlockingScript)/2) +
+			len(ci.UnlockingScript)/2 + 4
+	}
+	p2pkhInputsSize := len(additionalUtxos) * 148
+	inputsSize := input0Size + extraContractInputsSize + p2pkhInputsSize
 
 	outputsSize := 0
-	if newLockingScript != "" {
-		outputsSize += 8 + varIntByteSize(len(newLockingScript)/2) +
-			len(newLockingScript)/2
+	for _, co := range contractOutputs {
+		outputsSize += 8 + varIntByteSize(len(co.Script)/2) + len(co.Script)/2
 	}
 	if changeAddress != "" || changeScript != "" {
 		outputsSize += 34 // P2PKH change
 	}
 	estimatedSize := 10 + inputsSize + outputsSize
-	rate := int64(1)
-	if len(feeRate) > 0 && feeRate[0] > 0 {
-		rate = feeRate[0]
+	rate := feeRate
+	if rate <= 0 {
+		rate = 1
 	}
 	fee := int64(estimatedSize) * rate
 
@@ -80,16 +120,24 @@ func BuildCallTransaction(
 	// Input count
 	tx += encodeVarInt(len(allUtxos))
 
-	// Input 0: contract UTXO with unlocking script
+	// Input 0: primary contract UTXO with unlocking script
 	tx += reverseHex(currentUtxo.Txid)
 	tx += toLittleEndian32(currentUtxo.OutputIndex)
 	tx += encodeVarInt(len(unlockingScript) / 2)
 	tx += unlockingScript
 	tx += "ffffffff"
 
-	// Additional inputs (unsigned)
-	for i := 1; i < len(allUtxos); i++ {
-		utxo := allUtxos[i]
+	// Additional contract inputs (with their own unlocking scripts)
+	for _, ci := range extraContractInputs {
+		tx += reverseHex(ci.Utxo.Txid)
+		tx += toLittleEndian32(ci.Utxo.OutputIndex)
+		tx += encodeVarInt(len(ci.UnlockingScript) / 2)
+		tx += ci.UnlockingScript
+		tx += "ffffffff"
+	}
+
+	// P2PKH funding inputs (unsigned)
+	for _, utxo := range additionalUtxos {
 		tx += reverseHex(utxo.Txid)
 		tx += toLittleEndian32(utxo.OutputIndex)
 		tx += "00" // empty scriptSig
@@ -97,20 +145,17 @@ func BuildCallTransaction(
 	}
 
 	// Output count
-	numOutputs := 0
-	if newLockingScript != "" {
-		numOutputs++
-	}
+	numOutputs := len(contractOutputs)
 	if change > 0 && (changeAddress != "" || changeScript != "") {
 		numOutputs++
 	}
 	tx += encodeVarInt(numOutputs)
 
-	// Output 0: new contract state (if stateful)
-	if newLockingScript != "" {
-		tx += toLittleEndian64(contractOutputSats)
-		tx += encodeVarInt(len(newLockingScript) / 2)
-		tx += newLockingScript
+	// Contract outputs
+	for _, co := range contractOutputs {
+		tx += toLittleEndian64(co.Satoshis)
+		tx += encodeVarInt(len(co.Script) / 2)
+		tx += co.Script
 	}
 
 	// Change output
@@ -127,7 +172,11 @@ func BuildCallTransaction(
 	// Locktime
 	tx += toLittleEndian32(0)
 
-	return tx, len(allUtxos)
+	retChange := int64(0)
+	if change > 0 {
+		retChange = change
+	}
+	return tx, len(allUtxos), retChange
 }
 
 // ---------------------------------------------------------------------------

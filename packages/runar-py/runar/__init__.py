@@ -14,6 +14,7 @@ from runar.builtins import (
     hash160, hash256, sha256, ripemd160,
     extract_locktime, extract_output_hash, extract_amount,
     extract_version, extract_sequence,
+    extract_hash_prevouts, extract_outpoint,
     num2bin, cat, substr, reverse_bytes, len_,
     verify_rabin_sig,
     safediv, safemod, clamp, sign, pow_, mul_div, percent_of,
@@ -68,6 +69,7 @@ __all__ = [
     # Preimage extraction
     'extract_locktime', 'extract_output_hash', 'extract_amount',
     'extract_version', 'extract_sequence',
+    'extract_hash_prevouts', 'extract_outpoint',
     # Binary utilities
     'num2bin', 'cat', 'substr', 'reverse_bytes', 'len_',
     # Math

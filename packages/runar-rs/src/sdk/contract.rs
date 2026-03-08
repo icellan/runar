@@ -9,9 +9,10 @@ use super::deployment::{
     build_deploy_transaction, select_utxos,
     build_p2pkh_script_from_address, encode_varint,
 };
-use super::calling::build_call_transaction;
+use super::calling::{build_call_transaction_ext, CallTxOptions, ContractOutput, AdditionalContractInput};
 use super::provider::Provider;
 use super::signer::Signer;
+use crate::prelude::hash160 as compute_hash160;
 
 /// Runtime wrapper for a compiled Rúnar contract.
 ///
@@ -273,10 +274,16 @@ impl RunarContract {
             .as_ref()
             .map_or(false, |f| !f.is_empty());
 
-        // For stateful contracts, the compiler injects a SigHashPreimage param
-        // into the ABI that users don't pass — filter it from validation.
+        // For stateful contracts, the compiler injects implicit params into every
+        // public method's ABI (SigHashPreimage, and for state-mutating methods:
+        // _changePKH and _changeAmount). The SDK auto-computes these.
+        let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let user_params: Vec<&AbiParam> = if is_stateful {
-            method.params.iter().filter(|p| p.param_type != "SigHashPreimage").collect()
+            method.params.iter().filter(|p| {
+                p.param_type != "SigHashPreimage"
+                    && p.name != "_changePKH"
+                    && p.name != "_changeAmount"
+            }).collect()
         } else {
             method.params.iter().collect()
         };
@@ -301,10 +308,11 @@ impl RunarContract {
             .and_then(|o| o.change_address.as_deref())
             .unwrap_or(&address);
 
-        // Detect Sig/PubKey/SigHashPreimage params that need auto-compute (user passed Auto)
+        // Detect Sig/PubKey/SigHashPreimage/ByteString params that need auto-compute (user passed Auto)
         let mut resolved_args: Vec<SdkValue> = args.to_vec();
         let mut sig_indices: Vec<usize> = Vec::new();
         let mut preimage_index: Option<usize> = None;
+        let mut prevouts_indices: Vec<usize> = Vec::new();
         for (i, param) in user_params.iter().enumerate() {
             if matches!(args[i], SdkValue::Auto) {
                 if param.param_type == "Sig" {
@@ -317,6 +325,11 @@ impl RunarContract {
                     preimage_index = Some(i);
                     // Placeholder preimage (will be replaced after tx construction)
                     resolved_args[i] = SdkValue::Bytes("00".repeat(181));
+                } else if param.param_type == "ByteString" {
+                    prevouts_indices.push(i);
+                    // Placeholder sized to estimated input count (1 primary + N extra + 1 funding)
+                    let estimated_inputs = 1 + options.and_then(|o| o.additional_contract_inputs.as_ref()).map_or(0, |v| v.len()) + 1;
+                    resolved_args[i] = SdkValue::Bytes("00".repeat(36 * estimated_inputs));
                 }
             }
         }
@@ -340,7 +353,35 @@ impl RunarContract {
         let mut new_locking_script: Option<String> = None;
         let mut new_satoshis: Option<i64> = None;
 
-        if is_stateful {
+        // Build contract outputs: multi-output (options.outputs) takes priority,
+        // then single continuation (options.new_state), then default.
+        let extra_contract_utxos: Vec<Utxo> = options
+            .and_then(|o| o.additional_contract_inputs.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let has_multi_output = options
+            .and_then(|o| o.outputs.as_ref())
+            .map_or(false, |v| !v.is_empty());
+
+        let mut contract_outputs: Option<Vec<ContractOutput>> = None;
+
+        if is_stateful && has_multi_output {
+            // Multi-output: build a locking script for each output
+            let code_script = self.code_script.clone().unwrap_or_else(|| self.build_code_script());
+            let state_fields = self.artifact.state_fields.as_ref().unwrap();
+            let outputs = options.unwrap().outputs.as_ref().unwrap();
+            contract_outputs = Some(
+                outputs.iter().map(|out| {
+                    let state_hex = serialize_state(state_fields, &out.state);
+                    ContractOutput {
+                        script: format!("{}6a{}", code_script, state_hex),
+                        satoshis: out.satoshis,
+                    }
+                }).collect()
+            );
+        } else if is_stateful {
+            // For single-output continuations, the on-chain script uses the input amount
+            // (extracted from the preimage). The SDK output must match.
             new_satoshis = Some(
                 options
                     .and_then(|o| o.satoshis)
@@ -355,29 +396,89 @@ impl RunarContract {
             new_locking_script = Some(self.get_locking_script());
         }
 
-        // For stateful single-output continuation, the TX must have exactly one
-        // output (the continuation UTXO). No change output or additional UTXOs.
-        let mut change_script = String::new();
-        let mut additional_utxos: Vec<Utxo> = Vec::new();
-        let mut fee_rate = 1;
+        // Fetch fee rate and funding UTXOs for all contract types.
+        // For stateful contracts with change output support, the change output
+        // is verified by the on-chain script (hashOutputs check).
+        let fee_rate = provider.get_fee_rate()?;
+        let change_script_str = build_p2pkh_script_from_address(change_address);
+        let all_funding_utxos = provider.get_utxos(&address).unwrap_or_default();
+        // Filter out the contract UTXO from funding UTXOs to avoid duplicate inputs
+        let additional_utxos: Vec<Utxo> = all_funding_utxos
+            .into_iter()
+            .filter(|u| !(u.txid == current_utxo.txid && u.output_index == current_utxo.output_index))
+            .collect();
 
-        if !is_stateful {
-            change_script = build_p2pkh_script_from_address(change_address);
-            fee_rate = provider.get_fee_rate()?;
-            let all_funding_utxos = provider.get_utxos(&address).unwrap_or_default();
-            // Filter out the contract UTXO from funding UTXOs to avoid duplicate inputs
-            additional_utxos = all_funding_utxos
-                .into_iter()
-                .filter(|u| !(u.txid == current_utxo.txid && u.output_index == current_utxo.output_index))
+        // Compute change PKH for stateful methods that need it
+        let change_pkh_hex = if is_stateful && method_needs_change {
+            let change_pub_key_hex = options
+                .and_then(|o| o.change_pub_key.as_deref())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| signer.get_public_key().unwrap_or_default());
+            let pub_key_bytes: Vec<u8> = (0..change_pub_key_hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&change_pub_key_hex[i..i + 2], 16).unwrap_or(0))
                 .collect();
-        }
-
-        let (change_addr_opt, change_script_opt): (Option<&str>, Option<&str>) = if is_stateful {
-            (None, None)
+            let hash = compute_hash160(&pub_key_bytes);
+            hash.iter().map(|b| format!("{:02x}", b)).collect::<String>()
         } else {
-            (Some(change_address), Some(&change_script))
+            String::new()
         };
-        let (tx_hex, input_count) = build_call_transaction(
+
+        // Resolve per-input args for additional contract inputs (same Sig/PubKey/ByteString handling as primary args)
+        let resolved_per_input_args: Option<Vec<Vec<SdkValue>>> = options
+            .and_then(|o| o.additional_contract_input_args.as_ref())
+            .map(|per_input| {
+                per_input.iter().map(|input_args| {
+                    let mut resolved = input_args.clone();
+                    for (i, param) in user_params.iter().enumerate() {
+                        if i < resolved.len() && matches!(resolved[i], SdkValue::Auto) {
+                            if param.param_type == "Sig" {
+                                resolved[i] = SdkValue::Bytes("00".repeat(72));
+                            } else if param.param_type == "PubKey" {
+                                // Use the same resolved pubkey as the primary args
+                                resolved[i] = resolved_args[i].clone();
+                            } else if param.param_type == "ByteString" {
+                                let estimated_inputs = 1 + options.and_then(|o| o.additional_contract_inputs.as_ref()).map_or(0, |v| v.len()) + 1;
+                                resolved[i] = SdkValue::Bytes("00".repeat(36 * estimated_inputs));
+                            }
+                        }
+                    }
+                    resolved
+                }).collect()
+            });
+
+        // Build placeholder unlocking scripts for merge inputs
+        let extra_unlock_placeholders: Vec<String> = extra_contract_utxos.iter().enumerate().map(|(i, _)| {
+            let args_for_placeholder = resolved_per_input_args.as_ref()
+                .and_then(|v| v.get(i))
+                .unwrap_or(&resolved_args);
+            format!(
+                "{}{}",
+                encode_push_data(&"00".repeat(72)),
+                self.build_unlocking_script(method_name, args_for_placeholder).unwrap_or_default(),
+            )
+        }).collect();
+
+        let change_addr_opt: Option<&str> = Some(change_address);
+        let change_script_opt: Option<&str> = Some(&change_script_str);
+
+        let call_tx_options = CallTxOptions {
+            contract_outputs: contract_outputs.as_ref().map(|cos| {
+                cos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
+            }),
+            additional_contract_inputs: if extra_contract_utxos.is_empty() {
+                None
+            } else {
+                Some(extra_contract_utxos.iter().enumerate().map(|(i, utxo)| {
+                    AdditionalContractInput {
+                        utxo: utxo.clone(),
+                        unlocking_script: extra_unlock_placeholders[i].clone(),
+                    }
+                }).collect())
+            },
+        };
+
+        let (tx_hex, input_count, mut change_amount) = build_call_transaction_ext(
             &current_utxo,
             &unlocking_script,
             new_locking_script.as_deref(),
@@ -390,12 +491,14 @@ impl RunarContract {
                 Some(&additional_utxos)
             },
             Some(fee_rate),
+            Some(&call_tx_options),
         );
 
-        // Sign additional inputs (input 0 already has the unlocking script)
+        // Sign P2PKH funding inputs (after contract inputs)
         let mut signed_tx = tx_hex;
-        for i in 1..input_count {
-            if let Some(utxo) = additional_utxos.get(i - 1) {
+        let p2pkh_start_idx = 1 + extra_contract_utxos.len();
+        for i in p2pkh_start_idx..input_count {
+            if let Some(utxo) = additional_utxos.get(i - p2pkh_start_idx) {
                 let sig = signer.sign(&signed_tx, i, &utxo.script, utxo.satoshis, None)?;
                 let pub_key = signer.get_public_key()?;
                 let unlock_script = format!("{}{}", encode_push_data(&sig), encode_push_data(&pub_key));
@@ -406,21 +509,7 @@ impl RunarContract {
         // For stateful contracts, build the unlock as:
         //   <opPushTxSig> <user_args> <txPreimage> <methodSelector>
         if is_stateful {
-            let (op_sig, preimage) = compute_op_push_tx(
-                &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
-            )?;
-
-            // Re-sign any Sig params against the current tx
-            for &idx in &sig_indices {
-                let real_sig = signer.sign(&signed_tx, 0, &current_utxo.script, current_utxo.satoshis, None)?;
-                resolved_args[idx] = SdkValue::Bytes(real_sig);
-            }
-
-            // Build: <opPushTxSig> <user_args> <txPreimage> <methodSelector>
-            let mut user_args_hex = String::new();
-            for arg in &resolved_args {
-                user_args_hex.push_str(&encode_arg(arg));
-            }
+            // Pre-compute method selector once
             let mut method_selector_hex = String::new();
             let public_methods: Vec<&AbiMethod> = self
                 .artifact
@@ -435,51 +524,133 @@ impl RunarContract {
                 }
             }
 
-            let stateful_unlock = format!(
-                "{}{}{}{}",
-                encode_push_data(&op_sig),
-                user_args_hex,
-                encode_push_data(&preimage),
-                method_selector_hex,
-            );
+            // Helper closure to build a stateful unlock for a given input
+            let build_stateful_unlock = |tx: &str, input_idx: usize, subscript: &str, sats: i64,
+                                          signer: &dyn Signer, sig_indices: &[usize],
+                                          prevouts_indices: &[usize],
+                                          resolved_args: &mut Vec<SdkValue>,
+                                          method_selector_hex: &str,
+                                          tx_change_amount: i64| -> Result<String, String> {
+                let (op_sig, preimage) = compute_op_push_tx(tx, input_idx, subscript, sats)?;
 
-            // Rebuild TX with the real unlocking script (stateful: no change output)
-            let (rebuilt_tx, _) = build_call_transaction(
-                &current_utxo,
-                &stateful_unlock,
-                new_locking_script.as_deref(),
-                new_satoshis,
-                None,
-                None,
-                None,
-                Some(fee_rate),
-            );
-            signed_tx = rebuilt_tx;
+                // Re-sign any Sig params against the current tx
+                for &idx in sig_indices {
+                    let real_sig = signer.sign(tx, input_idx, subscript, sats, None)?;
+                    resolved_args[idx] = SdkValue::Bytes(real_sig);
+                }
 
-            // Recompute OP_PUSH_TX from the final TX (preimage changes with unlock size)
-            let (final_sig, final_preimage) = compute_op_push_tx(
+                // Resolve ByteString params (auto-compute allPrevouts from tx)
+                if !prevouts_indices.is_empty() {
+                    let all_prevouts_hex = extract_all_prevouts(tx);
+                    for &idx in prevouts_indices {
+                        resolved_args[idx] = SdkValue::Bytes(all_prevouts_hex.clone());
+                    }
+                }
+
+                let mut user_args_hex = String::new();
+                for arg in resolved_args.iter() {
+                    user_args_hex.push_str(&encode_arg(arg));
+                }
+
+                // Append change params (PKH + amount) for methods that need them
+                let mut change_hex = String::new();
+                if method_needs_change && !change_pkh_hex.is_empty() {
+                    change_hex.push_str(&encode_push_data(&change_pkh_hex));
+                    change_hex.push_str(&encode_arg(&SdkValue::Int(tx_change_amount)));
+                }
+
+                Ok(format!(
+                    "{}{}{}{}{}",
+                    encode_push_data(&op_sig),
+                    user_args_hex,
+                    change_hex,
+                    encode_push_data(&preimage),
+                    method_selector_hex,
+                ))
+            };
+
+            // First pass: build unlocking scripts with current tx layout
+            let input0_unlock = build_stateful_unlock(
                 &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                signer, &sig_indices, &prevouts_indices, &mut resolved_args, &method_selector_hex,
+                change_amount,
             )?;
 
-            // Re-sign Sig params against the final tx if needed
-            for &idx in &sig_indices {
-                let real_sig = signer.sign(&signed_tx, 0, &current_utxo.script, current_utxo.satoshis, None)?;
-                resolved_args[idx] = SdkValue::Bytes(real_sig);
+            let mut extra_unlocks: Vec<String> = Vec::new();
+            for (i, mu) in extra_contract_utxos.iter().enumerate() {
+                let mut args_for_input = resolved_per_input_args.as_ref()
+                    .and_then(|v| v.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| resolved_args.clone());
+                let unlock = build_stateful_unlock(
+                    &signed_tx, i + 1, &mu.script, mu.satoshis,
+                    signer, &sig_indices, &prevouts_indices, &mut args_for_input, &method_selector_hex,
+                    change_amount,
+                )?;
+                extra_unlocks.push(unlock);
             }
 
-            user_args_hex = String::new();
-            for arg in &resolved_args {
-                user_args_hex.push_str(&encode_arg(arg));
-            }
+            // Rebuild TX with real unlocking scripts (sizes may differ from placeholders)
+            let rebuild_options = CallTxOptions {
+                contract_outputs: contract_outputs.as_ref().map(|cos| {
+                    cos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
+                }),
+                additional_contract_inputs: if extra_contract_utxos.is_empty() {
+                    None
+                } else {
+                    Some(extra_contract_utxos.iter().enumerate().map(|(i, utxo)| {
+                        AdditionalContractInput {
+                            utxo: utxo.clone(),
+                            unlocking_script: extra_unlocks[i].clone(),
+                        }
+                    }).collect())
+                },
+            };
 
-            let final_unlock = format!(
-                "{}{}{}{}",
-                encode_push_data(&final_sig),
-                user_args_hex,
-                encode_push_data(&final_preimage),
-                method_selector_hex,
+            let (rebuilt_tx, _, rebuilt_change) = build_call_transaction_ext(
+                &current_utxo,
+                &input0_unlock,
+                new_locking_script.as_deref(),
+                new_satoshis,
+                change_addr_opt,
+                change_script_opt,
+                if additional_utxos.is_empty() { None } else { Some(&additional_utxos) },
+                Some(fee_rate),
+                Some(&rebuild_options),
             );
-            signed_tx = insert_unlocking_script(&signed_tx, 0, &final_unlock)?;
+            signed_tx = rebuilt_tx;
+            change_amount = rebuilt_change;
+
+            // Second pass: recompute with final tx (preimage changes with unlock size)
+            let final_input0_unlock = build_stateful_unlock(
+                &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                signer, &sig_indices, &prevouts_indices, &mut resolved_args, &method_selector_hex,
+                change_amount,
+            )?;
+            signed_tx = insert_unlocking_script(&signed_tx, 0, &final_input0_unlock)?;
+
+            for (i, mu) in extra_contract_utxos.iter().enumerate() {
+                let mut args_for_input = resolved_per_input_args.as_ref()
+                    .and_then(|v| v.get(i))
+                    .cloned()
+                    .unwrap_or_else(|| resolved_args.clone());
+                let final_merge_unlock = build_stateful_unlock(
+                    &signed_tx, i + 1, &mu.script, mu.satoshis,
+                    signer, &sig_indices, &prevouts_indices, &mut args_for_input, &method_selector_hex,
+                    change_amount,
+                )?;
+                signed_tx = insert_unlocking_script(&signed_tx, i + 1, &final_merge_unlock)?;
+            }
+
+            // Re-sign P2PKH funding inputs (outputs changed after rebuild)
+            for i in p2pkh_start_idx..input_count {
+                if let Some(utxo) = additional_utxos.get(i - p2pkh_start_idx) {
+                    let sig = signer.sign(&signed_tx, i, &utxo.script, utxo.satoshis, None)?;
+                    let pub_key = signer.get_public_key()?;
+                    let unlock_script = format!("{}{}", encode_push_data(&sig), encode_push_data(&pub_key));
+                    signed_tx = insert_unlocking_script(&signed_tx, i, &unlock_script)?;
+                }
+            }
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless with SigHashPreimage or Sig params: auto-compute
             let mut op_push_tx_sig_hex: Option<String> = None;
@@ -528,7 +699,19 @@ impl RunarContract {
         let txid = provider.broadcast(&signed_tx)?;
 
         // Update tracked UTXO for stateful contracts
-        if is_stateful {
+        if is_stateful && has_multi_output {
+            // Multi-output: track the first continuation output
+            if let Some(ref cos) = contract_outputs {
+                if !cos.is_empty() {
+                    self.current_utxo = Some(Utxo {
+                        txid: txid.clone(),
+                        output_index: 0,
+                        satoshis: cos[0].satoshis,
+                        script: cos[0].script.clone(),
+                    });
+                }
+            }
+        } else if is_stateful {
             if let Some(ref nls) = new_locking_script {
                 self.current_utxo = Some(Utxo {
                     txid: txid.clone(),
@@ -776,6 +959,53 @@ impl RunarContract {
 // ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
+
+/// Extract all input outpoints from a raw tx hex as a concatenated hex string.
+/// Each outpoint is txid (32 bytes LE) + vout (4 bytes LE) = 36 bytes.
+fn extract_all_prevouts(tx_hex: &str) -> String {
+    let bytes: Vec<u8> = (0..tx_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&tx_hex[i..i + 2], 16).unwrap_or(0))
+        .collect();
+    let mut offset = 4; // skip version (4 bytes)
+    // Read varint for input count
+    let (input_count, varint_size) = read_varint_bytes(&bytes, offset);
+    offset += varint_size;
+
+    let mut prevouts = String::new();
+    for _ in 0..input_count {
+        // txid (32 bytes) + vout (4 bytes) = 36 bytes of outpoint
+        for b in &bytes[offset..offset + 36] {
+            prevouts.push_str(&format!("{:02x}", b));
+        }
+        offset += 36; // skip outpoint
+        // Read script length varint
+        let (script_len, vsize) = read_varint_bytes(&bytes, offset);
+        offset += vsize;
+        offset += script_len as usize; // skip script
+        offset += 4; // skip sequence
+    }
+    prevouts
+}
+
+fn read_varint_bytes(bytes: &[u8], offset: usize) -> (u64, usize) {
+    let first = bytes[offset];
+    if first < 0xfd {
+        (first as u64, 1)
+    } else if first == 0xfd {
+        let val = (bytes[offset + 1] as u64) | ((bytes[offset + 2] as u64) << 8);
+        (val, 3)
+    } else if first == 0xfe {
+        let val = (bytes[offset + 1] as u64)
+            | ((bytes[offset + 2] as u64) << 8)
+            | ((bytes[offset + 3] as u64) << 16)
+            | ((bytes[offset + 4] as u64) << 24);
+        (val, 5)
+    } else {
+        // 0xff: 8-byte varint (unlikely for tx input counts)
+        (0, 9)
+    }
+}
 
 /// Encode an argument value as a Bitcoin Script push data element.
 fn encode_arg(value: &SdkValue) -> String {

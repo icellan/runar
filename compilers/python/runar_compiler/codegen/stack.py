@@ -195,6 +195,10 @@ class StackMap:
             raise RuntimeError("stack underflow on dup")
         self.slots.append(self.slots[-1])
 
+    def named_slots(self) -> set[str]:
+        """Return the set of all non-empty slot names."""
+        return {s for s in self.slots if s}
+
 
 # ---------------------------------------------------------------------------
 # Use analysis -- determine last-use sites for each variable
@@ -282,6 +286,7 @@ class _LoweringContext:
         self.properties: list[ANFProperty] = properties
         self.private_methods: dict[str, ANFMethod] = {}
         self.local_bindings: dict[str, bool] = {}
+        self.outer_protected_refs: Optional[set[str]] = None
         self._track_depth()
 
     def _track_depth(self) -> None:
@@ -354,6 +359,11 @@ class _LoweringContext:
     def lower_bindings(self, bindings: list[ANFBinding], terminal_assert: bool) -> None:
         self.local_bindings = {b.name: True for b in bindings}
         last_uses = compute_last_uses(bindings)
+
+        # Protect parent-scope refs that are still needed after this scope
+        if self.outer_protected_refs is not None:
+            for ref in self.outer_protected_refs:
+                last_uses[ref] = len(bindings)
 
         # Find terminal binding index
         last_assert_idx = -1
@@ -674,6 +684,17 @@ class _LoweringContext:
             self._lower_compute_state_output_hash(binding_name, args, binding_index, last_uses)
             return
 
+        # computeStateOutput(preimage, stateBytes) — same as computeStateOutputHash
+        # but returns raw output bytes WITHOUT the final OP_HASH256
+        if func_name == "computeStateOutput":
+            self._lower_compute_state_output(binding_name, args, binding_index, last_uses)
+            return
+
+        # buildChangeOutput(pkh, amount) — builds a P2PKH output serialization
+        if func_name == "buildChangeOutput":
+            self._lower_build_change_output(binding_name, args, binding_index, last_uses)
+            return
+
         # Preimage field extractors
         if len(func_name) > 7 and func_name[:7] == "extract":
             self._lower_extractor(binding_name, func_name, args, binding_index, last_uses)
@@ -766,9 +787,19 @@ class _LoweringContext:
         self.bring_to_top(cond, is_last)
         self.sm.pop()  # OP_IF consumes the condition
 
+        # Identify parent-scope items still needed after this if-expression.
+        protected_refs: set[str] = set()
+        for ref, last_idx in last_uses.items():
+            if last_idx > binding_index and self.sm.has(ref):
+                protected_refs.add(ref)
+
+        # Snapshot parent stackMap names before branches run
+        pre_if_names = self.sm.named_slots()
+
         # Lower then-branch
         then_ctx = _LoweringContext(None, self.properties)
         then_ctx.sm = self.sm.clone()
+        then_ctx.outer_protected_refs = protected_refs
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
         if terminal_assert and then_ctx.sm.depth() > 1:
@@ -777,11 +808,10 @@ class _LoweringContext:
                 then_ctx.emit_op(StackOp(op="nip"))
                 then_ctx.sm.remove_at_depth(1)
 
-        then_ops = then_ctx.ops
-
         # Lower else-branch
         else_ctx = _LoweringContext(None, self.properties)
         else_ctx.sm = self.sm.clone()
+        else_ctx.outer_protected_refs = protected_refs
         else_ctx.lower_bindings(else_bindings, terminal_assert)
 
         if terminal_assert and else_ctx.sm.depth() > 1:
@@ -790,12 +820,81 @@ class _LoweringContext:
                 else_ctx.emit_op(StackOp(op="nip"))
                 else_ctx.sm.remove_at_depth(1)
 
+        # Balance stack between branches so both end at the same depth.
+        # When addOutput is inside an if-then with no else, the then-branch
+        # consumes stack items and pushes a serialized output, while the
+        # else-branch leaves the stack unchanged. Both must end at the same
+        # depth for correct execution after OP_ENDIF.
+        #
+        # Fix: identify items consumed by the then-branch (present in parent
+        # but gone after then). Emit targeted ROLL+DROP in the else-branch
+        # to remove those same items, then push empty bytes as placeholder.
+        # OP_CAT with empty bytes is identity (no-op for output hashing).
+        post_then_names = then_ctx.sm.named_slots()
+        consumed_names = [n for n in pre_if_names
+                          if n not in post_then_names and else_ctx.sm.has(n)]
+        if consumed_names:
+            # Remove consumed items from else-branch, deepest first
+            depths = sorted([else_ctx.sm.find_depth(n) for n in consumed_names], reverse=True)
+            for depth in depths:
+                if depth == 0:
+                    else_ctx.emit_op(StackOp(op="drop"))
+                    else_ctx.sm.pop()
+                elif depth == 1:
+                    else_ctx.emit_op(StackOp(op="nip"))
+                    else_ctx.sm.remove_at_depth(1)
+                else:
+                    # Push depth, ROLL to bring item to top, then DROP
+                    else_ctx.emit_op(StackOp(op="push", value=big_int_push(depth)))
+                    else_ctx.sm.push("")
+                    else_ctx.emit_op(StackOp(op="roll", depth=depth))
+                    else_ctx.sm.pop()  # remove depth literal
+                    rolled = else_ctx.sm.remove_at_depth(depth)
+                    else_ctx.sm.push(rolled)
+                    else_ctx.emit_op(StackOp(op="drop"))
+                    else_ctx.sm.pop()
+            # Push empty bytes as placeholder result
+            else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
+            else_ctx.sm.push("")
+        # Handle the reverse case symmetrically (unlikely but safe)
+        post_else_names = else_ctx.sm.named_slots()
+        else_consumed_names = [n for n in pre_if_names
+                               if n not in post_else_names and then_ctx.sm.has(n)]
+        if else_consumed_names:
+            depths = sorted([then_ctx.sm.find_depth(n) for n in else_consumed_names], reverse=True)
+            for depth in depths:
+                if depth == 0:
+                    then_ctx.emit_op(StackOp(op="drop"))
+                    then_ctx.sm.pop()
+                elif depth == 1:
+                    then_ctx.emit_op(StackOp(op="nip"))
+                    then_ctx.sm.remove_at_depth(1)
+                else:
+                    then_ctx.emit_op(StackOp(op="push", value=big_int_push(depth)))
+                    then_ctx.sm.push("")
+                    then_ctx.emit_op(StackOp(op="roll", depth=depth))
+                    then_ctx.sm.pop()
+                    rolled = then_ctx.sm.remove_at_depth(depth)
+                    then_ctx.sm.push(rolled)
+                    then_ctx.emit_op(StackOp(op="drop"))
+                    then_ctx.sm.pop()
+            then_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
+            then_ctx.sm.push("")
+
+        then_ops = then_ctx.ops
         else_ops = else_ctx.ops
 
         if_op = StackOp(op="if", then=then_ops)
         if else_ops:
             if_op.else_ops = else_ops
         self.emit_op(if_op)
+
+        # Reconcile parent stackMap: remove items consumed by the branches.
+        post_branch_names = then_ctx.sm.named_slots()
+        for name in pre_if_names:
+            if name not in post_branch_names and self.sm.has(name):
+                depth = self.sm.find_depth(name)
+                self.sm.remove_at_depth(depth)
 
         self.sm.push(binding_name)
         self._track_depth()
@@ -1063,6 +1162,188 @@ class _LoweringContext:
 
         # Step 7: Hash with SHA256d
         self.emit_op(StackOp(op="opcode", code="OP_HASH256"))
+
+        self.sm.pop()
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # compute_state_output (raw bytes, no hash)
+    # -----------------------------------------------------------------
+
+    def _lower_compute_state_output(self, binding_name: str, args: list[str],
+                                     binding_index: int, last_uses: dict[str, int]) -> None:
+        """Same as computeStateOutputHash but WITHOUT the final OP_HASH256."""
+        # Compute fixed state serialization length
+        state_len = 0
+        for p in self.properties:
+            if p.readonly:
+                continue
+            if p.type == "bigint":
+                state_len += 8
+            elif p.type == "boolean":
+                state_len += 1
+            elif p.type == "PubKey":
+                state_len += 33
+            elif p.type == "Addr":
+                state_len += 20
+            elif p.type == "Sha256":
+                state_len += 32
+            elif p.type == "Point":
+                state_len += 64
+            else:
+                raise RuntimeError(f"computeStateOutput: unsupported mutable property type: {p.type}")
+
+        preimage_ref = args[0]
+        state_bytes_ref = args[1]
+
+        # Bring stateBytes then preimage to top
+        self.bring_to_top(state_bytes_ref, self._is_last_use(state_bytes_ref, binding_index, last_uses))
+        self.bring_to_top(preimage_ref, self._is_last_use(preimage_ref, binding_index, last_uses))
+
+        # Step 1: Extract middle: varint + scriptCode + amount
+        self.emit_op(StackOp(op="push", value=big_int_push(104)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # prefix
+        self.sm.push("")  # rest
+        self.emit_op(StackOp(op="nip"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # rest
+
+        # Drop last 44 bytes
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(44)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # middle
+        self.sm.push("")  # tail44
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # Step 2: Split off amount (last 8 bytes), save to altstack
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # varint+sc
+        self.sm.push("")  # amount
+        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
+        self.sm.pop()
+
+        # Step 3: Strip state + OP_RETURN from end
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(state_len + 1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # varint+code
+        self.sm.push("")  # opReturn+state
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # Step 4: Append OP_RETURN byte
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        # Step 5: Swap and CAT to append stateBytes
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        # Step 6: Prepend amount from altstack
+        self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        # --- Stack: [..., fullOutputSerialization] --- (NO hash)
+
+        self.sm.pop()
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # build_change_output
+    # -----------------------------------------------------------------
+
+    def _lower_build_change_output(self, binding_name: str, args: list[str],
+                                    binding_index: int, last_uses: dict[str, int]) -> None:
+        """Build a P2PKH output serialization: amount(8LE) + 0x19 + 76a914 <pkh:20bytes> 88ac."""
+        pkh_ref = args[0]
+        amount_ref = args[1]
+
+        # Step 1: Build the P2PKH locking script with length prefix.
+        # Push prefix: varint(25) + OP_DUP + OP_HASH160 + OP_PUSHBYTES_20 = 0x1976a914
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x19, 0x76, 0xa9, 0x14]))))
+        self.sm.push("")
+
+        # Push the 20-byte PKH
+        self.bring_to_top(pkh_ref, self._is_last_use(pkh_ref, binding_index, last_uses))
+        # CAT: prefix || pkh
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        # Push suffix: OP_EQUALVERIFY + OP_CHECKSIG = 0x88ac
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x88, 0xac]))))
+        self.sm.push("")
+        # CAT: (prefix || pkh) || suffix
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        # --- Stack: [..., 0x1976a914{pkh}88ac] ---
+
+        # Step 2: Prepend amount as 8-byte LE.
+        self.bring_to_top(amount_ref, self._is_last_use(amount_ref, binding_index, last_uses))
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()  # pop width
+        # Stack: [..., script, amount(8LE)]
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        # Stack: [..., amount(8LE), script]
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        # --- Stack: [..., amount(8LE)+0x1976a914{pkh}88ac] ---
 
         self.sm.pop()
         self.sm.push(binding_name)
@@ -1428,7 +1709,8 @@ class _LoweringContext:
             self.emit_op(StackOp(op="push", value=big_int_push(32)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop()
+            self.sm.pop()  # pop position (32)
+            self.sm.pop()  # pop data being split
             self.sm.push("")
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
@@ -1448,7 +1730,8 @@ class _LoweringContext:
             self.emit_op(StackOp(op="push", value=big_int_push(32)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop()
+            self.sm.pop()  # pop position (32)
+            self.sm.pop()  # pop data being split
             self.sm.push("")
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))
@@ -1468,7 +1751,8 @@ class _LoweringContext:
             self.emit_op(StackOp(op="push", value=big_int_push(36)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop()
+            self.sm.pop()  # pop position (36)
+            self.sm.pop()  # pop data being split
             self.sm.push("")
             self.sm.push("")
             self.emit_op(StackOp(op="drop"))

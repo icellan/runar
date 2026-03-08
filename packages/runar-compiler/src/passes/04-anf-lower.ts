@@ -83,7 +83,16 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
     const methodCtx = new LoweringContext(contract);
 
     if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
-      // Register txPreimage as an implicit parameter
+      // Determine if this method verifies hashOutputs (needs change output support).
+      // Methods that use addOutput or mutate state need hashOutputs verification.
+      // Non-mutating methods (like close/destroy) don't verify outputs.
+      const needsChangeOutput = methodMutatesState(method, contract) || methodHasAddOutput(method);
+
+      // Register implicit parameters
+      if (needsChangeOutput) {
+        methodCtx.addParam('_changePKH');
+        methodCtx.addParam('_changeAmount');
+      }
       methodCtx.addParam('txPreimage');
 
       // Inject checkPreimage(txPreimage) at the start
@@ -92,8 +101,6 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       methodCtx.emit({ kind: 'assert', value: checkResult });
 
       // Deserialize mutable state from the preimage's scriptCode.
-      // On subsequent spends, the state is embedded in the script (after OP_RETURN),
-      // so we extract it from the scriptCode field rather than using hardcoded initial values.
       const stateProps = contract.properties.filter(p => p.kind === 'property' && !p.readonly);
       if (stateProps.length > 0) {
         const preimageRef3 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
@@ -105,36 +112,49 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
 
       // Determine state continuation type
       const addOutputRefs = methodCtx.getAddOutputRefs();
-      if (addOutputRefs.length > 0) {
-        // Multi-output continuation: concat all outputs, hash, compare to extractOutputHash
-        let accumulated = addOutputRefs[0]!;
-        for (let i = 1; i < addOutputRefs.length; i++) {
-          accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, addOutputRefs[i]!] });
+      if (addOutputRefs.length > 0 || methodMutatesState(method, contract)) {
+        // Build the P2PKH change output for hashOutputs verification
+        const changePKHRef = methodCtx.emit({ kind: 'load_param', name: '_changePKH' });
+        const changeAmountRef = methodCtx.emit({ kind: 'load_param', name: '_changeAmount' });
+        const changeOutputRef = methodCtx.emit({ kind: 'call', func: 'buildChangeOutput', args: [changePKHRef, changeAmountRef] });
+
+        if (addOutputRefs.length > 0) {
+          // Multi-output continuation: concat all outputs + change output, hash
+          let accumulated = addOutputRefs[0]!;
+          for (let i = 1; i < addOutputRefs.length; i++) {
+            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, addOutputRefs[i]!] });
+          }
+          accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
+          const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
+          const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+          const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
+          const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
+          methodCtx.emit({ kind: 'assert', value: eqRef });
+        } else {
+          // Single-output continuation: build raw output bytes, concat with change, hash
+          const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
+          const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+          const contractOutputRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutput', args: [preimageRef2, stateScriptRef] });
+          const allOutputs = methodCtx.emit({ kind: 'call', func: 'cat', args: [contractOutputRef, changeOutputRef] });
+          const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [allOutputs] });
+          const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+          const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
+          const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
+          methodCtx.emit({ kind: 'assert', value: eqRef });
         }
-        const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
-        const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-        const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
-        const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-        methodCtx.emit({ kind: 'assert', value: eqRef });
-      } else if (methodMutatesState(method, contract)) {
-        // Single-output continuation: build full output serialization hash and
-        // compare with hashOutputs from the BIP-143 preimage.
-        // computeStateOutputHash extracts codePart and amount from the preimage,
-        // builds: amount(8LE) + varint(scriptLen) + codePart + OP_RETURN + stateBytes,
-        // and returns hash256 of the result.
-        const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
-        const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-        const hashRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutputHash', args: [preimageRef2, stateScriptRef] });
-        const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef2] });
-        const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
-        methodCtx.emit({ kind: 'assert', value: eqRef });
       }
 
-      // Append implicit txPreimage param to the method's param list
-      const augmentedParams: ParamNode[] = [
-        ...method.params,
+      // Build augmented params list for ABI
+      const augmentedParams: ParamNode[] = [...method.params];
+      if (needsChangeOutput) {
+        augmentedParams.push(
+          { kind: 'param', name: '_changePKH', type: { kind: 'primitive_type', name: 'Ripemd160' } },
+          { kind: 'param', name: '_changeAmount', type: { kind: 'primitive_type', name: 'bigint' } },
+        );
+      }
+      augmentedParams.push(
         { kind: 'param', name: 'txPreimage', type: { kind: 'primitive_type', name: 'SigHashPreimage' } },
-      ];
+      );
 
       result.push({
         name: method.name,
@@ -173,6 +193,7 @@ class LoweringContext {
   private readonly contract: ContractNode;
   private readonly paramNames: Set<string> = new Set();
   private readonly localNames: Set<string> = new Set();
+  private readonly localByteVars: Set<string> = new Set();
   private readonly _addOutputRefs: string[] = [];
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
@@ -207,6 +228,16 @@ class LoweringContext {
   /** Record a local variable name so we know it's a local ref. */
   addLocal(name: string): void {
     this.localNames.add(name);
+  }
+
+  /** Record a local variable as byte-typed. */
+  addLocalByteVar(name: string): void {
+    this.localByteVars.add(name);
+  }
+
+  /** Check if a local variable is byte-typed. */
+  isLocalByteVar(name: string): boolean {
+    return this.localByteVars.has(name);
   }
 
   isParam(name: string): boolean {
@@ -271,6 +302,7 @@ class LoweringContext {
     // Share the parameter, local name sets, and aliases
     for (const p of this.paramNames) sub.paramNames.add(p);
     for (const l of this.localNames) sub.localNames.add(l);
+    for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
     return sub;
   }
@@ -326,6 +358,11 @@ function lowerVariableDecl(
   const valueRef = lowerExprToRef(stmt.init, ctx);
   ctx.addLocal(stmt.name);
 
+  // Track byte-typed locals so equality comparisons use OP_EQUAL
+  if (isByteTypedExpr(stmt.init, ctx)) {
+    ctx.addLocalByteVar(stmt.name);
+  }
+
   // Emit a binding that aliases the variable name to the computed value.
   // We load the temp as a const reference to the computed value.
   ctx.emitNamed(stmt.name, { kind: 'load_const', value: `@ref:${valueRef}` });
@@ -378,6 +415,16 @@ function lowerIfStatement(
     then: thenCtx.bindings,
     else: elseCtx.bindings,
   });
+
+  // Propagate addOutput refs from sub-contexts: when both branches produce
+  // the same number of addOutput calls, the if-expression result represents
+  // each addOutput (only one branch executes at runtime).
+  const thenOutputRefs = thenCtx.getAddOutputRefs();
+  const elseOutputRefs = elseCtx.getAddOutputRefs();
+  if (thenOutputRefs.length > 0 || elseOutputRefs.length > 0) {
+    // Use the if-expression result as the addOutput ref since only one branch executes
+    ctx.addOutputRef(ifName);
+  }
 
   // If both branches end by reassigning the same local variable,
   // alias that variable to the if-expression result so that subsequent
@@ -801,6 +848,8 @@ const BYTE_RETURNING_FUNCTIONS = new Set([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
+  'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
+  'extractVersion', 'extractLocktime', 'extractSigHashType',
 ]);
 
 /**
@@ -818,6 +867,8 @@ function isByteTypedExpr(expr: Expression, ctx: LoweringContext): boolean {
       if (paramType && BYTE_TYPES.has(paramType)) return true;
       const propType = ctx.getPropertyType(expr.name);
       if (propType && BYTE_TYPES.has(propType)) return true;
+      // Check if it's a local variable known to be byte-typed
+      if (ctx.isLocalByteVar(expr.name)) return true;
       return false;
     }
 
@@ -915,6 +966,38 @@ function exprMutatesState(expr: Expression, mutableProps: Set<string>): boolean 
     if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) {
       return true;
     }
+  }
+  return false;
+}
+
+function methodHasAddOutput(method: { body: Statement[] }): boolean {
+  return bodyHasAddOutput(method.body);
+}
+
+function bodyHasAddOutput(stmts: Statement[]): boolean {
+  for (const stmt of stmts) {
+    if (stmtHasAddOutput(stmt)) return true;
+  }
+  return false;
+}
+
+function stmtHasAddOutput(stmt: Statement): boolean {
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return exprHasAddOutput(stmt.expression);
+    case 'if_statement':
+      return bodyHasAddOutput(stmt.then) ||
+             (stmt.else ? bodyHasAddOutput(stmt.else) : false);
+    case 'for_statement':
+      return bodyHasAddOutput(stmt.body);
+    default:
+      return false;
+  }
+}
+
+function exprHasAddOutput(expr: Expression): boolean {
+  if (expr.kind === 'call_expr' && expr.callee.kind === 'property_access' && expr.callee.property === 'addOutput') {
+    return true;
   }
   return false;
 }

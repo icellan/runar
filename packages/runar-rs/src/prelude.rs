@@ -188,6 +188,18 @@ pub fn extract_output_hash(_p: &[u8]) -> ByteString {
     vec![0u8; 32]
 }
 
+/// Returns `hash256([0u8; 72])` in test mode.
+/// This is consistent with passing `all_prevouts = [0u8; 72]` in tests,
+/// since `extract_outpoint` also returns 36 zero bytes.
+pub fn extract_hash_prevouts(_p: &[u8]) -> Sha256 {
+    hash256(&vec![0u8; 72])
+}
+
+/// Returns 36 zero bytes in test mode.
+pub fn extract_outpoint(_p: &[u8]) -> ByteString {
+    vec![0u8; 36]
+}
+
 /// Returns a mock state script (empty bytes).
 pub fn get_state_script<T>(_contract: &T) -> ByteString {
     vec![]
@@ -196,6 +208,13 @@ pub fn get_state_script<T>(_contract: &T) -> ByteString {
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
+
+/// Returns a substring of a byte string starting at `start` with the given `length`.
+pub fn substr(data: &[u8], start: i64, length: i64) -> ByteString {
+    let s = start as usize;
+    let l = length as usize;
+    data[s..s + l].to_vec()
+}
 
 /// Converts an integer to a byte string of the specified length
 /// using Bitcoin Script's little-endian signed magnitude encoding.

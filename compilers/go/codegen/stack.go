@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sort"
 	"strings"
 
 	"github.com/icellan/runar/compilers/go/ir"
@@ -200,6 +201,17 @@ func (s *stackMap) dup() {
 	s.slots = append(s.slots, s.slots[len(s.slots)-1])
 }
 
+// namedSlots returns the set of all non-empty slot names.
+func (s *stackMap) namedSlots() map[string]bool {
+	names := make(map[string]bool)
+	for _, slot := range s.slots {
+		if slot != "" {
+			names[slot] = true
+		}
+	}
+	return names
+}
+
 // ---------------------------------------------------------------------------
 // Use analysis — determine last-use sites for each variable
 // ---------------------------------------------------------------------------
@@ -280,7 +292,8 @@ type loweringContext struct {
 	maxDepth       int
 	properties     []ir.ANFProperty
 	privateMethods map[string]*ir.ANFMethod // private methods available for inlining
-	localBindings  map[string]bool          // binding names in current lowerBindings scope; used by @ref: handler
+	localBindings      map[string]bool // binding names in current lowerBindings scope; used by @ref: handler
+	outerProtectedRefs map[string]bool // parent-scope refs that must not be consumed (used after current if-branch)
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -375,6 +388,13 @@ func (ctx *loweringContext) lowerBindings(bindings []ir.ANFBinding, terminalAsse
 		ctx.localBindings[b.Name] = true
 	}
 	lastUses := computeLastUses(bindings)
+
+	// Protect parent-scope refs that are still needed after this scope
+	if ctx.outerProtectedRefs != nil {
+		for ref := range ctx.outerProtectedRefs {
+			lastUses[ref] = len(bindings)
+		}
+	}
 
 	// Find the terminal binding index (if terminalAssert is set).
 	// If the last binding is an 'if' whose branches end in asserts,
@@ -747,6 +767,22 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	// computeStateOutput(preimage, stateBytes) — same as computeStateOutputHash
+	// but returns raw output bytes WITHOUT hashing. Used when the output bytes
+	// need to be concatenated with a change output before hashing.
+	if funcName == "computeStateOutput" {
+		ctx.lowerComputeStateOutput(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
+	// buildChangeOutput(pkh, amount) — builds a P2PKH output serialization:
+	//   amount(8LE) + varint(25) + OP_DUP OP_HASH160 OP_PUSHBYTES_20 <pkh> OP_EQUALVERIFY OP_CHECKSIG
+	//   = amount(8LE) + 0x19 + 76a914 <pkh:20> 88ac
+	if funcName == "buildChangeOutput" {
+		ctx.lowerBuildChangeOutput(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
 	// Preimage field extractors — each needs a custom OP_SPLIT sequence
 	// because OP_SPLIT produces two stack values and the intermediate stack
 	// management cannot be expressed in the simple builtinOpcodes table.
@@ -847,9 +883,21 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	ctx.bringToTop(cond, isLast)
 	ctx.sm.pop() // OP_IF consumes the condition
 
+	// Identify parent-scope items still needed after this if-expression.
+	protectedRefs := make(map[string]bool)
+	for ref, lastIdx := range lastUses {
+		if lastIdx > bindingIndex && ctx.sm.has(ref) {
+			protectedRefs[ref] = true
+		}
+	}
+
+	// Snapshot parent stackMap names before branches run
+	preIfNames := ctx.sm.namedSlots()
+
 	// Lower then-branch
 	thenCtx := newLoweringContext(nil, ctx.properties)
 	thenCtx.sm = ctx.sm.clone()
+	thenCtx.outerProtectedRefs = protectedRefs
 	thenCtx.lowerBindings(thenBindings, ta)
 
 	if ta && thenCtx.sm.depth() > 1 {
@@ -860,11 +908,10 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 		}
 	}
 
-	thenOps := thenCtx.ops
-
 	// Lower else-branch
 	elseCtx := newLoweringContext(nil, ctx.properties)
 	elseCtx.sm = ctx.sm.clone()
+	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.lowerBindings(elseBindings, ta)
 
 	if ta && elseCtx.sm.depth() > 1 {
@@ -875,6 +922,90 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 		}
 	}
 
+	// Balance stack between branches so both end at the same depth.
+	// When addOutput is inside an if-then with no else, the then-branch
+	// consumes stack items and pushes a serialized output, while the
+	// else-branch leaves the stack unchanged. Both must end at the same
+	// depth for correct execution after OP_ENDIF.
+	//
+	// Fix: identify items consumed by the then-branch (present in parent
+	// but gone after then). Emit targeted ROLL+DROP in the else-branch
+	// to remove those same items, then push empty bytes as placeholder.
+	// OP_CAT with empty bytes is identity (no-op for output hashing).
+	postThenNames := thenCtx.sm.namedSlots()
+	var consumedNames []string
+	for name := range preIfNames {
+		if !postThenNames[name] && elseCtx.sm.has(name) {
+			consumedNames = append(consumedNames, name)
+		}
+	}
+	if len(consumedNames) > 0 {
+		// Remove consumed items from else-branch, deepest first to keep depths stable
+		depths := make([]int, 0, len(consumedNames))
+		for _, n := range consumedNames {
+			depths = append(depths, elseCtx.sm.findDepth(n))
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(depths)))
+		for _, depth := range depths {
+			if depth == 0 {
+				elseCtx.emitOp(StackOp{Op: "drop"})
+				elseCtx.sm.pop()
+			} else if depth == 1 {
+				elseCtx.emitOp(StackOp{Op: "nip"})
+				elseCtx.sm.removeAtDepth(1)
+			} else {
+				// Push depth, then ROLL to bring item to top, then DROP
+				elseCtx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+				elseCtx.sm.push("")
+				elseCtx.emitOp(StackOp{Op: "roll", Depth: depth})
+				elseCtx.sm.pop() // remove depth literal
+				removed := elseCtx.sm.removeAtDepth(depth)
+				elseCtx.sm.push(removed)
+				elseCtx.emitOp(StackOp{Op: "drop"})
+				elseCtx.sm.pop()
+			}
+		}
+		// Push empty bytes as placeholder result
+		elseCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
+		elseCtx.sm.push("")
+	}
+	// Handle the reverse case symmetrically (unlikely but safe)
+	postElseNames := elseCtx.sm.namedSlots()
+	var elseConsumedNames []string
+	for name := range preIfNames {
+		if !postElseNames[name] && thenCtx.sm.has(name) {
+			elseConsumedNames = append(elseConsumedNames, name)
+		}
+	}
+	if len(elseConsumedNames) > 0 {
+		depths := make([]int, 0, len(elseConsumedNames))
+		for _, n := range elseConsumedNames {
+			depths = append(depths, thenCtx.sm.findDepth(n))
+		}
+		sort.Sort(sort.Reverse(sort.IntSlice(depths)))
+		for _, depth := range depths {
+			if depth == 0 {
+				thenCtx.emitOp(StackOp{Op: "drop"})
+				thenCtx.sm.pop()
+			} else if depth == 1 {
+				thenCtx.emitOp(StackOp{Op: "nip"})
+				thenCtx.sm.removeAtDepth(1)
+			} else {
+				thenCtx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+				thenCtx.sm.push("")
+				thenCtx.emitOp(StackOp{Op: "roll", Depth: depth})
+				thenCtx.sm.pop()
+				removed := thenCtx.sm.removeAtDepth(depth)
+				thenCtx.sm.push(removed)
+				thenCtx.emitOp(StackOp{Op: "drop"})
+				thenCtx.sm.pop()
+			}
+		}
+		thenCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
+		thenCtx.sm.push("")
+	}
+
+	thenOps := thenCtx.ops
 	elseOps := elseCtx.ops
 
 	ifOp := StackOp{
@@ -885,6 +1016,15 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 		ifOp.Else = elseOps
 	}
 	ctx.emitOp(ifOp)
+
+	// Reconcile parent stackMap: remove items consumed by the branches.
+	postBranchNames := thenCtx.sm.namedSlots()
+	for name := range preIfNames {
+		if !postBranchNames[name] && ctx.sm.has(name) {
+			depth := ctx.sm.findDepth(name)
+			ctx.sm.removeAtDepth(depth)
+		}
+	}
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
@@ -1181,6 +1321,190 @@ func (ctx *loweringContext) lowerComputeStateOutputHash(bindingName string, args
 
 	// Step 7: Hash with SHA256d.
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_HASH256"})
+
+	ctx.sm.pop()
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// lowerComputeStateOutput builds the full BIP-143 output serialization for
+// a single-output stateful continuation WITHOUT the final hash. This allows
+// the caller to concatenate additional outputs (e.g., change output) before hashing.
+func (ctx *loweringContext) lowerComputeStateOutput(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Compute fixed state serialization length from non-readonly properties.
+	stateLen := 0
+	for _, p := range ctx.properties {
+		if p.Readonly {
+			continue
+		}
+		switch p.Type {
+		case "bigint":
+			stateLen += 8
+		case "boolean":
+			stateLen += 1
+		case "PubKey":
+			stateLen += 33
+		case "Addr":
+			stateLen += 20
+		case "Sha256":
+			stateLen += 32
+		case "Point":
+			stateLen += 64
+		default:
+			panic("computeStateOutput: unsupported mutable property type: " + p.Type)
+		}
+	}
+
+	preimageRef := args[0]
+	stateBytesRef := args[1]
+
+	// Bring stateBytes then preimage to top.
+	ctx.bringToTop(stateBytesRef, ctx.isLastUse(stateBytesRef, bindingIndex, lastUses))
+	ctx.bringToTop(preimageRef, ctx.isLastUse(preimageRef, bindingIndex, lastUses))
+
+	// Step 1: Extract middle: varint + scriptCode + amount.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(104)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "nip"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// Drop last 44 bytes.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(44)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+
+	// Step 2: Split off amount (last 8 bytes), save to altstack.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	ctx.sm.pop()
+
+	// Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(stateLen + 1))})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+
+	// Step 4: Append OP_RETURN byte.
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x6a}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// Step 5: Swap and CAT to append stateBytes.
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// Step 6: Prepend amount from altstack.
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	// --- Stack: [..., fullOutputSerialization] --- (NO hash)
+
+	ctx.sm.pop()
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// lowerBuildChangeOutput builds a P2PKH output serialization:
+//
+//	amount(8LE) + 0x19 + 76a914 <pkh:20bytes> 88ac
+//
+// Total: 34 bytes (8 + 1 + 25).
+func (ctx *loweringContext) lowerBuildChangeOutput(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	pkhRef := args[0]
+	amountRef := args[1]
+
+	// Step 1: Build the P2PKH locking script with length prefix.
+	// Push prefix: varint(25) + OP_DUP + OP_HASH160 + OP_PUSHBYTES_20 = 0x1976a914
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x19, 0x76, 0xa9, 0x14}}})
+	ctx.sm.push("")
+
+	// Push the 20-byte PKH
+	ctx.bringToTop(pkhRef, ctx.isLastUse(pkhRef, bindingIndex, lastUses))
+	// CAT: prefix || pkh
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	// Push suffix: OP_EQUALVERIFY + OP_CHECKSIG = 0x88ac
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x88, 0xac}}})
+	ctx.sm.push("")
+	// CAT: (prefix || pkh) || suffix
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	// --- Stack: [..., 0x1976a914{pkh}88ac] ---
+
+	// Step 2: Prepend amount as 8-byte LE.
+	ctx.bringToTop(amountRef, ctx.isLastUse(amountRef, bindingIndex, lastUses))
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop() // pop width
+	// Stack: [..., script, amount(8LE)]
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	// Stack: [..., amount(8LE), script]
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	// --- Stack: [..., amount(8LE)+0x1976a914{pkh}88ac] ---
 
 	ctx.sm.pop()
 	ctx.sm.push(bindingName)
@@ -1597,7 +1921,8 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(32)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-		ctx.sm.pop()
+		ctx.sm.pop() // pop position (32)
+		ctx.sm.pop() // pop data being split
 		ctx.sm.push("")
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
@@ -1618,7 +1943,8 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(32)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-		ctx.sm.pop()
+		ctx.sm.pop() // pop position (32)
+		ctx.sm.pop() // pop data being split
 		ctx.sm.push("")
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})
@@ -1639,7 +1965,8 @@ func (ctx *loweringContext) lowerExtractor(bindingName, funcName string, args []
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(36)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-		ctx.sm.pop()
+		ctx.sm.pop() // pop position (36)
+		ctx.sm.pop() // pop data being split
 		ctx.sm.push("")
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "drop"})

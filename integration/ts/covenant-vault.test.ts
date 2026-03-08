@@ -73,7 +73,7 @@ describe('CovenantVault', () => {
       1000n,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
     expect(typeof deployTxid).toBe('string');
     expect(deployTxid.length).toBe(64);
@@ -93,7 +93,7 @@ describe('CovenantVault', () => {
       0n,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -111,7 +111,7 @@ describe('CovenantVault', () => {
       100_000_000n, // 1 BTC in satoshis
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -128,7 +128,7 @@ describe('CovenantVault', () => {
       500n,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -161,7 +161,7 @@ describe('CovenantVault', () => {
       1000n, // minAmount
     ]);
 
-    await contract.deploy(provider, ownerSigner, { satoshis: 5000 });
+    await contract.deploy(provider, ownerSigner, {});
 
     // spend(sig=null, amount=2000, txPreimage=null)
     // SDK auto-computes both Sig and SigHashPreimage from the spending transaction
@@ -191,7 +191,7 @@ describe('CovenantVault', () => {
       1000n, // minAmount=1000
     ]);
 
-    await contract.deploy(provider, ownerSigner, { satoshis: 5000 });
+    await contract.deploy(provider, ownerSigner, {});
 
     // spend(sig=null, amount=500, txPreimage=null) — amount < minAmount should fail
     await expect(

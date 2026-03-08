@@ -126,6 +126,7 @@ export class RunarInterpreter {
     version: 1n,
     sequence: 0xfffffffen,
   };
+  private _mockPreimageBytes: Record<string, Uint8Array> = {};
 
   /**
    * @param properties - Contract constructor properties (name -> value).
@@ -139,6 +140,7 @@ export class RunarInterpreter {
 
   setContract(contract: ContractNode): void { this._contract = contract; }
   setMockPreimage(overrides: Record<string, bigint>): void { Object.assign(this._mockPreimage, overrides); }
+  setMockPreimageBytes(overrides: Record<string, Uint8Array>): void { Object.assign(this._mockPreimageBytes, overrides); }
   resetOutputs(): void { this._outputs = []; }
   getOutputs(): { satoshis: RunarValue; stateValues: Record<string, RunarValue> }[] { return [...this._outputs]; }
   getState(): Record<string, RunarValue> {
@@ -931,12 +933,16 @@ export class RunarInterpreter {
 
       case 'extractOutputHash':
       case 'extractOutputs':
+        return { kind: 'bytes', value: this._mockPreimageBytes['outputHash'] ?? new Uint8Array(32) };
+
       case 'extractHashPrevouts':
+        return { kind: 'bytes', value: this._mockPreimageBytes['hashPrevouts'] ?? new Uint8Array(32) };
+
       case 'extractHashSequence':
-        return { kind: 'bytes', value: new Uint8Array(32) };
+        return { kind: 'bytes', value: this._mockPreimageBytes['hashSequence'] ?? new Uint8Array(32) };
 
       case 'extractOutpoint':
-        return { kind: 'bytes', value: new Uint8Array(36) };
+        return { kind: 'bytes', value: this._mockPreimageBytes['outpoint'] ?? new Uint8Array(36) };
 
       case 'extractInputIndex':
         return { kind: 'bigint', value: 0n };

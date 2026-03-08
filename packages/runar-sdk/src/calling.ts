@@ -27,25 +27,42 @@ export function buildCallTransaction(
   changeScript?: string,
   additionalUtxos?: UTXO[],
   feeRate: number = 1,
-): { txHex: string; inputCount: number } {
-  const allUtxos = [currentUtxo, ...(additionalUtxos ?? [])];
+  options?: {
+    /** Multiple contract outputs (replaces single newLockingScript). */
+    contractOutputs?: Array<{ script: string; satoshis: number }>;
+    /** Additional contract inputs with their own unlocking scripts (for merge). */
+    additionalContractInputs?: Array<{ utxo: UTXO; unlockingScript: string }>;
+  },
+): { txHex: string; inputCount: number; changeAmount: number } {
+  const extraContractInputs = options?.additionalContractInputs ?? [];
+  const allUtxos = [currentUtxo, ...extraContractInputs.map((i) => i.utxo), ...(additionalUtxos ?? [])];
 
   const totalInput = allUtxos.reduce((sum, u) => sum + u.satoshis, 0);
 
-  // Calculate outputs total
-  const contractOutputSats = newLockingScript ? (newSatoshis ?? currentUtxo.satoshis) : 0;
+  // Determine contract outputs: multi-output takes priority over single
+  const contractOutputs: Array<{ script: string; satoshis: number }> =
+    options?.contractOutputs ??
+    (newLockingScript
+      ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
+      : []);
+
+  const contractOutputSats = contractOutputs.reduce((sum, o) => sum + o.satoshis, 0);
 
   // Estimate fee using actual script sizes
-  // Input 0 is the contract UTXO with a known unlocking script
   const input0Size = 32 + 4 + varIntByteSize(unlockingScript.length / 2) +
     unlockingScript.length / 2 + 4;
-  const additionalInputsSize = (allUtxos.length - 1) * 148; // P2PKH
-  const inputsSize = input0Size + additionalInputsSize;
+  let extraContractInputsSize = 0;
+  for (const ci of extraContractInputs) {
+    extraContractInputsSize += 32 + 4 +
+      varIntByteSize(ci.unlockingScript.length / 2) +
+      ci.unlockingScript.length / 2 + 4;
+  }
+  const p2pkhInputsSize = (additionalUtxos?.length ?? 0) * 148;
+  const inputsSize = input0Size + extraContractInputsSize + p2pkhInputsSize;
 
   let outputsSize = 0;
-  if (newLockingScript) {
-    outputsSize += 8 + varIntByteSize(newLockingScript.length / 2) +
-      newLockingScript.length / 2;
+  for (const co of contractOutputs) {
+    outputsSize += 8 + varIntByteSize(co.script.length / 2) + co.script.length / 2;
   }
   if (changeAddress || changeScript) {
     outputsSize += 34; // P2PKH change
@@ -64,33 +81,42 @@ export function buildCallTransaction(
   // Input count
   tx += encodeVarInt(allUtxos.length);
 
-  // Input 0: contract UTXO with unlocking script
+  // Input 0: primary contract UTXO with unlocking script
   tx += reverseHex(currentUtxo.txid);
   tx += toLittleEndian32(currentUtxo.outputIndex);
   tx += encodeVarInt(unlockingScript.length / 2);
   tx += unlockingScript;
   tx += 'ffffffff';
 
-  // Additional inputs (unsigned)
-  for (let i = 1; i < allUtxos.length; i++) {
-    const utxo = allUtxos[i]!;
-    tx += reverseHex(utxo.txid);
-    tx += toLittleEndian32(utxo.outputIndex);
-    tx += '00'; // empty scriptSig
+  // Additional contract inputs (with their own unlocking scripts)
+  for (const ci of extraContractInputs) {
+    tx += reverseHex(ci.utxo.txid);
+    tx += toLittleEndian32(ci.utxo.outputIndex);
+    tx += encodeVarInt(ci.unlockingScript.length / 2);
+    tx += ci.unlockingScript;
     tx += 'ffffffff';
   }
 
+  // P2PKH funding inputs (unsigned)
+  if (additionalUtxos) {
+    for (const utxo of additionalUtxos) {
+      tx += reverseHex(utxo.txid);
+      tx += toLittleEndian32(utxo.outputIndex);
+      tx += '00'; // empty scriptSig
+      tx += 'ffffffff';
+    }
+  }
+
   // Output count
-  let numOutputs = 0;
-  if (newLockingScript) numOutputs++;
+  let numOutputs = contractOutputs.length;
   if (change > 0 && (changeAddress || changeScript)) numOutputs++;
   tx += encodeVarInt(numOutputs);
 
-  // Output 0: new contract state (if stateful)
-  if (newLockingScript) {
-    tx += toLittleEndian64(contractOutputSats);
-    tx += encodeVarInt(newLockingScript.length / 2);
-    tx += newLockingScript;
+  // Contract outputs
+  for (const co of contractOutputs) {
+    tx += toLittleEndian64(co.satoshis);
+    tx += encodeVarInt(co.script.length / 2);
+    tx += co.script;
   }
 
   // Change output
@@ -105,7 +131,7 @@ export function buildCallTransaction(
   // Locktime
   tx += toLittleEndian32(0);
 
-  return { txHex: tx, inputCount: allUtxos.length };
+  return { txHex: tx, inputCount: allUtxos.length, changeAmount: change > 0 ? change : 0 };
 }
 
 // ---------------------------------------------------------------------------

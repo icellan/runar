@@ -31,15 +31,14 @@ func deployFunctionPatterns(t *testing.T, owner *helpers.Wallet, initialBalance 
 		int64(initialBalance),
 	})
 
-	funder := helpers.NewWallet()
-	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	helpers.RPCCall("importaddress", owner.Address, "", false)
+	_, err = helpers.FundWallet(owner, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
 	provider := helpers.NewRPCProvider()
-	signer, err := helpers.SDKSignerFromWallet(funder)
+	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
@@ -95,51 +94,25 @@ func buildFPSpendTx(t *testing.T, contract *runar.RunarContract, newBalance int6
 	return spendTx
 }
 
-func spendFunctionPatterns(t *testing.T, contract *runar.RunarContract, owner *helpers.Wallet, newBalance int64, methodIdx int, extraArgs string) {
+// sdkCallFunctionPatterns calls a FunctionPatterns method via the SDK.
+func sdkCallFunctionPatterns(t *testing.T, contract *runar.RunarContract, provider runar.Provider, signer runar.Signer, methodName string, newBalance int64, extraArgs []interface{}) {
 	t.Helper()
 
-	spendTx := buildFPSpendTx(t, contract, newBalance)
+	// Build args: sig (auto) + extraArgs
+	args := []interface{}{nil} // Sig = auto
+	args = append(args, extraArgs...)
 
-	sigHex, err := helpers.SignInput(spendTx, 0, owner.PrivKey)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	callOpts := &runar.CallOptions{
+		NewState: map[string]interface{}{
+			"balance": newBalance,
+		},
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
 
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
+	txid, _, err := contract.Call(methodName, args, provider, signer, callOpts)
 	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
-	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// Unlocking: <opPushTxSig> <sig> <extraArgs> <txPreimage> <methodIndex>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		extraArgs +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(methodIdx)
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid, err := helpers.BroadcastAndMine(spendTx.Hex())
-	if err != nil {
-		t.Fatalf("spend (method %d, balance->%d): %v", methodIdx, newBalance, err)
+		t.Fatalf("%s (balance->%d): %v", methodName, newBalance, err)
 	}
 	t.Logf("balance->%d TX: %s", newBalance, txid)
-
-	// Update the contract's UTXO to the new continuation output
-	newUTXO, err := helpers.FindUTXOByIndex(txid, 0)
-	if err != nil {
-		t.Fatalf("find UTXO: %v", err)
-	}
-	contract.SetCurrentUtxo(&runar.UTXO{
-		Txid:        newUTXO.Txid,
-		OutputIndex: newUTXO.Vout,
-		Satoshis:    newUTXO.Satoshis,
-		Script:      newUTXO.Script,
-	})
 }
 
 func TestFunctionPatterns_Compile(t *testing.T) {
@@ -236,24 +209,21 @@ func TestFunctionPatterns_DistinctTxids(t *testing.T) {
 
 func TestFunctionPatterns_Deposit(t *testing.T) {
 	owner := helpers.NewWallet()
-	contract, _, _ := deployFunctionPatterns(t, owner, 100)
+	contract, provider, signer := deployFunctionPatterns(t, owner, 100)
 
 	// deposit(sig, amount=50) -> balance = 150
-	// deposit is method 0
-	spendFunctionPatterns(t, contract, owner, 150, 0, helpers.EncodePushInt(50))
+	sdkCallFunctionPatterns(t, contract, provider, signer, "deposit", 150, []interface{}{int64(50)})
 }
 
 func TestFunctionPatterns_DepositThenWithdraw(t *testing.T) {
 	owner := helpers.NewWallet()
-	contract, _, _ := deployFunctionPatterns(t, owner, 1000)
+	contract, provider, signer := deployFunctionPatterns(t, owner, 1000)
 
 	// deposit 500 -> 1500
-	spendFunctionPatterns(t, contract, owner, 1500, 0, helpers.EncodePushInt(500))
+	sdkCallFunctionPatterns(t, contract, provider, signer, "deposit", 1500, []interface{}{int64(500)})
 
 	// withdraw(sig, amount=200, feeBps=100) -> fee=2, total=202, balance=1298
-	// withdraw is method 1
-	spendFunctionPatterns(t, contract, owner, 1298, 1,
-		helpers.EncodePushInt(200)+helpers.EncodePushInt(100))
+	sdkCallFunctionPatterns(t, contract, provider, signer, "withdraw", 1298, []interface{}{int64(200), int64(100)})
 	t.Logf("chain: 1000->1500->1298 succeeded")
 }
 

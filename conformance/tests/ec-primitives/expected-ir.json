@@ -824,6 +824,7 @@
             "kind": "bin_op",
             "left": "compressed",
             "op": "===",
+            "result_type": "bytes",
             "right": "t2"
           }
         },

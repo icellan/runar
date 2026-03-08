@@ -324,15 +324,18 @@ txHex, inputCount, err := runar.BuildDeployTransaction(
 )
 
 // Build a method call transaction
-// feeRate is variadic ...int64; defaults to 1 sat/byte when omitted
-txHex, inputCount := runar.BuildCallTransaction(
-    currentUtxo, unlockingScript, newLockingScript, newSatoshis,
-    changeAddress, changeScript, additionalUtxos,
-)
-// Or with explicit fee rate:
 txHex, inputCount := runar.BuildCallTransaction(
     currentUtxo, unlockingScript, newLockingScript, newSatoshis,
     changeAddress, changeScript, additionalUtxos, feeRate,
+)
+// Or with multi-output and additional contract inputs:
+txHex, inputCount := runar.BuildCallTransaction(
+    currentUtxo, unlockingScript, newLockingScript, newSatoshis,
+    changeAddress, changeScript, additionalUtxos, feeRate,
+    &runar.BuildCallOptions{
+        ContractOutputs: []runar.ContractOutput{{Script: "...", Satoshis: 5000}},
+        AdditionalContractInputs: []runar.AdditionalContractInput{{Utxo: mergeUtxo, UnlockingScript: "..."}},
+    },
 )
 
 // State serialization

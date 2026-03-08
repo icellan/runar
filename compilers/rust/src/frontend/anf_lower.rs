@@ -81,7 +81,17 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
         if contract.parent_class == "StatefulSmartContract"
             && method.visibility == Visibility::Public
         {
-            // Register txPreimage as an implicit parameter
+            // Determine if this method verifies hashOutputs (needs change output support).
+            // Methods that use addOutput or mutate state need hashOutputs verification.
+            // Non-mutating methods (like close/destroy) don't verify outputs.
+            let needs_change_output =
+                method_mutates_state(method, contract) || method_has_add_output(method);
+
+            // Register implicit parameters
+            if needs_change_output {
+                method_ctx.add_param("_changePKH");
+                method_ctx.add_param("_changeAmount");
+            }
             method_ctx.add_param("txPreimage");
 
             // Inject checkPreimage(txPreimage) at the start
@@ -113,59 +123,97 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
             // Determine state continuation type
             let add_output_refs = method_ctx.add_output_refs.clone();
-            if !add_output_refs.is_empty() {
-                // Multi-output continuation: concat all outputs, hash, compare to extractOutputHash
-                let mut accumulated = add_output_refs[0].clone();
-                for i in 1..add_output_refs.len() {
+            if !add_output_refs.is_empty() || method_mutates_state(method, contract) {
+                // Build the P2PKH change output for hashOutputs verification
+                let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
+                    name: "_changePKH".to_string(),
+                });
+                let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                    name: "_changeAmount".to_string(),
+                });
+                let change_output_ref = method_ctx.emit(ANFValue::Call {
+                    func: "buildChangeOutput".to_string(),
+                    args: vec![change_pkh_ref, change_amount_ref],
+                });
+
+                if !add_output_refs.is_empty() {
+                    // Multi-output continuation: concat all outputs + change output, hash
+                    let mut accumulated = add_output_refs[0].clone();
+                    for i in 1..add_output_refs.len() {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, add_output_refs[i].clone()],
+                        });
+                    }
                     accumulated = method_ctx.emit(ANFValue::Call {
                         func: "cat".to_string(),
-                        args: vec![accumulated, add_output_refs[i].clone()],
+                        args: vec![accumulated, change_output_ref],
                     });
+                    let hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "hash256".to_string(),
+                        args: vec![accumulated],
+                    });
+                    let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let output_hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractOutputHash".to_string(),
+                        args: vec![preimage_ref2],
+                    });
+                    let eq_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "===".to_string(),
+                        left: hash_ref,
+                        right: output_hash_ref,
+                        result_type: Some("bytes".to_string()),
+                    });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
+                } else {
+                    // Single-output continuation: build raw output bytes, concat with change, hash
+                    let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
+                    let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let contract_output_ref = method_ctx.emit(ANFValue::Call {
+                        func: "computeStateOutput".to_string(),
+                        args: vec![preimage_ref2.clone(), state_script_ref],
+                    });
+                    let all_outputs = method_ctx.emit(ANFValue::Call {
+                        func: "cat".to_string(),
+                        args: vec![contract_output_ref, change_output_ref],
+                    });
+                    let hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "hash256".to_string(),
+                        args: vec![all_outputs],
+                    });
+                    let preimage_ref4 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let output_hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractOutputHash".to_string(),
+                        args: vec![preimage_ref4],
+                    });
+                    let eq_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "===".to_string(),
+                        left: hash_ref,
+                        right: output_hash_ref,
+                        result_type: Some("bytes".to_string()),
+                    });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
                 }
-                let hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "hash256".to_string(),
-                    args: vec![accumulated],
-                });
-                let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
-                    name: "txPreimage".to_string(),
-                });
-                let output_hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "extractOutputHash".to_string(),
-                    args: vec![preimage_ref2],
-                });
-                let eq_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "===".to_string(),
-                    left: hash_ref,
-                    right: output_hash_ref,
-                    result_type: Some("bytes".to_string()),
-                });
-                method_ctx.emit(ANFValue::Assert { value: eq_ref });
-            } else if method_mutates_state(method, contract) {
-                // Single-output continuation: build full output serialization hash
-                // and compare with hashOutputs from the BIP-143 preimage.
-                let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
-                let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
-                    name: "txPreimage".to_string(),
-                });
-                let hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "computeStateOutputHash".to_string(),
-                    args: vec![preimage_ref2.clone(), state_script_ref],
-                });
-                let output_hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "extractOutputHash".to_string(),
-                    args: vec![preimage_ref2],
-                });
-                let eq_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "===".to_string(),
-                    left: hash_ref,
-                    right: output_hash_ref,
-                    result_type: Some("bytes".to_string()),
-                });
-                method_ctx.emit(ANFValue::Assert { value: eq_ref });
             }
 
-            // Append implicit txPreimage param to the method's param list
+            // Build augmented params list for ABI
             let mut augmented_params = lower_params(&method.params);
+            if needs_change_output {
+                augmented_params.push(ANFParam {
+                    name: "_changePKH".to_string(),
+                    param_type: "Ripemd160".to_string(),
+                });
+                augmented_params.push(ANFParam {
+                    name: "_changeAmount".to_string(),
+                    param_type: "bigint".to_string(),
+                });
+            }
             augmented_params.push(ANFParam {
                 name: "txPreimage".to_string(),
                 param_type: "SigHashPreimage".to_string(),
@@ -221,6 +269,8 @@ struct LoweringContext<'a> {
     /// Maps local variable names to their current ANF binding name.
     /// Updated after if-statements that reassign locals in both branches.
     local_aliases: HashMap<String, String>,
+    /// Tracks local variables known to be byte-typed.
+    local_byte_vars: HashSet<String>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -233,6 +283,7 @@ impl<'a> LoweringContext<'a> {
             local_names: HashSet::new(),
             add_output_refs: Vec::new(),
             local_aliases: HashMap::new(),
+            local_byte_vars: HashSet::new(),
         }
     }
 
@@ -302,6 +353,7 @@ impl<'a> LoweringContext<'a> {
         sub.param_names = self.param_names.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();
+        sub.local_byte_vars = self.local_byte_vars.clone();
         // Note: add_output_refs is NOT propagated to sub-contexts
         // because addOutput calls in sub-blocks should flow up to
         // the parent context via explicit tracking.
@@ -369,6 +421,9 @@ fn lower_statement(stmt: &Statement, ctx: &mut LoweringContext) {
 fn lower_variable_decl(name: &str, init: &Expression, ctx: &mut LoweringContext) {
     let value_ref = lower_expr_to_ref(init, ctx);
     ctx.add_local(name);
+    if is_byte_typed_expr(init, ctx) {
+        ctx.local_byte_vars.insert(name.to_string());
+    }
     ctx.emit_named(
         name,
         ANFValue::LoadConst {
@@ -442,11 +497,21 @@ fn lower_if_statement(
         _ => None,
     };
 
+    // Propagate addOutput refs from sub-contexts: when either branch produces
+    // addOutput calls, the if-expression result represents each addOutput
+    // (only one branch executes at runtime).
+    let then_has_outputs = !then_ctx.add_output_refs.is_empty();
+    let else_has_outputs = !else_ctx.add_output_refs.is_empty();
+
     let if_name = ctx.emit(ANFValue::If {
         cond: cond_ref,
         then: then_bindings,
         else_branch: else_bindings,
     });
+
+    if then_has_outputs || else_has_outputs {
+        ctx.add_output_refs.push(if_name.clone());
+    }
 
     if let Some(local_name) = alias_local {
         ctx.set_local_alias(&local_name, &if_name);
@@ -1002,6 +1067,9 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
                     return true;
                 }
             }
+            if ctx.local_byte_vars.contains(name.as_str()) {
+                return true;
+            }
             false
         }
 
@@ -1151,4 +1219,58 @@ fn expr_mutates_state(expr: &Expression, mutable_props: &HashSet<String>) -> boo
         }
         _ => false,
     }
+}
+
+// ---------------------------------------------------------------------------
+// addOutput detection for determining change output necessity
+// ---------------------------------------------------------------------------
+
+/// Check if a method body contains any this.addOutput() calls.
+fn method_has_add_output(method: &MethodNode) -> bool {
+    body_has_add_output(&method.body)
+}
+
+fn body_has_add_output(stmts: &[Statement]) -> bool {
+    for stmt in stmts {
+        if stmt_has_add_output(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+fn stmt_has_add_output(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::ExpressionStatement { expression, .. } => expr_has_add_output(expression),
+        Statement::IfStatement {
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            body_has_add_output(then_branch)
+                || else_branch
+                    .as_ref()
+                    .map_or(false, |e| body_has_add_output(e))
+        }
+        Statement::ForStatement { body, .. } => body_has_add_output(body),
+        _ => false,
+    }
+}
+
+fn expr_has_add_output(expr: &Expression) -> bool {
+    if let Expression::CallExpr { callee, .. } = expr {
+        if let Expression::PropertyAccess { property } = callee.as_ref() {
+            if property == "addOutput" {
+                return true;
+            }
+        }
+        if let Expression::MemberExpr { object, property } = callee.as_ref() {
+            if let Expression::Identifier { name } = object.as_ref() {
+                if name == "this" && property == "addOutput" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }

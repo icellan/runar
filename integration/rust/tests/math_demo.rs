@@ -9,8 +9,7 @@ fn new_state(value: i64) -> Option<CallOptions> {
     state.insert("value".to_string(), SdkValue::Int(value));
     Some(CallOptions {
         new_state: Some(state),
-        satoshis: None,
-        change_address: None,
+        ..Default::default()
     })
 }
 

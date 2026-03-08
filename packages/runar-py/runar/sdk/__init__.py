@@ -3,7 +3,7 @@
 from runar.sdk.types import (
     Utxo, Transaction, TxInput, TxOutput,
     RunarArtifact, Abi, AbiMethod, AbiParam,
-    StateField, ConstructorSlot, DeployOptions, CallOptions,
+    StateField, ConstructorSlot, DeployOptions, CallOptions, OutputSpec,
     SdkValue,
 )
 from runar.sdk.provider import Provider, MockProvider
@@ -19,7 +19,7 @@ from runar.sdk.oppushtx import compute_op_push_tx
 __all__ = [
     'Utxo', 'Transaction', 'TxInput', 'TxOutput',
     'RunarArtifact', 'Abi', 'AbiMethod', 'AbiParam',
-    'StateField', 'ConstructorSlot', 'DeployOptions', 'CallOptions',
+    'StateField', 'ConstructorSlot', 'DeployOptions', 'CallOptions', 'OutputSpec',
     'SdkValue',
     'Provider', 'MockProvider', 'RPCProvider',
     'Signer', 'MockSigner', 'ExternalSigner', 'LocalSigner',

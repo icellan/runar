@@ -164,8 +164,7 @@ fn test_nft_transfer() {
             &*signer,
             Some(&CallOptions {
                 new_state: Some(new_state),
-                satoshis: None,
-                change_address: None,
+                ..Default::default()
             }),
         )
         .expect("transfer failed");
@@ -251,8 +250,7 @@ fn test_nft_wrong_owner_rejected() {
         &*signer_b,
         Some(&CallOptions {
             new_state: Some(new_state),
-            satoshis: None,
-            change_address: None,
+            ..Default::default()
         }),
     );
     assert!(result.is_err(), "transfer with wrong owner should be rejected");

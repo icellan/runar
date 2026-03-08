@@ -193,6 +193,16 @@ class StackMap {
     if (this.slots.length < 1) throw new Error('Stack underflow on dup');
     this.slots.push(this.slots[this.slots.length - 1]!);
   }
+
+  /** Get the set of all named (non-null) slot values. */
+  namedSlots(): Set<string> {
+    const names = new Set<string>();
+    for (const s of this.slots) {
+      if (s !== null) names.add(s);
+    }
+    return names;
+  }
+
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +299,8 @@ class LoweringContext {
   /** Binding names defined in the current lowerBindings scope.
    *  Used by @ref: handler to decide whether to consume (local) or copy (outer-scope). */
   private localBindings: Set<string> = new Set();
+  /** Parent-scope refs that must not be consumed (used after the current if-branch). */
+  private outerProtectedRefs: Set<string> | null = null;
 
   constructor(
     params: string[],
@@ -399,6 +411,14 @@ class LoweringContext {
   lowerBindings(bindings: ANFBinding[], terminalAssert = false): void {
     this.localBindings = new Set(bindings.map(b => b.name));
     const lastUses = computeLastUses(bindings);
+
+    // Protect parent-scope refs that are still needed after this scope
+    // (e.g., txPreimage used both inside an if-branch and after the if).
+    if (this.outerProtectedRefs) {
+      for (const ref of this.outerProtectedRefs) {
+        lastUses.set(ref, bindings.length);
+      }
+    }
 
     // Find the terminal binding index (if terminalAssert is set).
     // If the last binding is an 'if' whose branches end in asserts,
@@ -826,6 +846,22 @@ class LoweringContext {
       return;
     }
 
+    // computeStateOutput(preimage, stateBytes) — same as computeStateOutputHash
+    // but returns raw output bytes WITHOUT hashing. Used when the output bytes
+    // need to be concatenated with a change output before hashing.
+    if (func === 'computeStateOutput') {
+      this.lowerComputeStateOutput(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // buildChangeOutput(pkh, amount) — builds a P2PKH output serialization:
+    //   amount(8LE) + varint(25) + OP_DUP OP_HASH160 OP_PUSHBYTES_20 <pkh> OP_EQUALVERIFY OP_CHECKSIG
+    //   = amount(8LE) + 0x19 + 76a914 <pkh:20> 88ac
+    if (func === 'buildChangeOutput') {
+      this.lowerBuildChangeOutput(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
     // Preimage field extractors — each needs a custom OP_SPLIT sequence
     // because OP_SPLIT produces two stack values and the intermediate stack
     // management cannot be expressed in the simple BUILTIN_OPCODES table.
@@ -940,9 +976,22 @@ class LoweringContext {
     this.bringToTop(cond, isLast);
     this.stackMap.pop(); // OP_IF consumes the condition
 
+    // Identify parent-scope items still needed after this if-expression.
+    // These must NOT be consumed (ROLLed) inside the branches — only PICKed.
+    const protectedRefs = new Set<string>();
+    for (const [ref, lastIdx] of lastUses.entries()) {
+      if (lastIdx > bindingIndex && this.stackMap.has(ref)) {
+        protectedRefs.add(ref);
+      }
+    }
+
+    // Snapshot parent stackMap names before branches run
+    const preIfNames = this.stackMap.namedSlots();
+
     // Lower then-branch
     const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
     thenCtx.stackMap = this.stackMap.clone();
+    thenCtx.outerProtectedRefs = protectedRefs;
     thenCtx.lowerBindings(thenBindings, terminalAssert);
 
     if (terminalAssert && thenCtx.stackMap.depth > 1) {
@@ -953,11 +1002,10 @@ class LoweringContext {
       }
     }
 
-    const thenOps = thenCtx.result.ops;
-
     // Lower else-branch
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
     elseCtx.stackMap = this.stackMap.clone();
+    elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx.lowerBindings(elseBindings, terminalAssert);
 
     if (terminalAssert && elseCtx.stackMap.depth > 1) {
@@ -968,6 +1016,82 @@ class LoweringContext {
       }
     }
 
+    // Balance stack between branches so both end at the same depth.
+    // When addOutput is inside an if-then with no else, the then-branch
+    // consumes stack items and pushes a serialized output, while the
+    // else-branch leaves the stack unchanged. Both must end at the same
+    // depth for correct execution after OP_ENDIF.
+    //
+    // Fix: identify items consumed by the then-branch (present in parent
+    // but gone after then). Emit targeted ROLL+DROP in the else-branch
+    // to remove those same items, then push empty bytes as placeholder.
+    // OP_CAT with empty bytes is identity (no-op for output hashing).
+    const postThenNames = thenCtx.stackMap.namedSlots();
+    const consumedNames: string[] = [];
+    for (const name of preIfNames) {
+      if (!postThenNames.has(name) && elseCtx.stackMap.has(name)) {
+        consumedNames.push(name);
+      }
+    }
+    if (consumedNames.length > 0) {
+      // Remove consumed items from else-branch, deepest first to keep depths stable
+      const depths = consumedNames.map(n => elseCtx.stackMap.findDepth(n)).sort((a, b) => b - a);
+      for (const depth of depths) {
+        if (depth === 0) {
+          elseCtx.emitOp({ op: 'drop' });
+          elseCtx.stackMap.pop();
+        } else if (depth === 1) {
+          elseCtx.emitOp({ op: 'nip' });
+          elseCtx.stackMap.removeAtDepth(1);
+        } else {
+          // Push depth, ROLL to bring item to top, then DROP
+          elseCtx.emitOp({ op: 'push', value: BigInt(depth) });
+          elseCtx.stackMap.push(null);
+          elseCtx.emitOp({ op: 'roll', depth });
+          elseCtx.stackMap.pop(); // remove depth literal
+          const rolled = elseCtx.stackMap.removeAtDepth(depth);
+          elseCtx.stackMap.push(rolled);
+          elseCtx.emitOp({ op: 'drop' });
+          elseCtx.stackMap.pop();
+        }
+      }
+      // Push empty bytes as placeholder result
+      elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
+      elseCtx.stackMap.push(null);
+    }
+    // Handle the reverse case symmetrically (unlikely but safe)
+    const postElseNames = elseCtx.stackMap.namedSlots();
+    const elseConsumedNames: string[] = [];
+    for (const name of preIfNames) {
+      if (!postElseNames.has(name) && thenCtx.stackMap.has(name)) {
+        elseConsumedNames.push(name);
+      }
+    }
+    if (elseConsumedNames.length > 0) {
+      const depths = elseConsumedNames.map(n => thenCtx.stackMap.findDepth(n)).sort((a, b) => b - a);
+      for (const depth of depths) {
+        if (depth === 0) {
+          thenCtx.emitOp({ op: 'drop' });
+          thenCtx.stackMap.pop();
+        } else if (depth === 1) {
+          thenCtx.emitOp({ op: 'nip' });
+          thenCtx.stackMap.removeAtDepth(1);
+        } else {
+          thenCtx.emitOp({ op: 'push', value: BigInt(depth) });
+          thenCtx.stackMap.push(null);
+          thenCtx.emitOp({ op: 'roll', depth });
+          thenCtx.stackMap.pop();
+          const rolled = thenCtx.stackMap.removeAtDepth(depth);
+          thenCtx.stackMap.push(rolled);
+          thenCtx.emitOp({ op: 'drop' });
+          thenCtx.stackMap.pop();
+        }
+      }
+      thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
+      thenCtx.stackMap.push(null);
+    }
+
+    const thenOps = thenCtx.result.ops;
     const elseOps = elseCtx.result.ops;
 
     this.emitOp({
@@ -975,6 +1099,16 @@ class LoweringContext {
       then: thenOps,
       else: elseOps.length > 0 ? elseOps : undefined,
     });
+
+    // Reconcile parent stackMap: remove items consumed by the branches.
+    // Use thenCtx as the reference (both branches must consume the same items).
+    const postBranchNames = thenCtx.stackMap.namedSlots();
+    for (const name of preIfNames) {
+      if (!postBranchNames.has(name) && this.stackMap.has(name)) {
+        const depth = this.stackMap.findDepth(name);
+        this.stackMap.removeAtDepth(depth);
+      }
+    }
 
     // The if expression produces one result value on top
     this.stackMap.push(bindingName);
@@ -1308,6 +1442,179 @@ class LoweringContext {
     // Step 7: Hash with SHA256d (replaces top in-place).
     this.emitOp({ op: 'opcode', code: 'OP_HASH256' });
     // --- Stack: [..., hash256(output)] ---
+
+    this.stackMap.pop();
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  /**
+   * computeStateOutput(preimage, stateBytes) — same as computeStateOutputHash
+   * but returns raw output bytes WITHOUT the final hash. This allows the caller
+   * to concatenate additional outputs (e.g., change output) before hashing.
+   */
+  private lowerComputeStateOutput(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Identical to lowerComputeStateOutputHash steps 1-6, without step 7 (hash).
+    const stateProps = this._properties.filter(p => !p.readonly);
+    let stateLen = 0;
+    for (const prop of stateProps) {
+      switch (prop.type) {
+        case 'bigint': stateLen += 8; break;
+        case 'boolean': stateLen += 1; break;
+        case 'PubKey': stateLen += 33; break;
+        case 'Addr': stateLen += 20; break;
+        case 'Sha256': stateLen += 32; break;
+        case 'Point': stateLen += 64; break;
+        default:
+          throw new Error(`computeStateOutput: unsupported type '${prop.type}' for property '${prop.name}'`);
+      }
+    }
+
+    const preimageRef = args[0]!;
+    const stateBytesRef = args[1]!;
+
+    const stateLast = this.isLastUse(stateBytesRef, bindingIndex, lastUses);
+    this.bringToTop(stateBytesRef, stateLast);
+    const preLast = this.isLastUse(preimageRef, bindingIndex, lastUses);
+    this.bringToTop(preimageRef, preLast);
+
+    // Step 1: Extract middle of preimage: varint + scriptCode + amount.
+    this.emitOp({ op: 'push', value: 104n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'nip' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+
+    // Drop last 44 bytes (nSeq+hashOutputs+nLocktime+sighashType).
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 44n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+
+    // Step 2: Split off amount (last 8 bytes), save to altstack.
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 8n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    this.stackMap.pop();
+
+    // Step 3: Strip current state + OP_RETURN from end.
+    this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: BigInt(stateLen + 1) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SUB' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null); this.stackMap.push(null);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+
+    // Step 4: Append OP_RETURN byte.
+    this.emitOp({ op: 'push', value: new Uint8Array([0x6a]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+
+    // Step 5: Swap and CAT to append stateBytes.
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+
+    // Step 6: Prepend amount from altstack.
+    this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    // --- Stack: [..., fullOutputSerialization] --- (NO hash)
+
+    this.stackMap.pop();
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  /**
+   * buildChangeOutput(pkh, amount) — builds a P2PKH output serialization:
+   *   amount(8LE) + 0x19 + 76a914 <pkh:20bytes> 88ac
+   * Total: 34 bytes (8 + 1 + 25).
+   */
+  private lowerBuildChangeOutput(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    const pkhRef = args[0]!;
+    const amountRef = args[1]!;
+
+    // Step 1: Build the P2PKH locking script with length prefix.
+    // Push prefix: varint(25) + OP_DUP + OP_HASH160 + OP_PUSHBYTES_20 = 0x1976a914
+    this.emitOp({ op: 'push', value: new Uint8Array([0x19, 0x76, 0xa9, 0x14]) });
+    this.stackMap.push(null);
+
+    // Push the 20-byte PKH
+    const pkhLast = this.isLastUse(pkhRef, bindingIndex, lastUses);
+    this.bringToTop(pkhRef, pkhLast);
+    // CAT: prefix || pkh
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+
+    // Push suffix: OP_EQUALVERIFY + OP_CHECKSIG = 0x88ac
+    this.emitOp({ op: 'push', value: new Uint8Array([0x88, 0xac]) });
+    this.stackMap.push(null);
+    // CAT: (prefix || pkh) || suffix
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    // --- Stack: [..., 0x1976a914{pkh}88ac] ---
+
+    // Step 2: Prepend amount as 8-byte LE.
+    const amountLast = this.isLastUse(amountRef, bindingIndex, lastUses);
+    this.bringToTop(amountRef, amountLast);
+    this.emitOp({ op: 'push', value: 8n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
+    this.stackMap.pop(); // pop width
+    // Stack: [..., script, amount(8LE)]
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+    // Stack: [..., amount(8LE), script]
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    // --- Stack: [..., amount(8LE)+0x1976a914{pkh}88ac] ---
 
     this.stackMap.pop();
     this.stackMap.push(bindingName);
@@ -1750,7 +2057,8 @@ class LoweringContext {
         this.emitOp({ op: 'push', value: 32n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-        this.stackMap.pop();
+        this.stackMap.pop(); // pop position (32)
+        this.stackMap.pop(); // pop data being split
         this.stackMap.push(null); // hashPrevouts (32 bytes)
         this.stackMap.push(null); // rest
         this.emitOp({ op: 'drop' }); // drop rest
@@ -1773,7 +2081,8 @@ class LoweringContext {
         this.emitOp({ op: 'push', value: 32n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-        this.stackMap.pop();
+        this.stackMap.pop(); // pop position (32)
+        this.stackMap.pop(); // pop data being split
         this.stackMap.push(null);
         this.stackMap.push(null);
         this.emitOp({ op: 'drop' });
@@ -1796,7 +2105,8 @@ class LoweringContext {
         this.emitOp({ op: 'push', value: 36n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
-        this.stackMap.pop();
+        this.stackMap.pop(); // pop position (36)
+        this.stackMap.pop(); // pop data being split
         this.stackMap.push(null);
         this.stackMap.push(null);
         this.emitOp({ op: 'drop' });

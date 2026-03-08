@@ -17,33 +17,60 @@ def build_call_transaction(
     change_script: str = '',
     additional_utxos: list[Utxo] | None = None,
     fee_rate: int = 1,
-) -> tuple[str, int]:
+    contract_outputs: list[dict] | None = None,
+    additional_contract_inputs: list[dict] | None = None,
+) -> tuple[str, int, int]:
     """Build a raw transaction that spends a contract UTXO.
 
-    Returns (tx_hex, input_count).
+    contract_outputs: list of {"script": str, "satoshis": int} for multi-output.
+    additional_contract_inputs: list of {"utxo": Utxo, "unlocking_script": str}
+        for additional contract inputs (e.g. merge).
+
+    Returns (tx_hex, input_count, change_amount).
     """
+    extra_contract_inputs = additional_contract_inputs or []
     additional = additional_utxos or []
-    all_utxos = [current_utxo] + additional
+    all_utxos = (
+        [current_utxo]
+        + [ci['utxo'] for ci in extra_contract_inputs]
+        + additional
+    )
 
     total_input = sum(u.satoshis for u in all_utxos)
 
-    contract_output_sats = 0
-    if new_locking_script:
-        contract_output_sats = new_satoshis if new_satoshis > 0 else current_utxo.satoshis
+    # Determine contract outputs: multi-output takes priority over single
+    resolved_contract_outputs: list[dict] = []
+    if contract_outputs:
+        resolved_contract_outputs = contract_outputs
+    elif new_locking_script:
+        sats = new_satoshis if new_satoshis > 0 else current_utxo.satoshis
+        resolved_contract_outputs = [{'script': new_locking_script, 'satoshis': sats}]
 
-    # Estimate fee
+    contract_output_sats = sum(co['satoshis'] for co in resolved_contract_outputs)
+
+    # Estimate fee using actual script sizes
     input0_size = (
         32 + 4 +
         _varint_byte_size(len(unlocking_script) // 2) +
         len(unlocking_script) // 2 +
         4
     )
+    extra_contract_inputs_size = 0
+    for ci in extra_contract_inputs:
+        ci_script = ci['unlocking_script']
+        extra_contract_inputs_size += (
+            32 + 4 +
+            _varint_byte_size(len(ci_script) // 2) +
+            len(ci_script) // 2 +
+            4
+        )
     additional_inputs_size = len(additional) * 148  # P2PKH
-    inputs_size = input0_size + additional_inputs_size
+    inputs_size = input0_size + extra_contract_inputs_size + additional_inputs_size
 
     outputs_size = 0
-    if new_locking_script:
-        outputs_size += 8 + _varint_byte_size(len(new_locking_script) // 2) + len(new_locking_script) // 2
+    for co in resolved_contract_outputs:
+        s = co['script']
+        outputs_size += 8 + _varint_byte_size(len(s) // 2) + len(s) // 2
     if change_address or change_script:
         outputs_size += 34  # P2PKH change
 
@@ -65,7 +92,17 @@ def build_call_transaction(
     tx += unlocking_script
     tx += 'ffffffff'
 
-    # Additional inputs (unsigned)
+    # Additional contract inputs (with their own unlocking scripts)
+    for ci in extra_contract_inputs:
+        ci_utxo = ci['utxo']
+        ci_script = ci['unlocking_script']
+        tx += _reverse_hex(ci_utxo.txid)
+        tx += _to_le32(ci_utxo.output_index)
+        tx += _encode_varint(len(ci_script) // 2)
+        tx += ci_script
+        tx += 'ffffffff'
+
+    # P2PKH funding inputs (unsigned)
     for utxo in additional:
         tx += _reverse_hex(utxo.txid)
         tx += _to_le32(utxo.output_index)
@@ -73,18 +110,17 @@ def build_call_transaction(
         tx += 'ffffffff'
 
     # Outputs
-    num_outputs = 0
-    if new_locking_script:
-        num_outputs += 1
+    num_outputs = len(resolved_contract_outputs)
     if change > 0 and (change_address or change_script):
         num_outputs += 1
     tx += _encode_varint(num_outputs)
 
-    # Output 0: new contract state
-    if new_locking_script:
-        tx += _to_le64(contract_output_sats)
-        tx += _encode_varint(len(new_locking_script) // 2)
-        tx += new_locking_script
+    # Contract outputs
+    for co in resolved_contract_outputs:
+        tx += _to_le64(co['satoshis'])
+        s = co['script']
+        tx += _encode_varint(len(s) // 2)
+        tx += s
 
     # Change output
     if change > 0 and (change_address or change_script):
@@ -96,7 +132,7 @@ def build_call_transaction(
     # Locktime
     tx += _to_le32(0)
 
-    return tx, len(all_utxos)
+    return tx, len(all_utxos), change if change > 0 else 0
 
 
 def insert_unlocking_script(tx_hex: str, input_index: int, unlock_script: str) -> str:

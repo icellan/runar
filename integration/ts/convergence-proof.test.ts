@@ -60,7 +60,7 @@ describe('ConvergenceProof', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
     expect(deployTxid.length).toBe(64);
   });
@@ -74,7 +74,7 @@ describe('ConvergenceProof', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     const { txid: spendTxid } = await contract.call(
       'proveConvergence',
@@ -95,7 +95,7 @@ describe('ConvergenceProof', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     await expect(
       contract.call('proveConvergence', [wrongDelta], provider, signer),

@@ -171,35 +171,25 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	// Build ABI with full param info
+	// Build ABI from ANF program (post-lowering) — includes compiler-injected params
+	// like SigHashPreimage, _changePKH, _changeAmount for stateful contracts.
 	contract := parseResult.Contract
 	var abiMethods []runar.ABIMethod
-	for _, m := range contract.Methods {
-		if m.Name == "constructor" {
-			continue
-		}
+	for _, m := range program.Methods {
 		var params []runar.ABIParam
 		for _, p := range m.Params {
-			typeName := "bigint"
-			if p.Type != nil {
-				typeName = astTypeName(p.Type)
-			}
-			params = append(params, runar.ABIParam{Name: p.Name, Type: typeName})
+			params = append(params, runar.ABIParam{Name: p.Name, Type: p.Type})
 		}
 		abiMethods = append(abiMethods, runar.ABIMethod{
 			Name:     m.Name,
 			Params:   params,
-			IsPublic: m.Visibility == "public",
+			IsPublic: m.IsPublic,
 		})
 	}
 
 	var ctorParams []runar.ABIParam
-	for _, p := range contract.Constructor.Params {
-		typeName := "bigint"
-		if p.Type != nil {
-			typeName = astTypeName(p.Type)
-		}
-		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: typeName})
+	for _, p := range program.Properties {
+		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: p.Type})
 	}
 
 	// Build state fields for stateful contracts
@@ -327,34 +317,23 @@ func CompileSourceStringToSDKArtifact(source, fileName string, constructorArgs m
 		return nil, fmt.Errorf("emit: %w", err)
 	}
 
-	contract := parseResult.Contract
+	// Build ABI from ANF program (post-lowering) — includes compiler-injected params
 	var abiMethods []runar.ABIMethod
-	for _, m := range contract.Methods {
-		if m.Name == "constructor" {
-			continue
-		}
+	for _, m := range program.Methods {
 		var params []runar.ABIParam
 		for _, p := range m.Params {
-			typeName := "bigint"
-			if p.Type != nil {
-				typeName = astTypeName(p.Type)
-			}
-			params = append(params, runar.ABIParam{Name: p.Name, Type: typeName})
+			params = append(params, runar.ABIParam{Name: p.Name, Type: p.Type})
 		}
 		abiMethods = append(abiMethods, runar.ABIMethod{
 			Name:     m.Name,
 			Params:   params,
-			IsPublic: m.Visibility == "public",
+			IsPublic: m.IsPublic,
 		})
 	}
 
 	var ctorParams []runar.ABIParam
-	for _, p := range contract.Constructor.Params {
-		typeName := "bigint"
-		if p.Type != nil {
-			typeName = astTypeName(p.Type)
-		}
-		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: typeName})
+	for _, p := range program.Properties {
+		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: p.Type})
 	}
 
 	var cSlots []runar.ConstructorSlot

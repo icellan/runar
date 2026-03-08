@@ -458,16 +458,33 @@ function compareScript(...outputs: (CompilerOutput | undefined)[]): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the source file for a conformance test directory.
+ *
+ * If `source.json` exists with a `path` field, resolve that path relative to
+ * the test directory. Otherwise fall back to `<testName>.runar.ts` in the dir.
+ */
+function resolveSourceFile(testDir: string, testName: string): string {
+  const configFile = join(testDir, 'source.json');
+  if (existsSync(configFile)) {
+    const config = JSON.parse(readFileSync(configFile, 'utf-8')) as { path?: string };
+    if (config.path) {
+      return resolve(testDir, config.path);
+    }
+  }
+  return join(testDir, `${testName}.runar.ts`);
+}
+
+/**
  * Run the conformance test in a single test directory.
  *
  * The directory is expected to contain:
- * - `<name>.runar.ts` -- the contract source
+ * - `<name>.runar.ts` -- the contract source (or `source.json` pointing to one)
  * - `expected-ir.json` -- golden ANF IR (optional)
  * - `expected-script.hex` -- golden compiled script (optional)
  */
 export async function runConformanceTest(testDir: string): Promise<ConformanceResult> {
   const testName = basename(testDir);
-  const sourceFile = join(testDir, `${testName}.runar.ts`);
+  const sourceFile = resolveSourceFile(testDir, testName);
   const expectedIrFile = join(testDir, 'expected-ir.json');
   const expectedScriptFile = join(testDir, 'expected-script.hex');
 
@@ -612,7 +629,7 @@ export async function runAllConformanceTests(
  */
 export async function updateGoldenFiles(testDir: string): Promise<void> {
   const testName = basename(testDir);
-  const sourceFile = join(testDir, `${testName}.runar.ts`);
+  const sourceFile = resolveSourceFile(testDir, testName);
   const source = readFileSync(sourceFile, 'utf-8');
 
   const tsResult = runTsCompiler(source, sourceFile);

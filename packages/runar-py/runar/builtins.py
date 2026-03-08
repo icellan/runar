@@ -96,6 +96,17 @@ def extract_version(preimage: bytes) -> int:
 def extract_sequence(preimage: bytes) -> int:
     return 0xFFFFFFFF
 
+def extract_hash_prevouts(preimage: bytes) -> bytes:
+    """Returns hash256(72 zero bytes) in test mode.
+
+    This is consistent with passing all_prevouts = 72 zero bytes in tests,
+    since extract_outpoint also returns 36 zero bytes.
+    """
+    return hash256(b'\x00' * 72)
+
+def extract_outpoint(preimage: bytes) -> bytes:
+    return b'\x00' * 36
+
 
 # -- Math Utilities ----------------------------------------------------------
 

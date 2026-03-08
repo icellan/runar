@@ -34,7 +34,11 @@ export {
   serializeState,
   deserializeState,
   extractStateFromScript,
+  findLastOpReturn,
 } from './state.js';
+
+// OP_PUSH_TX
+export { computeOpPushTx } from './oppushtx.js';
 
 // Token management
 export { TokenWallet } from './tokens.js';

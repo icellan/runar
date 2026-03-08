@@ -10,7 +10,7 @@ import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
-import { Utils } from '@bsv/sdk';
+import { Utils, Hash, Transaction as BsvTransaction } from '@bsv/sdk';
 
 /**
  * Runtime wrapper for a compiled Runar contract.
@@ -129,7 +129,7 @@ export class RunarContract {
       options = maybeOptions;
     } else if (
       typeof providerOrOptions === 'object' &&
-      'satoshis' in providerOrOptions
+      !('getUtxos' in providerOrOptions)
     ) {
       // Connected: deploy(options)
       const resolved = this.resolveProviderSigner();
@@ -146,6 +146,7 @@ export class RunarContract {
 
     const address = await signer.getAddress();
     const changeAddress = options.changeAddress ?? address;
+    const deploySatoshis = options.satoshis ?? 1;
     const lockingScript = this.getLockingScript();
 
     // Fetch fee rate and funding UTXOs
@@ -154,14 +155,14 @@ export class RunarContract {
     if (allUtxos.length === 0) {
       throw new Error(`RunarContract.deploy: no UTXOs found for address ${address}`);
     }
-    const utxos = selectUtxos(allUtxos, options.satoshis, lockingScript.length / 2, feeRate);
+    const utxos = selectUtxos(allUtxos, deploySatoshis, lockingScript.length / 2, feeRate);
 
     // Build the deploy transaction
     const changeScript = buildP2PKHScriptFromAddress(changeAddress);
     const { txHex, inputCount } = buildDeployTransaction(
       lockingScript,
       utxos,
-      options.satoshis,
+      deploySatoshis,
       changeAddress,
       changeScript,
       feeRate,
@@ -185,7 +186,7 @@ export class RunarContract {
     this.currentUtxo = {
       txid,
       outputIndex: 0,
-      satoshis: options.satoshis,
+      satoshis: deploySatoshis,
       script: lockingScript,
     };
 
@@ -195,7 +196,7 @@ export class RunarContract {
         txid,
         version: 1,
         inputs: [],
-        outputs: [{ satoshis: options.satoshis, script: lockingScript }],
+        outputs: [{ satoshis: deploySatoshis, script: lockingScript }],
         locktime: 0,
         raw: signedTx,
       };
@@ -270,15 +271,21 @@ export class RunarContract {
         `RunarContract.call: method '${methodName}' not found in ${this.artifact.contractName}`,
       );
     }
-    // For stateful contracts, the compiler injects SigHashPreimage into every
-    // public method's ABI, but the SDK auto-computes it. Filter it out so
-    // users only pass their own args. For stateless contracts, SigHashPreimage
-    // is an explicit param that the user passes as null for auto-compute.
+    // For stateful contracts, the compiler injects implicit params into every
+    // public method's ABI (SigHashPreimage, and for state-mutating methods:
+    // _changePKH and _changeAmount). The SDK auto-computes these.
+    // Filter them out so users only pass their own args.
     const isStateful =
       this.artifact.stateFields !== undefined &&
       this.artifact.stateFields.length > 0;
+    const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const userParams = isStateful
-      ? method.params.filter((p) => p.type !== 'SigHashPreimage')
+      ? method.params.filter(
+          (p) =>
+            p.type !== 'SigHashPreimage' &&
+            p.name !== '_changePKH' &&
+            p.name !== '_changeAmount',
+        )
       : method.params;
     if (userParams.length !== args.length) {
       throw new Error(
@@ -303,6 +310,7 @@ export class RunarContract {
     // userParams excludes SigHashPreimage (auto-computed for stateful contracts).
     // For stateless contracts with explicit SigHashPreimage, the user passes null.
     const sigIndices: number[] = [];
+    const prevoutsIndices: number[] = [];
     let preimageIndex = -1;
     const resolvedArgs = [...args];
     for (let i = 0; i < userParams.length; i++) {
@@ -318,6 +326,12 @@ export class RunarContract {
         preimageIndex = i;
         // Placeholder preimage (will be replaced after tx construction)
         resolvedArgs[i] = '00'.repeat(181);
+      }
+      if (userParams[i]!.type === 'ByteString' && args[i] === null) {
+        prevoutsIndices.push(i);
+        // Placeholder sized to estimated input count (1 primary + N extra + 1 funding)
+        const estimatedInputs = 1 + (options?.additionalContractInputs?.length ?? 0) + 1;
+        resolvedArgs[i] = '00'.repeat(36 * estimatedInputs);
       }
     }
 
@@ -338,7 +352,23 @@ export class RunarContract {
     let newLockingScript: string | undefined;
     let newSatoshis: number | undefined;
 
-    if (isStateful) {
+    // Build contract outputs: multi-output (options.outputs) takes priority,
+    // then single continuation (options.newState), then default.
+    let contractOutputs: Array<{ script: string; satoshis: number }> | undefined;
+    const extraContractUtxos = options?.additionalContractInputs ?? [];
+    const hasMultiOutput = options?.outputs && options.outputs.length > 0;
+
+    if (isStateful && hasMultiOutput) {
+      // Multi-output: build a locking script for each output
+      const codeScript = this._codeScript ?? this.buildCodeScript();
+      contractOutputs = options!.outputs!.map((out) => {
+        const stateHex = serializeState(this.artifact.stateFields!, out.state);
+        // Default to 1 satoshi per output
+        return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
+      });
+    } else if (isStateful) {
+      // For single-output continuations, the on-chain script uses the input amount
+      // (extracted from the preimage). The SDK output must match.
       newSatoshis = options?.satoshis ?? this.currentUtxo.satoshis;
       // Apply new state values before building the continuation output
       if (options?.newState) {
@@ -347,26 +377,52 @@ export class RunarContract {
       newLockingScript = this.getLockingScript();
     }
 
-    // For stateful single-output continuation, the TX must have exactly one
-    // output (the continuation UTXO). The compiler's computeStateOutputHash
-    // hashes only that output and compares with BIP-143 hashOutputs.
-    let changeScript = '';
-    let additionalUtxos: UTXO[] = [];
-    let feeRate = 1;
+    // Fetch fee rate and funding UTXOs for all contract types.
+    // For stateful contracts with change output support, the change output
+    // is verified by the on-chain script (hashOutputs check).
+    const feeRate = await provider.getFeeRate();
+    const changeScript = buildP2PKHScriptFromAddress(changeAddress);
+    const allFundingUtxos = await provider.getUtxos(address);
+    const additionalUtxos = allFundingUtxos.filter(
+      (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex),
+    );
 
-    if (!isStateful) {
-      changeScript = buildP2PKHScriptFromAddress(changeAddress);
-      feeRate = await provider.getFeeRate();
-      const allFundingUtxos = await provider.getUtxos(address);
-      // Exclude the contract UTXO from funding inputs (it's already input 0).
-      // This matters when the contract script is identical to a standard P2PKH
-      // (e.g., the P2PKH contract), so getUtxos returns it alongside change.
-      additionalUtxos = allFundingUtxos.filter(
-        (u) => !(u.txid === this.currentUtxo!.txid && u.outputIndex === this.currentUtxo!.outputIndex),
-      );
+    // Compute change PKH for stateful methods that need it
+    let changePKHHex = '';
+    if (isStateful && methodNeedsChange) {
+      const changePubKeyHex = options?.changePubKey ?? await signer.getPublicKey();
+      const pubKeyBytes = Utils.toArray(changePubKeyHex, 'hex');
+      const hash160Bytes = Hash.hash160(pubKeyBytes);
+      changePKHHex = Utils.toHex(hash160Bytes);
     }
 
-    let { txHex, inputCount } = buildCallTransaction(
+    // Resolve per-input args for additional contract inputs (same Sig/PubKey handling as primary args)
+    const resolvedPerInputArgs: unknown[][] | undefined = options?.additionalContractInputArgs
+      ? options.additionalContractInputArgs.map((inputArgs) => {
+          const resolved = [...inputArgs];
+          for (let i = 0; i < userParams.length; i++) {
+            if (userParams[i]!.type === 'Sig' && resolved[i] === null) {
+              resolved[i] = '00'.repeat(72); // placeholder
+            }
+            if (userParams[i]!.type === 'PubKey' && resolved[i] === null) {
+              resolved[i] = resolvedArgs[userParams.findIndex((p) => p.type === 'PubKey')];
+            }
+            if (userParams[i]!.type === 'ByteString' && resolved[i] === null) {
+              const estimatedInputs = 1 + (options?.additionalContractInputs?.length ?? 0) + 1;
+              resolved[i] = '00'.repeat(36 * estimatedInputs);
+            }
+          }
+          return resolved;
+        })
+      : undefined;
+
+    // Build placeholder unlocking scripts for merge inputs
+    const extraUnlockPlaceholders = extraContractUtxos.map((_, i) => {
+      const argsForPlaceholder = resolvedPerInputArgs?.[i] ?? resolvedArgs;
+      return encodePushData('00'.repeat(72)) + this.buildUnlockingScript(methodName, argsForPlaceholder);
+    });
+
+    let { txHex, inputCount, changeAmount } = buildCallTransaction(
       this.currentUtxo,
       unlockingScript,
       newLockingScript,
@@ -375,12 +431,19 @@ export class RunarContract {
       changeScript,
       additionalUtxos.length > 0 ? additionalUtxos : undefined,
       feeRate,
+      {
+        contractOutputs,
+        additionalContractInputs: extraContractUtxos.length > 0
+          ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
+          : undefined,
+      },
     );
 
-    // Sign additional inputs (input 0 already has the unlocking script)
+    // Sign P2PKH funding inputs (after contract inputs)
     let signedTx = txHex;
-    for (let i = 1; i < inputCount; i++) {
-      const utxo = additionalUtxos[i - 1];
+    const p2pkhStartIdx = 1 + extraContractUtxos.length;
+    for (let i = p2pkhStartIdx; i < inputCount; i++) {
+      const utxo = additionalUtxos[i - p2pkhStartIdx];
       if (utxo) {
         const sig = await signer.sign(signedTx, i, utxo.script, utxo.satoshis);
         const pubKey = await signer.getPublicKey();
@@ -390,24 +453,9 @@ export class RunarContract {
     }
 
     // For stateful contracts, build the OP_PUSH_TX unlocking script:
-    //   <opPushTxSig> <user_args> <txPreimage> <methodSelector>
+    //   <opPushTxSig> <user_args> [<_changePKH> <_changeAmount>] <txPreimage> <methodSelector>
     if (isStateful) {
-      const { sigHex: opSig, preimageHex: preimage } = computeOpPushTx(
-        signedTx, 0, this.currentUtxo.script, this.currentUtxo.satoshis,
-      );
-
-      // Re-sign any Sig params against the current tx
-      for (const idx of sigIndices) {
-        resolvedArgs[idx] = await signer.sign(
-          signedTx, 0, this.currentUtxo.script, this.currentUtxo.satoshis,
-        );
-      }
-
-      // Build: <opPushTxSig> <user_args> <txPreimage> <methodSelector>
-      let userArgsHex = '';
-      for (const arg of resolvedArgs) {
-        userArgsHex += encodeArg(arg);
-      }
+      // Compute method selector
       let methodSelectorHex = '';
       const publicMethods = this.artifact.abi.methods.filter((m) => m.isPublic);
       if (publicMethods.length > 1) {
@@ -415,46 +463,107 @@ export class RunarContract {
         if (idx >= 0) methodSelectorHex = encodeScriptNumber(BigInt(idx));
       }
 
-      const statefulUnlock = encodePushData(opSig) +
-        userArgsHex +
-        encodePushData(preimage) +
-        methodSelectorHex;
+      // Per-input args for additional contract inputs (e.g., merge with different otherBalance per input)
+      const perInputArgs = options?.additionalContractInputArgs;
 
-      // Rebuild TX with the real unlocking script
-      ({ txHex, inputCount } = buildCallTransaction(
+      // Helper to build a stateful unlocking script for a given input
+      const buildStatefulUnlock = async (
+        tx: string, inputIdx: number, subscript: string, sats: number,
+        argsOverride?: unknown[],
+        txChangeAmount?: number,
+      ): Promise<string> => {
+        const { sigHex: opSig, preimageHex: preimage } = computeOpPushTx(
+          tx, inputIdx, subscript, sats,
+        );
+        // Use per-input args override if provided, otherwise clone primary resolvedArgs
+        const baseArgs = argsOverride ?? resolvedArgs;
+        const inputArgs = [...baseArgs];
+        // Resolve Sig params (auto-computed per input)
+        for (const idx of sigIndices) {
+          inputArgs[idx] = await signer.sign(tx, inputIdx, subscript, sats);
+        }
+        // Resolve ByteString params passed as null (auto-compute allPrevouts from tx)
+        if (prevoutsIndices.length > 0) {
+          const parsedTx = BsvTransaction.fromHex(tx);
+          let allPrevoutsHex = '';
+          for (const inp of parsedTx.inputs) {
+            // txid is big-endian in sourceTXID, reverse to little-endian
+            const txidLE = inp.sourceTXID!.match(/.{2}/g)!.reverse().join('');
+            const voutLE = inp.sourceOutputIndex.toString(16).padStart(8, '0')
+              .match(/.{2}/g)!.reverse().join('');
+            allPrevoutsHex += txidLE + voutLE;
+          }
+          // DEBUG: log prevouts and hashPrevouts
+          for (const idx of prevoutsIndices) {
+            inputArgs[idx] = allPrevoutsHex;
+          }
+        }
+        let argsHex = '';
+        for (const arg of inputArgs) argsHex += encodeArg(arg);
+        // Append change params (PKH + amount) for methods that need them
+        let changeHex = '';
+        if (methodNeedsChange && changePKHHex) {
+          changeHex = encodePushData(changePKHHex) + encodeArg(BigInt(txChangeAmount ?? 0));
+        }
+        const fullUnlock = encodePushData(opSig) + argsHex + changeHex + encodePushData(preimage) + methodSelectorHex;
+        return fullUnlock;
+      };
+
+      // First pass: build unlocking scripts with current tx layout
+      const input0Unlock = await buildStatefulUnlock(
+        signedTx, 0, this.currentUtxo.script, this.currentUtxo.satoshis,
+        undefined, changeAmount,
+      );
+      const extraUnlocks: string[] = [];
+      for (let i = 0; i < extraContractUtxos.length; i++) {
+        const mu = extraContractUtxos[i]!;
+        const extraArgs = perInputArgs?.[i] ? resolvedPerInputArgs?.[i] : undefined;
+        extraUnlocks.push(await buildStatefulUnlock(signedTx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount));
+      }
+
+      // Rebuild TX with real unlocking scripts (sizes may differ from placeholders)
+      ({ txHex, inputCount, changeAmount } = buildCallTransaction(
         this.currentUtxo,
-        statefulUnlock,
+        input0Unlock,
         newLockingScript,
         newSatoshis,
         changeAddress,
         changeScript,
-        undefined,
+        additionalUtxos.length > 0 ? additionalUtxos : undefined,
         feeRate,
+        {
+          contractOutputs,
+          additionalContractInputs: extraContractUtxos.length > 0
+            ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlocks[i]! }))
+            : undefined,
+        },
       ));
       signedTx = txHex;
 
-      // Recompute OP_PUSH_TX from the final TX (preimage changes with unlock size)
-      const { sigHex: finalSig, preimageHex: finalPreimage } = computeOpPushTx(
+      // Second pass: recompute with final tx (preimage changes with unlock size)
+      const finalInput0Unlock = await buildStatefulUnlock(
         signedTx, 0, this.currentUtxo.script, this.currentUtxo.satoshis,
+        undefined, changeAmount,
       );
+      signedTx = insertUnlockingScript(signedTx, 0, finalInput0Unlock);
 
-      // Re-sign Sig params against the final tx if needed
-      for (const idx of sigIndices) {
-        resolvedArgs[idx] = await signer.sign(
-          signedTx, 0, this.currentUtxo.script, this.currentUtxo.satoshis,
-        );
+      for (let i = 0; i < extraContractUtxos.length; i++) {
+        const mu = extraContractUtxos[i]!;
+        const extraArgs = perInputArgs?.[i] ? resolvedPerInputArgs?.[i] : undefined;
+        const finalMergeUnlock = await buildStatefulUnlock(signedTx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount);
+        signedTx = insertUnlockingScript(signedTx, i + 1, finalMergeUnlock);
       }
 
-      userArgsHex = '';
-      for (const arg of resolvedArgs) {
-        userArgsHex += encodeArg(arg);
+      // Re-sign P2PKH funding inputs (outputs changed after rebuild)
+      for (let i = p2pkhStartIdx; i < inputCount; i++) {
+        const utxo = additionalUtxos[i - p2pkhStartIdx];
+        if (utxo) {
+          const sig = await signer.sign(signedTx, i, utxo.script, utxo.satoshis);
+          const pubKey = await signer.getPublicKey();
+          const unlockScript = encodePushData(sig) + encodePushData(pubKey);
+          signedTx = insertUnlockingScript(signedTx, i, unlockScript);
+        }
       }
-
-      const finalUnlock = encodePushData(finalSig) +
-        userArgsHex +
-        encodePushData(finalPreimage) +
-        methodSelectorHex;
-      signedTx = insertUnlockingScript(signedTx, 0, finalUnlock);
     } else if (needsOpPushTx || sigIndices.length > 0) {
       // Stateless with SigHashPreimage or Sig params: auto-compute
       let opPushTxSigHex: string | undefined;
@@ -496,7 +605,15 @@ export class RunarContract {
     const txid = await provider.broadcast(signedTx);
 
     // Update tracked UTXO for stateful contracts
-    if (isStateful && newLockingScript) {
+    if (isStateful && hasMultiOutput) {
+      // Multi-output: track the first continuation output
+      this.currentUtxo = {
+        txid,
+        outputIndex: 0,
+        satoshis: contractOutputs![0]!.satoshis,
+        script: contractOutputs![0]!.script,
+      };
+    } else if (isStateful && newLockingScript) {
       this.currentUtxo = {
         txid,
         outputIndex: 0,

@@ -208,6 +208,11 @@ impl StackMap {
         let top = self.slots.last().unwrap().clone();
         self.slots.push(top);
     }
+
+    /// Get the set of all non-empty slot names.
+    fn named_slots(&self) -> HashSet<String> {
+        self.slots.iter().filter(|s| !s.is_empty()).cloned().collect()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,6 +317,8 @@ struct LoweringContext {
     /// Binding names defined in the current lowerBindings scope.
     /// Used by @ref: handler to decide whether to consume (local) or copy (outer-scope).
     local_bindings: HashSet<String>,
+    /// Parent-scope refs that must not be consumed (used after current if-branch).
+    outer_protected_refs: Option<HashSet<String>>,
 }
 
 impl LoweringContext {
@@ -323,6 +330,7 @@ impl LoweringContext {
             properties: properties.to_vec(),
             private_methods: HashMap::new(),
             local_bindings: HashSet::new(),
+            outer_protected_refs: None,
         };
         ctx.track_depth();
         ctx
@@ -403,7 +411,14 @@ impl LoweringContext {
 
     fn lower_bindings(&mut self, bindings: &[ANFBinding], terminal_assert: bool) {
         self.local_bindings = bindings.iter().map(|b| b.name.clone()).collect();
-        let last_uses = compute_last_uses(bindings);
+        let mut last_uses = compute_last_uses(bindings);
+
+        // Protect parent-scope refs that are still needed after this scope
+        if let Some(ref protected) = self.outer_protected_refs {
+            for r in protected {
+                last_uses.insert(r.clone(), bindings.len());
+            }
+        }
 
         // Find the terminal binding index (if terminal_assert is set).
         // If the last binding is an 'if' whose branches end in asserts,
@@ -857,6 +872,22 @@ impl LoweringContext {
             return;
         }
 
+        // computeStateOutput(preimage, stateBytes) — same as computeStateOutputHash
+        // but returns raw output bytes WITHOUT hashing. Used when the output bytes
+        // need to be concatenated with a change output before hashing.
+        if func_name == "computeStateOutput" {
+            self.lower_compute_state_output(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        // buildChangeOutput(pkh, amount) — builds a P2PKH output serialization:
+        //   amount(8LE) + varint(25) + OP_DUP OP_HASH160 OP_PUSHBYTES_20 <pkh> OP_EQUALVERIFY OP_CHECKSIG
+        //   = amount(8LE) + 0x19 + 76a914 <pkh:20> 88ac
+        if func_name == "buildChangeOutput" {
+            self.lower_build_change_output(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
         // Preimage field extractors — each needs a custom OP_SPLIT sequence
         // because OP_SPLIT produces two stack values and the intermediate stack
         // management cannot be expressed in the simple builtin_opcodes table.
@@ -975,9 +1006,21 @@ impl LoweringContext {
         self.bring_to_top(cond, is_last);
         self.sm.pop(); // OP_IF consumes condition
 
+        // Identify parent-scope items still needed after this if-expression.
+        let mut protected_refs = HashSet::new();
+        for (ref_name, &last_idx) in last_uses.iter() {
+            if last_idx > binding_index && self.sm.has(ref_name) {
+                protected_refs.insert(ref_name.clone());
+            }
+        }
+
+        // Snapshot parent stackMap names before branches run
+        let pre_if_names = self.sm.named_slots();
+
         // Lower then-branch
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
+        then_ctx.outer_protected_refs = Some(protected_refs.clone());
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
         if terminal_assert && then_ctx.sm.depth() > 1 {
@@ -988,11 +1031,10 @@ impl LoweringContext {
             }
         }
 
-        let then_ops = then_ctx.ops;
-
         // Lower else-branch
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
+        else_ctx.outer_protected_refs = Some(protected_refs);
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 
         if terminal_assert && else_ctx.sm.depth() > 1 {
@@ -1003,6 +1045,90 @@ impl LoweringContext {
             }
         }
 
+        // Balance stack between branches so both end at the same depth.
+        // When addOutput is inside an if-then with no else, the then-branch
+        // consumes stack items and pushes a serialized output, while the
+        // else-branch leaves the stack unchanged. Both must end at the same
+        // depth for correct execution after OP_ENDIF.
+        //
+        // Fix: identify items consumed by the then-branch (present in parent
+        // but gone after then). Emit targeted ROLL+DROP in the else-branch
+        // to remove those same items, then push empty bytes as placeholder.
+        // OP_CAT with empty bytes is identity (no-op for output hashing).
+        let post_then_names = then_ctx.sm.named_slots();
+        let mut consumed_names: Vec<String> = Vec::new();
+        for name in &pre_if_names {
+            if !post_then_names.contains(name) && else_ctx.sm.has(name) {
+                consumed_names.push(name.clone());
+            }
+        }
+        if !consumed_names.is_empty() {
+            // Remove consumed items from else-branch, deepest first to keep depths stable
+            let mut depths: Vec<usize> = consumed_names
+                .iter()
+                .map(|n| else_ctx.sm.find_depth(n).unwrap())
+                .collect();
+            depths.sort_by(|a, b| b.cmp(a));
+            for depth in depths {
+                if depth == 0 {
+                    else_ctx.emit_op(StackOp::Drop);
+                    else_ctx.sm.pop();
+                } else if depth == 1 {
+                    else_ctx.emit_op(StackOp::Nip);
+                    else_ctx.sm.remove_at_depth(1);
+                } else {
+                    // Push depth, ROLL to bring item to top, then DROP
+                    else_ctx.emit_op(StackOp::Push(PushValue::Int(depth as i128)));
+                    else_ctx.sm.push("");
+                    else_ctx.emit_op(StackOp::Roll { depth });
+                    else_ctx.sm.pop(); // remove depth literal
+                    let rolled = else_ctx.sm.remove_at_depth(depth);
+                    else_ctx.sm.push(&rolled);
+                    else_ctx.emit_op(StackOp::Drop);
+                    else_ctx.sm.pop();
+                }
+            }
+            // Push empty bytes as placeholder result
+            else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
+            else_ctx.sm.push("");
+        }
+        // Handle the reverse case symmetrically (unlikely but safe)
+        let post_else_names = else_ctx.sm.named_slots();
+        let mut else_consumed_names: Vec<String> = Vec::new();
+        for name in &pre_if_names {
+            if !post_else_names.contains(name) && then_ctx.sm.has(name) {
+                else_consumed_names.push(name.clone());
+            }
+        }
+        if !else_consumed_names.is_empty() {
+            let mut depths: Vec<usize> = else_consumed_names
+                .iter()
+                .map(|n| then_ctx.sm.find_depth(n).unwrap())
+                .collect();
+            depths.sort_by(|a, b| b.cmp(a));
+            for depth in depths {
+                if depth == 0 {
+                    then_ctx.emit_op(StackOp::Drop);
+                    then_ctx.sm.pop();
+                } else if depth == 1 {
+                    then_ctx.emit_op(StackOp::Nip);
+                    then_ctx.sm.remove_at_depth(1);
+                } else {
+                    then_ctx.emit_op(StackOp::Push(PushValue::Int(depth as i128)));
+                    then_ctx.sm.push("");
+                    then_ctx.emit_op(StackOp::Roll { depth });
+                    then_ctx.sm.pop();
+                    let rolled = then_ctx.sm.remove_at_depth(depth);
+                    then_ctx.sm.push(&rolled);
+                    then_ctx.emit_op(StackOp::Drop);
+                    then_ctx.sm.pop();
+                }
+            }
+            then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
+            then_ctx.sm.push("");
+        }
+
+        let then_ops = then_ctx.ops;
         let else_ops = else_ctx.ops;
 
         self.emit_op(StackOp::If {
@@ -1013,6 +1139,16 @@ impl LoweringContext {
                 else_ops
             },
         });
+
+        // Reconcile parent stackMap: remove items consumed by the branches.
+        let post_branch_names = then_ctx.sm.named_slots();
+        for name in &pre_if_names {
+            if !post_branch_names.contains(name) && self.sm.has(name) {
+                if let Some(depth) = self.sm.find_depth(name) {
+                    self.sm.remove_at_depth(depth);
+                }
+            }
+        }
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -1316,6 +1452,202 @@ impl LoweringContext {
 
         // Step 7: Hash with SHA256d.
         self.emit_op(StackOp::Opcode("OP_HASH256".into()));
+
+        self.sm.pop();
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// `computeStateOutput(preimage, stateBytes)` — same as `computeStateOutputHash`
+    /// but returns raw output bytes WITHOUT the final OP_HASH256. This allows the
+    /// caller to concatenate additional outputs (e.g., change output) before hashing.
+    fn lower_compute_state_output(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &std::collections::HashMap<String, usize>,
+    ) {
+        // Compute fixed state serialization length from non-readonly properties.
+        let mut state_len: usize = 0;
+        for p in &self.properties {
+            if p.readonly {
+                continue;
+            }
+            state_len += match p.prop_type.as_str() {
+                "bigint" => 8,
+                "boolean" => 1,
+                "PubKey" => 33,
+                "Addr" => 20,
+                "Sha256" => 32,
+                "Point" => 64,
+                _ => panic!(
+                    "computeStateOutput: unsupported mutable property type '{}' for '{}'",
+                    p.prop_type, p.name
+                ),
+            };
+        }
+
+        let preimage_ref = &args[0];
+        let state_bytes_ref = &args[1];
+
+        // Bring stateBytes then preimage to top.
+        let sb_last = self.is_last_use(state_bytes_ref, binding_index, last_uses);
+        self.bring_to_top(state_bytes_ref, sb_last);
+        let pre_last = self.is_last_use(preimage_ref, binding_index, last_uses);
+        self.bring_to_top(preimage_ref, pre_last);
+
+        // Stack: [..., stateBytes, preimage]
+
+        // Step 1: Extract middle: varint + scriptCode + amount.
+        self.emit_op(StackOp::Push(PushValue::Int(104)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [prefix, rest]
+        self.sm.pop(); // 104
+        self.sm.pop(); // preimage
+        self.sm.push(""); // prefix
+        self.sm.push(""); // rest
+        self.emit_op(StackOp::Nip); // drop prefix
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // rest
+
+        // Drop last 44 bytes.
+        self.emit_op(StackOp::Opcode("OP_SIZE".into())); // [rest, restLen]
+        self.sm.push(""); // restLen (1 push for OP_SIZE)
+        self.emit_op(StackOp::Push(PushValue::Int(44)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [middle, tail44]
+        self.sm.pop(); // position
+        self.sm.pop(); // rest
+        self.sm.push(""); // middle
+        self.sm.push(""); // tail44
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // Step 2: Split off amount (last 8 bytes), save to altstack.
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(8)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+sc, amount]
+        self.sm.pop(); // position
+        self.sm.pop(); // middle
+        self.sm.push(""); // varint+sc
+        self.sm.push(""); // amount
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.sm.pop();
+
+        // Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int((state_len + 1) as i128)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+code, opReturn+state]
+        self.sm.pop(); // position
+        self.sm.pop(); // varint+sc
+        self.sm.push(""); // varint+code
+        self.sm.push(""); // opReturn+state
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // Step 4: Append OP_RETURN byte (0x6a as data).
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        // Step 5: Swap and CAT to append stateBytes.
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        // Step 6: Prepend amount from altstack.
+        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        // --- Stack: [..., fullOutputSerialization] --- (NO hash)
+
+        self.sm.pop();
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    /// `buildChangeOutput(pkh, amount)` — builds a P2PKH output serialization:
+    ///   amount(8LE) + 0x19 + 76a914 <pkh:20bytes> 88ac
+    /// Total: 34 bytes (8 + 1 + 25).
+    fn lower_build_change_output(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &std::collections::HashMap<String, usize>,
+    ) {
+        let pkh_ref = &args[0];
+        let amount_ref = &args[1];
+
+        // Step 1: Build the P2PKH locking script with length prefix.
+        // Push prefix: varint(25) + OP_DUP + OP_HASH160 + OP_PUSHBYTES_20 = 0x1976a914
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x19, 0x76, 0xa9, 0x14])));
+        self.sm.push("");
+
+        // Push the 20-byte PKH
+        let pkh_last = self.is_last_use(pkh_ref, binding_index, last_uses);
+        self.bring_to_top(pkh_ref, pkh_last);
+        // CAT: prefix || pkh
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        // Push suffix: OP_EQUALVERIFY + OP_CHECKSIG = 0x88ac
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x88, 0xac])));
+        self.sm.push("");
+        // CAT: (prefix || pkh) || suffix
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        // --- Stack: [..., 0x1976a914{pkh}88ac] ---
+
+        // Step 2: Prepend amount as 8-byte LE.
+        let amount_last = self.is_last_use(amount_ref, binding_index, last_uses);
+        self.bring_to_top(amount_ref, amount_last);
+        self.emit_op(StackOp::Push(PushValue::Int(8)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); // pop width
+        // Stack: [..., script, amount(8LE)]
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        // Stack: [..., amount(8LE), script]
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        // --- Stack: [..., amount(8LE)+0x1976a914{pkh}88ac] ---
 
         self.sm.pop();
         self.sm.push(binding_name);
@@ -1780,7 +2112,8 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Int(32)));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-                self.sm.pop();
+                self.sm.pop(); // pop position (32)
+                self.sm.pop(); // pop data being split
                 self.sm.push("");
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
@@ -1801,7 +2134,8 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Int(32)));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-                self.sm.pop();
+                self.sm.pop(); // pop position (32)
+                self.sm.pop(); // pop data being split
                 self.sm.push("");
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);
@@ -1822,7 +2156,8 @@ impl LoweringContext {
                 self.emit_op(StackOp::Push(PushValue::Int(36)));
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-                self.sm.pop();
+                self.sm.pop(); // pop position (36)
+                self.sm.pop(); // pop data being split
                 self.sm.push("");
                 self.sm.push("");
                 self.emit_op(StackOp::Drop);

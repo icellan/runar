@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 from base64 import b64encode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from runar.sdk.provider import Provider
@@ -53,7 +54,21 @@ class RPCProvider(Provider):
             },
         )
 
-        resp = urlopen(req, timeout=600)
+        try:
+            resp = urlopen(req, timeout=600)
+        except HTTPError as e:
+            # Bitcoin RPC returns HTTP 500 for rejected transactions
+            # but the response body contains the JSON-RPC error details
+            body = e.read()
+            try:
+                data = json.loads(body)
+                if data.get('error'):
+                    msg = data['error'].get('message', str(data['error']))
+                    raise RuntimeError(f'RPC error {data["error"].get("code", "")}: {msg}')
+            except (json.JSONDecodeError, KeyError):
+                pass
+            raise RuntimeError(f'RPC {method}: HTTP {e.code} {e.reason}') from e
+
         data = json.loads(resp.read())
 
         if data.get('error'):

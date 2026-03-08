@@ -164,4 +164,11 @@ export class TestContract {
     }
     this.interpreter.setMockPreimage(converted);
   }
+
+  /**
+   * Configure mock preimage byte fields (hashPrevouts, outpoint, etc.).
+   */
+  setMockPreimageBytes(overrides: Record<string, Uint8Array>): void {
+    this.interpreter.setMockPreimageBytes(overrides);
+  }
 }

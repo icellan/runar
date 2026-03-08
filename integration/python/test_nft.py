@@ -112,11 +112,18 @@ class TestSimpleNFT:
         contract.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
         # transfer: sig=None (auto), newOwner, outputSatoshis
+        # transfer uses addOutput, so we need Outputs (not new_state)
         call_txid, _ = contract.call(
             "transfer",
-            [None, new_owner["pubKeyHex"], 5000],
+            [None, new_owner["pubKeyHex"], 4500],
             provider, owner_wallet["signer"],
-            CallOptions(new_state={"owner": new_owner["pubKeyHex"]}),
+            CallOptions(outputs=[
+                {"satoshis": 4500, "state": {
+                    "owner": new_owner["pubKeyHex"],
+                    "tokenId": token_id_hex,
+                    "metadata": metadata_hex,
+                }},
+            ]),
         )
         assert call_txid
 

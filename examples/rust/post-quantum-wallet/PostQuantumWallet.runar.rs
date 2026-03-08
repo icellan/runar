@@ -34,6 +34,15 @@ use runar::prelude::*;
 ///   <verifyWOTS ~10KB inline>        // verify WOTS+(ecdsaSig, wotsSig, wotsPubKey)
 /// ```
 ///
+/// # Stack Trace
+///
+/// | Step | Stack (top -> bottom) |
+/// |------|----------------------|
+/// | Start | wotsSig, wotsPK, ecdsaSig, ecdsaPK |
+/// | After ECDSA verify | wotsSig, wotsPK |
+/// | After WOTS PK hash check | wotsSig, wotsPK |
+/// | After WOTS verify | (empty / true) |
+///
 /// # Parameter Sizes
 ///
 /// - ecdsaPubKeyHash: 20 bytes (HASH160 of compressed ECDSA public key)

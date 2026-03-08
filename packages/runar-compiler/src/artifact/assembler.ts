@@ -12,6 +12,8 @@ import type {
   TypeNode,
   ParamNode,
   PropertyNode,
+  Statement,
+  Expression,
   StackProgram,
   ANFProgram,
 } from '../ir/index.js';
@@ -156,12 +158,23 @@ function extractABI(contract: ContractNode): ABI {
   // Constructor
   const constructorParams: ABIParam[] = contract.constructor.params.map(paramToABI);
 
+  const isStateful = contract.parentClass === 'StatefulSmartContract';
+  const mutablePropNames = isStateful
+    ? new Set(contract.properties.filter(p => !p.readonly).map(p => p.name))
+    : new Set<string>();
+
   // Methods
   const methods: ABIMethod[] = contract.methods.map(method => {
     const params = method.params.map(paramToABI);
 
-    // For StatefulSmartContract, public methods have an implicit txPreimage param
-    if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
+    if (isStateful && method.visibility === 'public') {
+      // Methods that mutate state or call addOutput need change output params
+      const needsChange = methodMutatesState(method.body, mutablePropNames) ||
+                          methodHasAddOutput(method.body);
+      if (needsChange) {
+        params.push({ name: '_changePKH', type: 'Ripemd160' });
+        params.push({ name: '_changeAmount', type: 'bigint' });
+      }
       params.push({ name: 'txPreimage', type: 'SigHashPreimage' });
     }
 
@@ -312,4 +325,72 @@ function bigintReviver(_key: string, value: unknown): unknown {
     return BigInt(value.slice(0, -1));
   }
   return value;
+}
+
+// ---------------------------------------------------------------------------
+// Change output detection (mirrors logic in 04-anf-lower.ts)
+// ---------------------------------------------------------------------------
+
+function methodMutatesState(stmts: Statement[], mutableProps: Set<string>): boolean {
+  for (const stmt of stmts) {
+    if (stmtMutatesState(stmt, mutableProps)) return true;
+  }
+  return false;
+}
+
+function stmtMutatesState(stmt: Statement, mutableProps: Set<string>): boolean {
+  switch (stmt.kind) {
+    case 'assignment':
+      if (stmt.target.kind === 'property_access' && mutableProps.has(stmt.target.property)) {
+        return true;
+      }
+      return false;
+    case 'expression_statement':
+      return exprMutatesState(stmt.expression, mutableProps);
+    case 'if_statement':
+      return methodMutatesState(stmt.then, mutableProps) ||
+             (stmt.else ? methodMutatesState(stmt.else, mutableProps) : false);
+    case 'for_statement':
+      return stmtMutatesState(stmt.update, mutableProps) ||
+             methodMutatesState(stmt.body, mutableProps);
+    default:
+      return false;
+  }
+}
+
+function exprMutatesState(expr: Expression, mutableProps: Set<string>): boolean {
+  if (expr.kind === 'increment_expr' || expr.kind === 'decrement_expr') {
+    if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function methodHasAddOutput(stmts: Statement[]): boolean {
+  for (const stmt of stmts) {
+    if (stmtHasAddOutput(stmt)) return true;
+  }
+  return false;
+}
+
+function stmtHasAddOutput(stmt: Statement): boolean {
+  switch (stmt.kind) {
+    case 'expression_statement':
+      return exprHasAddOutput(stmt.expression);
+    case 'if_statement':
+      return methodHasAddOutput(stmt.then) ||
+             (stmt.else ? methodHasAddOutput(stmt.else) : false);
+    case 'for_statement':
+      return methodHasAddOutput(stmt.body);
+    default:
+      return false;
+  }
+}
+
+function exprHasAddOutput(expr: Expression): boolean {
+  if (expr.kind === 'call_expr' && expr.callee.kind === 'property_access' && expr.callee.property === 'addOutput') {
+    return true;
+  }
+  return false;
 }

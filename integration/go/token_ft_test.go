@@ -9,14 +9,12 @@ import (
 	"runar-integration/helpers"
 
 	runar "github.com/icellan/runar/packages/runar-go"
-
-	"github.com/bsv-blockchain/go-sdk/script"
-	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // deployFungibleToken compiles and deploys a FungibleToken contract using the SDK,
-// returning the contract, provider, signer, and owner wallet. The contract is
-// deployed with the given owner and initial balance.
+// returning the contract, provider, and signer. The owner wallet is funded directly
+// and the returned signer corresponds to the owner key, so Call("send", ...) works
+// with checkSig.
 func deployFungibleToken(t *testing.T, owner *helpers.Wallet, initialBalance int64) (*runar.RunarContract, runar.Provider, runar.Signer) {
 	t.Helper()
 
@@ -34,18 +32,19 @@ func deployFungibleToken(t *testing.T, owner *helpers.Wallet, initialBalance int
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		owner.PubKeyHex(),
 		int64(initialBalance),
+		int64(0),
 		tokenIdHex,
 	})
 
-	wallet := helpers.NewWallet()
-	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	// Fund the owner wallet directly so the signer matches the contract owner
+	helpers.RPCCall("importaddress", owner.Address, "", false)
+	_, err = helpers.FundWallet(owner, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
 	provider := helpers.NewRPCProvider()
-	signer, err := helpers.SDKSignerFromWallet(wallet)
+	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
 	}
@@ -57,53 +56,6 @@ func deployFungibleToken(t *testing.T, owner *helpers.Wallet, initialBalance int
 	t.Logf("deployed: %s", deployTxid)
 
 	return contract, provider, signer
-}
-
-// buildFTSpendTx builds a raw spending transaction for a FungibleToken UTXO.
-// It creates a continuation output with the new state (new owner + same or new balance).
-// Returns the unsigned transaction ready for signing.
-func buildFTSpendTx(t *testing.T, contract *runar.RunarContract, newOwnerPubKeyHex string, newBalance int64) *transaction.Transaction {
-	t.Helper()
-
-	utxo := contract.GetCurrentUtxo()
-	if utxo == nil {
-		t.Fatalf("contract has no current UTXO")
-	}
-
-	// Build the continuation locking script: code + OP_RETURN + new state
-	// The code portion is everything before the last OP_RETURN in the current script.
-	lastOpReturn := runar.FindLastOpReturn(utxo.Script)
-	if lastOpReturn == -1 {
-		t.Fatalf("no OP_RETURN found in contract script")
-	}
-	codePart := utxo.Script[:lastOpReturn]
-
-	// Serialize the new state: owner (PubKey) + balance (bigint)
-	newState := runar.SerializeState(contract.Artifact.StateFields, map[string]interface{}{
-		"owner":   newOwnerPubKeyHex,
-		"balance": int64(newBalance),
-	})
-	continuationScript := codePart + "6a" + newState
-
-	lockScript, _ := script.NewFromHex(utxo.Script)
-	contScript, _ := script.NewFromHex(continuationScript)
-	outputSatoshis := int64(4500)
-
-	spendTx := transaction.NewTransaction()
-	spendTx.AddInputWithOutput(&transaction.TransactionInput{
-		SourceTXID:       helpers.TxidToChainHash(utxo.Txid),
-		SourceTxOutIndex: uint32(utxo.OutputIndex),
-		SequenceNumber:   transaction.DefaultSequenceNumber,
-	}, &transaction.TransactionOutput{
-		Satoshis:      uint64(utxo.Satoshis),
-		LockingScript: lockScript,
-	})
-	spendTx.AddOutput(&transaction.TransactionOutput{
-		Satoshis:      uint64(outputSatoshis),
-		LockingScript: contScript,
-	})
-
-	return spendTx
 }
 
 func TestFungibleToken_Compile(t *testing.T) {
@@ -156,41 +108,24 @@ func TestFungibleToken_Send(t *testing.T) {
 	owner := helpers.NewWallet()
 	receiver := helpers.NewWallet()
 	initialBalance := int64(1000)
-
-	// Deploy using SDK
-	contract, _, _ := deployFungibleToken(t, owner, initialBalance)
-
-	// Build raw spend tx (needed because send() takes a checkSig sig argument
-	// that must be computed over the final spending transaction)
-	spendTx := buildFTSpendTx(t, contract, receiver.PubKeyHex(), initialBalance)
 	outputSatoshis := int64(4500)
 
-	sigHex, err := helpers.SignInput(spendTx, 0, owner.PrivKey)
+	// Deploy using SDK (owner wallet is funded, signer matches owner key)
+	contract, provider, ownerSigner := deployFungibleToken(t, owner, initialBalance)
+
+	// Call send via SDK: sig is nil (auto-computed), to=receiver, outputSatoshis
+	// send uses addOutput, so we need Outputs (not NewState)
+	txid, _, err := contract.Call("send",
+		[]interface{}{nil, receiver.PubKeyHex(), outputSatoshis},
+		provider, ownerSigner,
+		&runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": receiver.PubKeyHex(), "balance": initialBalance, "mergeBalance": int64(0)}},
+			},
+		})
 	if err != nil {
-		t.Fatalf("sign: %v", err)
+		t.Fatalf("send call: %v", err)
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
-	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
-	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// send is method index 1 (transfer=0, send=1, merge=2)
-	// Unlocking: <opPushTxSig> <sig> <to:PubKey> <outputSatoshis> <txPreimage> <methodIdx>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(receiver.PubKeyBytes) +
-		helpers.EncodePushInt(outputSatoshis) +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(1) // send
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid := helpers.AssertTxAccepted(t, spendTx.Hex())
 	helpers.AssertTxInBlock(t, txid)
 }
 
@@ -199,37 +134,405 @@ func TestFungibleToken_WrongOwner_Rejected(t *testing.T) {
 	attacker := helpers.NewWallet()
 	receiver := helpers.NewWallet()
 	initialBalance := int64(1000)
-
-	// Deploy using SDK
-	contract, _, _ := deployFungibleToken(t, owner, initialBalance)
-
-	// Build raw spend tx
-	spendTx := buildFTSpendTx(t, contract, receiver.PubKeyHex(), initialBalance)
 	outputSatoshis := int64(4500)
 
-	// Sign with attacker's key (wrong) -- checkSig should fail
-	sigHex, err := helpers.SignInput(spendTx, 0, attacker.PrivKey)
+	// Deploy with owner's key
+	contract, provider, _ := deployFungibleToken(t, owner, initialBalance)
+
+	// Fund the attacker wallet and create a signer from it
+	helpers.RPCCall("importaddress", attacker.Address, "", false)
+	_, err := helpers.FundWallet(attacker, 1.0)
 	if err != nil {
-		t.Fatalf("sign: %v", err)
+		t.Fatalf("fund attacker: %v", err)
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
+	attackerSigner, err := helpers.SDKSignerFromWallet(attacker)
 	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
+		t.Fatalf("attacker signer: %v", err)
 	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
 
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(receiver.PubKeyBytes) +
-		helpers.EncodePushInt(outputSatoshis) +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(1) // send
+	// Call send with attacker's signer -- checkSig should fail because
+	// the attacker's key doesn't match the contract owner
+	_, _, err = contract.Call("send",
+		[]interface{}{nil, receiver.PubKeyHex(), outputSatoshis},
+		provider, attackerSigner,
+		&runar.CallOptions{
+			NewState: map[string]interface{}{"owner": receiver.PubKeyHex(), "balance": initialBalance, "mergeBalance": int64(0)},
+		})
+	if err == nil {
+		t.Fatalf("expected send with wrong owner to be rejected, but it succeeded")
+	}
+	t.Logf("send correctly rejected with wrong owner: %v", err)
+}
 
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
+func TestFungibleToken_Transfer(t *testing.T) {
+	// Transfer splits 1 UTXO into 2 outputs:
+	// output 0 → recipient gets `amount`, output 1 → sender keeps remainder
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	amount := int64(300)
+	remainder := initialBalance - amount
+	outputSatoshis := int64(4500)
 
-	helpers.AssertTxRejected(t, spendTx.Hex())
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	// SDK Call with multi-output: transfer method (index 0)
+	// transfer(sig, to, amount, outputSatoshis)
+	txid, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), amount, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": amount, "mergeBalance": int64(0)}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": remainder, "mergeBalance": int64(0)}},
+			},
+		})
+	if err != nil {
+		t.Fatalf("transfer call: %v", err)
+	}
+	helpers.AssertTxInBlock(t, txid)
+}
+
+func TestFungibleToken_Merge(t *testing.T) {
+	// Merge consolidates 2 UTXOs into 1 output (same owner)
+	// Uses position-dependent balance slots for anti-inflation security
+	alice := helpers.NewWallet()
+	balance1 := int64(400)
+	balance2 := int64(600)
+	outputSatoshis := int64(4500)
+
+	contract1, provider, aliceSigner := deployFungibleToken(t, alice, balance1)
+	contract2, _, _ := deployFungibleToken(t, alice, balance2)
+
+	utxo2 := contract2.GetCurrentUtxo()
+	if utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy for contract2")
+	}
+
+	// merge(sig, otherBalance, allPrevouts, outputSatoshis)
+	// allPrevouts is nil (auto-computed by SDK from transaction inputs)
+	txid, _, err := contract1.Call("merge",
+		[]interface{}{nil, balance2, nil, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
+			},
+			AdditionalContractInputs: []*runar.UTXO{
+				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
+			},
+			AdditionalContractInputArgs: [][]interface{}{
+				{nil, balance1, nil, outputSatoshis},
+			},
+		})
+	if err != nil {
+		t.Fatalf("merge call: %v", err)
+	}
+	helpers.AssertTxInBlock(t, txid)
+}
+
+func TestFungibleToken_MergeInflatedOtherBalance(t *testing.T) {
+	// Attacker lies about otherBalance. With secure merge, each input writes its
+	// own verified balance to a position-dependent slot. hashOutputs forces both
+	// inputs to produce identical outputs, so lying causes a mismatch.
+	alice := helpers.NewWallet()
+	balance1 := int64(400)
+	balance2 := int64(600)
+	outputSatoshis := int64(4500)
+
+	contract1, provider, aliceSigner := deployFungibleToken(t, alice, balance1)
+	contract2, _, _ := deployFungibleToken(t, alice, balance2)
+
+	utxo2 := contract2.GetCurrentUtxo()
+	if utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy for contract2")
+	}
+
+	// Attacker: input 0 claims otherBalance=1600, input 1 claims otherBalance=1400
+	// Output from input 0: (400, 1600), from input 1: (1400, 600) → mismatch
+	_, _, err := contract1.Call("merge",
+		[]interface{}{nil, int64(1600), nil, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": int64(1600)}},
+			},
+			AdditionalContractInputs: []*runar.UTXO{
+				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
+			},
+			AdditionalContractInputArgs: [][]interface{}{
+				{nil, int64(1400), nil, outputSatoshis},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected merge with inflated otherBalance to be rejected, but it succeeded")
+	}
+	t.Logf("merge correctly rejected with inflated otherBalance: %v", err)
+}
+
+func TestFungibleToken_MergeNegativeOtherBalance(t *testing.T) {
+	// Negative otherBalance fails assert(otherBalance >= 0)
+	alice := helpers.NewWallet()
+	balance1 := int64(400)
+	balance2 := int64(600)
+	outputSatoshis := int64(4500)
+
+	contract1, provider, aliceSigner := deployFungibleToken(t, alice, balance1)
+	contract2, _, _ := deployFungibleToken(t, alice, balance2)
+
+	utxo2 := contract2.GetCurrentUtxo()
+	if utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy for contract2")
+	}
+
+	_, _, err := contract1.Call("merge",
+		[]interface{}{nil, int64(100), nil, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": int64(100)}},
+			},
+			AdditionalContractInputs: []*runar.UTXO{
+				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
+			},
+			AdditionalContractInputArgs: [][]interface{}{
+				{nil, int64(-1), nil, outputSatoshis},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected merge with negative otherBalance to be rejected, but it succeeded")
+	}
+	t.Logf("merge correctly rejected with negative otherBalance: %v", err)
+}
+
+func TestFungibleToken_MergeZeroBalance(t *testing.T) {
+	// Edge case: merge with one zero-balance UTXO. Should succeed.
+	alice := helpers.NewWallet()
+	balance1 := int64(0)
+	balance2 := int64(500)
+	outputSatoshis := int64(4500)
+
+	contract1, provider, aliceSigner := deployFungibleToken(t, alice, balance1)
+	contract2, _, _ := deployFungibleToken(t, alice, balance2)
+
+	utxo2 := contract2.GetCurrentUtxo()
+	if utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy for contract2")
+	}
+
+	txid, _, err := contract1.Call("merge",
+		[]interface{}{nil, balance2, nil, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
+			},
+			AdditionalContractInputs: []*runar.UTXO{
+				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
+			},
+			AdditionalContractInputArgs: [][]interface{}{
+				{nil, balance1, nil, outputSatoshis},
+			},
+		})
+	if err != nil {
+		t.Fatalf("merge with zero balance: %v", err)
+	}
+	helpers.AssertTxInBlock(t, txid)
+}
+
+func TestFungibleToken_MergeWrongSigner(t *testing.T) {
+	// Different signer tries to merge. Should fail checkSig.
+	alice := helpers.NewWallet()
+	attacker := helpers.NewWallet()
+	balance1 := int64(400)
+	balance2 := int64(600)
+	outputSatoshis := int64(4500)
+
+	contract1, provider, _ := deployFungibleToken(t, alice, balance1)
+	contract2, _, _ := deployFungibleToken(t, alice, balance2)
+
+	utxo2 := contract2.GetCurrentUtxo()
+	if utxo2 == nil {
+		t.Fatalf("missing UTXO after deploy for contract2")
+	}
+
+	// Fund attacker wallet and create attacker signer
+	helpers.RPCCall("importaddress", attacker.Address, "", false)
+	_, err := helpers.FundWallet(attacker, 1.0)
+	if err != nil {
+		t.Fatalf("fund attacker: %v", err)
+	}
+	attackerSigner, err := helpers.SDKSignerFromWallet(attacker)
+	if err != nil {
+		t.Fatalf("attacker signer: %v", err)
+	}
+
+	_, _, err = contract1.Call("merge",
+		[]interface{}{nil, balance2, nil, outputSatoshis},
+		provider, attackerSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": balance1, "mergeBalance": balance2}},
+			},
+			AdditionalContractInputs: []*runar.UTXO{
+				{Txid: utxo2.Txid, OutputIndex: utxo2.OutputIndex, Satoshis: utxo2.Satoshis, Script: utxo2.Script},
+			},
+			AdditionalContractInputArgs: [][]interface{}{
+				{nil, balance1, nil, outputSatoshis},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected merge with wrong signer to be rejected, but it succeeded")
+	}
+	t.Logf("merge correctly rejected with wrong signer: %v", err)
+}
+
+func TestFungibleToken_TransferExactBalance(t *testing.T) {
+	// Transfer the entire balance to recipient. Should produce only 1 output (no change).
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	outputSatoshis := int64(4500)
+
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	txid, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), initialBalance, outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": initialBalance, "mergeBalance": int64(0)}},
+			},
+		})
+	if err != nil {
+		t.Fatalf("transfer exact balance: %v", err)
+	}
+	helpers.AssertTxInBlock(t, txid)
+	t.Logf("transfer exact balance (1 output, no change) accepted: %s", txid)
+}
+
+func TestFungibleToken_TransferInflatedBalance(t *testing.T) {
+	// Attacker tries to inflate balance: claims outputs total more than input balance.
+	// hashOutputs mismatch should reject this on-chain.
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	outputSatoshis := int64(4500)
+
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	// Attacker claims bob gets 800 and alice keeps 500 = 1300 total (inflated from 1000)
+	_, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), int64(800), outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": int64(800), "mergeBalance": int64(0)}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": int64(500), "mergeBalance": int64(0)}},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected transfer with inflated balance to be rejected, but it succeeded")
+	}
+	t.Logf("transfer correctly rejected inflated balance: %v", err)
+}
+
+func TestFungibleToken_TransferDeflatedBalance(t *testing.T) {
+	// Attacker tries to steal by deflating: claims outputs total less than input.
+	// The script computes totalBalance - amount for change, so mismatched outputs
+	// will cause hashOutputs failure.
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	outputSatoshis := int64(4500)
+
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	// Attacker claims bob gets 300 and alice keeps 200 = 500 total (deflated from 1000)
+	_, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), int64(300), outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": int64(300), "mergeBalance": int64(0)}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": int64(200), "mergeBalance": int64(0)}},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected transfer with deflated balance to be rejected, but it succeeded")
+	}
+	t.Logf("transfer correctly rejected deflated balance: %v", err)
+}
+
+func TestFungibleToken_TransferZeroAmountRejected(t *testing.T) {
+	// Transfer of zero amount should fail the assert(amount > 0) check.
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	outputSatoshis := int64(4500)
+
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	_, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), int64(0), outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": int64(0), "mergeBalance": int64(0)}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": initialBalance, "mergeBalance": int64(0)}},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected transfer of zero amount to be rejected, but it succeeded")
+	}
+	t.Logf("transfer correctly rejected zero amount: %v", err)
+}
+
+func TestFungibleToken_TransferExceedsBalanceRejected(t *testing.T) {
+	// Transfer exceeding balance should fail the assert(amount <= totalBalance) check.
+	alice := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	outputSatoshis := int64(4500)
+
+	contract, provider, aliceSigner := deployFungibleToken(t, alice, initialBalance)
+
+	_, _, err := contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), int64(2000), outputSatoshis},
+		provider, aliceSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": int64(2000), "mergeBalance": int64(0)}},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected transfer exceeding balance to be rejected, but it succeeded")
+	}
+	t.Logf("transfer correctly rejected amount exceeding balance: %v", err)
+}
+
+func TestFungibleToken_TransferWrongSigner(t *testing.T) {
+	// Different signer tries to transfer. Should fail checkSig.
+	alice := helpers.NewWallet()
+	attacker := helpers.NewWallet()
+	bob := helpers.NewWallet()
+	initialBalance := int64(1000)
+	amount := int64(300)
+	remainder := initialBalance - amount
+	outputSatoshis := int64(4500)
+
+	contract, provider, _ := deployFungibleToken(t, alice, initialBalance)
+
+	// Fund attacker wallet and create attacker signer
+	helpers.RPCCall("importaddress", attacker.Address, "", false)
+	_, err := helpers.FundWallet(attacker, 1.0)
+	if err != nil {
+		t.Fatalf("fund attacker: %v", err)
+	}
+	attackerSigner, err := helpers.SDKSignerFromWallet(attacker)
+	if err != nil {
+		t.Fatalf("attacker signer: %v", err)
+	}
+
+	_, _, err = contract.Call("transfer",
+		[]interface{}{nil, bob.PubKeyHex(), amount, outputSatoshis},
+		provider, attackerSigner, &runar.CallOptions{
+			Outputs: []runar.OutputSpec{
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": bob.PubKeyHex(), "balance": amount}},
+				{Satoshis: outputSatoshis, State: map[string]interface{}{"owner": alice.PubKeyHex(), "balance": remainder}},
+			},
+		})
+	if err == nil {
+		t.Fatalf("expected transfer with wrong signer to be rejected, but it succeeded")
+	}
+	t.Logf("transfer correctly rejected with wrong signer: %v", err)
 }

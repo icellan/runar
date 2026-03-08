@@ -22,7 +22,7 @@ describe('Counter', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
 
     const { txid: callTxid } = await contract.call('increment', [], provider, signer, {
@@ -38,7 +38,7 @@ describe('Counter', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     await contract.call('increment', [], provider, signer, {
       newState: { count: 1n },
@@ -56,7 +56,7 @@ describe('Counter', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     await contract.call('increment', [], provider, signer, {
       newState: { count: 1n },
@@ -74,7 +74,7 @@ describe('Counter', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     // Claim count=99 instead of 1 — hashOutputs mismatch
     await expect(
@@ -91,7 +91,7 @@ describe('Counter', () => {
     const provider = createProvider();
     const { signer } = await createFundedWallet(provider);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     // count=0, decrement → assert(count > 0) fails
     await expect(

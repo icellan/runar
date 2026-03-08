@@ -82,7 +82,7 @@ describe('OraclePriceFeed', () => {
     // RabinPubKey is bigint (n = p*q), PubKey is hex string
     const contract = new RunarContract(artifact, [rabinKP.n, receiver.pubKeyHex]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
     expect(typeof deployTxid).toBe('string');
     expect(deployTxid.length).toBe(64);
@@ -100,7 +100,7 @@ describe('OraclePriceFeed', () => {
 
     const contract = new RunarContract(artifact, [rabinKP.n, receiver.pubKeyHex]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -123,7 +123,7 @@ describe('OraclePriceFeed', () => {
       rabinKP.n,
       receiverWallet.pubKeyHex,
     ]);
-    await contract.deploy(provider, receiverWallet.signer, { satoshis: 5000 });
+    await contract.deploy(provider, receiverWallet.signer, {});
 
     // --- Step 3: Oracle signs a price above the 50,000 threshold ---
     const price = 55001n;
@@ -159,7 +159,7 @@ describe('OraclePriceFeed', () => {
       rabinKP.n,
       receiverWallet.pubKeyHex,
     ]);
-    await contract.deploy(provider, receiverWallet.signer, { satoshis: 5000 });
+    await contract.deploy(provider, receiverWallet.signer, {});
 
     // Oracle signs a price BELOW the 50,000 threshold
     const price = 49999n;
@@ -190,7 +190,7 @@ describe('OraclePriceFeed', () => {
       rabinKP.n,
       walletA.pubKeyHex,
     ]);
-    await contract.deploy(provider, walletA.signer, { satoshis: 5000 });
+    await contract.deploy(provider, walletA.signer, {});
 
     // Oracle signs a valid price above threshold
     const price = 55001n;

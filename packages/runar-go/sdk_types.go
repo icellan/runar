@@ -46,7 +46,30 @@ type DeployOptions struct {
 type CallOptions struct {
 	Satoshis      int64                  `json:"satoshis,omitempty"`
 	ChangeAddress string                 `json:"changeAddress,omitempty"`
+	ChangePubKey  string                 `json:"changePubKey,omitempty"` // Override public key for change output (hex-encoded). Defaults to signer's pubkey.
 	NewState      map[string]interface{} `json:"newState,omitempty"`
+
+	// Multiple continuation outputs for multi-output methods (e.g., transfer).
+	// Each entry specifies the satoshis and state for one output UTXO.
+	// When provided, replaces the single continuation output from NewState.
+	Outputs []OutputSpec `json:"outputs,omitempty"`
+
+	// Additional contract UTXOs to include as inputs (e.g., for merge, swap,
+	// or any multi-input spending pattern). Each UTXO's unlocking script uses
+	// the same method and args as the primary call, with OP_PUSH_TX and Sig
+	// auto-computed per input.
+	AdditionalContractInputs []*UTXO `json:"additionalContractInputs,omitempty"`
+
+	// Per-input args for additional contract inputs. When provided,
+	// AdditionalContractInputArgs[i] overrides args for AdditionalContractInputs[i].
+	// Sig params (nil) are still auto-computed per input.
+	AdditionalContractInputArgs [][]interface{} `json:"additionalContractInputArgs,omitempty"`
+}
+
+// OutputSpec specifies a single continuation output for multi-output calls.
+type OutputSpec struct {
+	Satoshis int64                  `json:"satoshis"`
+	State    map[string]interface{} `json:"state"`
 }
 
 // ---------------------------------------------------------------------------

@@ -48,7 +48,7 @@ describe('SimpleNFT', () => {
       metadataHex,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
     expect(typeof deployTxid).toBe('string');
     expect(deployTxid.length).toBe(64);
@@ -71,7 +71,7 @@ describe('SimpleNFT', () => {
       tokenIdHex,
       metadataHex,
     ]);
-    const { txid: txid1 } = await contract1.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: txid1 } = await contract1.deploy(provider, signer, {});
     expect(txid1).toBeTruthy();
 
     const contract2 = new RunarContract(artifact, [
@@ -79,7 +79,7 @@ describe('SimpleNFT', () => {
       tokenIdHex,
       metadataHex,
     ]);
-    const { txid: txid2 } = await contract2.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: txid2 } = await contract2.deploy(provider, signer, {});
     expect(txid2).toBeTruthy();
 
     // Different deploy txids
@@ -103,7 +103,7 @@ describe('SimpleNFT', () => {
       metadataHex,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -124,11 +124,11 @@ describe('SimpleNFT', () => {
       metadataHex,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
 
     // transfer(sig, newOwner, outputSatoshis) — null Sig is auto-computed by the SDK
-    const { txid: callTxid } = await contract.call('transfer', [null, newOwner.pubKeyHex, 5000n], provider, signer, {
+    const { txid: callTxid } = await contract.call('transfer', [null, newOwner.pubKeyHex, 1n], provider, signer, {
       newState: { owner: newOwner.pubKeyHex, tokenId: tokenIdHex, metadata: metadataHex },
     });
     expect(callTxid).toBeTruthy();
@@ -152,7 +152,7 @@ describe('SimpleNFT', () => {
       metadataHex,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
 
     // burn(sig) — null Sig is auto-computed by the SDK; no newState since burn destroys the UTXO
@@ -180,14 +180,14 @@ describe('SimpleNFT', () => {
       metadataHex,
     ]);
 
-    await contract.deploy(provider, ownerSigner, { satoshis: 5000 });
+    await contract.deploy(provider, ownerSigner, {});
 
     // Call transfer with walletB — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
     await expect(
       contract.call(
-        'transfer', [null, newOwner.pubKeyHex, 5000n], provider, wrongSigner,
+        'transfer', [null, newOwner.pubKeyHex, 1n], provider, wrongSigner,
         { newState: { owner: newOwner.pubKeyHex, tokenId: tokenIdHex, metadata: metadataHex } },
       ),
     ).rejects.toThrow();

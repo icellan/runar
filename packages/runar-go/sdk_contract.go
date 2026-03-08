@@ -1,11 +1,14 @@
 package runar
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"math/big"
 	"sort"
 	"strings"
+
+	"golang.org/x/crypto/ripemd160"
 )
 
 // ---------------------------------------------------------------------------
@@ -189,10 +192,32 @@ func (c *RunarContract) Call(
 			methodName, c.Artifact.ContractName,
 		)
 	}
-	if len(method.Params) != len(args) {
+	// For stateful contracts, the compiler injects implicit params into every
+	// public method's ABI (SigHashPreimage, and for state-mutating methods:
+	// _changePKH and _changeAmount). The SDK auto-computes these.
+	// Filter them out so users only pass their own args.
+	isStateful := len(c.Artifact.StateFields) > 0
+	methodNeedsChange := false
+	for _, p := range method.Params {
+		if p.Name == "_changePKH" {
+			methodNeedsChange = true
+			break
+		}
+	}
+	var userParams []ABIParam
+	if isStateful {
+		for _, p := range method.Params {
+			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" {
+				userParams = append(userParams, p)
+			}
+		}
+	} else {
+		userParams = method.Params
+	}
+	if len(userParams) != len(args) {
 		return "", nil, fmt.Errorf(
 			"RunarContract.call: method '%s' expects %d args, got %d",
-			methodName, len(method.Params), len(args),
+			methodName, len(userParams), len(args),
 		)
 	}
 
@@ -215,12 +240,13 @@ func (c *RunarContract) Call(
 		changeAddress = address
 	}
 
-	// Detect Sig/PubKey params that need auto-compute (user passed nil)
+	// Detect Sig/PubKey/SigHashPreimage/ByteString params that need auto-compute (user passed nil)
 	resolvedArgs := make([]interface{}, len(args))
 	copy(resolvedArgs, args)
 	var sigIndices []int
+	var prevoutsIndices []int
 	preimageIndex := -1
-	for i, param := range method.Params {
+	for i, param := range userParams {
 		if param.Type == "Sig" && args[i] == nil {
 			sigIndices = append(sigIndices, i)
 			// 72-byte placeholder
@@ -238,19 +264,52 @@ func (c *RunarContract) Call(
 			// Placeholder preimage (will be replaced after tx construction)
 			resolvedArgs[i] = strings.Repeat("00", 181)
 		}
+		if param.Type == "ByteString" && args[i] == nil {
+			prevoutsIndices = append(prevoutsIndices, i)
+			// Placeholder sized to estimated input count (1 primary + N extra + 1 funding)
+			nExtra := 0
+			if options != nil {
+				nExtra = len(options.AdditionalContractInputs)
+			}
+			estimatedInputs := 1 + nExtra + 1
+			resolvedArgs[i] = strings.Repeat("00", 36*estimatedInputs)
+		}
 	}
 
-	// If any param uses SigHashPreimage, the compiler injects an implicit
-	// _opPushTxSig at the beginning of the unlocking script.
-	needsOpPushTx := preimageIndex >= 0
+	// For stateful contracts, preimage is always needed (auto-computed by the
+	// stateful path below), even though it's not in userParams.
+	needsOpPushTx := preimageIndex >= 0 || isStateful
 
-	// Determine if this is a stateful call
-	isStateful := len(c.Artifact.StateFields) > 0
+	// Collect additional contract inputs (e.g., for merge)
+	var extraContractUtxos []*UTXO
+	if options != nil {
+		extraContractUtxos = options.AdditionalContractInputs
+	}
+
+	// Build contract outputs: multi-output (options.Outputs) takes priority,
+	// then single continuation (options.NewState), then default.
+	var contractOutputs []ContractOutput
+	hasMultiOutput := options != nil && len(options.Outputs) > 0
 
 	newLockingScript := ""
 	newSatoshis := int64(0)
 
-	if isStateful {
+	if isStateful && hasMultiOutput {
+		// Multi-output: build a locking script for each output
+		codeScript := c.codeScript
+		if codeScript == "" {
+			codeScript = c.buildCodeScript()
+		}
+		for _, out := range options.Outputs {
+			stateHex := SerializeState(c.Artifact.StateFields, out.State)
+			contractOutputs = append(contractOutputs, ContractOutput{
+				Script:   codeScript + "6a" + stateHex,
+				Satoshis: out.Satoshis,
+			})
+		}
+	} else if isStateful {
+		// For single-output continuations, the on-chain script uses the input amount
+		// (extracted from the preimage). The SDK output must match.
 		newSatoshis = c.currentUtxo.Satoshis
 		if options != nil && options.Satoshis > 0 {
 			newSatoshis = options.Satoshis
@@ -264,25 +323,47 @@ func (c *RunarContract) Call(
 		newLockingScript = c.GetLockingScript()
 	}
 
-	// For stateful single-output continuation, the TX must have exactly one
-	// output (the continuation UTXO). The compiler's computeStateOutputHash
-	// hashes only that output and compares with BIP-143 hashOutputs.
-	// No change output or additional inputs are needed.
-	changeScript := ""
+	// Fetch fee rate and funding UTXOs for all contract types.
+	// For stateful contracts with change output support, the change output
+	// is verified by the on-chain script (hashOutputs check).
+	feeRate, feeErr := provider.GetFeeRate()
+	if feeErr != nil {
+		return "", nil, fmt.Errorf("RunarContract.Call: getting fee rate: %w", feeErr)
+	}
+	changeScript := BuildP2PKHScript(changeAddress)
+	allFundingUtxos, err := provider.GetUtxos(address)
+	if err != nil {
+		return "", nil, fmt.Errorf("RunarContract.Call: getting UTXOs: %w", err)
+	}
+	// Filter out the current contract UTXO from funding UTXOs
 	var additionalUtxos []UTXO
-	feeRate := int64(1)
+	for _, u := range allFundingUtxos {
+		if !(u.Txid == c.currentUtxo.Txid && u.OutputIndex == c.currentUtxo.OutputIndex) {
+			additionalUtxos = append(additionalUtxos, u)
+		}
+	}
 
-	if !isStateful {
-		changeScript = BuildP2PKHScript(changeAddress)
-		var feeErr error
-		feeRate, feeErr = provider.GetFeeRate()
-		if feeErr != nil {
-			return "", nil, fmt.Errorf("RunarContract.Call: getting fee rate: %w", feeErr)
+	// Compute change PKH for stateful methods that need it
+	changePKHHex := ""
+	if isStateful && methodNeedsChange {
+		changePubKeyHex := ""
+		if options != nil && options.ChangePubKey != "" {
+			changePubKeyHex = options.ChangePubKey
+		} else {
+			pk, pkErr := signer.GetPublicKey()
+			if pkErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: getting public key for change PKH: %w", pkErr)
+			}
+			changePubKeyHex = pk
 		}
-		additionalUtxos, err = provider.GetUtxos(address)
-		if err != nil {
-			return "", nil, fmt.Errorf("RunarContract.Call: getting UTXOs: %w", err)
+		pubKeyBytes, decErr := hex.DecodeString(changePubKeyHex)
+		if decErr != nil {
+			return "", nil, fmt.Errorf("RunarContract.Call: decoding change pubkey hex: %w", decErr)
 		}
+		h := sha256.Sum256(pubKeyBytes)
+		r := ripemd160.New()
+		r.Write(h[:])
+		changePKHHex = hex.EncodeToString(r.Sum(nil))
 	}
 
 	// Build the unlocking script. For contracts with checkPreimage (stateful
@@ -302,7 +383,65 @@ func (c *RunarContract) Call(
 		unlockingScript = c.BuildUnlockingScript(methodName, resolvedArgs)
 	}
 
-	txHex, inputCount := BuildCallTransaction(
+	// Resolve per-input args for additional contract inputs
+	extraResolvedArgs := make([][]interface{}, len(extraContractUtxos))
+	for i := range extraContractUtxos {
+		if options != nil && i < len(options.AdditionalContractInputArgs) && options.AdditionalContractInputArgs[i] != nil {
+			perInputArgs := options.AdditionalContractInputArgs[i]
+			resolved := make([]interface{}, len(perInputArgs))
+			copy(resolved, perInputArgs)
+			for j, param := range userParams {
+				if j >= len(resolved) {
+					break
+				}
+				if param.Type == "Sig" && resolved[j] == nil {
+					resolved[j] = strings.Repeat("00", 72)
+				}
+				if param.Type == "PubKey" && resolved[j] == nil {
+					pubKey, pkErr := signer.GetPublicKey()
+					if pkErr != nil {
+						return "", nil, fmt.Errorf("RunarContract.Call: getting public key for PubKey param (extra input %d): %w", i, pkErr)
+					}
+					resolved[j] = pubKey
+				}
+				if param.Type == "SigHashPreimage" && resolved[j] == nil {
+					resolved[j] = strings.Repeat("00", 181)
+				}
+				if param.Type == "ByteString" && resolved[j] == nil {
+					nExtra := len(options.AdditionalContractInputs)
+					estimatedInputs := 1 + nExtra + 1
+					resolved[j] = strings.Repeat("00", 36*estimatedInputs)
+				}
+			}
+			extraResolvedArgs[i] = resolved
+		} else {
+			extraResolvedArgs[i] = resolvedArgs
+		}
+	}
+
+	// Build placeholder unlocking scripts for additional contract inputs
+	extraUnlockPlaceholders := make([]string, len(extraContractUtxos))
+	for i := range extraContractUtxos {
+		extraUnlockPlaceholders[i] = EncodePushData(strings.Repeat("00", 72)) +
+			c.BuildUnlockingScript(methodName, extraResolvedArgs[i])
+	}
+
+	// Build the BuildCallOptions
+	buildOpts := &BuildCallOptions{}
+	if len(contractOutputs) > 0 {
+		buildOpts.ContractOutputs = contractOutputs
+	}
+	if len(extraContractUtxos) > 0 {
+		buildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
+		for i, utxo := range extraContractUtxos {
+			buildOpts.AdditionalContractInputs[i] = AdditionalContractInput{
+				Utxo:            *utxo,
+				UnlockingScript: extraUnlockPlaceholders[i],
+			}
+		}
+	}
+
+	txHex, inputCount, changeAmount := BuildCallTransaction(
 		*c.currentUtxo,
 		unlockingScript,
 		newLockingScript,
@@ -311,82 +450,168 @@ func (c *RunarContract) Call(
 		changeScript,
 		additionalUtxos,
 		feeRate,
+		buildOpts,
 	)
 
-	if isStateful || needsOpPushTx {
-		// Compute OP_PUSH_TX signature and preimage from the unsigned TX
-		opPushTxSig, preimage, err := ComputeOpPushTx(txHex, 0,
-			c.currentUtxo.Script, c.currentUtxo.Satoshis)
-		if err != nil {
-			return "", nil, fmt.Errorf("RunarContract.Call: OP_PUSH_TX: %w", err)
-		}
-
-		if needsOpPushTx {
-			// For stateless contracts, put preimage into the user's resolved args
-			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
-		}
-
-		if isStateful {
-			// For stateful, build: <opPushTxSig> <user_args> <txPreimage> <methodSelector>
-			userArgsHex := ""
-			for _, arg := range resolvedArgs {
-				userArgsHex += encodeArg(arg)
-			}
-			methodSelectorHex := ""
-			publicMethods := c.getPublicMethods()
-			if len(publicMethods) > 1 {
-				for i, m := range publicMethods {
-					if m.Name == methodName {
-						methodSelectorHex = encodeScriptNumber(int64(i))
-						break
-					}
-				}
-			}
-			unlockingScript = EncodePushData(hex.EncodeToString(opPushTxSig)) +
-				userArgsHex +
-				EncodePushData(hex.EncodeToString(preimage)) +
-				methodSelectorHex
-		} else {
-			// For stateless with checkPreimage: <opPushTxSig> <user_args_with_preimage>
-			unlockingScript = EncodePushData(hex.EncodeToString(opPushTxSig)) +
-				c.BuildUnlockingScript(methodName, resolvedArgs)
-		}
-
-		// Rebuild the transaction with the real unlocking script
-		txHex, inputCount = BuildCallTransaction(
-			*c.currentUtxo,
-			unlockingScript,
-			newLockingScript,
-			newSatoshis,
-			changeAddress,
-			changeScript,
-			additionalUtxos,
-			feeRate,
-		)
-	}
-
-	// Sign additional inputs (input 0 already has the unlocking script)
+	// Sign P2PKH funding inputs (after contract inputs)
 	signedTx := txHex
-	for i := 1; i < inputCount; i++ {
-		if i-1 < len(additionalUtxos) {
-			utxo := additionalUtxos[i-1]
-			sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
-			if err != nil {
-				return "", nil, fmt.Errorf("RunarContract.Call: signing input %d: %w", i, err)
+	p2pkhStartIdx := 1 + len(extraContractUtxos)
+	for i := p2pkhStartIdx; i < inputCount; i++ {
+		utxoIdx := i - p2pkhStartIdx
+		if utxoIdx < len(additionalUtxos) {
+			utxo := additionalUtxos[utxoIdx]
+			sig, signErr := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
+			if signErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: signing input %d: %w", i, signErr)
 			}
-			pubKey, err := signer.GetPublicKey()
-			if err != nil {
-				return "", nil, fmt.Errorf("RunarContract.Call: getting public key: %w", err)
+			pubKey, pkErr := signer.GetPublicKey()
+			if pkErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: getting public key: %w", pkErr)
 			}
 			unlockScript := EncodePushData(sig) + EncodePushData(pubKey)
 			signedTx = InsertUnlockingScript(signedTx, i, unlockScript)
 		}
 	}
 
-	// Two-pass auto-compute: recompute OP_PUSH_TX from the final TX
-	// (the first computation used a placeholder TX with wrong change amount)
-	if len(sigIndices) > 0 || needsOpPushTx || isStateful {
-		// Re-sign Sig params
+	// For stateful contracts, build the OP_PUSH_TX unlocking script:
+	//   <opPushTxSig> <user_args> <txPreimage> <methodSelector>
+	if isStateful {
+		// Compute method selector
+		methodSelectorHex := ""
+		publicMethods := c.getPublicMethods()
+		if len(publicMethods) > 1 {
+			for i, m := range publicMethods {
+				if m.Name == methodName {
+					methodSelectorHex = encodeScriptNumber(int64(i))
+					break
+				}
+			}
+		}
+
+		// Helper to build a stateful unlocking script for a given input
+		buildStatefulUnlock := func(tx string, inputIdx int, subscript string, sats int64, baseArgs []interface{}, txChangeAmount int64) (string, error) {
+			opSig, preimage, ptxErr := ComputeOpPushTx(tx, inputIdx, subscript, sats)
+			if ptxErr != nil {
+				return "", fmt.Errorf("OP_PUSH_TX for input %d: %w", inputIdx, ptxErr)
+			}
+			// Clone baseArgs for this input (Sig params are input-specific)
+			inputArgs := make([]interface{}, len(baseArgs))
+			copy(inputArgs, baseArgs)
+			for _, idx := range sigIndices {
+				realSig, sigErr := signer.Sign(tx, inputIdx, subscript, sats, nil)
+				if sigErr != nil {
+					return "", fmt.Errorf("auto-signing Sig param %d for input %d: %w", idx, inputIdx, sigErr)
+				}
+				inputArgs[idx] = realSig
+			}
+			// Resolve ByteString params (auto-compute allPrevouts from tx)
+			if len(prevoutsIndices) > 0 {
+				allPrevoutsHex := extractAllPrevouts(tx)
+				for _, idx := range prevoutsIndices {
+					inputArgs[idx] = allPrevoutsHex
+				}
+			}
+			argsHex := ""
+			for _, arg := range inputArgs {
+				argsHex += encodeArg(arg)
+			}
+			// Append change params (PKH + amount) for methods that need them
+			changeHex := ""
+			if methodNeedsChange && changePKHHex != "" {
+				changeHex = EncodePushData(changePKHHex) + encodeArg(txChangeAmount)
+			}
+			return EncodePushData(hex.EncodeToString(opSig)) +
+				argsHex +
+				changeHex +
+				EncodePushData(hex.EncodeToString(preimage)) +
+				methodSelectorHex, nil
+		}
+
+		// First pass: build unlocking scripts with current tx layout
+		input0Unlock, err := buildStatefulUnlock(signedTx, 0, c.currentUtxo.Script, c.currentUtxo.Satoshis, resolvedArgs, changeAmount)
+		if err != nil {
+			return "", nil, fmt.Errorf("RunarContract.Call: %w", err)
+		}
+		extraUnlocks := make([]string, len(extraContractUtxos))
+		for i, mu := range extraContractUtxos {
+			extraUnlocks[i], err = buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
+			if err != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: %w", err)
+			}
+		}
+
+		// Rebuild TX with real unlocking scripts (sizes may differ from placeholders)
+		rebuildOpts := &BuildCallOptions{}
+		if len(contractOutputs) > 0 {
+			rebuildOpts.ContractOutputs = contractOutputs
+		}
+		if len(extraContractUtxos) > 0 {
+			rebuildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
+			for i, utxo := range extraContractUtxos {
+				rebuildOpts.AdditionalContractInputs[i] = AdditionalContractInput{
+					Utxo:            *utxo,
+					UnlockingScript: extraUnlocks[i],
+				}
+			}
+		}
+		txHex, inputCount, changeAmount = BuildCallTransaction(
+			*c.currentUtxo,
+			input0Unlock,
+			newLockingScript,
+			newSatoshis,
+			changeAddress,
+			changeScript,
+			additionalUtxos,
+			feeRate,
+			rebuildOpts,
+		)
+		signedTx = txHex
+
+		// Second pass: recompute with final tx (preimage changes with unlock size)
+		finalInput0Unlock, err := buildStatefulUnlock(signedTx, 0, c.currentUtxo.Script, c.currentUtxo.Satoshis, resolvedArgs, changeAmount)
+		if err != nil {
+			return "", nil, fmt.Errorf("RunarContract.Call: %w", err)
+		}
+		signedTx = InsertUnlockingScript(signedTx, 0, finalInput0Unlock)
+
+		for i, mu := range extraContractUtxos {
+			finalMergeUnlock, mergeErr := buildStatefulUnlock(signedTx, i+1, mu.Script, mu.Satoshis, extraResolvedArgs[i], changeAmount)
+			if mergeErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: %w", mergeErr)
+			}
+			signedTx = InsertUnlockingScript(signedTx, i+1, finalMergeUnlock)
+		}
+
+		// Re-sign P2PKH funding inputs (outputs changed after rebuild)
+		for i := p2pkhStartIdx; i < inputCount; i++ {
+			utxoIdx := i - p2pkhStartIdx
+			if utxoIdx < len(additionalUtxos) {
+				utxo := additionalUtxos[utxoIdx]
+				sig, signErr := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
+				if signErr != nil {
+					return "", nil, fmt.Errorf("RunarContract.Call: re-signing input %d: %w", i, signErr)
+				}
+				pubKey, pkErr := signer.GetPublicKey()
+				if pkErr != nil {
+					return "", nil, fmt.Errorf("RunarContract.Call: getting public key: %w", pkErr)
+				}
+				unlockScript := EncodePushData(sig) + EncodePushData(pubKey)
+				signedTx = InsertUnlockingScript(signedTx, i, unlockScript)
+			}
+		}
+	} else if needsOpPushTx || len(sigIndices) > 0 {
+		// Stateless with SigHashPreimage or Sig params: auto-compute
+		var opPushTxSigHex string
+		if needsOpPushTx {
+			opPushTxSig, preimage, ptxErr := ComputeOpPushTx(signedTx, 0,
+				c.currentUtxo.Script, c.currentUtxo.Satoshis)
+			if ptxErr != nil {
+				return "", nil, fmt.Errorf("RunarContract.Call: OP_PUSH_TX: %w", ptxErr)
+			}
+			opPushTxSigHex = hex.EncodeToString(opPushTxSig)
+			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
+		}
+
 		for _, idx := range sigIndices {
 			realSig, sigErr := signer.Sign(signedTx, 0, c.currentUtxo.Script, c.currentUtxo.Satoshis, nil)
 			if sigErr != nil {
@@ -395,47 +620,28 @@ func (c *RunarContract) Call(
 			resolvedArgs[idx] = realSig
 		}
 
-		// Recompute OP_PUSH_TX with the final tx state
-		if isStateful || needsOpPushTx {
-			opPushTxSig, preimage, ptxErr := ComputeOpPushTx(signedTx, 0,
+		realUnlockingScript := c.BuildUnlockingScript(methodName, resolvedArgs)
+		if needsOpPushTx && opPushTxSigHex != "" {
+			realUnlockingScript = EncodePushData(opPushTxSigHex) + realUnlockingScript
+
+			tmpTx := InsertUnlockingScript(signedTx, 0, realUnlockingScript)
+			finalSig, finalPreimage, ptxErr := ComputeOpPushTx(tmpTx, 0,
 				c.currentUtxo.Script, c.currentUtxo.Satoshis)
 			if ptxErr != nil {
 				return "", nil, fmt.Errorf("RunarContract.Call: OP_PUSH_TX for rebuild: %w", ptxErr)
 			}
-
-			if needsOpPushTx {
-				resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
-			}
-
-			var realUnlockingScript string
-			if isStateful {
-				userArgsHex := ""
-				for _, arg := range resolvedArgs {
-					userArgsHex += encodeArg(arg)
+			resolvedArgs[preimageIndex] = hex.EncodeToString(finalPreimage)
+			for _, idx := range sigIndices {
+				realSig, sigErr := signer.Sign(tmpTx, 0, c.currentUtxo.Script, c.currentUtxo.Satoshis, nil)
+				if sigErr != nil {
+					return "", nil, fmt.Errorf("RunarContract.Call: auto-signing Sig param %d: %w", idx, sigErr)
 				}
-				methodSelectorHex := ""
-				publicMethods := c.getPublicMethods()
-				if len(publicMethods) > 1 {
-					for i, m := range publicMethods {
-						if m.Name == methodName {
-							methodSelectorHex = encodeScriptNumber(int64(i))
-							break
-						}
-					}
-				}
-				realUnlockingScript = EncodePushData(hex.EncodeToString(opPushTxSig)) +
-					userArgsHex +
-					EncodePushData(hex.EncodeToString(preimage)) +
-					methodSelectorHex
-			} else {
-				realUnlockingScript = EncodePushData(hex.EncodeToString(opPushTxSig)) +
-					c.BuildUnlockingScript(methodName, resolvedArgs)
+				resolvedArgs[idx] = realSig
 			}
-			signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
-		} else {
-			realUnlockingScript := c.BuildUnlockingScript(methodName, resolvedArgs)
-			signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
+			realUnlockingScript = EncodePushData(hex.EncodeToString(finalSig)) +
+				c.BuildUnlockingScript(methodName, resolvedArgs)
 		}
+		signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 	}
 
 	// Broadcast
@@ -445,7 +651,15 @@ func (c *RunarContract) Call(
 	}
 
 	// Update tracked UTXO for stateful contracts
-	if isStateful && newLockingScript != "" {
+	if isStateful && hasMultiOutput && len(contractOutputs) > 0 {
+		// Multi-output: track the first continuation output
+		c.currentUtxo = &UTXO{
+			Txid:        txid,
+			OutputIndex: 0,
+			Satoshis:    contractOutputs[0].Satoshis,
+			Script:      contractOutputs[0].Script,
+		}
+	} else if isStateful && newLockingScript != "" {
 		c.currentUtxo = &UTXO{
 			Txid:        txid,
 			OutputIndex: 0,
@@ -673,6 +887,49 @@ func (c *RunarContract) getPublicMethods() []ABIMethod {
 }
 
 // ---------------------------------------------------------------------------
+// extractAllPrevouts extracts all input outpoints from a raw tx hex as a
+// concatenated hex string. Each outpoint is txid (32 bytes LE) + vout (4 bytes LE).
+func extractAllPrevouts(txHex string) string {
+	bytes, _ := hex.DecodeString(txHex)
+	if len(bytes) < 5 {
+		return ""
+	}
+	offset := 4 // skip version
+	inputCount, viLen := readVarintBytes(bytes, offset)
+	offset += viLen
+
+	var prevouts strings.Builder
+	for i := 0; i < int(inputCount); i++ {
+		// outpoint = 32 bytes txid + 4 bytes vout = 36 bytes
+		if offset+36 > len(bytes) {
+			break
+		}
+		prevouts.WriteString(hex.EncodeToString(bytes[offset : offset+36]))
+		offset += 36
+		// skip script
+		scriptLen, svLen := readVarintBytes(bytes, offset)
+		offset += svLen + int(scriptLen)
+		offset += 4 // skip sequence
+	}
+	return prevouts.String()
+}
+
+func readVarintBytes(data []byte, offset int) (uint64, int) {
+	if offset >= len(data) {
+		return 0, 1
+	}
+	first := data[offset]
+	if first < 0xfd {
+		return uint64(first), 1
+	} else if first == 0xfd && offset+2 < len(data) {
+		return uint64(data[offset+1]) | uint64(data[offset+2])<<8, 3
+	} else if first == 0xfe && offset+4 < len(data) {
+		return uint64(data[offset+1]) | uint64(data[offset+2])<<8 |
+			uint64(data[offset+3])<<16 | uint64(data[offset+4])<<24, 5
+	}
+	return 0, 9
+}
+
 // Argument encoding
 // ---------------------------------------------------------------------------
 

@@ -136,11 +136,26 @@ class DeployOptions:
 
 
 @dataclass
+class OutputSpec:
+    """Specification for a single contract continuation output."""
+    satoshis: int
+    state: dict
+
+    @staticmethod
+    def from_dict(d: dict) -> OutputSpec:
+        return OutputSpec(satoshis=d['satoshis'], state=d['state'])
+
+
+@dataclass
 class CallOptions:
     """Options for calling a contract method."""
     satoshis: int = 0
     change_address: str = ''
+    change_pub_key: str = ''
     new_state: dict | None = None
+    outputs: list[OutputSpec | dict] | None = None
+    additional_contract_inputs: list[Utxo | dict] | None = None
+    additional_contract_input_args: list[list] | None = None
 
 
 # SdkValue is the union of types that can be passed as contract arguments

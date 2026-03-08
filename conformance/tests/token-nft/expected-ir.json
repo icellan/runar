@@ -203,45 +203,81 @@
         {
           "name": "t13",
           "value": {
-            "args": [
-              "t12"
-            ],
-            "func": "hash256",
-            "kind": "call"
+            "kind": "load_param",
+            "name": "_changePKH"
           }
         },
         {
           "name": "t14",
           "value": {
             "kind": "load_param",
-            "name": "txPreimage"
+            "name": "_changeAmount"
           }
         },
         {
           "name": "t15",
           "value": {
             "args": [
+              "t13",
               "t14"
             ],
-            "func": "extractOutputHash",
+            "func": "buildChangeOutput",
             "kind": "call"
           }
         },
         {
           "name": "t16",
           "value": {
-            "kind": "bin_op",
-            "left": "t13",
-            "op": "===",
-            "result_type": "bytes",
-            "right": "t15"
+            "args": [
+              "t12",
+              "t15"
+            ],
+            "func": "cat",
+            "kind": "call"
           }
         },
         {
           "name": "t17",
           "value": {
+            "args": [
+              "t16"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "args": [
+              "t18"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t17",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t19"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
             "kind": "assert",
-            "value": "t16"
+            "value": "t20"
           }
         }
       ],
@@ -258,6 +294,14 @@
         },
         {
           "name": "outputSatoshis",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
           "type": "bigint"
         },
         {

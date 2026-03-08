@@ -54,7 +54,7 @@ describe('Auction', () => {
       1000000n, // deadline far in the future
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
     expect(typeof deployTxid).toBe('string');
     expect(deployTxid.length).toBe(64);
@@ -75,7 +75,7 @@ describe('Auction', () => {
       500000n,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -94,7 +94,7 @@ describe('Auction', () => {
       999999n,
     ]);
 
-    const { txid: deployTxid } = await contract.deploy(provider, signer, { satoshis: 5000 });
+    const { txid: deployTxid } = await contract.deploy(provider, signer, {});
     expect(deployTxid).toBeTruthy();
   });
 
@@ -118,7 +118,7 @@ describe('Auction', () => {
       0n,
     ]);
 
-    await contract.deploy(provider, signer, { satoshis: 5000 });
+    await contract.deploy(provider, signer, {});
 
     // null Sig is auto-computed from the signer (who is the auctioneer)
     // close() does not continue state, so no newState needed
@@ -144,7 +144,7 @@ describe('Auction', () => {
       0n, // deadline=0 so extractLocktime passes
     ]);
 
-    await contract.deploy(provider, auctioneerSigner, { satoshis: 5000 });
+    await contract.deploy(provider, auctioneerSigner, {});
 
     // Call close with walletB — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);

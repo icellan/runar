@@ -2,18 +2,63 @@ package contract
 
 import runar "github.com/icellan/runar/packages/runar-go"
 
+// CovenantVault is a stateless Bitcoin covenant contract.
+//
+// A covenant is a self-enforcing spending constraint: the locking script
+// dictates not just who can spend the funds, but how they may be spent.
+// This contract demonstrates the pattern by combining three verification
+// layers in its single public method:
+//
+//  1. Owner authorization  -- the owner's ECDSA signature must be valid
+//     (proves who is spending).
+//  2. Preimage verification -- CheckPreimage (OP_PUSH_TX) proves the
+//     contract is inspecting the real spending transaction, enabling
+//     on-chain introspection of its fields.
+//  3. Covenant rule -- the output amount must be >= MinAmount, which
+//     constrains the transaction structure itself.
+//
+// Script layout (simplified):
+//
+//	Unlocking: <sig> <amount> <txPreimage>
+//	Locking:   <pubKey> OP_CHECKSIG OP_VERIFY <checkPreimage>
+//	           <amount >= minAmount> OP_VERIFY
+//
+// Use cases for this pattern include withdrawal limits, time-locked vaults,
+// rate-limited spending, and enforced change addresses.
+//
+// Contract model: Stateless (SmartContract). All constructor parameters
+// are readonly and baked into the locking script at deploy time.
 type CovenantVault struct {
 	runar.SmartContract
-	Owner     runar.PubKey `runar:"readonly"`
-	Recipient runar.Addr   `runar:"readonly"`
+	// Owner is the compressed ECDSA public key (33 bytes) of the vault owner.
+	// Only the corresponding private key can produce a valid signature.
+	Owner runar.PubKey `runar:"readonly"`
+	// Recipient is the address hash (20 bytes, hash160 of pubkey) of the
+	// intended recipient.
+	Recipient runar.Addr `runar:"readonly"`
+	// MinAmount is the minimum output amount in satoshis enforced by the
+	// covenant rule.
 	MinAmount runar.Bigint `runar:"readonly"`
 }
 
+// Spend unlocks funds held by this covenant. The caller must supply three
+// pieces of evidence:
+//   - sig:        ECDSA signature from the owner (~72 bytes DER).
+//   - amount:     Declared output amount; must be >= MinAmount.
+//   - txPreimage: Sighash preimage (variable length) used by CheckPreimage
+//     to verify the spending transaction.
 func (c *CovenantVault) Spend(sig runar.Sig, amount runar.Bigint, txPreimage runar.SigHashPreimage) {
-	// Owner must authorize
+	// Layer 1: Owner authorization -- verify the ECDSA signature against
+	// the owner's public key. This proves the rightful owner is spending.
 	runar.Assert(runar.CheckSig(sig, c.Owner))
+
+	// Layer 2: Preimage verification -- OP_PUSH_TX proves the contract is
+	// inspecting the actual spending transaction, not a forgery. Without
+	// this, the covenant rule below could be trivially bypassed.
 	runar.Assert(runar.CheckPreimage(txPreimage))
 
-	// Enforce minimum output amount (covenant rule)
+	// Layer 3: Covenant rule -- enforce a minimum output amount. This is
+	// the core covenant constraint: it restricts how funds are spent,
+	// not just who can spend them.
 	runar.Assert(amount >= c.MinAmount)
 }

@@ -496,12 +496,18 @@ class _MoveParser:
 
             self.expect(TOK_COLON)
 
+            # Detect &mut prefix before parsing the type name
+            is_mut = (
+                self.check(TOK_AMP)
+                and self.pos + 1 < len(self.tokens)
+                and self.tokens[self.pos + 1].kind == TOK_IDENT
+                and self.tokens[self.pos + 1].value == "mut"
+            )
             type_name = self._parse_move_type_name()
             type_node = _move_map_type(type_name)
 
-            # Determine readonly: by default all fields in a Move resource are mutable
-            # But if the module uses SmartContract parent, fields should be readonly
-            readonly = True  # default to readonly; will be overridden for StatefulSmartContract later
+            # &mut fields are mutable; all others are readonly
+            readonly = not is_mut
 
             props.append(PropertyNode(
                 name=field_name,

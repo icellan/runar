@@ -11,20 +11,74 @@ from runar import mock_sig, mock_pub_key
 
 
 def test_transfer():
-    c = FungibleToken(owner=mock_pub_key(), balance=1000, token_id=b'\xab' * 16)
+    c = FungibleToken(owner=mock_pub_key(), balance=1000, merge_balance=0, token_id=b'\xab' * 16)
     recipient = b'\x03' + b'\x01' * 32
     c.transfer(mock_sig(), recipient, 300, 546)
     assert len(c._outputs) == 2
 
 
 def test_transfer_exceeds_balance_fails():
-    c = FungibleToken(owner=mock_pub_key(), balance=100, token_id=b'\xab' * 16)
+    c = FungibleToken(owner=mock_pub_key(), balance=100, merge_balance=0, token_id=b'\xab' * 16)
     with pytest.raises(AssertionError):
         c.transfer(mock_sig(), mock_pub_key(), 200, 546)
 
 
 def test_send():
-    c = FungibleToken(owner=mock_pub_key(), balance=1000, token_id=b'\xab' * 16)
+    c = FungibleToken(owner=mock_pub_key(), balance=1000, merge_balance=0, token_id=b'\xab' * 16)
     recipient = b'\x03' + b'\x01' * 32
+    c.send(mock_sig(), recipient, 546)
+    assert len(c._outputs) == 1
+
+
+def test_merge():
+    c = FungibleToken(owner=mock_pub_key(), balance=50, merge_balance=0, token_id=b'\xab' * 16)
+    # allPrevouts = 72 zero bytes (two 36-byte zero outpoints),
+    # consistent with mock extract_hash_prevouts and extract_outpoint.
+    all_prevouts = b'\x00' * 72
+    c.merge(mock_sig(), 150, all_prevouts, 546)
+    assert len(c._outputs) == 1
+
+
+def test_merge_negative_other_balance_fails():
+    c = FungibleToken(owner=mock_pub_key(), balance=100, merge_balance=0, token_id=b'\xab' * 16)
+    all_prevouts = b'\x00' * 72
+    with pytest.raises(AssertionError):
+        c.merge(mock_sig(), -1, all_prevouts, 546)
+
+
+def test_merge_tampered_prevouts_fails():
+    c = FungibleToken(owner=mock_pub_key(), balance=30, merge_balance=0, token_id=b'\xab' * 16)
+    tampered_prevouts = b'\xff' * 72
+    with pytest.raises(AssertionError):
+        c.merge(mock_sig(), 70, tampered_prevouts, 546)
+
+
+def test_merge_with_pre_existing_merge_balance():
+    c = FungibleToken(owner=mock_pub_key(), balance=20, merge_balance=10, token_id=b'\xab' * 16)
+    all_prevouts = b'\x00' * 72
+    c.merge(mock_sig(), 50, all_prevouts, 546)
+    assert len(c._outputs) == 1
+
+
+def test_transfer_exact_balance():
+    pk = mock_pub_key()
+    recipient = b'\x03' + b'\x01' * 32
+    c = FungibleToken(owner=pk, balance=100, merge_balance=0, token_id=b'\xab' * 16)
+    c.transfer(mock_sig(), recipient, 100, 546)
+    assert len(c._outputs) == 1
+
+
+def test_transfer_uses_merge_balance():
+    pk = mock_pub_key()
+    recipient = b'\x03' + b'\x01' * 32
+    c = FungibleToken(owner=pk, balance=60, merge_balance=40, token_id=b'\xab' * 16)
+    c.transfer(mock_sig(), recipient, 80, 546)
+    assert len(c._outputs) == 2
+
+
+def test_send_uses_merge_balance():
+    pk = mock_pub_key()
+    recipient = b'\x03' + b'\x01' * 32
+    c = FungibleToken(owner=pk, balance=60, merge_balance=40, token_id=b'\xab' * 16)
     c.send(mock_sig(), recipient, 546)
     assert len(c._outputs) == 1

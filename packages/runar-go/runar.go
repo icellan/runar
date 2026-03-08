@@ -228,6 +228,14 @@ func ExtractVersion(p SigHashPreimage) int64 { return 1 }
 // ExtractSequence returns 0xffffffff in test mode.
 func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
 
+// ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
+// This is consistent with passing allPrevouts = 72 zero bytes in tests,
+// since ExtractOutpoint also returns 36 zero bytes.
+func ExtractHashPrevouts(p SigHashPreimage) Sha256 { return Hash256(ByteString(make([]byte, 72))) }
+
+// ExtractOutpoint returns 36 zero bytes in test mode.
+func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------

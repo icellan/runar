@@ -889,7 +889,7 @@ func TestBuildDeployTransaction_SingleOutputWhenZeroChange(t *testing.T) {
 
 func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.version != 1 {
@@ -902,7 +902,7 @@ func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 
 func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].script != "aabb" {
@@ -912,7 +912,7 @@ func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 
 func TestBuildCallTransaction_SingleInput(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, inputCount, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 1 {
@@ -928,7 +928,7 @@ func TestBuildCallTransaction_AdditionalInputs(t *testing.T) {
 	additional := []UTXO{makeUtxo(50000, 1), makeUtxo(30000, 2)}
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional)
+	txHex, inputCount, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional, 1)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 3 {
@@ -951,7 +951,7 @@ func TestBuildCallTransaction_StatefulOutput(t *testing.T) {
 	newLockingScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].script != newLockingScript {
@@ -967,7 +967,7 @@ func TestBuildCallTransaction_DefaultSatoshis(t *testing.T) {
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
 	// newSatoshis = 0 with newLockingScript set => defaults to currentUtxo.Satoshis
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].satoshis != 75000 {
@@ -979,7 +979,7 @@ func TestBuildCallTransaction_ChangeCalculation(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
@@ -1000,7 +1000,7 @@ func TestBuildCallTransaction_NoChangeWhenZero(t *testing.T) {
 	utxo := makeUtxo(50096, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputCount != 1 {
@@ -1012,7 +1012,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(42) + changeOut(34) + overhead(10) = 86
@@ -1030,7 +1030,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 
 func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	expected := reverseHex(utxo.Txid)
@@ -1041,7 +1041,7 @@ func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 
 func TestBuildCallTransaction_CorrectOutputIndex(t *testing.T) {
 	utxo := makeUtxo(100000, 3)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].prevIndex != 3 {

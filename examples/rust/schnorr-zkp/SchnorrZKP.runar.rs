@@ -2,12 +2,18 @@ use runar::prelude::*;
 
 /// Schnorr zero-knowledge proof verifier.
 ///
-/// Proves knowledge of a private key k such that P = k*G without revealing k.
-/// Uses the Schnorr identification protocol:
-///   Prover: picks random r, sends R = r*G
-///   Verifier: sends challenge e
-///   Prover: sends s = r + e*k (mod n)
-///   Verifier: checks s*G === R + e*P
+/// Proves knowledge of a private key `k` such that `P = k*G` without
+/// revealing `k`. Uses the Schnorr identification protocol:
+///
+/// ```text
+/// Prover: picks random r, sends R = r*G
+/// Verifier: sends challenge e
+/// Prover: sends s = r + e*k (mod n)
+/// Verifier: checks s*G === R + e*P
+/// ```
+///
+/// In a Bitcoin contract context, the prover provides (R, s, e) in the
+/// unlocking script, and the contract verifies the proof on-chain.
 #[runar::contract]
 pub struct SchnorrZKP {
     #[readonly]
@@ -17,8 +23,13 @@ pub struct SchnorrZKP {
 #[runar::methods(SchnorrZKP)]
 impl SchnorrZKP {
     /// Verify a Schnorr ZKP proof.
+    ///
+    /// - `r_point` - The commitment R = r*G (prover's nonce point)
+    /// - `s` - The response s = r + e*k (mod n)
+    /// - `e` - The challenge value
     #[public]
     pub fn verify(&self, r_point: &Point, s: Bigint, e: Bigint) {
+        // Verify R is on the curve
         assert!(ec_on_curve(r_point));
 
         // Left side: s*G

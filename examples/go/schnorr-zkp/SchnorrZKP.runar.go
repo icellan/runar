@@ -11,13 +11,21 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //	Verifier: sends challenge e
 //	Prover: sends s = r + e*k (mod n)
 //	Verifier: checks s*G === R + e*P
+//
+// In a Bitcoin contract context, the prover provides (R, s, e) in the
+// unlocking script, and the contract verifies the proof on-chain.
 type SchnorrZKP struct {
 	runar.SmartContract
 	PubKey runar.Point `runar:"readonly"`
 }
 
 // Verify checks a Schnorr ZKP proof.
+//
+// rPoint is the commitment R = r*G (prover's nonce point).
+// s is the response s = r + e*k (mod n).
+// e is the challenge value.
 func (c *SchnorrZKP) Verify(rPoint runar.Point, s runar.Bigint, e runar.Bigint) {
+	// Verify R is on the curve
 	runar.Assert(runar.EcOnCurve(rPoint))
 
 	// Left side: s*G
