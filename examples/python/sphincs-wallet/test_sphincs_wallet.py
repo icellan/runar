@@ -10,11 +10,8 @@ contract_mod = load_contract(str(Path(__file__).parent / "SPHINCSWallet.runar.py
 SPHINCSWallet = contract_mod.SPHINCSWallet
 
 # Import real SLH-DSA crypto. Skip signature tests if not installed.
-try:
-    from runar import slh_keygen
-    _HAS_SLHDSA = True
-except Exception:
-    _HAS_SLHDSA = False
+from runar import slh_keygen
+from runar.slhdsa_impl import _HAS_SLHDSA
 
 # Module-level shared SLH-DSA keypair (keygen is slow, ~2-3s).
 _slh_kp = None
