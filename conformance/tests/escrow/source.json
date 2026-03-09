@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/escrow/Escrow.runar.ts",
+    ".runar.sol": "../../../examples/sol/escrow/Escrow.runar.sol",
+    ".runar.move": "../../../examples/move/escrow/Escrow.runar.move",
+    ".runar.go": "../../../examples/go/escrow/Escrow.runar.go",
+    ".runar.rs": "../../../examples/rust/escrow/Escrow.runar.rs",
+    ".runar.py": "../../../examples/python/escrow/Escrow.runar.py"
+  }
+}

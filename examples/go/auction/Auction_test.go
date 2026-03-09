@@ -1,8 +1,8 @@
 package contract
 
 import (
+	runar "github.com/icellan/runar/packages/runar-go"
 	"testing"
-	"runar"
 )
 
 func newAuction() *Auction {
@@ -17,7 +17,7 @@ func newAuction() *Auction {
 func TestAuction_Bid(t *testing.T) {
 	c := newAuction()
 	bidder := runar.PubKey("new_bidder_placeholder_33bytes!")
-	c.Bid(bidder, 200)
+	c.Bid(runar.MockSig(), bidder, 200)
 	if c.HighestBid != 200 {
 		t.Errorf("expected HighestBid=200, got %d", c.HighestBid)
 	}
@@ -29,13 +29,13 @@ func TestAuction_Bid_MustBeHigher(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newAuction().Bid(runar.MockPubKey(), 50)
+	newAuction().Bid(runar.MockSig(), runar.MockPubKey(), 50)
 }
 
 func TestAuction_MultipleBids(t *testing.T) {
 	c := newAuction()
-	c.Bid(runar.PubKey("bidder1_33bytes_placeholder_____"), 200)
-	c.Bid(runar.PubKey("bidder2_33bytes_placeholder_____"), 300)
+	c.Bid(runar.MockSig(), runar.PubKey("bidder1_33bytes_placeholder_____"), 200)
+	c.Bid(runar.MockSig(), runar.PubKey("bidder2_33bytes_placeholder_____"), 300)
 	if c.HighestBid != 300 {
 		t.Errorf("expected HighestBid=300, got %d", c.HighestBid)
 	}

@@ -53,7 +53,25 @@ func applyOnePass(ops []StackOp) ([]StackOp, bool) {
 	i := 0
 
 	for i < len(ops) {
-		// Try window-2 rules first
+		// Try 4-op window
+		if i+3 < len(ops) {
+			if replacement, ok := matchWindow4(ops[i], ops[i+1], ops[i+2], ops[i+3]); ok {
+				result = append(result, replacement...)
+				i += 4
+				changed = true
+				continue
+			}
+		}
+		// Try 3-op window
+		if i+2 < len(ops) {
+			if replacement, ok := matchWindow3(ops[i], ops[i+1], ops[i+2]); ok {
+				result = append(result, replacement...)
+				i += 3
+				changed = true
+				continue
+			}
+		}
+		// Try 2-op window
 		if i+1 < len(ops) {
 			if replacement, ok := matchWindow2(ops[i], ops[i+1]); ok {
 				result = append(result, replacement...)
@@ -149,6 +167,105 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	// OP_DROP, OP_DROP -> OP_2DROP
 	if a.Op == "drop" && b.Op == "drop" {
 		return []StackOp{{Op: "opcode", Code: "OP_2DROP"}}, true
+	}
+
+	// PUSH(0n) + Roll{depth:0} -> remove both (roll 0 is a no-op)
+	if isPushBigInt(a, 0) && b.Op == "roll" {
+		return nil, true
+	}
+
+	// PUSH(1n) + Roll{depth:1} -> SWAP
+	if isPushBigInt(a, 1) && b.Op == "roll" {
+		return []StackOp{{Op: "swap"}}, true
+	}
+
+	// PUSH(2n) + Roll{depth:2} -> ROT
+	if isPushBigInt(a, 2) && b.Op == "roll" {
+		return []StackOp{{Op: "rot"}}, true
+	}
+
+	// PUSH(0n) + Pick{depth:0} -> DUP
+	if isPushBigInt(a, 0) && b.Op == "pick" {
+		return []StackOp{{Op: "dup"}}, true
+	}
+
+	// PUSH(1n) + Pick{depth:1} -> OVER
+	if isPushBigInt(a, 1) && b.Op == "pick" {
+		return []StackOp{{Op: "over"}}, true
+	}
+
+	// SHA256 + SHA256 -> HASH256
+	if isOpcodeOp(a, "OP_SHA256") && isOpcodeOp(b, "OP_SHA256") {
+		return []StackOp{{Op: "opcode", Code: "OP_HASH256"}}, true
+	}
+
+	// PUSH 0 + NUMEQUAL -> NOT
+	if isPushBigInt(a, 0) && isOpcodeOp(b, "OP_NUMEQUAL") {
+		return []StackOp{{Op: "opcode", Code: "OP_NOT"}}, true
+	}
+
+	return nil, false
+}
+
+// pushBigIntValue extracts the big.Int from a push op, or returns nil.
+func pushBigIntValue(op StackOp) *big.Int {
+	if op.Op != "push" || op.Value.Kind != "bigint" || op.Value.BigInt == nil {
+		return nil
+	}
+	return op.Value.BigInt
+}
+
+// makePushBigInt creates a push StackOp with the given big.Int value.
+func makePushBigInt(n *big.Int) StackOp {
+	return StackOp{
+		Op: "push",
+		Value: PushValue{
+			Kind:   "bigint",
+			BigInt: n,
+		},
+	}
+}
+
+func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
+	aVal := pushBigIntValue(a)
+	bVal := pushBigIntValue(b)
+
+	if aVal != nil && bVal != nil {
+		// PUSH(a) + PUSH(b) + OP_ADD -> PUSH(a+b)
+		if isOpcodeOp(c, "OP_ADD") {
+			result := new(big.Int).Add(aVal, bVal)
+			return []StackOp{makePushBigInt(result)}, true
+		}
+		// PUSH(a) + PUSH(b) + OP_SUB -> PUSH(a-b)
+		if isOpcodeOp(c, "OP_SUB") {
+			result := new(big.Int).Sub(aVal, bVal)
+			return []StackOp{makePushBigInt(result)}, true
+		}
+		// PUSH(a) + PUSH(b) + OP_MUL -> PUSH(a*b)
+		if isOpcodeOp(c, "OP_MUL") {
+			result := new(big.Int).Mul(aVal, bVal)
+			return []StackOp{makePushBigInt(result)}, true
+		}
+	}
+
+	return nil, false
+}
+
+func matchWindow4(a, b, c, d StackOp) ([]StackOp, bool) {
+	aVal := pushBigIntValue(a)
+	cVal := pushBigIntValue(c)
+
+	if aVal != nil && cVal != nil {
+		// PUSH(a) + OP_ADD + PUSH(b) + OP_ADD -> PUSH(a+b), OP_ADD
+		if isOpcodeOp(b, "OP_ADD") && isOpcodeOp(d, "OP_ADD") {
+			result := new(big.Int).Add(aVal, cVal)
+			return []StackOp{makePushBigInt(result), {Op: "opcode", Code: "OP_ADD"}}, true
+		}
+		// PUSH(a) + OP_SUB + PUSH(b) + OP_SUB -> PUSH(a+b), OP_SUB
+		if isOpcodeOp(b, "OP_SUB") && isOpcodeOp(d, "OP_SUB") {
+			result := new(big.Int).Add(aVal, cVal)
+			return []StackOp{makePushBigInt(result), {Op: "opcode", Code: "OP_SUB"}}, true
+		}
 	}
 
 	return nil, false

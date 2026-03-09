@@ -1,0 +1,74 @@
+[
+  {
+    "name": "roll0-noop",
+    "before": [{ "op": "push", "value": 0 }, { "op": "roll", "depth": 0 }],
+    "after": [],
+    "bytes_saved": 2
+  },
+  {
+    "name": "roll1-to-swap",
+    "before": [{ "op": "push", "value": 1 }, { "op": "roll", "depth": 1 }],
+    "after": [{ "op": "swap" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "roll2-to-rot",
+    "before": [{ "op": "push", "value": 2 }, { "op": "roll", "depth": 2 }],
+    "after": [{ "op": "rot" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "pick0-to-dup",
+    "before": [{ "op": "push", "value": 0 }, { "op": "pick", "depth": 0 }],
+    "after": [{ "op": "dup" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "pick1-to-over",
+    "before": [{ "op": "push", "value": 1 }, { "op": "pick", "depth": 1 }],
+    "after": [{ "op": "over" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "sha256-sha256-to-hash256",
+    "before": [{ "op": "opcode", "code": "OP_SHA256" }, { "op": "opcode", "code": "OP_SHA256" }],
+    "after": [{ "op": "opcode", "code": "OP_HASH256" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "0-numequal-to-not",
+    "before": [{ "op": "push", "value": 0 }, { "op": "opcode", "code": "OP_NUMEQUAL" }],
+    "after": [{ "op": "opcode", "code": "OP_NOT" }],
+    "bytes_saved": 1
+  },
+  {
+    "name": "const-fold-add",
+    "before": [{ "op": "push", "value": 3 }, { "op": "push", "value": 7 }, { "op": "opcode", "code": "OP_ADD" }],
+    "after": [{ "op": "push", "value": 10 }],
+    "bytes_saved": 2
+  },
+  {
+    "name": "const-fold-sub",
+    "before": [{ "op": "push", "value": 10 }, { "op": "push", "value": 3 }, { "op": "opcode", "code": "OP_SUB" }],
+    "after": [{ "op": "push", "value": 7 }],
+    "bytes_saved": 2
+  },
+  {
+    "name": "const-fold-mul",
+    "before": [{ "op": "push", "value": 6 }, { "op": "push", "value": 7 }, { "op": "opcode", "code": "OP_MUL" }],
+    "after": [{ "op": "push", "value": 42 }],
+    "bytes_saved": 2
+  },
+  {
+    "name": "add-chain-fold",
+    "before": [{ "op": "push", "value": 3 }, { "op": "opcode", "code": "OP_ADD" }, { "op": "push", "value": 7 }, { "op": "opcode", "code": "OP_ADD" }],
+    "after": [{ "op": "push", "value": 10 }, { "op": "opcode", "code": "OP_ADD" }],
+    "bytes_saved": 2
+  },
+  {
+    "name": "sub-chain-fold",
+    "before": [{ "op": "push", "value": 3 }, { "op": "opcode", "code": "OP_SUB" }, { "op": "push", "value": 7 }, { "op": "opcode", "code": "OP_SUB" }],
+    "after": [{ "op": "push", "value": 10 }, { "op": "opcode", "code": "OP_SUB" }],
+    "bytes_saved": 2
+  }
+]

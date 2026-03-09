@@ -2,7 +2,7 @@
 
 *Old Norse plural for "runes" (rún = secret/script/mystery). Pronounced ROO-nar.*
 
-**Write Bitcoin smart contracts in TypeScript, Go, Rust, Solidity, or Move. Compile to Bitcoin Script.**
+**Write Bitcoin smart contracts in TypeScript, Go, Rust, Python, Solidity, or Move. Compile to Bitcoin Script.**
 
 <!-- Badges -->
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
@@ -94,9 +94,50 @@ contract P2PKH is SmartContract {
 ```
 </td>
 </tr>
+<tr>
+<td>
+
+**Move-style**
+```move
+module P2PKH {
+    use runar::types::{Addr, PubKey, Sig};
+    use runar::crypto::{hash160, check_sig};
+
+    resource struct P2PKH {
+        pub_key_hash: Addr,
+    }
+
+    public fun unlock(contract: &P2PKH, sig: Sig, pub_key: PubKey) {
+        assert!(hash160(pub_key) == contract.pub_key_hash, 0);
+        assert!(check_sig(sig, pub_key), 0);
+    }
+}
+```
+</td>
+<td>
+
+**Python**
+```python
+from runar import (SmartContract, Addr, PubKey,
+    Sig, hash160, check_sig, assert_, public)
+
+class P2PKH(SmartContract):
+    pub_key_hash: Addr
+
+    def __init__(self, pub_key_hash: Addr):
+        super().__init__(pub_key_hash)
+        self.pub_key_hash = pub_key_hash
+
+    @public
+    def unlock(self, sig: Sig, pub_key: PubKey):
+        assert_(hash160(pub_key) == self.pub_key_hash)
+        assert_(check_sig(sig, pub_key))
+```
+</td>
+</tr>
 </table>
 
-All four produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
+All six formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
 
 ---
 
@@ -105,9 +146,9 @@ All four produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQU
 Bitcoin Script development today forces a choice between hand-writing opcodes (error-prone, unauditable) or adopting a framework with heavy decorator-based DSLs that obscure what happens on-chain. Rúnar takes a different path:
 
 - **No decorators** — uses native language keywords (`readonly`, `public`, `immutable`, `#[readonly]`)
-- **Write in your language** — TypeScript, Go, Rust, Solidity-like, or Move-style
-- **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust
-- **Three compilers** — TypeScript (reference), Go, Rust — all produce byte-identical output
+- **Write in your language** — TypeScript, Go, Rust, Python, Solidity-like, or Move-style
+- **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust, `pytest` for Python
+- **Four compilers** — TypeScript (reference), Go, Rust, Python — all produce byte-identical output
 - **Post-quantum ready** — WOTS+ and SLH-DSA (FIPS 205) signature verification in Bitcoin Script
 - **Nanopass architecture** — 6 small passes, each auditable in a single sitting
 - **Full IDE support** — type checking, autocompletion, go-to-definition in every language
@@ -120,13 +161,14 @@ Bitcoin Script development today forces a choice between hand-writing opcodes (e
 
 ```bash
 pnpm add runar-lang runar-compiler runar-cli
-runar compile MyContract.runar.ts    # => artifacts/MyContract.json
+runar compile MyContract.runar.ts    # => artifacts/MyContract.runar.json
 ```
 
 ### Go
 
 ```bash
-# In your go.mod, add: require runar v0.0.0
+# In your go.mod, add:
+#   require github.com/icellan/runar/packages/runar-go v0.1.0
 # Contracts are real Go — test with go test, compile with the Rúnar Go compiler
 go test ./...
 ```
@@ -134,9 +176,17 @@ go test ./...
 ### Rust
 
 ```bash
-# In Cargo.toml: runar = { path = "..." }
+# In Cargo.toml: runar = { package = "runar-lang", version = "0.1.0" }
 # Contracts are real Rust — test with cargo test, compile with the Rúnar Rust compiler
 cargo test
+```
+
+### Python
+
+```bash
+# pip install runar-lang
+# Contracts are real Python — test with pytest, compile with any Rúnar compiler
+PYTHONPATH=packages/runar-py python3 -m pytest
 ```
 
 ---
@@ -188,24 +238,40 @@ fn test_compile() {
 }
 ```
 
+**Python** (pytest):
+```python
+from conftest import load_contract
+from runar import hash160, mock_sig, mock_pub_key
+
+contract_mod = load_contract("P2PKH.runar.py")
+P2PKH = contract_mod.P2PKH
+
+def test_unlock():
+    pk = mock_pub_key()
+    c = P2PKH(pub_key_hash=hash160(pk))
+    c.unlock(mock_sig(), pk)
+```
+
 ---
 
 ## Supported Formats
 
 | Format | Extension | Compilers | IDE Support | Status |
 |--------|-----------|-----------|-------------|--------|
-| TypeScript | `.runar.ts` | TS, Go, Rust | Full (`tsc`) | **Stable** |
-| Go | `.runar.go` | Go | Full (`gopls`) | Experimental |
-| Rust DSL | `.runar.rs` | Rust | Full (`rust-analyzer`) | Experimental |
-| Solidity-like | `.runar.sol` | TS, Go, Rust | Syntax highlighting | Experimental |
-| Move-style | `.runar.move` | TS, Go, Rust | Syntax highlighting | Experimental |
+| TypeScript | `.runar.ts` | TS, Go, Rust, Python | Full (`tsc`) | **Stable** |
+| Go | `.runar.go` | Go, Python | Full (`gopls`) | Experimental |
+| Rust DSL | `.runar.rs` | Rust, Python | Full (`rust-analyzer`) | Experimental |
+| Python | `.runar.py` | TS, Go, Rust, Python | Full (`pyright`) | Experimental |
+| Solidity-like | `.runar.sol` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
+| Move-style | `.runar.move` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
 
 All formats parse into the same `ContractNode` AST. From there, the pipeline is identical:
 
 ```
   .runar.ts ──┐
   .runar.sol ──┤
-  .runar.move ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
+  .runar.move ─┤
+  .runar.py ───┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
   .runar.go ───┤
   .runar.rs ───┘
 ```
@@ -214,7 +280,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-8 example contracts demonstrate all major patterns, each available in all supported formats:
+16 example contracts demonstrate all major patterns:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -228,8 +294,14 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [SimpleNFT](examples/ts/token-nft/) | NFT with transfer/burn | Yes | Yes |
 | [PostQuantumWallet](examples/ts/post-quantum-wallet/) | WOTS+ signature verification | No | No |
 | [SPHINCSWallet](examples/ts/sphincs-wallet/) | SLH-DSA (FIPS 205) verification | No | No |
+| [SchnorrZKP](examples/ts/schnorr-zkp/) | Schnorr zero-knowledge proof (EC ops) | No | No |
+| [FunctionPatterns](examples/ts/function-patterns/) | Public/private methods, built-ins | Yes | Yes |
+| [MathDemo](examples/ts/math-demo/) | Math built-in functions | Yes | Yes |
+| [ConvergenceProof](examples/ts/convergence-proof/) | Convergence proof pattern | No | No |
+| [ECDemo](examples/ts/ec-demo/) | EC point operations | No | No |
+| [BoundedCounter](examples/ts/property-initializers/) | Property initializers with defaults | Yes | Yes |
 
-Each contract has tests in TypeScript, Go, Rust, Solidity, and Move:
+11 contracts are available in all 6 formats (TypeScript, Go, Rust, Solidity, Move, Python). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, and Python.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -237,6 +309,7 @@ examples/
   rust/p2pkh/        P2PKH.runar.rs + P2PKH_test.rs
   sol/p2pkh/         P2PKH.runar.sol + P2PKH.test.ts
   move/p2pkh/        P2PKH.runar.move + P2PKH.test.ts
+  python/p2pkh/      P2PKH.runar.py + test_p2pkh.py
 ```
 
 ---
@@ -256,7 +329,7 @@ The compiler is structured as six small, composable nanopass transforms. Each pa
 | 5 | **Stack Lower** | ANF IR | Stack IR |
 | 6 | **Emit** | Stack IR | Bitcoin Script |
 
-The optimizer (constant folding + dead binding elimination) runs between passes 4 and 5.
+The constant folding optimizer (+ dead binding elimination) is available between passes 4 and 5 but is disabled by default to preserve ANF conformance. The peephole optimizer runs between passes 5 and 6 (always enabled).
 
 ### Multi-Compiler Strategy
 
@@ -265,8 +338,9 @@ Rúnar defines a **canonical IR conformance boundary** at the ANF level. Any com
 - The **TypeScript compiler** is the reference implementation
 - The **Go compiler** produces identical output for all example contracts including post-quantum
 - The **Rust compiler** produces identical output for all example contracts including post-quantum
+- The **Python compiler** produces identical output for all example contracts including post-quantum
 
-The conformance suite in `conformance/` contains 9 golden-file tests (including WOTS+ and SLH-DSA). All three compilers must pass the same suite.
+The conformance suite in `conformance/` contains 25 golden-file tests (including WOTS+, SLH-DSA, and EC primitives). All four compilers must pass the same suite.
 
 ### Contract Model
 
@@ -292,15 +366,17 @@ packages/
   runar-lang/          # Language types and builtins (developer imports)
   runar-compiler/      # TypeScript compiler (6 nanopass passes)
   runar-ir-schema/     # Shared IR type definitions and JSON schemas
-  runar-testing/       # TestContract API, Script VM, interpreter
+  runar-testing/       # TestContract API, Script VM, interpreter, fuzzer
   runar-sdk/           # Deployment SDK (providers, signers)
   runar-cli/           # CLI tool
-  runar-go/            # Go mock package (types, mock crypto, CompileCheck)
-  runar-rs/            # Rust mock crate (prelude types, compile_check)
+  runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
+  runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
+  runar-py/            # Python package: types, mock crypto, real hashes, deployment SDK
 compilers/
   go/                 # Go compiler (tree-sitter + native Go frontend)
   rust/               # Rust compiler (SWC + native Rust frontend)
+  python/             # Python compiler (native Python frontend)
 conformance/          # Cross-compiler conformance test suite
 examples/
   ts/                 # TypeScript contracts + tests
@@ -308,6 +384,9 @@ examples/
   rust/               # Rust contracts + tests
   sol/                # Solidity-like contracts + tests
   move/               # Move-style contracts + tests
+  python/             # Python contracts + tests
+  sdk-usage/          # SDK usage reference docs (not runnable)
+end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
 spec/                 # Language specification
 docs/                 # Documentation + format guides
 ```
@@ -321,6 +400,7 @@ docs/                 # Documentation + format guides
 - **Node.js** >= 20, **pnpm** 9.15+
 - **Go** 1.26+ (for Go compiler and Go contract tests)
 - **Rust** 1.75+ (for Rust compiler and Rust contract tests)
+- **Python** 3.10+ (for Python compiler and Python contract tests)
 
 ### Build & Test
 
@@ -338,6 +418,10 @@ cd examples/go && go test ./...
 # Rust compiler + Rust contract tests
 cd compilers/rust && cargo test
 cd examples/rust && cargo test
+
+# Python package + Python contract tests
+cd packages/runar-py && python3 -m pytest
+cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest
 ```
 
 ---

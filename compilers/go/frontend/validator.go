@@ -60,6 +60,7 @@ var validPropTypes = map[string]bool{
 	"SigHashPreimage": true,
 	"RabinSig":       true,
 	"RabinPubKey":    true,
+	"Point":          true,
 }
 
 func (ctx *validationContext) validateProperties() {
@@ -107,7 +108,7 @@ func (ctx *validationContext) validateConstructor() {
 		ctx.addError("constructor must call super() as its first statement")
 	}
 
-	// Check all properties are assigned
+	// Check all properties without initializers are assigned
 	assignedProps := make(map[string]bool)
 	for _, stmt := range ctor.Body {
 		if assign, ok := stmt.(AssignmentStmt); ok {
@@ -116,8 +117,15 @@ func (ctx *validationContext) validateConstructor() {
 			}
 		}
 	}
+	// Properties with initializers don't need constructor assignments
+	propsWithInit := make(map[string]bool)
+	for _, prop := range ctx.contract.Properties {
+		if prop.Initializer != nil {
+			propsWithInit[prop.Name] = true
+		}
+	}
 	for name := range propNames {
-		if !assignedProps[name] {
+		if !assignedProps[name] && !propsWithInit[name] {
 			ctx.addError(fmt.Sprintf("property '%s' must be assigned in the constructor", name))
 		}
 	}

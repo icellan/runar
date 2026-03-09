@@ -82,8 +82,9 @@ func FindLastOpReturn(scriptHex string) int {
 		opcode := hexByteValAt(scriptHex, offset)
 
 		if opcode == 0x6a {
-			lastPos = offset
-			offset += 2
+			// OP_RETURN at a real opcode boundary. Everything after is
+			// raw state data (not opcodes), so stop walking immediately.
+			return offset
 		} else if opcode >= 0x01 && opcode <= 0x4b {
 			// Direct push: opcode is the number of bytes
 			offset += 2 + int(opcode)*2
@@ -135,22 +136,53 @@ func hexByteValAt(hex string, pos int) uint64 {
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+// encodeStateValue encodes a state field as raw bytes (no push opcode wrapper)
+// matching the compiler's OP_NUM2BIN-based fixed-width serialization.
+// The result is raw hex bytes that are concatenated after OP_RETURN.
 func encodeStateValue(value interface{}, fieldType string) string {
 	switch fieldType {
 	case "int", "bigint":
 		n := toInt64(value)
-		return EncodeScriptInt(n)
+		return encodeNum2Bin(n, 8)
 	case "bool":
 		b, _ := value.(bool)
 		if b {
-			return "0151" // push 1 byte: 0x51 (OP_TRUE)
+			return "01"
 		}
-		return "0100" // push 1 byte: 0x00
+		return "00"
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point":
+		// Fixed-size byte types: raw hex, no framing needed.
+		return fmt.Sprintf("%v", value)
 	default:
-		// bytes, ByteString, PubKey, Addr, Ripemd160, Sha256, etc.
+		// Variable-length types (bytes, ByteString, etc.): use push-data
+		// encoding so the decoder can determine the length.
 		hex := fmt.Sprintf("%v", value)
+		if len(hex) == 0 {
+			return "00" // OP_0
+		}
 		return EncodePushData(hex)
 	}
+}
+
+// encodeNum2Bin encodes an integer as a fixed-width LE sign-magnitude byte
+// string, matching OP_NUM2BIN behaviour. The sign bit is in the MSB of the
+// last byte.
+func encodeNum2Bin(n int64, width int) string {
+	buf := make([]byte, width)
+	negative := n < 0
+	absVal := n
+	if negative {
+		absVal = -absVal
+	}
+	v := uint64(absVal)
+	for i := 0; i < width && v > 0; i++ {
+		buf[i] = byte(v & 0xff)
+		v >>= 8
+	}
+	if negative {
+		buf[width-1] |= 0x80
+	}
+	return bytesToHex(buf)
 }
 
 // EncodeScriptInt encodes an integer as a Bitcoin Script minimal-encoded
@@ -159,7 +191,7 @@ func encodeStateValue(value interface{}, fieldType string) string {
 // uses OP_0/OP_1..16 opcodes.
 func EncodeScriptInt(n int64) string {
 	if n == 0 {
-		return "0100" // push 1 byte: 0x00
+		return "00" // OP_0
 	}
 
 	negative := n < 0
@@ -217,16 +249,54 @@ func EncodePushData(dataHex string) string {
 // ---------------------------------------------------------------------------
 
 func decodeStateValue(hex string, offset int, fieldType string) (interface{}, int) {
-	data, bytesRead := DecodePushData(hex, offset)
-
 	switch fieldType {
-	case "int", "bigint":
-		return DecodeScriptInt(data), bytesRead
 	case "bool":
-		return data != "00" && data != "", bytesRead
+		// 1 raw byte: 0x00 = false, 0x01 = true
+		if offset+2 > len(hex) {
+			return false, 2
+		}
+		return hex[offset:offset+2] != "00", 2
+	case "int", "bigint":
+		// 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+		byteWidth := 8
+		hexWidth := byteWidth * 2
+		if offset+hexWidth > len(hex) {
+			return int64(0), hexWidth
+		}
+		return decodeNum2Bin(hex[offset : offset+hexWidth]), hexWidth
+	case "PubKey":
+		return hex[offset : offset+66], 66 // 33 bytes
+	case "Addr", "Ripemd160":
+		return hex[offset : offset+40], 40 // 20 bytes
+	case "Sha256":
+		return hex[offset : offset+64], 64 // 32 bytes
+	case "Point":
+		return hex[offset : offset+128], 128 // 64 bytes
 	default:
+		// For unknown types, fall back to push-data decoding
+		data, bytesRead := DecodePushData(hex, offset)
 		return data, bytesRead
 	}
+}
+
+// decodeNum2Bin decodes a fixed-width LE sign-magnitude number.
+func decodeNum2Bin(hex string) int64 {
+	bytes := hexToBytes(hex)
+	if len(bytes) == 0 {
+		return 0
+	}
+	negative := (bytes[len(bytes)-1] & 0x80) != 0
+	bytes[len(bytes)-1] &= 0x7f
+
+	var result int64
+	for i := len(bytes) - 1; i >= 0; i-- {
+		result = (result << 8) | int64(bytes[i])
+	}
+
+	if negative {
+		return -result
+	}
+	return result
 }
 
 // DecodePushData decodes a Bitcoin Script push data at the given hex offset.
@@ -322,6 +392,17 @@ func toInt64(value interface{}) int64 {
 		return int64(v)
 	case uint64:
 		return int64(v)
+	case string:
+		// Handle BigInt strings with "n" suffix from JSON (e.g. "0n", "1000n", "-42n")
+		s := v
+		if strings.HasSuffix(s, "n") {
+			s = strings.TrimSuffix(s, "n")
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
 	default:
 		return 0
 	}

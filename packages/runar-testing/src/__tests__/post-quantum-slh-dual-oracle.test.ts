@@ -5,10 +5,8 @@
  *   1. The reference interpreter (TestContract) — real SLH-DSA verification
  *   2. The compiled Bitcoin Script (ScriptExecutionContract) — actual BSV execution
  *
- * NOTE: The compiled script uses compile-time ADRS constants (treeAddr=0, kp=0)
- * while the interpreter uses proper runtime ADRS. For messages where these
- * values happen to be 0, the dual-oracle will agree. For other messages,
- * there may be mismatches until runtime ADRS construction is implemented.
+ * The compiled script uses runtime ADRS construction (treeAddr, keypair, hash
+ * derived from the message digest at execution time).
  */
 import { describe, it, expect } from 'vitest';
 import { TestContract } from '../test-contract.js';
@@ -68,4 +66,15 @@ describe('SLH-DSA-SHA2-128s dual-oracle', () => {
     const result = contract.call('spend', { msg: toHex(msg), sig: toHex(bad) });
     expect(result.success).toBe(false);
   });
+
+  it('compiled script accepts valid signature', () => {
+    const msg = new TextEncoder().encode('slh-dsa dual oracle test');
+    const sig = slhSign(params, msg, sk);
+    const contract = ScriptExecutionContract.fromSource(SOURCE, { pubkey: pkHex });
+    const result = contract.execute('spend', [toHex(msg), toHex(sig)]);
+    if (!result.success) {
+      console.log('Script execution failed:', result.error);
+    }
+    expect(result.success).toBe(true);
+  }, 60000);
 });

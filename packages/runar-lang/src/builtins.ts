@@ -16,6 +16,7 @@ import type {
   Sha256,
   RabinPubKey,
   RabinSig,
+  Point,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -318,11 +319,19 @@ export function divmod(_a: bigint, _b: bigint): bigint {
 }
 
 /**
- * Approximate floor(log2(n)) via byte size of script number encoding.
- * Compiles to: `OP_SIZE OP_NIP 8 OP_MUL 8 OP_SUB`
+ * Approximate floor(log2(n)) via bit-scanning.
+ * Compiles to a 64-iteration bit-scanning loop.
  */
 export function log2(_n: bigint): bigint {
   return compilerStub('log2');
+}
+
+/**
+ * Convert a number to a boolean: 0n is false, non-zero is true.
+ * Compiles to: `OP_0NOTEQUAL`
+ */
+export function bool(_value: bigint): boolean {
+  return compilerStub('bool');
 }
 
 // ---------------------------------------------------------------------------
@@ -422,4 +431,83 @@ export function verifySLHDSA_SHA2_256s(_msg: ByteString, _sig: ByteString, _pubk
  */
 export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_256f');
+}
+
+// ---------------------------------------------------------------------------
+// Elliptic curve point operations (secp256k1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Add two elliptic curve points.
+ * Compiled to inlined affine point addition using modular arithmetic opcodes.
+ */
+export function ecAdd(_a: Point, _b: Point): Point {
+  return compilerStub('ecAdd');
+}
+
+/**
+ * Scalar multiplication of a point by an integer.
+ * Compiled to 256-iteration double-and-add using Jacobian coordinates.
+ */
+export function ecMul(_p: Point, _k: bigint): Point {
+  return compilerStub('ecMul');
+}
+
+/**
+ * Scalar multiplication of the generator point G by an integer.
+ * Equivalent to `ecMul(EC_G, k)` but the generator is hardcoded.
+ */
+export function ecMulGen(_k: bigint): Point {
+  return compilerStub('ecMulGen');
+}
+
+/**
+ * Negate an elliptic curve point: returns (x, p - y).
+ */
+export function ecNegate(_p: Point): Point {
+  return compilerStub('ecNegate');
+}
+
+/**
+ * Check if a point lies on the secp256k1 curve: y² ≡ x³ + 7 (mod p).
+ */
+export function ecOnCurve(_p: Point): boolean {
+  return compilerStub('ecOnCurve');
+}
+
+/**
+ * Modular reduction: `((value % mod) + mod) % mod`.
+ * Ensures non-negative result for use with EC group order.
+ */
+export function ecModReduce(_value: bigint, _mod: bigint): bigint {
+  return compilerStub('ecModReduce');
+}
+
+/**
+ * Encode a point as a 33-byte compressed public key (02/03 prefix + x).
+ */
+export function ecEncodeCompressed(_p: Point): ByteString {
+  return compilerStub('ecEncodeCompressed');
+}
+
+/**
+ * Construct a Point from two bigint coordinates (x, y).
+ * Each coordinate is encoded as a 32-byte big-endian unsigned integer.
+ */
+export function ecMakePoint(_x: bigint, _y: bigint): Point {
+  return compilerStub('ecMakePoint');
+}
+
+/**
+ * Extract the x-coordinate from a Point as a bigint.
+ */
+export function ecPointX(_p: Point): bigint {
+  return compilerStub('ecPointX');
+}
+
+/**
+ * Extract the y-coordinate from a Point as a bigint.
+ */
+export function ecPointY(_p: Point): bigint {
+  return compilerStub('ecPointY');
 }

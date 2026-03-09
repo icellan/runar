@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/auction/Auction.runar.ts",
+    ".runar.sol": "../../../examples/sol/auction/Auction.runar.sol",
+    ".runar.move": "../../../examples/move/auction/Auction.runar.move",
+    ".runar.go": "../../../examples/go/auction/Auction.runar.go",
+    ".runar.rs": "../../../examples/rust/auction/Auction.runar.rs",
+    ".runar.py": "../../../examples/python/auction/Auction.runar.py"
+  }
+}

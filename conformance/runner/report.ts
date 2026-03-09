@@ -24,6 +24,7 @@ export interface TestResult {
     ts?: number;
     go?: number;
     rust?: number;
+    python?: number;
   };
 }
 
@@ -46,7 +47,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
   const testResults: TestResult[] = results.map((r) => {
     const hasErrors = r.errors.length > 0;
     const tsOk = r.tsCompiler.success;
-    const allCompilersSkipped = !tsOk && !r.goCompiler?.success && !r.rustCompiler?.success;
+    const allCompilersSkipped = !tsOk && !r.goCompiler?.success && !r.rustCompiler?.success && !r.pythonCompiler?.success;
 
     let status: TestResult['status'];
     if (allCompilersSkipped) {
@@ -67,6 +68,7 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
         ts: r.tsCompiler.durationMs,
         go: r.goCompiler?.durationMs,
         rust: r.rustCompiler?.durationMs,
+        python: r.pythonCompiler?.durationMs,
       },
     };
   });
@@ -111,6 +113,20 @@ export function generateReport(results: ConformanceResult[]): ConformanceReport 
     testsSucceeded: rustSuccess.length,
     averageDurationMs: rustDurations.length > 0
       ? rustDurations.reduce((a, b) => a + b, 0) / rustDurations.length
+      : 0,
+  });
+
+  // Python compiler
+  const pythonResults = results.filter((r) => r.pythonCompiler !== undefined);
+  const pythonSuccess = pythonResults.filter((r) => r.pythonCompiler?.success);
+  const pythonDurations = pythonSuccess.map((r) => r.pythonCompiler!.durationMs);
+  compilers.push({
+    name: 'Python',
+    available: pythonResults.length > 0,
+    testsRun: pythonResults.length,
+    testsSucceeded: pythonSuccess.length,
+    averageDurationMs: pythonDurations.length > 0
+      ? pythonDurations.reduce((a, b) => a + b, 0) / pythonDurations.length
       : 0,
   });
 
@@ -168,13 +184,14 @@ export function formatReportAsMarkdown(report: ConformanceReport): string {
   // Timing details
   lines.push('## Timing Details');
   lines.push('');
-  lines.push('| Test | TS (ms) | Go (ms) | Rust (ms) |');
-  lines.push('|------|---------|---------|-----------|');
+  lines.push('| Test | TS (ms) | Go (ms) | Rust (ms) | Python (ms) |');
+  lines.push('|------|---------|---------|-----------|-------------|');
   for (const r of report.results) {
     const ts = r.timings.ts !== undefined ? r.timings.ts.toFixed(1) : '-';
     const go = r.timings.go !== undefined ? r.timings.go.toFixed(1) : '-';
     const rust = r.timings.rust !== undefined ? r.timings.rust.toFixed(1) : '-';
-    lines.push(`| ${r.testName} | ${ts} | ${go} | ${rust} |`);
+    const python = r.timings.python !== undefined ? r.timings.python.toFixed(1) : '-';
+    lines.push(`| ${r.testName} | ${ts} | ${go} | ${rust} | ${python} |`);
   }
   lines.push('');
 

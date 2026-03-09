@@ -76,7 +76,7 @@ BaseClass
 
 - Exactly one class per file.
 - The class MUST extend `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `InductiveSmartContract` (stateful with backward chain verification).
-- `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods.
+- `StatefulSmartContract` automatically handles preimage verification and state continuation for public methods. Specifically, the ANF lowerer implicitly injects a `txPreimage: SigHashPreimage` parameter, a `checkPreimage(txPreimage)` assertion at method entry, and state continuation code (via `addOutput`) at method exit. Developers do not need to write these explicitly.
 - `InductiveSmartContract` extends `StatefulSmartContract` and additionally verifies parent transaction authenticity, lineage consistency, and chain linking at method entry.
 - Decorators are **disallowed**.
 - Generic type parameters on the class are **disallowed**.
@@ -87,7 +87,7 @@ BaseClass
 
 ```ebnf
 PropertyDeclaration
-    = [ 'readonly' ] Identifier ':' Type ';'
+    = [ 'readonly' ] Identifier ':' Type [ '=' Literal ] ';'
     ;
 ```
 
@@ -95,7 +95,7 @@ PropertyDeclaration
 
 - **`readonly`** properties are immutable. They are set in the constructor and cannot be reassigned. They are embedded in the locking script at deployment time.
 - **Non-`readonly`** properties are stateful. They can be modified within public methods and their new values are propagated across transactions via `OP_PUSH_TX`. Contracts with mutable properties should extend `StatefulSmartContract` (or `InductiveSmartContract` if chain provenance verification is needed), which automatically handles preimage verification and state continuation.
-- Properties MUST NOT have initializers at the declaration site; all initialization happens in the constructor.
+- Properties MAY have literal initializers at the declaration site (e.g., `count: bigint = 0n`). Properties with initializers do not need to be passed as constructor parameters or assigned in the constructor body. Only literal values are allowed as initializers (`bigint`, `boolean`, `ByteString`).
 - Access modifiers (`public`, `private`, `protected`) on properties are **optional** but have no semantic effect in Rúnar -- all properties are accessible within the contract.
 
 ---
@@ -206,6 +206,7 @@ Type
     | 'SigHashPreimage'
     | 'RabinSig'
     | 'RabinPubKey'
+    | 'Point'
     | FixedArrayType
     ;
 
@@ -229,6 +230,7 @@ FixedArrayType
 | `SigHashPreimage` | Transaction sighash preimage                   | ByteString   |
 | `RabinSig`        | Rabin signature (big integer)                  | bigint       |
 | `RabinPubKey`     | Rabin public key (big integer)                 | bigint       |
+| `Point`           | secp256k1 EC point (64 bytes: x[32] \|\| y[32]) | ByteString   |
 | `FixedArray<T,N>` | Fixed-length array of N elements of type T     | N stack items|
 
 ### Disallowed Types
@@ -262,7 +264,11 @@ VariableDeclaration
     ;
 
 AssignmentStatement
-    = AssignmentTarget '=' Expression ';'
+    = AssignmentTarget AssignmentOperator Expression ';'
+    ;
+
+AssignmentOperator
+    = '=' | '+=' | '-=' | '*=' | '/=' | '%='
     ;
 
 AssignmentTarget
@@ -298,6 +304,8 @@ ReturnStatement
     = 'return' [ Expression ] ';'
     ;
 ```
+
+> **Compound assignment desugaring:** Compound assignment operators (`+=`, `-=`, `*=`, `/=`, `%=`) are desugared by the parser into simple assignments. For example, `x += e` becomes `x = x + e`, and `this.p -= e` becomes `this.p = this.p - e`. The resulting AST contains only plain `=` assignments with a binary expression on the right-hand side. This desugaring happens at parse time (pass 01) and is transparent to all subsequent compiler passes.
 
 ### Statement Restrictions
 
@@ -471,7 +479,7 @@ The following functions are available without import (provided by the Rúnar run
 ```ebnf
 BuiltinFunction_Assert
     = 'assert'             /* assert(condition: boolean, message?: string): void */
-    | 'exit'               /* exit(success: boolean): void -- OP_RETURN */
+    | 'exit'               /* exit(success: boolean): void -- OP_VERIFY */
     ;
 ```
 
@@ -510,6 +518,23 @@ BuiltinFunction_PQ
     ;
 ```
 
+### Elliptic Curve (secp256k1)
+
+```ebnf
+BuiltinFunction_EC
+    = 'ecAdd'              /* ecAdd(a: Point, b: Point): Point */
+    | 'ecMul'              /* ecMul(p: Point, k: bigint): Point */
+    | 'ecMulGen'           /* ecMulGen(k: bigint): Point */
+    | 'ecNegate'           /* ecNegate(p: Point): Point */
+    | 'ecOnCurve'          /* ecOnCurve(p: Point): boolean */
+    | 'ecModReduce'        /* ecModReduce(value: bigint, mod: bigint): bigint */
+    | 'ecEncodeCompressed' /* ecEncodeCompressed(p: Point): ByteString */
+    | 'ecMakePoint'        /* ecMakePoint(x: bigint, y: bigint): Point */
+    | 'ecPointX'           /* ecPointX(p: Point): bigint */
+    | 'ecPointY'           /* ecPointY(p: Point): bigint */
+    ;
+```
+
 ### Byte-String Operations
 
 ```ebnf
@@ -519,11 +544,13 @@ BuiltinFunction_Bytes
     | 'substr'             /* substr(data: ByteString, start: bigint, len: bigint): ByteString */
     | 'left'               /* left(data: ByteString, len: bigint): ByteString */
     | 'right'              /* right(data: ByteString, len: bigint): ByteString */
-    | 'split'              /* split(data: ByteString, index: bigint): [ByteString, ByteString] */
+    | 'split'              /* split(data: ByteString, index: bigint): ByteString */
     | 'reverseBytes'       /* reverseBytes(data: ByteString): ByteString */
     | 'toByteString'       /* toByteString(hex: string): ByteString */
     ;
 ```
+
+> **Note on `split`:** At the Bitcoin Script level, `OP_SPLIT` leaves two values on the stack (left part and right part). However, the Rúnar type checker treats the return type as `ByteString` (the right/top part). The left part remains on the stack but is not directly accessible through normal Rúnar expressions. Use `left(data, len)` or `right(data, len)` for explicit single-value extraction.
 
 ### Conversion
 
@@ -532,11 +559,13 @@ BuiltinFunction_Conv
     = 'num2bin'            /* num2bin(value: bigint, byteLen: bigint): ByteString */
     | 'bin2num'            /* bin2num(data: ByteString): bigint */
     | 'int2str'            /* int2str(value: bigint, byteLen: bigint): ByteString */
-    | 'pack'               /* pack(n: bigint): ByteString -- encode integer as Script number */
+    | 'pack'               /* pack(n: bigint): ByteString -- type-level cast from bigint to ByteString (no-op at script level) */
     | 'unpack'             /* unpack(data: ByteString): bigint -- decode Script number */
     | 'bool'               /* bool(n: bigint): boolean -- convert integer to boolean */
     ;
 ```
+
+> **Note:** `pack` and `unpack` are compiler-internal builtins. They are NOT exported from `runar-lang` and cannot be imported by contract authors. The compiler uses them internally for type-level casts between `bigint` and `ByteString`.
 
 ### Math
 
@@ -569,16 +598,18 @@ BuiltinFunction_Preimage
     | 'extractHashPrevouts'  /* extractHashPrevouts(txPreimage: SigHashPreimage): Sha256 */
     | 'extractHashSequence'  /* extractHashSequence(txPreimage: SigHashPreimage): Sha256 */
     | 'extractOutpoint'    /* extractOutpoint(txPreimage: SigHashPreimage): ByteString */
-    | 'extractInputIndex'  /* extractInputIndex(txPreimage: SigHashPreimage): bigint */
+    | 'extractInputIndex'  /* extractInputIndex(txPreimage: SigHashPreimage): bigint -- see note below */
     | 'extractScriptCode'  /* extractScriptCode(txPreimage: SigHashPreimage): ByteString */
     | 'extractAmount'      /* extractAmount(txPreimage: SigHashPreimage): bigint */
     | 'extractSequence'    /* extractSequence(txPreimage: SigHashPreimage): bigint */
     | 'extractOutputHash'  /* extractOutputHash(txPreimage: SigHashPreimage): Sha256 */
-    | 'extractOutputs'     /* extractOutputs(txPreimage: SigHashPreimage): Sha256 */
+    | 'extractOutputs'     /* extractOutputs(txPreimage: SigHashPreimage): Sha256 -- alias for extractOutputHash */
     | 'extractLocktime'    /* extractLocktime(txPreimage: SigHashPreimage): bigint */
     | 'extractSigHashType' /* extractSigHashType(txPreimage: SigHashPreimage): bigint */
     ;
 ```
+
+> **Note:** Despite the name, `extractInputIndex` returns the **prevout output index** (the index of the output in the *previous* transaction that created the UTXO being spent), NOT the spending input's position in the current transaction's input list.
 
 ### State Management (StatefulSmartContract / InductiveSmartContract)
 
@@ -588,6 +619,8 @@ BuiltinFunction_State
     ;
 ```
 
+**Constraint:** The type checker enforces that `addOutput` receives exactly `1 + N` arguments, where `N` is the number of mutable (non-`readonly`) properties on the contract. The first argument is the satoshi amount (`bigint`). The remaining `N` arguments are the new state values, which must match the types of the mutable properties in declaration order.
+
 The complete set of built-in functions is:
 
 ```ebnf
@@ -596,6 +629,7 @@ BuiltinFunction
     | BuiltinFunction_Hash
     | BuiltinFunction_Sig
     | BuiltinFunction_PQ
+    | BuiltinFunction_EC
     | BuiltinFunction_Bytes
     | BuiltinFunction_Conv
     | BuiltinFunction_Math

@@ -20,8 +20,19 @@ type Provider interface {
 	// GetUtxos returns all UTXOs for a given address.
 	GetUtxos(address string) ([]UTXO, error)
 
+	// GetContractUtxo finds a UTXO by its script hash (for stateful contract lookup).
+	// Returns nil if no UTXO is found with the given script hash.
+	GetContractUtxo(scriptHash string) (*UTXO, error)
+
 	// GetNetwork returns the network this provider is connected to.
 	GetNetwork() string
+
+	// GetFeeRate returns the current fee rate in satoshis per byte.
+	// BSV standard is 1 sat/byte.
+	GetFeeRate() (int64, error)
+
+	// GetRawTransaction fetches the raw transaction hex by its txid.
+	GetRawTransaction(txid string) (string, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -34,9 +45,11 @@ type Provider interface {
 type MockProvider struct {
 	transactions   map[string]*Transaction
 	utxos          map[string][]UTXO
+	contractUtxos  map[string]*UTXO
 	broadcastedTxs []string
 	network        string
 	broadcastCount int
+	feeRate        int64
 }
 
 // NewMockProvider creates a new MockProvider for the given network.
@@ -45,9 +58,11 @@ func NewMockProvider(network string) *MockProvider {
 		network = "testnet"
 	}
 	return &MockProvider{
-		transactions: make(map[string]*Transaction),
-		utxos:        make(map[string][]UTXO),
-		network:      network,
+		transactions:  make(map[string]*Transaction),
+		utxos:         make(map[string][]UTXO),
+		contractUtxos: make(map[string]*UTXO),
+		network:       network,
+		feeRate:       1,
 	}
 }
 
@@ -59,6 +74,11 @@ func (m *MockProvider) AddTransaction(tx *Transaction) {
 // AddUtxo injects a UTXO for the given address.
 func (m *MockProvider) AddUtxo(address string, utxo UTXO) {
 	m.utxos[address] = append(m.utxos[address], utxo)
+}
+
+// AddContractUtxo injects a contract UTXO for lookup by script hash.
+func (m *MockProvider) AddContractUtxo(scriptHash string, utxo *UTXO) {
+	m.contractUtxos[scriptHash] = utxo
 }
 
 // GetBroadcastedTxs returns all raw tx hexes that were broadcast.
@@ -88,9 +108,40 @@ func (m *MockProvider) GetUtxos(address string) ([]UTXO, error) {
 	return m.utxos[address], nil
 }
 
+// GetContractUtxo returns a UTXO by script hash from the mock store.
+func (m *MockProvider) GetContractUtxo(scriptHash string) (*UTXO, error) {
+	utxo, ok := m.contractUtxos[scriptHash]
+	if !ok {
+		return nil, nil
+	}
+	return utxo, nil
+}
+
 // GetNetwork returns the mock network name.
 func (m *MockProvider) GetNetwork() string {
 	return m.network
+}
+
+// GetRawTransaction returns the raw hex of a stored transaction.
+func (m *MockProvider) GetRawTransaction(txid string) (string, error) {
+	tx, ok := m.transactions[txid]
+	if !ok {
+		return "", fmt.Errorf("MockProvider: transaction %s not found", txid)
+	}
+	if tx.Raw == "" {
+		return "", fmt.Errorf("MockProvider: transaction %s has no raw hex", txid)
+	}
+	return tx.Raw, nil
+}
+
+// GetFeeRate returns the configured fee rate (default 1 sat/byte).
+func (m *MockProvider) GetFeeRate() (int64, error) {
+	return m.feeRate, nil
+}
+
+// SetFeeRate sets the fee rate returned by GetFeeRate (for testing).
+func (m *MockProvider) SetFeeRate(rate int64) {
+	m.feeRate = rate
 }
 
 // ---------------------------------------------------------------------------

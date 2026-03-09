@@ -30,6 +30,20 @@ export interface MockPreimage {
 // Value conversion
 // ---------------------------------------------------------------------------
 
+function extractInitializerValue(expr: { kind: string; value?: unknown; op?: string; operand?: { kind: string; value?: unknown } }): unknown {
+  switch (expr.kind) {
+    case 'bigint_literal': return expr.value as bigint;
+    case 'bool_literal': return expr.value as boolean;
+    case 'bytestring_literal': return expr.value as string;
+    case 'unary_expr':
+      if (expr.op === '-' && expr.operand?.kind === 'bigint_literal') {
+        return -(expr.operand.value as bigint);
+      }
+      return undefined;
+    default: return undefined;
+  }
+}
+
 function toRunarValue(val: unknown): RunarValue {
   if (typeof val === 'bigint') return { kind: 'bigint', value: val };
   if (typeof val === 'boolean') return { kind: 'boolean', value: val };
@@ -91,6 +105,17 @@ export class TestContract {
     }
 
     const props: Record<string, RunarValue> = {};
+
+    // Auto-populate initial values from property initializers
+    for (const prop of result.contract.properties) {
+      if (prop.initializer && !(prop.name in initialState)) {
+        const val = extractInitializerValue(prop.initializer);
+        if (val !== undefined) {
+          props[prop.name] = toRunarValue(val);
+        }
+      }
+    }
+
     for (const [key, value] of Object.entries(initialState)) {
       props[key] = toRunarValue(value);
     }
@@ -163,5 +188,12 @@ export class TestContract {
       converted[k] = v as bigint;
     }
     this.interpreter.setMockPreimage(converted);
+  }
+
+  /**
+   * Configure mock preimage byte fields (hashPrevouts, outpoint, etc.).
+   */
+  setMockPreimageBytes(overrides: Record<string, Uint8Array>): void {
+    this.interpreter.setMockPreimageBytes(overrides);
   }
 }

@@ -1,7 +1,7 @@
 package contract
 
 import (
-	"runar"
+	runar "github.com/icellan/runar/packages/runar-go"
 	"testing"
 )
 

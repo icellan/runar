@@ -2,7 +2,7 @@ package contract
 
 import (
 	"testing"
-	"runar"
+	runar "github.com/icellan/runar/packages/runar-go"
 )
 
 func newEscrow() *Escrow {
@@ -13,10 +13,13 @@ func newEscrow() *Escrow {
 	}
 }
 
-func TestEscrow_ReleaseBySeller(t *testing.T)  { newEscrow().ReleaseBySeller(runar.MockSig()) }
-func TestEscrow_ReleaseByArbiter(t *testing.T) { newEscrow().ReleaseByArbiter(runar.MockSig()) }
-func TestEscrow_RefundToBuyer(t *testing.T)    { newEscrow().RefundToBuyer(runar.MockSig()) }
-func TestEscrow_RefundByArbiter(t *testing.T)  { newEscrow().RefundByArbiter(runar.MockSig()) }
+func TestEscrow_Release(t *testing.T) {
+	newEscrow().Release(runar.MockSig(), runar.MockSig())
+}
+
+func TestEscrow_Refund(t *testing.T) {
+	newEscrow().Refund(runar.MockSig(), runar.MockSig())
+}
 
 func TestEscrow_Compile(t *testing.T) {
 	if err := runar.CompileCheck("Escrow.runar.go"); err != nil {

@@ -30,6 +30,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
     "sourceMap": { ... },
     "ir": { ... },
     "stateFields": [ ... ],
+    "constructorSlots": [ ... ],
     "buildTimestamp": "string"
 }
 ```
@@ -42,8 +43,8 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
 
 - **Type**: `string`
 - **Required**: Yes
-- **Description**: Artifact format version. Follows semantic versioning.
-- **Example**: `"0.1.0"`
+- **Description**: Artifact format version. Uses `runar-v` prefix followed by semantic versioning.
+- **Example**: `"runar-v0.1.0"`
 - **Rules**: The SDK MUST reject artifacts with a major version it does not support.
 
 ### 3.2 `compilerVersion`
@@ -83,7 +84,7 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -93,27 +94,22 @@ When the Rúnar compiler processes a `.ts` source file, it produces a `.json` ar
 
 - **Type**: `string` (hexadecimal)
 - **Required**: Yes
-- **Description**: The compiled locking script as a hex-encoded byte string. This is the **script template** -- it contains placeholders for constructor parameters.
-- **Example**: `"76a914<pubKeyHash>88ac"`
-- **Placeholder format**: `<paramName>` is replaced with the actual value during deployment.
+- **Description**: The compiled locking script as a hex-encoded byte string. This is the **script template** -- it contains `OP_0` (`00`) byte placeholders at positions where constructor parameter values will be spliced in during deployment.
+- **Example**: `"76a9140088ac"` (the `00` at byte offset 3 is a placeholder for `pubKeyHash`)
 
-#### Placeholder Encoding
+#### Placeholder Mechanism
 
-Placeholders appear in the hex string as:
+The compiler emits `OP_0` (hex `00`) as a 1-byte placeholder wherever a constructor parameter value belongs. The byte offset of each placeholder is recorded in the `constructorSlots` array (see section 3.10). At deployment time, the SDK replaces the 2-hex-char `00` at each recorded byte offset with the encoded argument value (push data opcode + serialized value).
 
-```
-<name>
-```
-
-Where `name` is the constructor parameter name. When deploying, the SDK replaces each placeholder with the hex-encoded push data for that parameter value.
+For example, given `constructorSlots: [{ "paramIndex": 0, "byteOffset": 3 }]`, the SDK knows to replace the `00` at byte offset 3 in the script hex with the serialized `pubKeyHash` value.
 
 ### 3.6 `asm`
 
 - **Type**: `string`
 - **Required**: Yes
 - **Description**: Human-readable assembly representation of the script. Uses standard Bitcoin Script opcode mnemonics.
-- **Example**: `"OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG"`
-- **Rules**: Opcodes are separated by single spaces. Placeholders use the same `<name>` syntax as the `script` field. Literal data is shown as hex.
+- **Example**: `"OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG"`
+- **Rules**: Opcodes are separated by single spaces. Constructor parameter placeholders appear as `OP_0` in the assembly. Literal data is shown as hex.
 
 ### 3.7 `sourceMap`
 
@@ -123,23 +119,18 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 
 ```json
 {
-    "file": "P2PKH.ts",
     "mappings": [
         {
-            "scriptOffset": 0,
-            "scriptLength": 1,
-            "sourceLine": 12,
-            "sourceColumn": 8,
-            "sourceLength": 25,
-            "opcode": "OP_DUP"
+            "opcodeIndex": 0,
+            "sourceFile": "P2PKH.ts",
+            "line": 12,
+            "column": 8
         },
         {
-            "scriptOffset": 1,
-            "scriptLength": 1,
-            "sourceLine": 12,
-            "sourceColumn": 8,
-            "sourceLength": 25,
-            "opcode": "OP_HASH160"
+            "opcodeIndex": 1,
+            "sourceFile": "P2PKH.ts",
+            "line": 12,
+            "column": 8
         }
     ]
 }
@@ -149,24 +140,22 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 
 | Field | Type | Description |
 |---|---|---|
-| `scriptOffset` | `number` | Byte offset in the compiled script |
-| `scriptLength` | `number` | Number of bytes for this opcode/instruction |
-| `sourceLine` | `number` | 1-based line number in source |
-| `sourceColumn` | `number` | 0-based column in source |
-| `sourceLength` | `number` | Character length of source expression |
-| `opcode` | `string` | The opcode mnemonic (for readability) |
+| `opcodeIndex` | `number` | Index of the opcode in the compiled script |
+| `sourceFile` | `string` | Source file name |
+| `line` | `number` | 1-based line number in source |
+| `column` | `number` | 0-based column in source |
 
 ### 3.8 `ir`
 
-- **Type**: `ANFProgram` object (see `ir-format.md`)
+- **Type**: `{ anf?: ANFProgram; stack?: StackProgram }` (see `ir-format.md` and `stack-ir.md`)
 - **Required**: No (optional, included when compiler flag `--ir` is set)
-- **Description**: The canonical ANF IR for the contract. Useful for debugging and verification.
+- **Description**: Optional IR snapshots for debugging and conformance checking. Contains optional `anf` (the canonical ANF IR) and optional `stack` (the Stack IR) sub-fields.
 
 ### 3.9 `stateFields`
 
 - **Type**: `StateField[]`
-- **Required**: Yes (empty array for stateless contracts)
-- **Description**: Describes the mutable state fields of the contract, their types, and their order in the state serialization.
+- **Required**: No (optional; omitted for stateless contracts)
+- **Description**: Describes the mutable state fields of the contract, their types, and their order in the state serialization. Only present for stateful contracts.
 
 ```json
 [
@@ -191,9 +180,33 @@ Where `name` is the constructor parameter name. When deploying, the SDK replaces
 | `type` | `string` | Rúnar type |
 | `index` | `number` | Position in state serialization (0-based) |
 
-For stateless contracts (no mutable properties), this is an empty array `[]`.
+For stateless contracts (no mutable properties), this field is omitted.
 
-### 3.10 `buildTimestamp`
+### 3.10 `constructorSlots`
+
+- **Type**: `ConstructorSlot[]`
+- **Required**: No (omitted when there are no constructor parameter placeholders)
+- **Description**: Specifies byte offsets within the `script` hex string where constructor parameter values should be spliced in during deployment. Each slot identifies which constructor parameter it corresponds to and the exact byte offset in the compiled script.
+
+```json
+[
+    {
+        "paramIndex": 0,
+        "byteOffset": 3
+    }
+]
+```
+
+#### ConstructorSlot Entry
+
+| Field | Type | Description |
+|---|---|---|
+| `paramIndex` | `number` | Index into the constructor's `params` array (0-based) |
+| `byteOffset` | `number` | Byte offset in the compiled script hex where this parameter's push data begins |
+
+The SDK uses these offsets to splice serialized constructor argument values directly into the script bytes, rather than relying on string-based placeholder replacement. This is the preferred mechanism for deployment as it is more robust than textual substitution.
+
+### 3.11 `buildTimestamp`
 
 - **Type**: `string` (ISO 8601)
 - **Required**: Yes
@@ -210,26 +223,29 @@ The SDK uses the artifact to deploy a contract as follows:
 ### Step 1: Instantiate
 
 ```typescript
+import { RunarContract } from 'runar-sdk';
+
 const artifact = JSON.parse(fs.readFileSync('P2PKH.json', 'utf8'));
-const P2PKH = buildContractClass(artifact);
-const instance = new P2PKH(pubKeyHash);
+const contract = new RunarContract(artifact, [pubKeyHash]);
 ```
 
 ### Step 2: Build Locking Script
 
-The SDK replaces placeholders in the `script` template:
+The SDK uses the `constructorSlots` array to splice constructor argument values into the `script` template at the recorded byte offsets:
 
 ```
-Template:  "76a914<pubKeyHash>88ac"
-Value:     pubKeyHash = "89abcdef01234567890abcdef01234567890abcd"
-Result:    "76a91489abcdef01234567890abcdef01234567890abcd88ac"
+Template:      "76a9140088ac"
+                       ^^ OP_0 placeholder at byteOffset 3
+constructorSlots: [{ paramIndex: 0, byteOffset: 3 }]
+Value:         pubKeyHash = "89abcdef01234567890abcdef01234567890abcd"
+Result:        "76a91489abcdef01234567890abcdef01234567890abcd88ac"
 ```
 
-For each placeholder, the SDK:
+For each constructor slot, the SDK:
 
 1. Serializes the value according to its type (see Type Encoding in `abi.md`).
 2. Wraps it with the appropriate push data opcode.
-3. Replaces the placeholder with the hex-encoded result.
+3. Replaces the 2-hex-char `00` (OP_0) at the recorded `byteOffset` with the hex-encoded result.
 
 ### Step 3: Create Transaction Output
 
@@ -251,13 +267,13 @@ The SDK constructs the unlocking script:
 
 ```
 For single-method contracts:
-    <param_n> <param_n-1> ... <param_1>
+    <param_1> <param_2> ... <param_n>
 
 For multi-method contracts:
-    <param_n> <param_n-1> ... <param_1> <method_index>
+    <param_1> <param_2> ... <param_n> <method_index>
 ```
 
-Parameters are pushed in **reverse declaration order** so that the first parameter ends up on top of the stack when the locking script begins execution.
+Parameters are pushed in **forward declaration order** (matching the order in the ABI `params` array). The first parameter is pushed first (ending up deepest on the stack) and the last parameter is pushed last (ending up on top).
 
 ### Step 3: Create Transaction Input
 
@@ -271,10 +287,10 @@ For stateful contracts, the deployment and invocation flows are extended:
 
 ### Deployment
 
-The initial locking script includes the initial state:
+The initial locking script includes the initial state appended after an `OP_RETURN` separator:
 
 ```
-<initial_state_data> OP_DROP ... OP_DROP <code_part>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
 ### State Transition
@@ -295,7 +311,7 @@ The SDK handles serialization/deserialization of state using the `stateFields` d
 
 ```json
 {
-    "version": "0.1.0",
+    "version": "runar-v0.1.0",
     "compilerVersion": "0.1.0",
     "contractName": "P2PKH",
     "abi": {
@@ -311,23 +327,24 @@ The SDK handles serialization/deserialization of state using the `stateFields` d
                     { "name": "sig", "type": "Sig" },
                     { "name": "pubKey", "type": "PubKey" }
                 ],
-                "index": 0
+                "isPublic": true
             }
         ]
     },
-    "script": "76a914<pubKeyHash>88ac",
-    "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
+    "script": "76a9140088ac",
+    "asm": "OP_DUP OP_HASH160 OP_0 OP_EQUALVERIFY OP_CHECKSIG",
+    "constructorSlots": [
+        { "paramIndex": 0, "byteOffset": 3 }
+    ],
     "sourceMap": {
-        "file": "P2PKH.ts",
         "mappings": [
-            { "scriptOffset": 0, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_DUP" },
-            { "scriptOffset": 1, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_HASH160" },
-            { "scriptOffset": 2, "scriptLength": 22, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_PUSHDATA" },
-            { "scriptOffset": 24, "scriptLength": 1, "sourceLine": 12, "sourceColumn": 8, "sourceLength": 37, "opcode": "OP_EQUALVERIFY" },
-            { "scriptOffset": 25, "scriptLength": 1, "sourceLine": 13, "sourceColumn": 8, "sourceLength": 26, "opcode": "OP_CHECKSIG" }
+            { "opcodeIndex": 0, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 1, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 2, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 3, "sourceFile": "P2PKH.ts", "line": 12, "column": 8 },
+            { "opcodeIndex": 4, "sourceFile": "P2PKH.ts", "line": 13, "column": 8 }
         ]
     },
-    "stateFields": [],
     "buildTimestamp": "2025-06-15T10:30:00Z"
 }
 ```

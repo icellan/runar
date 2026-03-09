@@ -4,6 +4,9 @@ use (
 	./compilers/go
 	./conformance
 	./end2end-example/go
+	./end2end-example/webapp
+	./end2end-example/webapp-blackjack
 	./examples/go
+	./integration/go
 	./packages/runar-go
 )

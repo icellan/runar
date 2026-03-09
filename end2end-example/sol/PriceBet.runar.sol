@@ -20,8 +20,12 @@ contract PriceBet is SmartContract {
         require(price > 0);
 
         if (price > this.strikePrice) {
+            // bobSig is present in the unlocking script for stack alignment but is
+            // intentionally not checked in this branch — only alice (the winner) signs.
             require(checkSig(aliceSig, this.alicePubKey));
         } else {
+            // aliceSig is present in the unlocking script for stack alignment but is
+            // intentionally not checked in this branch — only bob (the winner) signs.
             require(checkSig(bobSig, this.bobPubKey));
         }
     }

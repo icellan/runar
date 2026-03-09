@@ -173,3 +173,48 @@ describe('MockProvider: network', () => {
     expect(provider.getNetwork()).toBe('mainnet');
   });
 });
+
+// ---------------------------------------------------------------------------
+// MockProvider: getRawTransaction
+// ---------------------------------------------------------------------------
+
+describe('MockProvider: getRawTransaction', () => {
+  it('returns raw hex when available', async () => {
+    const provider = new MockProvider();
+    const tx: Transaction = {
+      txid: 'aa'.repeat(32),
+      version: 1,
+      inputs: [],
+      outputs: [{ satoshis: 10000, script: '51' }],
+      locktime: 0,
+      raw: '01000000deadbeef',
+    };
+
+    provider.addTransaction(tx);
+    const rawHex = await provider.getRawTransaction(tx.txid);
+    expect(rawHex).toBe('01000000deadbeef');
+  });
+
+  it('throws for unknown txid', async () => {
+    const provider = new MockProvider();
+    await expect(
+      provider.getRawTransaction('nonexistent'),
+    ).rejects.toThrow('not found');
+  });
+
+  it('throws when transaction has no raw hex', async () => {
+    const provider = new MockProvider();
+    const tx: Transaction = {
+      txid: 'bb'.repeat(32),
+      version: 1,
+      inputs: [],
+      outputs: [{ satoshis: 5000, script: '51' }],
+      locktime: 0,
+    };
+
+    provider.addTransaction(tx);
+    await expect(
+      provider.getRawTransaction(tx.txid),
+    ).rejects.toThrow('no raw hex');
+  });
+});

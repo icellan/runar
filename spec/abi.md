@@ -37,7 +37,7 @@ The ABI describes:
             "params": [
                 { "name": "string", "type": "string" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -117,7 +117,7 @@ ABI:
             "params": [
                 { "name": "paramName", "type": "TypeName" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -131,26 +131,24 @@ Each method entry:
 |---|---|---|
 | `name` | `string` | Method name |
 | `params` | `Param[]` | Ordered list of method parameters |
-| `index` | `number` | Method dispatch index (0-based) |
+| `isPublic` | `boolean` | Whether the method is a public entry point |
 
-### 4.3 Method Index
+### 4.3 Method Dispatch
 
-The `index` field determines how the method is selected during spending:
+For multi-method contracts, the unlocking script includes a method index as the last push data item. The locking script's dispatch table routes to the correct method based on this index. Method dispatch indices correspond to the position of the method in the `methods` array.
 
-- **Single-method contracts**: The `index` is always `0`. No method selector is pushed onto the unlocking script.
-- **Multi-method contracts**: The unlocking script includes the method index as the last push data item. The locking script's dispatch table routes to the correct method based on this index.
-
-Method indices are assigned in **declaration order** in the source file, starting from `0`.
+- **Single-method contracts**: No method selector is pushed onto the unlocking script.
+- **Multi-method contracts**: The unlocking script includes the method index as the last push data item.
 
 ### 4.4 Parameter Order and Unlocking Script Layout
 
-For a method with parameters `[p1, p2, ..., pn]`, the unlocking script pushes values in **reverse order**:
+For a method with parameters `[p1, p2, ..., pn]`, the unlocking script pushes values in **forward order** (matching declaration order):
 
 ```
-Unlocking script: <pn> <pn-1> ... <p2> <p1> [<method_index>]
+Unlocking script: <p1> <p2> ... <pn-1> <pn> [<method_index>]
 ```
 
-This results in `p1` being on top of the stack when the locking script begins execution, which matches the natural left-to-right reading of the parameter list.
+This results in `p1` at the bottom of the stack and `pn` on top when the locking script begins execution. The first parameter is pushed first (ending up deepest), and the last parameter is pushed last (ending up on top).
 
 ### 4.5 Example
 
@@ -170,7 +168,7 @@ ABI:
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         },
         {
             "name": "refund",
@@ -178,7 +176,7 @@ ABI:
                 { "name": "sig", "type": "Sig" },
                 { "name": "preimage", "type": "SigHashPreimage" }
             ],
-            "index": 1
+            "isPublic": true
         }
     ]
 }
@@ -186,13 +184,13 @@ ABI:
 
 Unlocking script to call `unlock`:
 ```
-<pubKey> <sig> OP_0
+<sig> <pubKey> OP_0
 ```
 (OP_0 is the method index for `unlock`)
 
 Unlocking script to call `refund`:
 ```
-<preimage> <sig> OP_1
+<sig> <preimage> OP_1
 ```
 (OP_1 is the method index for `refund`)
 
@@ -217,7 +215,7 @@ Types are encoded as strings in the ABI:
 | `SigHashPreimage` | `"SigHashPreimage"` | Variable-length bytes |
 | `RabinSig` | `"RabinSig"` | Script number |
 | `RabinPubKey` | `"RabinPubKey"` | Script number |
-| `FixedArray<T, N>` | `{"array": "T", "size": N}` | N consecutive push data items |
+| `FixedArray<T, N>` | `"FixedArray<T, N>"` | N consecutive push data items |
 
 ### 5.2 bigint Encoding
 
@@ -305,15 +303,13 @@ State fields are described separately from the ABI but are included in the artif
 
 ### 6.3 State Serialization Format
 
-State is encoded in the locking script as:
+State is encoded in the locking script after an `OP_RETURN` separator:
 
 ```
-<field_0> <field_1> ... <field_n> OP_DROP OP_DROP ... OP_DROP <code_part>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-Each field is pushed as a data item using the type encoding rules above. Fields are pushed in **index order** (field 0 first). The `OP_DROP` sequence removes the state data from the stack before the contract code executes.
-
-The number of `OP_DROP` opcodes equals the number of state fields.
+Each field is pushed as a data item using the type encoding rules above. Fields are appended in **index order** (field 0 first). The `OP_RETURN` opcode terminates script execution, so the state fields are never executed as opcodes. The contract reads its state from the sighash preimage (which includes the full scriptCode).
 
 ### 6.4 State Reading
 
@@ -324,10 +320,9 @@ The contract reads its current state from the **sighash preimage** rather than f
 When a stateful method modifies state, the compiler generates code to:
 
 1. Serialize the new state values.
-2. Concatenate them with `OP_DROP` opcodes.
-3. Append the code part (which is constant).
-4. Place the result in the expected output.
-5. Use `checkPreimage` to verify the output matches.
+2. Construct the new locking script: `<code_part> OP_RETURN <field_0> ... <field_n>`.
+3. Place the result in the expected output.
+4. Use `checkPreimage` to verify the output matches.
 
 ---
 
@@ -349,7 +344,7 @@ When a stateful method modifies state, the compiler generates code to:
                 { "name": "sig", "type": "Sig" },
                 { "name": "pubKey", "type": "PubKey" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -361,16 +356,16 @@ When a stateful method modifies state, the compiler generates code to:
 {
     "constructor": {
         "params": [
-            { "name": "pubKeys", "type": { "array": "PubKey", "size": 3 } }
+            { "name": "pubKeys", "type": "FixedArray<PubKey, 3>" }
         ]
     },
     "methods": [
         {
             "name": "unlock",
             "params": [
-                { "name": "sigs", "type": { "array": "Sig", "size": 2 } }
+                { "name": "sigs", "type": "FixedArray<Sig, 2>" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -390,9 +385,9 @@ When a stateful method modifies state, the compiler generates code to:
             "name": "increment",
             "params": [
                 { "name": "amount", "type": "bigint" },
-                { "name": "preimage", "type": "SigHashPreimage" }
+                { "name": "txPreimage", "type": "SigHashPreimage" }
             ],
-            "index": 0
+            "isPublic": true
         }
     ]
 }
@@ -405,16 +400,35 @@ State fields:
 ]
 ```
 
+### 7.4 Implicit Parameters for Stateful Contracts
+
+Stateful contract public methods have **two implicit parameters** injected by the compiler that do not appear in the source code but **must** be provided by the SDK/caller when constructing the unlocking script:
+
+| Parameter | Type | Description |
+|---|---|---|
+| `txPreimage` | `SigHashPreimage` | The sighash preimage for BIP-143. Used by the compiler-injected `checkPreimage` call to verify the transaction context. |
+| `_opPushTxSig` | `Sig` | An ECDSA signature that validates the preimage via the OP_PUSH_TX pattern. This proves the preimage is authentic. |
+
+**Unlocking script layout:** The `_opPushTxSig` implicit parameter is pushed first (ending up at the bottom of the stack), followed by the user-declared parameters in declaration order, and finally `txPreimage` on top. For the Counter example above, calling `increment(amount)` requires the following unlocking script:
+
+```
+<_opPushTxSig> <amount> <txPreimage>
+```
+
+The `txPreimage` parameter is appended to the ABI method params (as shown in section 7.3). The `_opPushTxSig` parameter is not listed in the ABI because it is consumed internally by the OP_PUSH_TX mechanism in the locking script and is not visible at the ABI level. The SDK must always provide `_opPushTxSig` as the bottom-most stack item and `txPreimage` as the top-most stack item when calling any stateful contract method.
+
+**Note:** The `txPreimage` parameter name uses the compiler-internal name `txPreimage` (not `preimage`). This matches the implicit parameter registered during ANF lowering.
+
 ---
 
 ## 8. ABI Validation Rules
 
 A conforming ABI must satisfy:
 
-1. **Non-empty constructor**: The constructor must have at least one parameter (a contract with no properties is useless).
+1. **Non-empty constructor**: The constructor should typically have at least one parameter. Note: this is a recommendation, not enforced by the validator.
 2. **Non-empty methods**: There must be at least one public method.
 3. **Unique method names**: No two methods may share the same name.
-4. **Sequential indices**: Method indices must be `0, 1, 2, ...` with no gaps.
+4. **Public method presence**: At least one method must have `isPublic: true`.
 5. **Valid types**: All type strings must be recognized Rúnar types.
 6. **Unique parameter names**: Within each method, parameter names must be unique.
 7. **Constructor-property alignment**: Constructor parameters must correspond 1:1 to contract properties (both readonly and mutable) in declaration order.

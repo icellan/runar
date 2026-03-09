@@ -633,10 +633,17 @@ func (p *moveParser) parseMoveStruct() ([]PropertyNode, bool) {
 		// But if the module uses SmartContract parent, fields should be readonly
 		readonly := true // default to readonly; will be overridden for StatefulSmartContract later
 
+		// Optional initializer: = value
+		var initializer Expression
+		if p.match(moveTokAssign) {
+			initializer = p.parseMoveExpression()
+		}
+
 		props = append(props, PropertyNode{
 			Name:           fieldName,
 			Type:           typeNode,
 			Readonly:       readonly,
+			Initializer:    initializer,
 			SourceLocation: p.loc(),
 		})
 
@@ -1339,13 +1346,21 @@ func parseMoveNumber(s string) Expression {
 // ---------------------------------------------------------------------------
 
 func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode {
-	var params []ParamNode
+	// Only non-initialized properties become constructor params
+	var uninitProps []PropertyNode
 	for _, prop := range properties {
+		if prop.Initializer == nil {
+			uninitProps = append(uninitProps, prop)
+		}
+	}
+
+	var params []ParamNode
+	for _, prop := range uninitProps {
 		params = append(params, ParamNode{Name: prop.Name, Type: prop.Type})
 	}
 
-	superArgs := make([]Expression, len(properties))
-	for i, prop := range properties {
+	superArgs := make([]Expression, len(uninitProps))
+	for i, prop := range uninitProps {
 		superArgs[i] = Identifier{Name: prop.Name}
 	}
 

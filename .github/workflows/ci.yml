@@ -23,7 +23,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test
-      - run: npx vitest run examples/ts/
+      - name: Example tests (TS + Sol + Move)
+        run: npx vitest run examples/ts/ examples/sol/ examples/move/
       - run: pnpm run typecheck
 
   go:
@@ -38,6 +39,8 @@ jobs:
       - run: cd compilers/go && go build ./...
       - run: cd compilers/go && go build -o runar-go .
       - run: cd compilers/go && go test -race -v ./...
+      - name: Go example tests
+        run: cd examples/go && go test ./...
       - uses: actions/upload-artifact@v4
         with:
           name: runar-go
@@ -51,14 +54,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cd compilers/rust && cargo build --release
       - run: cd compilers/rust && cargo test
+      - name: Rust example tests
+        run: cd examples/rust && cargo test
+      - name: Rust SDK tests
+        run: cd packages/runar-rs && cargo test
       - uses: actions/upload-artifact@v4
         with:
           name: runar-rust
           path: compilers/rust/target/release/runar-compiler-rust
 
+  python:
+    name: Python Compiler
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest
+      - run: cd compilers/python && python -m pytest tests/ -v
+      - name: Python SDK tests
+        run: cd packages/runar-py && python -m pytest
+      - name: Python example tests
+        run: cd examples/python && PYTHONPATH=../../packages/runar-py python -m pytest
+
   conformance:
     name: Conformance Tests
-    needs: [typescript, go, rust]
+    needs: [typescript, go, rust, python]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -75,16 +97,74 @@ jobs:
           for test in conformance/tests/*/expected-ir.json; do
             dir=$(dirname "$test")
             name=$(basename "$dir")
-            echo "=== $name ==="
+            echo -n "=== $name === "
             go_hex=$(./runar-go --ir "$test" --hex)
             rust_hex=$(./runar-compiler-rust --ir "$test" --hex)
-            echo "  Go:   $go_hex"
-            echo "  Rust: $rust_hex"
             if [ "$go_hex" != "$rust_hex" ]; then
-              echo "  MISMATCH between Go and Rust for $name"
+              echo "MISMATCH (Go: ${#go_hex} chars, Rust: ${#rust_hex} chars)"
               fail=1
             else
-              echo "  OK"
+              echo "OK (${#go_hex} hex chars)"
             fi
           done
           exit $fail
+
+  integration:
+    name: Integration Tests
+    needs: [typescript, go, rust, python]
+    runs-on: ubuntu-latest
+    env:
+      RPC_URL: http://localhost:18332
+      RPC_USER: regtest
+      RPC_PASS: regtest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: compilers/go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pytest bsv-sdk
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+
+      - name: Pre-create regtest node config with test credentials
+        run: |
+          mkdir -p integration/regtest-data/n1
+          printf '%s\n' \
+            'port=18333' 'rpcbind=0.0.0.0' 'rpcport=18332' \
+            'rpcuser=regtest' 'rpcpassword=regtest' 'rpcallowip=0.0.0.0/0' \
+            'dnsseed=0' 'listenonion=0' 'listen=1' 'server=1' 'rest=1' 'regtest=1' \
+            'usecashaddr=0' 'txindex=1' 'excessiveblocksize=1000000000' \
+            'maxstackmemoryusageconsensus=100000000' 'maxscriptsizepolicy=0' \
+            'maxscriptnumlengthpolicy=0' 'maxstackmemoryusagepolicy=100000000' \
+            'maxtxsizepolicy=0' 'genesisactivationheight=1' 'minminingtxfee=0.00000001' \
+            > integration/regtest-data/n1/bitcoin.conf
+
+      - name: Start BSV regtest node
+        run: cd integration && ./regtest.sh start
+
+      - name: Go integration tests
+        run: cd integration/go && go test -tags integration -v -timeout 600s
+
+      - name: TypeScript integration tests
+        run: cd integration/ts && npx vitest run
+
+      - name: Rust integration tests
+        run: cd integration/rust && cargo test --release -- --ignored
+        timeout-minutes: 10
+
+      - name: Python integration tests
+        run: cd integration/python && PYTHONPATH=../../compilers/python:../../packages/runar-py pytest -v
+
+      - name: Stop regtest node
+        if: always()
+        run: cd integration && ./regtest.sh stop

@@ -20,7 +20,7 @@ pub struct ValidationResult {
 /// Validate a parsed Rúnar AST against the language subset constraints.
 pub fn validate(contract: &ContractNode) -> ValidationResult {
     let mut errors = Vec::new();
-    let mut warnings = Vec::new();
+    let warnings = Vec::new();
 
     validate_properties(contract, &mut errors);
     validate_constructor(contract, &mut errors);
@@ -46,7 +46,8 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
         | PrimitiveTypeName::Addr
         | PrimitiveTypeName::SigHashPreimage
         | PrimitiveTypeName::RabinSig
-        | PrimitiveTypeName::RabinPubKey => true,
+        | PrimitiveTypeName::RabinPubKey
+        | PrimitiveTypeName::Point => true,
         PrimitiveTypeName::Void => false,
     }
 }
@@ -111,8 +112,16 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<String>) {
         }
     }
 
+    // Properties with initializers don't need constructor assignments
+    let props_with_init: HashSet<String> = contract
+        .properties
+        .iter()
+        .filter(|p| p.initializer.is_some())
+        .map(|p| p.name.clone())
+        .collect();
+
     for prop_name in &prop_names {
-        if !assigned_props.contains(prop_name) {
+        if !assigned_props.contains(prop_name) && !props_with_init.contains(prop_name) {
             errors.push(format!(
                 "Property '{}' must be assigned in the constructor",
                 prop_name

@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-runar = { path = "../../packages/runar-rs" }
+runar = { package = "runar-lang", path = "../../packages/runar-rs" }
 
 [[test]]
 name = "price_bet"

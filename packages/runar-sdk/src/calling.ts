@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import type { UTXO } from './types.js';
-import { Utils } from '@bsv/sdk';
+import { buildP2PKHScript } from './script-utils.js';
 
 /** A single output to include in the call transaction. */
 export interface CallOutput {
@@ -31,42 +31,53 @@ export function buildCallTransaction(
   changeAddress?: string,
   changeScript?: string,
   additionalUtxos?: UTXO[],
-  /** For multi-output methods: multiple continuation outputs. */
+  feeRate: number = 1,
+  options?: {
+    /** Multiple contract outputs (replaces single newLockingScript). */
+    contractOutputs?: Array<{ script: string; satoshis: number }>;
+    /** Additional contract inputs with their own unlocking scripts (for merge). */
+    additionalContractInputs?: Array<{ utxo: UTXO; unlockingScript: string }>;
+  },
+  /** For multi-output methods: multiple continuation outputs (legacy). */
   multiOutputs?: CallOutput[],
-): { txHex: string; inputCount: number } {
-  const allUtxos = [currentUtxo, ...(additionalUtxos ?? [])];
+): { txHex: string; inputCount: number; changeAmount: number } {
+  const extraContractInputs = options?.additionalContractInputs ?? [];
+  const allUtxos = [currentUtxo, ...extraContractInputs.map((i) => i.utxo), ...(additionalUtxos ?? [])];
 
   const totalInput = allUtxos.reduce((sum, u) => sum + u.satoshis, 0);
 
-  // Build the list of contract outputs
-  const contractOutputs: CallOutput[] = [];
-  if (multiOutputs && multiOutputs.length > 0) {
-    contractOutputs.push(...multiOutputs);
-  } else if (newLockingScript) {
-    contractOutputs.push({
-      lockingScript: newLockingScript,
-      satoshis: newSatoshis ?? currentUtxo.satoshis,
-    });
-  }
+  // Determine contract outputs: explicit options take priority, then multiOutputs, then single
+  const contractOutputs: Array<{ script: string; satoshis: number }> =
+    options?.contractOutputs ??
+    (multiOutputs && multiOutputs.length > 0
+      ? multiOutputs.map((o) => ({ script: o.lockingScript, satoshis: o.satoshis }))
+      : newLockingScript
+        ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
+        : []);
 
   const contractOutputSats = contractOutputs.reduce((sum, o) => sum + o.satoshis, 0);
 
   // Estimate fee using actual script sizes
   const input0Size = 32 + 4 + varIntByteSize(unlockingScript.length / 2) +
     unlockingScript.length / 2 + 4;
-  const additionalInputsSize = (allUtxos.length - 1) * 148; // P2PKH
-  const inputsSize = input0Size + additionalInputsSize;
+  let extraContractInputsSize = 0;
+  for (const ci of extraContractInputs) {
+    extraContractInputsSize += 32 + 4 +
+      varIntByteSize(ci.unlockingScript.length / 2) +
+      ci.unlockingScript.length / 2 + 4;
+  }
+  const p2pkhInputsSize = (additionalUtxos?.length ?? 0) * 148;
+  const inputsSize = input0Size + extraContractInputsSize + p2pkhInputsSize;
 
   let outputsSize = 0;
-  for (const out of contractOutputs) {
-    outputsSize += 8 + varIntByteSize(out.lockingScript.length / 2) +
-      out.lockingScript.length / 2;
+  for (const co of contractOutputs) {
+    outputsSize += 8 + varIntByteSize(co.script.length / 2) + co.script.length / 2;
   }
   if (changeAddress || changeScript) {
     outputsSize += 34; // P2PKH change
   }
   const estimatedSize = 10 + inputsSize + outputsSize;
-  const fee = estimatedSize; // 1 sat/byte
+  const fee = Math.ceil(estimatedSize * feeRate);
 
   const change = totalInput - contractOutputSats - fee;
 
@@ -79,20 +90,30 @@ export function buildCallTransaction(
   // Input count
   tx += encodeVarInt(allUtxos.length);
 
-  // Input 0: contract UTXO with unlocking script
+  // Input 0: primary contract UTXO with unlocking script
   tx += reverseHex(currentUtxo.txid);
   tx += toLittleEndian32(currentUtxo.outputIndex);
   tx += encodeVarInt(unlockingScript.length / 2);
   tx += unlockingScript;
   tx += 'ffffffff';
 
-  // Additional inputs (unsigned)
-  for (let i = 1; i < allUtxos.length; i++) {
-    const utxo = allUtxos[i]!;
-    tx += reverseHex(utxo.txid);
-    tx += toLittleEndian32(utxo.outputIndex);
-    tx += '00'; // empty scriptSig
+  // Additional contract inputs (with their own unlocking scripts)
+  for (const ci of extraContractInputs) {
+    tx += reverseHex(ci.utxo.txid);
+    tx += toLittleEndian32(ci.utxo.outputIndex);
+    tx += encodeVarInt(ci.unlockingScript.length / 2);
+    tx += ci.unlockingScript;
     tx += 'ffffffff';
+  }
+
+  // P2PKH funding inputs (unsigned)
+  if (additionalUtxos) {
+    for (const utxo of additionalUtxos) {
+      tx += reverseHex(utxo.txid);
+      tx += toLittleEndian32(utxo.outputIndex);
+      tx += '00'; // empty scriptSig
+      tx += 'ffffffff';
+    }
   }
 
   // Output count
@@ -101,10 +122,10 @@ export function buildCallTransaction(
   tx += encodeVarInt(numOutputs);
 
   // Contract continuation outputs
-  for (const out of contractOutputs) {
-    tx += toLittleEndian64(out.satoshis);
-    tx += encodeVarInt(out.lockingScript.length / 2);
-    tx += out.lockingScript;
+  for (const co of contractOutputs) {
+    tx += toLittleEndian64(co.satoshis);
+    tx += encodeVarInt(co.script.length / 2);
+    tx += co.script;
   }
 
   // Change output
@@ -119,14 +140,14 @@ export function buildCallTransaction(
   // Locktime
   tx += toLittleEndian32(0);
 
-  return { txHex: tx, inputCount: allUtxos.length };
+  return { txHex: tx, inputCount: allUtxos.length, changeAmount: change > 0 ? change : 0 };
 }
 
 // ---------------------------------------------------------------------------
 // Bitcoin wire format helpers
 // ---------------------------------------------------------------------------
 
-function toLittleEndian32(n: number): string {
+export function toLittleEndian32(n: number): string {
   const buf = new ArrayBuffer(4);
   new DataView(buf).setUint32(0, n, true);
   return Array.from(new Uint8Array(buf))
@@ -134,13 +155,13 @@ function toLittleEndian32(n: number): string {
     .join('');
 }
 
-function toLittleEndian64(n: number): string {
+export function toLittleEndian64(n: number): string {
   const lo = n & 0xffffffff;
   const hi = Math.floor(n / 0x100000000) & 0xffffffff;
   return toLittleEndian32(lo) + toLittleEndian32(hi);
 }
 
-function encodeVarInt(n: number): string {
+export function encodeVarInt(n: number): string {
   if (n < 0xfd) {
     return n.toString(16).padStart(2, '0');
   } else if (n <= 0xffff) {
@@ -157,7 +178,7 @@ function encodeVarInt(n: number): string {
   }
 }
 
-function reverseHex(hex: string): string {
+export function reverseHex(hex: string): string {
   const pairs: string[] = [];
   for (let i = 0; i < hex.length; i += 2) {
     pairs.push(hex.slice(i, i + 2));
@@ -172,19 +193,3 @@ function varIntByteSize(n: number): number {
   return 9;
 }
 
-function buildP2PKHScript(address: string): string {
-  let pubKeyHash: string;
-
-  if (/^[0-9a-fA-F]{40}$/.test(address)) {
-    // Already a raw 20-byte pubkey hash in hex
-    pubKeyHash = address;
-  } else {
-    // Decode Base58Check address to extract the 20-byte pubkey hash
-    const decoded = Utils.fromBase58Check(address);
-    pubKeyHash = typeof decoded.data === 'string'
-      ? decoded.data
-      : Utils.toHex(decoded.data);
-  }
-
-  return '76a914' + pubKeyHash + '88ac';
-}

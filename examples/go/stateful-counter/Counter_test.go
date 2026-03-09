@@ -2,7 +2,7 @@ package contract
 
 import (
 	"testing"
-	"runar"
+	runar "github.com/icellan/runar/packages/runar-go"
 )
 
 func TestCounter_Increment(t *testing.T) {

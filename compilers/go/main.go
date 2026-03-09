@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+
+	"github.com/icellan/runar/compilers/go/compiler"
 )
 
 func main() {
@@ -34,12 +36,26 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--emit-ir requires --source")
 			os.Exit(1)
 		}
-		program, err := CompileSourceToIR(*sourceFile)
+		program, err := compiler.CompileSourceToIR(*sourceFile)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
 			os.Exit(1)
 		}
-		irJSON, err := json.MarshalIndent(program, "", "  ")
+		// Serialize to generic map and ensure "if" values always have an
+		// "else" field (even if empty) to match TS compiler IR format.
+		// Go's omitempty drops empty slices, but TS always emits else: [].
+		fullJSON, err := json.Marshal(program)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
+			os.Exit(1)
+		}
+		var raw map[string]interface{}
+		if err := json.Unmarshal(fullJSON, &raw); err != nil {
+			fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
+			os.Exit(1)
+		}
+		ensureElseFields(raw)
+		irJSON, err := json.MarshalIndent(raw, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
 			os.Exit(1)
@@ -48,13 +64,13 @@ func main() {
 		return
 	}
 
-	var artifact *Artifact
+	var artifact *compiler.Artifact
 	var err error
 
 	if *sourceFile != "" {
-		artifact, err = CompileFromSource(*sourceFile)
+		artifact, err = compiler.CompileFromSource(*sourceFile)
 	} else {
-		artifact, err = CompileFromIR(*irFile)
+		artifact, err = compiler.CompileFromIR(*irFile)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
@@ -68,7 +84,7 @@ func main() {
 	} else if *asmOnly {
 		output = artifact.ASM
 	} else {
-		jsonBytes, err := ArtifactToJSON(artifact)
+		jsonBytes, err := compiler.ArtifactToJSON(artifact)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "JSON serialization error: %v\n", err)
 			os.Exit(1)
@@ -85,5 +101,27 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Output written to %s\n", *outputFile)
 	} else {
 		fmt.Println(output)
+	}
+}
+
+// ensureElseFields walks a generic JSON map and adds "else": [] to any
+// ANF value object with kind "if" that is missing the "else" field.
+// This matches the TS compiler which always emits else: [].
+func ensureElseFields(v interface{}) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		// If this is a binding value with kind "if", ensure "else" exists
+		if kind, ok := val["kind"]; ok && kind == "if" {
+			if _, hasElse := val["else"]; !hasElse {
+				val["else"] = []interface{}{}
+			}
+		}
+		for _, child := range val {
+			ensureElseFields(child)
+		}
+	case []interface{}:
+		for _, item := range val {
+			ensureElseFields(item)
+		}
 	}
 }

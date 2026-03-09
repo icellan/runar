@@ -1,8 +1,13 @@
 [package]
-name = "runar-macros"
-version = "0.1.0"
+name = "runar-lang-macros"
+version = "0.2.0"
 edition = "2021"
 description = "Proc-macro attributes for Rúnar smart contract development"
+license = "MIT"
+repository = "https://github.com/icellan/runar"
+homepage = "https://github.com/icellan/runar"
+keywords = ["bitcoin", "smart-contracts", "bsv", "script"]
+categories = ["cryptography"]
 
 [lib]
 proc-macro = true

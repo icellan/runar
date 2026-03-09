@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PriceBet Arena</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>PriceBet Arena</h1>
+      <div class="subtitle">Over/Under betting on BSV regtest</div>
+    </header>
+
+    <div id="init-screen" class="init-screen">
+      <button id="btn-init" class="btn" onclick="initGame()">Initialize Game</button>
+    </div>
+
+    <div id="game-screen" class="hidden">
+      <div class="game-grid">
+
+        <div id="alice-panel" class="panel player-panel alice">
+          <h2>Alice</h2>
+          <div class="balance">
+            <span class="symbol">&#8383;</span>
+            <span id="alice-btc">0.0000</span>
+            <span class="sats"><span id="alice-sats">0</span> sats</span>
+          </div>
+          <div id="alice-bet-area">
+            <div id="alice-buttons" class="bet-buttons hidden">
+              <button class="btn btn-green" onclick="placeBet('alice','over')">OVER</button>
+              <button class="btn btn-red" onclick="placeBet('alice','under')">UNDER</button>
+            </div>
+            <div id="alice-choice" class="hidden"></div>
+          </div>
+        </div>
+
+        <div id="center-panel" class="panel center-panel">
+          <div class="round-label">Round</div>
+          <div id="round-number" class="round-number">-</div>
+
+          <div id="threshold-area" class="hidden">
+            <div class="threshold-label">Threshold</div>
+            <div id="threshold-value" class="threshold-value">-</div>
+          </div>
+
+          <div id="oracle-area" class="hidden">
+            <div class="oracle-label">Oracle Number</div>
+            <div id="oracle-box" class="oracle-box">???</div>
+          </div>
+
+          <div id="reveal-area" class="hidden">
+            <button id="btn-reveal" class="btn btn-reveal" onclick="revealOracle()">REVEAL</button>
+          </div>
+
+          <div id="result-area" class="hidden">
+            <div id="result-banner" class="result-banner"></div>
+            <button class="btn" onclick="newRound()" style="margin-top:12px">Next Round</button>
+          </div>
+
+          <div id="status" class="status-msg"></div>
+        </div>
+
+        <div id="bob-panel" class="panel player-panel bob">
+          <h2>Bob</h2>
+          <div class="balance">
+            <span class="symbol">&#8383;</span>
+            <span id="bob-btc">0.0000</span>
+            <span class="sats"><span id="bob-sats">0</span> sats</span>
+          </div>
+          <div id="bob-bet-area">
+            <div id="bob-buttons" class="bet-buttons hidden">
+              <button class="btn btn-green" onclick="placeBet('bob','over')">OVER</button>
+              <button class="btn btn-red" onclick="placeBet('bob','under')">UNDER</button>
+            </div>
+            <div id="bob-choice" class="hidden"></div>
+          </div>
+        </div>
+
+      </div>
+
+      <div class="panel tx-log">
+        <h3>Transaction Log</h3>
+        <div id="tx-log-entries" class="tx-log-entries"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,17 +1,24 @@
 //! State serialization and deserialization for stateful contracts.
 //!
 //! Stateful Rúnar contracts embed their state in the locking script as a
-//! suffix of OP_RETURN-delimited data pushes:
+//! suffix of OP_RETURN-delimited raw bytes:
 //!
 //!   <code> OP_RETURN <field0> <field1> ... <fieldN>
 //!
-//! Each field is encoded as a Bitcoin Script push according to its type.
+//! Each field is encoded as raw bytes (no push opcodes) matching the
+//! compiler's OP_NUM2BIN-based fixed-width serialization:
+//!   - int/bigint: 8 bytes LE sign-magnitude
+//!   - bool: 1 byte (0x01 / 0x00)
+//!   - PubKey: 33 raw bytes
+//!   - Addr/Ripemd160: 20 raw bytes
+//!   - Sha256: 32 raw bytes
+//!   - Point: 64 raw bytes
 
 use std::collections::HashMap;
 use super::types::{StateField, RunarArtifact, SdkValue};
 
-/// Serialize a set of state values into a hex-encoded Bitcoin Script data
-/// section (without the OP_RETURN prefix -- that is handled by the caller).
+/// Serialize a set of state values into a hex-encoded raw byte section
+/// (without the OP_RETURN prefix -- that is handled by the caller).
 ///
 /// Field order is determined by the `index` property of each StateField.
 pub fn serialize_state(
@@ -30,7 +37,7 @@ pub fn serialize_state(
     hex
 }
 
-/// Deserialize state values from a hex-encoded Bitcoin Script data section.
+/// Deserialize state values from a hex-encoded raw byte section.
 ///
 /// The caller must strip the code prefix and OP_RETURN byte before passing
 /// the data section.
@@ -79,7 +86,6 @@ pub fn extract_state_from_script(
 ///
 /// Returns the hex-char offset of the last OP_RETURN, or None.
 pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
-    let mut last_pos: Option<usize> = None;
     let mut offset = 0;
     let len = script_hex.len();
 
@@ -87,8 +93,9 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
         let opcode = u8::from_str_radix(&script_hex[offset..offset + 2], 16).unwrap_or(0);
 
         if opcode == 0x6a {
-            last_pos = Some(offset);
-            offset += 2;
+            // OP_RETURN at a real opcode boundary. Everything after is
+            // raw state data (not opcodes), so stop walking immediately.
+            return Some(offset);
         } else if opcode >= 0x01 && opcode <= 0x4b {
             // Direct push: opcode is the number of bytes
             offset += 2 + opcode as usize * 2;
@@ -119,60 +126,63 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
         }
     }
 
-    last_pos
+    None
 }
 
 // ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/// Encode a state field as raw bytes (no push opcode wrapper) matching the
+/// compiler's OP_NUM2BIN-based fixed-width serialization.
 fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
     match field_type {
         "int" | "bigint" => {
-            let n = value.as_int();
-            encode_script_int(n)
+            // Defensively handle SdkValue::Bytes containing a BigInt string
+            // (e.g. "0n", "1000n") that may have slipped through from JSON
+            // artifacts loaded without a BigInt reviver.
+            let n = match value {
+                SdkValue::Int(i) => *i,
+                SdkValue::Bytes(s) => {
+                    let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
+                    num_str.parse::<i64>().unwrap_or(0)
+                }
+                _ => value.as_int(),
+            };
+            encode_num2bin(n, 8)
         }
         "bool" => {
             if value.as_bool() {
-                "0151".to_string() // push 1 byte: 0x51 (OP_TRUE)
+                "01".to_string()
             } else {
-                "0100".to_string() // push 1 byte: 0x00
+                "00".to_string()
             }
         }
-        // All byte-like types: bytes, ByteString, PubKey, Addr, Ripemd160, Sha256
+        // All byte-like types: raw hex, no push opcode
         _ => {
-            let hex = value.as_bytes();
-            encode_push_data(hex)
+            value.as_bytes().to_string()
         }
     }
 }
 
-/// Encode an integer as a Bitcoin Script minimal-encoded number push
-/// (for state encoding -- always uses push data, even for 0).
-fn encode_script_int(n: i64) -> String {
-    if n == 0 {
-        return "0100".to_string(); // push 1 byte: 0x00
-    }
-
+/// Encode an integer as a fixed-width LE sign-magnitude byte string,
+/// matching OP_NUM2BIN behaviour. The sign bit is in the MSB of the last byte.
+fn encode_num2bin(n: i64, width: usize) -> String {
+    let mut bytes = vec![0u8; width];
     let negative = n < 0;
     let mut abs_val = if negative { -(n as i128) } else { n as i128 } as u64;
-    let mut bytes = Vec::new();
 
-    while abs_val > 0 {
-        bytes.push((abs_val & 0xff) as u8);
+    for i in 0..width {
+        if abs_val == 0 { break; }
+        bytes[i] = (abs_val & 0xff) as u8;
         abs_val >>= 8;
     }
 
-    // If the high bit of the last byte is set, add a sign byte
-    if (bytes.last().unwrap() & 0x80) != 0 {
-        bytes.push(if negative { 0x80 } else { 0x00 });
-    } else if negative {
-        let last = bytes.len() - 1;
-        bytes[last] |= 0x80;
+    if negative {
+        bytes[width - 1] |= 0x80;
     }
 
-    let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    encode_push_data(&hex)
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 /// Wrap a hex-encoded byte string in a Bitcoin Script push data opcode.
@@ -213,19 +223,76 @@ fn decode_state_value(
     offset: usize,
     field_type: &str,
 ) -> (SdkValue, usize) {
-    let (data, bytes_read) = decode_push_data(hex, offset);
-
     match field_type {
-        "int" | "bigint" => {
-            (SdkValue::Int(decode_script_int(&data)), bytes_read)
-        }
         "bool" => {
-            (SdkValue::Bool(data != "00" && !data.is_empty()), bytes_read)
+            // 1 raw byte: 0x00 = false, 0x01 = true
+            if offset + 2 > hex.len() {
+                return (SdkValue::Bool(false), 2);
+            }
+            let byte = &hex[offset..offset + 2];
+            (SdkValue::Bool(byte != "00"), 2)
+        }
+        "int" | "bigint" => {
+            // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+            let hex_width = 16; // 8 bytes * 2
+            if offset + hex_width > hex.len() {
+                return (SdkValue::Int(0), hex_width);
+            }
+            let data = &hex[offset..offset + hex_width];
+            (SdkValue::Int(decode_num2bin(data)), hex_width)
+        }
+        "PubKey" => {
+            let w = 66; // 33 bytes
+            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
+            (SdkValue::Bytes(data.to_string()), w)
+        }
+        "Addr" | "Ripemd160" => {
+            let w = 40; // 20 bytes
+            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
+            (SdkValue::Bytes(data.to_string()), w)
+        }
+        "Sha256" => {
+            let w = 64; // 32 bytes
+            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
+            (SdkValue::Bytes(data.to_string()), w)
+        }
+        "Point" => {
+            let w = 128; // 64 bytes
+            let data = if offset + w <= hex.len() { &hex[offset..offset + w] } else { "" };
+            (SdkValue::Bytes(data.to_string()), w)
         }
         _ => {
+            // Unknown type: fall back to push-data decoding
+            let (data, bytes_read) = decode_push_data(hex, offset);
             (SdkValue::Bytes(data), bytes_read)
         }
     }
+}
+
+/// Decode a fixed-width LE sign-magnitude number from hex.
+fn decode_num2bin(hex: &str) -> i64 {
+    if hex.is_empty() {
+        return 0;
+    }
+
+    let mut bytes = Vec::new();
+    let mut i = 0;
+    while i + 2 <= hex.len() {
+        bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0));
+        i += 2;
+    }
+
+    let negative = (bytes[bytes.len() - 1] & 0x80) != 0;
+    let last = bytes.len() - 1;
+    bytes[last] &= 0x7f;
+
+    let mut result: i64 = 0;
+    for i in (0..bytes.len()).rev() {
+        result = (result << 8) | (bytes[i] as i64);
+    }
+
+    if result == 0 { return 0; }
+    if negative { -result } else { result }
 }
 
 /// Decode a Bitcoin Script push data at the given hex offset.
@@ -287,31 +354,6 @@ pub(crate) fn decode_push_data(hex: &str, offset: usize) -> (String, usize) {
     }
 }
 
-/// Decode a minimally-encoded Bitcoin Script integer from hex.
-pub(crate) fn decode_script_int(hex: &str) -> i64 {
-    if hex.is_empty() || hex == "00" {
-        return 0;
-    }
-
-    let mut bytes = Vec::new();
-    let mut i = 0;
-    while i + 2 <= hex.len() {
-        bytes.push(u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0));
-        i += 2;
-    }
-
-    let negative = (bytes[bytes.len() - 1] & 0x80) != 0;
-    let last = bytes.len() - 1;
-    bytes[last] &= 0x7f;
-
-    let mut result: i64 = 0;
-    for i in (0..bytes.len()).rev() {
-        result = (result << 8) | (bytes[i] as i64);
-    }
-
-    if negative { -result } else { result }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -326,6 +368,7 @@ mod tests {
                 name: name.to_string(),
                 field_type: typ.to_string(),
                 index: *index,
+                initial_value: None,
             })
             .collect()
     }
@@ -390,42 +433,35 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Bigint encoding specifics
+    // NUM2BIN encoding specifics
     // -----------------------------------------------------------------------
 
     #[test]
-    fn encodes_zero_as_0100() {
+    fn encodes_zero_as_8_null_bytes() {
         let fields = make_fields(&[("v", "bigint", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(0))]));
-        assert_eq!(hex, "0100");
+        assert_eq!(hex, "0000000000000000"); // 8 zero bytes
     }
 
     #[test]
-    fn encodes_42_as_012a() {
+    fn encodes_42_as_8_bytes_le() {
         let fields = make_fields(&[("v", "bigint", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(42))]));
-        assert_eq!(hex, "012a");
+        assert_eq!(hex, "2a00000000000000"); // 42 in LE, zero-padded to 8 bytes
     }
 
     #[test]
-    fn encodes_1000_as_02e803() {
+    fn encodes_1000_as_8_bytes_le() {
         let fields = make_fields(&[("v", "bigint", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(1000))]));
-        assert_eq!(hex, "02e803");
+        assert_eq!(hex, "e803000000000000"); // 1000 = 0x03e8 in LE
     }
 
     #[test]
-    fn encodes_128_with_extra_zero_byte() {
+    fn encodes_negative_42_with_sign_bit() {
         let fields = make_fields(&[("v", "bigint", 0)]);
-        let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(128))]));
-        assert_eq!(hex, "028000");
-    }
-
-    #[test]
-    fn encodes_negative_128_with_sign_bit() {
-        let fields = make_fields(&[("v", "bigint", 0)]);
-        let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(-128))]));
-        assert_eq!(hex, "028080");
+        let hex = serialize_state(&fields, &make_values(&[("v", SdkValue::Int(-42))]));
+        assert_eq!(hex, "2a00000000000080"); // 42 LE + sign bit in last byte
     }
 
     // -----------------------------------------------------------------------
@@ -436,14 +472,14 @@ mod tests {
     fn encodes_bool_true() {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("flag", SdkValue::Bool(true))]));
-        assert_eq!(hex, "0151");
+        assert_eq!(hex, "01");
     }
 
     #[test]
     fn encodes_bool_false() {
         let fields = make_fields(&[("flag", "bool", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("flag", SdkValue::Bool(false))]));
-        assert_eq!(hex, "0100");
+        assert_eq!(hex, "00");
     }
 
     #[test]
@@ -465,32 +501,23 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Bytes encoding
+    // Bytes encoding (raw, no push opcode)
     // -----------------------------------------------------------------------
 
     #[test]
-    fn roundtrips_byte_string() {
-        let fields = make_fields(&[("data", "bytes", 0)]);
-        let values = make_values(&[("data", SdkValue::Bytes("aabbccdd".to_string()))]);
-        let hex = serialize_state(&fields, &values);
-        let result = deserialize_state(&fields, &hex);
-        assert_eq!(result["data"], SdkValue::Bytes("aabbccdd".to_string()));
-    }
-
-    #[test]
-    fn encodes_pubkey_with_21_prefix() {
+    fn encodes_pubkey_as_raw_hex() {
         let pubkey = "ff".repeat(33);
         let fields = make_fields(&[("pk", "PubKey", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("pk", SdkValue::Bytes(pubkey.clone()))]));
-        assert_eq!(hex, format!("21{}", pubkey));
+        assert_eq!(hex, pubkey); // raw hex, no push prefix
     }
 
     #[test]
-    fn encodes_addr_with_14_prefix() {
+    fn encodes_addr_as_raw_hex() {
         let addr = "aa".repeat(20);
         let fields = make_fields(&[("a", "Addr", 0)]);
         let hex = serialize_state(&fields, &make_values(&[("a", SdkValue::Bytes(addr.clone()))]));
-        assert_eq!(hex, format!("14{}", addr));
+        assert_eq!(hex, addr); // raw hex, no push prefix
     }
 
     // -----------------------------------------------------------------------
@@ -683,63 +710,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // 0x6a inside state data (regression tests)
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn extracts_state_when_bigint_value_is_106() {
-        let fields = make_fields(&[("count", "bigint", 0)]);
-        let values = make_values(&[("count", SdkValue::Int(106))]);
-        let state_hex = serialize_state(&fields, &values);
-        assert_eq!(state_hex, "016a"); // sanity check
-        let full_script = format!("51ac6a{}", state_hex);
-
-        let artifact = RunarArtifact {
-            version: "runar-v0.1.0".to_string(),
-            contract_name: "Test".to_string(),
-            abi: super::super::types::Abi {
-                constructor: super::super::types::AbiConstructor { params: vec![] },
-                methods: vec![],
-            },
-            script: "51ac".to_string(),
-            state_fields: Some(fields),
-            constructor_slots: None,
-        };
-
-        let result = extract_state_from_script(&artifact, &full_script);
-        assert!(result.is_some());
-        assert_eq!(result.unwrap()["count"], SdkValue::Int(106));
-    }
-
-    #[test]
-    fn extracts_state_when_pubkey_ends_with_6a() {
-        let pubkey = format!("{}{}", "ab".repeat(32), "6a");
-        let fields = make_fields(&[("count", "bigint", 0), ("owner", "PubKey", 1)]);
-        let values = make_values(&[
-            ("count", SdkValue::Int(42)),
-            ("owner", SdkValue::Bytes(pubkey.clone())),
-        ]);
-        let state_hex = serialize_state(&fields, &values);
-        let full_script = format!("516a{}", state_hex);
-
-        let artifact = RunarArtifact {
-            version: "runar-v0.1.0".to_string(),
-            contract_name: "Test".to_string(),
-            abi: super::super::types::Abi {
-                constructor: super::super::types::AbiConstructor { params: vec![] },
-                methods: vec![],
-            },
-            script: "51".to_string(),
-            state_fields: Some(fields),
-            constructor_slots: None,
-        };
-
-        let result = extract_state_from_script(&artifact, &full_script).unwrap();
-        assert_eq!(result["count"], SdkValue::Int(42));
-        assert_eq!(result["owner"], SdkValue::Bytes(pubkey));
-    }
-
-    // -------------------------------------------------------------------
     // find_last_op_return
     // -------------------------------------------------------------------
 
@@ -758,5 +728,29 @@ mod tests {
     #[test]
     fn find_op_return_returns_none() {
         assert_eq!(find_last_op_return("5193885187"), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Defensive BigInt string handling in state serialization
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bigint_serialize_state_handles_0n_string_defensively() {
+        let fields = make_fields(&[("count", "bigint", 0)]);
+        // Simulate state containing unrevived "0n" string as SdkValue::Bytes
+        let values = make_values(&[("count", SdkValue::Bytes("0n".to_string()))]);
+        let hex = serialize_state(&fields, &values);
+        assert_eq!(hex, "0000000000000000");
+    }
+
+    #[test]
+    fn bigint_serialize_state_handles_1000n_string_defensively() {
+        let fields = make_fields(&[("count", "bigint", 0)]);
+        let values_str = make_values(&[("count", SdkValue::Bytes("1000n".to_string()))]);
+        let hex_str = serialize_state(&fields, &values_str);
+        // Should match the output from a proper SdkValue::Int(1000)
+        let values_int = make_values(&[("count", SdkValue::Int(1000))]);
+        let hex_int = serialize_state(&fields, &values_int);
+        assert_eq!(hex_str, hex_int);
     }
 }

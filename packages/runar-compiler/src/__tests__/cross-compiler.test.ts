@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { compile } from '../index.js';
@@ -111,6 +111,7 @@ function runGoCompiler(irFilePath: string): string | null {
         cwd: GO_COMPILER_DIR,
         timeout: 30000,
         stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
       },
     );
     return result.toString().trim();
@@ -132,6 +133,7 @@ function runRustCompiler(irFilePath: string): string | null {
         cwd: RUST_COMPILER_DIR,
         timeout: 30000,
         stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
       },
     );
     return result.toString().trim();
@@ -442,14 +444,30 @@ function findConformanceTests(): { name: string; sourceFile: string; hexFile: st
       const hexFile = join(dirPath, 'expected-script.hex');
       if (!existsSync(hexFile)) continue;
 
-      // Find the .runar.ts source file
-      const files = readdirSync(dirPath);
-      const runarFile = files.find(f => f.endsWith('.runar.ts'));
-      if (!runarFile) continue;
+      // Find the .runar.ts source file: check source.json first, then local files
+      let sourceFile: string | undefined;
+      const configFile = join(dirPath, 'source.json');
+      if (existsSync(configFile)) {
+        const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
+          path?: string;
+          sources?: Record<string, string>;
+        };
+        if (config.sources?.['.runar.ts']) {
+          sourceFile = resolve(dirPath, config.sources['.runar.ts']);
+        } else if (config.path) {
+          sourceFile = resolve(dirPath, config.path);
+        }
+      }
+      if (!sourceFile) {
+        const files = readdirSync(dirPath);
+        const runarFile = files.find(f => f.endsWith('.runar.ts'));
+        if (runarFile) sourceFile = join(dirPath, runarFile);
+      }
+      if (!sourceFile) continue;
 
       tests.push({
         name: dir.name,
-        sourceFile: join(dirPath, runarFile),
+        sourceFile,
         hexFile,
       });
     }

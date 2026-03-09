@@ -3,7 +3,7 @@ package contract
 import (
 	"testing"
 
-	"runar"
+	runar "github.com/icellan/runar/packages/runar-go"
 )
 
 func TestP2PKH_Unlock(t *testing.T) {

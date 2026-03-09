@@ -1,6 +1,6 @@
 {
   "name": "runar-cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Rúnar CLI: compile, test, deploy, and manage smart contracts",
   "main": "dist/index.js",
@@ -15,6 +15,15 @@
     "typecheck": "tsc --noEmit"
   },
   "files": ["dist"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/icellan/runar",
+    "directory": "packages/runar-cli"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "commander": "^12.1.0",
     "runar-compiler": "workspace:*",

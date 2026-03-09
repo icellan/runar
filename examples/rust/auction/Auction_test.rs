@@ -18,26 +18,26 @@ fn new_auction() -> Auction {
 fn test_bid() {
     let mut c = new_auction();
     let bidder = b"new_bidder_placeholder_33bytes!x".to_vec();
-    c.bid(bidder.clone(), 200);
+    c.bid(&mock_sig(), bidder.clone(), 200);
     assert_eq!(c.highest_bidder, bidder);
     assert_eq!(c.highest_bid, 200);
 }
 
 #[test]
 #[should_panic]
-fn test_bid_must_be_higher() { new_auction().bid(mock_pub_key(), 50); }
+fn test_bid_must_be_higher() { new_auction().bid(&mock_sig(), mock_pub_key(), 50); }
 
 #[test]
 #[should_panic]
-fn test_bid_equal_to_highest_fails() { new_auction().bid(mock_pub_key(), 100); }
+fn test_bid_equal_to_highest_fails() { new_auction().bid(&mock_sig(), mock_pub_key(), 100); }
 
 #[test]
 fn test_multiple_bids() {
     let mut c = new_auction();
     let bidder1 = b"bidder_one_33bytes_placeholder_!".to_vec();
     let bidder2 = b"bidder_two_33bytes_placeholder_!".to_vec();
-    c.bid(bidder1, 200);
-    c.bid(bidder2.clone(), 300);
+    c.bid(&mock_sig(), bidder1, 200);
+    c.bid(&mock_sig(), bidder2.clone(), 300);
     assert_eq!(c.highest_bid, 300);
     assert_eq!(c.highest_bidder, bidder2);
 }

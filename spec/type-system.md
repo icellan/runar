@@ -27,9 +27,9 @@ Rúnar uses a structural type system with the following characteristics:
      |            |
    bigint     ByteString     boolean
      |            |
-     |      +-----+-----+-----+-----+-----+
-     |      |     |      |     |     |     |
-     |   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage
+     |      +-----+-----+-----+-----+-----+-----+
+     |      |     |      |     |     |     |     |
+     |   PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  Point
      |
   +--+--+
   |     |
@@ -57,7 +57,7 @@ RabinSig RabinPubKey
 - Immutable sequence of bytes.
 - No character encoding semantics -- purely binary data.
 - Constructed via `toByteString('hex...')`.
-- Supports concatenation (`+` operator maps to `OP_CAT`), slicing (via `ByteString.slice()`), and length (`len()`).
+- Supports concatenation (`+` operator maps to `OP_CAT`), slicing (via built-in functions `split(data, index)`, `left(data, len)`, `right(data, len)`, `substr(data, start, len)`), and length (`len()`).
 
 ### 2.2 Domain Types
 
@@ -71,25 +71,41 @@ Domain types are **subtypes of `ByteString`** with additional compile-time size 
 | `Ripemd160`| 20          | RIPEMD-160 digest                            |
 | `Addr`     | 20          | Bitcoin address (= RIPEMD-160 of SHA-256 of pubkey) |
 | `SigHashPreimage` | variable | Serialized sighash preimage for OP_PUSH_TX |
+| `Point`    | 64          | secp256k1 elliptic curve point (affine coordinates) |
+
+#### Point Encoding
+
+The `Point` type represents a secp256k1 elliptic curve point as 64 bytes of raw coordinate data:
+
+- Bytes 0-31: x-coordinate, 32 bytes, big-endian unsigned integer
+- Bytes 32-63: y-coordinate, 32 bytes, big-endian unsigned integer
+- No prefix byte (unlike compressed public keys which have a 02/03 prefix)
+
+Both coordinates are elements of the secp256k1 field `F_p` where `p = 2^256 - 2^32 - 977`. A valid point satisfies the curve equation `y^2 === x^3 + 7 (mod p)`.
+
+The `Point` type is distinct from `PubKey` (33-byte compressed format). Use `ecEncodeCompressed(p)` to convert a `Point` to a compressed `PubKey`-compatible `ByteString`.
 
 #### Subtyping Rule
 
 ```
          ByteString
-        /    |    \     \       \          \
-    PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage
+        /    |    \     \       \          \         \
+    PubKey  Sig  Sha256  Ripemd160  Addr  SigHashPreimage  Point
 
     T <: ByteString    for all domain types T
     T <: T             reflexivity
 ```
 
-A domain type value can be **widened** to `ByteString` implicitly. Narrowing (going from `ByteString` to a domain type) requires an explicit cast function:
+A domain type value can be **widened** to `ByteString` implicitly. The type checker also accepts `ByteString` where a domain type is expected (bidirectional compatibility), as well as cross-subtype assignments within the `ByteString` family (e.g., `PubKey` assignable to `Sig`). This permissive approach simplifies common patterns like passing concatenation results or hash outputs to domain-typed parameters.
 
 ```typescript
-const addr: Addr = pubKeyToAddr(pubKey);      // OK: built-in returns Addr
+const addr: Addr = hash160(pubKey);            // OK: hash160 returns Ripemd160, compatible with Addr
 const bs: ByteString = addr;                   // OK: widening
-const addr2: Addr = bs;                        // ERROR: narrowing without cast
+const addr2: Addr = bs;                        // OK: bidirectional compatibility
+const h: Ripemd160 = addr;                     // OK: cross-subtype within ByteString family
 ```
+
+The same bidirectional compatibility applies to the `bigint` family: `RabinSig` and `RabinPubKey` are mutually compatible with each other and with `bigint`.
 
 ### 2.3 Rabin Types
 
@@ -307,18 +323,18 @@ counter: bigint;
 
 ### 5.3 State Serialization
 
-For stateful contracts, the compiler generates a **state script** that encodes all mutable properties:
+For stateful contracts, the compiler generates a locking script with state data appended after an `OP_RETURN` separator:
 
 ```
-<prop_1> <prop_2> ... <prop_n> OP_DROP OP_DROP ... <locking_code>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-The state is prepended to the locking script. When a stateful method executes, it:
+The `OP_RETURN` terminates script execution so the state fields are never executed as opcodes. When a stateful method executes, it:
 
-1. Reads current state from the script itself (via `OP_PUSH_TX` preimage).
+1. Reads current state from the sighash preimage (which includes the full scriptCode with the state data).
 2. Executes the method logic, potentially modifying state properties.
-3. Constructs the new state script with updated values.
-4. Verifies (via `checkPreimage`) that the transaction output contains the new state script.
+3. Constructs the new locking script with `<code_part> OP_RETURN <updated_fields>`.
+4. Verifies (via `checkPreimage`) that the transaction output contains the new locking script.
 
 ---
 
@@ -399,6 +415,7 @@ For each method:
 | `Ripemd160` | 20 bytes pushed directly |
 | `Addr` | 20 bytes pushed directly |
 | `SigHashPreimage` | Variable-length bytes pushed directly |
+| `Point` | 64 bytes pushed directly (x[32] \|\| y[32], big-endian) |
 | `RabinSig` | Script number |
 | `RabinPubKey` | Script number |
 | `FixedArray<T,N>` | N consecutive stack items, each encoded as T |

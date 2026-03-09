@@ -260,6 +260,115 @@ func TestNewRunarContract_InitializesState_MismatchedNames(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// BigInt values from JSON without reviver ("0n" strings)
+// ---------------------------------------------------------------------------
+
+func TestNewRunarContract_BigIntJSON_Revives0n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "count", Type: "bigint", Index: 0, InitialValue: "0n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["count"] != int64(0) {
+		t.Errorf("expected count=0, got %v (type %T)", state["count"], state["count"])
+	}
+}
+
+func TestNewRunarContract_BigIntJSON_Revives1000n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "amount", Type: "bigint", Index: 0, InitialValue: "1000n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["amount"] != int64(1000) {
+		t.Errorf("expected amount=1000, got %v (type %T)", state["amount"], state["amount"])
+	}
+}
+
+func TestNewRunarContract_BigIntJSON_RevivesNegative(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "offset", Type: "bigint", Index: 0, InitialValue: "-42n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["offset"] != int64(-42) {
+		t.Errorf("expected offset=-42, got %v (type %T)", state["offset"], state["offset"])
+	}
+}
+
+func TestSerializeState_BigIntJSON_Handles0nString(t *testing.T) {
+	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	// Simulate state containing unrevived "0n" string
+	hex := SerializeState(fields, map[string]interface{}{"count": "0n"})
+	if hex != "0000000000000000" {
+		t.Errorf("expected 0000000000000000, got %s", hex)
+	}
+}
+
+func TestSerializeState_BigIntJSON_Handles1000nString(t *testing.T) {
+	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	hexFromString := SerializeState(fields, map[string]interface{}{"count": "1000n"})
+	hexFromInt := SerializeState(fields, map[string]interface{}{"count": int64(1000)})
+	if hexFromString != hexFromInt {
+		t.Errorf("expected %s, got %s", hexFromInt, hexFromString)
+	}
+}
+
+func TestGetLockingScript_BigIntJSON_InitialValue0n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "count", Type: "bigint", Index: 0, InitialValue: "0n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	script := c.GetLockingScript()
+	// Should contain OP_RETURN separator
+	if !strings.Contains(script, "6a") {
+		t.Error("expected script to contain OP_RETURN (6a)")
+	}
+	// Should be valid hex (even length, only hex chars)
+	if len(script)%2 != 0 {
+		t.Error("expected even-length hex string")
+	}
+	for _, ch := range script {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			t.Errorf("unexpected character in hex: %c", ch)
+			break
+		}
+	}
+}
+
+func TestReviveJSONValue_Float64(t *testing.T) {
+	// JSON numbers decode as float64 in Go — verify they're handled
+	result := reviveJSONValue(float64(42), "bigint")
+	if result != int64(42) {
+		t.Errorf("expected int64(42), got %v (type %T)", result, result)
+	}
+}
+
+func TestReviveJSONValue_NonBigintType(t *testing.T) {
+	// Non-bigint types should pass through unchanged
+	result := reviveJSONValue("hello", "ByteString")
+	if result != "hello" {
+		t.Errorf("expected 'hello', got %v", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // getLockingScript with constructor slots
 // ---------------------------------------------------------------------------
 
@@ -485,58 +594,62 @@ func TestStateRoundtrip_MixedTypes(t *testing.T) {
 func TestStateEncode_Zero(t *testing.T) {
 	fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"v": int64(0)})
-	if hex != "0100" {
-		t.Errorf("expected 0100, got %s", hex)
+	// NUM2BIN(0, 8) → 8 zero bytes
+	if hex != "0000000000000000" {
+		t.Errorf("expected 0000000000000000, got %s", hex)
 	}
 }
 
 func TestStateEncode_42(t *testing.T) {
 	fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"v": int64(42)})
-	if hex != "012a" {
-		t.Errorf("expected 012a, got %s", hex)
+	// 42 = 0x2a → LE 8 bytes
+	if hex != "2a00000000000000" {
+		t.Errorf("expected 2a00000000000000, got %s", hex)
 	}
 }
 
 func TestStateEncode_1000(t *testing.T) {
 	fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"v": int64(1000)})
-	if hex != "02e803" {
-		t.Errorf("expected 02e803, got %s", hex)
+	// 1000 = 0x03E8 → LE 8 bytes
+	if hex != "e803000000000000" {
+		t.Errorf("expected e803000000000000, got %s", hex)
 	}
 }
 
 func TestStateEncode_128(t *testing.T) {
 	fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"v": int64(128)})
-	// 128 = 0x80, high bit set, needs 0x00 sign byte: 02 80 00
-	if hex != "028000" {
-		t.Errorf("expected 028000, got %s", hex)
+	// 128 = 0x80 → LE 8 bytes, sign bit in byte[7] is 0x00 (positive)
+	if hex != "8000000000000000" {
+		t.Errorf("expected 8000000000000000, got %s", hex)
 	}
 }
 
 func TestStateEncode_Neg128(t *testing.T) {
 	fields := []StateField{{Name: "v", Type: "bigint", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"v": int64(-128)})
-	// -128: abs=0x80, high bit set, needs 0x80 sign byte: 02 80 80
-	if hex != "028080" {
-		t.Errorf("expected 028080, got %s", hex)
+	// -128: magnitude=0x80, sign bit in byte[7]
+	if hex != "8000000000000080" {
+		t.Errorf("expected 8000000000000080, got %s", hex)
 	}
 }
 
 func TestStateEncode_BoolTrue(t *testing.T) {
 	fields := []StateField{{Name: "flag", Type: "bool", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"flag": true})
-	if hex != "0151" {
-		t.Errorf("expected 0151, got %s", hex)
+	// Raw byte 0x01
+	if hex != "01" {
+		t.Errorf("expected 01, got %s", hex)
 	}
 }
 
 func TestStateEncode_BoolFalse(t *testing.T) {
 	fields := []StateField{{Name: "flag", Type: "bool", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"flag": false})
-	if hex != "0100" {
-		t.Errorf("expected 0100, got %s", hex)
+	if hex != "00" {
+		t.Errorf("expected 00, got %s", hex)
 	}
 }
 
@@ -544,10 +657,9 @@ func TestStateEncode_PubKey(t *testing.T) {
 	pubkey := strings.Repeat("ff", 33)
 	fields := []StateField{{Name: "pk", Type: "PubKey", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"pk": pubkey})
-	// 33 = 0x21
-	expected := "21" + pubkey
-	if hex != expected {
-		t.Errorf("expected %s, got %s", expected, hex)
+	// Raw 33 bytes, no push-data prefix
+	if hex != pubkey {
+		t.Errorf("expected %s, got %s", pubkey, hex)
 	}
 }
 
@@ -555,10 +667,9 @@ func TestStateEncode_Addr(t *testing.T) {
 	addr := strings.Repeat("aa", 20)
 	fields := []StateField{{Name: "a", Type: "Addr", Index: 0}}
 	hex := SerializeState(fields, map[string]interface{}{"a": addr})
-	// 20 = 0x14
-	expected := "14" + addr
-	if hex != expected {
-		t.Errorf("expected %s, got %s", expected, hex)
+	// Raw 20 bytes, no push-data prefix
+	if hex != addr {
+		t.Errorf("expected %s, got %s", addr, hex)
 	}
 }
 
@@ -692,10 +803,10 @@ func TestExtractState_BigintValue106(t *testing.T) {
 		a.StateFields = fields
 	})
 
-	// 106 = 0x6a → state encoding: push 1 byte 0x6a → "016a"
+	// 106 = 0x6a → NUM2BIN(8): "6a00000000000000"
 	stateHex := SerializeState(fields, map[string]interface{}{"count": int64(106)})
-	if stateHex != "016a" {
-		t.Fatalf("expected state hex 016a, got %s", stateHex)
+	if stateHex != "6a00000000000000" {
+		t.Fatalf("expected state hex 6a00000000000000, got %s", stateHex)
 	}
 	fullScript := "51ac" + "6a" + stateHex
 
@@ -887,7 +998,7 @@ func TestBuildDeployTransaction_SingleOutputWhenZeroChange(t *testing.T) {
 
 func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.version != 1 {
@@ -900,7 +1011,7 @@ func TestBuildCallTransaction_BasicStructure(t *testing.T) {
 
 func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "aabb", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].script != "aabb" {
@@ -910,7 +1021,7 @@ func TestBuildCallTransaction_UnlockingScriptInInput0(t *testing.T) {
 
 func TestBuildCallTransaction_SingleInput(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
+	txHex, inputCount, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 1 {
@@ -926,7 +1037,7 @@ func TestBuildCallTransaction_AdditionalInputs(t *testing.T) {
 	additional := []UTXO{makeUtxo(50000, 1), makeUtxo(30000, 2)}
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, inputCount := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional, nil)
+	txHex, inputCount, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional, 1)
 	parsed := parseTxHex(txHex)
 
 	if inputCount != 3 {
@@ -949,7 +1060,7 @@ func TestBuildCallTransaction_StatefulOutput(t *testing.T) {
 	newLockingScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", newLockingScript, 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].script != newLockingScript {
@@ -965,7 +1076,7 @@ func TestBuildCallTransaction_DefaultSatoshis(t *testing.T) {
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
 	// newSatoshis = 0 with newLockingScript set => defaults to currentUtxo.Satoshis
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 0, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputs[0].satoshis != 75000 {
@@ -977,7 +1088,7 @@ func TestBuildCallTransaction_ChangeCalculation(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
@@ -998,7 +1109,7 @@ func TestBuildCallTransaction_NoChangeWhenZero(t *testing.T) {
 	utxo := makeUtxo(50096, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "00", "51", 50000, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.outputCount != 1 {
@@ -1010,7 +1121,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
 	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
 
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, nil, 1)
 	parsed := parseTxHex(txHex)
 
 	// Fee: input0(42) + changeOut(34) + overhead(10) = 86
@@ -1028,7 +1139,7 @@ func TestBuildCallTransaction_StatelessChangeOnly(t *testing.T) {
 
 func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 	utxo := makeUtxo(100000, 0)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	expected := reverseHex(utxo.Txid)
@@ -1039,7 +1150,7 @@ func TestBuildCallTransaction_ReversedTxid(t *testing.T) {
 
 func TestBuildCallTransaction_CorrectOutputIndex(t *testing.T) {
 	utxo := makeUtxo(100000, 3)
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, nil)
+	txHex, _, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, 1)
 	parsed := parseTxHex(txHex)
 
 	if parsed.inputs[0].prevIndex != 3 {
@@ -1292,8 +1403,8 @@ func TestBuildUnlockingScript_BoolTrue(t *testing.T) {
 	})
 
 	c := NewRunarContract(artifact, nil)
-	if c.BuildUnlockingScript("check", []interface{}{true}) != "0151" {
-		t.Error("true should encode as 0151")
+	if c.BuildUnlockingScript("check", []interface{}{true}) != "51" {
+		t.Error("true should encode as 51")
 	}
 }
 
@@ -1306,8 +1417,8 @@ func TestBuildUnlockingScript_BoolFalse(t *testing.T) {
 	})
 
 	c := NewRunarContract(artifact, nil)
-	if c.BuildUnlockingScript("check", []interface{}{false}) != "0100" {
-		t.Error("false should encode as 0100")
+	if c.BuildUnlockingScript("check", []interface{}{false}) != "00" {
+		t.Error("false should encode as 00")
 	}
 }
 
@@ -1851,11 +1962,11 @@ func TestMockSigner_GetPublicKey(t *testing.T) {
 
 func TestMockSigner_Sign(t *testing.T) {
 	signer := NewMockSigner("", "")
-	sig, err := signer.Sign("aabb", 0, "51", 10000)
+	sig, err := signer.Sign("aabb", 0, "51", 10000, nil)
 	if err != nil {
 		t.Fatalf("Sign error: %v", err)
 	}
-	// 71 zero bytes + sighash 0x41 = 144 hex chars
+	// DER prefix 0x30 + 70 zero bytes + sighash 0x41 = 144 hex chars
 	if len(sig) != 144 {
 		t.Errorf("expected 144-char signature, got %d: %s", len(sig), sig)
 	}
@@ -1885,395 +1996,293 @@ func TestSetState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BuildCallTransaction with multi-output
+// LocalSigner
 // ---------------------------------------------------------------------------
 
-func TestBuildCallTransaction_MultiOutput_CreatesMultipleOutputs(t *testing.T) {
-	utxo := makeUtxo(100000, 0)
-	multiOutputs := []CallOutput{
-		{LockingScript: "51", Satoshis: 30000},
-		{LockingScript: "52", Satoshis: 20000},
-	}
+const testPrivKeyHex1 = "0000000000000000000000000000000000000000000000000000000000000001"
+const testPrivKeyHex2 = "0000000000000000000000000000000000000000000000000000000000000002"
+const testWifCompressed = "KwDiBf89QgGbjEhKnhXJuH7LrciVrZi3qYjgd9M7rFU73sVHnoWn"
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "", 0, "", "", nil, multiOutputs)
-	parsed := parseTxHex(txHex)
-
-	if parsed.outputCount != 2 {
-		t.Fatalf("expected 2 outputs, got %d", parsed.outputCount)
+func TestLocalSigner_ConstructorHex(t *testing.T) {
+	signer, err := NewLocalSigner(testPrivKeyHex1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if parsed.outputs[0].script != "51" {
-		t.Errorf("expected first output script 51, got %s", parsed.outputs[0].script)
-	}
-	if parsed.outputs[0].satoshis != 30000 {
-		t.Errorf("expected first output 30000 sats, got %d", parsed.outputs[0].satoshis)
-	}
-	if parsed.outputs[1].script != "52" {
-		t.Errorf("expected second output script 52, got %s", parsed.outputs[1].script)
-	}
-	if parsed.outputs[1].satoshis != 20000 {
-		t.Errorf("expected second output 20000 sats, got %d", parsed.outputs[1].satoshis)
+	if signer == nil {
+		t.Fatal("expected non-nil signer")
 	}
 }
 
-func TestBuildCallTransaction_MultiOutput_WithChangeOutput(t *testing.T) {
-	utxo := makeUtxo(200000, 0)
-	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
-	multiOutputs := []CallOutput{
-		{LockingScript: "51", Satoshis: 30000},
-		{LockingScript: "52", Satoshis: 20000},
+func TestLocalSigner_ConstructorWif(t *testing.T) {
+	signer, err := NewLocalSigner(testWifCompressed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-
-	txHex, _ := BuildCallTransaction(utxo, "00", "", 0, "changeaddr", changeScript, nil, multiOutputs)
-	parsed := parseTxHex(txHex)
-
-	// Should have 3 outputs: 2 contract + 1 change
-	if parsed.outputCount != 3 {
-		t.Fatalf("expected 3 outputs (2 contract + 1 change), got %d", parsed.outputCount)
-	}
-	if parsed.outputs[0].satoshis != 30000 {
-		t.Errorf("expected first contract output 30000 sats, got %d", parsed.outputs[0].satoshis)
-	}
-	if parsed.outputs[1].satoshis != 20000 {
-		t.Errorf("expected second contract output 20000 sats, got %d", parsed.outputs[1].satoshis)
-	}
-	if parsed.outputs[2].script != changeScript {
-		t.Errorf("expected change script, got %s", parsed.outputs[2].script)
-	}
-	// Verify change = totalInput - contractOutputSats - fee
-	totalContractSats := int64(30000 + 20000)
-	changeAmount := parsed.outputs[2].satoshis
-	if changeAmount <= 0 {
-		t.Errorf("expected positive change, got %d", changeAmount)
-	}
-	// change + fee + contractOutputSats should equal totalInput
-	reconstructed := changeAmount + totalContractSats
-	if reconstructed >= 200000 {
-		t.Errorf("change + contract sats should be less than total input (fee deducted), got %d", reconstructed)
+	if signer == nil {
+		t.Fatal("expected non-nil signer")
 	}
 }
 
-func TestBuildCallTransaction_MultiOutput_ThreeOutputs(t *testing.T) {
-	utxo := makeUtxo(200000, 0)
-	multiOutputs := []CallOutput{
-		{LockingScript: "5193", Satoshis: 10000},
-		{LockingScript: "5293", Satoshis: 20000},
-		{LockingScript: "5393", Satoshis: 30000},
+func TestLocalSigner_ConstructorInvalid(t *testing.T) {
+	_, err := NewLocalSigner("not-a-key")
+	if err == nil {
+		t.Fatal("expected error for invalid key")
+	}
+}
+
+func TestLocalSigner_GetPublicKey(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	pk, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey error: %v", err)
+	}
+	// Private key 1 = secp256k1 generator point G
+	expected := "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+	if pk != expected {
+		t.Errorf("expected %s, got %s", expected, pk)
+	}
+}
+
+func TestLocalSigner_GetPublicKey_66Chars(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	pk, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey error: %v", err)
+	}
+	if len(pk) != 66 {
+		t.Errorf("expected 66-char public key, got %d: %s", len(pk), pk)
+	}
+}
+
+func TestLocalSigner_GetAddress(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+	addr, err := signer.GetAddress()
+	if err != nil {
+		t.Fatalf("GetAddress error: %v", err)
+	}
+	if len(addr) == 0 {
+		t.Fatal("expected non-empty address")
+	}
+	if addr[0] != '1' {
+		t.Errorf("expected mainnet address starting with 1, got %s", addr)
+	}
+}
+
+func TestLocalSigner_WifSameAsHex(t *testing.T) {
+	fromHex, _ := NewLocalSigner(testPrivKeyHex1)
+	fromWif, _ := NewLocalSigner(testWifCompressed)
+
+	pkHex, _ := fromHex.GetPublicKey()
+	pkWif, _ := fromWif.GetPublicKey()
+	if pkHex != pkWif {
+		t.Errorf("WIF and hex should produce same pubkey: %s vs %s", pkHex, pkWif)
 	}
 
-	txHex, _ := BuildCallTransaction(utxo, "51", "", 0, "", "", nil, multiOutputs)
-	parsed := parseTxHex(txHex)
-
-	if parsed.outputCount != 3 {
-		t.Fatalf("expected 3 outputs, got %d", parsed.outputCount)
+	addrHex, _ := fromHex.GetAddress()
+	addrWif, _ := fromWif.GetAddress()
+	if addrHex != addrWif {
+		t.Errorf("WIF and hex should produce same address: %s vs %s", addrHex, addrWif)
 	}
-	for i, expected := range []struct {
-		script   string
-		satoshis int64
-	}{
-		{"5193", 10000},
-		{"5293", 20000},
-		{"5393", 30000},
-	} {
-		if parsed.outputs[i].script != expected.script {
-			t.Errorf("output %d: expected script %s, got %s", i, expected.script, parsed.outputs[i].script)
+}
+
+func TestLocalSigner_Sign(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
+
+	// Minimal valid transaction: version(4) + 1 input(41 bytes) + 1 output(10 bytes) + locktime(4)
+	txHex := "01000000" + // version 1
+		"01" + // 1 input
+		strings.Repeat("00", 32) + // prevTxid
+		"00000000" + // prevIndex 0
+		"00" + // empty scriptSig
+		"ffffffff" + // sequence
+		"01" + // 1 output
+		"5000000000000000" + // 80 satoshis (LE)
+		"01" + // script length 1
+		"51" + // OP_1
+		"00000000" // locktime 0
+
+	sig, err := signer.Sign(txHex, 0, "51", 100, nil)
+	if err != nil {
+		t.Fatalf("Sign error: %v", err)
+	}
+
+	// Should be valid hex
+	for _, c := range sig {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("non-hex character in signature: %c", c)
 		}
-		if parsed.outputs[i].satoshis != expected.satoshis {
-			t.Errorf("output %d: expected %d sats, got %d", i, expected.satoshis, parsed.outputs[i].satoshis)
-		}
+	}
+
+	// Should end with sighash byte 0x41
+	if sig[len(sig)-2:] != "41" {
+		t.Errorf("expected signature ending with 41, got %s", sig[len(sig)-2:])
+	}
+
+	// Should start with DER prefix 30
+	if sig[:2] != "30" {
+		t.Errorf("expected DER signature starting with 30, got %s", sig[:2])
 	}
 }
 
-func TestBuildCallTransaction_MultiOutput_IgnoresNewLockingScript(t *testing.T) {
-	// When multiOutputs is provided, newLockingScript should be ignored
-	utxo := makeUtxo(100000, 0)
-	multiOutputs := []CallOutput{
-		{LockingScript: "51", Satoshis: 30000},
-	}
+func TestLocalSigner_SignDeterministic(t *testing.T) {
+	signer, _ := NewLocalSigner(testPrivKeyHex1)
 
-	txHex, _ := BuildCallTransaction(utxo, "00", "deadbeef", 50000, "", "", nil, multiOutputs)
-	parsed := parseTxHex(txHex)
+	txHex := "01000000" +
+		"01" +
+		strings.Repeat("00", 32) +
+		"00000000" +
+		"00" +
+		"ffffffff" +
+		"01" +
+		"5000000000000000" +
+		"01" +
+		"51" +
+		"00000000"
 
-	if parsed.outputCount != 1 {
-		t.Fatalf("expected 1 output, got %d", parsed.outputCount)
-	}
-	// Output should use multiOutputs, not the newLockingScript
-	if parsed.outputs[0].script != "51" {
-		t.Errorf("expected script from multiOutputs (51), got %s", parsed.outputs[0].script)
-	}
-	if parsed.outputs[0].satoshis != 30000 {
-		t.Errorf("expected 30000 sats from multiOutputs, got %d", parsed.outputs[0].satoshis)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Call() with multi-output options
-// ---------------------------------------------------------------------------
-
-func TestCall_MultiOutput_BuildsMultipleOutputs(t *testing.T) {
-	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
-	artifact := makeArtifact("51", ABI{
-		Constructor: ABIConstructor{
-			Params: []ABIParam{{Name: "count", Type: "bigint"}},
-		},
-		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
-	}, func(a *RunarArtifact) {
-		a.StateFields = stateFields
-	})
-
-	contract := NewRunarContract(artifact, []interface{}{int64(100)})
-
-	provider := NewMockProvider("testnet")
-	mockAddr := strings.Repeat("00", 20)
-	signer := NewMockSigner("", mockAddr)
-
-	// Deploy the contract first
-	provider.AddUtxo(mockAddr, UTXO{
-		Txid:        strings.Repeat("aa", 32),
-		OutputIndex: 0,
-		Satoshis:    200000,
-		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
-	})
-	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
-	if err != nil {
-		t.Fatalf("Deploy error: %v", err)
-	}
-
-	// Call with multi-output
-	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
-		Outputs: []OutputSpec{
-			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
-			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Call error: %v", err)
-	}
-	if txid == "" {
-		t.Fatal("expected non-empty txid after multi-output call")
-	}
-
-	// Verify the broadcasted transaction has multiple outputs
-	broadcasted := provider.GetBroadcastedTxs()
-	if len(broadcasted) < 2 {
-		t.Fatal("expected at least 2 broadcasted txs (deploy + call)")
-	}
-	callTxHex := broadcasted[len(broadcasted)-1]
-	parsed := parseTxHex(callTxHex)
-
-	// Should have at least 2 contract outputs
-	if parsed.outputCount < 2 {
-		t.Fatalf("expected at least 2 outputs in call tx, got %d", parsed.outputCount)
-	}
-
-	// Verify the satoshis on each output
-	if parsed.outputs[0].satoshis != 40000 {
-		t.Errorf("expected first output 40000 sats, got %d", parsed.outputs[0].satoshis)
-	}
-	if parsed.outputs[1].satoshis != 60000 {
-		t.Errorf("expected second output 60000 sats, got %d", parsed.outputs[1].satoshis)
+	sig1, _ := signer.Sign(txHex, 0, "51", 100, nil)
+	sig2, _ := signer.Sign(txHex, 0, "51", 100, nil)
+	if sig1 != sig2 {
+		t.Errorf("expected deterministic signatures, got %s vs %s", sig1, sig2)
 	}
 }
 
-func TestCall_MultiOutput_DefaultContinuationIsLastOutput(t *testing.T) {
-	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
-	artifact := makeArtifact("51", ABI{
-		Constructor: ABIConstructor{
-			Params: []ABIParam{{Name: "count", Type: "bigint"}},
-		},
-		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
-	}, func(a *RunarArtifact) {
-		a.StateFields = stateFields
-	})
+func TestLocalSigner_DifferentKeysDifferentSigs(t *testing.T) {
+	signer1, _ := NewLocalSigner(testPrivKeyHex1)
+	signer2, _ := NewLocalSigner(testPrivKeyHex2)
 
-	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+	txHex := "01000000" +
+		"01" +
+		strings.Repeat("00", 32) +
+		"00000000" +
+		"00" +
+		"ffffffff" +
+		"01" +
+		"5000000000000000" +
+		"01" +
+		"51" +
+		"00000000"
 
-	provider := NewMockProvider("testnet")
-	mockAddr := strings.Repeat("00", 20)
-	signer := NewMockSigner("", mockAddr)
-
-	provider.AddUtxo(mockAddr, UTXO{
-		Txid:        strings.Repeat("aa", 32),
-		OutputIndex: 0,
-		Satoshis:    200000,
-		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
-	})
-	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
-	if err != nil {
-		t.Fatalf("Deploy error: %v", err)
-	}
-
-	// Call with multi-output, no ContinuationOutputIndex specified (default to last)
-	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
-		Outputs: []OutputSpec{
-			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
-			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Call error: %v", err)
-	}
-
-	// Default continuation is the last output (index 1)
-	state := contract.GetState()
-	if state["count"] != int64(60) {
-		t.Errorf("expected continuation state count=60 (last output), got %v", state["count"])
-	}
-
-	// Verify the tracked UTXO has the correct output index and satoshis
-	if contract.currentUtxo == nil {
-		t.Fatal("expected currentUtxo to be tracked after multi-output call")
-	}
-	if contract.currentUtxo.OutputIndex != 1 {
-		t.Errorf("expected continuation output index 1 (last), got %d", contract.currentUtxo.OutputIndex)
-	}
-	if contract.currentUtxo.Satoshis != 60000 {
-		t.Errorf("expected continuation satoshis 60000, got %d", contract.currentUtxo.Satoshis)
-	}
-	if contract.currentUtxo.Txid != txid {
-		t.Errorf("expected continuation txid %s, got %s", txid, contract.currentUtxo.Txid)
+	sig1, _ := signer1.Sign(txHex, 0, "51", 100, nil)
+	sig2, _ := signer2.Sign(txHex, 0, "51", 100, nil)
+	if sig1 == sig2 {
+		t.Error("different keys should produce different signatures")
 	}
 }
 
 // ---------------------------------------------------------------------------
-// ContinuationOutputIndex tracking
+// BuildUnlockingScript
 // ---------------------------------------------------------------------------
 
-func TestCall_MultiOutput_ContinuationOutputIndex_TracksCorrectOutput(t *testing.T) {
-	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
-	artifact := makeArtifact("51", ABI{
+func TestBuildUnlockingScript_SingleMethod_NoSelector(t *testing.T) {
+	artifact := makeArtifact("009c", ABI{
 		Constructor: ABIConstructor{
-			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+			Params: []ABIParam{{Name: "target", Type: "bigint"}},
 		},
-		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+		Methods: []ABIMethod{
+			{Name: "check", Params: []ABIParam{{Name: "x", Type: "bigint"}}, IsPublic: true},
+		},
 	}, func(a *RunarArtifact) {
-		a.StateFields = stateFields
+		a.ConstructorSlots = []ConstructorSlot{{ParamIndex: 0, ByteOffset: 0}}
 	})
 
-	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+	c := NewRunarContract(artifact, []interface{}{int64(42)})
+	unlock := c.BuildUnlockingScript("check", []interface{}{int64(7)})
 
-	provider := NewMockProvider("testnet")
-	mockAddr := strings.Repeat("00", 20)
-	signer := NewMockSigner("", mockAddr)
-
-	provider.AddUtxo(mockAddr, UTXO{
-		Txid:        strings.Repeat("aa", 32),
-		OutputIndex: 0,
-		Satoshis:    200000,
-		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
-	})
-	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
-	if err != nil {
-		t.Fatalf("Deploy error: %v", err)
-	}
-
-	// Call with multi-output, tracking the FIRST output (index 0)
-	txid, _, err := contract.Call("split", nil, provider, signer, &CallOptions{
-		Outputs: []OutputSpec{
-			{Satoshis: 40000, State: map[string]interface{}{"count": int64(40)}},
-			{Satoshis: 60000, State: map[string]interface{}{"count": int64(60)}},
-			{Satoshis: 30000, State: map[string]interface{}{"count": int64(30)}},
-		},
-		ContinuationOutputIndex: 1,
-	})
-	if err != nil {
-		t.Fatalf("Call error: %v", err)
-	}
-
-	// Should track output at index 1
-	state := contract.GetState()
-	if state["count"] != int64(60) {
-		t.Errorf("expected continuation state count=60 (output index 1), got %v", state["count"])
-	}
-
-	if contract.currentUtxo == nil {
-		t.Fatal("expected currentUtxo to be tracked")
-	}
-	if contract.currentUtxo.OutputIndex != 1 {
-		t.Errorf("expected continuation output index 1, got %d", contract.currentUtxo.OutputIndex)
-	}
-	if contract.currentUtxo.Satoshis != 60000 {
-		t.Errorf("expected continuation satoshis 60000, got %d", contract.currentUtxo.Satoshis)
-	}
-	if contract.currentUtxo.Txid != txid {
-		t.Errorf("expected continuation txid %s, got %s", txid, contract.currentUtxo.Txid)
+	// Single-method contract: no method selector, only the arg
+	// 7 → OP_7 = 0x57
+	expected := "57"
+	if unlock != expected {
+		t.Errorf("expected unlocking script %q, got %q", expected, unlock)
 	}
 }
 
-func TestCall_MultiOutput_EachOutputGetsDistinctState(t *testing.T) {
-	stateFields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
-	artifact := makeArtifact("51", ABI{
+func TestBuildUnlockingScript_MultiMethod_HasSelector(t *testing.T) {
+	artifact := makeArtifact("009c", ABI{
 		Constructor: ABIConstructor{
-			Params: []ABIParam{{Name: "count", Type: "bigint"}},
+			Params: []ABIParam{{Name: "target", Type: "bigint"}},
 		},
-		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+		Methods: []ABIMethod{
+			{Name: "methodA", Params: []ABIParam{{Name: "x", Type: "bigint"}}, IsPublic: true},
+			{Name: "methodB", Params: nil, IsPublic: true},
+		},
 	}, func(a *RunarArtifact) {
-		a.StateFields = stateFields
+		a.ConstructorSlots = []ConstructorSlot{{ParamIndex: 0, ByteOffset: 0}}
 	})
 
-	contract := NewRunarContract(artifact, []interface{}{int64(100)})
+	c := NewRunarContract(artifact, []interface{}{int64(42)})
+	unlock := c.BuildUnlockingScript("methodB", []interface{}{})
 
-	provider := NewMockProvider("testnet")
-	mockAddr := strings.Repeat("00", 20)
-	signer := NewMockSigner("", mockAddr)
-
-	provider.AddUtxo(mockAddr, UTXO{
-		Txid:        strings.Repeat("aa", 32),
-		OutputIndex: 0,
-		Satoshis:    200000,
-		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
-	})
-	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
-	if err != nil {
-		t.Fatalf("Deploy error: %v", err)
-	}
-
-	// Each output should get its own locking script with distinct state
-	_, _, err = contract.Call("split", nil, provider, signer, &CallOptions{
-		Outputs: []OutputSpec{
-			{Satoshis: 40000, State: map[string]interface{}{"count": int64(10)}},
-			{Satoshis: 60000, State: map[string]interface{}{"count": int64(20)}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Call error: %v", err)
-	}
-
-	// Verify distinct locking scripts were produced in the raw transaction
-	broadcasted := provider.GetBroadcastedTxs()
-	callTxHex := broadcasted[len(broadcasted)-1]
-	parsed := parseTxHex(callTxHex)
-
-	if parsed.outputCount < 2 {
-		t.Fatalf("expected at least 2 outputs, got %d", parsed.outputCount)
-	}
-
-	// The two contract outputs should have different locking scripts
-	// because they encode different state values
-	if parsed.outputs[0].script == parsed.outputs[1].script {
-		t.Error("expected distinct locking scripts for outputs with different state, but they are identical")
+	// Multi-method: method selector for index 1 (methodB) = OP_1 = 0x51
+	expected := "51"
+	if unlock != expected {
+		t.Errorf("expected unlocking script %q, got %q", expected, unlock)
 	}
 }
 
-func TestCall_MultiOutput_OriginalStatePreservedDuringScriptBuilding(t *testing.T) {
-	// Verify that multi-output building does not corrupt the contract's state
-	// during locking script generation (state is saved and restored for each output)
-	stateFields := []StateField{
-		{Name: "a", Type: "bigint", Index: 0},
-		{Name: "b", Type: "bigint", Index: 1},
-	}
-	artifact := makeArtifact("51", ABI{
+// ---------------------------------------------------------------------------
+// buildCodeScript must NOT duplicate constructor args
+// ---------------------------------------------------------------------------
+
+func TestBuildCodeScript_WithSlots_NoFallbackAppend(t *testing.T) {
+	// Script: OP_0 (placeholder at offset 0) + OP_NUMEQUAL
+	// After splicing target=42: should be "012a" + "9c"
+	artifact := makeArtifact("009c", ABI{
 		Constructor: ABIConstructor{
-			Params: []ABIParam{
-				{Name: "a", Type: "bigint"},
-				{Name: "b", Type: "bigint"},
-			},
+			Params: []ABIParam{{Name: "target", Type: "bigint"}},
 		},
-		Methods: []ABIMethod{{Name: "split", Params: nil, IsPublic: true}},
+		Methods: []ABIMethod{
+			{Name: "check", Params: []ABIParam{{Name: "x", Type: "bigint"}}, IsPublic: true},
+		},
 	}, func(a *RunarArtifact) {
-		a.StateFields = stateFields
+		a.ConstructorSlots = []ConstructorSlot{{ParamIndex: 0, ByteOffset: 0}}
 	})
 
-	contract := NewRunarContract(artifact, []interface{}{int64(10), int64(20)})
+	c := NewRunarContract(artifact, []interface{}{int64(42)})
+	lockingScript := c.GetLockingScript()
+
+	// 42 = 0x2a → script number push: 01 2a
+	// Then OP_NUMEQUAL = 9c
+	expected := "012a9c"
+	if lockingScript != expected {
+		t.Errorf("expected locking script %q, got %q\nlength: expected %d, got %d",
+			expected, lockingScript, len(expected), len(lockingScript))
+	}
+}
+
+func TestBuildCodeScript_WithoutSlots_FallbackAppends(t *testing.T) {
+	// Old artifact format: no constructor slots, args appended to script
+	artifact := makeArtifact("009c", ABI{
+		Constructor: ABIConstructor{
+			Params: []ABIParam{{Name: "target", Type: "bigint"}},
+		},
+		Methods: []ABIMethod{
+			{Name: "check", Params: []ABIParam{{Name: "x", Type: "bigint"}}, IsPublic: true},
+		},
+	})
+
+	c := NewRunarContract(artifact, []interface{}{int64(42)})
+	lockingScript := c.GetLockingScript()
+
+	// Fallback: "009c" + encoded(42) = "009c" + "012a"
+	expected := "009c" + "012a"
+	if lockingScript != expected {
+		t.Errorf("expected locking script %q, got %q", expected, lockingScript)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Terminal method call tests
+// ---------------------------------------------------------------------------
+
+func TestTerminalCall_SetsUtxoToNil(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "cancel", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
 
 	provider := NewMockProvider("testnet")
 	mockAddr := strings.Repeat("00", 20)
@@ -2282,32 +2291,172 @@ func TestCall_MultiOutput_OriginalStatePreservedDuringScriptBuilding(t *testing.
 	provider.AddUtxo(mockAddr, UTXO{
 		Txid:        strings.Repeat("aa", 32),
 		OutputIndex: 0,
-		Satoshis:    200000,
+		Satoshis:    100000,
 		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
 	})
-	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 100000})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 50000})
 	if err != nil {
 		t.Fatalf("Deploy error: %v", err)
 	}
 
-	// Call with multi-output — outputs override only some fields
-	_, _, err = contract.Call("split", nil, provider, signer, &CallOptions{
-		Outputs: []OutputSpec{
-			{Satoshis: 40000, State: map[string]interface{}{"a": int64(99), "b": int64(88)}},
-			{Satoshis: 60000, State: map[string]interface{}{"a": int64(77), "b": int64(66)}},
+	payoutScript := "76a914" + strings.Repeat("bb", 20) + "88ac"
+	txid, _, err := contract.Call("cancel", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: payoutScript, Satoshis: 49000},
 		},
-		// Default continuation is last output (index 1)
 	})
 	if err != nil {
-		t.Fatalf("Call error: %v", err)
+		t.Fatalf("Terminal call error: %v", err)
+	}
+	if len(txid) != 64 {
+		t.Errorf("expected 64-char txid, got %d", len(txid))
+	}
+	if contract.GetCurrentUtxo() != nil {
+		t.Error("expected currentUtxo to be nil after terminal call")
+	}
+}
+
+func TestTerminalCall_SubsequentCallFails(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "spend", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    100000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 10000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
 	}
 
-	// After the call, continuation state should be from the last output (default)
-	state := contract.GetState()
-	if state["a"] != int64(77) {
-		t.Errorf("expected a=77 (from continuation output), got %v", state["a"])
+	_, _, err = contract.Call("spend", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: "76a914" + strings.Repeat("cc", 20) + "88ac", Satoshis: 9000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Terminal call error: %v", err)
 	}
-	if state["b"] != int64(66) {
-		t.Errorf("expected b=66 (from continuation output), got %v", state["b"])
+
+	// Subsequent call should fail with "not deployed"
+	_, _, err = contract.Call("spend", nil, provider, signer, nil)
+	if err == nil {
+		t.Fatal("expected error after terminal call")
+	}
+	if !strings.Contains(err.Error(), "not deployed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestTerminalCall_MultipleOutputs(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "settle", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    100000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 20000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	txid, _, err := contract.Call("settle", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: "76a914" + strings.Repeat("aa", 20) + "88ac", Satoshis: 10000},
+			{ScriptHex: "76a914" + strings.Repeat("bb", 20) + "88ac", Satoshis: 9000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Terminal call error: %v", err)
+	}
+	if len(txid) != 64 {
+		t.Errorf("expected 64-char txid, got %d", len(txid))
+	}
+	if contract.GetCurrentUtxo() != nil {
+		t.Error("expected currentUtxo to be nil after terminal call")
+	}
+}
+
+func TestTerminalCall_TxStructure(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: nil},
+		Methods: []ABIMethod{
+			{Name: "cancel", Params: nil, IsPublic: true},
+		},
+	})
+
+	contract := NewRunarContract(artifact, nil)
+
+	provider := NewMockProvider("testnet")
+	mockAddr := strings.Repeat("00", 20)
+	signer := NewMockSigner("", mockAddr)
+
+	provider.AddUtxo(mockAddr, UTXO{
+		Txid:        strings.Repeat("aa", 32),
+		OutputIndex: 0,
+		Satoshis:    100000,
+		Script:      "76a914" + strings.Repeat("00", 20) + "88ac",
+	})
+
+	_, _, err := contract.Deploy(provider, signer, DeployOptions{Satoshis: 50000})
+	if err != nil {
+		t.Fatalf("Deploy error: %v", err)
+	}
+
+	payoutScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
+	_, _, err = contract.Call("cancel", nil, provider, signer, &CallOptions{
+		TerminalOutputs: []TerminalOutput{
+			{ScriptHex: payoutScript, Satoshis: 49000},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Terminal call error: %v", err)
+	}
+
+	broadcastedTxs := provider.GetBroadcastedTxs()
+	// Deploy is first broadcast, terminal call is second
+	if len(broadcastedTxs) != 2 {
+		t.Fatalf("expected 2 broadcasts, got %d", len(broadcastedTxs))
+	}
+
+	termTxHex := broadcastedTxs[1]
+	parsed := parseTxHex(termTxHex)
+
+	// Should have version 1
+	if parsed.version != 1 {
+		t.Errorf("expected version 1, got %d", parsed.version)
+	}
+
+	// Should have 1 input (no funding inputs)
+	if parsed.inputCount != 1 {
+		t.Errorf("expected 1 input, got %d", parsed.inputCount)
 	}
 }

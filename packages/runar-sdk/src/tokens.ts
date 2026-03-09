@@ -7,6 +7,8 @@ import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { UTXO } from './types.js';
 import { RunarContract } from './contract.js';
+import { buildCallTransaction } from './calling.js';
+import { buildP2PKHScript } from './script-utils.js';
 
 /**
  * Manages token UTXOs for a fungible token contract.
@@ -40,8 +42,8 @@ export class TokenWallet {
         this.provider,
       );
       const state = contract.state;
-      // Look for a balance/amount field in the state
-      const balanceField = state['balance'] ?? state['amount'] ?? 0;
+      // Look for a supply/balance/amount field in the state
+      const balanceField = state['supply'] ?? state['balance'] ?? state['amount'] ?? 0;
       total += BigInt(balanceField as number | bigint);
     }
 
@@ -49,10 +51,14 @@ export class TokenWallet {
   }
 
   /**
-   * Transfer tokens to a recipient address.
+   * Transfer the entire balance of a token UTXO to a new address.
    *
-   * @param recipientAddr - The BSV address of the recipient.
-   * @param amount - The amount of tokens to transfer.
+   * The FungibleToken.transfer(sig, to) method transfers the full supply
+   * held in the UTXO to the given address.  The signature is produced by
+   * this wallet's signer and passed as the first argument.
+   *
+   * @param recipientAddr - The BSV address (Addr) of the recipient.
+   * @param amount - Minimum token balance required in the source UTXO.
    * @returns The txid of the transfer transaction.
    */
   async transfer(recipientAddr: string, amount: bigint): Promise<string> {
@@ -70,15 +76,41 @@ export class TokenWallet {
         this.provider,
       );
       const state = contract.state;
-      const balance = BigInt((state['balance'] ?? state['amount'] ?? 0) as number | bigint);
+      const balance = BigInt((state['balance'] ?? state['supply'] ?? state['amount'] ?? 0) as number | bigint);
 
       if (balance >= amount) {
+        // FungibleToken.transfer(sig: Sig, to: Addr)
+        // Build a preliminary unlocking script with a placeholder sig so we
+        // can construct the transaction, then BIP-143 sign input 0.
+        const placeholderSig = '00'.repeat(72); // DER sig placeholder
+        const prelimUnlock = contract.buildUnlockingScript('transfer', [placeholderSig, recipientAddr]);
+
+        // Build the preliminary transaction to obtain a signable tx hex
+        const changeAddress = await this.signer.getAddress();
+        const feeRate = await this.provider.getFeeRate();
+        const additionalUtxos = await this.provider.getUtxos(changeAddress);
+        const changeScript = buildP2PKHScript(changeAddress);
+
+        const { txHex: prelimTxHex } = buildCallTransaction(
+          utxo,
+          prelimUnlock,
+          undefined, // FungibleToken is stateless (SmartContract base)
+          undefined,
+          changeAddress,
+          changeScript,
+          additionalUtxos.length > 0 ? additionalUtxos : undefined,
+          feeRate,
+        );
+
+        // Sign input 0 against the contract UTXO's locking script
+        const sig = await this.signer.sign(prelimTxHex, 0, utxo.script, utxo.satoshis);
+
         const result = await contract.call(
           'transfer',
-          [recipientAddr, amount],
+          [sig, recipientAddr],
           this.provider,
           this.signer,
-          { changeAddress: await this.signer.getAddress() },
+          { changeAddress },
         );
         return result.txid;
       }
@@ -90,7 +122,11 @@ export class TokenWallet {
   }
 
   /**
-   * Merge multiple token UTXOs into a single UTXO.
+   * Merge two token UTXOs into a single UTXO.
+   *
+   * FungibleToken.merge(sig, otherSupply, otherHolder) combines the supply
+   * from two UTXOs.  The second UTXO's supply and holder are read from its
+   * on-chain state and passed as arguments.
    *
    * @returns The txid of the merge transaction.
    */
@@ -100,8 +136,7 @@ export class TokenWallet {
       throw new Error('TokenWallet.merge: need at least 2 UTXOs to merge');
     }
 
-    // Merge the first two UTXOs by calling a merge method
-    // This assumes the contract has a 'merge' public method.
+    // Merge the first two UTXOs by calling the merge method on the first.
     const firstUtxo = utxos[0]!;
     const contract = await RunarContract.fromTxId(
       this.artifact,
@@ -110,12 +145,48 @@ export class TokenWallet {
       this.provider,
     );
 
+    // Read the second UTXO's state to extract its supply and holder.
+    const secondUtxo = utxos[1]!;
+    const secondContract = await RunarContract.fromTxId(
+      this.artifact,
+      secondUtxo.txid,
+      secondUtxo.outputIndex,
+      this.provider,
+    );
+    const secondState = secondContract.state;
+    const otherSupply = BigInt((secondState['supply'] ?? secondState['balance'] ?? secondState['amount'] ?? 0) as number | bigint);
+    const otherHolder = (secondState['holder'] ?? '') as string;
+
+    // FungibleToken.merge(sig: Sig, otherSupply: bigint, otherHolder: PubKey)
+    // Build a preliminary transaction with a placeholder sig for BIP-143 signing.
+    const placeholderSig = '00'.repeat(72);
+    const prelimUnlock = contract.buildUnlockingScript('merge', [placeholderSig, otherSupply, otherHolder]);
+
+    const changeAddress = await this.signer.getAddress();
+    const feeRate = await this.provider.getFeeRate();
+    const additionalUtxos = await this.provider.getUtxos(changeAddress);
+    const changeScript = buildP2PKHScript(changeAddress);
+
+    const { txHex: prelimTxHex } = buildCallTransaction(
+      firstUtxo,
+      prelimUnlock,
+      undefined,
+      undefined,
+      changeAddress,
+      changeScript,
+      additionalUtxos.length > 0 ? additionalUtxos : undefined,
+      feeRate,
+    );
+
+    // Sign input 0 against the first contract UTXO's locking script
+    const sig = await this.signer.sign(prelimTxHex, 0, firstUtxo.script, firstUtxo.satoshis);
+
     const result = await contract.call(
       'merge',
-      [utxos[1]!],
+      [sig, otherSupply, otherHolder],
       this.provider,
       this.signer,
-      { changeAddress: await this.signer.getAddress() },
+      { changeAddress },
     );
 
     return result.txid;
@@ -142,3 +213,4 @@ export class TokenWallet {
     });
   }
 }
+

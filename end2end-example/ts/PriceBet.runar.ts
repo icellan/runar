@@ -21,8 +21,12 @@ class PriceBet extends SmartContract {
     assert(price > 0n);
 
     if (price > this.strikePrice) {
+      // bobSig is present in the unlocking script for stack alignment but is
+      // intentionally not checked in this branch — only alice (the winner) signs.
       assert(checkSig(aliceSig, this.alicePubKey));
     } else {
+      // aliceSig is present in the unlocking script for stack alignment but is
+      // intentionally not checked in this branch — only bob (the winner) signs.
       assert(checkSig(bobSig, this.bobPubKey));
     }
   }

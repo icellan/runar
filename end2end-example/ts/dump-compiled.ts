@@ -15,7 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compile } from '../../packages/runar-compiler/src/index.js';
+import { compile } from 'runar-compiler';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'PriceBet.runar.ts'), 'utf8');

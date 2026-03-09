@@ -56,9 +56,11 @@ pnpm test -- --watch
 
 ---
 
-## Using TestContract
+## Using TestContract (Interpreter-Based Testing)
 
-`TestContract` is the primary test helper. It compiles a contract from source, uses the interpreter (not the VM) to execute methods with mocked crypto, and tracks state changes.
+`TestContract` is the primary test helper. It compiles a contract from source, uses the **interpreter** (not the Script VM) to execute methods, and tracks state changes.
+
+> **Important:** `TestContract` uses mocked cryptographic operations — `checkSig`, `checkPreimage`, `verifyWOTS`, and all signature-related builtins always return `true`. This is intentional: it lets you test business logic (state transitions, assertions, arithmetic) without managing real keys or signatures. For tests that verify actual compiled Script execution, use `TestSmartContract` or `ScriptExecutionContract` instead.
 
 ### Creating an Instance
 
@@ -111,11 +113,34 @@ counter.call('increment');
 expect(counter.state.count).toBe(1n);
 ```
 
+### Configuring Mock Preimage
+
+For stateful contracts that inspect transaction preimage fields (e.g., time locks, input amounts), use `setMockPreimage()` to override the default mock values:
+
+```typescript
+const contract = TestContract.fromSource(source, { deadline: 1000n });
+
+// Override the locktime preimage field for this test
+contract.setMockPreimage({ locktime: 2000n });
+
+const result = contract.call('spend', { sig, pubKey });
+expect(result.success).toBe(true);
+```
+
+`setMockPreimage` accepts a partial `MockPreimage` object with the following optional fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `locktime` | `bigint` | Mock nLocktime value |
+| `amount` | `bigint` | Mock input amount (satoshis) |
+| `version` | `bigint` | Mock transaction version |
+| `sequence` | `bigint` | Mock input nSequence |
+
 ---
 
-## Script VM Testing
+## Script VM Testing (Compiled Script Execution)
 
-The `ScriptVM` class can be used directly for lower-level testing without the `TestSmartContract` wrapper.
+The `ScriptVM` class can be used directly for lower-level testing without the `TestSmartContract` wrapper. Unlike `TestContract` (which interprets ANF IR with mocked crypto), `ScriptVM` executes actual compiled Bitcoin Script opcodes.
 
 ```typescript
 import { ScriptVM, hexToBytes, bytesToHex, disassemble } from 'runar-testing';
@@ -163,21 +188,35 @@ The reference interpreter (`RunarInterpreter`) evaluates ANF IR directly, withou
 
 ```typescript
 import { RunarInterpreter } from 'runar-testing';
-import type { ANFProgram } from 'runar-ir-schema';
+import type { RunarValue } from 'runar-testing';
+import { compile } from 'runar-compiler';
 
-// Load the ANF IR (from a compiled artifact with --ir flag)
-const anfProgram: ANFProgram = artifact.ir;
+// Compile the contract to get the AST (ContractNode)
+const result = compile(source, { fileName: 'P2PKH.runar.ts' });
+const contractNode = result.contract!; // ContractNode (from CompileResult, not artifact)
 
-const interpreter = new RunarInterpreter(anfProgram);
-
-// Evaluate a method with arguments
-const result = interpreter.evaluate('unlock', {
-  sig: '3044022...',
-  pubKey: '02abc...',
+// Create interpreter with property values (constructor args).
+// Unlike TestContract (which accepts plain JS values), RunarInterpreter
+// requires RunarValue wrappers for all values:
+//   { kind: 'bigint', value: 42n }
+//   { kind: 'boolean', value: true }
+//   { kind: 'bytes', value: hexToBytes('abcd') }
+const interpreter = new RunarInterpreter({
+  pubKeyHash: { kind: 'bytes', value: hexToBytes('89abcdef...') },
 });
 
-// result.success: boolean
-// result.value: the final value (for private methods)
+// Optionally set the contract node for reuse across multiple calls
+interpreter.setContract(contractNode);
+
+// Execute a method with RunarValue-wrapped arguments
+const interpResult = interpreter.executeMethod(contractNode, 'unlock', {
+  sig: { kind: 'bytes', value: hexToBytes('3044022...') },
+  pubKey: { kind: 'bytes', value: hexToBytes('02abc...') },
+});
+
+// interpResult.success: boolean
+// interpResult.error?: string (if an assertion failed)
+// interpResult.returnValue?: RunarValue (for private methods)
 ```
 
 ### Comparing Interpreter and VM Results
@@ -185,7 +224,10 @@ const result = interpreter.evaluate('unlock', {
 ```typescript
 it('compiler and interpreter agree', () => {
   const vmResult = contract.call('unlock', { sig, pubKey });
-  const interpResult = interpreter.evaluate('unlock', { sig, pubKey });
+  const interpResult = interpreter.executeMethod(contractNode, 'unlock', {
+    sig: { kind: 'bytes', value: hexToBytes(sig) },
+    pubKey: { kind: 'bytes', value: hexToBytes(pubKey) },
+  });
 
   // Both should agree on success/failure
   expect(vmResult.success).toBe(interpResult.success);
@@ -243,7 +285,7 @@ describe('compiler fuzzing', () => {
 
 ### Differential Fuzzing
 
-The conformance fuzzer in `conformance/fuzzer/` generates random programs and checks that the compiler + VM produce the same result as the interpreter:
+The conformance fuzzer in `packages/runar-testing/src/fuzzer/` generates random programs and checks that the compiler + VM produce the same result as the interpreter:
 
 ```bash
 # Run the differential fuzzer
@@ -288,7 +330,7 @@ go.work
 └── conformance          # Cross-compiler tests
 ```
 
-This workspace allows `import "runar"` to resolve to the mock package everywhere.
+This workspace allows `import runar "github.com/icellan/runar/packages/runar-go"` to resolve to the mock package everywhere. Within the monorepo, the `go.work` file provides local replacement; external consumers use the published module path directly.
 
 ### Basic Test Structure
 
@@ -297,7 +339,7 @@ package contract
 
 import (
 	"testing"
-	"runar"
+	runar "github.com/icellan/runar/packages/runar-go"
 )
 
 func TestP2PKH_Unlock(t *testing.T) {
@@ -428,7 +470,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-runar = { path = "../../packages/runar-rs" }
+runar = { package = "runar-lang", version = "0.1.0" }
 
 [[test]]
 name = "p2pkh"
@@ -591,15 +633,21 @@ cargo test --test counter -- --nocapture  # Verbose output
 | Aspect | TypeScript | Go | Rust |
 |--------|-----------|----|----|
 | **Test framework** | vitest | `testing.T` | `#[test]` |
-| **Failure assertion** | `expectScriptFailure(result)` | `defer/recover` | `#[should_panic]` |
+| **Failure assertion** | `expectScriptFailure(result)` (see note below) | `defer/recover` | `#[should_panic]` |
 | **Contract loading** | `TestContract.fromSource(source, state)` | Struct literal in same package | `#[path = "..."] mod contract;` |
-| **Type imports** | `import { ... } from 'runar-testing'` | `import "runar"` | `use runar::prelude::*;` |
+| **Type imports** | `import { ... } from 'runar-testing'` | `import runar "github.com/icellan/runar/packages/runar-go"` | `use runar::prelude::*;` |
 | **Byte types** | Hex strings / `Uint8Array` | `string` (for `==`) | `Vec<u8>` (for `==` via `PartialEq`) |
 | **Scalar types** | `bigint` | `int64` aliases | `i64` aliases |
 | **Output tracking** | `contract.state` after `call()` | `c.Outputs()` method | Manual `Vec<Output>` field |
 | **Compile check** | Built into `fromArtifact` / `fromSource` | `runar.CompileCheck("file.runar.go")` | `runar::compile_check(include_str!("file"), "file")` |
 | **Borrow workarounds** | N/A | None needed | `.clone()` for owned fields in `add_output` |
 | **Run command** | `npx vitest run` | `go test ./...` | `cargo test` |
+
+> **`expectScriptFailure`**: A convenience assertion exported from `runar-testing`. It takes a `VMResult` from `TestSmartContract.call()` or `ScriptVM.execute()` and throws if the script execution succeeded (i.e., it asserts that the script failed). Its counterpart is `expectScriptSuccess`. Both are imported from `runar-testing`:
+>
+> ```typescript
+> import { expectScriptFailure, expectScriptSuccess } from 'runar-testing';
+> ```
 
 ---
 
@@ -641,13 +689,81 @@ Both paths must agree on valid signatures (accept) and invalid signatures (rejec
 
 ### Conformance Golden Files
 
-`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. All three compilers (TS, Go, Rust) must produce byte-identical output.
+`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. All four compilers (TS, Go, Rust, Python) must produce byte-identical output.
+
+---
+
+## Elliptic Curve Contract Testing
+
+EC-based contracts (using `ecAdd`, `ecMul`, `ecMulGen`, etc.) are tested like any other Rúnar contract via `TestContract`, but require generating valid EC test vectors in the test harness.
+
+### Generating EC Test Vectors
+
+Since EC operations manipulate secp256k1 points, tests need to compute valid points and scalars. The test file typically includes JS helper functions for EC arithmetic:
+
+```typescript
+import { TestContract } from 'runar-testing';
+
+// secp256k1 constants
+const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn;
+const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n;
+const GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n;
+
+// JS helpers for test vector generation
+function mod(a: bigint, m: bigint): bigint { return ((a % m) + m) % m; }
+function modInv(a: bigint, m: bigint): bigint { /* extended Euclidean */ }
+function pointAdd(x1: bigint, y1: bigint, x2: bigint, y2: bigint): [bigint, bigint] { /* ... */ }
+function scalarMul(bx: bigint, by: bigint, k: bigint): [bigint, bigint] { /* ... */ }
+
+// Encode a point as a 128-char hex string (64 bytes: x[32] || y[32])
+function makePointHex(x: bigint, y: bigint): string {
+  return x.toString(16).padStart(64, '0').toUpperCase()
+       + y.toString(16).padStart(64, '0').toUpperCase();
+}
+```
+
+### Example: Testing a Schnorr ZKP Contract
+
+```typescript
+describe('SchnorrZKP contract', () => {
+  it('verifies a valid Schnorr ZKP proof', () => {
+    const privKey = 42n;
+    const [pubX, pubY] = scalarMul(GX, GY, privKey);
+    const pubKeyHex = makePointHex(pubX, pubY);
+
+    const r = 12345n;
+    const [rX, rY] = scalarMul(GX, GY, r);
+    const rHex = makePointHex(rX, rY);
+
+    const e = 7n;
+    const s = mod(r + e * privKey, EC_N);
+
+    const c = TestContract.fromSource(source, { pubKey: pubKeyHex });
+    const result = c.call('verify', { rPoint: rHex, s, e });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects a proof with wrong s value', () => {
+    // ... same setup but pass s + 1n ...
+    const result = c.call('verify', { rPoint: rHex, s: s + 1n, e });
+    expect(result.success).toBe(false);
+  });
+});
+```
+
+### Key Testing Considerations for EC Contracts
+
+- **Point format**: Points are 64 bytes (128 hex chars), big-endian unsigned, no prefix. Use `makePointHex()` or equivalent to construct valid test points.
+- **Modular arithmetic**: All scalar computations in tests must use `mod(value, EC_N)` to stay within the group order, matching what the on-chain contract does.
+- **Interpreter-based**: `TestContract` uses the interpreter, which performs real EC arithmetic (not mocked). This means test results accurately reflect the contract's mathematical behavior.
+- **Script size**: EC contracts generate large scripts (~50-100 KB per `ecMul`/`ecMulGen` call). Full Script VM execution of these contracts is feasible but slower than interpreter-based testing.
 
 ---
 
 ## Conformance Testing Across Compilers
 
-The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust) produce identical output.
+The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust, Python) produce identical output.
 
 ### Golden-File Tests
 
@@ -671,6 +787,9 @@ pnpm run conformance:go
 
 # Test the Rust compiler
 pnpm run conformance:rust
+
+# Test the Python compiler
+pnpm run conformance:python
 ```
 
 The runner compiles each source file, serializes the ANF IR using canonical JSON (RFC 8785), and compares the SHA-256 hash against the expected output. Byte-identical output is required.
@@ -709,7 +828,7 @@ Rúnar employs a layered testing strategy:
 |-------|--------------|------|
 | **Unit tests per pass** | Each compiler pass in isolation | vitest |
 | **End-to-end compilation** | Full pipeline: source to script | vitest + conformance golden files |
-| **VM execution** | Compiled script with specific inputs | `TestSmartContract` + `ScriptVM` |
+| **VM execution** | Compiled script with specific inputs | `TestSmartContract` / `ScriptVM` (execute compiled Bitcoin Script) |
 | **Interpreter oracle** | ANF IR evaluation matches VM execution | `RunarInterpreter` vs `ScriptVM` |
 | **Property-based fuzzing** | Random valid programs compile correctly | fast-check generators |
 | **Differential fuzzing** | Compiler + VM agree with interpreter | `conformance/fuzzer` |

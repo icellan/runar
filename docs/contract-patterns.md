@@ -72,7 +72,7 @@ class Escrow extends SmartContract {
 
 - **`release`**: The seller can release funds to themselves, or the arbiter can authorize release. Either signature suffices.
 - **`refund`**: The buyer can reclaim funds, or the arbiter can authorize a refund.
-- The `||` operator is short-circuit evaluated: if the first `checkSig` succeeds, the second is not executed.
+- The `||` operator uses eager evaluation: both `checkSig` calls are always executed, and their results are combined with `OP_BOOLOR`.
 
 Because this contract has two public methods, the compiler generates a dispatch table. The unlocking script includes a method index (`0n` for `release`, `1n` for `refund`) in addition to the signature.
 
@@ -86,11 +86,10 @@ A contract whose state persists across transactions. The counter can be incremen
 import { StatefulSmartContract, assert } from 'runar-lang';
 
 class Counter extends StatefulSmartContract {
-  count: bigint; // non-readonly = stateful
+  count: bigint = 0n; // mutable with default — excluded from constructor
 
-  constructor(count: bigint) {
-    super(count);
-    this.count = count;
+  constructor() {
+    super();
   }
 
   public increment() {
@@ -106,10 +105,12 @@ class Counter extends StatefulSmartContract {
 
 **How it works:**
 
-1. The `count` property is mutable (no `readonly`), making this a stateful contract.
+1. The `count` property is mutable (no `readonly`), making this a stateful contract. The `= 0n` initializer gives it a default value, so it doesn't need to be passed as a constructor argument.
 2. Extending `StatefulSmartContract` (or `InductiveSmartContract` for chain provenance) tells the compiler to automatically handle the OP_PUSH_TX pattern. For every public method, the compiler injects a preimage check at entry.
 3. `this.count++` / `this.count--` updates the in-memory state.
 4. Because these methods mutate state, the compiler automatically appends a state continuation assertion at the end — it serializes the updated state, hashes it, and verifies the transaction output carries the new state forward.
+
+> **Property Initializers:** Properties with `= value` defaults are excluded from the constructor. Only properties without initializers need to be passed as constructor arguments. This significantly simplifies constructors for contracts with many default values. Initializers must be literal values (`0n`, `true`, `false`, or hex byte strings).
 
 **State lifecycle:**
 
@@ -128,7 +129,7 @@ A simple fungible token where ownership can be transferred. The total supply is 
 
 ```typescript
 import { StatefulSmartContract, assert, checkSig } from 'runar-lang';
-import type { PubKey, Sig } from 'runar-lang';
+import type { PubKey, Sig, ByteString } from 'runar-lang';
 
 class FungibleToken extends StatefulSmartContract {
   owner: PubKey;           // stateful: current token owner
@@ -304,38 +305,41 @@ A stateful auction where bidders can submit increasing bids, and the auctioneer 
 
 ```typescript
 import {
-  StatefulSmartContract, assert, PubKey, Sig, SigHashPreimage,
-  checkSig, checkPreimage, hash256, extractOutputHash, extractLocktime
+  StatefulSmartContract, assert, PubKey, Sig,
+  checkSig, extractLocktime
 } from 'runar-lang';
 
 class Auction extends StatefulSmartContract {
   readonly auctioneer: PubKey;
-  highestBidder: PubKey;      // stateful
-  highestBid: bigint;          // stateful
+  highestBidder: PubKey;       // stateful
+  highestBid: bigint = 0n;     // stateful with default — excluded from constructor
   readonly deadline: bigint;   // block height deadline
 
-  constructor(auctioneer: PubKey, highestBidder: PubKey, highestBid: bigint, deadline: bigint) {
-    super(auctioneer, highestBidder, highestBid, deadline);
+  constructor(auctioneer: PubKey, highestBidder: PubKey, deadline: bigint) {
+    super(auctioneer, highestBidder, deadline);
     this.auctioneer = auctioneer;
     this.highestBidder = highestBidder;
-    this.highestBid = highestBid;
     this.deadline = deadline;
   }
 
-  public bid(bidder: PubKey, bidAmount: bigint, txPreimage: SigHashPreimage) {
-    assert(checkPreimage(txPreimage));
+  // StatefulSmartContract automatically injects:
+  // - checkPreimage at method entry
+  // - state continuation (hash256(getStateScript()) === extractOutputHash)
+  //   at method exit for any method that mutates state
+  // The developer only writes the business logic.
+
+  public bid(bidder: PubKey, bidAmount: bigint) {
     assert(bidAmount > this.highestBid);
-    assert(extractLocktime(txPreimage) < this.deadline);
+    assert(extractLocktime(this.txPreimage) < this.deadline);
     this.highestBidder = bidder;
     this.highestBid = bidAmount;
-    assert(hash256(this.getStateScript()) === extractOutputHash(txPreimage));
+    // State continuation is auto-injected because state was mutated
   }
 
-  public close(sig: Sig, txPreimage: SigHashPreimage) {
-    assert(checkPreimage(txPreimage));
+  public close(sig: Sig) {
     assert(checkSig(sig, this.auctioneer));
-    assert(extractLocktime(txPreimage) >= this.deadline);
-    // No state continuation -- auction is done
+    assert(extractLocktime(this.txPreimage) >= this.deadline);
+    // No state continuation injected -- no state mutation
   }
 }
 ```
@@ -349,13 +353,74 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 
 ---
 
+## Schnorr Zero-Knowledge Proof
+
+A stateless contract that verifies a Schnorr ZKP proof on-chain, demonstrating the EC (elliptic curve) builtins. The prover proves knowledge of a private key `k` such that `P = k*G` without revealing `k`.
+
+```typescript
+import {
+  SmartContract, assert,
+  ecAdd, ecMul, ecMulGen, ecPointX, ecPointY, ecOnCurve, ecModReduce,
+  EC_N,
+} from 'runar-lang';
+import type { Point } from 'runar-lang';
+
+class SchnorrZKP extends SmartContract {
+  readonly pubKey: Point;
+
+  constructor(pubKey: Point) {
+    super(pubKey);
+    this.pubKey = pubKey;
+  }
+
+  public verify(rPoint: Point, s: bigint, e: bigint) {
+    // Verify R is on the curve
+    assert(ecOnCurve(rPoint));
+
+    // Left side: s*G
+    const sG = ecMulGen(s);
+
+    // Right side: R + e*P
+    const eP = ecMul(this.pubKey, e);
+    const rhs = ecAdd(rPoint, eP);
+
+    // Verify equality
+    assert(ecPointX(sG) === ecPointX(rhs));
+    assert(ecPointY(sG) === ecPointY(rhs));
+  }
+}
+```
+
+**How it works:**
+
+The Schnorr identification protocol:
+
+1. **Prover** picks a random nonce `r`, computes `R = r*G`, and sends `R` to the verifier.
+2. **Verifier** sends a random challenge `e`.
+3. **Prover** computes `s = r + e*k (mod n)` and sends `s`.
+4. **Verifier** checks that `s*G === R + e*P`.
+
+In the Bitcoin contract context, the prover provides `(R, s, e)` in the unlocking script (scriptSig). The locking script contains the public key `P` and verifies the proof equation using on-chain EC arithmetic.
+
+**Key EC builtins used:**
+
+- `ecOnCurve(rPoint)` -- validates the commitment point is on the secp256k1 curve
+- `ecMulGen(s)` -- computes `s*G` using the hardcoded generator point
+- `ecMul(this.pubKey, e)` -- computes `e*P` (scalar multiplication of the public key)
+- `ecAdd(rPoint, eP)` -- computes `R + e*P` (point addition)
+- `ecPointX` / `ecPointY` -- extracts coordinates for comparison
+
+> **Note:** Each `ecMul`/`ecMulGen` call generates ~50-100 KB of Bitcoin Script due to the 256-iteration double-and-add loop. This contract's compiled script is substantial but well within BSV's limits (no opcode count limit, 32 MB stack memory limit).
+
+---
+
 ## Pattern Summary
 
 | Pattern | Stateful | Key Techniques |
 |---------|----------|----------------|
 | P2PKH | No | `hash160`, `checkSig` |
 | Escrow | No | Multiple public methods, `\|\|` for multi-party auth |
-| Counter | Yes | OP_PUSH_TX, `getStateScript`, `extractOutputHash` |
+| Counter | Yes | OP_PUSH_TX, automatic state continuation via `StatefulSmartContract` |
 | Fungible Token | Yes | Owner transfer via state update |
 | NFT | Yes | Transfer + burn (no state continuation) |
 | Oracle | No | Rabin signatures, `verifyRabinSig`, `num2bin` |
@@ -363,3 +428,4 @@ This pattern demonstrates combining multiple stateful fields, time-based conditi
 | Auction | Yes | Multiple stateful fields, locktime checks, two spending paths |
 | PostQuantumWallet | No | `verifyWOTS` — WOTS+ one-time PQ signature (~10 KB script) |
 | SPHINCSWallet | No | `verifySLHDSA_SHA2_128s` — SLH-DSA stateless PQ signature (~203 KB script) |
+| SchnorrZKP | No | `ecMulGen`, `ecMul`, `ecAdd`, `ecOnCurve` — on-chain Schnorr ZKP via EC arithmetic |

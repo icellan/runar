@@ -4,11 +4,12 @@
  * Splice into LoweringContext in 05-stack-lower.ts. All helpers self-contained.
  * Entry: lowerVerifySLHDSA() → calls emitVerifySLHDSA().
  *
- * Alt-stack convention: pkSeedPad (64 bytes) on alt permanently.
- * Tweakable hash pops pkSeedPad, DUPs, pushes copy back, uses original.
+ * Main-stack convention: pkSeedPad (64 bytes) tracked as '_pkSeedPad' on the
+ * main stack, accessed via PICK at known depth. Never placed on alt.
  *
- * Compile-time ADRS: treeAddr=0, keypair=0 where runtime values needed.
- * WOTS+ chain hashAddress built dynamically from a counter on the stack.
+ * Runtime ADRS: treeAddr (8-byte BE) and keypair (4-byte BE) are tracked on
+ * the main stack as 'treeAddr8' and 'keypair4', threaded into rawBlocks.
+ * ADRS is built at runtime using emitBuildADRS / emitBuildADRS18 helpers.
  */
 
 import type { StackOp } from '../ir/index.js';
@@ -70,6 +71,16 @@ function emitReverseN(n: number): StackOp[] {
 }
 
 // ===========================================================================
+// 1c. Collect ops into array helper
+// ===========================================================================
+
+function collectOps(fn: (emit: (op: StackOp) => void) => void): StackOp[] {
+  const ops: StackOp[] = [];
+  fn(op => ops.push(op));
+  return ops;
+}
+
+// ===========================================================================
 // 2. Compressed ADRS (22 bytes)
 // ===========================================================================
 // [0] layer  [1..8] tree  [9] type  [10..13] keypair
@@ -108,6 +119,104 @@ function slhADRS18(opts: {
   keypair?: number; chain?: number;
 }): Uint8Array {
   return slhADRS({ ...opts, hash: 0 }).slice(0, 18);
+}
+
+// ===========================================================================
+// 2b. Runtime ADRS builders
+// ===========================================================================
+
+/**
+ * Convert a compile-time integer to a 4-byte big-endian Uint8Array.
+ */
+function int4BE(v: number): Uint8Array {
+  const b = new Uint8Array(4);
+  b[0] = (v >>> 24) & 0xff;
+  b[1] = (v >>> 16) & 0xff;
+  b[2] = (v >>> 8) & 0xff;
+  b[3] = v & 0xff;
+  return b;
+}
+
+/**
+ * Emit runtime 18-byte ADRS prefix: layer(1B) || PICK(treeAddr8)(8B) ||
+ * type(1B) || PICK(keypair4)(4B) || chain(4B).
+ *
+ * Net stack effect: +1 (the 18-byte result on TOS).
+ *
+ * ta8Depth and kp4Depth are from TOS *before* this function pushes anything.
+ */
+function emitBuildADRS18(
+  emit: (op: StackOp) => void,
+  layer: number, type_: number, chain: number,
+  ta8Depth: number, kp4Depth: number | 'zero',
+): void {
+  // Push layer byte (1B)
+  emit({ op: 'push', value: new Uint8Array([layer & 0xff]) });
+  // After push: ta8 at ta8Depth+1, kp4 at kp4Depth+1
+
+  // PICK ta8: depth = ta8Depth + 1 (one extra item on stack)
+  emit({ op: 'push', value: BigInt(ta8Depth + 1) });
+  emit({ op: 'pick', depth: ta8Depth + 1 });
+  // Stack: ... layerByte ta8Copy (2 items above original TOS)
+  emit({ op: 'opcode', code: 'OP_CAT' });
+  // Stack: ... (layer||ta8)(9B) — net +1 from start
+
+  // Push type byte (1B)
+  emit({ op: 'push', value: new Uint8Array([type_ & 0xff]) });
+  emit({ op: 'opcode', code: 'OP_CAT' });
+  // Stack: ... partial10B — net +1
+
+  // Keypair (4B): either PICK from stack or push zeros
+  if (kp4Depth === 'zero') {
+    emit({ op: 'push', value: new Uint8Array(4) });
+  } else {
+    emit({ op: 'push', value: BigInt(kp4Depth + 1) });
+    emit({ op: 'pick', depth: kp4Depth + 1 });
+  }
+  emit({ op: 'opcode', code: 'OP_CAT' });
+  // Stack: ... partial14B — net +1
+
+  // Push chain (4B BE)
+  emit({ op: 'push', value: int4BE(chain) });
+  emit({ op: 'opcode', code: 'OP_CAT' });
+  // Stack: ... prefix18B — net +1
+}
+
+/**
+ * Emit runtime 22-byte ADRS.
+ *
+ * hash mode:
+ *   'zero'  — append 4 zero bytes (hash=0)
+ *   'stack' — TOS has a 4-byte BE hash value; consumed and appended
+ *
+ * For 'zero': net stack effect = +1 (22B ADRS on TOS).
+ * For 'stack': net stack effect = 0 (TOS hash4 replaced by 22B ADRS).
+ *
+ * ta8Depth/kp4Depth measured from TOS before this function pushes anything.
+ */
+function emitBuildADRS(
+  emit: (op: StackOp) => void,
+  layer: number, type_: number, chain: number,
+  ta8Depth: number, kp4Depth: number | 'zero',
+  hash: 'zero' | 'stack',
+): void {
+  if (hash === 'stack') {
+    // Save hash4 from TOS to alt
+    emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    // Depths shift by -1 (one item removed from main)
+    const adjKp = kp4Depth === 'zero' ? 'zero' as const : kp4Depth - 1;
+    emitBuildADRS18(emit, layer, type_, chain, ta8Depth - 1, adjKp);
+    // 18-byte prefix on TOS
+    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+    emit({ op: 'opcode', code: 'OP_CAT' });
+    // 22-byte ADRS on TOS. Net: replaced hash4 with adrs22.
+  } else {
+    // 'zero'
+    emitBuildADRS18(emit, layer, type_, chain, ta8Depth, kp4Depth);
+    emit({ op: 'push', value: new Uint8Array(4) });
+    emit({ op: 'opcode', code: 'OP_CAT' });
+    // 22-byte ADRS on TOS. Net: +1.
+  }
 }
 
 // ===========================================================================
@@ -221,9 +330,11 @@ class SLHTracker {
 // 4. Tweakable Hash T(pkSeed, ADRS, M)
 // ===========================================================================
 // trunc_n(SHA-256(pkSeedPad(64) || ADRSc(22) || M))
-// pkSeedPad on alt; pop, DUP, push back, use.
+// pkSeedPad on main stack, accessed via PICK.
 
-/** Tracked tweakable hash. */
+/**
+ * Tracked tweakable hash. Accesses _pkSeedPad via copyToTop.
+ */
 function emitSLHT(
   t: SLHTracker, n: number,
   adrs: string, msg: string, result: string,
@@ -231,9 +342,8 @@ function emitSLHT(
   t.toTop(adrs);
   t.toTop(msg);
   t.cat('_am');
-  t.fromAlt('_psp');
-  t.dup('_psp2');
-  t.toAlt();
+  // Access pkSeedPad via PICK on main stack
+  t.copyToTop('_pkSeedPad', '_psp');
   t.swap();
   t.cat('_pre');
   t.sha256('_h32');
@@ -246,12 +356,21 @@ function emitSLHT(
   }
 }
 
-/** Raw tweakable hash. Stack: adrsC(1) msg(0) -> result(n). pkSeedPad on alt. */
-function emitSLHT_raw(e: (op: StackOp) => void, n: number): void {
+/**
+ * Raw tweakable hash with pkSeedPad on main stack via PICK.
+ *
+ * Stack in:  adrsC(1) msg(0), pkSeedPad at depth pkSeedPadDepth from TOS
+ * After CAT: (adrsC||msg)(0), pkSeedPad at depth pkSeedPadDepth-1
+ * PICK pkSeedPad, SWAP, CAT, SHA256, truncate
+ * Stack out: result(0)
+ */
+function emitSLHT_raw(e: (op: StackOp) => void, n: number, pkSeedPadDepth: number): void {
   e({ op: 'opcode', code: 'OP_CAT' });
-  e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
-  e({ op: 'opcode', code: 'OP_DUP' });
-  e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+  // After CAT: 2 consumed, 1 produced. pkSeedPad depth = pkSeedPadDepth - 1.
+  const pickDepth = pkSeedPadDepth - 1;
+  e({ op: 'push', value: BigInt(pickDepth) });
+  e({ op: 'pick', depth: pickDepth });
+  // pkSeedPad copy on TOS, original still in place
   e({ op: 'swap' });
   e({ op: 'opcode', code: 'OP_CAT' });
   e({ op: 'opcode', code: 'OP_SHA256' });
@@ -270,9 +389,12 @@ function emitSLHT_raw(e: (op: StackOp) => void, n: number): void {
  * One conditional hash step (if-then body).
  *
  * Entry: sigElem(2) steps(1) hashAddr(0)
+ *        with ADRS prefix (18B) on alt (FROMALT/DUP/TOALT pattern)
+ *        and pkSeedPad at pkSeedPadDepth from TOS.
+ *
  * Exit:  newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
  */
-function slhChainStepThen(adrsPrefix: Uint8Array, n: number): StackOp[] {
+function slhChainStepThen(n: number, pkSeedPadDepth: number): StackOp[] {
   const ops: StackOp[] = [];
   // DUP hashAddr before consuming it in ADRS construction
   ops.push({ op: 'dup' });
@@ -281,26 +403,31 @@ function slhChainStepThen(adrsPrefix: Uint8Array, n: number): StackOp[] {
   ops.push({ op: 'push', value: 4n });
   ops.push({ op: 'opcode', code: 'OP_NUM2BIN' });
   ops.push(...emitReverseN(4));
-  // Build ADRS = prefix(18) || hashAddrBE(4)
-  ops.push({ op: 'push', value: adrsPrefix });
-  ops.push({ op: 'swap' });
-  ops.push({ op: 'opcode', code: 'OP_CAT' });
-  // sigElem(3) steps(2) hashAddr(1) adrsC(0)
-  // Move sigElem to top: ROLL 3
-  ops.push({ op: 'push', value: 3n });
-  ops.push({ op: 'roll', depth: 3 });
-  // steps(2) hashAddr(1) adrsC(0) sigElem(top)
-  // CAT: adrsC(1) || sigElem(0) -> adrsC||sigElem
-  ops.push({ op: 'opcode', code: 'OP_CAT' });
-  // steps(1) hashAddr(0) (adrsC||sigElem)(top)
-  // pkSeedPad from alt
+  // sigElem(3) steps(2) hashAddr(1) hashAddrBE4(0) — 4 items above base
+
+  // Get prefix from alt: FROMALT; DUP; TOALT
   ops.push({ op: 'opcode', code: 'OP_FROMALTSTACK' });
   ops.push({ op: 'opcode', code: 'OP_DUP' });
   ops.push({ op: 'opcode', code: 'OP_TOALTSTACK' });
-  // steps(2) hashAddr(1) (adrsC||sigElem)(0) pkSeedPad(top)
+  // sigElem(4) steps(3) hashAddr(2) hashAddrBE4(1) prefix18(0) — 5 items
+  ops.push({ op: 'swap' });
+  ops.push({ op: 'opcode', code: 'OP_CAT' });
+  // sigElem(3) steps(2) hashAddr(1) adrsC22(0) — 4 items
+
+  // Move sigElem to top: ROLL 3
+  ops.push({ op: 'push', value: 3n });
+  ops.push({ op: 'roll', depth: 3 });
+  // steps(2) hashAddr(1) adrsC22(0) sigElem(top) — 4 items
+  // CAT: adrsC(1) || sigElem(0) -> adrsC||sigElem
+  ops.push({ op: 'opcode', code: 'OP_CAT' });
+  // steps(1) hashAddr(0) (adrsC||sigElem)(top) — 3 items
+
+  // pkSeedPad via PICK (3 items on main above base, same as entry)
+  ops.push({ op: 'push', value: BigInt(pkSeedPadDepth) });
+  ops.push({ op: 'pick', depth: pkSeedPadDepth });
+  // steps(2) hashAddr(1) (adrsC||sigElem)(0) pkSeedPad(top) — 4 items
   ops.push({ op: 'swap' });
   // steps(2) hashAddr(1) pkSeedPad(0) (adrsC||sigElem)(top)
-  // CAT: pkSeedPad || (adrsC||sigElem)
   ops.push({ op: 'opcode', code: 'OP_CAT' });
   ops.push({ op: 'opcode', code: 'OP_SHA256' });
   if (n < 32) {
@@ -308,23 +435,12 @@ function slhChainStepThen(adrsPrefix: Uint8Array, n: number): StackOp[] {
     ops.push({ op: 'opcode', code: 'OP_SPLIT' });
     ops.push({ op: 'drop' });
   }
-  // steps(2) hashAddr(1) newSigElem(0)
+  // steps(2) hashAddr(1) newSigElem(0) — 3 items
   // Rearrange -> newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
-  // ROT: brings steps(depth 2) to top
   ops.push({ op: 'rot' });
-  // hashAddr(1) newSigElem(0) steps(top)
   ops.push({ op: 'opcode', code: 'OP_1SUB' });
-  // hashAddr(1) newSigElem(0) (steps-1)(top)
-  // ROT: brings hashAddr(depth 2) to top
   ops.push({ op: 'rot' });
-  // newSigElem(1) (steps-1)(0) hashAddr(top)
   ops.push({ op: 'opcode', code: 'OP_1ADD' });
-  // newSigElem(1) (steps-1)(0) (hashAddr+1)(top)
-  // Need: newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
-  // Save (hashAddr+1), swap bottom two, restore
-  ops.push({ op: 'opcode', code: 'OP_TOALTSTACK' });
-  ops.push({ op: 'swap' });
-  ops.push({ op: 'opcode', code: 'OP_FROMALTSTACK' });
   // newSigElem(2) (steps-1)(1) (hashAddr+1)(0)
   return ops;
 }
@@ -333,12 +449,19 @@ function slhChainStepThen(adrsPrefix: Uint8Array, n: number): StackOp[] {
  * One WOTS+ chain with tweakable hashing (raw opcodes).
  *
  * Input:  sig(3) csum(2) endptAcc(1) digit(0)
+ *         pkSeedPad at pkSeedPadDepth from TOS (digit)
+ *         treeAddr8 at ta8Depth from TOS
+ *         keypair4 at kp4Depth from TOS
+ *
  * Output: sigRest(2) newCsum(1) newEndptAcc(0)
- * Alt: pkSeedPad persists. 4 internal push/pop balanced.
+ *         (3 items replaces 4 input items, so depths shift by -1)
+ *
+ * Alt: not used for pkSeedPad. Uses alt internally (balanced).
  */
 function emitSLHOneChainClean(
   emit: (op: StackOp) => void,
   n: number, layer: number, chainIdx: number,
+  pkSeedPadDepth: number, ta8Depth: number, kp4Depth: number,
 ): void {
   // Input: sig(3) csum(2) endptAcc(1) digit(0)
 
@@ -356,6 +479,8 @@ function emitSLHOneChainClean(
   emit({ op: 'swap' });
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });   // alt: steps_copy, endptAcc, csum(top)
   // main: sig(1) steps(0)
+  // pspD = pkSeedPadDepth - 2 (4 items removed, 2 remain = -2)
+  // ta8D = ta8Depth - 2, kp4D = kp4Depth - 2
 
   // Split n-byte sig element
   emit({ op: 'swap' });
@@ -364,22 +489,35 @@ function emitSLHOneChainClean(
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });   // alt: ..., csum, sigRest(top)
   emit({ op: 'swap' });
   // main: sigElem(1) steps(0)
+  // pspD = pkSeedPadDepth - 2 (since we went from 2 to 2 items via split+toalt+swap)
 
   // Compute hashAddr = 15 - steps (= digit) on main stack
   emit({ op: 'opcode', code: 'OP_DUP' });
   emit({ op: 'push', value: 15n });
   emit({ op: 'swap' });
   emit({ op: 'opcode', code: 'OP_SUB' });
-  // main: sigElem(2) steps(1) hashAddr(0)
+  // main: sigElem(2) steps(1) hashAddr(0) — 3 items
+  // pspD = pkSeedPadDepth - 1 (was pspD_base - 2, now 3 items instead of 2 = +1 => -1 total)
+  const pspDChain = pkSeedPadDepth - 1;
+  const ta8DChain = ta8Depth - 1;
+  const kp4DChain = kp4Depth - 1;
 
-  // Build ADRS prefix for this chain
-  const prefix = slhADRS18({ layer, type: SLH_WOTS_HASH, chain: chainIdx });
-  const thenOps = slhChainStepThen(prefix, n);
+  // Build 18-byte ADRS prefix using runtime treeAddr8 and keypair4
+  // After emitBuildADRS18: +1 item on stack => 4 items: sigElem steps hashAddr prefix18
+  emitBuildADRS18(emit, layer, SLH_WOTS_HASH, chainIdx, ta8DChain, kp4DChain);
+  // pspD = pspDChain + 1 = pkSeedPadDepth
+  // Save prefix18 to alt for loop reuse
+  emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+  // main: sigElem(2) steps(1) hashAddr(0) — back to 3 items
+  // pspD = pspDChain = pkSeedPadDepth - 1
+
+  // Build then-ops for chain step
+  // At step entry: sigElem(2) steps(1) hashAddr(0), 3 items above base
+  // pspD at step entry = pkSeedPadDepth - 1
+  const thenOps = slhChainStepThen(n, pspDChain);
 
   // 15 unrolled conditional hash iterations
   for (let j = 0; j < 15; j++) {
-    // sigElem(2) steps(1) hashAddr(0)
-    // Check steps > 0: OVER copies steps (depth 1) to top
     emit({ op: 'over' });
     emit({ op: 'opcode', code: 'OP_0NOTEQUAL' });
     emit({ op: 'if', then: thenOps });
@@ -390,6 +528,10 @@ function emitSLHOneChainClean(
   emit({ op: 'drop' });
   // main: endpoint
 
+  // Drop prefix from alt
+  emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+  emit({ op: 'drop' });
+
   // Restore from alt (LIFO): sigRest, csum, endptAcc, steps_copy
   emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // sigRest
   emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // csum
@@ -399,21 +541,12 @@ function emitSLHOneChainClean(
 
   // csum += steps_copy: ROT top-3 to bring csum up
   emit({ op: 'rot' });
-  // ... endptAcc steps_copy csum -> after rot of top-3: steps_copy csum endptAcc
-  // Wait. Top-3 are csum(2) endptAcc(1) steps_copy(0). ROT brings csum to top.
-  // No. ROT brings depth-2 of the top-3 to top.
-  // The full stack (bottom->top): endpoint, sigRest, csum, endptAcc, steps_copy
-  // Top-3: csum(depth 2 in top-3), endptAcc(depth 1), steps_copy(depth 0 = top)
-  // ROT brings csum to top: endpoint sigRest endptAcc steps_copy csum
   emit({ op: 'opcode', code: 'OP_ADD' });
-  // endpoint sigRest endptAcc newCsum
 
   // Cat endpoint to endptAcc
   emit({ op: 'swap' });
-  // endpoint sigRest newCsum endptAcc
   emit({ op: 'push', value: 3n });
   emit({ op: 'roll', depth: 3 });
-  // sigRest newCsum endptAcc endpoint
   emit({ op: 'opcode', code: 'OP_CAT' });
   // sigRest(2) newCsum(1) newEndptAcc(0)
 }
@@ -421,8 +554,8 @@ function emitSLHOneChainClean(
 // ===========================================================================
 // Full WOTS+ Processing (all len chains)
 // ===========================================================================
-// Input:  wotsSig(len*n)(1) msg(n)(0)
-// Output: wotsPk(n)
+// Input:  psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
+// Output: psp(3) ta8(2) kp4(1) wotsPk(0)
 
 function emitSLHWotsAll(
   emit: (op: StackOp) => void,
@@ -430,15 +563,19 @@ function emitSLHWotsAll(
 ): void {
   const { n, len1, len2 } = p;
 
-  // Rearrange: sigRem(3) csum=0(2) endptAcc=empty(1) msgRem(0)
+  // Input: psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
+  // Rearrange: psp(6) ta8(5) kp4(4) sigRem(3) csum=0(2) endptAcc=empty(1) msgRem(0)
   emit({ op: 'swap' });
   emit({ op: 'push', value: 0n });
   emit({ op: 'opcode', code: 'OP_0' });
   emit({ op: 'push', value: 3n });
   emit({ op: 'roll', depth: 3 });
+  // psp(6) ta8(5) kp4(4) sigRem(3) csum(2) endptAcc(1) msgRem(0)
+  // pspD=6, ta8D=5, kp4D=4
 
   // Process n bytes -> 2*n message chains
   for (let byteIdx = 0; byteIdx < n; byteIdx++) {
+    // State: psp(6) ta8(5) kp4(4) sigRem(3) csum(2) endptAcc(1) msgRem(0)
     if (byteIdx < n - 1) {
       emit({ op: 'push', value: 1n });
       emit({ op: 'opcode', code: 'OP_SPLIT' });
@@ -457,36 +594,56 @@ function emitSLHWotsAll(
     emit({ op: 'swap' });
     emit({ op: 'push', value: 16n });
     emit({ op: 'opcode', code: 'OP_MOD' });
+    // Stack: ..kp4 sig csum endptAcc [msgRest if non-last] hiNib loNib
 
     if (byteIdx < n - 1) {
-      emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
-      emit({ op: 'swap' });
-      emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      // Stack: psp ta8 kp4 sig csum endptAcc msgRest hiNib loNib
+      emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // loNib -> alt
+      emit({ op: 'swap' });                            // msgRest hiNib -> hiNib msgRest
+      emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // msgRest -> alt
+      // Stack: psp(6) ta8(5) kp4(4) sig(3) csum(2) endptAcc(1) hiNib(0)
+      // pspD=6, ta8D=5, kp4D=4
     } else {
-      emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      // Stack: psp ta8 kp4 sig csum endptAcc hiNib loNib
+      emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // loNib -> alt
+      // Stack: psp(6) ta8(5) kp4(4) sig(3) csum(2) endptAcc(1) hiNib(0)
     }
 
-    emitSLHOneChainClean(emit, n, layer, byteIdx * 2);
+    // First chain call (hiNib)
+    // sig(3) csum(2) endptAcc(1) digit=hiNib(0), pspD=6, ta8D=5, kp4D=4
+    emitSLHOneChainClean(emit, n, layer, byteIdx * 2, 6, 5, 4);
+    // Output: sigRest(2) newCsum(1) newEndptAcc(0)
+    // pspD=5, ta8D=4, kp4D=3
 
     if (byteIdx < n - 1) {
-      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
-      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      // Restore loNib and msgRest from alt
+      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // msgRest
+      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // loNib
       emit({ op: 'swap' });
-      emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // msgRest -> alt
+      // Stack: psp(6) ta8(5) kp4(4) sigRest(3) newCsum(2) newEndptAcc(1) loNib(0)
     } else {
-      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // loNib
+      // Stack: psp(6) ta8(5) kp4(4) sigRest(3) newCsum(2) newEndptAcc(1) loNib(0)
     }
 
-    emitSLHOneChainClean(emit, n, layer, byteIdx * 2 + 1);
+    // Second chain call (loNib)
+    emitSLHOneChainClean(emit, n, layer, byteIdx * 2 + 1, 6, 5, 4);
+    // Output: sigRest(2) newCsum(1) newEndptAcc(0)
+    // pspD=5, ta8D=4, kp4D=3
 
     if (byteIdx < n - 1) {
-      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      // Restore msgRest from alt
+      emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // msgRest
+      // Stack: psp(6) ta8(5) kp4(4) sigRest(3) csum(2) endptAcc(1) msgRest(0)
     }
+    // Back to shape: psp(6) ta8(5) kp4(4) sigRest(3) csum(2) endptAcc(1) msgRem(0)
   }
 
-  // sigRest(2) totalCsum(1) endptAcc(0)
+  // After all message chains: psp(5) ta8(4) kp4(3) sigRest(2) totalCsum(1) endptAcc(0)
   // Checksum digits (len2=3)
   emit({ op: 'swap' });
+  // psp(5) ta8(4) kp4(3) sigRest(2) endptAcc(1) totalCsum(0)
 
   emit({ op: 'opcode', code: 'OP_DUP' });
   emit({ op: 'push', value: 16n });
@@ -505,36 +662,46 @@ function emitSLHWotsAll(
   emit({ op: 'push', value: 16n });
   emit({ op: 'opcode', code: 'OP_MOD' });
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+  // psp(4) ta8(3) kp4(2) sigRest(1) endptAcc(0) | alt: d2, d1, d0(top)
 
-  // sigRest(1) endptAcc(0) | alt: ..., d2, d1, d0(top)
   for (let ci = 0; ci < len2; ci++) {
-    emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    // psp(4) ta8(3) kp4(2) sigRest(1) endptAcc(0)
+    emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // endptAcc -> alt
     emit({ op: 'push', value: 0n });
-    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
-    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // endptAcc
+    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // digit
+    // psp(6) ta8(5) kp4(4) sigRest(3) 0(2) endptAcc(1) digit(0)
 
-    emitSLHOneChainClean(emit, n, layer, len1 + ci);
+    emitSLHOneChainClean(emit, n, layer, len1 + ci, 6, 5, 4);
+    // sigRest(2) newCsum(1) newEndptAcc(0) — pspD=5, ta8D=4, kp4D=3
 
     emit({ op: 'swap' });
     emit({ op: 'drop' });
+    // psp(4) ta8(3) kp4(2) sigRest(1) newEndptAcc(0)
   }
 
-  // empty(1) endptAcc(0)
+  // psp(4) ta8(3) kp4(2) empty(1) endptAcc(0)
   emit({ op: 'swap' });
   emit({ op: 'drop' });
+  // psp(3) ta8(2) kp4(1) endptAcc(0)
 
   // Compress -> wotsPk via T(pkSeed, ADRS_WOTS_PK, endptAcc)
-  const pkAdrs = slhADRS({ layer, type: SLH_WOTS_PK });
-  emit({ op: 'push', value: pkAdrs });
+  // Build ADRS: ta8 at depth 2, keypair=0 (setType clears it, not restored per FIPS 205)
+  emitBuildADRS(emit, layer, SLH_WOTS_PK, 0, 2, 'zero', 'zero');
+  // psp(4) ta8(3) kp4(2) endptAcc(1) adrs22(0)
   emit({ op: 'swap' });
-  emitSLHT_raw(emit, n);
+  // psp(4) ta8(3) kp4(2) adrs22(1) endptAcc(0)
+  emitSLHT_raw(emit, n, 4);
+  // psp(3) ta8(2) kp4(1) wotsPk(0)
 }
 
 // ===========================================================================
 // 6. Merkle Auth Path Verification
 // ===========================================================================
-// Input:  leafIdx(2) authPath(hp*n)(1) node(n)(0)
-// Output: root(n)
+// Input:  psp(5) ta8(4) kp4(3) leafIdx(2) authPath(hp*n)(1) node(n)(0)
+// Output: psp(2) ta8(1) kp4(0) root(top)... wait, Merkle consumes
+//         leafIdx+authPath+node and produces root. psp/ta8/kp4 are below.
+// Output: psp(3) ta8(2) kp4(1) root(0)
 
 function emitSLHMerkle(
   emit: (op: StackOp) => void,
@@ -542,13 +709,15 @@ function emitSLHMerkle(
 ): void {
   const { n, hp } = p;
 
+  // Input: psp(5) ta8(4) kp4(3) leafIdx(2) authPath(1) node(0)
   // Move leafIdx to alt
   emit({ op: 'push', value: 2n });
   emit({ op: 'roll', depth: 2 });
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
-  // authPath(1) node(0) | alt: ..., leafIdx
+  // psp(4) ta8(3) kp4(2) authPath(1) node(0) | alt: leafIdx
 
   for (let j = 0; j < hp; j++) {
+    // psp(4) ta8(3) kp4(2) authPath(1) node(0)
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });    // node -> alt
 
     emit({ op: 'push', value: BigInt(n) });
@@ -556,40 +725,58 @@ function emitSLHMerkle(
     emit({ op: 'swap' });                               // authPathRest authJ
 
     emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });  // node
-    // authPathRest(2) authJ(1) node(0)
+    // psp(4) ta8(3) kp4(2) authPathRest(2) authJ(1) node(0)
 
     // Get leafIdx
     emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
     emit({ op: 'opcode', code: 'OP_DUP' });
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
-    // authPathRest(3) authJ(2) node(1) leafIdx(0)
+    // psp(5) ta8(4) kp4(3) authPathRest(3) authJ(2) node(1) leafIdx(0)
 
-    // bit = (leafIdx >> j) & 1
+    // bit = (leafIdx >> j) % 2
     if (j > 0) {
-      emit({ op: 'push', value: BigInt(j) });
-      emit({ op: 'opcode', code: 'OP_RSHIFT' });
+      emit({ op: 'push', value: BigInt(1 << j) });
+      emit({ op: 'opcode', code: 'OP_DIV' });
     }
-    emit({ op: 'push', value: 1n });
-    emit({ op: 'opcode', code: 'OP_AND' });
+    emit({ op: 'push', value: 2n });
+    emit({ op: 'opcode', code: 'OP_MOD' });
 
-    const adrs = slhADRS({ layer, type: SLH_TREE, chain: j + 1, hash: 0 });
+    // Build the tweakable hash ops for both branches.
+    // After CAT in branch: authPathRest(1) children(0)
+    // psp(4) ta8(3) kp4(2) authPathRest(1) children(0)
+    // pspD=4, ta8D=3, kp4D=2
 
-    const mkTweakHash: StackOp[] = [
-      { op: 'push', value: adrs },
-      { op: 'swap' },
-      { op: 'opcode', code: 'OP_CAT' },
-      { op: 'opcode', code: 'OP_FROMALTSTACK' },
-      { op: 'opcode', code: 'OP_DUP' },
-      { op: 'opcode', code: 'OP_TOALTSTACK' },
-      { op: 'swap' },
-      { op: 'opcode', code: 'OP_CAT' },
-      { op: 'opcode', code: 'OP_SHA256' },
-      ...(n < 32 ? [
-        { op: 'push', value: BigInt(n) } as StackOp,
-        { op: 'opcode', code: 'OP_SPLIT' } as StackOp,
-        { op: 'drop' } as StackOp,
-      ] : []),
-    ];
+    // Need ADRS with hash = leafIdx >> (j+1) as 4-byte BE
+    // Build hash: get leafIdx from alt, shift, convert to 4B BE
+    const mkTweakHash: StackOp[] = collectOps(e => {
+      // Stack in: authPathRest(1) children(0)
+      // pspD=4, ta8D=3, kp4D=2
+
+      // Get leafIdx from alt to compute hash
+      e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      e({ op: 'opcode', code: 'OP_DUP' });
+      e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      // authPathRest(2) children(1) leafIdx(0); pspD=5, ta8D=4, kp4D=3
+      if (j + 1 > 0) {
+        e({ op: 'push', value: BigInt(1 << (j + 1)) });
+        e({ op: 'opcode', code: 'OP_DIV' });
+      }
+      // Convert to 4-byte BE
+      e({ op: 'push', value: 4n });
+      e({ op: 'opcode', code: 'OP_NUM2BIN' });
+      for (const op of emitReverseN(4)) e(op);
+      // authPathRest(2) children(1) hash4BE(0); pspD=5, ta8D=4, kp4D=3
+
+      // Build ADRS (22B) with hash='stack', keypair=0 (setType clears it per FIPS 205)
+      emitBuildADRS(e, layer, SLH_TREE, j + 1, 4, 'zero', 'stack');
+      // Net 0 (hash4 replaced by adrs22). pspD=5, ta8D=4, kp4D=3
+      // authPathRest(2) children(1) adrs22(0)
+      e({ op: 'swap' });
+      // authPathRest(2) adrs22(1) children(0)
+      // Now tweakable hash: adrs(1) msg(0) -> result. pspD=5
+      emitSLHT_raw(e, n, 5);
+      // authPathRest(1) result(0); pspD=4
+    });
 
     emit({
       op: 'if',
@@ -605,22 +792,33 @@ function emitSLHMerkle(
         ...mkTweakHash,
       ],
     });
+    // psp(3) ta8(2) kp4(1) authPathRest(1) result(0) | alt: leafIdx
   }
 
   // Drop leafIdx from alt
   emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
   emit({ op: 'drop' });
 
-  // authPathRest(empty)(1) root(0)
+  // psp(3) ta8(2) kp4(1) authPathRest(empty)(1) root(0)
   emit({ op: 'swap' });
   emit({ op: 'drop' });
+  // psp(3) ta8(2) kp4(1) root(0)... wait, 4 items total
+  // After swap+drop: psp(2) ta8(1) kp4(0) root... no.
+  // Let me recount. Before drop of leafIdx:
+  // psp ta8 kp4 authPathRest root leafIdx(from alt) — after FROMALT, 6 items
+  // DROP leafIdx: psp ta8 kp4 authPathRest root — 5 items
+  // SWAP: psp ta8 kp4 root authPathRest
+  // DROP: psp ta8 kp4 root — 4 items
+  // psp(3) ta8(2) kp4(1) root(0)
 }
 
 // ===========================================================================
 // 7. FORS Verification
 // ===========================================================================
-// Input:  forsSig(k*(1+a)*n)(1) md(ceil(k*a/8))(0)
-// Output: forsPk(n)
+// Input:  psp(4) ta8(3) kp4(2) forsSig(1) md(0)
+// Output: psp(2) ta8(1) kp4(0) forsPk(top)... let me recount.
+// FORS consumes forsSig+md and produces forsPk.
+// Output: psp(3) ta8(2) kp4(1) forsPk(0)
 
 function emitSLHFors(
   emit: (op: StackOp) => void,
@@ -628,14 +826,16 @@ function emitSLHFors(
 ): void {
   const { n, a, k } = p;
 
+  // Input: psp(4) ta8(3) kp4(2) forsSig(1) md(0)
   // Save md to alt, push empty rootAcc to alt
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });      // md -> alt
   emit({ op: 'opcode', code: 'OP_0' });
   emit({ op: 'opcode', code: 'OP_TOALTSTACK' });      // rootAcc(empty) -> alt
-  // main: forsSig | alt: pkSeedPad, md, rootAcc(top)
+  // psp(3) ta8(2) kp4(1) forsSig(0) | alt: md, rootAcc(top)
+  // pspD=3, ta8D=2, kp4D=1
 
   for (let i = 0; i < k; i++) {
-    // main: forsSigRem | alt: pkSeedPad, md, rootAcc
+    // psp(3) ta8(2) kp4(1) forsSigRem(0) | alt: md, rootAcc
 
     // Get md: pop rootAcc, pop md, dup md, push md back, push rootAcc back
     emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });  // rootAcc
@@ -644,7 +844,7 @@ function emitSLHFors(
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });    // md back
     emit({ op: 'swap' });
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });    // rootAcc back
-    // main: forsSigRem md_copy
+    // psp(4) ta8(3) kp4(2) forsSigRem(1) md_copy(0)
 
     // Extract idx: `a` bits at position i*a from md_copy
     const bitStart = i * a;
@@ -670,33 +870,55 @@ function emitSLHFors(
     const totalBits = take * 8;
     const rightShift = totalBits - bitOffset - a;
     if (rightShift > 0) {
-      emit({ op: 'push', value: BigInt(rightShift) });
-      emit({ op: 'opcode', code: 'OP_RSHIFT' });
+      emit({ op: 'push', value: BigInt(1 << rightShift) });
+      emit({ op: 'opcode', code: 'OP_DIV' });
     }
-    emit({ op: 'push', value: BigInt((1 << a) - 1) });
-    emit({ op: 'opcode', code: 'OP_AND' });
-    // main: forsSigRem idx
+    // Use OP_MOD instead of OP_AND to avoid byte-length mismatch
+    emit({ op: 'push', value: BigInt(1 << a) });
+    emit({ op: 'opcode', code: 'OP_MOD' });
+    // psp(4) ta8(3) kp4(2) forsSigRem(1) idx(0)
 
     // Save idx to alt (above rootAcc)
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
-    // main: forsSigRem | alt: ..., md, rootAcc, idx(top)
+    // psp(3) ta8(2) kp4(1) forsSigRem(0) | alt: md, rootAcc, idx(top)
 
     // Split sk(n) from sigRem
     emit({ op: 'push', value: BigInt(n) });
     emit({ op: 'opcode', code: 'OP_SPLIT' });
     emit({ op: 'swap' });
-    // main: sigRest sk
+    // psp(4) ta8(3) kp4(2) sigRest(1) sk(0)
 
-    // Leaf = T(pkSeed, ADRS_FORS_TREE{h=0}, sk)
-    const leafAdrs = slhADRS({ type: SLH_FORS_TREE, chain: 0, hash: 0 });
-    emit({ op: 'push', value: leafAdrs });
+    // Leaf = T(pkSeed, ADRS_FORS_TREE{chain=0, hash=runtime}, sk)
+    // The FORS leaf hash index is: i * (1<<a) + idx
+    // Need to get idx from alt, compute, convert to 4B BE, build ADRS
+    // Get idx from alt (above rootAcc)
+    emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // idx
+    emit({ op: 'opcode', code: 'OP_DUP' });
+    emit({ op: 'opcode', code: 'OP_TOALTSTACK' }); // idx back
+    // psp(5) ta8(4) kp4(3) sigRest(2) sk(1) idx(0)
+
+    // Compute hash = i*(1<<a) + idx
+    if (i > 0) {
+      emit({ op: 'push', value: BigInt(i * (1 << a)) });
+      emit({ op: 'opcode', code: 'OP_ADD' });
+    }
+    // Convert to 4B BE
+    emit({ op: 'push', value: 4n });
+    emit({ op: 'opcode', code: 'OP_NUM2BIN' });
+    for (const op of emitReverseN(4)) emit(op);
+    // psp(5) ta8(4) kp4(3) sigRest(2) sk(1) hash4BE(0)
+
+    // Build ADRS with hash='stack': ta8D=4, kp4D=3
+    emitBuildADRS(emit, 0, SLH_FORS_TREE, 0, 4, 3, 'stack');
+    // hash4 replaced by adrs22. psp(5) ta8(4) kp4(3) sigRest(2) sk(1) adrs22(0)
     emit({ op: 'swap' });
-    emitSLHT_raw(emit, n);
-    // main: sigRest(1) node(0)
+    // psp(5) ta8(4) kp4(3) sigRest(2) adrs22(1) sk(0)
+    emitSLHT_raw(emit, n, 5);
+    // psp(4) ta8(3) kp4(2) sigRest(1) node(0)
 
     // Auth path walk: a levels
     for (let j = 0; j < a; j++) {
-      // sigRest(1) node(0)
+      // psp(4) ta8(3) kp4(2) sigRest(1) node(0)
       emit({ op: 'opcode', code: 'OP_TOALTSTACK' });  // node -> alt
 
       emit({ op: 'push', value: BigInt(n) });
@@ -705,56 +927,74 @@ function emitSLHFors(
       // sigRest authJ
 
       emit({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // node
-      // sigRest(2) authJ(1) node(0)
+      // psp(4) ta8(3) kp4(2) sigRest(2) authJ(1) node(0)
 
       // Get idx: pop from alt (idx is top of alt), dup, push back
       emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
       emit({ op: 'opcode', code: 'OP_DUP' });
       emit({ op: 'opcode', code: 'OP_TOALTSTACK' });
-      // sigRest(3) authJ(2) node(1) idx(0)
+      // psp(5) ta8(4) kp4(3) sigRest(3) authJ(2) node(1) idx(0)
 
-      // bit = (idx >> j) & 1
+      // bit = (idx >> j) % 2
       if (j > 0) {
-        emit({ op: 'push', value: BigInt(j) });
-        emit({ op: 'opcode', code: 'OP_RSHIFT' });
+        emit({ op: 'push', value: BigInt(1 << j) });
+        emit({ op: 'opcode', code: 'OP_DIV' });
       }
-      emit({ op: 'push', value: 1n });
-      emit({ op: 'opcode', code: 'OP_AND' });
+      emit({ op: 'push', value: 2n });
+      emit({ op: 'opcode', code: 'OP_MOD' });
 
-      const levelAdrs = slhADRS({ type: SLH_FORS_TREE, chain: j + 1, hash: 0 });
+      // After if/then branches: CAT children -> children(0)
+      // psp(4) ta8(3) kp4(2) sigRest(1) children(0)
+      // Need tweakable hash with ADRS. hash = i*(1<<(a-j-1)) + (idx >> (j+1))
+      const mkForsAuthHash: StackOp[] = collectOps(e => {
+        // Stack: sigRest(1) children(0)
+        // pspD=4, ta8D=3, kp4D=2
 
-      const hashTail: StackOp[] = [
-        { op: 'push', value: levelAdrs },
-        { op: 'swap' },
-        { op: 'opcode', code: 'OP_CAT' },
-        { op: 'opcode', code: 'OP_FROMALTSTACK' },
-        { op: 'opcode', code: 'OP_DUP' },
-        { op: 'opcode', code: 'OP_TOALTSTACK' },
-        { op: 'swap' },
-        { op: 'opcode', code: 'OP_CAT' },
-        { op: 'opcode', code: 'OP_SHA256' },
-        ...(n < 32 ? [
-          { op: 'push', value: BigInt(n) } as StackOp,
-          { op: 'opcode', code: 'OP_SPLIT' } as StackOp,
-          { op: 'drop' } as StackOp,
-        ] : []),
-      ];
+        // Get idx from alt to compute hash
+        e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+        e({ op: 'opcode', code: 'OP_DUP' });
+        e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+        // sigRest(2) children(1) idx(0); pspD=5, ta8D=4, kp4D=3
+        // hash = i*(1<<(a-j-1)) + (idx >> (j+1))
+        if (j + 1 > 0) {
+          e({ op: 'push', value: BigInt(1 << (j + 1)) });
+          e({ op: 'opcode', code: 'OP_DIV' });
+        }
+        const base = i * (1 << (a - j - 1));
+        if (base > 0) {
+          e({ op: 'push', value: BigInt(base) });
+          e({ op: 'opcode', code: 'OP_ADD' });
+        }
+        // Convert to 4B BE
+        e({ op: 'push', value: 4n });
+        e({ op: 'opcode', code: 'OP_NUM2BIN' });
+        for (const op of emitReverseN(4)) e(op);
+        // sigRest(2) children(1) hash4BE(0); ta8D=4, kp4D=3
+
+        // Build ADRS with hash='stack'
+        emitBuildADRS(e, 0, SLH_FORS_TREE, j + 1, 4, 3, 'stack');
+        // sigRest(2) children(1) adrs22(0); pspD=5, ta8D=4, kp4D=3
+        e({ op: 'swap' });
+        emitSLHT_raw(e, n, 5);
+        // sigRest(1) result(0); pspD=4
+      });
 
       emit({
         op: 'if',
         then: [
           { op: 'opcode', code: 'OP_CAT' },
-          ...hashTail,
+          ...mkForsAuthHash,
         ],
         else: [
           { op: 'swap' },
           { op: 'opcode', code: 'OP_CAT' },
-          ...hashTail,
+          ...mkForsAuthHash,
         ],
       });
+      // psp(4) ta8(3) kp4(2) sigRest(1) result(0)
     }
 
-    // sigRest(1) treeRoot(0) | alt: ..., md, rootAcc, idx
+    // psp(4) ta8(3) kp4(2) sigRest(1) treeRoot(0) | alt: md, rootAcc, idx
 
     // Drop idx from alt
     emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });
@@ -764,10 +1004,10 @@ function emitSLHFors(
     emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });  // rootAcc
     emit({ op: 'swap' });
     emit({ op: 'opcode', code: 'OP_CAT' });
-    // main: sigRest(1) newRootAcc(0)
+    // psp(3) ta8(2) kp4(1) sigRest(1) newRootAcc(0)
 
     emit({ op: 'opcode', code: 'OP_TOALTSTACK' });    // rootAcc -> alt
-    // main: sigRest | alt: ..., md, newRootAcc
+    // psp(3) ta8(2) kp4(1) sigRest(0) | alt: md, newRootAcc
   }
 
   // Drop empty sigRest
@@ -777,13 +1017,20 @@ function emitSLHFors(
   emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });    // rootAcc
   emit({ op: 'opcode', code: 'OP_FROMALTSTACK' });    // md
   emit({ op: 'drop' });
-  // main: rootAcc(k*n)
+  // psp(2) ta8(1) kp4(0) rootAcc(top)... wait:
+  // psp ta8 kp4 rootAcc md -> after drop md: psp ta8 kp4 rootAcc
+  // Actually: after FROMALT rootAcc and FROMALT md:
+  // main: psp ta8 kp4 rootAcc md — 5 items
+  // After DROP: psp ta8 kp4 rootAcc — 4 items
+  // psp(3) ta8(2) kp4(1) rootAcc(0)
 
   // Compress: T(pkSeed, ADRS_FORS_ROOTS, rootAcc)
-  const forsAdrs = slhADRS({ type: SLH_FORS_ROOTS });
-  emit({ op: 'push', value: forsAdrs });
+  // Build ADRS: ta8D=2, kp4D=1
+  emitBuildADRS(emit, 0, SLH_FORS_ROOTS, 0, 2, 1, 'zero');
+  // psp(4) ta8(3) kp4(2) rootAcc(1) adrs22(0)
   emit({ op: 'swap' });
-  emitSLHT_raw(emit, n);
+  emitSLHT_raw(emit, n, 4);
+  // psp(3) ta8(2) kp4(1) forsPk(0)
 }
 
 // ===========================================================================
@@ -879,7 +1126,7 @@ function emitVerifySLHDSA(
   t.pushInt(null, BigInt(n));
   t.split('pkSeed', 'pkRoot');
 
-  // Build pkSeedPad = pkSeed || zeros(64-n), push to alt
+  // Build pkSeedPad = pkSeed || zeros(64-n), keep on main stack
   t.copyToTop('pkSeed', '_psp');
   if (64 - n > 0) {
     t.pushBytes(null, new Uint8Array(64 - n));
@@ -887,7 +1134,7 @@ function emitVerifySLHDSA(
   } else {
     t.rename('_pkSeedPad');
   }
-  t.toAlt();
+  // _pkSeedPad stays on main stack (tracked)
 
   // ---- 2. Parse R from sig ----
   t.toTop('sig');
@@ -921,9 +1168,10 @@ function emitVerifySLHDSA(
     e({ op: 'opcode', code: 'OP_NUM2BIN' });
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
-    const mask = (1n << BigInt(p.h - hp)) - 1n;
-    e({ op: 'push', value: mask });
-    e({ op: 'opcode', code: 'OP_AND' });
+    // Use OP_MOD instead of OP_AND to avoid byte-length mismatch
+    const modulus = 1n << BigInt(p.h - hp);
+    e({ op: 'push', value: modulus });
+    e({ op: 'opcode', code: 'OP_MOD' });
   });
 
   // Convert _leafBytes -> leafIdx
@@ -935,8 +1183,25 @@ function emitVerifySLHDSA(
     e({ op: 'opcode', code: 'OP_NUM2BIN' });
     e({ op: 'opcode', code: 'OP_CAT' });
     e({ op: 'opcode', code: 'OP_BIN2NUM' });
-    e({ op: 'push', value: BigInt((1 << hp) - 1) });
-    e({ op: 'opcode', code: 'OP_AND' });
+    e({ op: 'push', value: BigInt(1 << hp) });
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
+
+  // ---- 4b. Compute treeAddr8 and keypair4 for ADRS construction ----
+  // treeAddr8 = treeIdx as 8-byte big-endian
+  t.copyToTop('treeIdx', '_ti8');
+  t.rawBlock(['_ti8'], 'treeAddr8', (e) => {
+    e({ op: 'push', value: 8n });
+    e({ op: 'opcode', code: 'OP_NUM2BIN' });
+    for (const op of emitReverseN(8)) e(op);
+  });
+
+  // keypair4 = leafIdx as 4-byte big-endian
+  t.copyToTop('leafIdx', '_li4');
+  t.rawBlock(['_li4'], 'keypair4', (e) => {
+    e({ op: 'push', value: 4n });
+    e({ op: 'opcode', code: 'OP_NUM2BIN' });
+    for (const op of emitReverseN(4)) e(op);
   });
 
   // ---- 5. Parse FORS sig ----
@@ -945,10 +1210,22 @@ function emitVerifySLHDSA(
   t.split('forsSig', 'htSigRest');
 
   // ---- 6. FORS -> forsPk ----
+  // Copy psp/ta8/kp4 to top, then forsSig, md
+  t.copyToTop('_pkSeedPad', '_psp');
+  t.copyToTop('treeAddr8', '_ta');
+  t.copyToTop('keypair4', '_kp');
   t.toTop('forsSig');
   t.toTop('md');
-  t.rawBlock(['forsSig', 'md'], 'forsPk', (e) => {
+  t.rawBlock(['_psp', '_ta', '_kp', 'forsSig', 'md'], 'forsPk', (e) => {
+    // Stack: psp(4) ta8(3) kp4(2) forsSig(1) md(0)
     emitSLHFors(e, p);
+    // Stack: psp(3) ta8(2) kp4(1) forsPk(0)
+    // Drop psp, ta8, kp4
+    e({ op: 'opcode', code: 'OP_TOALTSTACK' }); // forsPk -> alt
+    e({ op: 'drop' }); // kp4
+    e({ op: 'drop' }); // ta8
+    e({ op: 'drop' }); // psp
+    e({ op: 'opcode', code: 'OP_FROMALTSTACK' }); // forsPk back
   });
 
   // ---- 7. Hypertree: d layers ----
@@ -963,34 +1240,75 @@ function emitVerifySLHDSA(
     t.pushInt(null, BigInt(len * n));
     t.split(`wsig${layer}`, `auth${layer}`);
 
-    // WOTS+: wotsSig + currentMsg -> wotsPk
+    // WOTS+: copy psp/ta8/kp4 + wotsSig + currentMsg -> wotsPk
     const curMsg = layer === 0 ? 'forsPk' : `root${layer - 1}`;
+    t.copyToTop('_pkSeedPad', '_psp');
+    t.copyToTop('treeAddr8', '_ta');
+    t.copyToTop('keypair4', '_kp');
     t.toTop(`wsig${layer}`);
     t.toTop(curMsg);
-    t.rawBlock([`wsig${layer}`, curMsg], `wpk${layer}`, (e) => {
+    t.rawBlock(['_psp', '_ta', '_kp', `wsig${layer}`, curMsg], `wpk${layer}`, (e) => {
+      // Stack: psp(4) ta8(3) kp4(2) wotsSig(1) msg(0)
       emitSLHWotsAll(e, p, layer);
+      // Stack: psp(3) ta8(2) kp4(1) wotsPk(0)
+      e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      e({ op: 'drop' }); e({ op: 'drop' }); e({ op: 'drop' });
+      e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
     });
 
-    // Merkle: leafIdx + authPath + wotsPk -> root
+    // Merkle: copy psp/ta8/kp4 + leafIdx + authPath + wotsPk -> root
+    t.copyToTop('_pkSeedPad', '_psp');
+    t.copyToTop('treeAddr8', '_ta');
+    t.copyToTop('keypair4', '_kp');
     t.toTop('leafIdx');
     t.toTop(`auth${layer}`);
     t.toTop(`wpk${layer}`);
-    t.rawBlock(['leafIdx', `auth${layer}`, `wpk${layer}`], `root${layer}`, (e) => {
+    t.rawBlock(['_psp', '_ta', '_kp', 'leafIdx', `auth${layer}`, `wpk${layer}`], `root${layer}`, (e) => {
+      // Stack: psp(5) ta8(4) kp4(3) leafIdx(2) authPath(1) node(0)
       emitSLHMerkle(e, p, layer);
+      // Stack: psp(3) ta8(2) kp4(1) root(0)
+      e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+      e({ op: 'drop' }); e({ op: 'drop' }); e({ op: 'drop' });
+      e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
     });
 
-    // Update leafIdx, treeIdx for next layer
+    // Update leafIdx, treeIdx, treeAddr8, keypair4 for next layer
     if (layer < d - 1) {
       t.toTop('treeIdx');
       t.dup('_tic');
-      t.pushInt(null, BigInt((1 << hp) - 1));
-      t.op('OP_AND');
-      t.rename('leafIdx');
+      // leafIdx = _tic % (1 << hp)
+      t.rawBlock(['_tic'], 'leafIdx', (e) => {
+        e({ op: 'push', value: BigInt(1 << hp) });
+        e({ op: 'opcode', code: 'OP_MOD' });
+      });
+      // treeIdx = treeIdx >> hp
+      t.swap();
+      t.rawBlock(['treeIdx'], 'treeIdx', (e) => {
+        e({ op: 'push', value: BigInt(1 << hp) });
+        e({ op: 'opcode', code: 'OP_DIV' });
+      });
 
-      t.toTop('_tic');
-      t.pushInt(null, BigInt(hp));
-      t.op('OP_RSHIFT');
-      t.rename('treeIdx');
+      // Update treeAddr8 = new treeIdx as 8-byte BE
+      // Drop old treeAddr8
+      t.toTop('treeAddr8');
+      t.drop();
+      t.copyToTop('treeIdx', '_ti8');
+      t.rawBlock(['_ti8'], 'treeAddr8', (e) => {
+        e({ op: 'push', value: 8n });
+        e({ op: 'opcode', code: 'OP_NUM2BIN' });
+        for (const op of emitReverseN(8)) e(op);
+      });
+
+      // Update keypair4 = new leafIdx as 4-byte BE
+      // Drop old keypair4
+      t.toTop('keypair4');
+      t.drop();
+      t.copyToTop('leafIdx', '_li4');
+      t.rawBlock(['_li4'], 'keypair4', (e) => {
+        e({ op: 'push', value: 4n });
+        e({ op: 'opcode', code: 'OP_NUM2BIN' });
+        for (const op of emitReverseN(4)) e(op);
+      });
     }
   }
 
@@ -1004,16 +1322,14 @@ function emitVerifySLHDSA(
   t.toAlt();
 
   // Drop all remaining tracked values
-  const leftover = ['msg', 'R', 'pkSeed', 'htSigRest', 'treeIdx', 'leafIdx'];
+  const leftover = ['msg', 'R', 'pkSeed', 'htSigRest', 'treeIdx', 'leafIdx',
+    '_pkSeedPad', 'treeAddr8', 'keypair4'];
   for (const nm of leftover) {
     if (t.has(nm)) { t.toTop(nm); t.drop(); }
   }
   while (t.depth > 0) t.drop();
 
   t.fromAlt('_result');
-  // Pop pkSeedPad from alt
-  t.fromAlt(null);
-  t.drop();
 }
 
 // ===========================================================================
@@ -1034,6 +1350,8 @@ export {
   emitSLHFors,
   emitSLHHmsg,
   emitVerifySLHDSA,
+  emitBuildADRS,
+  emitBuildADRS18,
 };
 
 export type { SLHCodegenParams };

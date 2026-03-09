@@ -1,0 +1,19 @@
+{
+  "name": "runar-integration-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "runar-compiler": "workspace:*",
+    "runar-sdk": "workspace:*",
+    "runar-lang": "workspace:*",
+    "runar-ir-schema": "workspace:*",
+    "@bsv/sdk": "^2.0.5"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

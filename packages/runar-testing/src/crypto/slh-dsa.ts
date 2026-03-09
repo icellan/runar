@@ -698,3 +698,92 @@ export function slhVerify(params: SLHParams, msg: Uint8Array, sig: Uint8Array, p
   }
   return true;
 }
+
+/** Verbose verify: returns intermediate values for debugging */
+export function slhVerifyVerbose(params: SLHParams, msg: Uint8Array, sig: Uint8Array, pk: Uint8Array): {
+  forsPk: Uint8Array;
+  wotsPks: Uint8Array[];
+  roots: Uint8Array[];
+  treeIdx: bigint;
+  leafIdx: number;
+} {
+  const { n, d, hp, k, a, len } = params;
+  const pkSeed = pk.slice(0, n);
+  const pkRoot = pk.slice(n, 2 * n);
+
+  let offset = 0;
+  const R = sig.slice(offset, offset + n); offset += n;
+  const forsSigLen = k * (1 + a) * n;
+  const forsSig = sig.slice(offset, offset + forsSigLen); offset += forsSigLen;
+
+  const mdLen = Math.ceil((k * a) / 8);
+  const treeIdxLen = Math.ceil((params.h - hp) / 8);
+  const leafIdxLen = Math.ceil(hp / 8);
+  const digestLen = mdLen + treeIdxLen + leafIdxLen;
+  const digest = Hmsg(R, pkSeed, pkRoot, msg, digestLen);
+
+  const md = digest.slice(0, mdLen);
+  let treeIdx = 0n;
+  for (let i = 0; i < treeIdxLen; i++) {
+    treeIdx = (treeIdx << 8n) | BigInt(digest[mdLen + i]!);
+  }
+  treeIdx &= (1n << BigInt(params.h - hp)) - 1n;
+
+  let leafIdx = 0;
+  for (let i = 0; i < leafIdxLen; i++) {
+    leafIdx = (leafIdx << 8) | (digest[mdLen + treeIdxLen + i]!);
+  }
+  leafIdx &= (1 << hp) - 1;
+
+  const forsAdrs = newADRS();
+  setTreeAddress(forsAdrs, treeIdx);
+  setType(forsAdrs, ADRS_FORS_TREE);
+  setKeyPairAddress(forsAdrs, leafIdx);
+  let currentMsg = forsPkFromSig(forsSig, md, pkSeed, forsAdrs, params);
+  const forsPk = new Uint8Array(currentMsg);
+
+  let currentTreeIdx = treeIdx;
+  let currentLeafIdx = leafIdx;
+  const roots: Uint8Array[] = [];
+  const wotsPks: Uint8Array[] = [];
+
+  const xmssSigLen = (len + hp) * n;
+  for (let layer = 0; layer < d; layer++) {
+    const xmssSig = sig.slice(offset, offset + xmssSigLen); offset += xmssSigLen;
+    const wotsSig = xmssSig.slice(0, len * n);
+    const auth = xmssSig.slice(len * n);
+
+    const layerAdrs = newADRS();
+    setLayerAddress(layerAdrs, layer);
+    setTreeAddress(layerAdrs, currentTreeIdx);
+
+    // WOTS+ pk reconstruction
+    const wAdrs = new Uint8Array(layerAdrs);
+    setType(wAdrs, ADRS_WOTS_HASH);
+    setKeyPairAddress(wAdrs, currentLeafIdx);
+    const wotsPk = wotsPkFromSig(wotsSig, currentMsg, pkSeed, wAdrs, params);
+    wotsPks.push(new Uint8Array(wotsPk));
+
+    // Merkle tree walk
+    const treeAdrs = new Uint8Array(layerAdrs);
+    setType(treeAdrs, ADRS_TREE);
+    let node = wotsPk;
+    for (let j = 0; j < hp; j++) {
+      const authJ = auth.slice(j * n, (j + 1) * n);
+      setTreeHeight(treeAdrs, j + 1);
+      if (((currentLeafIdx >> j) & 1) === 0) {
+        setTreeIndex(treeAdrs, currentLeafIdx >> (j + 1));
+        node = T(pkSeed, treeAdrs, concat(node, authJ), n);
+      } else {
+        setTreeIndex(treeAdrs, currentLeafIdx >> (j + 1));
+        node = T(pkSeed, treeAdrs, concat(authJ, node), n);
+      }
+    }
+    currentMsg = node;
+    roots.push(new Uint8Array(currentMsg));
+    currentLeafIdx = Number(currentTreeIdx & BigInt((1 << hp) - 1));
+    currentTreeIdx = currentTreeIdx >> BigInt(hp);
+  }
+
+  return { forsPk, wotsPks, roots, treeIdx, leafIdx };
+}

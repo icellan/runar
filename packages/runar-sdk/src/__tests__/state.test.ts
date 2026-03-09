@@ -151,54 +151,37 @@ describe('mixed state fields', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Fix #26: decodeScriptInt negative zero edge case
+// Fix #26: decodeNum2Bin negative zero edge case
 // ---------------------------------------------------------------------------
 
-describe('decodeScriptInt negative zero edge cases', () => {
-  it('decodes 0x80 (negative zero, 1 byte) as 0n', () => {
-    // 0x80 is negative zero in Bitcoin Script encoding.
-    // The sign bit is set but the magnitude is zero.
-    // Bitcoin treats negative zero as zero.
+describe('decodeNum2Bin negative zero edge cases', () => {
+  it('decodes 8-byte negative zero as 0n', () => {
+    // 8-byte NUM2BIN with only sign bit set → negative zero → 0n
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
-    // Manually construct hex: push 1 byte (opcode 01) + data 80
-    const hex = '0180';
+    const hex = '0000000000000080';
     const result = deserializeState(fields, hex);
     expect(result.v).toBe(0n);
   });
 
-  it('decodes 0x0080 (negative zero, 2 bytes) as 0n', () => {
-    // 0x0080 is a 2-byte representation of negative zero:
-    // byte 0 = 0x00 (magnitude), byte 1 = 0x80 (sign bit set, magnitude = 0)
+  it('decodes 8-byte all-zeros as 0n', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
-    // push 2 bytes (opcode 02) + data 0080
-    const hex = '020080';
+    const hex = '0000000000000000';
     const result = deserializeState(fields, hex);
     expect(result.v).toBe(0n);
   });
 
-  it('decodes 0x0000 (multi-byte zero, no sign bit) as 0n', () => {
-    // 0x0000: two zero bytes, no sign bit → still zero
+  it('correctly decodes -1 in NUM2BIN(8) format', () => {
+    // -1: magnitude=1 in byte[0], sign bit in byte[7]
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
-    // push 2 bytes (opcode 02) + data 0000
-    const hex = '020000';
-    const result = deserializeState(fields, hex);
-    expect(result.v).toBe(0n);
-  });
-
-  it('still correctly decodes -1 (0x81) after the fix', () => {
-    // 0x81 = magnitude 1 with sign bit set → -1
-    const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
-    // push 1 byte (opcode 01) + data 81
-    const hex = '0181';
+    const hex = '0100000000000080';
     const result = deserializeState(fields, hex);
     expect(result.v).toBe(-1n);
   });
 
-  it('still correctly decodes -128 (0x8080) after the fix', () => {
-    // -128: magnitude bytes = [0x80], sign byte needed → [0x80, 0x80]
+  it('correctly decodes -128 in NUM2BIN(8) format', () => {
+    // -128: magnitude=0x80 in byte[0], sign bit in byte[7]
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
-    // push 2 bytes (opcode 02) + data 8080
-    const hex = '028080';
+    const hex = '8000000000000080';
     const result = deserializeState(fields, hex);
     expect(result.v).toBe(-128n);
   });

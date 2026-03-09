@@ -10,16 +10,16 @@ export type {
   UTXO,
   DeployOptions,
   CallOptions,
+  PreparedCall,
 } from './types.js';
 
 // Providers
-export type { Provider } from './providers/index.js';
-export { WhatsOnChainProvider, MockProvider } from './providers/index.js';
+export { WhatsOnChainProvider, MockProvider, RPCProvider } from './providers/index.js';
+export type { Provider, RPCProviderOptions } from './providers/index.js';
 
 // Signers
-export type { Signer } from './signers/index.js';
-export type { SignCallback } from './signers/index.js';
-export { LocalSigner, ExternalSigner } from './signers/index.js';
+export { LocalSigner, ExternalSigner, WalletSigner } from './signers/index.js';
+export type { Signer, SignCallback, WalletSignerOptions } from './signers/index.js';
 
 // Contract
 export { RunarContract } from './contract.js';
@@ -33,10 +33,20 @@ export {
   serializeState,
   deserializeState,
   extractStateFromScript,
+  findLastOpReturn,
 } from './state.js';
+
+// OP_PUSH_TX
+export { computeOpPushTx } from './oppushtx.js';
+
+// Script utilities
+export { buildP2PKHScript } from './script-utils.js';
 
 // Token management
 export { TokenWallet } from './tokens.js';
+
+// Code generation
+export { generateTypescript } from './codegen/index.js';
 
 // Re-export artifact types from runar-ir-schema for convenience
 export type {

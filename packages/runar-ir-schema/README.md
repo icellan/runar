@@ -22,19 +22,24 @@ The Rúnar AST is produced by Pass 1 (Parse) and consumed by Pass 2 (Validate) a
 
 ```
 ContractNode
+  +-- kind: 'contract'
   +-- name: string
+  +-- parentClass: 'SmartContract' | 'StatefulSmartContract'
   +-- properties: PropertyNode[]
   +-- constructor: MethodNode
   +-- methods: MethodNode[]
   +-- sourceFile: string
 
 PropertyNode
+  +-- kind: 'property'
   +-- name: string
   +-- type: TypeNode
   +-- readonly: boolean
+  +-- initializer?: Expression          (default value, literal only)
   +-- sourceLocation: SourceLocation
 
 MethodNode
+  +-- kind: 'method'
   +-- name: string
   +-- params: ParamNode[]
   +-- body: Statement[]
@@ -64,12 +69,14 @@ All expressions use a discriminated union on the `kind` field:
 
 ### Statement Nodes
 
+All statement nodes include an implicit `sourceLocation: SourceLocation` field (omitted from the table for brevity).
+
 | Kind | Fields | Description |
 |---|---|---|
 | `variable_decl` | `name`, `type?`, `init` | `const x = ...` or `let x = ...` |
 | `assignment` | `target`, `value` | `x = ...` or `this.x = ...` |
 | `if_statement` | `condition`, `then`, `else?` | Conditional |
-| `for_statement` | `init`, `condition`, `update`, `body` | Bounded loop |
+| `for_statement` | `init: VariableDeclStatement`, `condition: Expression`, `update: Statement`, `body: Statement[]` | Bounded loop |
 | `return_statement` | `value?` | Return from private method |
 | `expression_statement` | `expression` | Expression as statement |
 
@@ -83,7 +90,6 @@ The ANF IR is the **canonical conformance boundary** for all Rúnar compilers. I
 
 ```
 ANFProgram
-  +-- version: string           (e.g., "0.1.0")
   +-- contractName: string
   +-- properties: ANFProperty[]
   +-- methods: ANFMethod[]
@@ -93,33 +99,31 @@ ANFMethod
   +-- params: ANFParam[]
   +-- body: ANFBinding[]        (flat list of bindings)
   +-- isPublic: boolean
-  +-- returnType: ANFType
 
 ANFBinding
   +-- name: string              (t0, t1, t2, ...)
-  +-- type: ANFType
-  +-- value: ANFValue           (tagged union)
+  +-- value: ANFValue           (discriminated on `kind`)
 ```
 
-### ANF Value Tags
+### ANF Value Kinds
 
-| Tag | Fields | Description |
+| Kind | Fields | Description |
 |---|---|---|
-| `load_param` | `param` | Load a method parameter |
-| `load_prop` | `prop` | Load a contract property |
-| `load_const` | `constType`, `value` | Load a constant value |
-| `bin_op` | `op`, `left`, `right` | Binary operation on two bindings |
+| `load_param` | `name` | Load a method parameter |
+| `load_prop` | `name` | Load a contract property |
+| `load_const` | `value` | Load a constant (`string \| bigint \| boolean`) |
+| `bin_op` | `op`, `left`, `right`, `result_type?` | Binary operation on two bindings |
 | `unary_op` | `op`, `operand` | Unary operation |
-| `call` | `function`, `args` | Call a built-in function |
-| `method_call` | `method`, `args` | Call a private method |
-| `if` | `condition`, `thenBranch`, `elseBranch`, `thenResult`, `elseResult` | Conditional |
-| `loop` | `iterations` | Unrolled bounded loop |
-| `assert` | `condition` | Assert condition |
-| `update_prop` | `prop`, `value` | Update mutable property |
+| `call` | `func`, `args` | Call a built-in function |
+| `method_call` | `object`, `method`, `args` | Call a private method |
+| `if` | `cond`, `then`, `else` | Conditional (branches are `ANFBinding[]`) |
+| `loop` | `count`, `body`, `iterVar` | Bounded loop (`body` is `ANFBinding[]`) |
+| `assert` | `value` | Assert condition |
+| `update_prop` | `name`, `value` | Update mutable property |
 | `get_state_script` | _(none)_ | Get serialized state |
 | `check_preimage` | `preimage` | Verify sighash preimage |
-| `array_access` | `array`, `index` | Read from array |
-| `array_update` | `array`, `index`, `value` | Write to array |
+| `add_output` | `satoshis`, `stateValues` | Add a transaction output (`stateValues` is `string[]`) |
+| `deserialize_state` | _(none)_ | Deserialize state from the script (stateful contracts) |
 
 ### Example
 
@@ -133,11 +137,11 @@ ANF IR:
 
 ```json
 [
-  { "name": "t0", "type": "PubKey",    "value": { "tag": "load_param", "param": "pubKey" } },
-  { "name": "t1", "type": "Ripemd160", "value": { "tag": "call", "function": "hash160", "args": ["t0"] } },
-  { "name": "t2", "type": "Addr",      "value": { "tag": "load_prop", "prop": "pubKeyHash" } },
-  { "name": "t3", "type": "boolean",   "value": { "tag": "bin_op", "op": "==", "left": "t1", "right": "t2" } },
-  { "name": "t4", "type": "void",      "value": { "tag": "assert", "condition": "t3" } }
+  { "name": "t0", "value": { "kind": "load_param", "name": "pubKey" } },
+  { "name": "t1", "value": { "kind": "call", "func": "hash160", "args": ["t0"] } },
+  { "name": "t2", "value": { "kind": "load_prop", "name": "pubKeyHash" } },
+  { "name": "t3", "value": { "kind": "bin_op", "op": "==", "left": "t1", "right": "t2" } },
+  { "name": "t4", "value": { "kind": "assert", "value": "t3" } }
 ]
 ```
 
@@ -147,37 +151,47 @@ ANF IR:
 
 The Stack IR is produced by Pass 5 (Stack Lower). It replaces named bindings with explicit stack operations.
 
-Each instruction is one of:
+Each instruction is discriminated on the `op` field:
 
-| Instruction | Description |
-|---|---|
-| `push_data(bytes)` | Push raw bytes onto the stack |
-| `push_int(n)` | Push a Script-encoded integer |
-| `opcode(op)` | Execute an opcode |
-| `pick(depth)` | `OP_PICK` from stack position `depth` |
-| `roll(depth)` | `OP_ROLL` from stack position `depth` |
-| `to_alt` | `OP_TOALTSTACK` |
-| `from_alt` | `OP_FROMALTSTACK` |
-| `if_block(then, else)` | `OP_IF ... OP_ELSE ... OP_ENDIF` |
+| Op | Fields | Description |
+|---|---|---|
+| `push` | `value` (`Uint8Array \| bigint \| boolean`) | Push a value onto the stack |
+| `dup` | _(none)_ | `OP_DUP` |
+| `swap` | _(none)_ | `OP_SWAP` |
+| `roll` | `depth` | `OP_ROLL` from stack position `depth` |
+| `pick` | `depth` | `OP_PICK` from stack position `depth` |
+| `drop` | _(none)_ | `OP_DROP` |
+| `opcode` | `code` (e.g., `'OP_ADD'`) | Execute an opcode |
+| `if` | `then`, `else?` (both `StackOp[]`) | `OP_IF ... OP_ELSE ... OP_ENDIF` |
+| `nip` | _(none)_ | `OP_NIP` |
+| `over` | _(none)_ | `OP_OVER` |
+| `rot` | _(none)_ | `OP_ROT` |
+| `tuck` | _(none)_ | `OP_TUCK` |
+| `placeholder` | `paramIndex`, `paramName` | Constructor parameter placeholder |
 
 ---
 
 ## Artifact Format
 
-The compilation artifact is the output of the full pipeline:
+The compilation artifact (`RunarArtifact`) is the output of the full pipeline:
 
 ```json
 {
-  "version": "0.1.0",
-  "contractName": "P2PKH",
+  "version": "runar-v0.1.0",
   "compilerVersion": "0.1.0",
+  "contractName": "P2PKH",
+  "abi": { "constructor": { "params": [...] }, "methods": [...] },
   "script": "76a97c7e7e87a988ac",
-  "abi": { ... },
-  "properties": [ ... ],
-  "anfIR": { ... },
-  "sourceMap": { ... }
+  "asm": "OP_DUP OP_HASH160 ...",
+  "sourceMap": { "mappings": [...] },
+  "ir": { "anf": { ... }, "stack": { ... } },
+  "stateFields": [{ "name": "count", "type": "bigint", "index": 0 }],
+  "constructorSlots": [{ "paramIndex": 0, "byteOffset": 3 }],
+  "buildTimestamp": "2025-01-01T00:00:00.000Z"
 }
 ```
+
+Fields `sourceMap`, `ir`, `stateFields`, and `constructorSlots` are optional.
 
 ---
 
@@ -185,7 +199,7 @@ The compilation artifact is the output of the full pipeline:
 
 The ANF IR is serialized according to **RFC 8785 (JSON Canonicalization Scheme / JCS)**:
 
-1. Object keys sorted lexicographically by Unicode code point.
+1. Object keys sorted by UTF-16 code-unit order (per RFC 8785).
 2. No whitespace between tokens.
 3. Numbers in shortest representation, no trailing zeros.
 4. Strings use minimal escaping.
@@ -198,26 +212,45 @@ This ensures byte-identical output across implementations. The SHA-256 of the se
 sha256(canonical_json(compiler_A(source))) === sha256(canonical_json(compiler_B(source)))
 ```
 
+The package exports two functions for canonical serialization:
+
+```typescript
+import { canonicalJsonStringify, canonicalise } from 'runar-ir-schema';
+
+// Serialise any JSON-compatible value to canonical JSON (RFC 8785 / JCS).
+// Throws TypeError if the value contains undefined, functions, symbols, or circular references.
+// BigInt values are serialised as bare integers (no quotes).
+const json = canonicalJsonStringify(anfProgram);
+
+// Parse a JSON string and re-serialise it to canonical form.
+// Useful for normalising IR that was stored with pretty-printing.
+const normalized = canonicalise(prettyPrintedJson);
+```
+
 ---
 
 ## JSON Schema Validation
 
 ```typescript
-import { validateANFIR, validateArtifact, validateRunarAST } from 'runar-ir-schema';
+import { validateANF, validateArtifact } from 'runar-ir-schema';
 
-const result = validateANFIR(jsonData);
+const result = validateANF(jsonData);
 if (!result.valid) {
   console.error(result.errors);
 }
+
+// Or use the assert variants that throw on failure:
+import { assertValidANF, assertValidArtifact } from 'runar-ir-schema';
+assertValidANF(jsonData); // throws if invalid
 ```
 
-Schemas are defined using JSON Schema 2020-12 and validated with AJV.
+Schemas are defined using JSON Schema 2020-12 and validated with Ajv.
 
 ---
 
 ## Design Decision: Discriminated Unions for IR Nodes
 
-All IR nodes use a `kind` field (for AST nodes) or `tag` field (for ANF values) as a discriminant. This pattern:
+All IR nodes use a `kind` field as a discriminant (for AST nodes and ANF values) or an `op` field (for Stack IR operations). This pattern:
 
 - Enables exhaustive `switch` statements in TypeScript (the compiler warns about unhandled cases).
 - Makes serialization straightforward -- the discriminant field tells the deserializer which fields to expect.

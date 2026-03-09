@@ -31,6 +31,7 @@ export {
   Addr,
   SigHashPreimage,
   OpCodeType,
+  Point,
   SigHash,
   // Pure types (no runtime value):
   type ByteString,
@@ -82,6 +83,7 @@ export {
   gcd,
   divmod,
   log2,
+  bool,
   // Rabin (also re-exported from oracle subpath)
   verifyRabinSig,
   // Post-quantum (hash-based)
@@ -92,7 +94,24 @@ export {
   verifySLHDSA_SHA2_192f,
   verifySLHDSA_SHA2_256s,
   verifySLHDSA_SHA2_256f,
+  // Elliptic curve operations
+  ecAdd,
+  ecMul,
+  ecMulGen,
+  ecNegate,
+  ecOnCurve,
+  ecModReduce,
+  ecEncodeCompressed,
+  ecMakePoint,
+  ecPointX,
+  ecPointY,
 } from './builtins.js';
+
+// ---------------------------------------------------------------------------
+// Re-exports — elliptic curve constants
+// ---------------------------------------------------------------------------
+
+export { EC_P, EC_N, EC_G } from './ec.js';
 
 // ---------------------------------------------------------------------------
 // Re-exports — preimage

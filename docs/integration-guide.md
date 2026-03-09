@@ -314,12 +314,12 @@ const state = extractStateFromScript(artifact, scriptHex);
 
 State fields are encoded as Bitcoin Script push data in the order specified by `stateFields[].index`:
 
-| Type | Encoding |
-|------|----------|
-| `bigint` | 8-byte OP_NUM2BIN (little-endian, sign-magnitude) |
-| `boolean` | 1-byte OP_NUM2BIN |
-| `ByteString` | Raw push data |
-| `PubKey` | 33-byte push data (compressed) |
+| Type | External Encoding (SDK / state construction) | Internal Encoding (locking script `getStateScript`) |
+|------|-----------------------------------------------|-----------------------------------------------------|
+| `bigint` | Minimal-encoded Bitcoin Script number (variable-length, little-endian, sign-magnitude) wrapped in push data | Fixed 8-byte little-endian via `OP_NUM2BIN` |
+| `boolean` | `OP_0` (0x00) for false, `OP_1` (0x51) for true | 1-byte via `OP_NUM2BIN` |
+| `ByteString` | Raw push data | Raw push data |
+| `PubKey` | 33-byte push data (compressed) | 33-byte push data (compressed) |
 
 ---
 
@@ -638,10 +638,12 @@ The SDK abstracts blockchain access and key management:
 ```typescript
 interface Provider {
   getTransaction(txid: string): Promise<Transaction>;
+  getRawTransaction(txid: string): Promise<string>;  // returns raw tx hex
   broadcast(rawTx: string): Promise<string>;  // returns txid
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
   getNetwork(): 'mainnet' | 'testnet';
+  getFeeRate(): Promise<number>;  // satoshis per byte (default: 1 for BSV)
 }
 ```
 
@@ -653,7 +655,7 @@ Built-in implementations: `WhatsOnChainProvider` (production), `MockProvider` (t
 interface Signer {
   getPublicKey(): Promise<string>;
   getAddress(): Promise<string>;
-  sign(txHex: string, inputIndex: number, subscript: string, satoshis: number): Promise<string>;
+  sign(txHex: string, inputIndex: number, subscript: string, satoshis: number, sigHashType?: number): Promise<string>;
 }
 ```
 
@@ -663,10 +665,10 @@ Built-in implementations: `LocalSigner` (in-memory key, testing/CLI), `ExternalS
 
 ## Cross-Compiler Workflow
 
-All three compilers (TypeScript, Go, Rust) produce byte-identical Bitcoin Script for the same contract. You can:
+All four compilers (TypeScript, Go, Rust, Python) produce byte-identical Bitcoin Script for the same contract. You can:
 
-1. **Write** in any format (`.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`)
-2. **Test** with the native test runner (`vitest`, `go test`, `cargo test`)
+1. **Write** in any format (`.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`, `.runar.py`)
+2. **Test** with the native test runner (`vitest`, `go test`, `cargo test`, `pytest`)
 3. **Compile** with any compiler
 4. **Deploy** the same artifact from any language
 
@@ -678,18 +680,18 @@ runar-go --ir Counter-anf.json -o Counter.json
 runar-rust --ir Counter-anf.json -o Counter.json
 ```
 
-All three produce identical `script` hex. The conformance test suite validates this.
+All four produce identical `script` hex. The conformance test suite validates this.
 
 ---
 
 ## Deployment SDKs
 
-Deployment SDKs are available in all three languages. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
+Deployment SDKs are available in all four languages. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
 
 ### Go SDK (`packages/runar-go/`)
 
 ```go
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 // Load artifact
 artifact := runar.RunarArtifact{}
@@ -700,14 +702,14 @@ contract := runar.NewRunarContract(&artifact, []interface{}{pubKeyHash})
 
 // Deploy
 provider := runar.NewMockProvider("testnet")
-signer := runar.NewExternalSigner(pubKeyHex, address, signFunc)
+signer, err := runar.NewLocalSigner(wifKey) // WIF or 64-char hex private key
 txid, tx, err := contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 50000})
 
 // Call
 txid, tx, err = contract.Call("unlock", []interface{}{sig, pubKey}, provider, signer, nil)
 ```
 
-Signing is delegated via the `ExternalSigner` callback pattern. For real ECDSA signing, wrap `github.com/bsv-blockchain/go-sdk` in an `ExternalSigner`.
+The Go SDK provides `LocalSigner` which wraps `github.com/bsv-blockchain/go-sdk` for real ECDSA signing with BIP-143 sighash computation. It accepts either a WIF-encoded key or a 64-char hex private key. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a callback instead.
 
 ### Rust SDK (`packages/runar-rs/src/sdk/`)
 
@@ -732,4 +734,28 @@ let txid = contract.deploy(&mut provider, &signer, &DeployOptions {
 let txid = contract.call("unlock", &[sig, pub_key], &mut provider, &signer, None)?;
 ```
 
-Signing is delegated via the `ExternalSigner` closure pattern. For real ECDSA signing, wrap `rust-sv` in an `ExternalSigner`.
+The Rust SDK provides `LocalSigner` which uses `k256` for real ECDSA signing with manual BIP-143 sighash computation. It accepts either a WIF-encoded key or a 64-char hex private key. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a closure instead.
+
+### Python SDK (`packages/runar-py/runar/sdk/`)
+
+```python
+from runar.sdk import RunarContract, MockProvider, MockSigner, DeployOptions
+
+# Load artifact
+import json
+with open("artifacts/Counter.json") as f:
+    artifact = json.load(f)
+
+# Create contract
+contract = RunarContract(artifact, [0])
+
+# Deploy
+provider = MockProvider("testnet")
+signer = MockSigner()
+txid, tx = contract.deploy(provider, signer, DeployOptions(satoshis=50000))
+
+# Call
+txid, tx = contract.call("increment", [], provider, signer)
+```
+
+The Python SDK provides `MockSigner` for testing. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a callback. Zero required dependencies — hash functions use stdlib `hashlib`.

@@ -107,7 +107,7 @@ type ANFValue struct {
 	// assert, update_prop (value ref), check_preimage
 	ValueRef string `json:"-"` // populated from RawValue for assert / update_prop / check_preimage
 
-	// check_preimage
+	// check_preimage, deserialize_state
 	Preimage string `json:"preimage,omitempty"`
 
 	// add_output

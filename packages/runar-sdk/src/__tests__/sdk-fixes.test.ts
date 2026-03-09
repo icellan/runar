@@ -600,10 +600,10 @@ describe('M2: SDK boolean encoding mismatch', () => {
     expect(unlockScript).toBe('00');
   });
 
-  it('encodeStateValue(true, "bool") produces 51 via serializeState', () => {
+  it('encodeStateValue(true, "bool") produces 01 (raw byte) via serializeState', () => {
     const fields: StateField[] = [{ name: 'flag', type: 'bool', index: 0 }];
     const hex = serializeState(fields, { flag: true });
-    expect(hex).toBe('51');
+    expect(hex).toBe('01');
   });
 
   it('encodeStateValue(false, "bool") produces 00 via serializeState', () => {
@@ -630,10 +630,10 @@ describe('M2: SDK boolean encoding mismatch', () => {
 // ---------------------------------------------------------------------------
 
 describe('m9: encodeScriptInt zero encoding', () => {
-  it('state serialization of zero bigint produces 00 (OP_0)', () => {
+  it('state serialization of zero bigint produces 8-byte NUM2BIN zeros', () => {
     const fields: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
     const hex = serializeState(fields, { count: 0n });
-    expect(hex).toBe('00');
+    expect(hex).toBe('0000000000000000');
   });
 
   it('zero bigint roundtrips correctly through serialize/deserialize', () => {
@@ -641,6 +641,94 @@ describe('m9: encodeScriptInt zero encoding', () => {
     const hex = serializeState(fields, { count: 0n });
     const result = deserializeState(fields, hex);
     expect(result.count).toBe(0n);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix: BigInt values from JSON without reviver ("0n" strings)
+// ---------------------------------------------------------------------------
+
+describe('BigInt values from JSON without reviver', () => {
+  it('constructor revives "0n" initialValue from JSON-loaded artifact', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [],
+      },
+      stateFields: [
+        { name: 'count', type: 'bigint', index: 0, initialValue: '0n' as unknown as bigint },
+      ],
+    });
+
+    const contract = new RunarContract(artifact, []);
+    expect(contract.state.count).toBe(0n);
+  });
+
+  it('constructor revives "1000n" initialValue from JSON-loaded artifact', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [],
+      },
+      stateFields: [
+        { name: 'amount', type: 'bigint', index: 0, initialValue: '1000n' as unknown as bigint },
+      ],
+    });
+
+    const contract = new RunarContract(artifact, []);
+    expect(contract.state.amount).toBe(1000n);
+  });
+
+  it('constructor revives negative "-42n" initialValue from JSON-loaded artifact', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [],
+      },
+      stateFields: [
+        { name: 'offset', type: 'bigint', index: 0, initialValue: '-42n' as unknown as bigint },
+      ],
+    });
+
+    const contract = new RunarContract(artifact, []);
+    expect(contract.state.offset).toBe(-42n);
+  });
+
+  it('serializeState handles "0n" string values defensively', () => {
+    const fields: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
+    // Simulate state containing unrevived "0n" string
+    const hex = serializeState(fields, { count: '0n' as unknown as bigint });
+    expect(hex).toBe('0000000000000000');
+  });
+
+  it('serializeState handles "1000n" string values defensively', () => {
+    const fields: StateField[] = [{ name: 'count', type: 'bigint', index: 0 }];
+    const hex = serializeState(fields, { count: '1000n' as unknown as bigint });
+    // 1000n serialized with native bigint should match
+    const expected = serializeState(fields, { count: 1000n });
+    expect(hex).toBe(expected);
+  });
+
+  it('end-to-end: getLockingScript works with JSON-loaded artifact having "0n" initialValues', () => {
+    const artifact = makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [] },
+        methods: [],
+      },
+      stateFields: [
+        { name: 'count', type: 'bigint', index: 0, initialValue: '0n' as unknown as bigint },
+      ],
+    });
+
+    const contract = new RunarContract(artifact, []);
+    const script = contract.getLockingScript();
+    // Should be valid hex, no crash
+    expect(script).toMatch(/^[0-9a-f]+$/);
+    expect(script).toContain('6a'); // OP_RETURN separator
   });
 });
 

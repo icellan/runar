@@ -18,6 +18,7 @@ export class MockProvider implements Provider {
   private readonly broadcastedTxs: string[] = [];
   private readonly network: 'mainnet' | 'testnet';
   private broadcastCount = 0;
+  private feeRate = 1;
 
   constructor(network: 'mainnet' | 'testnet' = 'testnet') {
     this.network = network;
@@ -76,6 +77,26 @@ export class MockProvider implements Provider {
 
   getNetwork(): 'mainnet' | 'testnet' {
     return this.network;
+  }
+
+  async getFeeRate(): Promise<number> {
+    return this.feeRate;
+  }
+
+  async getRawTransaction(txid: string): Promise<string> {
+    const tx = this.transactions.get(txid);
+    if (!tx) {
+      throw new Error(`MockProvider: transaction ${txid} not found`);
+    }
+    if (!tx.raw) {
+      throw new Error(`MockProvider: transaction ${txid} has no raw hex`);
+    }
+    return tx.raw;
+  }
+
+  /** Set the fee rate returned by getFeeRate() (for testing). */
+  setFeeRate(rate: number): void {
+    this.feeRate = rate;
   }
 }
 

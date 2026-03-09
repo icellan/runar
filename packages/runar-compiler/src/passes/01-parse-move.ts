@@ -158,7 +158,7 @@ function mapMoveType(name: string): string {
 }
 
 function snakeToCamel(name: string): string {
-  return name.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+  return name.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
 }
 
 // ---------------------------------------------------------------------------
@@ -254,11 +254,19 @@ class MoveParser {
           const typeName = this.parseMoveType();
           if (!readonly) hasMutableField = true;
 
+          // Optional initializer: = value
+          let initializer: Expression | undefined;
+          if (this.current().type === '=') {
+            this.advance();
+            initializer = this.parseExpression();
+          }
+
           properties.push({
             kind: 'property',
             name: propName,
             type: typeName,
             readonly,
+            initializer,
             sourceLocation: propLoc,
           });
 
@@ -284,12 +292,13 @@ class MoveParser {
     const hasMutable = properties.some(p => !p.readonly);
     if (hasMutable) parentClass = 'StatefulSmartContract';
 
-    // Build constructor
+    // Build constructor — only non-initialized properties become params
     const loc = { file: this.file, line: 1, column: 1 };
+    const uninitProps = properties.filter(p => !p.initializer);
     const constructorNode: MethodNode = {
       kind: 'method',
       name: 'constructor',
-      params: properties.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
+      params: uninitProps.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
       body: [
         // super(...) as first statement
         {
@@ -297,11 +306,11 @@ class MoveParser {
           expression: {
             kind: 'call_expr' as const,
             callee: { kind: 'identifier' as const, name: 'super' },
-            args: properties.map(p => ({ kind: 'identifier' as const, name: p.name })),
+            args: uninitProps.map(p => ({ kind: 'identifier' as const, name: p.name })),
           },
           sourceLocation: loc,
         },
-        ...properties.map(p => ({
+        ...uninitProps.map(p => ({
           kind: 'assignment' as const,
           target: { kind: 'property_access' as const, property: p.name },
           value: { kind: 'identifier' as const, name: p.name },
@@ -344,7 +353,7 @@ class MoveParser {
 
     const primitives = new Set([
       'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'void',
+      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
     ]);
     if (primitives.has(mapped)) {
       return { kind: 'primitive_type', name: mapped as PrimitiveTypeName };
@@ -709,13 +718,62 @@ class MoveParser {
     if (t.type === 'ident') {
       this.advance();
       const name = snakeToCamel(t.value);
-      // Map Move builtins to Rúnar builtins
+      // Map Move builtins to Rúnar builtins.
+      // After snakeToCamel, most names already match (e.g. check_sig → checkSig).
+      // Explicit entries are needed for:
+      //   1. Names where snakeToCamel produces wrong casing (num_2_bin → num2Bin, not num2bin)
+      //   2. Names where the Move convention differs from the Rúnar name
+      //      (reverse_byte_string → reverseByteString, but Rúnar uses reverseBytes)
+      //   3. Builtins whose names pass through snakeToCamel unchanged and need anchoring
       const builtinMap: Record<string, string> = {
-        hash160: 'hash160', hash256: 'hash256', sha256: 'sha256',
-        ripemd160: 'ripemd160', checkSig: 'checkSig', checkMultiSig: 'checkMultiSig',
+        // Hashing
+        hash160: 'hash160', hash256: 'hash256', sha256: 'sha256', ripemd160: 'ripemd160',
+        // Signature verification
+        checkSig: 'checkSig', checkMultiSig: 'checkMultiSig',
         checkPreimage: 'checkPreimage', verifyRabinSig: 'verifyRabinSig',
-        num2bin: 'num2bin', extractLocktime: 'extractLocktime',
+        // Post-quantum signature verification
+        verifyWOTS: 'verifyWOTS', verifyWots: 'verifyWOTS',
+        // verify_slhdsa_sha2_128s → verifySlhdsaSha2128s, verify_slh_dsa_sha2_128s → verifySlhDsaSha2128s
+        verifySlhdsaSha2128s: 'verifySLHDSA_SHA2_128s', verifySlhDsaSha2128s: 'verifySLHDSA_SHA2_128s',
+        verifySlhdsaSha2128f: 'verifySLHDSA_SHA2_128f', verifySlhDsaSha2128f: 'verifySLHDSA_SHA2_128f',
+        verifySlhdsaSha2192s: 'verifySLHDSA_SHA2_192s', verifySlhDsaSha2192s: 'verifySLHDSA_SHA2_192s',
+        verifySlhdsaSha2192f: 'verifySLHDSA_SHA2_192f', verifySlhDsaSha2192f: 'verifySLHDSA_SHA2_192f',
+        verifySlhdsaSha2256s: 'verifySLHDSA_SHA2_256s', verifySlhDsaSha2256s: 'verifySLHDSA_SHA2_256s',
+        verifySlhdsaSha2256f: 'verifySLHDSA_SHA2_256f', verifySlhDsaSha2256f: 'verifySLHDSA_SHA2_256f',
+        // Byte operations — fixups for digit-containing names
+        num2bin: 'num2bin', num2Bin: 'num2bin',
+        bin2num: 'bin2num', bin2Num: 'bin2num',
+        int2str: 'int2str', int2Str: 'int2str',
+        // Byte operations — name divergence fixups
+        reverseByteString: 'reverseBytes', reverseBytes: 'reverseBytes',
+        toByteString: 'toByteString',
+        cat: 'cat', substr: 'substr', split: 'split', left: 'left', right: 'right',
+        len: 'len', pack: 'pack', unpack: 'unpack', bool: 'bool',
+        // Preimage extractors
+        extractVersion: 'extractVersion',
+        extractHashPrevouts: 'extractHashPrevouts',
+        extractHashSequence: 'extractHashSequence',
+        extractOutpoint: 'extractOutpoint',
+        extractScriptCode: 'extractScriptCode',
+        extractSequence: 'extractSequence',
+        extractSigHashType: 'extractSigHashType',
+        extractInputIndex: 'extractInputIndex',
+        extractOutputs: 'extractOutputs',
+        extractAmount: 'extractAmount',
+        extractLocktime: 'extractLocktime',
         extractOutputHash: 'extractOutputHash',
+        // Output construction
+        addOutput: 'addOutput',
+        // Math builtins
+        abs: 'abs', min: 'min', max: 'max', within: 'within',
+        safediv: 'safediv', safemod: 'safemod', clamp: 'clamp', sign: 'sign',
+        pow: 'pow', mulDiv: 'mulDiv', percentOf: 'percentOf', sqrt: 'sqrt',
+        gcd: 'gcd', divmod: 'divmod', log2: 'log2',
+        // EC builtins
+        ecAdd: 'ecAdd', ecMul: 'ecMul', ecMulGen: 'ecMulGen',
+        ecNegate: 'ecNegate', ecOnCurve: 'ecOnCurve', ecModReduce: 'ecModReduce',
+        ecEncodeCompressed: 'ecEncodeCompressed', ecMakePoint: 'ecMakePoint',
+        ecPointX: 'ecPointX', ecPointY: 'ecPointY',
       };
       return { kind: 'identifier', name: builtinMap[name] || name };
     }

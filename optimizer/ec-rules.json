@@ -1,0 +1,62 @@
+[
+  {
+    "name": "ec-add-identity-right",
+    "match": { "func": "ecAdd", "args": ["$x", { "func": "ecMulGen", "args": [0] }] },
+    "replace": "$x"
+  },
+  {
+    "name": "ec-add-identity-left",
+    "match": { "func": "ecAdd", "args": [{ "func": "ecMulGen", "args": [0] }, "$x"] },
+    "replace": "$x"
+  },
+  {
+    "name": "ec-mul-one",
+    "match": { "func": "ecMul", "args": ["$x", 1] },
+    "replace": "$x"
+  },
+  {
+    "name": "ec-mul-zero",
+    "match": { "func": "ecMul", "args": ["$x", 0] },
+    "replace": { "const": "INFINITY" }
+  },
+  {
+    "name": "ec-mulgen-zero",
+    "match": { "func": "ecMulGen", "args": [0] },
+    "replace": { "const": "INFINITY" }
+  },
+  {
+    "name": "ec-mulgen-one",
+    "match": { "func": "ecMulGen", "args": [1] },
+    "replace": { "const": "G" }
+  },
+  {
+    "name": "ec-negate-negate",
+    "match": { "func": "ecNegate", "args": [{ "func": "ecNegate", "args": ["$x"] }] },
+    "replace": "$x"
+  },
+  {
+    "name": "ec-add-negate-cancel",
+    "match": { "func": "ecAdd", "args": ["$x", { "func": "ecNegate", "args": ["$x"] }] },
+    "replace": { "const": "INFINITY" }
+  },
+  {
+    "name": "ec-mul-associative",
+    "match": { "func": "ecMul", "args": [{ "func": "ecMul", "args": ["$p", "$k1"] }, "$k2"] },
+    "replace": { "func": "ecMul", "args": ["$p", { "op": "*", "args": ["$k1", "$k2"] }] }
+  },
+  {
+    "name": "ec-mulgen-linear",
+    "match": { "func": "ecAdd", "args": [{ "func": "ecMulGen", "args": ["$k1"] }, { "func": "ecMulGen", "args": ["$k2"] }] },
+    "replace": { "func": "ecMulGen", "args": [{ "op": "+", "args": ["$k1", "$k2"] }] }
+  },
+  {
+    "name": "ec-mul-distributive",
+    "match": { "func": "ecAdd", "args": [{ "func": "ecMul", "args": ["$k1", "$p"] }, { "func": "ecMul", "args": ["$k2", "$p"] }] },
+    "replace": { "func": "ecMul", "args": [{ "op": "+", "args": ["$k1", "$k2"] }, "$p"] }
+  },
+  {
+    "name": "ec-mul-generator-specialize",
+    "match": { "func": "ecMul", "args": ["$k", { "const": "G" }] },
+    "replace": { "func": "ecMulGen", "args": ["$k"] }
+  }
+]

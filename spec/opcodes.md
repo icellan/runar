@@ -94,8 +94,7 @@ Means: `b` is on top, `a` is below it. The operation consumes both and pushes `a
 | `if (cond) { ... } else { ... }` | `OP_IF ... OP_ELSE ... OP_ENDIF` |
 | `assert(cond)` (non-final) | `<cond> OP_VERIFY` |
 | `assert(cond)` (final statement) | `<cond>` (left on stack) |
-| `exit(true)` | `OP_TRUE OP_RETURN` |
-| `exit(false)` | `OP_FALSE OP_RETURN` |
+| `exit(cond)` | `<cond> OP_VERIFY` |
 
 ### 3.2 If/Else Compilation
 
@@ -174,6 +173,8 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `0x98` | `OP_LSHIFT` | `(a b -- a<<b)` | Left shift (BSV re-enabled) |
 | `0x99` | `OP_RSHIFT` | `(a b -- a>>b)` | Right shift (BSV re-enabled) |
 
+> **Warning:** `OP_LSHIFT` and `OP_RSHIFT` in BSV operate on **raw byte arrays** (big-endian unsigned shift), NOT on Script numbers. They preserve the input byte length. This is incompatible with numeric `BigInt` shifting for multi-byte script numbers. The constant-fold optimizer skips folding `>>` for negative left operands due to this mismatch; however, `<<` is currently folded unconditionally, which may produce results at compile time that differ from runtime `OP_LSHIFT` behavior for negative or multi-byte operands. For reliable numeric shifting, use `OP_DIV` or `OP_MUL` with a power of 2 instead (e.g., `PUSH (1<<n) OP_DIV` for right-shift, `PUSH (1<<n) OP_MUL` for left-shift).
+
 ### 5.1 Rúnar Mapping
 
 | Rúnar Expression | Opcode |
@@ -186,8 +187,10 @@ Use `OP_PICK` when the value will be needed again later. Use `OP_ROLL` when this
 | `-a` | `OP_NEGATE` |
 | `abs(a)` | `OP_ABS` |
 | `!a` | `OP_NOT` |
-| `a && b` (after short-circuit lowering) | `OP_BOOLAND` or `OP_IF`/`OP_ENDIF` |
-| `a \|\| b` (after short-circuit lowering) | `OP_BOOLOR` or `OP_IF`/`OP_ENDIF` |
+| `a && b` (eager evaluation) | `OP_BOOLAND` |
+| `a \|\| b` (eager evaluation) | `OP_BOOLOR` |
+| `a << b` | `OP_LSHIFT` |
+| `a >> b` | `OP_RSHIFT` |
 
 ### 5.2 Bitwise Operations
 
@@ -245,7 +248,7 @@ These are fully available for Rúnar on BSV. They are NOT available on BTC or BC
 |---|---|
 | `a === b` (bigint) | `OP_NUMEQUAL` |
 | `a === b` (ByteString) | `OP_EQUAL` |
-| `a !== b` (bigint) | `OP_NUMNOTEQUAL` |
+| `a !== b` (bigint) | `OP_NUMEQUAL OP_NOT` |
 | `a !== b` (ByteString) | `OP_EQUAL OP_NOT` |
 | `a < b` | `OP_LESSTHAN` |
 | `a > b` | `OP_GREATERTHAN` |
@@ -268,11 +271,11 @@ Rúnar selects the appropriate opcode based on the operand types determined duri
 
 | Hex | Name | Stack Effect | Description |
 |-----|------|-------------|-------------|
-| `0xa7` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
-| `0xa8` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
-| `0xa9` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
-| `0xaa` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
-| `0xab` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
+| `0xa6` | `OP_RIPEMD160` | `(data -- hash)` | RIPEMD-160 hash |
+| `0xa7` | `OP_SHA1` | `(data -- hash)` | SHA-1 hash (not recommended) |
+| `0xa8` | `OP_SHA256` | `(data -- hash)` | SHA-256 hash |
+| `0xa9` | `OP_HASH160` | `(data -- hash)` | SHA-256 then RIPEMD-160 |
+| `0xaa` | `OP_HASH256` | `(data -- hash)` | Double SHA-256 |
 | `0xac` | `OP_CHECKSIG` | `(sig pubKey -- bool)` | Verify ECDSA signature |
 | `0xad` | `OP_CHECKSIGVERIFY` | `(sig pubKey -- )` | `OP_CHECKSIG` then `OP_VERIFY` |
 | `0xae` | `OP_CHECKMULTISIG` | `(... sigs n pubKeys m -- bool)` | Verify m-of-n multi-signature |
@@ -350,9 +353,12 @@ These opcodes were disabled in BTC but are **re-enabled in BSV**:
 | Rúnar Operation | Opcode |
 |---|---|
 | `a + b` (ByteString) | `OP_CAT` |
-| `ByteString.slice(start, end)` | `OP_SPLIT` (twice if needed) |
+| `split(data, index)` | `OP_SPLIT` |
+| `left(data, len)` | `OP_SPLIT OP_DROP` |
+| `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` |
+| `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` |
 | `len(data)` | `OP_SIZE OP_NIP` |
-| `pack(n)` | `OP_NUM2BIN` |
+| `pack(n)` | No-op (type-level cast) |
 | `unpack(data)` | `OP_BIN2NUM` |
 
 ### 8.2 OP_CAT Significance
@@ -386,8 +392,8 @@ The following opcodes exist in the Bitcoin Script specification but are **not us
 |-----|------|--------|
 | `0x65` | `OP_VERIF` | Always fails (reserved) |
 | `0x66` | `OP_VERNOTIF` | Always fails (reserved) |
-| `0xa8` | `OP_SHA1` | Not used by Rúnar (weak hash) |
-| `0xab`+ | `OP_CODESEPARATOR` | Not used by Rúnar |
+| `0xa7` | `OP_SHA1` | Not used by Rúnar (weak hash) |
+| `0xab` | `OP_CODESEPARATOR` | Not used by Rúnar |
 
 ---
 
@@ -435,15 +441,52 @@ The `this.checkPreimage(preimage)` call in Rúnar generates the OP_PUSH_TX verif
 
 ---
 
-## 12. Chronicle Extensions (Future)
+## 12. Elliptic Curve Operations (Synthesized)
+
+EC operations (`ecAdd`, `ecMul`, `ecMulGen`, etc.) do not have dedicated Bitcoin Script opcodes. Instead, the EC codegen module synthesizes them from base arithmetic opcodes.
+
+### 12.1 Field Arithmetic Primitives
+
+All EC operations are built on secp256k1 field arithmetic over `F_p` where `p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F`:
+
+| Operation | Implementation |
+|-----------|---------------|
+| Field addition | `OP_ADD`, `OP_MOD` |
+| Field subtraction | `OP_SUB`, `OP_MOD` (with correction for negative results) |
+| Field multiplication | `OP_MUL`, `OP_MOD` |
+| Modular inverse | Extended Euclidean algorithm via bounded `OP_IF`/`OP_ELSE` loop |
+| Field division | Multiply by modular inverse |
+
+### 12.2 EC Operation Synthesis
+
+| Rúnar Function | Synthesized From | Approximate Script Size |
+|---------------|------------------|------------------------|
+| `ecAdd(a, b)` | Field arithmetic: slope computation, point formula | ~2-5 KB |
+| `ecMul(p, k)` | 256-iteration double-and-add loop (Jacobian coordinates) | ~50-100 KB |
+| `ecMulGen(k)` | Same as `ecMul` but with hardcoded generator G | ~50-100 KB |
+| `ecNegate(p)` | `OP_SPLIT` (extract y), `PUSH p`, `OP_SWAP`, `OP_SUB` | ~100 B |
+| `ecOnCurve(p)` | Compute `y^2` and `x^3 + 7`, compare mod p | ~500 B |
+| `ecModReduce(v, m)` | `OP_MOD` with negative correction | ~20 B |
+| `ecEncodeCompressed(p)` | Extract x, compute parity of y, prefix with 02/03 | ~200 B |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN` (32 bytes each), `OP_CAT` | ~50 B |
+| `ecPointX(p)` | `PUSH 0`, `PUSH 32`, `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | ~20 B |
+| `ecPointY(p)` | `PUSH 32`, `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | ~20 B |
+
+### 12.3 Jacobian Coordinate Optimization
+
+`ecMul` and `ecMulGen` use Jacobian projective coordinates internally to avoid expensive modular inversions during the 256-iteration double-and-add loop. A single affine conversion (one modular inverse) is performed at the end. This is a standard optimization for EC scalar multiplication.
+
+---
+
+## 13. Chronicle Extensions (Future)
 
 The following notes document potential future opcodes or extensions that may be available on Chronicle (BSV-derived chains) but are **not part of BSV consensus as of this specification**.
 
-### 12.1 BSV-Native (Available Now)
+### 13.1 BSV-Native (Available Now)
 
-All opcodes listed in sections 2-10 are BSV-native and available on mainnet.
+All opcodes listed in sections 2-11 are BSV-native and available on mainnet.
 
-### 12.2 Potential Chronicle Extensions
+### 13.2 Potential Chronicle Extensions
 
 | Name | Description | Status |
 |---|---|---|
@@ -461,13 +504,13 @@ All opcodes listed in sections 2-10 are BSV-native and available on mainnet.
 
 If Chronicle extensions become available, Rúnar would be able to replace the OP_PUSH_TX sighash-trick pattern with direct introspection opcodes, resulting in smaller and more efficient scripts for stateful contracts.
 
-### 12.3 Impact on Rúnar
+### 13.3 Impact on Rúnar
 
 Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preimage` and `get_state_script` IR nodes abstract over the underlying mechanism. If native introspection opcodes become available, only the code generator (Stack IR to Script) needs to change -- the ANF IR and higher-level semantics remain the same.
 
 ---
 
-## 13. Quick Reference: Rúnar Operation to Opcode
+## 14. Quick Reference: Rúnar Operation to Opcode
 
 | Rúnar Operation | Primary Opcode(s) | Hex |
 |---|---|---|
@@ -482,24 +525,41 @@ Rúnar's IR is designed to be opcode-agnostic at the ANF level. The `check_preim
 | `abs(a)` | `OP_ABS` | `0x90` |
 | `a === b` (bigint) | `OP_NUMEQUAL` | `0x9c` |
 | `a === b` (bytes) | `OP_EQUAL` | `0x87` |
-| `a !== b` (bigint) | `OP_NUMNOTEQUAL` | `0x9e` |
+| `a !== b` (bigint) | `OP_NUMEQUAL OP_NOT` | `0x9c 0x91` |
 | `a < b` | `OP_LESSTHAN` | `0x9f` |
 | `a <= b` | `OP_LESSTHANOREQUAL` | `0xa1` |
 | `a > b` | `OP_GREATERTHAN` | `0xa0` |
 | `a >= b` | `OP_GREATERTHANOREQUAL` | `0xa2` |
-| `sha256(x)` | `OP_SHA256` | `0xa9` |
-| `ripemd160(x)` | `OP_RIPEMD160` | `0xa7` |
-| `hash160(x)` | `OP_HASH160` | `0xaa` |
-| `hash256(x)` | `OP_HASH256` | `0xab` |
+| `sha256(x)` | `OP_SHA256` | `0xa8` |
+| `ripemd160(x)` | `OP_RIPEMD160` | `0xa6` |
+| `hash160(x)` | `OP_HASH160` | `0xa9` |
+| `hash256(x)` | `OP_HASH256` | `0xaa` |
 | `checkSig(s, pk)` | `OP_CHECKSIG` | `0xac` |
 | `checkMultiSig(...)` | `OP_CHECKMULTISIG` | `0xae` |
 | `assert(x)` (non-final) | `OP_VERIFY` | `0x69` |
 | `len(x)` | `OP_SIZE OP_NIP` | `0x82 0x77` |
-| `pack(n)` | `OP_NUM2BIN` | `0x80` |
+| `pack(n)` | No-op (type-level cast) | — |
 | `unpack(bs)` | `OP_BIN2NUM` | `0x81` |
 | `a & b` | `OP_AND` | `0x84` |
 | `a \| b` | `OP_OR` | `0x85` |
 | `a ^ b` | `OP_XOR` | `0x86` |
 | `~a` | `OP_INVERT` | `0x83` |
 | `reverseBytes(x)` | `OP_SPLIT` / `OP_CAT` loop | — |
+| `num2bin(n, size)` | `OP_NUM2BIN` | `0x80` |
+| `int2str(n, size)` | `OP_NUM2BIN` | `0x80` |
+| `bool(n)` | `OP_0NOTEQUAL` | `0x92` |
+| `substr(data, start, len)` | `OP_SPLIT OP_NIP` + `OP_SPLIT OP_DROP` | `0x7f 0x77 ... 0x7f 0x75` |
+| `right(data, len)` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` | `0x7c 0x82 0x7b 0x94 0x7f 0x77` |
+| `split(data, index)` | `OP_SPLIT` | `0x7f` |
+| `left(data, len)` | `OP_SPLIT OP_DROP` | `0x7f 0x75` |
 | `if/else` | `OP_IF OP_ELSE OP_ENDIF` | `0x63 0x67 0x68` |
+| `ecAdd(a, b)` | Synthesized (field arithmetic) | — |
+| `ecMul(p, k)` | Synthesized (256-iter double-and-add) | — |
+| `ecMulGen(k)` | Synthesized (256-iter double-and-add) | — |
+| `ecNegate(p)` | `OP_SPLIT`, `OP_SUB` | — |
+| `ecOnCurve(p)` | Synthesized (field arithmetic) | — |
+| `ecModReduce(v, m)` | `OP_MOD`, `OP_ADD`, `OP_MOD` | — |
+| `ecEncodeCompressed(p)` | `OP_SPLIT`, `OP_MOD`, `OP_CAT` | — |
+| `ecMakePoint(x, y)` | `OP_NUM2BIN`, `OP_CAT` | — |
+| `ecPointX(p)` | `OP_SPLIT`, `OP_DROP`, `OP_BIN2NUM` | — |
+| `ecPointY(p)` | `OP_SPLIT`, `OP_NIP`, `OP_BIN2NUM` | — |

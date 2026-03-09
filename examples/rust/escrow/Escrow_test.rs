@@ -12,10 +12,8 @@ fn new_escrow() -> Escrow {
     }
 }
 
-#[test] fn test_release_by_seller()  { new_escrow().release_by_seller(&mock_sig()); }
-#[test] fn test_release_by_arbiter() { new_escrow().release_by_arbiter(&mock_sig()); }
-#[test] fn test_refund_to_buyer()    { new_escrow().refund_to_buyer(&mock_sig()); }
-#[test] fn test_refund_by_arbiter()  { new_escrow().refund_by_arbiter(&mock_sig()); }
+#[test] fn test_release() { new_escrow().release(&mock_sig(), &mock_sig()); }
+#[test] fn test_refund()  { new_escrow().refund(&mock_sig(), &mock_sig()); }
 
 #[test]
 fn test_compile() {

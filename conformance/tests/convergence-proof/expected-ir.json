@@ -1,0 +1,286 @@
+{
+  "contractName": "ConvergenceProof",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "rA"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "rB"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "rA"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "update_prop",
+            "name": "rA",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "rB"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "rB",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "rA",
+          "type": "Point"
+        },
+        {
+          "name": "rB",
+          "type": "Point"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "rA"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "rB"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t3"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "rA"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_prop",
+            "name": "rB"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "t7"
+            ],
+            "func": "ecNegate",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "t6",
+              "t8"
+            ],
+            "func": "ecAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "diff",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t9"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "deltaO"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "args": [
+              "t10"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "expected",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t11"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "args": [
+              "diff"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "args": [
+              "expected"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "bin_op",
+            "left": "t12",
+            "op": "===",
+            "right": "t13"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "assert",
+            "value": "t14"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "args": [
+              "diff"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "args": [
+              "expected"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "bin_op",
+            "left": "t16",
+            "op": "===",
+            "right": "t17"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "assert",
+            "value": "t18"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "proveConvergence",
+      "params": [
+        {
+          "name": "deltaO",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "rA",
+      "readonly": true,
+      "type": "Point"
+    },
+    {
+      "name": "rB",
+      "readonly": true,
+      "type": "Point"
+    }
+  ]
+}

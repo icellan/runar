@@ -1,6 +1,6 @@
 package contract
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type PriceBet struct {
 	runar.SmartContract
@@ -17,8 +17,12 @@ func (c *PriceBet) Settle(price runar.Bigint, rabinSig runar.RabinSig, padding r
 	runar.Assert(price > 0)
 
 	if price > c.StrikePrice {
+		// bobSig is present in the unlocking script for stack alignment but is
+		// intentionally not checked in this branch — only alice (the winner) signs.
 		runar.Assert(runar.CheckSig(aliceSig, c.AlicePubKey))
 	} else {
+		// aliceSig is present in the unlocking script for stack alignment but is
+		// intentionally not checked in this branch — only bob (the winner) signs.
 		runar.Assert(runar.CheckSig(bobSig, c.BobPubKey))
 	}
 }

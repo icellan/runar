@@ -11,3 +11,9 @@ coverage/
 .vscode/
 /conformance/.tmp/
 target/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+runar*-go

@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/covenant-vault/CovenantVault.runar.ts",
+    ".runar.sol": "../../../examples/sol/covenant-vault/CovenantVault.runar.sol",
+    ".runar.move": "../../../examples/move/covenant-vault/CovenantVault.runar.move",
+    ".runar.go": "../../../examples/go/covenant-vault/CovenantVault.runar.go",
+    ".runar.rs": "../../../examples/rust/covenant-vault/CovenantVault.runar.rs",
+    ".runar.py": "../../../examples/python/covenant-vault/CovenantVault.runar.py"
+  }
+}

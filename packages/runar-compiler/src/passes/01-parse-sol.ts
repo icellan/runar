@@ -251,10 +251,12 @@ class SolParser {
     // Build constructor if not explicitly defined
     if (!constructorNode) {
       const loc = { file: this.file, line: 1, column: 1 };
+      // Only non-initialized properties become constructor params
+      const uninitProps = properties.filter(p => !p.initializer);
       constructorNode = {
         kind: 'method',
         name: 'constructor',
-        params: properties.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
+        params: uninitProps.map(p => ({ kind: 'param' as const, name: p.name, type: p.type })),
         body: [
           // super(...) as first statement
           {
@@ -262,11 +264,11 @@ class SolParser {
             expression: {
               kind: 'call_expr' as const,
               callee: { kind: 'identifier' as const, name: 'super' },
-              args: properties.map(p => ({ kind: 'identifier' as const, name: p.name })),
+              args: uninitProps.map(p => ({ kind: 'identifier' as const, name: p.name })),
             },
             sourceLocation: loc,
           },
-          ...properties.map(p => ({
+          ...uninitProps.map(p => ({
             kind: 'assignment' as const,
             target: { kind: 'property_access' as const, property: p.name },
             value: { kind: 'identifier' as const, name: p.name },
@@ -298,7 +300,7 @@ class SolParser {
 
   private parseProperty(): PropertyNode {
     const location = this.loc();
-    // Type [immutable] name;
+    // Type [immutable] name [= value];
     const typeName = this.parseType();
     let readonly = false;
     if (this.current().type === 'immutable') {
@@ -306,12 +308,21 @@ class SolParser {
       readonly = true;
     }
     const name = this.expect('ident').value;
+
+    // Optional initializer: = value
+    let initializer: Expression | undefined;
+    if (this.current().type === '=') {
+      this.advance();
+      initializer = this.parseExpression();
+    }
+
     this.expect(';');
     return {
       kind: 'property',
       name,
       type: typeName,
       readonly,
+      initializer,
       sourceLocation: location,
     };
   }
@@ -336,7 +347,7 @@ class SolParser {
   private makePrimitiveOrCustom(name: string): TypeNode {
     const primitives = new Set([
       'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'void',
+      'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
     ]);
     if (primitives.has(name)) {
       return { kind: 'primitive_type', name: name as PrimitiveTypeName };

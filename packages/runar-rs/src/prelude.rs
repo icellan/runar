@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256 as Sha256Hasher};
 
 // Re-export macros so `use runar::prelude::*` gets them too.
-pub use runar_macros::{contract, methods, public, stateful_contract};
+pub use runar_lang_macros::{contract, methods, public, stateful_contract};
 
 // ---------------------------------------------------------------------------
 // Scalar types — type aliases so Rust arithmetic operators work directly
@@ -49,6 +49,9 @@ pub type RabinSig = Vec<u8>;
 
 /// A Rabin public key.
 pub type RabinPubKey = Vec<u8>;
+
+/// A 64-byte EC point (x[32] || y[32], big-endian, no prefix).
+pub type Point = Vec<u8>;
 
 // ---------------------------------------------------------------------------
 // Output snapshot (for stateful contracts with add_output)
@@ -147,20 +150,60 @@ pub fn verify_rabin_sig(_msg: &[u8], _sig: &[u8], _padding: &[u8], _pk: &[u8]) -
     true
 }
 
-/// Always returns `true` in test mode.
-/// Real WOTS+ verification happens in compiled Bitcoin Script.
-pub fn verify_wots(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool {
-    true
+/// Real WOTS+ signature verification using SHA-256 hash chains.
+pub fn verify_wots(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::wots::wots_verify_impl(msg, sig, pk)
 }
 
-// SLH-DSA (SPHINCS+) SHA-256 variants — all return true in test mode.
+// SLH-DSA (SPHINCS+) SHA-256 variants — real FIPS 205 verification.
 
-pub fn verify_slh_dsa_sha2_128s(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
-pub fn verify_slh_dsa_sha2_128f(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
-pub fn verify_slh_dsa_sha2_192s(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
-pub fn verify_slh_dsa_sha2_192f(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
-pub fn verify_slh_dsa_sha2_256s(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
-pub fn verify_slh_dsa_sha2_256f(_msg: &[u8], _sig: &[u8], _pk: &[u8]) -> bool { true }
+/// Real SLH-DSA-SHA2-128s verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_128s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_128S, msg, sig, pk)
+}
+
+/// Real SLH-DSA-SHA2-128f verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_128f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_128F, msg, sig, pk)
+}
+
+/// Real SLH-DSA-SHA2-192s verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_192s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_192S, msg, sig, pk)
+}
+
+/// Real SLH-DSA-SHA2-192f verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_192f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_192F, msg, sig, pk)
+}
+
+/// Real SLH-DSA-SHA2-256s verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_256s(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_256S, msg, sig, pk)
+}
+
+/// Real SLH-DSA-SHA2-256f verification (FIPS 205).
+pub fn verify_slh_dsa_sha2_256f(msg: &[u8], sig: &[u8], pk: &[u8]) -> bool {
+    crate::slh_dsa::slh_verify(&crate::slh_dsa::SLH_SHA2_256F, msg, sig, pk)
+}
+
+// ---------------------------------------------------------------------------
+// EC (elliptic curve) functions — real secp256k1 arithmetic for testing.
+// In compiled Bitcoin Script, these map to EC codegen opcodes.
+// ---------------------------------------------------------------------------
+
+pub use crate::ec::{
+    ec_add, ec_encode_compressed, ec_make_point, ec_mod_reduce, ec_mul, ec_mul_gen,
+    ec_negate, ec_on_curve, ec_point_x, ec_point_y,
+};
+
+pub use crate::wots::{wots_keygen, wots_sign, WotsKeyPair};
+
+pub use crate::slh_dsa::{
+    slh_keygen, slh_sign, slh_verify, SlhKeyPair, SlhParams,
+    SLH_SHA2_128S, SLH_SHA2_128F, SLH_SHA2_192S, SLH_SHA2_192F,
+    SLH_SHA2_256S, SLH_SHA2_256F,
+};
 
 // ---------------------------------------------------------------------------
 // Real hash functions
@@ -207,6 +250,18 @@ pub fn extract_output_hash(_p: &[u8]) -> ByteString {
     vec![0u8; 32]
 }
 
+/// Returns `hash256([0u8; 72])` in test mode.
+/// This is consistent with passing `all_prevouts = [0u8; 72]` in tests,
+/// since `extract_outpoint` also returns 36 zero bytes.
+pub fn extract_hash_prevouts(_p: &[u8]) -> Sha256 {
+    hash256(&vec![0u8; 72])
+}
+
+/// Returns 36 zero bytes in test mode.
+pub fn extract_outpoint(_p: &[u8]) -> ByteString {
+    vec![0u8; 36]
+}
+
 /// Returns a mock state script (empty bytes).
 pub fn get_state_script<T>(_contract: &T) -> ByteString {
     vec![]
@@ -215,6 +270,13 @@ pub fn get_state_script<T>(_contract: &T) -> ByteString {
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
+
+/// Returns a substring of a byte string starting at `start` with the given `length`.
+pub fn substr(data: &[u8], start: i64, length: i64) -> ByteString {
+    let s = start as usize;
+    let l = length as usize;
+    data[s..s + l].to_vec()
+}
 
 /// Converts an integer to a byte string of the specified length
 /// using Bitcoin Script's little-endian signed magnitude encoding.
@@ -237,6 +299,32 @@ pub fn num2bin(v: &Bigint, length: usize) -> ByteString {
         buf[length - 1] |= 0x80;
     }
     buf
+}
+
+/// Converts a byte string (Bitcoin Script LE signed-magnitude) back to an integer.
+/// Inverse of `num2bin`.
+pub fn bin2num(data: &[u8]) -> Bigint {
+    if data.is_empty() {
+        return 0;
+    }
+    let last = data[data.len() - 1];
+    let negative = (last & 0x80) != 0;
+    let mut result: u64 = (last & 0x7f) as u64;
+    for i in (0..data.len() - 1).rev() {
+        result = (result << 8) | data[i] as u64;
+    }
+    if negative {
+        -(result as i64)
+    } else {
+        result as i64
+    }
+}
+
+/// Concatenates two byte strings.
+pub fn cat(a: &[u8], b: &[u8]) -> ByteString {
+    let mut result = a.to_vec();
+    result.extend_from_slice(b);
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -265,32 +353,45 @@ pub fn sign(n: Int) -> Int {
     if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
 }
 
-/// Exponentiation for non-negative exponents.
+/// Exponentiation for non-negative exponents. Panics on i64 overflow.
 pub fn pow(base: Int, exp: Int) -> Int {
     assert!(exp >= 0, "pow: negative exponent");
     let mut result: Int = 1;
-    for _ in 0..exp { result *= base; }
+    for _ in 0..exp {
+        result = result.checked_mul(base).unwrap_or_else(|| {
+            panic!("runar: i64 overflow in {} * {} — Bitcoin Script supports arbitrary precision but Rust tests use i64", result, base)
+        });
+    }
     result
 }
 
-/// (a * b) / c without intermediate overflow concern.
+/// (a * b) / c — panics on i64 overflow in a*b.
 pub fn mul_div(a: Int, b: Int, c: Int) -> Int {
     assert!(c != 0, "mulDiv: division by zero");
-    (a * b) / c
+    let product = a.checked_mul(b).unwrap_or_else(|| {
+        panic!("runar: i64 overflow in {} * {} — Bitcoin Script supports arbitrary precision but Rust tests use i64", a, b)
+    });
+    product / c
 }
 
-/// (amount * bps) / 10000 — basis point percentage.
+/// (amount * bps) / 10000 — basis point percentage. Panics on i64 overflow.
 pub fn percent_of(amount: Int, bps: Int) -> Int {
-    (amount * bps) / 10000
+    let product = amount.checked_mul(bps).unwrap_or_else(|| {
+        panic!("runar: i64 overflow in {} * {} — Bitcoin Script supports arbitrary precision but Rust tests use i64", amount, bps)
+    });
+    product / 10000
 }
 
-/// Integer square root via Newton's method.
+/// Integer square root via Newton's method. Panics on i64 overflow.
 pub fn sqrt(n: Int) -> Int {
     assert!(n >= 0, "sqrt: negative input");
     if n == 0 { return 0; }
     let mut guess = n;
     for _ in 0..256 {
-        let next = (guess + n / guess) / 2;
+        let sum = guess.checked_add(n / guess).unwrap_or_else(|| {
+            panic!("runar: i64 overflow in sqrt — Bitcoin Script supports arbitrary precision but Rust tests use i64")
+        });
+        let next = sum / 2;
         if next >= guess { break; }
         guess = next;
     }
@@ -298,9 +399,14 @@ pub fn sqrt(n: Int) -> Int {
 }
 
 /// Greatest common divisor via Euclidean algorithm.
+/// Panics if either argument is i64::MIN (|MIN| overflows i64).
 pub fn gcd(mut a: Int, mut b: Int) -> Int {
-    a = a.abs();
-    b = b.abs();
+    a = a.checked_abs().unwrap_or_else(|| {
+        panic!("runar: i64 overflow in gcd — |i64::MIN| not representable; Bitcoin Script supports arbitrary precision but Rust tests use i64")
+    });
+    b = b.checked_abs().unwrap_or_else(|| {
+        panic!("runar: i64 overflow in gcd — |i64::MIN| not representable; Bitcoin Script supports arbitrary precision but Rust tests use i64")
+    });
     while b != 0 { let t = b; b = a % b; a = t; }
     a
 }
@@ -417,5 +523,54 @@ mod tests {
         let pk = mock_pub_key();
         assert_eq!(pk.len(), 33);
         assert_eq!(pk[0], 0x02);
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow boundary tests — i64 limitation detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pow_small_values() {
+        assert_eq!(pow(2, 10), 1024);
+        assert_eq!(pow(3, 0), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_pow_overflow() {
+        pow(i64::MAX, 2);
+    }
+
+    #[test]
+    fn test_mul_div_small_values() {
+        assert_eq!(mul_div(100, 3, 2), 150);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_mul_div_overflow() {
+        mul_div(i64::MAX, 2, 1);
+    }
+
+    #[test]
+    fn test_percent_of_small_values() {
+        assert_eq!(percent_of(10000, 2500), 2500);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_percent_of_overflow() {
+        percent_of(i64::MAX, 5000);
+    }
+
+    #[test]
+    fn test_gcd_small_values() {
+        assert_eq!(gcd(12, 8), 4);
+    }
+
+    #[test]
+    #[should_panic(expected = "i64 overflow")]
+    fn test_gcd_min_panics() {
+        gcd(i64::MIN, 1);
     }
 }

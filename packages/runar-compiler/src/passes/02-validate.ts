@@ -58,7 +58,7 @@ interface ValidationContext {
 
 const VALID_PRIMITIVE_TYPES = new Set<string>([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point',
 ]);
 
 /** Reserved internal field names for InductiveSmartContract. */
@@ -88,6 +88,17 @@ function validateProperties(ctx: ValidationContext): void {
         prop.sourceLocation,
       ));
     }
+
+    // Validate initializer if present
+    if (prop.initializer) {
+      if (!isLiteralExpression(prop.initializer)) {
+        ctx.errors.push(makeDiagnostic(
+          `Property '${prop.name}' initializer must be a literal value (number, boolean, or hex string)`,
+          'error',
+          prop.sourceLocation,
+        ));
+      }
+    }
   }
 
   // SmartContract requires all properties to be readonly
@@ -114,6 +125,16 @@ function validateProperties(ctx: ValidationContext): void {
       ));
     }
   }
+}
+
+/** Check if an expression is a literal (allowed as property initializer). */
+function isLiteralExpression(expr: Expression): boolean {
+  if (expr.kind === 'bigint_literal') return true;
+  if (expr.kind === 'bool_literal') return true;
+  if (expr.kind === 'bytestring_literal') return true;
+  // Allow negative literals: -42n
+  if (expr.kind === 'unary_expr' && expr.op === '-' && expr.operand.kind === 'bigint_literal') return true;
+  return false;
 }
 
 function validatePropertyType(
@@ -182,7 +203,7 @@ function validateConstructor(ctx: ValidationContext): void {
     ));
   }
 
-  // Check that all properties are assigned in constructor
+  // Check that all properties without initializers are assigned in constructor
   const assignedProps = new Set<string>();
   for (const stmt of ctor.body) {
     if (stmt.kind === 'assignment') {
@@ -193,8 +214,13 @@ function validateConstructor(ctx: ValidationContext): void {
     }
   }
 
+  // Properties with initializers don't need constructor assignments
+  const propsWithInitializers = new Set(
+    ctx.contract.properties.filter(p => p.initializer).map(p => p.name),
+  );
+
   for (const propName of propNames) {
-    if (!assignedProps.has(propName)) {
+    if (!assignedProps.has(propName) && !propsWithInitializers.has(propName)) {
       ctx.errors.push(makeDiagnostic(
         `Property '${propName}' must be assigned in the constructor`,
         'error',

@@ -1,6 +1,6 @@
 {
   "name": "runar-compiler",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Rúnar reference compiler (TypeScript): nanopass pipeline from TS to Bitcoin Script",
   "main": "dist/index.js",
@@ -12,6 +12,15 @@
     "typecheck": "tsc --noEmit"
   },
   "files": ["dist"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/icellan/runar",
+    "directory": "packages/runar-compiler"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "ts-morph": "^24.0.0",
     "runar-lang": "workspace:*",

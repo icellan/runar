@@ -553,11 +553,12 @@ describe('Optimizer: Constant Folding', () => {
         makeMethod('m', [
           b('t0', { kind: 'load_const', value: 1000n }),
           b('t1', { kind: 'load_param', name: 'count' }),
-          b('t2', { kind: 'add_output', satoshis: 't0', stateValues: ['t1'] }),
+          b('pre', { kind: 'check_preimage', preimage: 'dummyPre' }),
+          b('t2', { kind: 'add_output', satoshis: 't0', stateValues: ['t1'], preimage: 'pre' }),
         ]),
       ]);
       const folded = foldConstants(program);
-      expect(folded.methods[0]!.body[2]!.value.kind).toBe('add_output');
+      expect(folded.methods[0]!.body[3]!.value.kind).toBe('add_output');
     });
   });
 });
@@ -655,11 +656,12 @@ describe('Optimizer: Dead Binding Elimination', () => {
       makeMethod('m', [
         b('t0', { kind: 'load_const', value: 1000n }),
         b('t1', { kind: 'load_param', name: 'val' }),
-        b('t2', { kind: 'add_output', satoshis: 't0', stateValues: ['t1'] }),
+        b('pre', { kind: 'check_preimage', preimage: 'dummyPre' }),
+        b('t2', { kind: 'add_output', satoshis: 't0', stateValues: ['t1'], preimage: 'pre' }),
       ]),
     ]);
     const cleaned = eliminateDeadBindings(program);
-    expect(cleaned.methods[0]!.body).toHaveLength(3);
+    expect(cleaned.methods[0]!.body).toHaveLength(4);
   });
 });
 
@@ -893,11 +895,130 @@ describe('Optimizer: Peephole (Stack IR)', () => {
     it('leaves unrelated ops unchanged', () => {
       const ops: StackOp[] = [
         { op: 'push', value: 10n },
-        { op: 'push', value: 20n },
         { op: 'opcode', code: 'OP_ADD' },
+        { op: 'opcode', code: 'OP_HASH160' },
       ];
       const result = optimizeStackIR(ops);
       expect(result).toEqual(ops);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // New rules: Roll/Pick simplification
+  // -----------------------------------------------------------------------
+
+  describe('Roll/Pick simplification', () => {
+    it('removes PUSH 0 + Roll(0) (no-op)', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
+      expect(optimizeStackIR(ops)).toEqual([]);
+    });
+
+    it('replaces PUSH 1 + Roll(1) with Swap', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 1n }, { op: 'roll', depth: 1 }];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'swap' }]);
+    });
+
+    it('replaces PUSH 2 + Roll(2) with Rot', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 2n }, { op: 'roll', depth: 2 }];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'rot' }]);
+    });
+
+    it('replaces PUSH 0 + Pick(0) with Dup', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 0n }, { op: 'pick', depth: 0 }];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'dup' }]);
+    });
+
+    it('replaces PUSH 1 + Pick(1) with Over', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 1n }, { op: 'pick', depth: 1 }];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'over' }]);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // New rules: SHA256+SHA256, 0+NUMEQUAL, 1+MUL
+  // -----------------------------------------------------------------------
+
+  describe('new 2-op rules', () => {
+    it('fuses SHA256 SHA256 into HASH256', () => {
+      const ops: StackOp[] = [
+        { op: 'opcode', code: 'OP_SHA256' },
+        { op: 'opcode', code: 'OP_SHA256' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'opcode', code: 'OP_HASH256' }]);
+    });
+
+    it('replaces PUSH 0 + NUMEQUAL with NOT', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 0n },
+        { op: 'opcode', code: 'OP_NUMEQUAL' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'opcode', code: 'OP_NOT' }]);
+    });
+
+  });
+
+  // -----------------------------------------------------------------------
+  // New rules: 3-op constant folding
+  // -----------------------------------------------------------------------
+
+  describe('3-op constant folding', () => {
+    it('folds PUSH(a) PUSH(b) ADD to PUSH(a+b)', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 3n },
+        { op: 'push', value: 7n },
+        { op: 'opcode', code: 'OP_ADD' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: 10n }]);
+    });
+
+    it('folds PUSH(a) PUSH(b) SUB to PUSH(a-b)', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 10n },
+        { op: 'push', value: 3n },
+        { op: 'opcode', code: 'OP_SUB' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: 7n }]);
+    });
+
+    it('folds PUSH(a) PUSH(b) MUL to PUSH(a*b)', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 6n },
+        { op: 'push', value: 7n },
+        { op: 'opcode', code: 'OP_MUL' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: 42n }]);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // New rules: 4-op chain folding
+  // -----------------------------------------------------------------------
+
+  describe('4-op chain folding', () => {
+    it('folds PUSH(a) ADD PUSH(b) ADD to PUSH(a+b) ADD', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 3n },
+        { op: 'opcode', code: 'OP_ADD' },
+        { op: 'push', value: 7n },
+        { op: 'opcode', code: 'OP_ADD' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([
+        { op: 'push', value: 10n },
+        { op: 'opcode', code: 'OP_ADD' },
+      ]);
+    });
+
+    it('folds PUSH(a) SUB PUSH(b) SUB to PUSH(a+b) SUB', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 3n },
+        { op: 'opcode', code: 'OP_SUB' },
+        { op: 'push', value: 7n },
+        { op: 'opcode', code: 'OP_SUB' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([
+        { op: 'push', value: 10n },
+        { op: 'opcode', code: 'OP_SUB' },
+      ]);
     });
   });
 });

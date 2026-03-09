@@ -45,3 +45,13 @@ export type { TestCallResult, OutputSnapshot, MockPreimage } from './test-contra
 // Script execution (BSV SDK)
 export { ScriptExecutionContract } from './script-execution.js';
 export type { ScriptExecResult } from './script-execution.js';
+
+// Post-quantum crypto primitives
+export { wotsKeygen, wotsSign, wotsVerify, WOTS_PARAMS } from './crypto/wots.js';
+export type { WOTSKeyPair } from './crypto/wots.js';
+export {
+  slhKeygen, slhSign, slhVerify, slhVerifyVerbose,
+  SLH_SHA2_128s, SLH_SHA2_128f, SLH_SHA2_192s, SLH_SHA2_192f,
+  SLH_SHA2_256s, SLH_SHA2_256f, ALL_SHA2_PARAMS,
+} from './crypto/slh-dsa.js';
+export type { SLHParams, SLHKeyPair } from './crypto/slh-dsa.js';

@@ -2,7 +2,7 @@
 
 **Formal specification documents for the Rúnar language, type system, semantics, and IR format.**
 
-This directory contains the normative documents that define what Rúnar is. All compiler implementations -- the TypeScript reference compiler, the Go compiler, and the Rust compiler -- must conform to these specifications.
+This directory contains the normative documents that define what Rúnar is. All compiler implementations -- the TypeScript reference compiler, the Go compiler, the Rust compiler, and the Python compiler -- must conform to these specifications.
 
 ---
 
@@ -38,10 +38,10 @@ The specification is authoritative. If a compiler's behavior contradicts the spe
        |
        | must pass
        v
-  +--------+  +--------+  +--------+
-  |  TS    |  |  Go    |  |  Rust  |
-  | Compiler| | Compiler| | Compiler|
-  +--------+  +--------+  +--------+
+  +--------+  +--------+  +--------+  +--------+
+  |  TS    |  |  Go    |  |  Rust  |  | Python |
+  | Compiler| | Compiler| | Compiler| | Compiler|
+  +--------+  +--------+  +--------+  +--------+
 ```
 
 The conformance test suite in `conformance/` is derived from the spec's examples and rules. A compiler is conformant if and only if it passes the full conformance suite.
@@ -53,7 +53,7 @@ The conformance test suite in `conformance/` is derived from the spec's examples
 1. Open an issue describing the proposed change and its rationale.
 2. Draft the change as a pull request modifying the relevant spec document.
 3. Update the conformance test suite to reflect the change.
-4. All three compilers must be updated (or have tracked issues) before the spec change is merged.
+4. All four compilers must be updated (or have tracked issues) before the spec change is merged.
 5. The spec version number is bumped according to the versioning policy.
 
 ---

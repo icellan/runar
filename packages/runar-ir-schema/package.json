@@ -1,6 +1,6 @@
 {
   "name": "runar-ir-schema",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "JSON Schema definitions and validators for Rúnar IR formats",
   "main": "dist/index.js",
@@ -12,6 +12,15 @@
     "typecheck": "tsc --noEmit"
   },
   "files": ["dist", "src/schemas"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/icellan/runar",
+    "directory": "packages/runar-ir-schema"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "ajv": "^8.17.0"
   },

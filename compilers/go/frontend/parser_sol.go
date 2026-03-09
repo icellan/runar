@@ -483,8 +483,41 @@ func (p *solParser) parseContract() (*ContractNode, error) {
 	p.expect(solTokRBrace)
 
 	if constructor == nil {
+		// Only non-initialized properties become constructor params
+		var uninitProps []PropertyNode
+		for _, prop := range properties {
+			if prop.Initializer == nil {
+				uninitProps = append(uninitProps, prop)
+			}
+		}
+		params := make([]ParamNode, len(uninitProps))
+		for i, prop := range uninitProps {
+			params[i] = ParamNode{Name: prop.Name, Type: prop.Type}
+		}
+		superArgs := make([]Expression, len(uninitProps))
+		for i, prop := range uninitProps {
+			superArgs[i] = Identifier{Name: prop.Name}
+		}
+		body := []Statement{
+			ExpressionStmt{
+				Expr: CallExpr{
+					Callee: Identifier{Name: "super"},
+					Args:   superArgs,
+				},
+				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			},
+		}
+		for _, prop := range uninitProps {
+			body = append(body, AssignmentStmt{
+				Target:         PropertyAccessExpr{Property: prop.Name},
+				Value:          Identifier{Name: prop.Name},
+				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+			})
+		}
 		constructor = &MethodNode{
 			Name:       "constructor",
+			Params:     params,
+			Body:       body,
 			Visibility: "public",
 			SourceLocation: SourceLocation{
 				File: p.fileName, Line: 1, Column: 0,
@@ -534,12 +567,19 @@ func (p *solParser) parseSolProperty() *PropertyNode {
 	nameTok := p.expect(solTokIdent)
 	propName := nameTok.value
 
+	// Optional initializer: = value
+	var initializer Expression
+	if p.match(solTokAssign) {
+		initializer = p.parseSolExpression()
+	}
+
 	p.expect(solTokSemicolon)
 
 	return &PropertyNode{
 		Name:           propName,
 		Type:           parseSolType(typeName),
 		Readonly:       isReadonly,
+		Initializer:    initializer,
 		SourceLocation: loc,
 	}
 }

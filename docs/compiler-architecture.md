@@ -9,9 +9,9 @@ This document describes the internal architecture of the Rúnar compiler for con
 The Rúnar compiler is structured as six small, composable passes. Each pass does one thing, transforms one intermediate representation (IR) into the next, and is small enough to audit in a single sitting. This design is based on the nanopass framework (Sarkar, Waddell & Dybvig, ICFP 2004).
 
 ```
-.runar.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [Stack Lower] --> [Emit]
-source       Pass 1       Pass 2         Pass 3           Pass 4          Pass 5          Pass 6
-           ~1100 LOC     ~700 LOC      ~1100 LOC         ~880 LOC       ~2660 LOC        ~570 LOC
+.runar.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [EC Optimize] --> [Stack Lower] --> [Emit]
+source       Pass 1       Pass 2         Pass 3           Pass 4          Pass 4.5          Pass 5          Pass 6
+           ~1120 LOC     ~730 LOC      ~1110 LOC        ~1030 LOC       (always-on)       ~3580 LOC        ~570 LOC
 ```
 
 Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
@@ -24,6 +24,7 @@ Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
 | `04-anf-lower.ts` | ANF Lower | Validated AST | ANF IR |
 | `05-stack-lower.ts` | Stack Lower | ANF IR | Stack IR |
 | `slh-dsa-codegen.ts` | SLH-DSA Codegen | (called by Pass 5) | Stack IR fragment |
+| `ec-codegen.ts` | EC Codegen | (called by Pass 5) | Stack IR fragment |
 | `06-emit.ts` | Emit | Stack IR | Bitcoin Script (hex) |
 
 The key benefit of this approach: each pass can be tested and verified in isolation. You can unit-test Pass 4 without caring about Passes 1-3, and you can swap out Pass 1 entirely (as the Go and Rust compilers do) while keeping Passes 4-6.
@@ -49,7 +50,7 @@ The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to p
 
 ### Alternative Frontends
 
-The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, and `.runar.go`. The Rust compiler similarly uses tree-sitter for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, and `.runar.rs`. All three frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
+The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, `.runar.go`, and `.runar.py`. The Rust compiler uses **SWC** (`swc_ecma_parser`) for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, `.runar.rs`, and `.runar.py`. The Python compiler uses hand-written recursive descent parsers for all six formats (`.runar.py`, `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All four frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
 
 ---
 
@@ -152,22 +153,19 @@ The ANF IR is the **conformance boundary** for the multi-compiler strategy. All 
 - Temporaries are numbered sequentially per method (`t0`, `t1`, ...).
 - Sub-expressions are flattened left-to-right.
 - Constants are always wrapped in `load_const` (never inlined).
-- Short-circuit operators (`&&`, `||`) are lowered to `if` nodes.
+- Logical operators (`&&`, `||`) use eager evaluation -- both operands are always evaluated and combined with a single opcode.
 
-### Short-Circuit Lowering Example
+### Logical Operator Lowering Example
 
 `a && b` becomes:
 
 ```
 t0 = <evaluate a>
-t1 = if(t0) {
-    t2 = <evaluate b>
-    -> t2
-} else {
-    t3 = load_const(boolean, "false")
-    -> t3
-}
+t1 = <evaluate b>
+t2 = bin_op("&&", t0, t1)
 ```
+
+Both operands are always evaluated. At the Stack IR level, `bin_op("&&")` emits `OP_BOOLAND` and `bin_op("||")` emits `OP_BOOLOR`. There is no short-circuit lowering -- Bitcoin Script has no conditional branching at the expression level that would skip operand evaluation, so both sides are computed eagerly.
 
 ---
 
@@ -208,7 +206,7 @@ When a value will not be used for many instructions, the scheduler may move it t
 
 ### Depth Tracking
 
-The compiler statically verifies that the stack depth never exceeds 800 items. Both branches of an `OP_IF`/`OP_ELSE`/`OP_ENDIF` must produce the same stack depth at `OP_ENDIF`.
+The compiler statically verifies that the stack depth never exceeds 800 items (a conservative limit set in `05-stack-lower.ts`). The ScriptVM testing environment allows up to 1000 items by default. The compiler uses the lower limit to provide a safety margin. Both branches of an `OP_IF`/`OP_ELSE`/`OP_ENDIF` must produce the same stack depth at `OP_ENDIF`.
 
 ---
 
@@ -248,18 +246,33 @@ Complex built-in functions like `verifyWOTS` and `verifySLHDSA_SHA2_*` are handl
 - **WOTS+** (`verifyWOTS`): Inline in `05-stack-lower.ts`. Emits ~10 KB of Bitcoin Script with 67 conditional hash chain loops. Uses the same `emitOp` pattern as other builtins.
 - **SLH-DSA** (`verifySLHDSA_SHA2_*`): In separate module `slh-dsa-codegen.ts`. Emits 200-900 KB of Bitcoin Script depending on parameter set. Uses a `SLHTracker` class to manage named stack positions across ~2,100 tweakable hash operations. Each hash uses a dynamically-constructed 22-byte ADRS for domain separation.
 
-The SLH-DSA codegen is replicated across all three compilers:
+The SLH-DSA codegen is replicated across all four compilers:
 - TypeScript: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts`
 - Go: `compilers/go/codegen/slh_dsa.go`
 - Rust: `compilers/rust/src/codegen/slh_dsa.rs`
+- Python: `compilers/python/runar_compiler/codegen/slh_dsa.py`
 
-All three produce byte-identical Bitcoin Script, verified by the conformance suite.
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
+
+### Elliptic Curve Codegen
+
+EC built-in functions (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`) are handled by a dedicated codegen module, following the same pattern as SLH-DSA:
+
+- **EC codegen** (`ec-codegen.ts`): Synthesizes secp256k1 field arithmetic from base opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.). The most complex operations are `ecMul` and `ecMulGen`, which emit a 256-iteration double-and-add loop using Jacobian projective coordinates internally. Each scalar multiplication generates ~50-100 KB of Bitcoin Script.
+
+The EC codegen is replicated across all four compilers:
+- TypeScript: `packages/runar-compiler/src/passes/ec-codegen.ts`
+- Go: `compilers/go/codegen/ec.go`
+- Rust: `compilers/rust/src/codegen/ec.rs`
+- Python: `compilers/python/runar_compiler/codegen/ec.py`
+
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
 
 ---
 
 ## Optimizer
 
-The optimizer consists of two components in `packages/runar-compiler/src/optimizer/`, running at different points in the pipeline:
+The optimizer consists of three components in `packages/runar-compiler/src/optimizer/`, running at different points in the pipeline:
 
 ### Peephole Optimizer (`peephole.ts`)
 
@@ -274,6 +287,10 @@ Runs on Stack IR between Pass 5 (Stack Lower) and Pass 6 (Emit). Always enabled.
 | `PUSH_INT(0) + ADD` | (removed) | 2+ bytes |
 | `NOT + NOT` | (removed) | 2 bytes |
 
+### ANF EC Optimizer (`anf-ec.ts`)
+
+Runs on ANF IR between Pass 4 (ANF Lower) and Pass 5 (Stack Lower). Always enabled. Applies 12 algebraic simplification rules for secp256k1 elliptic curve operations (e.g., `ecAdd(P, ecNegate(P))` → identity, `ecMul(P, 1)` → `P`). Dead bindings eliminated after rule application. Replicated across all four compilers (`anf_optimize.go`, `anf_optimize.rs`, `anf_optimize.py`).
+
 ### Constant Folder (`constant-fold.ts`)
 
 Available between Pass 4 (ANF Lower) and Pass 5 (Stack Lower), but disabled by default to preserve ANF conformance (see whitepaper Section 4.5). When enabled, evaluates constant expressions at compile time. For example, `3n + 4n` is folded to `7n` and emitted as a single `OP_7` instead of `OP_3 OP_4 OP_ADD`.
@@ -286,22 +303,23 @@ The final output of compilation is a JSON artifact (specified in `spec/artifact-
 
 ```json
 {
-  "version": "0.1.0",
+  "version": "runar-v0.1.0",
   "compilerVersion": "0.1.0",
   "contractName": "P2PKH",
   "abi": {
     "constructor": { "params": [{ "name": "pubKeyHash", "type": "Addr" }] },
-    "methods": [{ "name": "unlock", "params": [...], "index": 0 }]
+    "methods": [{ "name": "unlock", "params": [...], "isPublic": true }]
   },
   "script": "76a914<pubKeyHash>88ac",
   "asm": "OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG",
   "sourceMap": { "file": "P2PKH.ts", "mappings": [...] },
   "stateFields": [],
+  "constructorSlots": [{ "paramIndex": 0, "byteOffset": 3 }],
   "buildTimestamp": "2025-06-15T10:30:00Z"
 }
 ```
 
-Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-readable opcodes), `abi` (method signatures for the SDK), `stateFields` (mutable property descriptors for stateful contracts).
+Key fields: `script` (hex template with `<param>` placeholders), `asm` (human-readable opcodes), `abi` (method signatures for the SDK), `stateFields` (mutable property descriptors for stateful contracts), `constructorSlots` (byte offsets where the SDK splices constructor arguments into the script template).
 
 ---
 
@@ -311,11 +329,12 @@ Rúnar defines a canonical IR conformance boundary at the ANF level. Any compile
 
 | Compiler | Frontend | Status |
 |----------|----------|--------|
-| **TypeScript** (reference) | ts-morph (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`) | Complete |
-| **Go** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.go`) | Complete |
-| **Rust** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`) | Complete |
+| **TypeScript** (reference) | ts-morph (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.py`) | Complete |
+| **Go** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`) | Complete |
+| **Rust** | SWC (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`, `.runar.py`) | Complete |
+| **Python** | hand-written recursive descent (all 6 formats: `.runar.py`, `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`) | Complete |
 
-All three compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The Go and Rust compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR. Each compiler supports multi-format parsing: TypeScript, Solidity-like, Move-style, and its own native syntax (Go or Rust DSL).
+All four compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The Go, Rust, and Python compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR. Each compiler supports multi-format parsing: TypeScript, Solidity-like, Move-style, Python, and (where applicable) its own native syntax (Go or Rust DSL).
 
 ### Why Multiple Compilers?
 
@@ -328,7 +347,8 @@ All three compilers share the same ANF-to-Script pipeline (Passes 4-6) semantica
 The conformance suite in `conformance/` contains golden-file tests: source programs paired with expected ANF IR and expected script output. All compilers must pass the same suite. The SHA-256 of the canonical JSON output must match across all implementations.
 
 ```bash
-pnpm run conformance:ts    # Test TypeScript compiler
-pnpm run conformance:go    # Test Go compiler
-pnpm run conformance:rust  # Test Rust compiler
+pnpm run conformance:ts      # Test TypeScript compiler
+pnpm run conformance:go      # Test Go compiler
+pnpm run conformance:rust    # Test Rust compiler
+pnpm run conformance:python  # Test Python compiler
 ```

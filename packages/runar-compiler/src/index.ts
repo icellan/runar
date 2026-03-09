@@ -1,17 +1,20 @@
 /**
  * Rúnar Compiler -- main entry point.
  *
- * Chains the nanopass pipeline:
- *   Pass 1: Parse (TypeScript source -> Rúnar AST)
+ * Chains the 6-pass nanopass pipeline:
+ *   Pass 1: Parse (source -> Rúnar AST)
  *   Pass 2: Validate (Rúnar AST -> validated Rúnar AST)
  *   Pass 3: Type-Check (Rúnar AST -> type-checked Rúnar AST)
  *   Pass 4: ANF Lower (Rúnar AST -> ANF IR)
+ *   Pass 5: Stack Lower (ANF IR -> Stack IR) + peephole optimize
+ *   Pass 6: Emit (Stack IR -> Bitcoin Script hex) + artifact assembly
  */
 
 export { parse } from './passes/01-parse.js';
 export type { ParseResult } from './passes/01-parse.js';
 export { parseSolSource } from './passes/01-parse-sol.js';
 export { parseMoveSource } from './passes/01-parse-move.js';
+export { parsePythonSource } from './passes/01-parse-python.js';
 
 export { validate } from './passes/02-validate.js';
 export type { ValidationResult } from './passes/02-validate.js';
@@ -33,6 +36,7 @@ import { lowerToANF } from './passes/04-anf-lower.js';
 import { lowerToStack } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
+import { optimizeEC } from './optimizer/anf-ec.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
@@ -42,7 +46,7 @@ import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
 // ---------------------------------------------------------------------------
 
 export interface CompileOptions {
-  /** Source file name for error messages. Defaults to "contract.ts". */
+  /** Source file name for error messages and parser dispatch. Defaults to "contract.ts". */
   fileName?: string;
 
   /** If true, stop after parsing (Pass 1). */
@@ -86,24 +90,46 @@ export interface CompileResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Compile a Rúnar TypeScript source string through the frontend passes.
+ * Compile a Rúnar source string through all 6 nanopass pipeline stages.
  *
  * The pipeline is:
- *   1. Parse: TS source -> Rúnar AST
+ *   1. Parse: source -> Rúnar AST (auto-dispatches by file extension)
  *   2. Validate: check language subset constraints
  *   3. Type-check: verify type consistency
  *   4. ANF Lower: flatten to A-Normal Form IR
+ *   5. Stack Lower: ANF IR -> Stack IR (+ peephole optimize)
+ *   6. Emit: Stack IR -> hex-encoded Bitcoin Script (+ artifact assembly)
  *
  * Each pass is a pure function. If a pass produces errors, subsequent
  * passes are skipped and the partial result is returned.
+ *
+ * This function never throws. All errors are caught and returned as
+ * diagnostics in the `CompileResult`.
+ *
+ * When `constructorArgs` are provided, the compiler replaces ANF property
+ * `initialValue` fields before stack lowering, producing a complete
+ * locking script with real values instead of OP_0 placeholders.
  */
 export function compile(source: string, options?: CompileOptions): CompileResult {
   const diagnostics: CompilerDiagnostic[] = [];
   const opts = options ?? {};
 
   // Pass 1: Parse
-  const parseResult = parse(source, opts.fileName);
-  diagnostics.push(...parseResult.errors);
+  // parse() uses asKindOrThrow() in 20+ places and can throw on malformed input.
+  let parseResult: ReturnType<typeof parse>;
+  try {
+    parseResult = parse(source, opts.fileName);
+    diagnostics.push(...parseResult.errors);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: null,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (!parseResult.contract || hasErrors(diagnostics)) {
     return {
@@ -124,9 +150,21 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 2: Validate
-  const validationResult = validate(parseResult.contract);
-  diagnostics.push(...validationResult.errors);
-  diagnostics.push(...validationResult.warnings);
+  let validationResult: ReturnType<typeof validate>;
+  try {
+    validationResult = validate(parseResult.contract);
+    diagnostics.push(...validationResult.errors);
+    diagnostics.push(...validationResult.warnings);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (hasErrors(diagnostics)) {
     return {
@@ -147,8 +185,20 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 3: Type-Check
-  const typeCheckResult = typecheck(parseResult.contract);
-  diagnostics.push(...typeCheckResult.errors);
+  let typeCheckResult: ReturnType<typeof typecheck>;
+  try {
+    typeCheckResult = typecheck(parseResult.contract);
+    diagnostics.push(...typeCheckResult.errors);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   if (hasErrors(diagnostics)) {
     return {
@@ -169,7 +219,19 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 4: ANF Lower
-  const anf = lowerToANF(parseResult.contract);
+  let anf: ANFProgram;
+  try {
+    anf = lowerToANF(parseResult.contract);
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
 
   // Bake constructor args into ANF properties so stack lowering emits real
   // values instead of OP_0 placeholders.
@@ -181,9 +243,8 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     }
   }
 
-  // Keep ANF canonical for conformance: do not apply ANF optimizations in
-  // the default compile path.
-  const optimizedAnf = anf;
+  // Pass 4.5: ANF EC Optimizer (always-on)
+  const optimizedAnf = optimizeEC(anf);
 
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {

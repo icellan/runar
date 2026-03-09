@@ -17,7 +17,7 @@ use swc_ecma_ast::{
 use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax, TsSyntax};
 
 use super::ast::{
-    self, BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
+    BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 
@@ -207,10 +207,14 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<
                 TypeNode::Custom("unknown".to_string())
             };
 
+            // Parse initializer if present (SWC ClassProp.value)
+            let initializer = prop.value.as_ref().map(|v| parse_expression(v, file, errors));
+
             result.push(PropertyNode {
                 name,
                 prop_type,
                 readonly,
+                initializer,
                 source_location: default_loc(file),
             });
         }
@@ -1132,6 +1136,7 @@ pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str)
             name: name.to_string(),
             prop_type: TypeNode::Primitive(PrimitiveTypeName::ByteString),
             readonly: false,
+            initializer: None,
             source_location: synthetic_loc.clone(),
         });
     }
@@ -1185,6 +1190,7 @@ pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str)
 /// - `.runar.sol` -> Solidity-like parser
 /// - `.runar.move` -> Move-style parser
 /// - `.runar.rs` -> Rust DSL parser
+/// - `.runar.py` -> Python parser
 /// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     let name = file_name.unwrap_or("contract.ts");
@@ -1196,6 +1202,9 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     }
     if name.ends_with(".runar.rs") {
         return super::parser_rustmacro::parse_rust_dsl(source, file_name);
+    }
+    if name.ends_with(".runar.py") {
+        return super::parser_python::parse_python(source, file_name);
     }
     // Default: TypeScript parser
     parse(source, file_name)

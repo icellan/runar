@@ -701,6 +701,17 @@ export class ScriptVM {
         // Bitwise logic
         // ---------------------------------------------------------------
 
+        if (byte === Opcode.OP_INVERT) {
+          this.countOp();
+          const a2 = this.pop();
+          const result = new Uint8Array(a2.length);
+          for (let j = 0; j < a2.length; j++) {
+            result[j] = ~a2[j]! & 0xff;
+          }
+          this.push(result);
+          continue;
+        }
+
         if (byte === Opcode.OP_AND) {
           this.countOp();
           const b2 = this.pop();

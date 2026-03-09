@@ -9,6 +9,7 @@ import { compileCommand } from './commands/compile.js';
 import { testCommand } from './commands/test.js';
 import { deployCommand } from './commands/deploy.js';
 import { verifyCommand } from './commands/verify.js';
+import { codegenCommand } from './commands/codegen.js';
 
 program
   .name('runar')
@@ -52,5 +53,13 @@ program
   .requiredOption('--artifact <path>', 'path to artifact')
   .requiredOption('--network <network>', 'network')
   .action(verifyCommand);
+
+program
+  .command('codegen')
+  .description('Generate typed contract wrappers from compiled artifacts')
+  .argument('<artifacts...>', 'artifact JSON files (supports globs)')
+  .option('-o, --output <dir>', 'output directory (default: same as artifact)')
+  .option('-l, --lang <lang>', 'target language (ts)', 'ts')
+  .action(codegenCommand);
 
 program.parse();

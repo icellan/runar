@@ -89,7 +89,6 @@ export function extractStateFromScript(
  * Returns the hex-char offset of the last OP_RETURN, or -1 if not found.
  */
 export function findLastOpReturn(scriptHex: string): number {
-  let lastPos = -1;
   let offset = 0;
   const len = scriptHex.length;
 
@@ -97,9 +96,9 @@ export function findLastOpReturn(scriptHex: string): number {
     const opcode = parseInt(scriptHex.slice(offset, offset + 2), 16);
 
     if (opcode === 0x6a) {
-      // OP_RETURN at a real opcode boundary
-      lastPos = offset;
-      offset += 2;
+      // OP_RETURN at a real opcode boundary. Everything after OP_RETURN is
+      // raw state data (not opcodes), so stop walking immediately.
+      return offset;
     } else if (opcode >= 0x01 && opcode <= 0x4b) {
       // Direct push: opcode is the number of bytes to push
       offset += 2 + opcode * 2;
@@ -130,108 +129,95 @@ export function findLastOpReturn(scriptHex: string): number {
     }
   }
 
-  return lastPos;
+  return -1;
 }
 
 // ---------------------------------------------------------------------------
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Encode a state field as raw bytes (no push opcode wrapper) matching the
+ * compiler's OP_NUM2BIN-based fixed-width serialization.
+ * The result is raw hex bytes that are concatenated after OP_RETURN.
+ */
 function encodeStateValue(value: unknown, type: string): string {
   switch (type) {
     case 'int':
     case 'bigint': {
-      const n = typeof value === 'bigint' ? value : BigInt(value as number);
-      return encodeScriptInt(n);
+      let n: bigint;
+      if (typeof value === 'bigint') {
+        n = value;
+      } else if (typeof value === 'string' && value.endsWith('n')) {
+        // BigInt string from JSON without reviver (e.g. "0n", "1000n")
+        n = BigInt(value.slice(0, -1));
+      } else {
+        n = BigInt(value as number);
+      }
+      return encodeNum2Bin(n, 8);
     }
     case 'bool': {
-      return value ? '51' : '00'; // OP_1 (OP_TRUE) or OP_0 (OP_FALSE)
+      return value ? '01' : '00'; // 1 raw byte
     }
-    case 'bytes':
-    case 'ByteString': {
-      const hex = String(value);
-      return encodePushData(hex);
-    }
-    case 'PubKey': {
-      const hex = String(value);
-      return encodePushData(hex);
-    }
+    case 'PubKey':
+    case 'Addr':
     case 'Ripemd160':
-    case 'Addr': {
-      const hex = String(value);
-      return encodePushData(hex);
-    }
-    case 'Sha256': {
-      const hex = String(value);
-      return encodePushData(hex);
-    }
+    case 'Sha256':
+    case 'Point':
+      // Fixed-size byte types: raw hex, no framing needed.
+      return String(value);
     default: {
-      // Default: treat as a hex byte string
+      // Variable-length types (bytes, ByteString, etc.): use push-data
+      // encoding so the decoder can determine the length.
       const hex = String(value);
-      return encodePushData(hex);
+      if (hex.length === 0) return '00'; // OP_0
+      return encodePushDataState(hex);
     }
   }
 }
 
 /**
- * Encode an integer as a Bitcoin Script minimal-encoded number push.
+ * Encode an integer as a fixed-width LE sign-magnitude byte string,
+ * matching OP_NUM2BIN behaviour. The sign bit is in the MSB of the last byte.
  */
-function encodeScriptInt(n: bigint): string {
-  if (n === 0n) {
-    return '00'; // OP_0
-  }
-
+function encodeNum2Bin(n: bigint, width: number): string {
+  const bytes = new Uint8Array(width);
   const negative = n < 0n;
   let absVal = negative ? -n : n;
-  const bytes: number[] = [];
 
-  while (absVal > 0n) {
-    bytes.push(Number(absVal & 0xffn));
+  for (let i = 0; i < width && absVal > 0n; i++) {
+    bytes[i] = Number(absVal & 0xffn);
     absVal >>= 8n;
   }
 
-  // If the high bit of the last byte is set, add a sign byte
-  if ((bytes[bytes.length - 1]! & 0x80) !== 0) {
-    bytes.push(negative ? 0x80 : 0x00);
-  } else if (negative) {
-    bytes[bytes.length - 1]! |= 0x80;
+  if (negative) {
+    bytes[width - 1]! |= 0x80;
   }
 
-  const hex = bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
-  return encodePushData(hex);
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 /**
- * Wrap a hex-encoded byte string in a Bitcoin Script push data opcode.
+ * Encode variable-length data as Bitcoin Script push data (with length prefix).
  */
-function encodePushData(dataHex: string): string {
+function encodePushDataState(dataHex: string): string {
   const len = dataHex.length / 2;
-
   if (len <= 75) {
     return len.toString(16).padStart(2, '0') + dataHex;
   } else if (len <= 0xff) {
     return '4c' + len.toString(16).padStart(2, '0') + dataHex;
   } else if (len <= 0xffff) {
-    return '4d' + toLittleEndian16(len) + dataHex;
-  } else {
-    return '4e' + toLittleEndian32(len) + dataHex;
+    const lo = (len & 0xff).toString(16).padStart(2, '0');
+    const hi = ((len >> 8) & 0xff).toString(16).padStart(2, '0');
+    return '4d' + lo + hi + dataHex;
   }
-}
-
-function toLittleEndian16(n: number): string {
-  return (
-    (n & 0xff).toString(16).padStart(2, '0') +
-    ((n >> 8) & 0xff).toString(16).padStart(2, '0')
-  );
-}
-
-function toLittleEndian32(n: number): string {
-  return (
-    (n & 0xff).toString(16).padStart(2, '0') +
-    ((n >> 8) & 0xff).toString(16).padStart(2, '0') +
-    ((n >> 16) & 0xff).toString(16).padStart(2, '0') +
-    ((n >> 24) & 0xff).toString(16).padStart(2, '0')
-  );
+  const b0 = (len & 0xff).toString(16).padStart(2, '0');
+  const b1 = ((len >> 8) & 0xff).toString(16).padStart(2, '0');
+  const b2 = ((len >> 16) & 0xff).toString(16).padStart(2, '0');
+  const b3 = ((len >> 24) & 0xff).toString(16).padStart(2, '0');
+  return '4e' + b0 + b1 + b2 + b3 + dataHex;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,22 +229,55 @@ function decodeStateValue(
   offset: number,
   type: string,
 ): { value: unknown; bytesRead: number } {
-  if (type === 'bool') {
-    // Boolean values are encoded as single-byte opcodes:
-    // OP_0 (0x00) = false, OP_1/OP_TRUE (0x51) = true
-    const opcode = parseInt(hex.slice(offset, offset + 2), 16);
-    return { value: opcode !== 0x00, bytesRead: 2 };
-  }
-
-  const { data, bytesRead } = decodePushData(hex, offset);
-
   switch (type) {
+    case 'bool': {
+      // 1 raw byte: 0x00 = false, 0x01 = true
+      return { value: hex.slice(offset, offset + 2) !== '00', bytesRead: 2 };
+    }
     case 'int':
-    case 'bigint':
-      return { value: decodeScriptInt(data), bytesRead };
-    default:
+    case 'bigint': {
+      // 8 raw bytes LE sign-magnitude (NUM2BIN 8)
+      const hexWidth = 16; // 8 bytes * 2
+      const data = hex.slice(offset, offset + hexWidth);
+      return { value: decodeNum2Bin(data), bytesRead: hexWidth };
+    }
+    case 'PubKey':
+      return { value: hex.slice(offset, offset + 66), bytesRead: 66 }; // 33 bytes
+    case 'Addr':
+    case 'Ripemd160':
+      return { value: hex.slice(offset, offset + 40), bytesRead: 40 }; // 20 bytes
+    case 'Sha256':
+      return { value: hex.slice(offset, offset + 64), bytesRead: 64 }; // 32 bytes
+    case 'Point':
+      return { value: hex.slice(offset, offset + 128), bytesRead: 128 }; // 64 bytes
+    default: {
+      // For unknown types, fall back to push-data decoding
+      const { data, bytesRead } = decodePushData(hex, offset);
       return { value: data, bytesRead };
+    }
   }
+}
+
+/**
+ * Decode a fixed-width LE sign-magnitude number.
+ */
+function decodeNum2Bin(hex: string): bigint {
+  if (hex.length === 0) return 0n;
+  const bytes: number[] = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.slice(i, i + 2), 16));
+  }
+
+  const negative = (bytes[bytes.length - 1]! & 0x80) !== 0;
+  bytes[bytes.length - 1]! &= 0x7f;
+
+  let result = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    result = (result << 8n) | BigInt(bytes[i]!);
+  }
+
+  if (result === 0n) return 0n;
+  return negative ? -result : result;
 }
 
 /**
@@ -314,29 +333,3 @@ function decodePushData(
   return { data: '', bytesRead: 2 };
 }
 
-/**
- * Decode a minimally-encoded Bitcoin Script integer from hex.
- */
-function decodeScriptInt(hex: string): bigint {
-  if (hex.length === 0 || hex === '00') return 0n;
-
-  const bytes: number[] = [];
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes.push(parseInt(hex.slice(i, i + 2), 16));
-  }
-
-  const negative = (bytes[bytes.length - 1]! & 0x80) !== 0;
-  bytes[bytes.length - 1]! &= 0x7f;
-
-  let result = 0n;
-  for (let i = bytes.length - 1; i >= 0; i--) {
-    result = (result << 8n) | BigInt(bytes[i]!);
-  }
-
-  // Normalize negative zero to positive zero. In Bitcoin Script, 0x80
-  // (and multi-byte variants like 0x0080) represent negative zero which
-  // should be treated as plain zero.
-  if (result === 0n) return 0n;
-
-  return negative ? -result : result;
-}

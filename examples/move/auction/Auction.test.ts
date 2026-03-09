@@ -29,7 +29,7 @@ describe('Auction (Move)', () => {
 
   it('accepts a valid bid above current highest', () => {
     const auction = makeAuction(100n);
-    const result = auction.call('bid', { bidder: BIDDER_B, bidAmount: 200n });
+    const result = auction.call('bid', { sig: MOCK_SIG, bidder: BIDDER_B, bidAmount: 200n });
     expect(result.success).toBe(true);
     expect(auction.state.highestBid).toBe(200n);
     expect(auction.state.highestBidder).toBe(BIDDER_B);
@@ -37,14 +37,14 @@ describe('Auction (Move)', () => {
 
   it('rejects a bid below current highest', () => {
     const auction = makeAuction(100n);
-    const result = auction.call('bid', { bidder: BIDDER_B, bidAmount: 50n });
+    const result = auction.call('bid', { sig: MOCK_SIG, bidder: BIDDER_B, bidAmount: 50n });
     expect(result.success).toBe(false);
   });
 
   it('rejects a bid after deadline', () => {
     const auction = makeAuction(100n);
     auction.setMockPreimage({ locktime: DEADLINE + 1n });
-    const result = auction.call('bid', { bidder: BIDDER_B, bidAmount: 200n });
+    const result = auction.call('bid', { sig: MOCK_SIG, bidder: BIDDER_B, bidAmount: 200n });
     expect(result.success).toBe(false);
   });
 
@@ -65,10 +65,10 @@ describe('Auction (Move)', () => {
   it('tracks multiple bids in sequence', () => {
     const auction = makeAuction(0n);
 
-    auction.call('bid', { bidder: BIDDER_A, bidAmount: 100n });
+    auction.call('bid', { sig: MOCK_SIG, bidder: BIDDER_A, bidAmount: 100n });
     expect(auction.state.highestBid).toBe(100n);
 
-    auction.call('bid', { bidder: BIDDER_B, bidAmount: 200n });
+    auction.call('bid', { sig: MOCK_SIG, bidder: BIDDER_B, bidAmount: 200n });
     expect(auction.state.highestBid).toBe(200n);
     expect(auction.state.highestBidder).toBe(BIDDER_B);
   });

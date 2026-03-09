@@ -237,6 +237,18 @@ func encodePushData(data []byte) []byte {
 		return []byte{0x00} // OP_0
 	}
 
+	// MINIMALDATA: single-byte values 1-16 must use OP_1..OP_16, 0x81 must use OP_1NEGATE.
+	// Note: 0x00 is NOT converted to OP_0 because OP_0 pushes empty [] not [0x00].
+	if length == 1 {
+		b := data[0]
+		if b >= 1 && b <= 16 {
+			return []byte{0x50 + b} // OP_1 through OP_16
+		}
+		if b == 0x81 {
+			return []byte{0x4f} // OP_1NEGATE
+		}
+	}
+
 	if length >= 1 && length <= 75 {
 		result := make([]byte, 1+length)
 		result[0] = byte(length)

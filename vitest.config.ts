@@ -10,4 +10,7 @@ export default defineConfig({
       'runar-lang': resolve(__dirname, 'packages/runar-lang/src/index.ts'),
     },
   },
+  test: {
+    exclude: ['**/node_modules/**', 'integration/**'],
+  },
 });

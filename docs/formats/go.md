@@ -21,10 +21,10 @@ This format is **only supported by the Go compiler** (`compilers/go`). The TypeS
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 ```
 
-The package name is ignored by the compiler. The `"runar"` import provides the base types and built-in functions.
+The package name is ignored by the compiler. The `runar` import provides the base types and built-in functions. The import is aliased to `runar` for use in the contract code.
 
 ### Struct Declaration
 
@@ -39,6 +39,26 @@ type P2PKH struct {
 - Properties are struct fields with `runar.Type` types.
 - The `runar:"readonly"` struct tag marks immutable properties.
 - Fields without the `readonly` tag are mutable (stateful).
+
+### Property Initializers
+
+Properties can have default values using a private `init()` method on the struct. The `init()` method must be unexported (lowercase), take no parameters, and contain only `self.Property = value` assignments with literal values:
+
+```go
+type GameBoard struct {
+    runar.StatefulSmartContract
+    Count    int64
+    Active   runar.Bool `runar:"readonly"`
+    Owner    runar.PubKey `runar:"readonly"`
+}
+
+func (c *GameBoard) init() {
+    c.Count = 0
+    c.Active = true
+}
+```
+
+Properties assigned in `init()` are excluded from the auto-generated constructor. Only properties without defaults (`Owner` above) need to be passed as constructor arguments. The `init()` method is consumed by the parser and does not appear in the compiled output.
 
 ### Exported vs. Unexported
 
@@ -153,6 +173,7 @@ Go does not have a ternary operator. Use if/else blocks to achieve the same effe
 | `runar.SigHashPreimage` | `SigHashPreimage` |
 | `runar.RabinSig` | `RabinSig` |
 | `runar.RabinPubKey` | `RabinPubKey` |
+| `runar.Point` | `Point` |
 
 Integer literals are plain Go integers (`0`, `42`, `50000`). The parser treats them as `bigint` values (no `n` suffix needed).
 
@@ -196,6 +217,49 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 | `runar.ExtractOutputHash(pre)` | `extractOutputHash(pre)` |
 | `runar.ExtractAmount(pre)` | `extractAmount(pre)` |
 | `runar.VerifyRabinSig(msg, sig, pad, pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
+| `runar.EcAdd(a, b)` | `ecAdd(a, b)` |
+| `runar.EcMul(p, k)` | `ecMul(p, k)` |
+| `runar.EcMulGen(k)` | `ecMulGen(k)` |
+| `runar.EcNegate(p)` | `ecNegate(p)` |
+| `runar.EcOnCurve(p)` | `ecOnCurve(p)` |
+| `runar.EcModReduce(value, mod)` | `ecModReduce(value, mod)` |
+| `runar.EcEncodeCompressed(p)` | `ecEncodeCompressed(p)` |
+| `runar.EcMakePoint(x, y)` | `ecMakePoint(x, y)` |
+| `runar.EcPointX(p)` | `ecPointX(p)` |
+| `runar.EcPointY(p)` | `ecPointY(p)` |
+| `runar.Cat(a, b)` | `cat(a, b)` |
+| `runar.Substr(data, start, len)` | `substr(data, start, len)` |
+| `runar.Split(data, index)` | `split(data, index)` |
+| `runar.Left(data, len)` | `left(data, len)` |
+| `runar.Right(data, len)` | `right(data, len)` |
+| `runar.ReverseBytes(data)` | `reverseBytes(data)` |
+| `runar.Bin2Num(data)` | `bin2num(data)` |
+| `runar.Int2Str(n, size)` | `int2str(n, size)` |
+| `runar.ToByteString(hex)` | `toByteString(hex)` |
+| `runar.ExtractVersion(pre)` | `extractVersion(pre)` |
+| `runar.ExtractHashPrevouts(pre)` | `extractHashPrevouts(pre)` |
+| `runar.ExtractHashSequence(pre)` | `extractHashSequence(pre)` |
+| `runar.ExtractOutpoint(pre)` | `extractOutpoint(pre)` |
+| `runar.ExtractScriptCode(pre)` | `extractScriptCode(pre)` |
+| `runar.ExtractSequence(pre)` | `extractSequence(pre)` |
+| `runar.ExtractSigHashType(pre)` | `extractSigHashType(pre)` |
+| `runar.ExtractInputIndex(pre)` | `extractInputIndex(pre)` |
+| `runar.ExtractOutputs(pre)` | `extractOutputs(pre)` |
+| `runar.VerifyWOTS(msg, sig, pubkey)` | `verifyWOTS(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_128s(msg, sig, pubkey)` | `verifySLHDSA_SHA2_128s(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_128f(msg, sig, pubkey)` | `verifySLHDSA_SHA2_128f(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_192s(msg, sig, pubkey)` | `verifySLHDSA_SHA2_192s(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_192f(msg, sig, pubkey)` | `verifySLHDSA_SHA2_192f(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_256s(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256s(msg, sig, pubkey)` |
+| `runar.VerifySLHDSA_SHA2_256f(msg, sig, pubkey)` | `verifySLHDSA_SHA2_256f(msg, sig, pubkey)` |
+
+EC constants are available as package-level variables:
+
+| Go constant | Rúnar constant |
+|------------|---------------|
+| `runar.EC_P` | `EC_P` |
+| `runar.EC_N` | `EC_N` |
+| `runar.EC_G` | `EC_G` |
 
 ---
 
@@ -206,7 +270,7 @@ Built-in functions are accessed through the `runar` package with PascalCase name
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type P2PKH struct {
     runar.SmartContract
@@ -224,7 +288,7 @@ func (c *P2PKH) Unlock(sig runar.Sig, pubKey runar.PubKey) {
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type Counter struct {
     runar.StatefulSmartContract
@@ -246,7 +310,7 @@ func (c *Counter) Decrement() {
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type Escrow struct {
     runar.SmartContract
@@ -277,7 +341,7 @@ func (c *Escrow) RefundByArbiter(sig runar.Sig) {
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type Auction struct {
     runar.StatefulSmartContract
@@ -306,7 +370,7 @@ func (c *Auction) Close(sig runar.Sig) {
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type OraclePriceFeed struct {
     runar.SmartContract
@@ -327,7 +391,7 @@ func (c *OraclePriceFeed) Settle(price int64, rabinSig runar.RabinSig, padding r
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type CovenantVault struct {
     runar.SmartContract
@@ -348,7 +412,7 @@ func (c *CovenantVault) Spend(sig runar.Sig, amount int64, txPreimage runar.SigH
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type FungibleToken struct {
     runar.StatefulSmartContract
@@ -383,7 +447,7 @@ func (c *FungibleToken) Merge(sig runar.Sig, totalBalance int64, outputSatoshis 
 ```go
 package contracts
 
-import "runar"
+import runar "github.com/icellan/runar/packages/runar-go"
 
 type SimpleNFT struct {
     runar.StatefulSmartContract
@@ -420,8 +484,8 @@ Unexported identifiers (lowercase first letter) are kept as-is.
 ### Constructor
 
 The constructor is auto-generated from the struct fields. The parser creates a constructor that:
-1. Accepts all fields as parameters (in declaration order).
+1. Accepts fields **without initializers** as parameters (in declaration order).
 2. Calls `super(...)` with all parameters.
 3. Assigns each parameter to the corresponding property.
 
-There is no explicit constructor syntax in the Go format.
+Properties with defaults (set via the `init()` method) are excluded from the constructor parameters. There is no explicit constructor syntax in the Go format.

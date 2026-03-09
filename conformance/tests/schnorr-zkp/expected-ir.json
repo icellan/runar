@@ -1,0 +1,294 @@
+{
+  "contractName": "SchnorrZKP",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "pubKey",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "pubKey",
+          "type": "Point"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "rPoint"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "rPoint"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "args": [
+              "t3",
+              "t4"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "t5"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t6"
+            ],
+            "func": "bin2num",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "e",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t7"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "s"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "t8"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "sG",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t9"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_prop",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "args": [
+              "t10",
+              "e"
+            ],
+            "func": "ecMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "eP",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t11"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_param",
+            "name": "rPoint"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "args": [
+              "t12",
+              "eP"
+            ],
+            "func": "ecAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "rhs",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t13"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "args": [
+              "sG"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "args": [
+              "rhs"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "bin_op",
+            "left": "t14",
+            "op": "===",
+            "right": "t15"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "assert",
+            "value": "t16"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "args": [
+              "sG"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "args": [
+              "rhs"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t18",
+            "op": "===",
+            "right": "t19"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "assert",
+            "value": "t20"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verify",
+      "params": [
+        {
+          "name": "rPoint",
+          "type": "Point"
+        },
+        {
+          "name": "s",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "pubKey",
+      "readonly": true,
+      "type": "Point"
+    }
+  ]
+}

@@ -78,7 +78,7 @@ describe('extractStateFromScript — returns null when appropriate', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractStateFromScript — OP_RETURN location', () => {
-  it('finds the last 6a in the script (not the first)', () => {
+  it('finds the real OP_RETURN (skips 0x6a inside push data)', () => {
     const fields = makeFields({ name: 'count', type: 'bigint', index: 0 });
     const artifact = makeArtifact({
       script: '51',
@@ -345,11 +345,12 @@ describe('extractStateFromScript — 0x6a inside state data', () => {
       stateFields: fields,
     });
 
-    // 106 = 0x6a → state encoding: push 1 byte 0x6a → "016a"
-    // Full script: "51ac" + "6a" + "016a"
-    // Naive lastIndexOf("6a") would find the last "6a" inside the state data.
+    // 106 = 0x6a → NUM2BIN(8): "6a00000000000000"
+    // Full script: "51ac" + "6a" + "6a00000000000000"
+    // findLastOpReturn stops at the first OP_RETURN (offset 4) and does
+    // NOT continue into raw state bytes where 0x6a appears again.
     const stateHex = serializeState(fields, { count: 106n });
-    expect(stateHex).toBe('016a'); // sanity check
+    expect(stateHex).toBe('6a00000000000000'); // sanity check
     const fullScript = '51ac' + '6a' + stateHex;
 
     const result = extractStateFromScript(artifact, fullScript);
@@ -432,70 +433,67 @@ describe('findLastOpReturn', () => {
 // serializeState — encoding verification
 // ---------------------------------------------------------------------------
 
-describe('serializeState — encoding specifics', () => {
-  it('encodes bigint 0n as OP_0 (0x00)', () => {
+describe('serializeState — encoding specifics (NUM2BIN fixed-width)', () => {
+  it('encodes bigint 0n as 8 zero bytes', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: 0n });
-    // State encoding: encodeScriptInt(0n) returns '00' (OP_0)
-    expect(hex).toBe('00');
+    // NUM2BIN(0, 8) → 8 zero bytes
+    expect(hex).toBe('0000000000000000');
   });
 
-  it('encodes bigint 42n as 0x01 0x2a (push 1 byte: 42)', () => {
+  it('encodes bigint 42n as 8-byte LE', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: 42n });
-    // 42 = 0x2a, high bit not set, no sign byte needed
-    // push 1 byte: 01 2a
-    expect(hex).toBe('012a');
+    // 42 = 0x2a → LE 8 bytes: 2a 00 00 00 00 00 00 00
+    expect(hex).toBe('2a00000000000000');
   });
 
-  it('encodes bigint 1000n as 0x02 0xe8 0x03 (push 2 bytes LE)', () => {
+  it('encodes bigint 1000n as 8-byte LE', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: 1000n });
-    // 1000 = 0x03E8 → LE bytes: e8, 03 → push 2 bytes: 02 e8 03
-    expect(hex).toBe('02e803');
+    // 1000 = 0x03E8 → LE 8 bytes: e8 03 00 00 00 00 00 00
+    expect(hex).toBe('e803000000000000');
   });
 
-  it('encodes bigint 128n with an extra zero byte to prevent sign-bit ambiguity', () => {
+  it('encodes bigint 128n as 8-byte LE (no sign-bit issue in fixed-width)', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: 128n });
-    // 128 = 0x80 → high bit set → must add 0x00 sign byte
-    // bytes: [0x80, 0x00] → push 2 bytes: 02 80 00
-    expect(hex).toBe('028000');
+    // 128 = 0x80 → LE 8 bytes: 80 00 00 00 00 00 00 00
+    // Sign bit is in byte[7] which is 0x00, so positive
+    expect(hex).toBe('8000000000000000');
   });
 
-  it('encodes negative bigint -128n with sign bit in MSB', () => {
+  it('encodes negative bigint -128n with sign bit in MSB of last byte', () => {
     const fields = makeFields({ name: 'v', type: 'bigint', index: 0 });
     const hex = serializeState(fields, { v: -128n });
-    // abs(128) = 0x80 → high bit set → must add sign byte 0x80
-    // bytes: [0x80, 0x80] → push 2 bytes: 02 80 80
-    expect(hex).toBe('028080');
+    // abs(128) = 0x80 → LE: 80 00 00 00 00 00 00 00
+    // Negative → set bit 7 of last byte: 80 00 00 00 00 00 00 80
+    expect(hex).toBe('8000000000000080');
   });
 
-  it('encodes bool true as OP_1 (0x51)', () => {
+  it('encodes bool true as raw byte 0x01', () => {
     const fields = makeFields({ name: 'flag', type: 'bool', index: 0 });
     const hex = serializeState(fields, { flag: true });
-    expect(hex).toBe('51');
+    expect(hex).toBe('01');
   });
 
-  it('encodes bool false as OP_0 (0x00)', () => {
+  it('encodes bool false as raw byte 0x00', () => {
     const fields = makeFields({ name: 'flag', type: 'bool', index: 0 });
     const hex = serializeState(fields, { flag: false });
     expect(hex).toBe('00');
   });
 
-  it('encodes PubKey as push-data with length prefix 0x21 (33 bytes)', () => {
+  it('encodes PubKey as raw 33 bytes (no push-data prefix)', () => {
     const pubkey = 'ff'.repeat(33);
     const fields = makeFields({ name: 'pk', type: 'PubKey', index: 0 });
     const hex = serializeState(fields, { pk: pubkey });
-    // 33 = 0x21, direct push (33 <= 75)
-    expect(hex).toBe('21' + pubkey);
+    expect(hex).toBe(pubkey);
   });
 
-  it('encodes Addr as push-data with length prefix 0x14 (20 bytes)', () => {
+  it('encodes Addr as raw 20 bytes (no push-data prefix)', () => {
     const addr = 'aa'.repeat(20);
     const fields = makeFields({ name: 'a', type: 'Addr', index: 0 });
     const hex = serializeState(fields, { a: addr });
-    // 20 = 0x14
-    expect(hex).toBe('14' + addr);
+    expect(hex).toBe(addr);
   });
 });

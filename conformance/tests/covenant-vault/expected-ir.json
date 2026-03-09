@@ -1,0 +1,326 @@
+{
+  "contractName": "CovenantVault",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "recipient"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "minAmount"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "owner",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "recipient"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "recipient",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "minAmount"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "minAmount",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "owner",
+          "type": "PubKey"
+        },
+        {
+          "name": "recipient",
+          "type": "Addr"
+        },
+        {
+          "name": "minAmount",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_const",
+            "value": "1976a914"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "recipient"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "t7",
+              "t8"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_const",
+            "value": "88ac"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "args": [
+              "t9",
+              "t10"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "p2pkhScript",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t11"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_prop",
+            "name": "minAmount"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_const",
+            "value": 8
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "args": [
+              "t12",
+              "t13"
+            ],
+            "func": "num2bin",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "args": [
+              "t14",
+              "p2pkhScript"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "expectedOutput",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t15"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "args": [
+              "expectedOutput"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "args": [
+              "t17"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "bin_op",
+            "left": "t16",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t18"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "assert",
+            "value": "t19"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "spend",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "owner",
+      "readonly": true,
+      "type": "PubKey"
+    },
+    {
+      "name": "recipient",
+      "readonly": true,
+      "type": "Addr"
+    },
+    {
+      "name": "minAmount",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}

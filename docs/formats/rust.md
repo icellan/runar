@@ -37,6 +37,36 @@ pub struct P2PKH {
 - Fields should be `pub` so tests can construct the struct directly.
 - All fields use snake_case; the Rúnar parser converts to camelCase for the AST.
 
+### Property Initializers
+
+Properties can have default values using a private `init()` method in the `impl` block. The `init()` method must take only `&mut self`, have no `#[public]` attribute, and contain only `self.property = value` assignments with literal values:
+
+```rust
+#[runar::contract]
+pub struct GameBoard {
+    pub count: Bigint,
+    #[readonly]
+    pub active: Bool,
+    #[readonly]
+    pub owner: PubKey,
+}
+
+#[runar::methods(GameBoard)]
+impl GameBoard {
+    fn init(&mut self) {
+        self.count = 0;
+        self.active = true;
+    }
+
+    #[public]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+}
+```
+
+Properties assigned in `init()` are excluded from the auto-generated constructor. Only properties without defaults (`owner` above) need to be passed as constructor arguments. The `init()` method is consumed by the parser and does not appear in the compiled output.
+
 ### Method Blocks
 
 ```rust
@@ -166,8 +196,8 @@ let x = if cond { a } else { b };
 
 | Rust type | Rúnar type |
 |-----------|-----------|
-| `Bigint` / `Int` / `i64` | `bigint` |
-| `bool` | `boolean` |
+| `Bigint` / `Int` / `i64` / `u64` / `i128` / `u128` | `bigint` |
+| `bool` / `Bool` | `boolean` |
 | `ByteString` | `ByteString` |
 | `PubKey` | `PubKey` |
 | `Sig` | `Sig` |
@@ -177,6 +207,7 @@ let x = if cond { a } else { b };
 | `SigHashPreimage` | `SigHashPreimage` |
 | `RabinSig` | `RabinSig` |
 | `RabinPubKey` | `RabinPubKey` |
+| `Point` | `Point` |
 
 All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
 
@@ -186,21 +217,34 @@ All byte types are `Vec<u8>` aliases. Integer types are `i64` aliases.
 
 Built-in functions use snake_case and take references for byte-type arguments:
 
+### Assert and Crypto
+
 | Rust function | Rúnar built-in |
 |--------------|---------------|
 | `assert!(cond)` | `assert(cond)` |
 | `assert_eq!(a, b)` | `assert(a === b)` |
 | `check_sig(&sig, &pk)` | `checkSig(sig, pk)` |
 | `check_multi_sig(&sigs, &pks)` | `checkMultiSig(sigs, pks)` |
+| `check_preimage(&pre)` | `checkPreimage(pre)` |
+| `verify_rabin_sig(&msg, &sig, &pad, &pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
+
+### Hash Functions
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
 | `hash256(&data)` | `hash256(data)` |
 | `hash160(&data)` | `hash160(data)` |
 | `sha256(&data)` | `sha256(data)` |
 | `ripemd160(&data)` | `ripemd160(data)` |
-| `num2bin(&n, size)` | `num2bin(n, size)` |
-| `check_preimage(&pre)` | `checkPreimage(pre)` |
-| `extract_locktime(&pre)` | `extractLocktime(pre)` |
-| `extract_output_hash(&pre)` | `extractOutputHash(pre)` |
-| `verify_rabin_sig(&msg, &sig, &pad, &pk)` | `verifyRabinSig(msg, sig, pad, pk)` |
+
+### Math Functions
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
+| `abs(n)` | `abs(n)` |
+| `min(a, b)` | `min(a, b)` |
+| `max(a, b)` | `max(a, b)` |
+| `within(x, lo, hi)` | `within(x, lo, hi)` |
 | `safediv(a, b)` | `safediv(a, b)` |
 | `safemod(a, b)` | `safemod(a, b)` |
 | `clamp(val, lo, hi)` | `clamp(val, lo, hi)` |
@@ -213,6 +257,73 @@ Built-in functions use snake_case and take references for byte-type arguments:
 | `divmod(a, b)` | `divmod(a, b)` |
 | `log2(n)` | `log2(n)` |
 | `bool_cast(n)` | `bool(n)` |
+
+### Byte Operations
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
+| `len(&data)` | `len(data)` |
+| `cat(&a, &b)` | `cat(a, b)` |
+| `substr(&data, start, len)` | `substr(data, start, len)` |
+| `left(&data, n)` | `left(data, n)` |
+| `right(&data, n)` | `right(data, n)` |
+| `reverse_bytes(&data)` | `reverseBytes(data)` |
+| `num2bin(&n, size)` | `num2bin(n, size)` |
+| `bin2num(&data)` / `bin_2_num(&data)` | `bin2num(data)` |
+| `int2str(n, radix)` / `int_2_str(n, radix)` | `int2str(n, radix)` |
+| `to_byte_string(&data)` | `toByteString(data)` |
+
+### Preimage Extract Functions
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
+| `extract_version(&pre)` | `extractVersion(pre)` |
+| `extract_hash_prevouts(&pre)` | `extractHashPrevouts(pre)` |
+| `extract_hash_sequence(&pre)` | `extractHashSequence(pre)` |
+| `extract_outpoint(&pre)` | `extractOutpoint(pre)` |
+| `extract_input_index(&pre)` | `extractInputIndex(pre)` |
+| `extract_script_code(&pre)` | `extractScriptCode(pre)` |
+| `extract_amount(&pre)` | `extractAmount(pre)` |
+| `extract_sequence(&pre)` | `extractSequence(pre)` |
+| `extract_output_hash(&pre)` | `extractOutputHash(pre)` |
+| `extract_outputs(&pre)` | `extractOutputs(pre)` |
+| `extract_locktime(&pre)` | `extractLocktime(pre)` |
+| `extract_sig_hash_type(&pre)` | `extractSigHashType(pre)` |
+
+### Post-Quantum Signature Verification
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
+| `verify_wots(&msg, &sig, &pk)` | `verifyWOTS(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_128s(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_128s(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_128f(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_128f(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_192s(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_192s(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_192f(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_192f(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_256s(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_256s(msg, sig, pk)` |
+| `verify_slh_dsa_sha2_256f(&msg, &sig, &pk)` | `verifySLHDSA_SHA2_256f(msg, sig, pk)` |
+
+### EC (secp256k1) Functions
+
+| Rust function | Rúnar built-in |
+|--------------|---------------|
+| `ec_add(&a, &b)` | `ecAdd(a, b)` |
+| `ec_mul(&p, k)` | `ecMul(p, k)` |
+| `ec_mul_gen(k)` | `ecMulGen(k)` |
+| `ec_negate(&p)` | `ecNegate(p)` |
+| `ec_on_curve(&p)` | `ecOnCurve(p)` |
+| `ec_mod_reduce(value, modulus)` | `ecModReduce(value, mod)` |
+| `ec_encode_compressed(&p)` | `ecEncodeCompressed(p)` |
+| `ec_make_point(x, y)` | `ecMakePoint(x, y)` |
+| `ec_point_x(&p)` | `ecPointX(p)` |
+| `ec_point_y(&p)` | `ecPointY(p)` |
+
+EC constants are available from `runar::prelude`:
+
+| Rust constant | Rúnar constant |
+|--------------|---------------|
+| `EC_P` | `EC_P` |
+| `EC_N` | `EC_N` |
+| `EC_G` | `EC_G` |
 
 ---
 
@@ -384,7 +495,7 @@ Type names and struct names remain PascalCase (unchanged).
 
 ### Constructor
 
-The constructor is auto-generated from the struct fields. There is no explicit constructor syntax.
+The constructor is auto-generated from the struct fields. Properties with defaults (set via the `init()` method) are excluded from the constructor parameters. There is no explicit constructor syntax.
 
 ---
 

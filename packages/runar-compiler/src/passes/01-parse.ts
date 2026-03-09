@@ -6,6 +6,7 @@
  *   - `.runar.ts`   → TypeScript (ts-morph)
  *   - `.runar.sol`  → Solidity-like syntax
  *   - `.runar.move` → Move-style resource language
+ *   - `.runar.py`   → Python (hand-written tokenizer with INDENT/DEDENT + recursive descent)
  */
 
 import {
@@ -42,6 +43,7 @@ import type { CompilerDiagnostic } from '../errors.js';
 import { makeDiagnostic } from '../errors.js';
 import { parseSolSource } from './01-parse-sol.js';
 import { parseMoveSource } from './01-parse-move.js';
+import { parsePythonSource } from './01-parse-python.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -68,6 +70,9 @@ export function parse(source: string, fileName?: string): ParseResult {
   }
   if (file.endsWith('.runar.move')) {
     return parseMoveSource(source, file);
+  }
+  if (file.endsWith('.runar.py')) {
+    return parsePythonSource(source, file);
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
@@ -248,11 +253,19 @@ function parseProperties(
       type = { kind: 'custom_type', name: 'unknown' };
     }
 
+    // Parse property initializer (e.g. `count: bigint = 0n`)
+    let initializer: Expression | undefined;
+    const initExpr = prop.getInitializer();
+    if (initExpr) {
+      initializer = parseExpression(initExpr, file, errors);
+    }
+
     result.push({
       kind: 'property',
       name,
       type,
       readonly: isReadonly,
+      initializer,
       sourceLocation: locFromNode(prop, file),
     });
   }
@@ -365,7 +378,7 @@ function parseParams(
 
 const PRIMITIVE_TYPES = new Set<string>([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
 ]);
 
 function parseTypeNode(

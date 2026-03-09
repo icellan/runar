@@ -290,10 +290,11 @@ function arbPropertyDefs(): fc.Arbitrary<PropertyDef[]> {
 
 function arbConstructor(properties: PropertyDef[]): string {
   const params = properties.map((p) => `${p.name}: ${p.type}`).join(', ');
+  const superArgs = properties.map((p) => p.name).join(', ');
   const assignments = properties
     .map((p) => `    this.${p.name} = ${p.name};`)
     .join('\n');
-  return `  constructor(${params}) {\n${assignments}\n  }`;
+  return `  constructor(${params}) {\n    super(${superArgs});\n${assignments}\n  }`;
 }
 
 function generateContractSource(
@@ -302,13 +303,13 @@ function generateContractSource(
   methods: string[],
 ): string {
   const propDecls = properties
-    .map((p) => `  @prop()\n  ${p.name}: ${p.type};`)
-    .join('\n\n');
+    .map((p) => `  readonly ${p.name}: ${p.type};`)
+    .join('\n');
 
   const ctor = arbConstructor(properties);
 
   const imports = [
-    `import { SmartContract, prop, method, assert } from 'runar-lang';`,
+    `import { SmartContract, assert } from 'runar-lang';`,
   ];
 
   // Add type imports if needed.
@@ -393,7 +394,7 @@ export const arbStatelessContract: fc.Arbitrary<string> = fc
     ),
   )
   .map(([contractName, methods]) => {
-    return `import { SmartContract, method, assert } from 'runar-lang';
+    return `import { SmartContract, assert } from 'runar-lang';
 
 export class ${contractName} extends SmartContract {
   constructor() { super(); }
@@ -491,20 +492,21 @@ export const arbCryptoContract: fc.Arbitrary<string> = fc
       )
       .map((methods) => {
         const propDecls = properties
-          .map((p) => `  @prop()\n  ${p.name}: ${p.type};`)
-          .join('\n\n');
+          .map((p) => `  readonly ${p.name}: ${p.type};`)
+          .join('\n');
         const ctorParams = properties.map((p) => `${p.name}: ${p.type}`).join(', ');
         const ctorBody = properties
           .map((p) => `    this.${p.name} = ${p.name};`)
           .join('\n');
 
-        return `import { SmartContract, prop, method, assert, checkSig, sha256 } from 'runar-lang';
+        return `import { SmartContract, assert, checkSig, sha256 } from 'runar-lang';
 import { PubKey, Sig, ByteString, toByteString } from 'runar-lang';
 
 export class ${contractName} extends SmartContract {
 ${propDecls}
 
   constructor(${ctorParams}) {
+    super(${properties.map((p) => p.name).join(', ')});
 ${ctorBody}
   }
 

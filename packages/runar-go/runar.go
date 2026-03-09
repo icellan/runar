@@ -12,6 +12,7 @@ package runar
 
 import (
 	"crypto/sha256"
+	"math"
 
 	"golang.org/x/crypto/ripemd160"
 )
@@ -33,32 +34,35 @@ type Bool = bool
 // Byte-string types — backed by string so == works for equality checks
 // ---------------------------------------------------------------------------
 
-// PubKey is a public key (compressed or uncompressed).
-type PubKey string
-
-// Sig is a DER-encoded signature.
-type Sig string
-
-// Addr is a 20-byte address (typically a hash160 of a public key).
-type Addr string
-
 // ByteString is an arbitrary byte sequence.
 type ByteString string
 
+// PubKey is a public key (compressed or uncompressed).
+type PubKey = ByteString
+
+// Sig is a DER-encoded signature.
+type Sig = ByteString
+
+// Addr is a 20-byte address (typically a hash160 of a public key).
+type Addr = ByteString
+
 // Sha256 is a 32-byte SHA-256 hash.
-type Sha256 string
+type Sha256 = ByteString
 
 // Ripemd160Hash is a 20-byte RIPEMD-160 hash.
-type Ripemd160Hash string
+type Ripemd160Hash = ByteString
 
 // SigHashPreimage is the sighash preimage for transaction validation.
-type SigHashPreimage string
+type SigHashPreimage = ByteString
 
 // RabinSig is a Rabin signature.
-type RabinSig string
+type RabinSig = ByteString
 
 // RabinPubKey is a Rabin public key.
-type RabinPubKey string
+type RabinPubKey = ByteString
+
+// Point is a 64-byte EC point (x[32] || y[32], big-endian, no prefix).
+type Point = ByteString
 
 // ---------------------------------------------------------------------------
 // Base contract structs
@@ -151,20 +155,38 @@ func VerifyRabinSig(msg ByteString, sig RabinSig, padding ByteString, pk RabinPu
 	return true
 }
 
-// VerifyWOTS always returns true in test mode.
-// Real WOTS+ verification happens in compiled Bitcoin Script.
+// VerifyWOTS performs real WOTS+ signature verification using SHA-256 hash chains.
 func VerifyWOTS(msg ByteString, sig ByteString, pubkey ByteString) bool {
-	return true
+	return wotsVerifyImpl([]byte(msg), []byte(sig), []byte(pubkey))
 }
 
-// SLH-DSA (SPHINCS+) SHA-256 variants — all return true in test mode.
+// SLH-DSA (SPHINCS+) SHA-256 variants — real FIPS 205 verification.
 
-func VerifySLHDSA_SHA2_128s(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
-func VerifySLHDSA_SHA2_128f(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
-func VerifySLHDSA_SHA2_192s(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
-func VerifySLHDSA_SHA2_192f(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
-func VerifySLHDSA_SHA2_256s(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
-func VerifySLHDSA_SHA2_256f(msg ByteString, sig ByteString, pubkey ByteString) bool { return true }
+func VerifySLHDSA_SHA2_128s(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_128s, []byte(msg), []byte(sig), []byte(pubkey))
+}
+func VerifySLHDSA_SHA2_128f(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_128f, []byte(msg), []byte(sig), []byte(pubkey))
+}
+func VerifySLHDSA_SHA2_192s(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_192s, []byte(msg), []byte(sig), []byte(pubkey))
+}
+func VerifySLHDSA_SHA2_192f(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_192f, []byte(msg), []byte(sig), []byte(pubkey))
+}
+func VerifySLHDSA_SHA2_256s(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_256s, []byte(msg), []byte(sig), []byte(pubkey))
+}
+func VerifySLHDSA_SHA2_256f(msg ByteString, sig ByteString, pubkey ByteString) bool {
+	return SLHVerify(SLH_SHA2_256f, []byte(msg), []byte(sig), []byte(pubkey))
+}
+
+// ---------------------------------------------------------------------------
+// EC (elliptic curve) functions — real secp256k1 arithmetic for testing.
+// In compiled Bitcoin Script, these map to EC codegen opcodes.
+// ---------------------------------------------------------------------------
+
+// EC functions are in ec.go
 
 // ---------------------------------------------------------------------------
 // Real hash functions
@@ -217,13 +239,25 @@ func ExtractVersion(p SigHashPreimage) int64 { return 1 }
 // ExtractSequence returns 0xffffffff in test mode.
 func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
 
+// ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
+// This is consistent with passing allPrevouts = 72 zero bytes in tests,
+// since ExtractOutpoint also returns 36 zero bytes.
+func ExtractHashPrevouts(p SigHashPreimage) Sha256 { return Hash256(ByteString(make([]byte, 72))) }
+
+// ExtractOutpoint returns 36 zero bytes in test mode.
+func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
+
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
 
 // Num2Bin converts an integer to a byte string of the specified length
 // using Bitcoin Script's little-endian signed magnitude encoding.
+// Panics if v == math.MinInt64 (|MinInt64| overflows int64).
 func Num2Bin(v int64, length int64) ByteString {
+	if v == math.MinInt64 {
+		panic("runar: int64 overflow in Num2Bin — |MinInt64| not representable; Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
+	}
 	buf := make([]byte, length)
 	if v == 0 {
 		return ByteString(buf)
@@ -241,6 +275,25 @@ func Num2Bin(v int64, length int64) ByteString {
 		buf[length-1] |= 0x80
 	}
 	return ByteString(buf[:length])
+}
+
+// Bin2Num converts a byte string (Bitcoin Script LE signed-magnitude) back to
+// an integer. Inverse of Num2Bin.
+func Bin2Num(data ByteString) int64 {
+	if len(data) == 0 {
+		return 0
+	}
+	last := data[len(data)-1]
+	negative := (last & 0x80) != 0
+	var result uint64
+	result = uint64(last & 0x7f)
+	for i := len(data) - 2; i >= 0; i-- {
+		result = (result << 8) | uint64(data[i])
+	}
+	if negative {
+		return -int64(result)
+	}
+	return int64(result)
 }
 
 // Len returns the length of a byte string as an integer.
@@ -267,8 +320,11 @@ func ReverseBytes(data ByteString) ByteString {
 	return ByteString(b)
 }
 
-// Abs returns the absolute value.
+// Abs returns the absolute value. Panics if n == math.MinInt64 (not representable as positive int64).
 func Abs(n int64) int64 {
+	if n == math.MinInt64 {
+		panic("runar: int64 overflow in Abs(MinInt64) — Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
+	}
 	if n < 0 {
 		return -n
 	}
@@ -334,32 +390,32 @@ func Sign(n int64) int64 {
 	return 0
 }
 
-// Pow computes base^exp for non-negative exponents.
+// Pow computes base^exp for non-negative exponents. Panics on int64 overflow.
 func Pow(base, exp int64) int64 {
 	if exp < 0 {
 		panic("pow: negative exponent")
 	}
 	result := int64(1)
 	for i := int64(0); i < exp; i++ {
-		result *= base
+		result = checkedMul(result, base)
 	}
 	return result
 }
 
-// MulDiv computes (a * b) / c.
+// MulDiv computes (a * b) / c. Panics on int64 overflow in a*b.
 func MulDiv(a, b, c int64) int64 {
 	if c == 0 {
 		panic("mulDiv: division by zero")
 	}
-	return (a * b) / c
+	return checkedMul(a, b) / c
 }
 
-// PercentOf computes (amount * bps) / 10000 (basis points).
+// PercentOf computes (amount * bps) / 10000 (basis points). Panics on int64 overflow.
 func PercentOf(amount, bps int64) int64 {
-	return (amount * bps) / 10000
+	return checkedMul(amount, bps) / 10000
 }
 
-// Sqrt computes the integer square root via Newton's method.
+// Sqrt computes the integer square root via Newton's method. Panics on int64 overflow.
 func Sqrt(n int64) int64 {
 	if n < 0 {
 		panic("sqrt: negative input")
@@ -369,7 +425,7 @@ func Sqrt(n int64) int64 {
 	}
 	guess := n
 	for i := 0; i < 256; i++ {
-		next := (guess + n/guess) / 2
+		next := checkedAdd(guess, n/guess) / 2
 		if next >= guess {
 			break
 		}
@@ -379,7 +435,11 @@ func Sqrt(n int64) int64 {
 }
 
 // Gcd computes the greatest common divisor via Euclidean algorithm.
+// Panics if either argument is math.MinInt64 (|MinInt64| overflows int64).
 func Gcd(a, b int64) int64 {
+	if a == math.MinInt64 || b == math.MinInt64 {
+		panic("runar: int64 overflow in Gcd — |MinInt64| not representable; Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
+	}
 	if a < 0 {
 		a = -a
 	}

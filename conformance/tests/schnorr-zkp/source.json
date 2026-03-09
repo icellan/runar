@@ -1,0 +1,8 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
+    ".runar.go": "../../../examples/go/schnorr-zkp/SchnorrZKP.runar.go",
+    ".runar.rs": "../../../examples/rust/schnorr-zkp/SchnorrZKP.runar.rs",
+    ".runar.py": "../../../examples/python/schnorr-zkp/SchnorrZKP.runar.py"
+  }
+}

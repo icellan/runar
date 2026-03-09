@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-runar = { path = "../../packages/runar-rs" }
+runar = { package = "runar-lang", path = "../../packages/runar-rs" }
 
 [[test]]
 name = "p2pkh"
@@ -46,3 +46,27 @@ path = "math-demo/MathDemo_test.rs"
 [[test]]
 name = "function_patterns"
 path = "function-patterns/FunctionPatterns_test.rs"
+
+[[test]]
+name = "convergence_proof"
+path = "convergence-proof/ConvergenceProof_test.rs"
+
+[[test]]
+name = "schnorr_zkp"
+path = "schnorr-zkp/SchnorrZKP_test.rs"
+
+[[test]]
+name = "post_quantum_wallet"
+path = "post-quantum-wallet/PostQuantumWallet_test.rs"
+
+[[test]]
+name = "sphincs_wallet"
+path = "sphincs-wallet/SPHINCSWallet_test.rs"
+
+[[test]]
+name = "ec_demo"
+path = "ec-demo/ECDemo_test.rs"
+
+[[test]]
+name = "bounded_counter"
+path = "property-initializers/BoundedCounter_test.rs"

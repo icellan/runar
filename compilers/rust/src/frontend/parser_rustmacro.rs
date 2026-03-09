@@ -4,7 +4,7 @@
 //! and recursive descent parser. Produces the same AST as the TypeScript parser.
 
 use super::ast::{
-    self, BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
+    BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
 use super::parser::ParseResult;
@@ -203,6 +203,19 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
+        // String literal (double-quoted) — treated as hex ByteString like in TS/Sol/Move
+        if ch == '"' {
+            let mut val = String::new();
+            pos += 1; col += 1;
+            while pos < chars.len() && chars[pos] != '"' {
+                val.push(chars[pos]);
+                pos += 1; col += 1;
+            }
+            if pos < chars.len() { pos += 1; col += 1; } // skip closing quote
+            tokens.push(Token { typ: TokenType::HexString(val), line: l, col: c });
+            continue;
+        }
+
         pos += 1; col += 1;
     }
 
@@ -312,6 +325,7 @@ impl RustDslParser {
                                 name: snake_to_camel(&field_name),
                                 prop_type: field_type,
                                 readonly,
+                                initializer: None,
                                 source_location: loc,
                             });
                         } else {
@@ -360,11 +374,38 @@ impl RustDslParser {
             return ParseResult { contract: None, errors: self.errors };
         }
 
-        // Build constructor
+        // Extract init() method as property initializers, if present.
+        // init() is a special private method that sets default values on properties.
+        let mut final_methods = Vec::new();
+        for m in methods {
+            if m.name == "init" && m.params.is_empty() {
+                for stmt in &m.body {
+                    if let Statement::Assignment { target, value, .. } = stmt {
+                        if let Expression::PropertyAccess { property } = target {
+                            for p in properties.iter_mut() {
+                                if p.name == *property {
+                                    p.initializer = Some(value.clone());
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                final_methods.push(m);
+            }
+        }
+        let methods = final_methods;
+
+        // Build constructor (only non-initialized properties)
+        let uninit_props: Vec<&PropertyNode> = properties.iter()
+            .filter(|p| p.initializer.is_none())
+            .collect();
+
         let loc = SourceLocation { file: self.file.clone(), line: 1, column: 1 };
 
         // super(...) call as first statement
-        let super_args: Vec<Expression> = properties.iter()
+        let super_args: Vec<Expression> = uninit_props.iter()
             .map(|p| Expression::Identifier { name: p.name.clone() })
             .collect();
         let super_call = Statement::ExpressionStatement {
@@ -377,7 +418,7 @@ impl RustDslParser {
 
         // Property assignments
         let mut ctor_body = vec![super_call];
-        for p in &properties {
+        for p in &uninit_props {
             ctor_body.push(Statement::Assignment {
                 target: Expression::PropertyAccess { property: p.name.clone() },
                 value: Expression::Identifier { name: p.name.clone() },
@@ -387,7 +428,7 @@ impl RustDslParser {
 
         let constructor = MethodNode {
             name: "constructor".to_string(),
-            params: properties.iter().map(|p| ParamNode {
+            params: uninit_props.iter().map(|p| ParamNode {
                 name: p.name.clone(),
                 param_type: p.prop_type.clone(),
             }).collect(),
@@ -914,15 +955,33 @@ fn snake_to_camel(name: &str) -> String {
 
 fn map_rust_type(name: &str) -> String {
     match name {
-        "Bigint" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
+        "Bigint" | "Int" | "i64" | "u64" | "i128" | "u128" => "bigint".to_string(),
         "Bool" | "bool" => "boolean".to_string(),
         _ => name.to_string(),
     }
 }
 
 fn map_rust_builtin(name: &str) -> String {
+    // Handle names that snake_to_camel can't produce correctly BEFORE conversion.
+    // These have acronyms, digit boundaries, or non-standard mappings.
+    match name {
+        "bool_cast" => return "bool".to_string(),
+        "verify_wots" => return "verifyWOTS".to_string(),
+        "verify_slh_dsa_sha2_128s" => return "verifySLHDSA_SHA2_128s".to_string(),
+        "verify_slh_dsa_sha2_128f" => return "verifySLHDSA_SHA2_128f".to_string(),
+        "verify_slh_dsa_sha2_192s" => return "verifySLHDSA_SHA2_192s".to_string(),
+        "verify_slh_dsa_sha2_192f" => return "verifySLHDSA_SHA2_192f".to_string(),
+        "verify_slh_dsa_sha2_256s" => return "verifySLHDSA_SHA2_256s".to_string(),
+        "verify_slh_dsa_sha2_256f" => return "verifySLHDSA_SHA2_256f".to_string(),
+        "bin_2_num" => return "bin2num".to_string(),
+        "int_2_str" => return "int2str".to_string(),
+        "to_byte_string" => return "toByteString".to_string(),
+        _ => {}
+    }
+
     let camel = snake_to_camel(name);
-    // Map specific Rust builtins
+    // Map specific Rust builtins that snake_to_camel handles correctly
+    // but we list explicitly for clarity and stability
     match camel.as_str() {
         "hash160" => "hash160".to_string(),
         "hash256" => "hash256".to_string(),
@@ -933,8 +992,23 @@ fn map_rust_builtin(name: &str) -> String {
         "checkPreimage" => "checkPreimage".to_string(),
         "verifyRabinSig" => "verifyRabinSig".to_string(),
         "num2bin" => "num2bin".to_string(),
+        "bin2num" => "bin2num".to_string(),
+        "int2str" => "int2str".to_string(),
         "extractLocktime" => "extractLocktime".to_string(),
         "extractOutputHash" => "extractOutputHash".to_string(),
+        "extractVersion" => "extractVersion".to_string(),
+        "extractHashPrevouts" => "extractHashPrevouts".to_string(),
+        "extractHashSequence" => "extractHashSequence".to_string(),
+        "extractOutpoint" => "extractOutpoint".to_string(),
+        "extractInputIndex" => "extractInputIndex".to_string(),
+        "extractScriptCode" => "extractScriptCode".to_string(),
+        "extractAmount" => "extractAmount".to_string(),
+        "extractSequence" => "extractSequence".to_string(),
+        "extractOutputs" => "extractOutputs".to_string(),
+        "extractSigHashType" => "extractSigHashType".to_string(),
+        "addOutput" => "addOutput".to_string(),
+        "reverseBytes" => "reverseBytes".to_string(),
+        "toByteString" => "toByteString".to_string(),
         _ => camel,
     }
 }
@@ -1200,5 +1274,57 @@ impl Test {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_int_type_maps_to_bigint() {
+        assert_eq!(map_rust_type("Int"), "bigint");
+    }
+
+    #[test]
+    fn test_bool_cast_maps_to_bool() {
+        assert_eq!(map_rust_builtin("bool_cast"), "bool");
+    }
+
+    #[test]
+    fn test_verify_wots_mapping() {
+        assert_eq!(map_rust_builtin("verify_wots"), "verifyWOTS");
+    }
+
+    #[test]
+    fn test_verify_slh_dsa_mappings() {
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_128s"), "verifySLHDSA_SHA2_128s");
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_128f"), "verifySLHDSA_SHA2_128f");
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_192s"), "verifySLHDSA_SHA2_192s");
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_192f"), "verifySLHDSA_SHA2_192f");
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_256s"), "verifySLHDSA_SHA2_256s");
+        assert_eq!(map_rust_builtin("verify_slh_dsa_sha2_256f"), "verifySLHDSA_SHA2_256f");
+    }
+
+    #[test]
+    fn test_extract_builtin_mappings() {
+        assert_eq!(map_rust_builtin("extract_version"), "extractVersion");
+        assert_eq!(map_rust_builtin("extract_hash_prevouts"), "extractHashPrevouts");
+        assert_eq!(map_rust_builtin("extract_hash_sequence"), "extractHashSequence");
+        assert_eq!(map_rust_builtin("extract_outpoint"), "extractOutpoint");
+        assert_eq!(map_rust_builtin("extract_input_index"), "extractInputIndex");
+        assert_eq!(map_rust_builtin("extract_script_code"), "extractScriptCode");
+        assert_eq!(map_rust_builtin("extract_amount"), "extractAmount");
+        assert_eq!(map_rust_builtin("extract_sequence"), "extractSequence");
+        assert_eq!(map_rust_builtin("extract_output_hash"), "extractOutputHash");
+        assert_eq!(map_rust_builtin("extract_outputs"), "extractOutputs");
+        assert_eq!(map_rust_builtin("extract_locktime"), "extractLocktime");
+        assert_eq!(map_rust_builtin("extract_sig_hash_type"), "extractSigHashType");
+    }
+
+    #[test]
+    fn test_byte_operation_builtin_mappings() {
+        assert_eq!(map_rust_builtin("reverse_bytes"), "reverseBytes");
+        assert_eq!(map_rust_builtin("bin2num"), "bin2num");
+        assert_eq!(map_rust_builtin("bin_2_num"), "bin2num");
+        assert_eq!(map_rust_builtin("int2str"), "int2str");
+        assert_eq!(map_rust_builtin("int_2_str"), "int2str");
+        assert_eq!(map_rust_builtin("to_byte_string"), "toByteString");
+        assert_eq!(map_rust_builtin("add_output"), "addOutput");
     }
 }

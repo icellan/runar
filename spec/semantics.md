@@ -135,25 +135,19 @@ Note: `==` and `===` have identical semantics in Rúnar (no type coercion). The 
 
 ### 3.7 Logical Operators
 
-Short-circuit evaluation:
+Eager evaluation (both operands are always evaluated):
 
 ```
-    <e1, env, sigma> -->* VBool(false)
-    ─────────────────────────────────────────
-    <e1 && e2, env, sigma>  -->  VBool(false)
+    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
+    ────────────────────────────────────────────────────────────────────
+    <e1 && e2, env, sigma>  -->  VBool(b1 ∧ b2)
 
-    <e1, env, sigma> -->* VBool(true)    <e2, env, sigma> -->* v
-    ─────────────────────────────────────────────────────────────
-    <e1 && e2, env, sigma>  -->  v
-
-    <e1, env, sigma> -->* VBool(true)
-    ────────────────────────────────────────
-    <e1 || e2, env, sigma>  -->  VBool(true)
-
-    <e1, env, sigma> -->* VBool(false)    <e2, env, sigma> -->* v
-    ──────────────────────────────────────────────────────────────
-    <e1 || e2, env, sigma>  -->  v
+    <e1, env, sigma> -->* VBool(b1)    <e2, env, sigma> -->* VBool(b2)
+    ────────────────────────────────────────────────────────────────────
+    <e1 || e2, env, sigma>  -->  VBool(b1 ∨ b2)
 ```
+
+`&&` compiles to `OP_BOOLAND` and `||` compiles to `OP_BOOLOR`. Unlike TypeScript's short-circuit semantics, both operands are evaluated unconditionally. This is safe in Rúnar because all expressions are pure (no side effects beyond `assert`).
 
 ### 3.8 Unary Operators
 
@@ -271,23 +265,25 @@ If there is no `else` clause and the condition is false, the environment and sto
 
 ### 4.4 For Loop (Bounded, Unrolled)
 
-For loops are unrolled at compile time. The semantics describe the unrolled version:
+For loops are unrolled at compile time. The ANF IR `loop` node stores only a `count` (number of iterations) and an `iterVar` name -- it does not store the original start value. The stack lowerer always assigns iteration variable values starting from `0`:
 
 ```
     bound = evaluate_const(e_bound)
     init = evaluate_const(e_init)
-    iterations = [init, init+1, ..., bound-1]   /* for i < bound, ++ */
+    count = bound - init                        /* for i < bound, ++ */
 
-    <S_body[i := iterations[0]], env, sigma> ==> <env_1, sigma_1>
-    <S_body[i := iterations[1]], env_1, sigma_1> ==> <env_2, sigma_2>
+    <S_body[i := 0], env, sigma> ==> <env_1, sigma_1>
+    <S_body[i := 1], env_1, sigma_1> ==> <env_2, sigma_2>
     ...
-    <S_body[i := iterations[k]], env_k, sigma_k> ==> <env_final, sigma_final>
+    <S_body[i := count-1], env_{k}, sigma_{k}> ==> <env_final, sigma_final>
     ──────────────────────────────────────────────────────────────────────────────
     <for (let i = e_init; i < e_bound; i++) S_body, env, sigma>
         ==>  <env_final, sigma_final>
 ```
 
 The loop variable `i` is substituted with the concrete iteration value in each unrolled copy of the body. This means the loop variable is effectively a compile-time constant within each iteration.
+
+> **Limitation:** Although the compiler correctly computes the iteration *count* for non-zero start values (e.g., `for (let i = 3n; i < 8n; i++)` produces `count = 5`), the iteration variable is always assigned values `[0, 1, ..., count-1]` rather than `[init, init+1, ..., bound-1]`. If the loop body depends on the iteration variable's absolute value (not just the iteration index), developers must use a 0-based loop and add the start offset manually (e.g., `const j = i + 3n`).
 
 ### 4.5 Expression Statement
 
@@ -423,16 +419,10 @@ Stateful contracts use the **OP_PUSH_TX** pattern to carry state across transact
 A stateful contract's locking script has the form:
 
 ```
-<state_data> <locking_code>
+<code_part> OP_RETURN <field_0> <field_1> ... <field_n>
 ```
 
-Where `<state_data>` is the serialized mutable properties followed by `OP_DROP` instructions to remove them from the stack before `<locking_code>` executes (the code reads them via the preimage instead).
-
-More precisely:
-
-```
-<prop_n> <prop_n-1> ... <prop_1> OP_DROP ... OP_DROP <code_part>
-```
+The `<code_part>` contains the contract logic. State data is appended after an `OP_RETURN` separator, which terminates script execution so the state fields are never executed as opcodes. The contract reads its current state from the sighash preimage (which includes the full scriptCode) rather than from the stack.
 
 ### 7.2 State Transition Rule
 
@@ -441,7 +431,7 @@ More precisely:
     <method_body, env, sigma_old> ==> <env', sigma_new>
     sigma_new = {p1: v1', ..., pn: vn'}   /* new state */
 
-    new_locking_script = serialize_state(sigma_new) ++ code_part
+    new_locking_script = code_part ++ OP_RETURN ++ serialize_state(sigma_new)
     preimage contains output with new_locking_script
     checkPreimage(preimage) succeeds
     ──────────────────────────────────────────────────────────────
@@ -469,7 +459,7 @@ More precisely:
 
 ```
     sigma = {p1: v1, ..., pn: vn}
-    serialized = serialize(v1) ++ ... ++ serialize(vn) ++ OP_DROP^n
+    serialized = serialize(v1) ++ ... ++ serialize(vn)
     ────────────────────────────────────────────────────────────────
     <this.getStateScript(), env, sigma>  -->  VBytes(serialized)
 ```
@@ -478,27 +468,110 @@ More precisely:
 
 ```
 Transaction 1 (Deploy):
-    Output[0].script = <0> OP_DROP <counter_code>
-                        ^-- initial counter value = 0
+    Output[0].script = <counter_code> OP_RETURN <0>
+                                                 ^-- initial counter value = 0
 
 Transaction 2 (Increment by 5):
     Input[0].script  = <5> <preimage>     /* amount=5, sighash preimage */
-    Output[0].script = <5> OP_DROP <counter_code>
-                        ^-- new counter value = 5
+    Output[0].script = <counter_code> OP_RETURN <5>
+                                                 ^-- new counter value = 5
 
     The increment method:
     1. Reads current state from preimage: counter = 0
     2. Computes new state: counter = 0 + 5 = 5
-    3. Constructs expected output script: <5> OP_DROP <counter_code>
+    3. Constructs expected output script: <counter_code> OP_RETURN <5>
     4. Verifies preimage matches (output contains expected script)
     5. assert succeeds -> transaction is valid
 ```
 
 ---
 
-## 8. Script Execution Model
+## 8. Elliptic Curve Operation Semantics
 
-### 8.1 Stack Machine
+Rúnar provides built-in functions for secp256k1 elliptic curve arithmetic. All EC operations use the following curve parameters:
+
+### 8.1 secp256k1 Constants
+
+```
+p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F   (field prime)
+n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141   (group order)
+a = 0                                                                       (curve param a)
+b = 7                                                                       (curve param b)
+G = (0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798,   (generator x)
+     0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8)  (generator y)
+```
+
+The curve equation is: `y^2 = x^3 + 7 (mod p)`
+
+### 8.2 Point Representation
+
+Points are represented as `VBytes(bs)` where `bs` is exactly 64 bytes: the x-coordinate (32 bytes, big-endian unsigned) concatenated with the y-coordinate (32 bytes, big-endian unsigned).
+
+### 8.3 Field Arithmetic
+
+All intermediate arithmetic in EC operations uses modular arithmetic over `F_p`:
+
+```
+    field_add(a, b)  =  (a + b) mod p
+    field_sub(a, b)  =  ((a - b) mod p + p) mod p
+    field_mul(a, b)  =  (a * b) mod p
+    field_inv(a)     =  a^(p-2) mod p              (Fermat's little theorem)
+    field_div(a, b)  =  field_mul(a, field_inv(b))
+```
+
+### 8.4 EC Operation Rules
+
+```
+    Point(x1, y1) = decode_point(a)    Point(x2, y2) = decode_point(b)
+    x1 != x2
+    slope = field_div(field_sub(y2, y1), field_sub(x2, x1))
+    rx = field_sub(field_sub(field_mul(slope, slope), x1), x2)
+    ry = field_sub(field_mul(slope, field_sub(x1, rx)), y1)
+    ──────────────────────────────────────────────────────────────
+    <ecAdd(a, b), env, sigma>  -->  VBytes(encode_point(rx, ry))
+
+    Point(x1, y1) = decode_point(a)    x1 == x2 && y1 == y2
+    slope = field_div(field_mul(3, field_mul(x1, x1)), field_mul(2, y1))
+    rx = field_sub(field_mul(slope, slope), field_mul(2, x1))
+    ry = field_sub(field_mul(slope, field_sub(x1, rx)), y1)
+    ──────────────────────────────────────────────────────────────
+    <ecAdd(a, a), env, sigma>  -->  VBytes(encode_point(rx, ry))    /* point doubling */
+
+    Point(x, y) = decode_point(p)    k = VInt(scalar)
+    result = double_and_add(x, y, scalar, 256 iterations)
+    ──────────────────────────────────────────────────────────────
+    <ecMul(p, k), env, sigma>  -->  VBytes(encode_point(result))
+
+    k = VInt(scalar)
+    result = double_and_add(Gx, Gy, scalar, 256 iterations)
+    ──────────────────────────────────────────────────────────────
+    <ecMulGen(k), env, sigma>  -->  VBytes(encode_point(result))
+
+    Point(x, y) = decode_point(p)
+    ──────────────────────────────────────────────────
+    <ecNegate(p), env, sigma>  -->  VBytes(encode_point(x, p - y))
+
+    Point(x, y) = decode_point(p)
+    lhs = field_mul(y, y)    rhs = field_add(field_mul(x, field_mul(x, x)), 7)
+    ──────────────────────────────────────────────────
+    <ecOnCurve(p), env, sigma>  -->  VBool(lhs == rhs)
+
+    v = VInt(value)    m = VInt(mod)
+    ──────────────────────────────────────────────────
+    <ecModReduce(v, m), env, sigma>  -->  VInt(((value % mod) + mod) % mod)
+```
+
+### 8.5 Jacobian Coordinate Optimization
+
+The `ecMul` and `ecMulGen` implementations use Jacobian projective coordinates `(X, Y, Z)` internally, where the affine point `(x, y)` corresponds to `(X/Z^2, Y/Z^3)`. This avoids expensive modular inversions during the 256-iteration double-and-add loop. A single conversion from Jacobian to affine (requiring one modular inverse) is performed at the end.
+
+The double-and-add algorithm iterates over the 256 bits of the scalar from most significant to least significant. For each bit: double the accumulator; if the bit is 1, add the base point. This produces a fixed 256-iteration loop regardless of the scalar value.
+
+---
+
+## 9. Script Execution Model
+
+### 9.1 Stack Machine
 
 Bitcoin Script is a stack-based language. Rúnar compilation targets this stack machine.
 
@@ -507,7 +580,7 @@ Bitcoin Script is a stack-based language. Rúnar compilation targets this stack 
 - Booleans are encoded as `OP_TRUE` (byte `0x01`) or `OP_FALSE` (empty byte vector `0x`).
 - The alt-stack is available for temporary storage.
 
-### 8.2 Execution Flow
+### 9.2 Execution Flow
 
 ```
 1. Push unlocking script data onto the stack.
@@ -518,20 +591,20 @@ Bitcoin Script is a stack-based language. Rúnar compilation targets this stack 
 3. Script succeeds iff stack top is truthy.
 ```
 
-### 8.3 Script Size Limits
+### 9.3 Script Size Limits
 
 BSV (post-Genesis) has removed most script size limits, but Rúnar still enforces:
 
 - **Stack depth**: Maximum 800 items (enforced at compile time via static analysis).
 - **Script size**: No hard limit, but the compiler will warn if the generated script exceeds 100 KB.
 
-### 8.4 Deterministic Execution
+### 9.4 Deterministic Execution
 
 All Rúnar operations are deterministic. Given the same unlocking script and locking script, execution always produces the same result. There is no randomness, no I/O, and no access to external state beyond what is provided in the sighash preimage.
 
 ---
 
-## 9. Error Conditions
+## 10. Error Conditions
 
 | Condition | Result |
 |---|---|
@@ -543,9 +616,9 @@ All Rúnar operations are deterministic. Given the same unlocking script and loc
 
 ---
 
-## 10. Formal Properties
+## 11. Formal Properties
 
-### 10.1 Termination
+### 11.1 Termination
 
 All Rúnar programs terminate. This is guaranteed by:
 - No unbounded loops (all loops have compile-time bounds).
@@ -553,18 +626,18 @@ All Rúnar programs terminate. This is guaranteed by:
 - All built-in operations terminate.
 - The stack depth is bounded.
 
-### 10.2 Determinism
+### 11.2 Determinism
 
 For any given `(unlocking_script, locking_script)` pair, the execution result is deterministic.
 
-### 10.3 Type Safety
+### 11.3 Type Safety
 
 If a Rúnar program type-checks, then at runtime:
 - No type errors will occur (all operations receive operands of the correct type).
 - No stack underflow will occur (static stack analysis guarantees sufficient items).
 - The only runtime failures are explicit `assert` failures and division by zero.
 
-### 10.4 UTXO Safety (Affine Guarantee)
+### 11.4 UTXO Safety (Affine Guarantee)
 
 If a Rúnar program passes affine type checking, then:
 - `SigHashPreimage` values are used exactly once.

@@ -22,35 +22,26 @@ describe('Escrow (Solidity)', () => {
     }, FILE_NAME);
   }
 
-  it('allows release by seller', () => {
+  it('allows release with seller + arbiter signatures', () => {
     const escrow = makeEscrow();
-    const result = escrow.call('releaseBySeller', { sig: MOCK_SIG });
+    const result = escrow.call('release', { sellerSig: MOCK_SIG, arbiterSig: MOCK_SIG });
     expect(result.success).toBe(true);
   });
 
-  it('allows release by arbiter', () => {
+  it('allows refund with buyer + arbiter signatures', () => {
     const escrow = makeEscrow();
-    const result = escrow.call('releaseByArbiter', { sig: MOCK_SIG });
+    const result = escrow.call('refund', { buyerSig: MOCK_SIG, arbiterSig: MOCK_SIG });
     expect(result.success).toBe(true);
   });
 
-  it('allows refund to buyer', () => {
+  it('has two distinct spending paths', () => {
     const escrow = makeEscrow();
-    const result = escrow.call('refundToBuyer', { sig: MOCK_SIG });
-    expect(result.success).toBe(true);
-  });
-
-  it('allows refund by arbiter', () => {
-    const escrow = makeEscrow();
-    const result = escrow.call('refundByArbiter', { sig: MOCK_SIG });
-    expect(result.success).toBe(true);
-  });
-
-  it('has four distinct spending paths', () => {
-    const escrow = makeEscrow();
-    const methods = ['releaseBySeller', 'releaseByArbiter', 'refundToBuyer', 'refundByArbiter'];
-    for (const method of methods) {
-      const result = escrow.call(method, { sig: MOCK_SIG });
+    const methods = [
+      { name: 'release', args: { sellerSig: MOCK_SIG, arbiterSig: MOCK_SIG } },
+      { name: 'refund', args: { buyerSig: MOCK_SIG, arbiterSig: MOCK_SIG } },
+    ];
+    for (const { name, args } of methods) {
+      const result = escrow.call(name, args);
       expect(result.success).toBe(true);
     }
   });

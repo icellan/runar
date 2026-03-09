@@ -84,7 +84,54 @@ count: bigint;
 - Changes are propagated across transactions using the OP_PUSH_TX pattern.
 - Having any mutable property makes the contract **stateful**. Use `StatefulSmartContract` (or `InductiveSmartContract` for chain provenance) as the base class.
 
-Properties must not have initializers at the declaration site. All initialization happens in the constructor.
+### Property Initializers
+
+Properties may have optional initializers at the declaration site:
+
+```typescript
+count: bigint = 0n;
+readonly active: boolean = true;
+```
+
+- Initializers must be literal values (`bigint`, `boolean`, or `ByteString`).
+- Properties with initializers do not need to be passed as constructor parameters.
+- This reduces constructor bloat when many properties have known defaults.
+
+The equivalent in other formats:
+
+```solidity
+// Solidity
+int count = 0;
+bool immutable active = true;
+```
+
+```move
+// Move
+count: &mut Int = 0,
+active: Bool = true,
+```
+
+```python
+# Python
+count: Bigint = 0
+active: Readonly[Bool] = True
+```
+
+```go
+// Go — use a private init() method
+func (c *MyContract) init() {
+    c.Count = 0
+    c.Active = true
+}
+```
+
+```rust
+// Rust — use a private init() method
+fn init(&mut self) {
+    self.count = 0;
+    self.active = true;
+}
+```
 
 ---
 
@@ -144,8 +191,9 @@ private square(x: bigint): bigint {
 | `Ripemd160` | 20 | RIPEMD-160 digest |
 | `Addr` | 20 | Bitcoin address (hash160 of pubkey) |
 | `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX |
+| `Point` | 64 | secp256k1 elliptic curve point (x[32] \|\| y[32], big-endian) |
 
-All domain types (`PubKey`, `Sig`, etc.) are subtypes of `ByteString`. A domain type value can be used wherever a `ByteString` is expected (widening), but not the reverse (narrowing requires an explicit cast function).
+All domain types (`PubKey`, `Sig`, `Point`, etc.) are subtypes of `ByteString`. A domain type value can be used wherever a `ByteString` is expected (widening), but not the reverse (narrowing requires an explicit cast function).
 
 ### Rabin Types
 
@@ -207,18 +255,18 @@ Mixing `bigint` and `ByteString` with `+` is a compile-time error.
 | Operator | Description | Opcode |
 |----------|-------------|--------|
 | `===` / `==` | Equality | `OP_NUMEQUAL` (bigint) or `OP_EQUAL` (bytes) |
-| `!==` / `!=` | Inequality | `OP_NUMNOTEQUAL` (bigint) or `OP_EQUAL OP_NOT` (bytes) |
+| `!==` / `!=` | Inequality | `OP_NUMEQUAL OP_NOT` (bigint) or `OP_EQUAL OP_NOT` (bytes) |
 
 Both `==` and `===` have identical semantics in Rúnar (no type coercion). The compiler recommends `===`.
 
 ### Logical (operands: `boolean`)
 
-| Operator | Description | Notes |
-|----------|-------------|-------|
-| `&&` | Logical AND | Short-circuit evaluated |
-| `\|\|` | Logical OR | Short-circuit evaluated |
+| Operator | Description | Opcode |
+|----------|-------------|--------|
+| `&&` | Logical AND | `OP_BOOLAND` |
+| `\|\|` | Logical OR | `OP_BOOLOR` |
 
-Short-circuit operators are lowered to `OP_IF`/`OP_ELSE`/`OP_ENDIF` in the IR.
+Both operands are always evaluated (eager evaluation). At the ANF IR level, both sides are lowered as flat `bin_op` nodes -- there is no short-circuit lowering. At the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
 
 ### Bitwise (operands: `bigint`)
 
@@ -235,6 +283,8 @@ Short-circuit operators are lowered to `OP_IF`/`OP_ELSE`/`OP_ENDIF` in the IR.
 |----------|-------------|--------|
 | `a << b` | Left shift | `OP_LSHIFT` |
 | `a >> b` | Right shift | `OP_RSHIFT` |
+
+> **Warning: byte-array semantics.** In the BSV runtime (`@bsv/sdk` v2.0.5), `OP_LSHIFT` and `OP_RSHIFT` operate on **raw byte arrays** (big-endian unsigned shift), not on script numbers. They preserve the input byte length. This means that for multi-byte script numbers (which use sign-magnitude little-endian encoding), the result of `OP_RSHIFT` may differ from the expected arithmetic right-shift. If you need numeric right-shift behaviour, prefer `a / pow(2n, b)` (which compiles to `OP_DIV`-based sequences) instead of `a >> b`. The numeric variant `OP_RSHIFTNUM` (opcode 0xb7) is planned for the BSV 2026 CHRONICLE upgrade but is not yet widely available.
 
 ### Unary
 
@@ -329,17 +379,18 @@ private helper(x: bigint): bigint {
 | `hash160` | `(data: ByteString) => Ripemd160` | `OP_HASH160` (SHA-256 then RIPEMD-160) |
 | `sha256` | `(data: ByteString) => Sha256` | `OP_SHA256` |
 | `ripemd160` | `(data: ByteString) => Ripemd160` | `OP_RIPEMD160` |
+| `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
 
 ### Byte Operations
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `len` | `(data: ByteString) => bigint` | `OP_SIZE OP_NIP` |
-| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop (bounded, max 520 bytes) |
+| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop (bounded) |
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |
-| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — returns two values on the stack (left and right) |
+| `split` | `(data: ByteString, pos: bigint) => ByteString` | `OP_SPLIT` — produces two stack values (left and right). The type checker returns `ByteString` because the language has no tuple type; at the Bitcoin Script level, `OP_SPLIT` pushes two separate items onto the stack. |
 | `left` | `(data: ByteString, n: bigint) => ByteString` | `OP_SPLIT OP_DROP` — returns the leftmost n bytes |
 | `right` | `(data: ByteString, n: bigint) => ByteString` | `OP_SWAP OP_SIZE OP_ROT OP_SUB OP_SPLIT OP_NIP` — returns the rightmost n bytes |
 | `int2str` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
@@ -349,8 +400,8 @@ private helper(x: bigint): bigint {
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
-| `pack` | `(n: bigint) => ByteString` | `OP_NUM2BIN` |
-| `unpack` | `(data: ByteString) => bigint` | `OP_BIN2NUM` |
+| `pack` | `(n: bigint) => ByteString` | No-op (type-level cast). *Compiler-internal — not importable by contract authors.* |
+| `unpack` | `(data: ByteString) => bigint` | `OP_BIN2NUM`. *Compiler-internal — not importable by contract authors.* |
 | `num2bin` | `(n: bigint, size: bigint) => ByteString` | `OP_NUM2BIN` |
 
 ### Math
@@ -363,7 +414,6 @@ private helper(x: bigint): bigint {
 | `min` | `(a: bigint, b: bigint) => bigint` | `OP_MIN` |
 | `max` | `(a: bigint, b: bigint) => bigint` | `OP_MAX` |
 | `within` | `(x: bigint, lo: bigint, hi: bigint) => boolean` | `OP_WITHIN` |
-| `sign` | `(n: bigint) => bigint` | `OP_DUP OP_ABS OP_SWAP OP_DIV` — returns -1, 0, or 1 |
 | `bool` | `(n: bigint) => boolean` | `OP_0NOTEQUAL` — converts integer to boolean |
 
 #### Safe Arithmetic
@@ -385,24 +435,24 @@ private helper(x: bigint): bigint {
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
+| `sign` | `(n: bigint) => bigint` | `OP_DUP OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF` — returns -1, 0, or 1 (guards against div-by-zero when n=0) |
 | `pow` | `(base: bigint, exp: bigint) => bigint` | 32-iteration bounded conditional multiply loop |
 | `sqrt` | `(n: bigint) => bigint` | 16-iteration Newton's method: `guess = (guess + n/guess) / 2` |
 | `gcd` | `(a: bigint, b: bigint) => bigint` | 256-iteration Euclidean algorithm |
-| `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — computes both quotient and remainder, returns quotient (the remainder is discarded). Despite the name suggesting both values, only the quotient is returned to the caller. |
-| `log2` | `(n: bigint) => bigint` | `OP_SIZE OP_NIP <8> OP_MUL <8> OP_SUB` — approximate floor(log2(n)) via byte size |
+| `divmod` | `(a: bigint, b: bigint) => bigint` | `OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD OP_DROP` — **Warning:** Despite the name, `divmod` only returns the quotient. The remainder is computed internally but discarded. |
+| `log2` | `(n: bigint) => bigint` | 64-iteration unrolled bit-scanning loop using `PUSH 2 OP_DIV` for numeric halving — exact floor(log2(n)) |
 
 > **Note on `pow`:** For compile-time constant exponents (e.g. `pow(x, 3n)`), the constant folder evaluates the result at compile time. For runtime exponents, a bounded 32-iteration loop is emitted, supporting exponents up to 32.
 >
 > **Note on `sqrt`:** Returns the integer (floor) square root. For `sqrt(10n)`, the result is `3n`.
 >
-> **Note on `log2`:** This is an approximation based on the byte size of the script number encoding. It is exact for powers of 2 and within 7 bits of the true value otherwise.
+> **Note on `log2`:** This computes the exact floor(log2(n)) using a 64-iteration unrolled bit-scanning loop that halves the input (via `PUSH 2 OP_DIV`) until it reaches 1, counting iterations. Uses `OP_DIV` rather than `OP_RSHIFT` because `OP_RSHIFT` has byte-array semantics on BSV that are incompatible with script number halving.
 
 ### Control
 
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `assert` | `(cond: boolean) => void` | `OP_VERIFY` |
-| `exit` | `(success: boolean) => void` | `OP_RETURN` |
 
 ### Preimage (Stateful Contracts)
 
@@ -443,6 +493,49 @@ In `StatefulSmartContract` and `InductiveSmartContract`, `checkPreimage` and sta
 | `verifySLHDSA_SHA2_192f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-192f. Fast variant. Sig: 35,664 B. |
 | `verifySLHDSA_SHA2_256s` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256s. 256-bit security. Sig: 29,792 B. |
 | `verifySLHDSA_SHA2_256f` | `(msg, sig, pubkey) => boolean` | SLH-DSA-SHA2-256f. Fast variant. Sig: 49,856 B. |
+
+### Elliptic Curve (secp256k1)
+
+On-chain elliptic curve operations over the secp256k1 curve. These are synthesized from base Bitcoin Script opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.) via field arithmetic -- there are no dedicated EC opcodes. The `Point` type is a 64-byte `ByteString` subtype encoding affine coordinates as `x[32] || y[32]` in big-endian unsigned format (no prefix byte).
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `ecAdd` | `(a: Point, b: Point) => Point` | Affine point addition |
+| `ecMul` | `(p: Point, k: bigint) => Point` | Scalar multiplication (256-iteration double-and-add, Jacobian coordinates internally) |
+| `ecMulGen` | `(k: bigint) => Point` | Scalar multiplication by the hardcoded generator point G |
+| `ecNegate` | `(p: Point) => Point` | Point negation: `(x, p - y)` |
+| `ecOnCurve` | `(p: Point) => boolean` | Verify point satisfies `y^2 === x^3 + 7 (mod p)` |
+| `ecModReduce` | `(value: bigint, mod: bigint) => bigint` | Modular reduction: `((value % mod) + mod) % mod` |
+| `ecEncodeCompressed` | `(p: Point) => ByteString` | Encode point as 33-byte compressed public key (02/03 prefix + x) |
+| `ecMakePoint` | `(x: bigint, y: bigint) => Point` | Construct a 64-byte Point from x and y coordinates |
+| `ecPointX` | `(p: Point) => bigint` | Extract x-coordinate from a Point |
+| `ecPointY` | `(p: Point) => bigint` | Extract y-coordinate from a Point |
+
+#### EC Constants
+
+Exported from `runar-lang`:
+
+| Constant | Type | Description |
+|----------|------|-------------|
+| `EC_P` | `bigint` | secp256k1 field prime: `2^256 - 2^32 - 977` |
+| `EC_N` | `bigint` | secp256k1 group order |
+| `EC_G` | `Point` | Generator point (64 bytes: `x[32] \|\| y[32]`, big-endian) |
+
+#### SigHash Constants
+
+Exported from `runar-lang`:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `SigHash.ALL` | `0x01` | Sign all inputs and outputs |
+| `SigHash.NONE` | `0x02` | Sign all inputs, no outputs |
+| `SigHash.SINGLE` | `0x03` | Sign all inputs, only the output at the same index |
+| `SigHash.FORKID` | `0x40` | BSV fork ID flag (required for BSV transactions) |
+| `SigHash.ANYONECANPAY` | `0x80` | Sign only the current input |
+
+These can be combined with bitwise OR (e.g., `SigHash.ALL | SigHash.FORKID` = `0x41`).
+
+> **Note on `ecMul` and `ecMulGen`:** These use a 256-iteration double-and-add loop with Jacobian coordinates internally for efficiency, converting back to affine at the end. Each call generates substantial Bitcoin Script (~50-100 KB). For scalar multiplication by the generator G, prefer `ecMulGen(k)` over `ecMul(EC_G, k)` as the generator point is hardcoded, avoiding the need to push 64 bytes of point data.
 
 ---
 

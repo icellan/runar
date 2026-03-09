@@ -61,6 +61,16 @@ var builtinFunctions = map[string]funcSig{
 	"verifySLHDSA_SHA2_192f": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"verifySLHDSA_SHA2_256s": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"verifySLHDSA_SHA2_256f": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
+	"ecAdd":              {params: []string{"Point", "Point"}, returnType: "Point"},
+	"ecMul":              {params: []string{"Point", "bigint"}, returnType: "Point"},
+	"ecMulGen":           {params: []string{"bigint"}, returnType: "Point"},
+	"ecNegate":           {params: []string{"Point"}, returnType: "Point"},
+	"ecOnCurve":          {params: []string{"Point"}, returnType: "boolean"},
+	"ecModReduce":        {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"ecEncodeCompressed": {params: []string{"Point"}, returnType: "ByteString"},
+	"ecMakePoint":        {params: []string{"bigint", "bigint"}, returnType: "Point"},
+	"ecPointX":           {params: []string{"Point"}, returnType: "bigint"},
+	"ecPointY":           {params: []string{"Point"}, returnType: "bigint"},
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
@@ -111,6 +121,7 @@ var byteStringSubtypes = map[string]bool{
 	"Ripemd160":      true,
 	"Addr":           true,
 	"SigHashPreimage": true,
+	"Point":          true,
 }
 
 var bigintSubtypes = map[string]bool{

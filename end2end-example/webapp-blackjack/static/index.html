@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Script 21 — Provably Fair Blackjack</title>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a12;
+    --surface: #12121f;
+    --surface2: #1a1a2e;
+    --cyan: #00e5ff;
+    --green: #00ff88;
+    --red: #ff3355;
+    --gold: #ffd700;
+    --purple: #aa66ff;
+    --text: #e0e0e0;
+    --dim: #666680;
+    --card-w: 70px;
+    --card-h: 100px;
+  }
+
+  body {
+    font-family: 'SF Mono', 'JetBrains Mono', 'Fira Code', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+  header {
+    text-align: center;
+    padding: 30px 0 20px;
+  }
+
+  header h1 {
+    font-size: 2.8rem;
+    letter-spacing: 0.15em;
+    background: linear-gradient(135deg, var(--cyan), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-shadow: none;
+    margin-bottom: 4px;
+  }
+
+  header .sub {
+    color: var(--dim);
+    font-size: 0.8rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+  }
+
+  .welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 24px;
+    padding: 60px 20px;
+  }
+
+  .welcome h2 {
+    font-size: 1.2rem;
+    color: var(--cyan);
+  }
+
+  .player-select {
+    display: flex;
+    gap: 8px;
+  }
+
+  .player-select button {
+    width: 44px;
+    height: 44px;
+    border: 2px solid var(--dim);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    font-size: 1.1rem;
+    font-family: inherit;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .player-select button:hover,
+  .player-select button.active {
+    border-color: var(--cyan);
+    color: var(--cyan);
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+  }
+
+  .btn {
+    padding: 12px 32px;
+    border: 2px solid var(--cyan);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--cyan);
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn:hover:not(:disabled) {
+    background: var(--cyan);
+    color: var(--bg);
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.4);
+  }
+
+  .btn:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
+
+  .btn-green { border-color: var(--green); color: var(--green); }
+  .btn-green:hover:not(:disabled) { background: var(--green); color: var(--bg); box-shadow: 0 0 20px rgba(0, 255, 136, 0.4); }
+
+  .btn-red { border-color: var(--red); color: var(--red); }
+  .btn-red:hover:not(:disabled) { background: var(--red); color: #fff; box-shadow: 0 0 20px rgba(255, 51, 85, 0.4); }
+
+  .btn-gold { border-color: var(--gold); color: var(--gold); }
+  .btn-gold:hover:not(:disabled) { background: var(--gold); color: var(--bg); box-shadow: 0 0 20px rgba(255, 215, 0, 0.4); }
+
+  .btn-sm { padding: 8px 16px; font-size: 0.85rem; }
+
+  .game-table {
+    position: relative;
+    background: radial-gradient(ellipse at center, #0d3320 0%, #0a1a14 60%, var(--bg) 100%);
+    border: 2px solid #1a4a30;
+    border-radius: 200px / 80px;
+    padding: 30px 40px;
+    min-height: 500px;
+    margin: 20px 0;
+  }
+
+  .dealer-area {
+    text-align: center;
+    margin-bottom: 30px;
+  }
+
+  .dealer-label {
+    font-size: 0.75rem;
+    color: var(--gold);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .hand {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    min-height: var(--card-h);
+    align-items: flex-start;
+  }
+
+  .card {
+    width: var(--card-w);
+    height: var(--card-h);
+    border-radius: 6px;
+    position: relative;
+    font-family: Georgia, serif;
+    box-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+    animation: dealCard 0.3s ease-out;
+  }
+
+  @keyframes dealCard {
+    from { opacity: 0; transform: translateY(-30px) scale(0.8); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .card-face {
+    background: #fff;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 4px 6px;
+  }
+
+  .card-face .top { text-align: left; line-height: 1; }
+  .card-face .bottom { text-align: right; line-height: 1; transform: rotate(180deg); }
+  .card-face .center {
+    text-align: center;
+    font-size: 1.8rem;
+    flex-grow: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .card-face .rank { font-size: 0.85rem; font-weight: bold; }
+  .card-face .suit-sm { font-size: 0.7rem; }
+
+  .card-red { color: #cc0000; }
+  .card-black { color: #111; }
+
+  .card-back {
+    background: linear-gradient(135deg, #1a237e 0%, #283593 50%, #1a237e 100%);
+    border: 2px solid #3949ab;
+    border-radius: 6px;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .card-back::after {
+    content: "\u2666";
+    font-size: 2rem;
+    color: rgba(255,255,255,0.15);
+  }
+
+  .hand-value {
+    font-size: 1rem;
+    font-weight: bold;
+    margin-top: 6px;
+    color: var(--text);
+  }
+
+  .hand-value.bust { color: var(--red); }
+  .hand-value.blackjack { color: var(--gold); }
+
+  .players-area {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 20px;
+  }
+
+  .player-seat {
+    background: var(--surface);
+    border: 2px solid var(--dim);
+    border-radius: 12px;
+    padding: 14px;
+    min-width: 140px;
+    text-align: center;
+    transition: all 0.3s;
+  }
+
+  .player-seat.active {
+    border-color: var(--cyan);
+    box-shadow: 0 0 20px rgba(0, 229, 255, 0.25);
+  }
+
+  .player-seat.winner {
+    border-color: var(--green);
+    box-shadow: 0 0 20px rgba(0, 255, 136, 0.25);
+  }
+
+  .player-seat.loser {
+    border-color: var(--red);
+    opacity: 0.7;
+  }
+
+  .player-seat.push-result {
+    border-color: var(--gold);
+    box-shadow: 0 0 15px rgba(255, 215, 0, 0.2);
+  }
+
+  .player-name {
+    font-size: 0.75rem;
+    color: var(--cyan);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+
+  .player-balance {
+    font-size: 0.7rem;
+    color: var(--dim);
+    margin-top: 4px;
+  }
+
+  .outcome-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 0.1em;
+    margin-top: 6px;
+    text-transform: uppercase;
+  }
+
+  .outcome-badge.win, .outcome-badge.blackjack { background: var(--green); color: #000; }
+  .outcome-badge.lose { background: var(--red); color: #fff; }
+  .outcome-badge.push { background: var(--gold); color: #000; }
+
+  .actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    margin: 20px 0;
+  }
+
+  .commit-bar {
+    text-align: center;
+    padding: 8px;
+    background: var(--surface);
+    border-radius: 8px;
+    margin-bottom: 16px;
+  }
+
+  .commit-bar .label {
+    font-size: 0.65rem;
+    color: var(--dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+
+  .commit-bar .hash {
+    font-size: 0.6rem;
+    color: var(--purple);
+    word-break: break-all;
+    margin-top: 2px;
+  }
+
+  .info-bar {
+    display: flex;
+    justify-content: center;
+    gap: 30px;
+    margin: 16px 0;
+    font-size: 0.75rem;
+  }
+
+  .info-bar .info-item {
+    color: var(--dim);
+  }
+
+  .info-bar .info-item span {
+    color: var(--text);
+  }
+
+  .log-panel {
+    background: var(--surface);
+    border: 1px solid var(--surface2);
+    border-radius: 8px;
+    padding: 16px;
+    max-height: 250px;
+    overflow-y: auto;
+    margin-top: 20px;
+  }
+
+  .log-panel h3 {
+    font-size: 0.75rem;
+    color: var(--dim);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .log-entry {
+    font-size: 0.7rem;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+
+  .log-entry .log-icon {
+    flex-shrink: 0;
+    width: 16px;
+    text-align: center;
+  }
+
+  .log-entry .log-msg { color: var(--text); }
+
+  .log-entry .log-txid {
+    color: var(--purple);
+    font-size: 0.6rem;
+    word-break: break-all;
+  }
+
+  .log-icon.fund { color: var(--green); }
+  .log-icon.deploy { color: var(--cyan); }
+  .log-icon.settle { color: var(--gold); }
+  .log-icon.commit { color: var(--purple); }
+  .log-icon.deal { color: var(--text); }
+  .log-icon.info { color: var(--dim); }
+  .log-icon.error { color: var(--red); }
+  .log-icon.action { color: var(--cyan); }
+  .log-icon.dealer { color: var(--gold); }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+  }
+
+  .modal {
+    background: var(--surface);
+    border: 2px solid var(--cyan);
+    border-radius: 12px;
+    padding: 24px;
+    max-width: 900px;
+    width: 95%;
+    max-height: 85vh;
+    overflow-y: auto;
+  }
+
+  .modal h2 {
+    color: var(--cyan);
+    font-size: 1rem;
+    margin-bottom: 12px;
+    letter-spacing: 0.1em;
+  }
+
+  .modal pre {
+    background: var(--bg);
+    padding: 12px;
+    border-radius: 6px;
+    font-size: 0.65rem;
+    overflow-x: auto;
+    color: var(--dim);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
+
+  .json-key { color: var(--cyan); }
+  .json-string { color: var(--green); }
+  .json-number { color: var(--gold); }
+  .json-bool { color: var(--red); }
+  .json-null { color: var(--dim); font-style: italic; }
+  .json-brace { color: var(--dim); }
+  .json-comma { color: var(--dim); }
+
+  .op-return-wrap {
+    position: relative;
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+    text-underline-offset: 2px;
+  }
+
+  .op-return-tip {
+    display: none;
+    position: fixed;
+    z-index: 200;
+    background: var(--surface2);
+    border: 1px solid var(--purple);
+    border-radius: 6px;
+    padding: 10px 12px;
+    min-width: 400px;
+    max-width: 800px;
+    max-height: 400px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    font-size: 0.65rem;
+    line-height: 1.5;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+  }
+
+  .op-return-tip .tip-label {
+    color: var(--purple);
+    font-weight: bold;
+    font-size: 0.6rem;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+
+  .op-return-tip .tip-segment {
+    margin-bottom: 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .op-return-tip .tip-segment:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+  .tip-segment .seg-label { color: var(--dim); font-size: 0.55rem; margin-bottom: 2px; }
+  .tip-segment .seg-text { color: var(--green); }
+  .tip-segment .seg-hex { color: var(--gold); }
+  .tip-segment .seg-json { color: var(--text); }
+
+  .loading {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--dim);
+    border-top-color: var(--cyan);
+    border-radius: 50%;
+    animation: spin 0.6s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .txid-link {
+    font-size: 0.55rem;
+    color: var(--purple);
+    opacity: 0.7;
+    word-break: break-all;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .txid-link:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+
+  .log-txid {
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .log-txid:hover {
+    opacity: 1;
+    text-decoration: underline;
+  }
+</style>
+</head>
+<body>
+<div class="container" x-data="blackjack()">
+  <header>
+    <h1>SCRIPT 21</h1>
+    <div class="sub">Provably Fair Blackjack on Bitcoin Script</div>
+  </header>
+
+  <!-- Welcome Screen -->
+  <template x-if="state.phase === 'welcome'">
+    <div class="welcome">
+      <h2>How many players?</h2>
+      <div class="player-select">
+        <template x-for="n in 7" :key="n">
+          <button :class="{ active: numPlayers === n }" @click="numPlayers = n" x-text="n"></button>
+        </template>
+      </div>
+      <button class="btn" @click="newGame()" :disabled="loading">
+        <span x-show="loading"><span class="loading"></span> SETTING UP...</span>
+        <span x-show="!loading">START GAME</span>
+      </button>
+    </div>
+  </template>
+
+  <!-- Game Screen -->
+  <template x-if="state.phase !== 'welcome'">
+    <div>
+      <!-- Commit bar -->
+      <div class="commit-bar" x-show="state.deckCommitHash">
+        <div class="label">Deck Commitment (SHA-256)</div>
+        <div class="hash" x-text="state.deckCommitHash"></div>
+      </div>
+
+      <!-- Info bar -->
+      <div class="info-bar">
+        <div class="info-item">Round: <span x-text="state.round || '-'"></span></div>
+        <div class="info-item">House: <span x-text="formatSats(state.houseBalance)"></span></div>
+        <div class="info-item">Bet: <span>1,000 sats</span></div>
+        <div class="info-item">BJ pays: <span>3:2</span></div>
+      </div>
+
+      <!-- Game Table -->
+      <div class="game-table">
+        <!-- Dealer -->
+        <div class="dealer-area">
+          <div class="dealer-label">Dealer</div>
+          <div class="hand">
+            <template x-if="state.dealer && state.dealer.hand">
+              <template x-for="(card, idx) in state.dealer.hand" :key="idx">
+                <div class="card" :style="'animation-delay:' + (idx * 0.1) + 's'">
+                  <template x-if="!state.dealer.showHidden && idx === 1">
+                    <div class="card-back"></div>
+                  </template>
+                  <template x-if="state.dealer.showHidden || idx === 0">
+                    <div class="card-face" :class="cardColor(card)">
+                      <div class="top">
+                        <div class="rank" x-text="rankName(card)"></div>
+                        <div class="suit-sm" x-text="suitSymbol(card)"></div>
+                      </div>
+                      <div class="center" x-text="suitSymbol(card)"></div>
+                      <div class="bottom">
+                        <div class="rank" x-text="rankName(card)"></div>
+                        <div class="suit-sm" x-text="suitSymbol(card)"></div>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </template>
+          </div>
+          <div class="hand-value"
+               :class="{ blackjack: state.dealer?.showHidden && state.dealer?.handValue === 21 && state.dealer?.hand?.length === 2 }"
+               x-show="state.dealer?.hand?.length > 0"
+               x-text="state.dealer?.showHidden ? state.dealer.handValue : (state.dealer?.hand?.length > 0 ? '?' : '')">
+          </div>
+        </div>
+
+        <!-- Players -->
+        <div class="players-area">
+          <template x-for="(player, idx) in state.players" :key="idx">
+            <div class="player-seat"
+                 :class="{
+                   active: state.phase === 'player-turns' && state.activePlayer === idx,
+                   winner: player.outcome === 'win' || player.outcome === 'blackjack',
+                   loser: player.outcome === 'lose',
+                   'push-result': player.outcome === 'push'
+                 }">
+              <div class="player-name" x-text="player.name"></div>
+              <div class="hand" x-show="player.hand && player.hand.length > 0">
+                <template x-for="(card, cidx) in player.hand" :key="cidx">
+                  <div class="card" :style="'animation-delay:' + (cidx * 0.1) + 's'">
+                    <div class="card-face" :class="cardColor(card)">
+                      <div class="top">
+                        <div class="rank" x-text="rankName(card)"></div>
+                        <div class="suit-sm" x-text="suitSymbol(card)"></div>
+                      </div>
+                      <div class="center" x-text="suitSymbol(card)"></div>
+                      <div class="bottom">
+                        <div class="rank" x-text="rankName(card)"></div>
+                        <div class="suit-sm" x-text="suitSymbol(card)"></div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+              </div>
+              <div class="hand-value"
+                   :class="{ bust: player.isBust, blackjack: player.isBlackjack }"
+                   x-show="player.hand && player.hand.length > 0"
+                   x-text="player.handValue + (player.isBlackjack ? ' BJ!' : player.isBust ? ' BUST' : '')">
+              </div>
+              <div x-show="player.outcome">
+                <span class="outcome-badge" :class="player.outcome" x-text="player.outcome"></span>
+              </div>
+              <div class="player-balance" x-text="formatSats(player.balance)"></div>
+              <div class="txid-link" x-show="player.contractTxid" @click="fetchTx(player.contractTxid)" x-text="'deploy: ' + player.contractTxid?.substring(0, 8) + '...' + player.contractTxid?.substring(56)"></div>
+              <div class="txid-link" x-show="player.settleTxid" @click="fetchTx(player.settleTxid)" x-text="'settle: ' + player.settleTxid?.substring(0, 8) + '...' + player.settleTxid?.substring(56)"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="actions">
+        <template x-if="state.phase === 'ready'">
+          <button class="btn btn-green" @click="deal()" :disabled="loading">
+            <span x-show="loading"><span class="loading"></span> DEALING...</span>
+            <span x-show="!loading">DEAL</span>
+          </button>
+        </template>
+
+        <template x-if="state.phase === 'player-turns'">
+          <div style="display:flex;gap:12px;">
+            <button class="btn btn-green" @click="action('hit')" :disabled="loading">HIT</button>
+            <button class="btn btn-red" @click="action('stand')" :disabled="loading">STAND</button>
+          </div>
+        </template>
+
+        <template x-if="state.phase === 'dealer-turn'">
+          <button class="btn btn-gold" @click="dealer()" :disabled="loading">
+            <span x-show="loading"><span class="loading"></span> SETTLING...</span>
+            <span x-show="!loading">DEALER PLAYS &amp; SETTLE</span>
+          </button>
+        </template>
+
+        <template x-if="state.phase === 'settlement'">
+          <div style="display:flex;gap:12px;">
+            <button class="btn btn-green" @click="newRound()" :disabled="loading">NEW ROUND</button>
+            <button class="btn btn-sm" @click="showAudit = true">AUDIT</button>
+            <button class="btn btn-sm" style="border-color:var(--purple);color:var(--purple);" @click="runVerify()">VERIFY</button>
+          </div>
+        </template>
+      </div>
+
+      <!-- Transaction Log -->
+      <div class="log-panel" x-show="state.log && state.log.length > 0">
+        <h3>Transaction Log</h3>
+        <template x-for="(entry, idx) in (state.log || [])" :key="idx">
+          <div class="log-entry">
+            <span class="log-icon" :class="entry.type" x-text="logIcon(entry.type)"></span>
+            <span class="log-msg" x-text="entry.message"></span>
+            <span class="log-txid" x-show="entry.txid" x-text="entry.txid" @click="fetchTx(entry.txid)"></span>
+          </div>
+        </template>
+      </div>
+
+      <!-- Audit Modal -->
+      <template x-if="showAudit && auditData">
+        <div class="modal-overlay" @click.self="showAudit = false">
+          <div class="modal">
+            <h2>Round Audit Data</h2>
+            <pre x-html="syntaxHighlight(auditData)"></pre>
+            <div style="margin-top:12px;display:flex;gap:8px;">
+              <button class="btn btn-sm" @click="downloadAudit()">Download JSON</button>
+              <button class="btn btn-sm btn-red" @click="showAudit = false">Close</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Verify Modal -->
+      <template x-if="showVerify">
+        <div class="modal-overlay" @click.self="showVerify = false">
+          <div class="modal">
+            <h2>Deck Integrity Verification</h2>
+            <div style="font-size:0.75rem;line-height:2;">
+              <template x-for="(step, si) in verifySteps" :key="si">
+                <div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);">
+                  <div style="display:flex;align-items:flex-start;gap:8px;">
+                    <span style="flex-shrink:0;width:20px;text-align:center;" x-text="step.pass === true ? '\u2705' : step.pass === false ? '\u274C' : '\u23F3'"></span>
+                    <div style="flex:1;">
+                      <div style="font-weight:bold;margin-bottom:4px;" :style="{ color: step.pass === true ? 'var(--green)' : step.pass === false ? 'var(--red)' : 'var(--dim)' }" x-text="'Step ' + (si + 1) + ': ' + step.title"></div>
+                      <div style="font-size:0.65rem;color:var(--dim);margin-bottom:4px;" x-text="step.description"></div>
+                      <template x-if="step.detail">
+                        <pre style="font-size:0.6rem;margin-top:4px;padding:8px;background:var(--bg);border-radius:4px;white-space:pre-wrap;word-break:break-all;" x-html="step.detailHtml || step.detail"></pre>
+                      </template>
+                    </div>
+                  </div>
+                </div>
+              </template>
+              <div style="margin-top:16px;padding:12px;border-radius:6px;text-align:center;font-weight:bold;letter-spacing:0.1em;"
+                   :style="{ background: verifyAllPass ? 'rgba(0,255,136,0.1)' : 'rgba(255,51,85,0.1)', color: verifyAllPass ? 'var(--green)' : 'var(--red)', border: '1px solid ' + (verifyAllPass ? 'var(--green)' : 'var(--red)') }"
+                   x-text="verifyAllPass ? 'DECK INTEGRITY VERIFIED' : 'VERIFICATION FAILED'">
+              </div>
+            </div>
+            <div style="margin-top:12px;">
+              <button class="btn btn-sm btn-red" @click="showVerify = false">Close</button>
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <!-- Transaction Modal -->
+      <template x-if="showTx && txData">
+        <div class="modal-overlay" @click.self="showTx = false">
+          <div class="modal">
+            <h2>Transaction</h2>
+            <div style="font-size:0.6rem;color:var(--purple);word-break:break-all;margin-bottom:12px;" x-text="txData.txid"></div>
+            <pre x-html="syntaxHighlight(txData)"></pre>
+            <div style="margin-top:12px;">
+              <button class="btn btn-sm btn-red" @click="showTx = false">Close</button>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </template>
+</div>
+
+<script>
+function blackjack() {
+  return {
+    state: { phase: 'welcome', players: [], dealer: {}, log: [] },
+    numPlayers: 3,
+    loading: false,
+    showAudit: false,
+    auditData: null,
+    showTx: false,
+    txData: null,
+    showVerify: false,
+    verifySteps: [],
+    verifyAllPass: false,
+
+    async api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) opts.body = JSON.stringify(body);
+      const resp = await fetch(path, opts);
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({ error: resp.statusText }));
+        throw new Error(err.error || resp.statusText);
+      }
+      return resp.json();
+    },
+
+    async newGame() {
+      this.loading = true;
+      try {
+        this.state = await this.api('POST', '/api/new-game', { numPlayers: this.numPlayers });
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      this.loading = false;
+    },
+
+    async deal() {
+      this.loading = true;
+      try {
+        this.state = await this.api('POST', '/api/deal');
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      this.loading = false;
+    },
+
+    async action(act) {
+      this.loading = true;
+      try {
+        this.state = await this.api('POST', '/api/action', { player: this.state.activePlayer, action: act });
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      this.loading = false;
+    },
+
+    async dealer() {
+      this.loading = true;
+      try {
+        this.state = await this.api('POST', '/api/dealer');
+        this.auditData = await this.api('GET', '/api/audit').catch(() => null);
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      this.loading = false;
+    },
+
+    async newRound() {
+      this.loading = true;
+      try {
+        this.state = await this.api('POST', '/api/new-round');
+        this.auditData = null;
+        this.showAudit = false;
+      } catch (e) {
+        alert('Error: ' + e.message);
+      }
+      this.loading = false;
+    },
+
+    async runVerify() {
+      if (!this.auditData) {
+        alert('No audit data available');
+        return;
+      }
+      const a = this.auditData;
+      const steps = [];
+
+      steps.push({
+        title: 'Retrieve on-chain deck commitment',
+        description: 'Fetch the commitment transaction broadcast before cards were dealt and extract the OP_RETURN data.',
+        detail: 'Txid: ' + (a.deckCommitTxid || 'N/A'),
+        pass: null
+      });
+
+      let onChainHash = null;
+      if (a.deckCommitTxid) {
+        try {
+          const tx = await this.api('GET', '/api/tx?txid=' + encodeURIComponent(a.deckCommitTxid));
+          const nullOut = tx.vout.find(v => v.scriptPubKey && v.scriptPubKey.type === 'nulldata');
+          if (nullOut) {
+            const hex = nullOut.scriptPubKey.hex;
+            const decoded = this.decodeOpReturnHex(hex);
+            if (decoded && decoded.length > 0) {
+              onChainHash = decoded[decoded.length - 1].display;
+              steps[0].detail = 'Txid: ' + a.deckCommitTxid + '\nOn-chain hash: ' + onChainHash;
+              steps[0].pass = true;
+            }
+          }
+          if (!onChainHash) {
+            steps[0].detail = 'Txid: ' + a.deckCommitTxid + '\nCould not extract hash from OP_RETURN';
+            steps[0].pass = false;
+          }
+        } catch (e) {
+          steps[0].detail = 'Failed to fetch tx: ' + e.message;
+          steps[0].pass = false;
+        }
+      } else {
+        steps[0].pass = false;
+      }
+
+      const salt = a.deckSalt;
+      const deckOrder = a.deckOrder;
+      let deckStr = '';
+      if (deckOrder) {
+        deckStr = deckOrder.map(c => c.rank + ':' + c.suit).join(',');
+      }
+      const preimage = salt + '|' + deckStr;
+
+      steps.push({
+        title: 'Reconstruct commitment preimage',
+        description: 'Combine the revealed salt and deck order in the same format used before dealing: SHA-256(salt | card1,card2,...)',
+        detail: 'Salt: ' + salt + '\nDeck: ' + deckStr.substring(0, 80) + '...\nPreimage: ' + preimage.substring(0, 80) + '...',
+        pass: salt && deckOrder ? true : false
+      });
+
+      let computedHash = null;
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(preimage);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        computedHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch (_) {}
+
+      steps.push({
+        title: 'Compute SHA-256 hash',
+        description: 'Hash the reconstructed preimage using SHA-256.',
+        detail: 'Computed: ' + (computedHash || 'FAILED'),
+        pass: computedHash ? true : false
+      });
+
+      const auditHash = a.deckCommitment;
+      const hashMatch = computedHash && auditHash && computedHash === auditHash;
+
+      steps.push({
+        title: 'Compare computed hash with audit commitment',
+        description: 'Verify the SHA-256 output matches the commitment hash from the audit data.',
+        detail: 'Audit says: ' + (auditHash || 'N/A') + '\nComputed:   ' + (computedHash || 'N/A') + '\nMatch: ' + (hashMatch ? 'YES' : 'NO'),
+        pass: hashMatch
+      });
+
+      const chainMatch = onChainHash && computedHash && onChainHash === computedHash;
+
+      steps.push({
+        title: 'Compare computed hash with on-chain commitment',
+        description: 'Verify the SHA-256 output matches the hash stored on the blockchain BEFORE cards were dealt. This proves the deck order was locked in before the game started.',
+        detail: 'On-chain:  ' + (onChainHash || 'N/A') + '\nComputed:  ' + (computedHash || 'N/A') + '\nMatch: ' + (chainMatch ? 'YES' : 'NO'),
+        pass: chainMatch
+      });
+
+      const cardsDealt = [];
+      if (deckOrder && a.players) {
+        let pos = 0;
+        for (const p of a.players) {
+          if (p.hand) {
+            for (const c of p.hand) cardsDealt.push({ pos: pos++, expected: deckOrder[cardsDealt.length], actual: c, who: p.name });
+          }
+        }
+        if (a.dealerHand) {
+          for (const c of a.dealerHand) cardsDealt.push({ pos: pos++, expected: deckOrder[cardsDealt.length], actual: c, who: 'Dealer' });
+        }
+      }
+
+      const dealOk = cardsDealt.length > 0 && cardsDealt.every(d => d.expected && d.actual && d.expected.rank === d.actual.rank && d.expected.suit === d.actual.suit);
+      const dealDetail = cardsDealt.map(d => {
+        const ok = d.expected && d.actual && d.expected.rank === d.actual.rank && d.expected.suit === d.actual.suit;
+        return (ok ? 'OK' : 'MISMATCH') + '  deck[' + d.pos + '] = ' + d.expected.rank + ':' + d.expected.suit + '  ->  ' + d.who;
+      }).join('\n');
+
+      steps.push({
+        title: 'Verify dealt cards match committed deck order',
+        description: 'Check that every card dealt to players and the dealer matches the pre-committed deck sequence.',
+        detail: dealDetail || 'No cards to verify',
+        pass: dealOk
+      });
+
+      this.verifySteps = steps;
+      this.verifyAllPass = steps.every(s => s.pass === true);
+      this.showVerify = true;
+    },
+
+    async fetchTx(txid) {
+      if (!txid) return;
+      try {
+        this.txData = await this.api('GET', '/api/tx?txid=' + encodeURIComponent(txid));
+        this.showTx = true;
+      } catch (e) {
+        alert('Error fetching transaction: ' + e.message);
+      }
+    },
+
+    downloadAudit() {
+      if (!this.auditData) return;
+      const blob = new Blob([JSON.stringify(this.auditData, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `round-${this.auditData.roundId}-audit.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    },
+
+    formatSats(sats) {
+      if (sats === undefined || sats === null) return '-';
+      return sats.toLocaleString() + ' sats';
+    },
+
+    rankName(card) {
+      if (!card) return '';
+      const r = card.rank;
+      if (r === 1) return 'A';
+      if (r === 11) return 'J';
+      if (r === 12) return 'Q';
+      if (r === 13) return 'K';
+      return '' + r;
+    },
+
+    suitSymbol(card) {
+      if (!card) return '';
+      return ['\u2660', '\u2665', '\u2666', '\u2663'][card.suit] || '?';
+    },
+
+    cardColor(card) {
+      if (!card) return '';
+      return (card.suit === 1 || card.suit === 2) ? 'card-red' : 'card-black';
+    },
+
+    decodeOpReturnHex(hex) {
+      const bytes = [];
+      for (let i = 0; i < hex.length; i += 2) {
+        bytes.push(Number.parseInt(hex.substr(i, 2), 16));
+      }
+      let pos = 0;
+      if (bytes[pos] === 0x00) pos++;
+      if (bytes[pos] === 0x6a) pos++;
+      else return null;
+      const segments = [];
+      while (pos < bytes.length) {
+        let len = 0;
+        const op = bytes[pos++];
+        if (op >= 0x01 && op <= 0x4b) {
+          len = op;
+        } else if (op === 0x4c) {
+          len = bytes[pos++];
+        } else if (op === 0x4d) {
+          len = bytes[pos] | (bytes[pos + 1] << 8);
+          pos += 2;
+        } else if (op === 0x4e) {
+          len = bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24);
+          pos += 4;
+        } else {
+          break;
+        }
+        const data = bytes.slice(pos, pos + len);
+        pos += len;
+        const hexStr = data.map(b => b.toString(16).padStart(2, '0')).join('');
+        let display = hexStr;
+        let isJson = false;
+        try {
+          const decoded = new TextDecoder('utf-8', { fatal: true }).decode(new Uint8Array(data));
+          const printable = decoded.split('').every(c => {
+            const code = c.codePointAt(0);
+            return code >= 0x20 || code === 0x0a || code === 0x0d || code === 0x09;
+          });
+          if (printable) {
+            try {
+              const parsed = JSON.parse(decoded);
+              display = JSON.stringify(parsed, null, 2);
+              isJson = true;
+            } catch (_) {
+              display = decoded;
+            }
+          }
+        } catch (_) {}
+        segments.push({ display, hex: hexStr, len: data.length, isJson });
+      }
+      return segments.length > 0 ? segments : null;
+    },
+
+    buildOpReturnTooltip(hex) {
+      const segments = this.decodeOpReturnHex(hex);
+      if (!segments) return null;
+      let tip = '<span class="op-return-tip">';
+      tip += '<div class="tip-label">OP_RETURN decoded</div>';
+      for (let i = 0; i < segments.length; i++) {
+        const s = segments[i];
+        tip += '<div class="tip-segment">';
+        tip += '<div class="seg-label">push ' + i + ' (' + s.len + ' bytes)</div>';
+        if (s.isJson) {
+          const highlighted = this.syntaxHighlightRaw(s.display);
+          tip += '<div class="seg-json">' + highlighted + '</div>';
+        } else if (s.display !== s.hex) {
+          tip += '<div class="seg-text">' + s.display.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</div>';
+        } else {
+          tip += '<div class="seg-hex">' + s.hex + '</div>';
+        }
+        tip += '</div>';
+      }
+      tip += '</span>';
+      return tip;
+    },
+
+    syntaxHighlightRaw(str) {
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\bnull\b)/g, (match) => {
+          let cls = 'json-number';
+          if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'json-key' : 'json-string';
+          } else if (/true|false/.test(match)) {
+            cls = 'json-bool';
+          } else if (/null/.test(match)) {
+            cls = 'json-null';
+          }
+          return '<span class="' + cls + '">' + match + '</span>';
+        });
+    },
+
+    syntaxHighlight(obj) {
+      const self = this;
+      const filtered = JSON.parse(JSON.stringify(obj));
+      if (filtered && filtered.hex) delete filtered.hex;
+      const json = JSON.stringify(filtered, null, 2);
+      let html = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?|\bnull\b)/g, (match) => {
+          let cls = 'json-number';
+          if (/^"/.test(match)) {
+            cls = /:$/.test(match) ? 'json-key' : 'json-string';
+          } else if (/true|false/.test(match)) {
+            cls = 'json-bool';
+          } else if (/null/.test(match)) {
+            cls = 'json-null';
+          }
+          return '<span class="' + cls + '">' + match + '</span>';
+        });
+      html = html.replace(/<span class="json-string">"((?:00)?6a[0-9a-f]+)"<\/span>/gi, (full, hex) => {
+        const tip = self.buildOpReturnTooltip(hex);
+        if (!tip) return full;
+        return '<span class="op-return-wrap"><span class="json-string">"' + hex + '"</span>' + tip + '</span>';
+      });
+      return html;
+    },
+
+    logIcon(type) {
+      const icons = {
+        fund: '$', deploy: '\u25C6', settle: '\u2605', commit: '#',
+        deal: '\u2660', info: '\u2022', error: '!', action: '\u25B6', dealer: '\u2663'
+      };
+      return icons[type] || '\u2022';
+    }
+  };
+}
+
+document.addEventListener('mouseover', function(e) {
+  const tip = e.target.closest('.op-return-tip');
+  if (tip) return;
+  const wrap = e.target.closest('.op-return-wrap');
+  if (!wrap) return;
+  const t = wrap.querySelector('.op-return-tip');
+  if (!t) return;
+  t.style.display = 'block';
+  const x = Math.min(e.clientX, window.innerWidth - t.offsetWidth - 16);
+  const y = e.clientY + 16;
+  t.style.left = Math.max(8, x) + 'px';
+  t.style.top = (y + t.offsetHeight > window.innerHeight ? e.clientY - t.offsetHeight - 8 : y) + 'px';
+});
+
+document.addEventListener('mouseout', function(e) {
+  const wrap = e.target.closest('.op-return-wrap');
+  const tip = e.target.closest('.op-return-tip');
+  const source = wrap || tip;
+  if (!source) return;
+  const container = source.closest('.op-return-wrap') || source;
+  if (container.contains(e.relatedTarget)) return;
+  const t = container.querySelector('.op-return-tip');
+  if (t) t.style.display = 'none';
+});
+</script>
+</body>
+</html>

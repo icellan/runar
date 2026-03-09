@@ -29,6 +29,8 @@ pub struct ABIMethod {
     pub params: Vec<ABIParam>,
     #[serde(rename = "isPublic")]
     pub is_public: bool,
+    #[serde(rename = "isTerminal", skip_serializing_if = "Option::is_none")]
+    pub is_terminal: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,37 +97,47 @@ pub fn assemble_artifact(
         })
         .collect();
 
-    // Build method ABIs
-    let methods: Vec<ABIMethod> = program
-        .methods
-        .iter()
-        .map(|m| ABIMethod {
-            name: m.name.clone(),
-            params: m
-                .params
-                .iter()
-                .map(|p| ABIParam {
-                    name: p.name.clone(),
-                    param_type: p.param_type.clone(),
-                })
-                .collect(),
-            is_public: m.is_public,
-        })
-        .collect();
-
-    // Build state fields for stateful contracts
+    // Build state fields for stateful contracts.
+    // Index = property position (matching constructor arg order), not sequential mutable index.
     let mut state_fields = Vec::new();
-    let mut index = 0;
-    for prop in &program.properties {
+    for (i, prop) in program.properties.iter().enumerate() {
         if !prop.readonly {
             state_fields.push(StateField {
                 name: prop.name.clone(),
                 field_type: prop.prop_type.clone(),
-                index,
+                index: i,
             });
-            index += 1;
         }
     }
+    let is_stateful = !state_fields.is_empty();
+
+    // Build method ABIs
+    let methods: Vec<ABIMethod> = program
+        .methods
+        .iter()
+        .map(|m| {
+            // For stateful contracts, mark public methods without _changePKH as terminal
+            let is_terminal = if is_stateful && m.is_public {
+                let has_change = m.params.iter().any(|p| p.name == "_changePKH");
+                if !has_change { Some(true) } else { None }
+            } else {
+                None
+            };
+            ABIMethod {
+                name: m.name.clone(),
+                params: m
+                    .params
+                    .iter()
+                    .map(|p| ABIParam {
+                        name: p.name.clone(),
+                        param_type: p.param_type.clone(),
+                    })
+                    .collect(),
+                is_public: m.is_public,
+                is_terminal,
+            }
+        })
+        .collect();
 
     // Timestamp
     let now = chrono_lite_utc_now();
@@ -174,7 +186,7 @@ fn chrono_lite_utc_now() -> String {
     )
 }
 
-fn epoch_days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Civil date algorithm from Howard Hinnant
     let z = days + 719468;
     let era = z / 146097;

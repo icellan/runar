@@ -1,6 +1,6 @@
 {
   "name": "runar-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Rúnar SDK: deploy, call, and interact with compiled smart contracts",
   "main": "dist/index.js",
@@ -12,6 +12,15 @@
     "typecheck": "tsc --noEmit"
   },
   "files": ["dist"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/icellan/runar",
+    "directory": "packages/runar-sdk"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@bsv/sdk": "^2.0.5",
     "runar-lang": "workspace:*",

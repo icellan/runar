@@ -1,0 +1,253 @@
+# Teranode regtest Docker Compose for Runar integration tests.
+# Adapted from https://github.com/bsv-blockchain/teranode-teratestnet
+# Minimal service set: no monitoring, no blockpersister, no asset-cache.
+
+x-teranode-base: &teranode-base
+  image: ghcr.io/bsv-blockchain/teranode:v0.13.2
+  networks:
+    - teranode-network
+  volumes:
+    - ./wait.sh:/app/wait.sh
+    - ./entrypoint.sh:/app/entrypoint.sh
+    - ./settings_local.conf:/app/settings_local.conf
+    - teranode-data:/app/data
+  environment:
+    SETTINGS_CONTEXT: docker.m
+    USE_LOCAL_AEROSPIKE: "true"
+    USE_LOCAL_POSTGRES: "true"
+    USE_LOCAL_KAFKA: "true"
+    GOGC: "200"
+    network: "regtest"
+    minminingtxfee: "0"
+    maxscriptsizepolicy: "0"
+    maxscriptnumlengthpolicy: "0"
+    maxtxsizepolicy: "0"
+    maxstackmemoryusageconsensus: "100000000"
+    maxstackmemoryusagepolicy: "100000000"
+
+networks:
+  teranode-network:
+    name: runar-teranode-network
+
+volumes:
+  postgres-data:
+  aerospike-data:
+  aerospike-smd:
+  teranode-data:
+
+services:
+  # Infrastructure
+  postgres:
+    container_name: runar-tn-postgres
+    image: postgres:17
+    networks:
+      - teranode-network
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: really_strong_password_change_me
+      POSTGRES_DB: postgres
+    # No host port mapping — only accessible within the Docker network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    entrypoint: ["/bin/bash", "-c"]
+    command: |
+      "
+      cat > /docker-entrypoint-initdb.d/init.sql <<'EOF'
+      CREATE ROLE teranode LOGIN
+        PASSWORD 'teranode'
+        SUPERUSER INHERIT NOCREATEDB NOCREATEROLE NOREPLICATION;
+      GRANT teranode TO postgres;
+      CREATE DATABASE teranode
+        WITH OWNER = teranode
+        ENCODING = 'UTF8'
+        CONNECTION LIMIT = -1;
+      EOF
+      exec /usr/local/bin/docker-entrypoint.sh postgres
+      "
+    restart: on-failure
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  kafka-shared:
+    container_name: runar-tn-kafka
+    image: redpandadata/redpanda:v25.2.1
+    mem_limit: 1024m
+    restart: on-failure
+    networks:
+      - teranode-network
+    command:
+      - redpanda start
+      - --smp 1
+      - --overprovisioned
+      - --node-id 0
+      - --kafka-addr PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr PLAINTEXT://kafka-shared:9092
+      - --pandaproxy-addr 0.0.0.0:9093
+      - --advertise-pandaproxy-addr localhost:9093
+
+  aerospike:
+    container_name: runar-tn-aerospike
+    image: aerospike/aerospike-server:8.1
+    command: --config-file /etc/aerospike.conf
+    networks:
+      - teranode-network
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 32768
+        hard: 32768
+    volumes:
+      - ./aerospike.conf:/etc/aerospike.conf
+      - aerospike-data:/opt/aerospike/data
+      - aerospike-smd:/opt/aerospike/smd
+    privileged: true
+    hostname: aerospike
+
+  # Teranode microservices
+  blockchain:
+    <<: *teranode-base
+    container_name: runar-tn-blockchain
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-blockchain=1"]
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8087"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  asset:
+    <<: *teranode-base
+    container_name: runar-tn-asset
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-asset=1"]
+    ports:
+      - "127.0.0.1:18090:8090"
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8091"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  subtreevalidation:
+    <<: *teranode-base
+    container_name: runar-tn-subtreevalidation
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-subtreevalidation=1"]
+    mem_limit: 32768m
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8086"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  blockvalidation:
+    <<: *teranode-base
+    container_name: runar-tn-blockvalidation
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-blockvalidation=1"]
+    mem_limit: 32768m
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8088"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  blockassembly:
+    <<: *teranode-base
+    container_name: runar-tn-blockassembly
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-blockassembly=1"]
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8085"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  propagation:
+    <<: *teranode-base
+    container_name: runar-tn-propagation
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-propagation=1"]
+    depends_on:
+      blockchain:
+        condition: service_healthy
+      blockvalidation:
+        condition: service_healthy
+      blockassembly:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 8084"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  peer:
+    <<: *teranode-base
+    container_name: runar-tn-peer
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-p2p=1"]
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 9905"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    restart: on-failure
+
+  rpc:
+    <<: *teranode-base
+    container_name: runar-tn-rpc
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-rpc=1"]
+    ports:
+      - "127.0.0.1:19292:9292"
+    healthcheck:
+      test: ["CMD-SHELL", "netstat -ltn | grep -c 9292"]
+      interval: 5s
+      timeout: 30s
+      retries: 10
+      start_period: 7s
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    restart: on-failure
+
+  validator:
+    <<: *teranode-base
+    container_name: runar-tn-validator
+    entrypoint: ["/app/entrypoint.sh"]
+    command: ["-validator=1"]
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    restart: on-failure

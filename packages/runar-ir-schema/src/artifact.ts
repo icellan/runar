@@ -26,6 +26,8 @@ export interface ABIMethod {
   name: string;
   params: ABIParam[];
   isPublic: boolean;
+  /** True for stateful contract methods that don't mutate state (no continuation output). */
+  isTerminal?: boolean;
 }
 
 export interface ABI {
@@ -56,6 +58,7 @@ export interface StateField {
   name: string;
   type: string;
   index: number;
+  initialValue?: string | bigint | boolean;
 }
 
 // ---------------------------------------------------------------------------

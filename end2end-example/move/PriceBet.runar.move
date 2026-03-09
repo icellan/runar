@@ -16,8 +16,12 @@ module PriceBet {
         assert!(price > 0, 0);
 
         if (price > contract.strike_price) {
+            // bob_sig is present in the unlocking script for stack alignment but is
+            // intentionally not checked in this branch — only alice (the winner) signs.
             assert!(check_sig(alice_sig, contract.alice_pub_key), 0);
         } else {
+            // alice_sig is present in the unlocking script for stack alignment but is
+            // intentionally not checked in this branch — only bob (the winner) signs.
             assert!(check_sig(bob_sig, contract.bob_pub_key), 0);
         }
     }

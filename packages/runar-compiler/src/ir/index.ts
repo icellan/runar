@@ -56,6 +56,7 @@ export type {
   UpdateProp,
   GetStateScript,
   CheckPreimage,
+  DeserializeState,
   AddOutput,
   ExtractParentOutput,
 } from './anf-ir.js';
@@ -77,6 +78,7 @@ export type {
   OverOp,
   RotOp,
   TuckOp,
+  PlaceholderOp,
 } from './stack-ir.js';
 
 // Artifact types
@@ -88,5 +90,6 @@ export type {
   SourceMapping,
   SourceMap,
   StateField,
+  ConstructorSlot,
   RunarArtifact,
 } from './artifact.js';

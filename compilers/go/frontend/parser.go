@@ -25,6 +25,7 @@ type ParseResult struct {
 //   - .runar.sol -> ParseSolidity
 //   - .runar.move -> ParseMove
 //   - .runar.go -> ParseGoContract
+//   - .runar.py -> ParsePython
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
 	lower := strings.ToLower(fileName)
@@ -35,6 +36,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		return ParseMove(source, fileName)
 	case strings.HasSuffix(lower, ".runar.go"):
 		return ParseGoContract(source, fileName)
+	case strings.HasSuffix(lower, ".runar.py"):
+		return ParsePython(source, fileName)
 	default:
 		return Parse(source, fileName)
 	}
@@ -305,6 +308,8 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 	var nameStr string
 	var typeNode TypeNode
 
+	var initializer Expression
+
 	for i := 0; i < int(node.ChildCount()); i++ {
 		child := node.Child(i)
 		switch child.Type() {
@@ -314,6 +319,11 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 			nameStr = p.nodeText(child)
 		case "type_annotation":
 			typeNode = p.parseTypeAnnotation(child)
+		default:
+			// SWC tree-sitter may expose the initializer as a child expression node
+			if nameStr != "" && typeNode != nil && initializer == nil {
+				initializer = p.parseExpression(child)
+			}
 		}
 	}
 
@@ -330,6 +340,7 @@ func (p *parseContext) parseProperty(node *sitter.Node) *PropertyNode {
 		Name:           nameStr,
 		Type:           typeNode,
 		Readonly:       isReadonly,
+		Initializer:    initializer,
 		SourceLocation: p.loc(node),
 	}
 }

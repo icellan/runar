@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/icellan/runar/compilers/go v0.0.0
-	runar v0.0.0
+	github.com/icellan/runar/packages/runar-go v0.0.0
 )
 
 require (
@@ -12,6 +12,6 @@ require (
 	golang.org/x/crypto v0.31.0 // indirect
 )
 
-replace runar => ../../packages/runar-go
+replace github.com/icellan/runar/packages/runar-go => ../../packages/runar-go
 
 replace github.com/icellan/runar/compilers/go => ../../compilers/go

@@ -150,7 +150,7 @@
           "name": "t10",
           "value": {
             "kind": "bin_op",
-            "left": "result",
+            "left": "t8",
             "op": ">",
             "right": "t9"
           }

@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/token-nft/NFTExample.runar.ts",
+    ".runar.sol": "../../../examples/sol/token-nft/NFTExample.runar.sol",
+    ".runar.move": "../../../examples/move/token-nft/NFTExample.runar.move",
+    ".runar.go": "../../../examples/go/token-nft/NFTExample.runar.go",
+    ".runar.rs": "../../../examples/rust/token-nft/NFTExample.runar.rs",
+    ".runar.py": "../../../examples/python/token-nft/NFTExample.runar.py"
+  }
+}

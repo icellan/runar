@@ -1,0 +1,1204 @@
+{
+  "contractName": "ECPrimitives",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "pt",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "pt",
+          "type": "Point"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedX"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": "===",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkX",
+      "params": [
+        {
+          "name": "expectedX",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedY"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": "===",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkY",
+      "params": [
+        {
+          "name": "expectedY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkOnCurve",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecNegate",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "negated",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "negated"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedNegY"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkNegateY",
+      "params": [
+        {
+          "name": "expectedNegY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "value"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "modulus"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "ecModReduce",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkModReduce",
+      "params": [
+        {
+          "name": "value",
+          "type": "bigint"
+        },
+        {
+          "name": "modulus",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "other"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "ecAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedX"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedY"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "bin_op",
+            "left": "t7",
+            "op": "===",
+            "right": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "assert",
+            "value": "t9"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkAdd",
+      "params": [
+        {
+          "name": "other",
+          "type": "Point"
+        },
+        {
+          "name": "expectedX",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "scalar"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "ecMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedX"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedY"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "bin_op",
+            "left": "t7",
+            "op": "===",
+            "right": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "assert",
+            "value": "t9"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMul",
+      "params": [
+        {
+          "name": "scalar",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedX",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "scalar"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedX"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedY"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "bin_op",
+            "left": "t6",
+            "op": "===",
+            "right": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "assert",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMulGen",
+      "params": [
+        {
+          "name": "scalar",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedX",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "x"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "y"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "ecMakePoint",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "pt",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "pt"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedX"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "pt"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedY"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "bin_op",
+            "left": "t7",
+            "op": "===",
+            "right": "t8"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "assert",
+            "value": "t9"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMakePoint",
+      "params": [
+        {
+          "name": "x",
+          "type": "bigint"
+        },
+        {
+          "name": "y",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedX",
+          "type": "bigint"
+        },
+        {
+          "name": "expectedY",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecEncodeCompressed",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "compressed",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "compressed",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkEncodeCompressed",
+      "params": [
+        {
+          "name": "expected",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "args": [
+              "t4"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t9"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t8",
+            "op": "===",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMulIdentity",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecNegate",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "neg1",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "neg1"
+            ],
+            "func": "ecNegate",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "neg2",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "neg2"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "args": [
+              "t4"
+            ],
+            "func": "ecPointX",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "neg2"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t9"
+            ],
+            "func": "ecPointY",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t8",
+            "op": "===",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkNegateRoundtrip",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "other"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "ecAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkAddOnCurve",
+      "params": [
+        {
+          "name": "other",
+          "type": "Point"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "scalar"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "ecMulGen",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "result"
+            ],
+            "func": "ecOnCurve",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "assert",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMulGenOnCurve",
+      "params": [
+        {
+          "name": "scalar",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "pt",
+      "readonly": true,
+      "type": "Point"
+    }
+  ]
+}

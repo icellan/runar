@@ -261,11 +261,18 @@ function encodePushValue(value: Uint8Array | bigint | boolean): { hex: string; a
   }
 
   // Uint8Array — raw data
+  if (value.length === 0) {
+    return { hex: '00', asm: 'OP_0' };
+  }
+  // MINIMALDATA: single-byte values 1-16 must use OP_1..OP_16, 0x81 must use OP_1NEGATE.
+  // Note: 0x00 is NOT converted to OP_0 because OP_0 pushes empty [] not [0x00].
+  if (value.length === 1) {
+    const b = value[0]!;
+    if (b >= 1 && b <= 16) return { hex: byteToHex(0x50 + b), asm: `OP_${b}` };
+    if (b === 0x81) return { hex: '4f', asm: 'OP_1NEGATE' };
+  }
   const encoded = encodePushData(value);
   const hex = bytesToHex(encoded);
-  if (value.length === 0) {
-    return { hex, asm: 'OP_0' };
-  }
   return { hex, asm: `<${bytesToHex(value)}>` };
 }
 
