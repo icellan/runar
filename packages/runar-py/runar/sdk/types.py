@@ -69,6 +69,7 @@ class StateField:
     name: str
     type: str
     index: int
+    initial_value: object = None  # compile-time default (may be "0n" string from JSON)
 
 
 @dataclass
@@ -108,7 +109,10 @@ class RunarArtifact:
             for m in abi_raw.get('methods', [])
         ]
         state_fields = [
-            StateField(name=sf['name'], type=sf['type'], index=sf['index'])
+            StateField(
+                name=sf['name'], type=sf['type'], index=sf['index'],
+                initial_value=sf.get('initialValue'),
+            )
             for sf in d.get('stateFields', [])
         ]
         ctor_slots = [

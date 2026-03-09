@@ -138,7 +138,17 @@ pub fn find_last_op_return(script_hex: &str) -> Option<usize> {
 fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
     match field_type {
         "int" | "bigint" => {
-            let n = value.as_int();
+            // Defensively handle SdkValue::Bytes containing a BigInt string
+            // (e.g. "0n", "1000n") that may have slipped through from JSON
+            // artifacts loaded without a BigInt reviver.
+            let n = match value {
+                SdkValue::Int(i) => *i,
+                SdkValue::Bytes(s) => {
+                    let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
+                    num_str.parse::<i64>().unwrap_or(0)
+                }
+                _ => value.as_int(),
+            };
             encode_num2bin(n, 8)
         }
         "bool" => {
@@ -358,6 +368,7 @@ mod tests {
                 name: name.to_string(),
                 field_type: typ.to_string(),
                 index: *index,
+                initial_value: None,
             })
             .collect()
     }
@@ -717,5 +728,29 @@ mod tests {
     #[test]
     fn find_op_return_returns_none() {
         assert_eq!(find_last_op_return("5193885187"), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Defensive BigInt string handling in state serialization
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bigint_serialize_state_handles_0n_string_defensively() {
+        let fields = make_fields(&[("count", "bigint", 0)]);
+        // Simulate state containing unrevived "0n" string as SdkValue::Bytes
+        let values = make_values(&[("count", SdkValue::Bytes("0n".to_string()))]);
+        let hex = serialize_state(&fields, &values);
+        assert_eq!(hex, "0000000000000000");
+    }
+
+    #[test]
+    fn bigint_serialize_state_handles_1000n_string_defensively() {
+        let fields = make_fields(&[("count", "bigint", 0)]);
+        let values_str = make_values(&[("count", SdkValue::Bytes("1000n".to_string()))]);
+        let hex_str = serialize_state(&fields, &values_str);
+        // Should match the output from a proper SdkValue::Int(1000)
+        let values_int = make_values(&[("count", SdkValue::Int(1000))]);
+        let hex_int = serialize_state(&fields, &values_int);
+        assert_eq!(hex_str, hex_int);
     }
 }

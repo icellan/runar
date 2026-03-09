@@ -157,9 +157,10 @@ type ABIParam struct {
 
 // StateField describes a state field in a stateful contract.
 type StateField struct {
-	Name  string `json:"name"`
-	Type  string `json:"type"`
-	Index int    `json:"index"`
+	Name         string      `json:"name"`
+	Type         string      `json:"type"`
+	Index        int         `json:"index"`
+	InitialValue interface{} `json:"initialValue,omitempty"`
 }
 
 // ConstructorSlot describes where a constructor parameter placeholder

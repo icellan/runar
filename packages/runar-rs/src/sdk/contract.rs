@@ -57,14 +57,20 @@ impl RunarContract {
         }
 
         // Initialize state from constructor args for stateful contracts.
-        // State fields are matched to constructor args by their declaration
+        // Properties with initial_value use their compile-time default;
+        // others are matched to constructor args by their declaration
         // index, not by name, since the constructor param name may differ
         // from the state field name (e.g., "initialHash" → "rollingHash").
         let mut state = HashMap::new();
         if let Some(ref state_fields) = artifact.state_fields {
             if !state_fields.is_empty() {
                 for field in state_fields {
-                    if field.index < constructor_args.len() {
+                    if let Some(ref init_val) = field.initial_value {
+                        // Property has a compile-time default value.
+                        // Revive BigInt strings ("0n") that occur when artifacts
+                        // are loaded via plain JSON import (without a BigInt reviver).
+                        state.insert(field.name.clone(), revive_json_value(init_val, &field.field_type));
+                    } else if field.index < constructor_args.len() {
                         state.insert(field.name.clone(), constructor_args[field.index].clone());
                     }
                 }
@@ -1498,6 +1504,26 @@ fn read_varint_hex(hex: &str, pos: usize) -> (u64, usize) {
     }
 }
 
+/// Revive a JSON value that may have been serialized as a BigInt string
+/// ("0n", "1000n", "-42n") when the artifact JSON was loaded without a
+/// BigInt reviver (e.g. via standard `serde_json::from_str`).
+fn revive_json_value(value: &serde_json::Value, field_type: &str) -> SdkValue {
+    match (field_type, value) {
+        ("int" | "bigint", serde_json::Value::String(s)) => {
+            let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
+            let n: i64 = num_str.parse().unwrap_or(0);
+            SdkValue::Int(n)
+        }
+        ("int" | "bigint", serde_json::Value::Number(n)) => {
+            SdkValue::Int(n.as_i64().unwrap_or(0))
+        }
+        ("bool", serde_json::Value::Bool(b)) => SdkValue::Bool(*b),
+        ("bool", serde_json::Value::String(s)) => SdkValue::Bool(s == "true"),
+        (_, serde_json::Value::String(s)) => SdkValue::Bytes(s.clone()),
+        _ => SdkValue::Int(0),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2090,8 +2116,8 @@ mod tests {
     #[test]
     fn from_txid_stateful_extracts_state() {
         let state_fields = vec![
-            StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0 },
-            StateField { name: "active".to_string(), field_type: "bool".to_string(), index: 1 },
+            StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None },
+            StateField { name: "active".to_string(), field_type: "bool".to_string(), index: 1, initial_value: None },
         ];
 
         let code_hex = "76a988ac";
@@ -2196,7 +2222,7 @@ mod tests {
                 methods: vec![],
             },
             script: "51".to_string(),
-            state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0 }]),
+            state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None }]),
             constructor_slots: None,
         };
 
@@ -2231,9 +2257,9 @@ mod tests {
             },
             script: "51".to_string(),
             state_fields: Some(vec![
-                StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0 },
-                StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1 },
-                StateField { name: "metadata".to_string(), field_type: "ByteString".to_string(), index: 2 },
+                StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0, initial_value: None },
+                StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1, initial_value: None },
+                StateField { name: "metadata".to_string(), field_type: "ByteString".to_string(), index: 2, initial_value: None },
             ]),
             constructor_slots: None,
         };
@@ -2430,5 +2456,105 @@ mod tests {
         assert_eq!(&term_tx_hex[0..8], "01000000");
         // Input count should be 1
         assert_eq!(&term_tx_hex[8..10], "01");
+    }
+
+    // -------------------------------------------------------------------
+    // BigInt values from JSON without reviver ("0n" strings)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn bigint_constructor_revives_0n_initial_value_from_json() {
+        let artifact = RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: "Counter".to_string(),
+            abi: Abi {
+                constructor: AbiConstructor { params: vec![] },
+                methods: vec![],
+            },
+            script: "51".to_string(),
+            state_fields: Some(vec![StateField {
+                name: "count".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: Some(serde_json::Value::String("0n".to_string())),
+            }]),
+            constructor_slots: None,
+        };
+
+        let contract = RunarContract::new(artifact, vec![]);
+        assert_eq!(contract.state.get("count"), Some(&SdkValue::Int(0)));
+    }
+
+    #[test]
+    fn bigint_constructor_revives_1000n_initial_value_from_json() {
+        let artifact = RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: "Counter".to_string(),
+            abi: Abi {
+                constructor: AbiConstructor { params: vec![] },
+                methods: vec![],
+            },
+            script: "51".to_string(),
+            state_fields: Some(vec![StateField {
+                name: "amount".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: Some(serde_json::Value::String("1000n".to_string())),
+            }]),
+            constructor_slots: None,
+        };
+
+        let contract = RunarContract::new(artifact, vec![]);
+        assert_eq!(contract.state.get("amount"), Some(&SdkValue::Int(1000)));
+    }
+
+    #[test]
+    fn bigint_constructor_revives_negative_n_initial_value_from_json() {
+        let artifact = RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: "Counter".to_string(),
+            abi: Abi {
+                constructor: AbiConstructor { params: vec![] },
+                methods: vec![],
+            },
+            script: "51".to_string(),
+            state_fields: Some(vec![StateField {
+                name: "offset".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: Some(serde_json::Value::String("-42n".to_string())),
+            }]),
+            constructor_slots: None,
+        };
+
+        let contract = RunarContract::new(artifact, vec![]);
+        assert_eq!(contract.state.get("offset"), Some(&SdkValue::Int(-42)));
+    }
+
+    #[test]
+    fn bigint_end_to_end_get_locking_script_with_0n_initial_values() {
+        let artifact = RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: "Counter".to_string(),
+            abi: Abi {
+                constructor: AbiConstructor { params: vec![] },
+                methods: vec![],
+            },
+            script: "51".to_string(),
+            state_fields: Some(vec![StateField {
+                name: "count".to_string(),
+                field_type: "bigint".to_string(),
+                index: 0,
+                initial_value: Some(serde_json::Value::String("0n".to_string())),
+            }]),
+            constructor_slots: None,
+        };
+
+        let contract = RunarContract::new(artifact, vec![]);
+        let script = contract.get_locking_script();
+        // Should be valid hex, no crash
+        assert!(script.chars().all(|c| c.is_ascii_hexdigit()));
+        // Should contain OP_RETURN separator
+        assert!(script.contains("6a"));
     }
 }

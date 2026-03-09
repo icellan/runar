@@ -392,6 +392,17 @@ func toInt64(value interface{}) int64 {
 		return int64(v)
 	case uint64:
 		return int64(v)
+	case string:
+		// Handle BigInt strings with "n" suffix from JSON (e.g. "0n", "1000n", "-42n")
+		s := v
+		if strings.HasSuffix(s, "n") {
+			s = strings.TrimSuffix(s, "n")
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return 0
+		}
+		return n
 	default:
 		return 0
 	}

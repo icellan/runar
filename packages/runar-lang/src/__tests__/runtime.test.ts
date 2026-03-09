@@ -71,8 +71,6 @@ import {
   // Base classes
   SmartContract,
   StatefulSmartContract,
-  type ByteString,
-  type Addr,
 } from '../runtime/index.js';
 
 describe('runtime builtins', () => {

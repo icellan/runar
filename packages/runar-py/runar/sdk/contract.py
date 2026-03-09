@@ -42,11 +42,30 @@ class RunarContract:
         self._provider: Provider | None = None
         self._signer: Signer | None = None
 
-        # Initialize state from constructor args for stateful contracts
+        # Initialize state from constructor args for stateful contracts.
+        # Properties with initial_value use their default; others are matched
+        # to constructor args by name lookup in the ABI constructor params.
         if artifact.state_fields:
             for field in artifact.state_fields:
-                if field.index < len(constructor_args):
-                    self._state[field.name] = constructor_args[field.index]
+                if field.initial_value is not None:
+                    # Property has a compile-time default value.
+                    # Revive BigInt strings ("0n") that occur when artifacts
+                    # are loaded via plain JSON import (without a reviver).
+                    self._state[field.name] = _revive_json_value(
+                        field.initial_value, field.type,
+                    )
+                else:
+                    # Match by name to constructor params
+                    param_idx = next(
+                        (i for i, p in enumerate(artifact.abi.constructor_params)
+                         if p.name == field.name),
+                        -1,
+                    )
+                    if 0 <= param_idx < len(constructor_args):
+                        self._state[field.name] = constructor_args[param_idx]
+                    elif field.index < len(constructor_args):
+                        # Fallback: use declaration index for backward compat
+                        self._state[field.name] = constructor_args[field.index]
 
     def get_utxo(self):
         """Returns the current UTXO tracked by this contract, if any."""
@@ -890,6 +909,16 @@ class RunarContract:
 # ---------------------------------------------------------------------------
 # Argument encoding
 # ---------------------------------------------------------------------------
+
+def _revive_json_value(value, field_type: str):
+    """Revive a value that may have been serialized as a BigInt string ("0n")
+    when the artifact JSON was loaded without a custom reviver."""
+    if isinstance(value, str) and field_type in ('bigint', 'int'):
+        if value.endswith('n'):
+            return int(value[:-1])
+        return int(value)
+    return value
+
 
 def _encode_arg(value) -> str:
     if isinstance(value, bool):

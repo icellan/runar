@@ -45,12 +45,17 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 	}
 
 	// Initialize state from constructor args for stateful contracts.
-	// State fields are matched to constructor args by their declaration
-	// index, not by name, since the constructor param name may differ
-	// from the state field name (e.g., "initialHash" → "rollingHash").
+	// Properties with InitialValue use their default; others are matched
+	// to constructor args by their declaration index, since the constructor
+	// param name may differ from the state field name (e.g., "initialHash" → "rollingHash").
 	if len(artifact.StateFields) > 0 {
 		for _, field := range artifact.StateFields {
-			if field.Index < len(constructorArgs) {
+			if field.InitialValue != nil {
+				// Property has a compile-time default value.
+				// Revive BigInt strings ("0n") that occur when artifacts
+				// are loaded via standard JSON parsing (without a custom reviver).
+				c.state[field.Name] = reviveJSONValue(field.InitialValue, field.Type)
+			} else if field.Index < len(constructorArgs) {
 				c.state[field.Name] = constructorArgs[field.Index]
 			}
 		}
@@ -1016,6 +1021,30 @@ func (c *RunarContract) getPublicMethods() []ABIMethod {
 		}
 	}
 	return result
+}
+
+// reviveJSONValue converts a value that may have been serialized as a BigInt
+// string with "n" suffix (e.g. "0n", "1000n", "-42n") back into a *big.Int
+// when the field type is "bigint" or "int". This handles the case where
+// artifacts are loaded via standard JSON parsing without a custom reviver.
+func reviveJSONValue(value interface{}, fieldType string) interface{} {
+	if fieldType == "bigint" || fieldType == "int" {
+		switch v := value.(type) {
+		case string:
+			s := v
+			if strings.HasSuffix(s, "n") {
+				s = strings.TrimSuffix(s, "n")
+			}
+			n := new(big.Int)
+			n.SetString(s, 10)
+			return n.Int64()
+		case float64:
+			return int64(v)
+		case int64:
+			return v
+		}
+	}
+	return value
 }
 
 // ---------------------------------------------------------------------------

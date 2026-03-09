@@ -181,7 +181,13 @@ _TYPE_WIDTHS = {
 
 def _encode_state_value(value, field_type: str) -> str:
     if field_type in ('int', 'bigint'):
-        n = int(value) if value is not None else 0
+        if value is None:
+            n = 0
+        elif isinstance(value, str) and value.endswith('n'):
+            # BigInt string from JSON without reviver (e.g. "0n", "1000n")
+            n = int(value[:-1])
+        else:
+            n = int(value)
         return _encode_num2bin(n, 8)
     elif field_type == 'bool':
         return '01' if value else '00'

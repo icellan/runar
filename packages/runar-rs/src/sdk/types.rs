@@ -148,11 +148,18 @@ pub struct AbiParam {
 
 /// A state field definition.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StateField {
     pub name: String,
     #[serde(rename = "type")]
     pub field_type: String,
     pub index: usize,
+    /// Compile-time default value for properties with initializers.
+    /// When artifacts are loaded via plain JSON.parse (without a BigInt
+    /// reviver), BigInt values appear as strings with an "n" suffix
+    /// (e.g. `"0n"`, `"1000n"`).
+    #[serde(default)]
+    pub initial_value: Option<serde_json::Value>,
 }
 
 /// A constructor slot mapping parameter index to byte offset in the script.

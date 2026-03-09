@@ -61,8 +61,10 @@ export class RunarContract {
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       for (const field of artifact.stateFields) {
         if ((field as { initialValue?: unknown }).initialValue !== undefined) {
-          // Property has a compile-time default value
-          this._state[field.name] = (field as { initialValue: unknown }).initialValue;
+          // Property has a compile-time default value.
+          // Revive BigInt strings ("0n") that occur when artifacts are loaded
+          // via plain JSON import (without the bigintReviver).
+          this._state[field.name] = reviveJsonValue((field as { initialValue: unknown }).initialValue, field.type);
         } else {
           // Match by name to constructor params
           const paramIdx = artifact.abi.constructor.params.findIndex(p => p.name === field.name);
@@ -1063,6 +1065,23 @@ export class RunarContract {
       (m) => m.name === name && m.isPublic,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// JSON BigInt revival
+// ---------------------------------------------------------------------------
+
+/**
+ * Revive a value that may have been serialized as a BigInt string ("0n")
+ * when the artifact JSON was loaded without the bigintReviver (e.g. via
+ * Vite's `import artifact from './artifact.json'`).
+ */
+function reviveJsonValue(value: unknown, type: string): unknown {
+  if (typeof value === 'string' && (type === 'bigint' || type === 'int')) {
+    if (value.endsWith('n')) return BigInt(value.slice(0, -1));
+    return BigInt(value);
+  }
+  return value;
 }
 
 // ---------------------------------------------------------------------------

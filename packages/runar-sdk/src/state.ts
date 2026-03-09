@@ -145,7 +145,15 @@ function encodeStateValue(value: unknown, type: string): string {
   switch (type) {
     case 'int':
     case 'bigint': {
-      const n = typeof value === 'bigint' ? value : BigInt(value as number);
+      let n: bigint;
+      if (typeof value === 'bigint') {
+        n = value;
+      } else if (typeof value === 'string' && value.endsWith('n')) {
+        // BigInt string from JSON without reviver (e.g. "0n", "1000n")
+        n = BigInt(value.slice(0, -1));
+      } else {
+        n = BigInt(value as number);
+      }
       return encodeNum2Bin(n, 8);
     }
     case 'bool': {

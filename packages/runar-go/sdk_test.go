@@ -260,6 +260,115 @@ func TestNewRunarContract_InitializesState_MismatchedNames(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// BigInt values from JSON without reviver ("0n" strings)
+// ---------------------------------------------------------------------------
+
+func TestNewRunarContract_BigIntJSON_Revives0n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "count", Type: "bigint", Index: 0, InitialValue: "0n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["count"] != int64(0) {
+		t.Errorf("expected count=0, got %v (type %T)", state["count"], state["count"])
+	}
+}
+
+func TestNewRunarContract_BigIntJSON_Revives1000n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "amount", Type: "bigint", Index: 0, InitialValue: "1000n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["amount"] != int64(1000) {
+		t.Errorf("expected amount=1000, got %v (type %T)", state["amount"], state["amount"])
+	}
+}
+
+func TestNewRunarContract_BigIntJSON_RevivesNegative(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "offset", Type: "bigint", Index: 0, InitialValue: "-42n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	state := c.GetState()
+	if state["offset"] != int64(-42) {
+		t.Errorf("expected offset=-42, got %v (type %T)", state["offset"], state["offset"])
+	}
+}
+
+func TestSerializeState_BigIntJSON_Handles0nString(t *testing.T) {
+	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	// Simulate state containing unrevived "0n" string
+	hex := SerializeState(fields, map[string]interface{}{"count": "0n"})
+	if hex != "0000000000000000" {
+		t.Errorf("expected 0000000000000000, got %s", hex)
+	}
+}
+
+func TestSerializeState_BigIntJSON_Handles1000nString(t *testing.T) {
+	fields := []StateField{{Name: "count", Type: "bigint", Index: 0}}
+	hexFromString := SerializeState(fields, map[string]interface{}{"count": "1000n"})
+	hexFromInt := SerializeState(fields, map[string]interface{}{"count": int64(1000)})
+	if hexFromString != hexFromInt {
+		t.Errorf("expected %s, got %s", hexFromInt, hexFromString)
+	}
+}
+
+func TestGetLockingScript_BigIntJSON_InitialValue0n(t *testing.T) {
+	artifact := makeArtifact("51", ABI{
+		Constructor: ABIConstructor{Params: []ABIParam{}},
+		Methods:     []ABIMethod{},
+	}, func(a *RunarArtifact) {
+		a.StateFields = []StateField{{Name: "count", Type: "bigint", Index: 0, InitialValue: "0n"}}
+	})
+
+	c := NewRunarContract(artifact, []interface{}{})
+	script := c.GetLockingScript()
+	// Should contain OP_RETURN separator
+	if !strings.Contains(script, "6a") {
+		t.Error("expected script to contain OP_RETURN (6a)")
+	}
+	// Should be valid hex (even length, only hex chars)
+	if len(script)%2 != 0 {
+		t.Error("expected even-length hex string")
+	}
+	for _, ch := range script {
+		if !((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+			t.Errorf("unexpected character in hex: %c", ch)
+			break
+		}
+	}
+}
+
+func TestReviveJSONValue_Float64(t *testing.T) {
+	// JSON numbers decode as float64 in Go — verify they're handled
+	result := reviveJSONValue(float64(42), "bigint")
+	if result != int64(42) {
+		t.Errorf("expected int64(42), got %v (type %T)", result, result)
+	}
+}
+
+func TestReviveJSONValue_NonBigintType(t *testing.T) {
+	// Non-bigint types should pass through unchanged
+	result := reviveJSONValue("hello", "ByteString")
+	if result != "hello" {
+		t.Errorf("expected 'hello', got %v", result)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // getLockingScript with constructor slots
 // ---------------------------------------------------------------------------
 
