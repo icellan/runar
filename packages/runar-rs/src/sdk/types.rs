@@ -248,6 +248,8 @@ pub struct PreparedCall {
     pub(crate) method_needs_change: bool,
     pub(crate) change_pkh_hex: String,
     pub(crate) change_amount: i64,
+    pub(crate) method_needs_new_amount: bool,
+    pub(crate) new_amount: i64,
     pub(crate) preimage_index: Option<usize>,
     pub(crate) contract_utxo: Utxo,
     pub(crate) new_locking_script: String,

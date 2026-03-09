@@ -327,12 +327,14 @@ export class RunarContract {
       this.artifact.stateFields !== undefined &&
       this.artifact.stateFields.length > 0;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
+    const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
     const userParams = isStateful
       ? method.params.filter(
           (p) =>
             p.type !== 'SigHashPreimage' &&
             p.name !== '_changePKH' &&
-            p.name !== '_changeAmount',
+            p.name !== '_changeAmount' &&
+            p.name !== '_newAmount',
         )
       : method.params;
 
@@ -511,6 +513,8 @@ export class RunarContract {
         _methodNeedsChange: methodNeedsChange,
         _changePKHHex: changePKHHex,
         _changeAmount: 0,
+        _methodNeedsNewAmount: false,
+        _newAmount: 0,
         _preimageIndex: preimageIndex,
         _contractUtxo: contractUtxo,
         _newLockingScript: '',
@@ -658,7 +662,11 @@ export class RunarContract {
         if (methodNeedsChange && changePKHHex) {
           changeHex = encodePushData(changePKHHex) + encodeArg(BigInt(txChangeAmount ?? 0));
         }
-        const unlock = encodePushData(opSig) + argsHex + changeHex + encodePushData(preimage) + methodSelectorHex;
+        let newAmountHex = '';
+        if (methodNeedsNewAmount) {
+          newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
+        }
+        const unlock = encodePushData(opSig) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
         return { unlock, opSig, preimage };
       };
 
@@ -788,6 +796,8 @@ export class RunarContract {
       _methodNeedsChange: methodNeedsChange,
       _changePKHHex: changePKHHex,
       _changeAmount: changeAmount,
+      _methodNeedsNewAmount: methodNeedsNewAmount,
+      _newAmount: newSatoshis ?? this.currentUtxo.satoshis,
       _preimageIndex: preimageIndex,
       _contractUtxo: contractUtxo,
       _newLockingScript: newLockingScript ?? '',
@@ -828,10 +838,15 @@ export class RunarContract {
         changeHex = encodePushData(prepared._changePKHHex) +
           encodeArg(BigInt(prepared._changeAmount));
       }
+      let newAmountHex = '';
+      if (prepared._methodNeedsNewAmount) {
+        newAmountHex = encodeArg(BigInt(prepared._newAmount));
+      }
       primaryUnlock =
         encodePushData(prepared.opPushTxSig) +
         argsHex +
         changeHex +
+        newAmountHex +
         encodePushData(prepared.preimage) +
         prepared._methodSelectorHex;
     } else if (prepared._needsOpPushTx) {

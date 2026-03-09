@@ -1458,9 +1458,10 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// `computeStateOutput(preimage, stateBytes)` — same as `computeStateOutputHash`
+    /// `computeStateOutput(preimage, stateBytes, newAmount)` — same as `computeStateOutputHash`
     /// but returns raw output bytes WITHOUT the final OP_HASH256. This allows the
     /// caller to concatenate additional outputs (e.g., change output) before hashing.
+    /// Uses _newAmount instead of sourceSatoshis from the preimage.
     fn lower_compute_state_output(
         &mut self,
         binding_name: &str,
@@ -1490,6 +1491,19 @@ impl LoweringContext {
 
         let preimage_ref = &args[0];
         let state_bytes_ref = &args[1];
+        let new_amount_ref = &args[2];
+
+        // Bring newAmount to top, convert to 8-byte LE, save to altstack.
+        let amount_last = self.is_last_use(new_amount_ref, binding_index, last_uses);
+        self.bring_to_top(new_amount_ref, amount_last);
+        self.emit_op(StackOp::Push(PushValue::Int(8)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.sm.pop();
 
         // Bring stateBytes then preimage to top.
         let sb_last = self.is_last_use(state_bytes_ref, binding_index, last_uses);
@@ -1529,7 +1543,7 @@ impl LoweringContext {
         self.emit_op(StackOp::Drop);
         self.sm.pop();
 
-        // Step 2: Split off amount (last 8 bytes), save to altstack.
+        // Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead.
         self.emit_op(StackOp::Opcode("OP_SIZE".into()));
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(8)));
@@ -1543,7 +1557,7 @@ impl LoweringContext {
         self.sm.pop(); // middle
         self.sm.push(""); // varint+sc
         self.sm.push(""); // amount
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
+        self.emit_op(StackOp::Drop); // drop sourceSatoshis — replaced by _newAmount
         self.sm.pop();
 
         // Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
@@ -1579,7 +1593,7 @@ impl LoweringContext {
         self.sm.pop();
         self.sm.push("");
 
-        // Step 6: Prepend amount from altstack.
+        // Step 6: Prepend _newAmount (8-byte LE) from altstack.
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.sm.push("");
         self.emit_op(StackOp::Swap);

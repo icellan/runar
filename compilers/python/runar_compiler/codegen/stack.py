@@ -1196,8 +1196,20 @@ class _LoweringContext:
 
         preimage_ref = args[0]
         state_bytes_ref = args[1]
+        new_amount_ref = args[2]
 
-        # Bring stateBytes then preimage to top
+        # Bring newAmount, stateBytes, then preimage to top
+        self.bring_to_top(new_amount_ref, self._is_last_use(new_amount_ref, binding_index, last_uses))
+        # Convert _newAmount (script number) to 8-byte LE and save to altstack
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
+        self.sm.pop()
+
         self.bring_to_top(state_bytes_ref, self._is_last_use(state_bytes_ref, binding_index, last_uses))
         self.bring_to_top(preimage_ref, self._is_last_use(preimage_ref, binding_index, last_uses))
 
@@ -1231,7 +1243,7 @@ class _LoweringContext:
         self.emit_op(StackOp(op="drop"))
         self.sm.pop()
 
-        # Step 2: Split off amount (last 8 bytes), save to altstack
+        # Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead
         self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(8)))
@@ -1245,7 +1257,7 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.push("")  # varint+sc
         self.sm.push("")  # amount
-        self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
+        self.emit_op(StackOp(op="drop"))  # drop sourceSatoshis — replaced by _newAmount
         self.sm.pop()
 
         # Step 3: Strip state + OP_RETURN from end
@@ -1281,7 +1293,7 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.push("")
 
-        # Step 6: Prepend amount from altstack
+        # Step 6: Prepend _newAmount (8-byte LE) from altstack
         self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
         self.sm.push("")
         self.emit_op(StackOp(op="swap"))

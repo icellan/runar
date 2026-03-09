@@ -59,7 +59,8 @@ export function classifyParams(method: ABIMethod, isStateful: boolean): Classifi
       (isStateful && (
         p.type === 'SigHashPreimage' ||
         p.name === '_changePKH' ||
-        p.name === '_changeAmount'
+        p.name === '_changeAmount' ||
+        p.name === '_newAmount'
       ));
     return {
       name: p.name,
@@ -88,7 +89,7 @@ export function getUserParams(method: ABIMethod, isStateful: boolean): Classifie
 export function getSdkArgParams(method: ABIMethod, isStateful: boolean): ClassifiedParam[] {
   return classifyParams(method, isStateful).filter((p) => {
     if (!isStateful) return true;
-    return p.abiType !== 'SigHashPreimage' && p.name !== '_changePKH' && p.name !== '_changeAmount';
+    return p.abiType !== 'SigHashPreimage' && p.name !== '_changePKH' && p.name !== '_changeAmount' && p.name !== '_newAmount';
   });
 }
 

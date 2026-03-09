@@ -211,22 +211,19 @@
         {
           "name": "t18",
           "value": {
-            "args": [
-              "t17",
-              "t16"
-            ],
-            "func": "computeStateOutput",
-            "kind": "call"
+            "kind": "load_param",
+            "name": "_newAmount"
           }
         },
         {
           "name": "t19",
           "value": {
             "args": [
-              "t18",
-              "t15"
+              "t17",
+              "t16",
+              "t18"
             ],
-            "func": "cat",
+            "func": "computeStateOutput",
             "kind": "call"
           }
         },
@@ -234,44 +231,55 @@
           "name": "t20",
           "value": {
             "args": [
-              "t19"
+              "t19",
+              "t15"
             ],
-            "func": "hash256",
+            "func": "cat",
             "kind": "call"
           }
         },
         {
           "name": "t21",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
+            "args": [
+              "t20"
+            ],
+            "func": "hash256",
+            "kind": "call"
           }
         },
         {
           "name": "t22",
           "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
             "args": [
-              "t21"
+              "t22"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t23",
+          "name": "t24",
           "value": {
             "kind": "bin_op",
-            "left": "t20",
+            "left": "t21",
             "op": "===",
             "result_type": "bytes",
-            "right": "t22"
+            "right": "t23"
           }
         },
         {
-          "name": "t24",
+          "name": "t25",
           "value": {
             "kind": "assert",
-            "value": "t23"
+            "value": "t24"
           }
         }
       ],
@@ -288,6 +296,10 @@
         },
         {
           "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
           "type": "bigint"
         },
         {
@@ -389,22 +401,19 @@
         {
           "name": "t12",
           "value": {
-            "args": [
-              "t11",
-              "t10"
-            ],
-            "func": "computeStateOutput",
-            "kind": "call"
+            "kind": "load_param",
+            "name": "_newAmount"
           }
         },
         {
           "name": "t13",
           "value": {
             "args": [
-              "t12",
-              "t9"
+              "t11",
+              "t10",
+              "t12"
             ],
-            "func": "cat",
+            "func": "computeStateOutput",
             "kind": "call"
           }
         },
@@ -412,44 +421,55 @@
           "name": "t14",
           "value": {
             "args": [
-              "t13"
+              "t13",
+              "t9"
             ],
-            "func": "hash256",
+            "func": "cat",
             "kind": "call"
           }
         },
         {
           "name": "t15",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
+            "args": [
+              "t14"
+            ],
+            "func": "hash256",
+            "kind": "call"
           }
         },
         {
           "name": "t16",
           "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
             "args": [
-              "t15"
+              "t16"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t17",
+          "name": "t18",
           "value": {
             "kind": "bin_op",
-            "left": "t14",
+            "left": "t15",
             "op": "===",
             "result_type": "bytes",
-            "right": "t16"
+            "right": "t17"
           }
         },
         {
-          "name": "t18",
+          "name": "t19",
           "value": {
             "kind": "assert",
-            "value": "t17"
+            "value": "t18"
           }
         }
       ],
@@ -462,6 +482,10 @@
         },
         {
           "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
           "type": "bigint"
         },
         {

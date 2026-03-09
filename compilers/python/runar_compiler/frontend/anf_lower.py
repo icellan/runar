@@ -218,6 +218,11 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             if needs_change_output:
                 method_ctx.add_param("_changePKH")
                 method_ctx.add_param("_changeAmount")
+            # Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
+            # Multi-output (addOutput) methods already specify amounts explicitly per output.
+            needs_new_amount = _method_mutates_state(method, contract) and not _method_has_add_output(method)
+            if needs_new_amount:
+                method_ctx.add_param("_newAmount")
             method_ctx.add_param("txPreimage")
 
             # Inject checkPreimage(txPreimage) at the start
@@ -261,7 +266,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     # Single-output continuation: build raw output bytes, concat with change, hash
                     state_script_ref = method_ctx.emit(ANFValue(kind="get_state_script"))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-                    contract_output_ref = method_ctx.emit(_make_call("computeStateOutput", [preimage_ref2, state_script_ref]))
+                    new_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
+                    contract_output_ref = method_ctx.emit(_make_call("computeStateOutput", [preimage_ref2, state_script_ref, new_amount_ref]))
                     all_outputs = method_ctx.emit(_make_call("cat", [contract_output_ref, change_output_ref]))
                     hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
                     preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
@@ -280,6 +286,8 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     ANFParam(name="_changePKH", type="Ripemd160"),
                     ANFParam(name="_changeAmount", type="bigint"),
                 ]
+            if needs_new_amount:
+                augmented_params.append(ANFParam(name="_newAmount", type="bigint"))
             augmented_params.append(ANFParam(name="txPreimage", type="SigHashPreimage"))
 
             result.append(ANFMethod(

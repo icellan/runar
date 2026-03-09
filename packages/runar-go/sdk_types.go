@@ -106,6 +106,8 @@ type PreparedCall struct {
 	methodNeedsChange bool
 	changePKHHex      string
 	changeAmount      int64
+	methodNeedsNewAmount bool
+	newAmount         int64
 	preimageIndex     int
 	contractUtxo      UTXO
 	newLockingScript  string

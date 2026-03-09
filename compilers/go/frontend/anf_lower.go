@@ -171,10 +171,17 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// Non-mutating methods (like close/destroy) don't verify outputs.
 			needsChangeOutput := methodMutatesState(method, contract) || methodHasAddOutput(method)
 
+			// Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
+			// Multi-output (addOutput) methods already specify amounts explicitly per output.
+			needsNewAmount := methodMutatesState(method, contract) && !methodHasAddOutput(method)
+
 			// Register implicit parameters
 			if needsChangeOutput {
 				methodCtx.addParam("_changePKH")
 				methodCtx.addParam("_changeAmount")
+			}
+			if needsNewAmount {
+				methodCtx.addParam("_newAmount")
 			}
 			methodCtx.addParam("txPreimage")
 
@@ -225,7 +232,8 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					// Single-output continuation: build raw output bytes, concat with change, hash
 					stateScriptRef := methodCtx.emit(ir.ANFValue{Kind: "get_state_script"})
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
-					contractOutputRef := methodCtx.emit(makeCall("computeStateOutput", []string{preimageRef2, stateScriptRef}))
+					newAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
+					contractOutputRef := methodCtx.emit(makeCall("computeStateOutput", []string{preimageRef2, stateScriptRef, newAmountRef}))
 					allOutputs := methodCtx.emit(makeCall("cat", []string{contractOutputRef, changeOutputRef}))
 					hashRef := methodCtx.emit(makeCall("hash256", []string{allOutputs}))
 					preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
@@ -242,6 +250,9 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					ir.ANFParam{Name: "_changePKH", Type: "Ripemd160"},
 					ir.ANFParam{Name: "_changeAmount", Type: "bigint"},
 				)
+			}
+			if needsNewAmount {
+				augmentedParams = append(augmentedParams, ir.ANFParam{Name: "_newAmount", Type: "bigint"})
 			}
 			augmentedParams = append(augmentedParams, ir.ANFParam{
 				Name: "txPreimage",

@@ -1459,7 +1459,8 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
-    // Identical to lowerComputeStateOutputHash steps 1-6, without step 7 (hash).
+    // computeStateOutput(preimage, stateBytes, newAmount)
+    // Builds the continuation output using _newAmount instead of sourceSatoshis.
     const stateProps = this._properties.filter(p => !p.readonly);
     let stateLen = 0;
     for (const prop of stateProps) {
@@ -1477,6 +1478,19 @@ class LoweringContext {
 
     const preimageRef = args[0]!;
     const stateBytesRef = args[1]!;
+    const newAmountRef = args[2]!;
+
+    // Bring newAmount, stateBytes, then preimage to top.
+    const amountLast = this.isLastUse(newAmountRef, bindingIndex, lastUses);
+    this.bringToTop(newAmountRef, amountLast);
+    // Convert _newAmount (script number) to 8-byte LE and save to altstack.
+    this.emitOp({ op: 'push', value: 8n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
+    this.stackMap.pop(); this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    this.stackMap.pop();
 
     const stateLast = this.isLastUse(stateBytesRef, bindingIndex, lastUses);
     this.bringToTop(stateBytesRef, stateLast);
@@ -1507,7 +1521,7 @@ class LoweringContext {
     this.emitOp({ op: 'drop' });
     this.stackMap.pop();
 
-    // Step 2: Split off amount (last 8 bytes), save to altstack.
+    // Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead.
     this.emitOp({ op: 'opcode', code: 'OP_SIZE' });
     this.stackMap.push(null);
     this.emitOp({ op: 'push', value: 8n });
@@ -1518,7 +1532,7 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
     this.stackMap.pop(); this.stackMap.pop();
     this.stackMap.push(null); this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    this.emitOp({ op: 'drop' }); // drop sourceSatoshis — replaced by _newAmount
     this.stackMap.pop();
 
     // Step 3: Strip current state + OP_RETURN from end.
@@ -1549,7 +1563,7 @@ class LoweringContext {
     this.stackMap.pop(); this.stackMap.pop();
     this.stackMap.push(null);
 
-    // Step 6: Prepend amount from altstack.
+    // Step 6: Prepend _newAmount (8-byte LE) from altstack.
     this.emitOp({ op: 'opcode', code: 'OP_FROMALTSTACK' });
     this.stackMap.push(null);
     this.emitOp({ op: 'swap' });

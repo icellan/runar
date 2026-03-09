@@ -354,11 +354,13 @@ impl RunarContract {
         // public method's ABI (SigHashPreimage, and for state-mutating methods:
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
+        let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
         let user_params: Vec<&AbiParam> = if is_stateful {
             method.params.iter().filter(|p| {
                 p.param_type != "SigHashPreimage"
                     && p.name != "_changePKH"
                     && p.name != "_changeAmount"
+                    && p.name != "_newAmount"
             }).collect()
         } else {
             method.params.iter().collect()
@@ -659,11 +661,17 @@ impl RunarContract {
                     change_hex.push_str(&encode_arg(&SdkValue::Int(tx_change_amount)));
                 }
 
+                let mut new_amount_hex = String::new();
+                if method_needs_new_amount {
+                    new_amount_hex.push_str(&encode_arg(&SdkValue::Int(new_satoshis.unwrap_or(current_utxo.satoshis))));
+                }
+
                 let unlock = format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     encode_push_data(&op_sig),
                     user_args_hex,
                     change_hex,
+                    new_amount_hex,
                     encode_push_data(&preimage),
                     method_selector_hex,
                 );
@@ -832,6 +840,8 @@ impl RunarContract {
             method_needs_change,
             change_pkh_hex,
             change_amount,
+            method_needs_new_amount,
+            new_amount: new_satoshis.unwrap_or(current_utxo.satoshis),
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: new_locking_script.unwrap_or_default(),
@@ -871,11 +881,16 @@ impl RunarContract {
                 change_hex.push_str(&encode_push_data(&prepared.change_pkh_hex));
                 change_hex.push_str(&encode_arg(&SdkValue::Int(prepared.change_amount)));
             }
+            let mut new_amount_hex = String::new();
+            if prepared.method_needs_new_amount {
+                new_amount_hex.push_str(&encode_arg(&SdkValue::Int(prepared.new_amount)));
+            }
             format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 encode_push_data(&prepared.op_push_tx_sig),
                 args_hex,
                 change_hex,
+                new_amount_hex,
                 encode_push_data(&prepared.preimage),
                 prepared.method_selector_hex,
             )
@@ -1092,6 +1107,8 @@ impl RunarContract {
             method_needs_change,
             change_pkh_hex: change_pkh_hex.to_string(),
             change_amount: 0,
+            method_needs_new_amount: false,
+            new_amount: 0,
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: String::new(),

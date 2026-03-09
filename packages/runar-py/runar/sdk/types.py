@@ -190,6 +190,8 @@ class PreparedCall:
     method_needs_change: bool = False
     change_pkh_hex: str = ''
     change_amount: int = 0
+    method_needs_new_amount: bool = False
+    new_amount: int = 0
     preimage_index: int = -1
     contract_utxo: Utxo | None = None
     new_locking_script: str = ''

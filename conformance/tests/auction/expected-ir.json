@@ -336,22 +336,19 @@
         {
           "name": "t27",
           "value": {
-            "args": [
-              "t26",
-              "t25"
-            ],
-            "func": "computeStateOutput",
-            "kind": "call"
+            "kind": "load_param",
+            "name": "_newAmount"
           }
         },
         {
           "name": "t28",
           "value": {
             "args": [
-              "t27",
-              "t24"
+              "t26",
+              "t25",
+              "t27"
             ],
-            "func": "cat",
+            "func": "computeStateOutput",
             "kind": "call"
           }
         },
@@ -359,44 +356,55 @@
           "name": "t29",
           "value": {
             "args": [
-              "t28"
+              "t28",
+              "t24"
             ],
-            "func": "hash256",
+            "func": "cat",
             "kind": "call"
           }
         },
         {
           "name": "t30",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
+            "args": [
+              "t29"
+            ],
+            "func": "hash256",
+            "kind": "call"
           }
         },
         {
           "name": "t31",
           "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
             "args": [
-              "t30"
+              "t31"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t32",
+          "name": "t33",
           "value": {
             "kind": "bin_op",
-            "left": "t29",
+            "left": "t30",
             "op": "===",
             "result_type": "bytes",
-            "right": "t31"
+            "right": "t32"
           }
         },
         {
-          "name": "t33",
+          "name": "t34",
           "value": {
             "kind": "assert",
-            "value": "t32"
+            "value": "t33"
           }
         }
       ],
@@ -421,6 +429,10 @@
         },
         {
           "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
           "type": "bigint"
         },
         {

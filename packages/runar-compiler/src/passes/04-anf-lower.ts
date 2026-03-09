@@ -121,6 +121,12 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         methodCtx.addParam('_changePKH');
         methodCtx.addParam('_changeAmount');
       }
+      // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
+      // Multi-output (addOutput) methods already specify amounts explicitly per output.
+      const needsNewAmount = methodMutatesState(method, contract) && !methodHasAddOutput(method);
+      if (needsNewAmount) {
+        methodCtx.addParam('_newAmount');
+      }
       methodCtx.addParam('txPreimage');
 
       // Inject checkPreimage(txPreimage) at the start
@@ -162,7 +168,8 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
           // Single-output continuation: build raw output bytes, concat with change, hash
           const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
           const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-          const contractOutputRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutput', args: [preimageRef2, stateScriptRef] });
+          const newAmountRef = methodCtx.emit({ kind: 'load_param', name: '_newAmount' });
+          const contractOutputRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutput', args: [preimageRef2, stateScriptRef, newAmountRef] });
           const allOutputs = methodCtx.emit({ kind: 'call', func: 'cat', args: [contractOutputRef, changeOutputRef] });
           const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [allOutputs] });
           const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
@@ -178,6 +185,11 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         augmentedParams.push(
           { kind: 'param', name: '_changePKH', type: { kind: 'primitive_type', name: 'Ripemd160' } },
           { kind: 'param', name: '_changeAmount', type: { kind: 'primitive_type', name: 'bigint' } },
+        );
+      }
+      if (needsNewAmount) {
+        augmentedParams.push(
+          { kind: 'param', name: '_newAmount', type: { kind: 'primitive_type', name: 'bigint' } },
         );
       }
       augmentedParams.push(

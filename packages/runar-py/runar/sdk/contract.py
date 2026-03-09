@@ -201,12 +201,14 @@ class RunarContract:
         # _changePKH and _changeAmount). The SDK auto-computes these.
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
+        method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
         if is_stateful:
             user_params = [
                 p for p in method.params
                 if p.type != 'SigHashPreimage'
                 and p.name != '_changePKH'
                 and p.name != '_changeAmount'
+                and p.name != '_newAmount'
             ]
         else:
             user_params = method.params
@@ -437,10 +439,14 @@ class RunarContract:
                 change_hex = ''
                 if method_needs_change and change_pkh_hex:
                     change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(tx_change_amount)
+                new_amount_hex = ''
+                if method_needs_new_amount:
+                    new_amount_hex = _encode_script_number(new_satoshis)
                 unlock = (
                     encode_push_data(op_sig) +
                     args_hex +
                     change_hex +
+                    new_amount_hex +
                     encode_push_data(preimage) +
                     method_selector_hex
                 )
@@ -565,6 +571,8 @@ class RunarContract:
             method_needs_change=method_needs_change,
             change_pkh_hex=change_pkh_hex,
             change_amount=change_amount,
+            method_needs_new_amount=method_needs_new_amount,
+            new_amount=new_satoshis,
             preimage_index=preimage_index,
             contract_utxo=contract_utxo,
             new_locking_script=new_locking_script,
@@ -605,10 +613,14 @@ class RunarContract:
             change_hex = ''
             if prepared.method_needs_change and prepared.change_pkh_hex:
                 change_hex = encode_push_data(prepared.change_pkh_hex) + _encode_script_number(prepared.change_amount)
+            new_amount_hex = ''
+            if prepared.method_needs_new_amount:
+                new_amount_hex = _encode_script_number(prepared.new_amount)
             primary_unlock = (
                 encode_push_data(prepared.op_push_tx_sig) +
                 args_hex +
                 change_hex +
+                new_amount_hex +
                 encode_push_data(prepared.preimage) +
                 prepared.method_selector_hex
             )
@@ -868,6 +880,8 @@ class RunarContract:
             method_needs_change=method_needs_change,
             change_pkh_hex=change_pkh_hex,
             change_amount=0,
+            method_needs_new_amount=False,
+            new_amount=0,
             preimage_index=preimage_index,
             contract_utxo=contract_utxo,
             new_locking_script='',

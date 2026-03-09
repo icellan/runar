@@ -180,6 +180,13 @@ function extractABI(contract: ContractNode): ABI {
         params.push({ name: '_changePKH', type: 'Ripemd160' });
         params.push({ name: '_changeAmount', type: 'bigint' });
       }
+      // Single-output continuation methods need _newAmount to allow changing UTXO satoshis.
+      // Methods using addOutput already specify amounts explicitly per output.
+      const needsNewAmount = methodMutatesState(method.body, mutablePropNames) &&
+                             !methodHasAddOutput(method.body);
+      if (needsNewAmount) {
+        params.push({ name: '_newAmount', type: 'bigint' });
+      }
       params.push({ name: 'txPreimage', type: 'SigHashPreimage' });
     }
 

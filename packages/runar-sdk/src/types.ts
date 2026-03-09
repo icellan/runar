@@ -66,6 +66,8 @@ export interface PreparedCall {
   /** @internal */ _methodNeedsChange: boolean;
   /** @internal */ _changePKHHex: string;
   /** @internal */ _changeAmount: number;
+  /** @internal */ _methodNeedsNewAmount: boolean;
+  /** @internal */ _newAmount: number;
   /** @internal */ _preimageIndex: number;
   /** @internal */ _contractUtxo: UTXO;
   /** @internal */ _newLockingScript: string;

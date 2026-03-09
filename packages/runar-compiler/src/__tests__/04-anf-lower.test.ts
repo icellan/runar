@@ -820,4 +820,89 @@ describe('Pass 4: ANF Lower', () => {
       expect(preimageParam).toBeUndefined();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // BUG REPRODUCTION: options.satoshis silently ignored by on-chain script
+  // ---------------------------------------------------------------------------
+
+  describe('single-output continuation supports _newAmount parameter', () => {
+    const POOL_CONTRACT = `
+      class Pool extends StatefulSmartContract {
+        readonly minBet: bigint;
+        totalPool: bigint;
+        constructor(minBet: bigint, totalPool: bigint) {
+          super(minBet, totalPool);
+          this.minBet = minBet;
+          this.totalPool = totalPool;
+        }
+        public deposit(amount: bigint, sig: Sig, depositor: PubKey) {
+          assert(amount >= this.minBet);
+          assert(checkSig(sig, depositor));
+          this.totalPool = this.totalPool + amount;
+        }
+      }
+    `;
+
+    it('computeStateOutput receives 3 args (preimage, stateScript, newAmount)', () => {
+      const program = lowerSource(POOL_CONTRACT);
+      const method = findMethod(program, 'deposit');
+
+      const calls = bindingsOfKind(method.body, 'call');
+      const computeOutputCall = calls.find(b => (b.value as { func: string }).func === 'computeStateOutput');
+      expect(computeOutputCall).toBeDefined();
+
+      const computeArgs = (computeOutputCall!.value as { args: string[] }).args;
+      expect(computeArgs).toHaveLength(3);
+    });
+
+    it('injects _newAmount as an implicit bigint parameter', () => {
+      const program = lowerSource(POOL_CONTRACT);
+      const method = findMethod(program, 'deposit');
+
+      const newAmountParam = method.params.find(p => p.name === '_newAmount');
+      expect(newAmountParam).toBeDefined();
+      expect(newAmountParam!.type).toBe('bigint');
+    });
+
+    it('does not inject _newAmount for methods using addOutput (multi-output)', () => {
+      const source = `
+        class Token extends StatefulSmartContract {
+          balance: bigint;
+          constructor(balance: bigint) { super(balance); this.balance = balance; }
+          public transfer(sendAmount: bigint) {
+            assert(sendAmount <= this.balance);
+            this.addOutput(1n, this.balance - sendAmount);
+            this.addOutput(1n, sendAmount);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'transfer');
+
+      const newAmountParam = method.params.find(p => p.name === '_newAmount');
+      expect(newAmountParam).toBeUndefined();
+    });
+
+    it('does not inject _newAmount for non-mutating methods', () => {
+      const source = `
+        class Auction extends StatefulSmartContract {
+          readonly auctioneer: PubKey;
+          highestBid: bigint;
+          constructor(auctioneer: PubKey, highestBid: bigint) {
+            super(auctioneer, highestBid);
+            this.auctioneer = auctioneer;
+            this.highestBid = highestBid;
+          }
+          public close(sig: Sig) {
+            assert(checkSig(sig, this.auctioneer));
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'close');
+
+      const newAmountParam = method.params.find(p => p.name === '_newAmount');
+      expect(newAmountParam).toBeUndefined();
+    });
+  });
 });

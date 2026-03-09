@@ -244,16 +244,19 @@ func (c *RunarContract) PrepareCall(
 
 	isStateful := len(c.Artifact.StateFields) > 0
 	methodNeedsChange := false
+	methodNeedsNewAmount := false
 	for _, p := range method.Params {
 		if p.Name == "_changePKH" {
 			methodNeedsChange = true
-			break
+		}
+		if p.Name == "_newAmount" {
+			methodNeedsNewAmount = true
 		}
 	}
 	var userParams []ABIParam
 	if isStateful {
 		for _, p := range method.Params {
-			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" {
+			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" && p.Name != "_newAmount" {
 				userParams = append(userParams, p)
 			}
 		}
@@ -567,11 +570,16 @@ func (c *RunarContract) PrepareCall(
 			if methodNeedsChange && changePKHHex != "" {
 				changeHex = EncodePushData(changePKHHex) + encodeArg(txChangeAmount)
 			}
+			newAmountHex := ""
+			if methodNeedsNewAmount {
+				newAmountHex = encodeArg(newSatoshis)
+			}
 			opSigHexStr := hex.EncodeToString(opSig)
 			preimageHexStr := hex.EncodeToString(preimage)
 			unlockStr := EncodePushData(opSigHexStr) +
 				argsHex +
 				changeHex +
+				newAmountHex +
 				EncodePushData(preimageHexStr) +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
@@ -720,6 +728,8 @@ func (c *RunarContract) PrepareCall(
 		methodNeedsChange: methodNeedsChange,
 		changePKHHex:      changePKHHex,
 		changeAmount:      changeAmount,
+		methodNeedsNewAmount: methodNeedsNewAmount,
+		newAmount:         newSatoshis,
 		preimageIndex:     preimageIndex,
 		contractUtxo:      contractUtxo,
 		newLockingScript:  newLockingScript,
@@ -763,9 +773,14 @@ func (c *RunarContract) FinalizeCall(
 		if prepared.methodNeedsChange && prepared.changePKHHex != "" {
 			changeHex = EncodePushData(prepared.changePKHHex) + encodeArg(prepared.changeAmount)
 		}
+		newAmountHex := ""
+		if prepared.methodNeedsNewAmount {
+			newAmountHex = encodeArg(prepared.newAmount)
+		}
 		primaryUnlock = EncodePushData(prepared.OpPushTxSig) +
 			argsHex +
 			changeHex +
+			newAmountHex +
 			EncodePushData(prepared.Preimage) +
 			prepared.methodSelectorHex
 	} else if prepared.needsOpPushTx {
@@ -1201,6 +1216,8 @@ func (c *RunarContract) prepareCallTerminal(
 		methodNeedsChange: methodNeedsChange,
 		changePKHHex:      changePKHHex,
 		changeAmount:      0,
+		methodNeedsNewAmount: false,
+		newAmount:         0,
 		preimageIndex:     preimageIndex,
 		contractUtxo:      contractUtxo,
 		newLockingScript:  "",

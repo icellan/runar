@@ -1357,8 +1357,20 @@ func (ctx *loweringContext) lowerComputeStateOutput(bindingName string, args []s
 
 	preimageRef := args[0]
 	stateBytesRef := args[1]
+	newAmountRef := args[2]
 
-	// Bring stateBytes then preimage to top.
+	// Bring newAmount, stateBytes, then preimage to top.
+	ctx.bringToTop(newAmountRef, ctx.isLastUse(newAmountRef, bindingIndex, lastUses))
+	// Convert _newAmount (script number) to 8-byte LE and save to altstack.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	ctx.sm.pop()
+
 	ctx.bringToTop(stateBytesRef, ctx.isLastUse(stateBytesRef, bindingIndex, lastUses))
 	ctx.bringToTop(preimageRef, ctx.isLastUse(preimageRef, bindingIndex, lastUses))
 
@@ -1392,7 +1404,7 @@ func (ctx *loweringContext) lowerComputeStateOutput(bindingName string, args []s
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 
-	// Step 2: Split off amount (last 8 bytes), save to altstack.
+	// Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead.
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(8)})
@@ -1406,7 +1418,7 @@ func (ctx *loweringContext) lowerComputeStateOutput(bindingName string, args []s
 	ctx.sm.pop()
 	ctx.sm.push("")
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	ctx.emitOp(StackOp{Op: "drop"}) // drop sourceSatoshis — replaced by _newAmount
 	ctx.sm.pop()
 
 	// Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
@@ -1442,7 +1454,7 @@ func (ctx *loweringContext) lowerComputeStateOutput(bindingName string, args []s
 	ctx.sm.pop()
 	ctx.sm.push("")
 
-	// Step 6: Prepend amount from altstack.
+	// Step 6: Prepend _newAmount (8-byte LE) from altstack.
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "swap"})

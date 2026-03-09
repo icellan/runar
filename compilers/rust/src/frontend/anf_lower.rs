@@ -110,10 +110,18 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             let needs_change_output =
                 method_mutates_state(method, contract) || method_has_add_output(method);
 
+            // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
+            // Methods with addOutput don't need it (they build outputs explicitly).
+            let needs_new_amount =
+                method_mutates_state(method, contract) && !method_has_add_output(method);
+
             // Register implicit parameters
             if needs_change_output {
                 method_ctx.add_param("_changePKH");
                 method_ctx.add_param("_changeAmount");
+            }
+            if needs_new_amount {
+                method_ctx.add_param("_newAmount");
             }
             method_ctx.add_param("txPreimage");
 
@@ -196,9 +204,12 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                     let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
                         name: "txPreimage".to_string(),
                     });
+                    let new_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_newAmount".to_string(),
+                    });
                     let contract_output_ref = method_ctx.emit(ANFValue::Call {
                         func: "computeStateOutput".to_string(),
-                        args: vec![preimage_ref2.clone(), state_script_ref],
+                        args: vec![preimage_ref2.clone(), state_script_ref, new_amount_ref],
                     });
                     let all_outputs = method_ctx.emit(ANFValue::Call {
                         func: "cat".to_string(),
@@ -234,6 +245,12 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 });
                 augmented_params.push(ANFParam {
                     name: "_changeAmount".to_string(),
+                    param_type: "bigint".to_string(),
+                });
+            }
+            if needs_new_amount {
+                augmented_params.push(ANFParam {
+                    name: "_newAmount".to_string(),
                     param_type: "bigint".to_string(),
                 });
             }
