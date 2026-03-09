@@ -2,7 +2,7 @@
 
 **Cross-compiler conformance test suite ensuring all Rúnar compilers produce identical output.**
 
-The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, and Rust -- must pass the full suite.
+The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, Rust, and Python -- must pass the full suite.
 
 ---
 
@@ -26,13 +26,14 @@ tests/
 |   +-- basic-p2pkh.runar.move    # Source contract (Move-style)
 |   +-- basic-p2pkh.runar.go      # Source contract (Go)
 |   +-- basic-p2pkh.runar.rs      # Source contract (Rust)
+|   +-- basic-p2pkh.runar.py      # Source contract (Python)
 |   +-- basic-p2pkh.runar.json    # Reference artifact (JSON AST, not tested by runner)
 |   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
 |   +-- expected-script.hex       # Expected compiled script (hex string)
 |
 +-- arithmetic/
 |   +-- arithmetic.runar.ts
-|   +-- arithmetic.runar.sol      # (+ .move, .go, .rs variants; .json is a reference artifact)
+|   +-- arithmetic.runar.sol      # (+ .move, .go, .rs, .py variants; .json is a reference artifact)
 |   +-- expected-ir.json
 |   +-- expected-script.hex
 |
@@ -52,7 +53,7 @@ tests/
 |   +-- expected-script.hex
 |
 +-- multi-method/
-|   +-- multi-method.runar.ts     # (+ .sol, .move, .go, .rs variants)
+|   +-- multi-method.runar.ts     # (+ .sol, .move, .go, .rs, .py variants)
 |   +-- expected-ir.json
 |   +-- expected-script.hex
 |
@@ -72,12 +73,28 @@ tests/
 |   +-- expected-script.hex
 |
 +-- ec-primitives/
-    +-- ec-primitives.runar.ts
-    +-- expected-ir.json
-    +-- expected-script.hex
+|   +-- ec-primitives.runar.ts
+|   +-- expected-ir.json
+|   +-- expected-script.hex
+|
++-- auction/                       # (+ 15 more test directories)
++-- convergence-proof/
++-- covenant-vault/
++-- ec-demo/
++-- escrow/
++-- function-patterns/
++-- math-demo/
++-- oracle-price/
++-- post-quantum-wallet/
++-- property-initializers/
++-- schnorr-zkp/
++-- sphincs-wallet/
++-- stateful-counter/
++-- token-ft/
++-- token-nft/
 ```
 
-> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All format variants must produce the same ANF IR and script output. The post-quantum and ec-primitives tests currently only have `.runar.ts` sources. Six of the ten test directories (`basic-p2pkh`, `arithmetic`, `boolean-logic`, `if-else`, `bounded-loop`, `stateful`) also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`). All format variants must produce the same ANF IR and script output. The post-quantum and ec-primitives tests currently only have `.runar.ts` sources. Several test directories also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
 
 ### File Roles
 
@@ -118,7 +135,7 @@ pnpm run test:markdown
 # Filter to a specific test
 pnpm run test:filter -- arithmetic
 
-# Test all input format variants (.ts, .sol, .move, .go, .rs)
+# Test all input format variants (.ts, .sol, .move, .go, .rs, .py)
 pnpm test -- --multi-format
 ```
 
@@ -226,17 +243,32 @@ Golden file updates should always be reviewed carefully. An unexpected change in
 
 ---
 
-## Current Test Cases
+## Current Test Cases (25)
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
-| `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
 | `arithmetic` | Binary arithmetic operations (+, -, *, /, %) | Yes |
+| `auction` | Stateful auction with bidding and closing | Yes |
+| `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
-| `if-else` | Conditional branches in ANF IR | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
-| `multi-method` | Method dispatch table generation | Yes |
-| `stateful` | State updates, checkPreimage, getStateScript | Yes |
-| `post-quantum-wots` | WOTS+ hash chain signature verification | Yes |
-| `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
+| `convergence-proof` | Convergence proof patterns | Yes |
+| `covenant-vault` | Covenant spending constraints | Yes |
+| `ec-demo` | EC point operation demos | Yes |
 | `ec-primitives` | EC point operations (ecAdd, ecMul, ecMulGen, etc.) | Yes |
+| `escrow` | Multi-party escrow with multiple spending paths | Yes |
+| `function-patterns` | Private helper methods and function call patterns | Yes |
+| `if-else` | Conditional branches in ANF IR | Yes |
+| `math-demo` | Built-in math functions (abs, min, max, sqrt, pow, etc.) | Yes |
+| `multi-method` | Method dispatch table generation | Yes |
+| `oracle-price` | Rabin signature oracle price feed | Yes |
+| `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
+| `post-quantum-wallet` | WOTS+ wallet contract | Yes |
+| `post-quantum-wots` | WOTS+ hash chain signature verification | Yes |
+| `property-initializers` | Default values on contract properties | Yes |
+| `schnorr-zkp` | Schnorr zero-knowledge proof (EC ops) | Yes |
+| `sphincs-wallet` | SLH-DSA wallet contract | Yes |
+| `stateful` | State updates, checkPreimage, getStateScript | Yes |
+| `stateful-counter` | Stateful counter with increment | Yes |
+| `token-ft` | Fungible token with split/merge | Yes |
+| `token-nft` | NFT with transfer/burn | Yes |

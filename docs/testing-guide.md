@@ -285,7 +285,7 @@ describe('compiler fuzzing', () => {
 
 ### Differential Fuzzing
 
-The conformance fuzzer in `conformance/fuzzer/` generates random programs and checks that the compiler + VM produce the same result as the interpreter:
+The conformance fuzzer in `packages/runar-testing/src/fuzzer/` generates random programs and checks that the compiler + VM produce the same result as the interpreter:
 
 ```bash
 # Run the differential fuzzer
@@ -689,7 +689,7 @@ Both paths must agree on valid signatures (accept) and invalid signatures (rejec
 
 ### Conformance Golden Files
 
-`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. All three compilers (TS, Go, Rust) must produce byte-identical output.
+`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. All four compilers (TS, Go, Rust, Python) must produce byte-identical output.
 
 ---
 
@@ -763,7 +763,7 @@ describe('SchnorrZKP contract', () => {
 
 ## Conformance Testing Across Compilers
 
-The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust) produce identical output.
+The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust, Python) produce identical output.
 
 ### Golden-File Tests
 
@@ -787,6 +787,9 @@ pnpm run conformance:go
 
 # Test the Rust compiler
 pnpm run conformance:rust
+
+# Test the Python compiler
+pnpm run conformance:python
 ```
 
 The runner compiles each source file, serializes the ANF IR using canonical JSON (RFC 8785), and compares the SHA-256 hash against the expected output. Byte-identical output is required.

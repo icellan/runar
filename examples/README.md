@@ -2,13 +2,13 @@
 
 **A collection of example smart contracts demonstrating Rúnar patterns and features.**
 
-Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, and `rust/`. Each format directory contains parallel implementations of the same contracts, plus format-specific extras.
+Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rust/`, and `python/`. Each format directory contains parallel implementations of the same contracts, plus format-specific extras.
 
 ---
 
 ## Contract Index
 
-Contracts available across all five formats (TypeScript, Solidity-like, Move-style, Go, Rust):
+Contracts available across all six formats (TypeScript, Solidity-like, Move-style, Go, Rust, Python):
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
@@ -21,20 +21,30 @@ Contracts available across all five formats (TypeScript, Solidity-like, Move-sty
 | **Auction** | `*/auction/` | Stateful, Multi-method | Advanced | On-chain auction with bidding and closing phases. Tracks highest bidder and bid amount. Enforces deadline via locktime. |
 | **Covenant Vault** | `*/covenant-vault/` | Covenant | Advanced | Vault that restricts spending with covenant rules. Owner must authorize, and the output amount must exceed a minimum. |
 | **Math Demo** | `*/math-demo/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates built-in math functions (abs, min, max, sqrt, pow, etc.). |
+| **EC Demo** | `*/ec-demo/` | Stateless, EC | Intermediate | Demonstrates EC point operations (ecAdd, ecMul, ecMulGen, etc.). |
+| **Property Initializers** | `*/property-initializers/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates default values on contract properties. |
 
-Contracts available in TypeScript, Go, and Rust only:
-
-| Contract | Directory | Pattern | Complexity | Description |
-|---|---|---|---|---|
-| **Function Patterns** | `{ts,go,rust}/function-patterns/` | Stateful (OP_PUSH_TX) | Intermediate | Demonstrates private helper methods and function call patterns. |
-
-TypeScript-only contracts (post-quantum and EC):
+Contracts available in TypeScript, Go, Rust, and Python:
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
-| **Post-Quantum Wallet** | `ts/post-quantum-wallet/` | Stateless, PQ | Advanced | WOTS+ (Winternitz One-Time Signature) wallet for post-quantum security. |
-| **SPHINCS+ Wallet** | `ts/sphincs-wallet/` | Stateless, PQ | Advanced | SLH-DSA-SHA2-128s (SPHINCS+) wallet for stateless post-quantum signatures. |
-| **SchnorrZKP** | `ts/schnorr-zkp/` | Stateless, EC | Advanced | Schnorr zero-knowledge proof using EC point operations. |
+| **Function Patterns** | `{ts,go,rust,python}/function-patterns/` | Stateful (OP_PUSH_TX) | Intermediate | Demonstrates private helper methods and function call patterns. |
+| **Post-Quantum Wallet** | `{ts,go,rust,python}/post-quantum-wallet/` | Stateless, PQ | Advanced | WOTS+ (Winternitz One-Time Signature) wallet for post-quantum security. |
+| **SPHINCS+ Wallet** | `{ts,go,rust,python}/sphincs-wallet/` | Stateless, PQ | Advanced | SLH-DSA-SHA2-128s (SPHINCS+) wallet for stateless post-quantum signatures. |
+| **SchnorrZKP** | `{ts,go,rust,python}/schnorr-zkp/` | Stateless, EC | Advanced | Schnorr zero-knowledge proof using EC point operations. |
+| **Convergence Proof** | `{ts,go,rust,python}/convergence-proof/` | Stateless | Advanced | Demonstrates convergence proof patterns. |
+
+---
+
+## SDK Usage Reference
+
+The `sdk-usage/` directory contains reference code snippets (not runnable) showing how to use the deployment SDK in TypeScript, Go, and Rust:
+
+- `sdk-usage-typescript.ts` — TypeScript SDK usage patterns
+- `sdk-usage-go.go` — Go SDK usage patterns
+- `sdk-usage-rust.rs` — Rust SDK usage patterns
+
+These are documentation files showing common SDK patterns (deploy, call, state management). They are not executable contracts.
 
 ---
 
@@ -109,6 +119,14 @@ Rust examples are tested as native Rust code with `runar::compile_check` for Run
 
 ```bash
 cd examples/rust && cargo test
+```
+
+### Python (pytest)
+
+Python examples are tested as native Python code with mock types from the `runar` package:
+
+```bash
+cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest
 ```
 
 ---

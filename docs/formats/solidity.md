@@ -122,10 +122,10 @@ Unlike TypeScript Rúnar where `this.` is required, the Solidity format allows b
 ### State Mutation
 
 ```solidity
-count++;
-count--;
-count = newValue;
-highestBidder = bidder;
+this.count++;
+this.count--;
+this.count = newValue;
+this.highestBidder = bidder;
 ```
 
 In stateful contracts, mutable properties can be assigned directly. The compiler auto-injects `checkPreimage` and state continuation.
@@ -133,7 +133,7 @@ In stateful contracts, mutable properties can be assigned directly. The compiler
 ### addOutput
 
 ```solidity
-addOutput(satoshis, owner, balance);
+this.addOutput(satoshis, owner, balance, 0);
 ```
 
 The `addOutput` call uses the same positional convention as TypeScript: the first argument is satoshis, followed by values matching mutable properties in declaration order.
@@ -163,20 +163,24 @@ contract P2PKH is SmartContract {
 pragma runar ^0.1.0;
 
 contract Counter is StatefulSmartContract {
-    int256 count;
+    bigint count;
+
+    constructor(bigint _count) {
+        count = _count;
+    }
 
     function increment() public {
-        count++;
+        this.count++;
     }
 
     function decrement() public {
-        require(count > 0);
-        count--;
+        require(this.count > 0);
+        this.count--;
     }
 }
 ```
 
-Note: `int256` is an alias for `bigint` in the Solidity format. Plain integer literals (without the `n` suffix) are accepted.
+Note: `int256` is an alias for `bigint` in the Solidity format. Both are accepted; the parser normalizes `int256` to `bigint`. Plain integer literals (without the `n` suffix) are accepted.
 
 ### Escrow
 
@@ -188,23 +192,25 @@ contract Escrow is SmartContract {
     PubKey immutable seller;
     PubKey immutable arbiter;
 
-    function releaseBySeller(Sig sig) public {
-        require(checkSig(sig, seller));
+    constructor(PubKey _buyer, PubKey _seller, PubKey _arbiter) {
+        buyer = _buyer;
+        seller = _seller;
+        arbiter = _arbiter;
     }
 
-    function releaseByArbiter(Sig sig) public {
-        require(checkSig(sig, arbiter));
+    function release(Sig sellerSig, Sig arbiterSig) public {
+        require(checkSig(sellerSig, this.seller));
+        require(checkSig(arbiterSig, this.arbiter));
     }
 
-    function refundToBuyer(Sig sig) public {
-        require(checkSig(sig, buyer));
-    }
-
-    function refundByArbiter(Sig sig) public {
-        require(checkSig(sig, arbiter));
+    function refund(Sig buyerSig, Sig arbiterSig) public {
+        require(checkSig(buyerSig, this.buyer));
+        require(checkSig(arbiterSig, this.arbiter));
     }
 }
 ```
+
+This is a dual-sig escrow: both spending paths require two signatures. The arbiter must co-sign every spend, preventing unilateral action by either the buyer or the seller.
 
 ### Auction
 
@@ -214,20 +220,28 @@ pragma runar ^0.1.0;
 contract Auction is StatefulSmartContract {
     PubKey immutable auctioneer;
     PubKey highestBidder;
-    int256 highestBid;
-    int256 immutable deadline;
+    bigint highestBid;
+    bigint immutable deadline;
 
-    function bid(PubKey bidder, int256 bidAmount) public {
-        require(bidAmount > highestBid);
-        require(extractLocktime(txPreimage) < deadline);
+    constructor(PubKey _auctioneer, PubKey _highestBidder, bigint _highestBid, bigint _deadline) {
+        auctioneer = _auctioneer;
+        highestBidder = _highestBidder;
+        highestBid = _highestBid;
+        deadline = _deadline;
+    }
 
-        highestBidder = bidder;
-        highestBid = bidAmount;
+    function bid(Sig sig, PubKey bidder, bigint bidAmount) public {
+        require(checkSig(sig, bidder));
+        require(bidAmount > this.highestBid);
+        require(extractLocktime(this.txPreimage) < this.deadline);
+
+        this.highestBidder = bidder;
+        this.highestBid = bidAmount;
     }
 
     function close(Sig sig) public {
-        require(checkSig(sig, auctioneer));
-        require(extractLocktime(txPreimage) >= deadline);
+        require(checkSig(sig, this.auctioneer));
+        require(extractLocktime(this.txPreimage) >= this.deadline);
     }
 }
 ```
@@ -241,11 +255,16 @@ contract OraclePriceFeed is SmartContract {
     RabinPubKey immutable oraclePubKey;
     PubKey immutable receiver;
 
-    function settle(int256 price, RabinSig rabinSig, ByteString padding, Sig sig) public {
-        ByteString msg = num2bin(price, 8);
-        require(verifyRabinSig(msg, rabinSig, padding, oraclePubKey));
+    constructor(RabinPubKey _oraclePubKey, PubKey _receiver) {
+        oraclePubKey = _oraclePubKey;
+        receiver = _receiver;
+    }
+
+    function settle(bigint price, RabinSig rabinSig, ByteString padding, Sig sig) public {
+        let ByteString msg = num2bin(price, 8);
+        require(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
         require(price > 50000);
-        require(checkSig(sig, receiver));
+        require(checkSig(sig, this.receiver));
     }
 }
 ```
@@ -258,15 +277,27 @@ pragma runar ^0.1.0;
 contract CovenantVault is SmartContract {
     PubKey immutable owner;
     Addr immutable recipient;
-    int256 immutable minAmount;
+    bigint immutable minAmount;
 
-    function spend(Sig sig, int256 amount, SigHashPreimage txPreimage) public {
-        require(checkSig(sig, owner));
+    constructor(PubKey _owner, Addr _recipient, bigint _minAmount) {
+        owner = _owner;
+        recipient = _recipient;
+        minAmount = _minAmount;
+    }
+
+    function spend(Sig sig, SigHashPreimage txPreimage) public {
+        require(checkSig(sig, this.owner));
         require(checkPreimage(txPreimage));
-        require(amount >= minAmount);
+
+        // Construct expected P2PKH output and verify against hashOutputs
+        ByteString p2pkhScript = cat(cat(0x1976a914, this.recipient), 0x88ac);
+        ByteString expectedOutput = cat(num2bin(this.minAmount, 8), p2pkhScript);
+        require(hash256(expectedOutput) == extractOutputHash(txPreimage));
     }
 }
 ```
+
+This contract demonstrates the covenant pattern: the locking script constrains not just *who* can spend the funds, but *how* they may be spent. It constructs the expected P2PKH output on-chain and verifies its hash against the transaction's `hashOutputs` field, enforcing both the destination and the minimum amount at the consensus level.
 
 ### FungibleToken
 
@@ -275,30 +306,58 @@ pragma runar ^0.1.0;
 
 contract FungibleToken is StatefulSmartContract {
     PubKey owner;
-    int256 balance;
+    bigint balance;
+    bigint mergeBalance;
     ByteString immutable tokenId;
 
-    function transfer(Sig sig, PubKey to, int256 amount, int256 outputSatoshis) public {
-        require(checkSig(sig, owner));
+    constructor(PubKey _owner, bigint _balance, bigint _mergeBalance, ByteString _tokenId) {
+        owner = _owner;
+        balance = _balance;
+        mergeBalance = _mergeBalance;
+        tokenId = _tokenId;
+    }
+
+    function transfer(Sig sig, PubKey to, bigint amount, bigint outputSatoshis) public {
+        require(checkSig(sig, this.owner));
+        require(outputSatoshis >= 1);
+        bigint totalBalance = this.balance + this.mergeBalance;
         require(amount > 0);
-        require(amount <= balance);
+        require(amount <= totalBalance);
 
-        addOutput(outputSatoshis, to, amount);
-        addOutput(outputSatoshis, owner, balance - amount);
+        this.addOutput(outputSatoshis, to, amount, 0);
+        if (amount < totalBalance) {
+            this.addOutput(outputSatoshis, this.owner, totalBalance - amount, 0);
+        }
     }
 
-    function send(Sig sig, PubKey to, int256 outputSatoshis) public {
-        require(checkSig(sig, owner));
-        addOutput(outputSatoshis, to, balance);
+    function send(Sig sig, PubKey to, bigint outputSatoshis) public {
+        require(checkSig(sig, this.owner));
+        require(outputSatoshis >= 1);
+
+        this.addOutput(outputSatoshis, to, this.balance + this.mergeBalance, 0);
     }
 
-    function merge(Sig sig, int256 totalBalance, int256 outputSatoshis) public {
-        require(checkSig(sig, owner));
-        require(totalBalance >= balance);
-        addOutput(outputSatoshis, owner, totalBalance);
+    function merge(Sig sig, bigint otherBalance, ByteString allPrevouts, bigint outputSatoshis) public {
+        require(checkSig(sig, this.owner));
+        require(outputSatoshis >= 1);
+        require(otherBalance >= 0);
+
+        require(hash256(allPrevouts) == extractHashPrevouts(this.txPreimage));
+
+        ByteString myOutpoint = extractOutpoint(this.txPreimage);
+        ByteString firstOutpoint = substr(allPrevouts, 0, 36);
+        bigint myBalance = this.balance + this.mergeBalance;
+
+        if (myOutpoint == firstOutpoint) {
+            this.addOutput(outputSatoshis, this.owner, myBalance, otherBalance);
+        } else {
+            this.addOutput(outputSatoshis, this.owner, otherBalance, myBalance);
+        }
     }
 }
 ```
+
+The `mergeBalance` property enables secure cross-input merge verification. Each input places its own verified balance in a position-dependent slot, and `hashOutputs` in BIP-143 forces both inputs to agree on the exact same output, preventing inflation attacks.
 
 ### SimpleNFT
 
@@ -310,13 +369,20 @@ contract SimpleNFT is StatefulSmartContract {
     ByteString immutable tokenId;
     ByteString immutable metadata;
 
-    function transfer(Sig sig, PubKey newOwner, int256 outputSatoshis) public {
-        require(checkSig(sig, owner));
-        addOutput(outputSatoshis, newOwner);
+    constructor(PubKey _owner, ByteString _tokenId, ByteString _metadata) {
+        owner = _owner;
+        tokenId = _tokenId;
+        metadata = _metadata;
+    }
+
+    function transfer(Sig sig, PubKey newOwner, bigint outputSatoshis) public {
+        require(checkSig(sig, this.owner));
+        require(outputSatoshis >= 1);
+        this.addOutput(outputSatoshis, newOwner);
     }
 
     function burn(Sig sig) public {
-        require(checkSig(sig, owner));
+        require(checkSig(sig, this.owner));
     }
 }
 ```
@@ -379,15 +445,15 @@ Elliptic curve operations on secp256k1 points are available:
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `ecAdd` | `(a: Point, b: Point) => Point` | Point addition |
-| `ecMul` | `(p: Point, k: int256) => Point` | Scalar multiplication |
-| `ecMulGen` | `(k: int256) => Point` | Generator multiplication |
+| `ecMul` | `(p: Point, k: bigint) => Point` | Scalar multiplication |
+| `ecMulGen` | `(k: bigint) => Point` | Generator multiplication |
 | `ecNegate` | `(p: Point) => Point` | Point negation |
 | `ecOnCurve` | `(p: Point) => bool` | Curve membership check |
-| `ecModReduce` | `(value: int256, mod: int256) => int256` | Modular reduction |
-| `ecEncodeCompressed` | `(p: Point) => bytes` | Compress to 33-byte pubkey |
-| `ecMakePoint` | `(x: int256, y: int256) => Point` | Construct point from coordinates |
-| `ecPointX` | `(p: Point) => int256` | Extract x-coordinate |
-| `ecPointY` | `(p: Point) => int256` | Extract y-coordinate |
+| `ecModReduce` | `(value: bigint, mod: bigint) => bigint` | Modular reduction |
+| `ecEncodeCompressed` | `(p: Point) => ByteString` | Compress to 33-byte pubkey |
+| `ecMakePoint` | `(x: bigint, y: bigint) => Point` | Construct point from coordinates |
+| `ecPointX` | `(p: Point) => bigint` | Extract x-coordinate |
+| `ecPointY` | `(p: Point) => bigint` | Extract y-coordinate |
 
 ### EC Constants
 
@@ -401,10 +467,10 @@ Elliptic curve operations on secp256k1 points are available:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `verifyWOTS` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | WOTS+ verification (w=16, SHA-256). One-time use per keypair. |
-| `verifySLHDSA_SHA2_128s` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-128s (FIPS 205). Stateless, multi-use. |
-| `verifySLHDSA_SHA2_128f` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-128f. Fast variant. |
-| `verifySLHDSA_SHA2_192s` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-192s. 192-bit security. |
-| `verifySLHDSA_SHA2_192f` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-192f. Fast variant. |
-| `verifySLHDSA_SHA2_256s` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-256s. 256-bit security. |
-| `verifySLHDSA_SHA2_256f` | `(msg: bytes, sig: bytes, pubkey: bytes) => bool` | SLH-DSA-SHA2-256f. Fast variant. |
+| `verifyWOTS` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | WOTS+ verification (w=16, SHA-256). One-time use per keypair. |
+| `verifySLHDSA_SHA2_128s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-128s (FIPS 205). Stateless, multi-use. |
+| `verifySLHDSA_SHA2_128f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-128f. Fast variant. |
+| `verifySLHDSA_SHA2_192s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-192s. 192-bit security. |
+| `verifySLHDSA_SHA2_192f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-192f. Fast variant. |
+| `verifySLHDSA_SHA2_256s` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-256s. 256-bit security. |
+| `verifySLHDSA_SHA2_256f` | `(msg: ByteString, sig: ByteString, pubkey: ByteString) => bool` | SLH-DSA-SHA2-256f. Fast variant. |

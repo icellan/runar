@@ -384,7 +384,7 @@ private helper(x: bigint): bigint {
 | Function | Signature | Opcode(s) |
 |----------|-----------|-----------|
 | `len` | `(data: ByteString) => bigint` | `OP_SIZE OP_NIP` |
-| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop (bounded, max 520 bytes) |
+| `reverseBytes` | `(data: ByteString) => ByteString` | `OP_SPLIT` / `OP_CAT` loop (bounded) |
 | `toByteString` | `(hex: string) => ByteString` | Compile-time literal construction |
 | `cat` | `(a: ByteString, b: ByteString) => ByteString` | `OP_CAT` |
 | `substr` | `(data: ByteString, start: bigint, length: bigint) => ByteString` | `OP_SPLIT` (twice) |

@@ -113,7 +113,7 @@ Uses the `bitcoinsv/bitcoin-sv:latest` Docker image. A single container runs the
 - `maxscriptsizepolicy=0` / `maxscriptnumlengthpolicy=0` — unlimited script sizes
 - Built-in wallet for `sendtoaddress` funding
 
-RPC: `http://localhost:18332` (user: `regtest`, pass: `regtest`)
+RPC: `http://localhost:18332` (user: `bitcoin`, pass: `bitcoin`)
 
 ### Teranode
 
@@ -141,8 +141,8 @@ Because Teranode's Genesis activation is hardcoded at height 10000 for regtest, 
 |----------|---------|-------------|
 | `NODE_TYPE` | `svnode` | Node backend: `svnode` or `teranode` |
 | `RPC_URL` | auto | Override RPC endpoint URL |
-| `RPC_USER` | `regtest` | RPC username |
-| `RPC_PASS` | `regtest` | RPC password |
+| `RPC_USER` | `bitcoin` | RPC username |
+| `RPC_PASS` | `bitcoin` | RPC password |
 
 ## Troubleshooting
 

@@ -35,6 +35,7 @@ PropertyNode
   +-- name: string
   +-- type: TypeNode
   +-- readonly: boolean
+  +-- initializer?: Expression          (default value, literal only)
   +-- sourceLocation: SourceLocation
 
 MethodNode
@@ -122,6 +123,7 @@ ANFBinding
 | `get_state_script` | _(none)_ | Get serialized state |
 | `check_preimage` | `preimage` | Verify sighash preimage |
 | `add_output` | `satoshis`, `stateValues` | Add a transaction output (`stateValues` is `string[]`) |
+| `deserialize_state` | _(none)_ | Deserialize state from the script (stateful contracts) |
 
 ### Example
 

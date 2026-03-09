@@ -186,7 +186,7 @@ async deploy(
 ): Promise<{ txid: string; tx: Transaction }>
 ```
 
-`DeployOptions` is `{ satoshis: number; changeAddress?: string }`.
+`DeployOptions` is `{ satoshis?: number; changeAddress?: string }`. `satoshis` defaults to 1 if omitted.
 
 1. Fetches the fee rate from the provider via `getFeeRate()`.
 2. Fetches funding UTXOs from the provider.
@@ -217,7 +217,18 @@ async call(
 ): Promise<{ txid: string; tx: Transaction }>
 ```
 
-`CallOptions` is `{ satoshis?: number; changeAddress?: string; newState?: Record<string, unknown> }`.
+`CallOptions` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `satoshis` | `number?` | Satoshis for the continuation output (stateful). |
+| `changeAddress` | `string?` | BSV address for the change output. |
+| `changePubKey` | `string?` | Hex-encoded public key for the change output. Defaults to the signer's key. |
+| `newState` | `Record<string, unknown>?` | New state values for the continuation output. |
+| `outputs` | `Array<{ satoshis, state }>?` | Multiple continuation outputs for multi-output methods (e.g., token split). Replaces `newState` when provided. |
+| `additionalContractInputs` | `UTXO[]?` | Additional contract UTXOs as inputs (e.g., for merge/swap patterns). Each gets its own OP_PUSH_TX and Sig. |
+| `additionalContractInputArgs` | `unknown[][]?` | Per-input args for additional contract inputs. If omitted, all use the primary call's args. |
+| `terminalOutputs` | `Array<{ scriptHex, satoshis }>?` | Terminal outputs for methods that verify `extractOutputHash()`. No change output; fee comes from the contract balance. |
 
 For stateful contracts, a new UTXO is created with the updated state. For stateless contracts, the UTXO is consumed.
 
@@ -286,6 +297,7 @@ Providers give the SDK access to the blockchain. All providers implement the `Pr
 ```typescript
 interface Provider {
   getTransaction(txid: string): Promise<Transaction>;
+  getRawTransaction(txid: string): Promise<string>;
   broadcast(rawTx: string): Promise<string>;
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
@@ -293,6 +305,10 @@ interface Provider {
   getFeeRate(): Promise<number>;
 }
 ```
+
+#### `getRawTransaction(txid)`
+
+Returns the raw transaction hex for a given txid.
 
 #### `getFeeRate()`
 
@@ -354,6 +370,27 @@ const txs = provider.getBroadcastedTxs();
 expect(txs.length).toBe(1);
 ```
 
+### RPCProvider
+
+JSON-RPC provider that connects directly to a Bitcoin node. Suitable for regtest and testnet integration testing.
+
+```typescript
+import { RPCProvider } from 'runar-sdk';
+
+const provider = new RPCProvider(url, user, pass, options?);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `url` | `string` | Node RPC URL (e.g., `http://localhost:18332`) |
+| `user` | `string` | RPC username |
+| `pass` | `string` | RPC password |
+| `options.network` | `'mainnet' \| 'testnet'` | Network name (default: `'testnet'`) |
+| `options.autoMine` | `boolean` | Auto-mine 1 block after broadcast (default: `false`) |
+| `options.mineAddress` | `string` | Mining address for `generatetoaddress`. If empty, uses `generate`. |
+
+Note: `getContractUtxo()` always returns `null` — use address-based UTXO tracking instead. `getFeeRate()` always returns 1.
+
 ---
 
 ## Signer Interface
@@ -408,6 +445,49 @@ const signer = new ExternalSigner(
 ```
 
 The constructor takes three parameters: the public key hex, the BSV address, and a signing callback. The callback receives the raw transaction hex, input index, the locking script being spent (hex), the satoshi value of the UTXO, and optional sighash flags (defaults to ALL | FORKID = 0x41). It returns a DER-encoded signature with the sighash byte appended. This pattern supports integration with browser wallets, hardware security modules, or custodial APIs.
+
+### WalletSigner
+
+Delegates signing to a BRC-100 compatible wallet via `@bsv/sdk`'s `WalletClient`. Computes BIP-143 sighash locally, then sends the pre-hashed digest to the wallet for ECDSA signing via `hashToDirectlySign`.
+
+```typescript
+import { WalletSigner } from 'runar-sdk';
+
+const signer = new WalletSigner({
+  protocolID: [2, 'my app'],  // BRC-100 protocol ID tuple
+  keyID: '1',                 // Key derivation ID
+  wallet: existingClient,     // Optional pre-existing WalletClient
+});
+```
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `protocolID` | `[SecurityLevel, string]` | BRC-100 protocol ID (required) |
+| `keyID` | `string` | Key derivation ID (required) |
+| `wallet` | `WalletClient?` | Pre-existing `WalletClient`. If not provided, a new one is created. |
+
+---
+
+## OP_PUSH_TX Helper
+
+For contracts that use `checkPreimage()` (stateful and some stateless patterns), `computeOpPushTx` computes the BIP-143 sighash preimage and OP_PUSH_TX signature.
+
+```typescript
+import { computeOpPushTx } from 'runar-sdk';
+
+const { sigHex, preimageHex } = computeOpPushTx(txHex, inputIndex, subscript, satoshis);
+```
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `txHex` | `string` | Raw transaction hex (with placeholder unlocking scripts) |
+| `inputIndex` | `number` | The contract input index (usually 0) |
+| `subscript` | `string` | Locking script of the UTXO being spent (hex) |
+| `satoshis` | `number` | Satoshi value of the UTXO being spent |
+
+Returns `{ sigHex: string; preimageHex: string }` — the DER signature (+ sighash byte) and raw BIP-143 preimage, both hex-encoded.
+
+This is called internally by `RunarContract.call()` for stateful contracts. It is exposed for manual transaction building workflows. Uses private key k=1 (public key = generator point G) and enforces low-S.
 
 ---
 

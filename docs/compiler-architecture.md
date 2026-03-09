@@ -9,9 +9,9 @@ This document describes the internal architecture of the Rúnar compiler for con
 The Rúnar compiler is structured as six small, composable passes. Each pass does one thing, transforms one intermediate representation (IR) into the next, and is small enough to audit in a single sitting. This design is based on the nanopass framework (Sarkar, Waddell & Dybvig, ICFP 2004).
 
 ```
-.runar.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [Stack Lower] --> [Emit]
-source       Pass 1       Pass 2         Pass 3           Pass 4          Pass 5          Pass 6
-           ~1100 LOC     ~700 LOC      ~1100 LOC         ~880 LOC       ~2660 LOC        ~570 LOC
+.runar.ts --> [Parse] --> [Validate] --> [Type-check] --> [ANF Lower] --> [EC Optimize] --> [Stack Lower] --> [Emit]
+source       Pass 1       Pass 2         Pass 3           Pass 4          Pass 4.5          Pass 5          Pass 6
+           ~1120 LOC     ~730 LOC      ~1110 LOC        ~1030 LOC       (always-on)       ~3580 LOC        ~570 LOC
 ```
 
 Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
@@ -50,7 +50,7 @@ The parser uses **ts-morph** (a wrapper around the TypeScript compiler API) to p
 
 ### Alternative Frontends
 
-The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, and `.runar.go`. The Rust compiler uses **SWC** (`swc_ecma_parser`) for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, and `.runar.rs`. All three frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
+The Go compiler uses **tree-sitter** with a TypeScript grammar for parsing `.runar.ts` files, plus hand-written recursive descent parsers for `.runar.sol`, `.runar.move`, `.runar.go`, and `.runar.py`. The Rust compiler uses **SWC** (`swc_ecma_parser`) for `.runar.ts` and hand-written parsers for `.runar.sol`, `.runar.move`, `.runar.rs`, and `.runar.py`. The Python compiler uses hand-written recursive descent parsers for all six formats (`.runar.py`, `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`). All four frontends must produce structurally equivalent Rúnar AST nodes. The conformance suite verifies this by checking that all compilers produce byte-identical ANF IR for the same source.
 
 ---
 
@@ -246,12 +246,13 @@ Complex built-in functions like `verifyWOTS` and `verifySLHDSA_SHA2_*` are handl
 - **WOTS+** (`verifyWOTS`): Inline in `05-stack-lower.ts`. Emits ~10 KB of Bitcoin Script with 67 conditional hash chain loops. Uses the same `emitOp` pattern as other builtins.
 - **SLH-DSA** (`verifySLHDSA_SHA2_*`): In separate module `slh-dsa-codegen.ts`. Emits 200-900 KB of Bitcoin Script depending on parameter set. Uses a `SLHTracker` class to manage named stack positions across ~2,100 tweakable hash operations. Each hash uses a dynamically-constructed 22-byte ADRS for domain separation.
 
-The SLH-DSA codegen is replicated across all three compilers:
+The SLH-DSA codegen is replicated across all four compilers:
 - TypeScript: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts`
 - Go: `compilers/go/codegen/slh_dsa.go`
 - Rust: `compilers/rust/src/codegen/slh_dsa.rs`
+- Python: `compilers/python/runar_compiler/codegen/slh_dsa.py`
 
-All three produce byte-identical Bitcoin Script, verified by the conformance suite.
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
 
 ### Elliptic Curve Codegen
 
@@ -259,18 +260,19 @@ EC built-in functions (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `e
 
 - **EC codegen** (`ec-codegen.ts`): Synthesizes secp256k1 field arithmetic from base opcodes (`OP_ADD`, `OP_MUL`, `OP_MOD`, etc.). The most complex operations are `ecMul` and `ecMulGen`, which emit a 256-iteration double-and-add loop using Jacobian projective coordinates internally. Each scalar multiplication generates ~50-100 KB of Bitcoin Script.
 
-The EC codegen is replicated across all three compilers:
+The EC codegen is replicated across all four compilers:
 - TypeScript: `packages/runar-compiler/src/passes/ec-codegen.ts`
 - Go: `compilers/go/codegen/ec.go`
 - Rust: `compilers/rust/src/codegen/ec.rs`
+- Python: `compilers/python/runar_compiler/codegen/ec.py`
 
-All three produce byte-identical Bitcoin Script, verified by the conformance suite.
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
 
 ---
 
 ## Optimizer
 
-The optimizer consists of two components in `packages/runar-compiler/src/optimizer/`, running at different points in the pipeline:
+The optimizer consists of three components in `packages/runar-compiler/src/optimizer/`, running at different points in the pipeline:
 
 ### Peephole Optimizer (`peephole.ts`)
 
@@ -284,6 +286,10 @@ Runs on Stack IR between Pass 5 (Stack Lower) and Pass 6 (Emit). Always enabled.
 | `SWAP + DROP` | `NIP` | 1 byte |
 | `PUSH_INT(0) + ADD` | (removed) | 2+ bytes |
 | `NOT + NOT` | (removed) | 2 bytes |
+
+### ANF EC Optimizer (`anf-ec.ts`)
+
+Runs on ANF IR between Pass 4 (ANF Lower) and Pass 5 (Stack Lower). Always enabled. Applies 12 algebraic simplification rules for secp256k1 elliptic curve operations (e.g., `ecAdd(P, ecNegate(P))` → identity, `ecMul(P, 1)` → `P`). Dead bindings eliminated after rule application. Replicated across all four compilers (`anf_optimize.go`, `anf_optimize.rs`, `anf_optimize.py`).
 
 ### Constant Folder (`constant-fold.ts`)
 
@@ -323,11 +329,12 @@ Rúnar defines a canonical IR conformance boundary at the ANF level. Any compile
 
 | Compiler | Frontend | Status |
 |----------|----------|--------|
-| **TypeScript** (reference) | ts-morph (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`) | Complete |
-| **Go** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.go`) | Complete |
-| **Rust** | SWC (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`) | Complete |
+| **TypeScript** (reference) | ts-morph (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.py`) | Complete |
+| **Go** | tree-sitter (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`) | Complete |
+| **Rust** | SWC (`.runar.ts`), hand-written recursive descent (`.runar.sol`, `.runar.move`, `.runar.rs`, `.runar.py`) | Complete |
+| **Python** | hand-written recursive descent (all 6 formats: `.runar.py`, `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`) | Complete |
 
-All three compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The Go and Rust compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR. Each compiler supports multi-format parsing: TypeScript, Solidity-like, Move-style, and its own native syntax (Go or Rust DSL).
+All four compilers share the same ANF-to-Script pipeline (Passes 4-6) semantically. The Go, Rust, and Python compilers implement their own Passes 1-3 (parsing, validation, type-checking) using language-native tools, but must produce identical ANF IR. Each compiler supports multi-format parsing: TypeScript, Solidity-like, Move-style, Python, and (where applicable) its own native syntax (Go or Rust DSL).
 
 ### Why Multiple Compilers?
 
@@ -340,7 +347,8 @@ All three compilers share the same ANF-to-Script pipeline (Passes 4-6) semantica
 The conformance suite in `conformance/` contains golden-file tests: source programs paired with expected ANF IR and expected script output. All compilers must pass the same suite. The SHA-256 of the canonical JSON output must match across all implementations.
 
 ```bash
-pnpm run conformance:ts    # Test TypeScript compiler
-pnpm run conformance:go    # Test Go compiler
-pnpm run conformance:rust  # Test Rust compiler
+pnpm run conformance:ts      # Test TypeScript compiler
+pnpm run conformance:go      # Test Go compiler
+pnpm run conformance:rust    # Test Rust compiler
+pnpm run conformance:python  # Test Python compiler
 ```

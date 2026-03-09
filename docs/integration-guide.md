@@ -638,6 +638,7 @@ The SDK abstracts blockchain access and key management:
 ```typescript
 interface Provider {
   getTransaction(txid: string): Promise<Transaction>;
+  getRawTransaction(txid: string): Promise<string>;  // returns raw tx hex
   broadcast(rawTx: string): Promise<string>;  // returns txid
   getUtxos(address: string): Promise<UTXO[]>;
   getContractUtxo(scriptHash: string): Promise<UTXO | null>;
@@ -664,10 +665,10 @@ Built-in implementations: `LocalSigner` (in-memory key, testing/CLI), `ExternalS
 
 ## Cross-Compiler Workflow
 
-All three compilers (TypeScript, Go, Rust) produce byte-identical Bitcoin Script for the same contract. You can:
+All four compilers (TypeScript, Go, Rust, Python) produce byte-identical Bitcoin Script for the same contract. You can:
 
-1. **Write** in any format (`.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`)
-2. **Test** with the native test runner (`vitest`, `go test`, `cargo test`)
+1. **Write** in any format (`.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`, `.runar.py`)
+2. **Test** with the native test runner (`vitest`, `go test`, `cargo test`, `pytest`)
 3. **Compile** with any compiler
 4. **Deploy** the same artifact from any language
 
@@ -679,13 +680,13 @@ runar-go --ir Counter-anf.json -o Counter.json
 runar-rust --ir Counter-anf.json -o Counter.json
 ```
 
-All three produce identical `script` hex. The conformance test suite validates this.
+All four produce identical `script` hex. The conformance test suite validates this.
 
 ---
 
 ## Deployment SDKs
 
-Deployment SDKs are available in all three languages. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
+Deployment SDKs are available in all four languages. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
 
 ### Go SDK (`packages/runar-go/`)
 
@@ -734,3 +735,27 @@ let txid = contract.call("unlock", &[sig, pub_key], &mut provider, &signer, None
 ```
 
 The Rust SDK provides `LocalSigner` which uses `k256` for real ECDSA signing with manual BIP-143 sighash computation. It accepts either a WIF-encoded key or a 64-char hex private key. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a closure instead.
+
+### Python SDK (`packages/runar-py/runar/sdk/`)
+
+```python
+from runar.sdk import RunarContract, MockProvider, MockSigner, DeployOptions
+
+# Load artifact
+import json
+with open("artifacts/Counter.json") as f:
+    artifact = json.load(f)
+
+# Create contract
+contract = RunarContract(artifact, [0])
+
+# Deploy
+provider = MockProvider("testnet")
+signer = MockSigner()
+txid, tx = contract.deploy(provider, signer, DeployOptions(satoshis=50000))
+
+# Call
+txid, tx = contract.call("increment", [], provider, signer)
+```
+
+The Python SDK provides `MockSigner` for testing. For custom signing logic (hardware wallets, custodial APIs), use `ExternalSigner` with a callback. Zero required dependencies — hash functions use stdlib `hashlib`.

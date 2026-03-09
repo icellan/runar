@@ -69,6 +69,27 @@ runar test
 runar test P2PKH
 ```
 
+### `runar codegen <files...>`
+
+Generate typed wrapper classes from compiled artifacts.
+
+```bash
+# Generate TypeScript wrappers from all artifacts
+runar codegen artifacts/*.json -o src/generated/
+
+# Generate from a single artifact
+runar codegen artifacts/MyContract.json -o src/generated/
+```
+
+**Options:**
+
+| Flag | Description | Default |
+|---|---|---|
+| `-o, --output <dir>` | Output directory for generated code | `./generated` |
+| `--lang <lang>` | Target language (currently only `ts`) | `ts` |
+
+Generated wrappers provide typed methods, hide auto-computed params (`Sig`, `SigHashPreimage`), and distinguish terminal from state-mutating methods. See [Code Generation](../../docs/api-reference.md#code-generation) for details.
+
 ### `runar deploy <artifact>`
 
 Deploy a compiled contract to the BSV network.

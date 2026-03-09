@@ -198,6 +198,7 @@ Implement the `Provider` trait for other network APIs:
 ```rust
 pub trait Provider {
     fn get_transaction(&self, txid: &str) -> Result<Transaction, String>;
+    fn get_raw_transaction(&self, txid: &str) -> Result<String, String>;
     fn broadcast(&mut self, raw_tx: &str) -> Result<String, String>;
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String>;
     fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String>;
@@ -322,6 +323,7 @@ pub enum SdkValue {
     Int(i64),
     Bool(bool),
     Bytes(String),  // hex-encoded
+    Auto,           // placeholder for auto-computed Sig/PubKey parameters
 }
 ```
 

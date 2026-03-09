@@ -241,13 +241,20 @@ expectStackTopNum(result, 42n);
 
 ---
 
-## Crypto Reference Implementations (Internal)
+## Crypto Reference Implementations
 
-The package includes internal reference implementations of post-quantum signature schemes used by the compiler's codegen tests. These are **not exported** from the package — they exist in `src/crypto/` and are used by the test suite to generate valid signatures for verifying compiled WOTS+ and SLH-DSA scripts.
+The package includes reference implementations of post-quantum signature schemes, exported for use in tests and applications:
 
-| Module | Description |
+| Export | Description |
 |--------|-------------|
-| `src/crypto/wots.ts` | WOTS+ (Winternitz One-Time Signature) keygen, sign, verify |
-| `src/crypto/slh-dsa.ts` | SLH-DSA (SPHINCS+, FIPS 205) keygen, sign, verify for all 6 parameter sets |
+| `wotsKeygen`, `wotsSign`, `wotsVerify`, `WOTS_PARAMS` | WOTS+ (Winternitz One-Time Signature) keygen, sign, verify |
+| `WOTSKeyPair` | Type for WOTS+ key pairs |
+| `slhKeygen`, `slhSign`, `slhVerify`, `slhVerifyVerbose` | SLH-DSA (SPHINCS+, FIPS 205) keygen, sign, verify |
+| `SLH_SHA2_128s`, `SLH_SHA2_128f`, `SLH_SHA2_192s`, `SLH_SHA2_192f`, `SLH_SHA2_256s`, `SLH_SHA2_256f` | Parameter sets for all 6 FIPS 205 SHA-2 variants |
+| `ALL_SHA2_PARAMS` | Array of all SHA-2 parameter sets |
+| `SLHParams`, `SLHKeyPair` | Types for SLH-DSA parameters and key pairs |
 
-These are used internally by tests like `post-quantum.test.ts` and `post-quantum-slh-dual-oracle.test.ts` to generate real signatures that the compiled Bitcoin Script then verifies.
+```typescript
+import { wotsKeygen, wotsSign, wotsVerify, WOTS_PARAMS } from 'runar-testing';
+import { slhKeygen, slhSign, slhVerify, SLH_SHA2_128s } from 'runar-testing';
+```

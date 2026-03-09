@@ -45,13 +45,17 @@ The parsing frontend uses **tree-sitter-typescript** for parsing `.runar.ts` fil
 
 Why tree-sitter instead of a custom parser? Rúnar source files are valid TypeScript. Parsing TypeScript correctly (including its expression grammar, ASI rules, and contextual keywords) is non-trivial. tree-sitter has a battle-tested TypeScript grammar maintained by the tree-sitter community.
 
-Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.py`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
 
 ### Dedicated Codegen Modules
 
 - `codegen/ec.go` — EC point operations (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, etc.)
 - `codegen/slh_dsa.go` — SLH-DSA (SPHINCS+) signature verification
 - `codegen/optimizer.go` — Peephole optimizer (runs on Stack IR between stack lowering and emit)
+
+### ANF EC Optimizer (Pass 4.5)
+
+The `frontend/anf_optimize.go` module implements 12 algebraic EC simplification rules that run between ANF lowering and stack lowering. This pass is always enabled and eliminates redundant EC operations (e.g., `ecAdd(P, ecNegate(P))` → identity, `ecMul(G, k)` → `ecMulGen(k)`).
 
 ---
 

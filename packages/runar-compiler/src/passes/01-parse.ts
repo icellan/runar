@@ -6,6 +6,7 @@
  *   - `.runar.ts`   → TypeScript (ts-morph)
  *   - `.runar.sol`  → Solidity-like syntax
  *   - `.runar.move` → Move-style resource language
+ *   - `.runar.py`   → Python (hand-written tokenizer with INDENT/DEDENT + recursive descent)
  */
 
 import {

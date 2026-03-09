@@ -2,7 +2,7 @@
 
 **Rúnar reference compiler: TypeScript to Bitcoin Script via a 6-pass nanopass pipeline.**
 
-This package is the canonical compiler implementation. It reads `.runar.ts`, `.runar.sol`, and `.runar.move` source files, runs them through six sequential passes, and produces a compiled artifact containing the Bitcoin Script bytecode, the canonical ANF IR, and metadata.
+This package is the canonical compiler implementation. It reads `.runar.ts`, `.runar.sol`, `.runar.move`, and `.runar.py` source files, runs them through six sequential passes, and produces a compiled artifact containing the Bitcoin Script bytecode, the canonical ANF IR, and metadata.
 
 ---
 
@@ -75,6 +75,7 @@ The `fileName` extension controls parser dispatch:
 - `.runar.ts` — TypeScript parser (ts-morph)
 - `.runar.sol` — Solidity-like parser (hand-written recursive descent)
 - `.runar.move` — Move-style parser (hand-written recursive descent)
+- `.runar.py` — Python parser (hand-written tokenizer with INDENT/DEDENT + recursive descent)
 
 ### CompileResult
 
@@ -138,14 +139,14 @@ Passes 1--4 are also exported individually for fine-grained use (passes 5--6 are
 
 ```typescript
 import { parse, validate, typecheck, lowerToANF } from 'runar-compiler';
-import { parseSolSource, parseMoveSource } from 'runar-compiler';
+import { parseSolSource, parseMoveSource, parsePythonSource } from 'runar-compiler';
 
 // Pass 1: Parse
 const parseResult = parse(source, 'MyContract.runar.ts');
 
 // parse() may return null on fatal parse errors
 if (!parseResult.contract) {
-  console.error('Parse failed:', parseResult.diagnostics);
+  console.error('Parse failed:', parseResult.errors);
 } else {
   // Pass 2: Validate
   const validationResult = validate(parseResult.contract);
@@ -186,7 +187,7 @@ interface TypeCheckResult {
 ## Pipeline Overview
 
 ```
-  Source (.runar.ts / .runar.sol / .runar.move)
+  Source (.runar.ts / .runar.sol / .runar.move / .runar.py)
        |
        v
   +-----------+     +-----------+     +------------+

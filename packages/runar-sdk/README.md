@@ -183,6 +183,27 @@ const broadcastedTxs = mock.getBroadcastedTxs();
 mock.setFeeRate(2);
 ```
 
+### RPCProvider
+
+Connects directly to a Bitcoin node via JSON-RPC. Suitable for regtest and testnet integration testing:
+
+```typescript
+import { RPCProvider } from 'runar-sdk';
+
+const provider = new RPCProvider(
+  'http://localhost:18332',  // node RPC URL
+  'bitcoin',                 // RPC username
+  'bitcoin',                 // RPC password
+  {
+    network: 'testnet',      // 'mainnet' | 'testnet' (default: 'testnet')
+    autoMine: true,          // auto-mine 1 block after broadcast (default: false)
+    mineAddress: '',         // mining address for generatetoaddress (optional)
+  },
+);
+```
+
+Note: `getContractUtxo()` always returns `null` on RPCProvider — use address-based UTXO tracking instead.
+
 ### Custom Provider
 
 Implement the `Provider` interface for other network APIs:
@@ -201,6 +222,10 @@ class MyProvider implements Provider {
 
   async getTransaction(txid: string): Promise<Transaction> {
     // Your implementation
+  }
+
+  async getRawTransaction(txid: string): Promise<string> {
+    // Return raw tx hex for the given txid
   }
 
   async getContractUtxo(scriptHash: string): Promise<UTXO | null> {
@@ -266,6 +291,20 @@ const signer = new ExternalSigner(
   addressStr,   // Base58Check BSV address
   signFn,
 );
+```
+
+### WalletSigner
+
+Delegates signing to a BRC-100 compatible wallet via `@bsv/sdk`'s `WalletClient`. Computes BIP-143 sighash locally, then sends the pre-hashed digest to the wallet for ECDSA signing:
+
+```typescript
+import { WalletSigner } from 'runar-sdk';
+
+const signer = new WalletSigner({
+  protocolID: [2, 'my app'],  // BRC-100 protocol ID
+  keyID: '1',                 // Key derivation ID
+  // wallet: existingClient,  // Optional pre-existing WalletClient
+});
 ```
 
 ### Custom Signer
@@ -470,14 +509,19 @@ interface UTXO {
 }
 
 interface DeployOptions {
-  satoshis: number;
+  satoshis?: number;       // defaults to 1
   changeAddress?: string;
 }
 
 interface CallOptions {
   satoshis?: number;
   changeAddress?: string;
+  changePubKey?: string;
   newState?: Record<string, unknown>;
+  outputs?: Array<{ satoshis: number; state: Record<string, unknown> }>;
+  additionalContractInputs?: UTXO[];
+  additionalContractInputArgs?: unknown[][];
+  terminalOutputs?: Array<{ scriptHex: string; satoshis: number }>;
 }
 ```
 
@@ -522,6 +566,25 @@ await auction.close([{ address: winnerAddr, satoshis: 9000 }]);
 The underlying `RunarContract` is accessible via `.contract` for advanced use cases.
 
 See the [API Reference](../../docs/api-reference.md#code-generation) for full details on parameter handling and generated class structure.
+
+---
+
+## OP_PUSH_TX Helper
+
+For contracts that use `checkPreimage()`, the SDK provides `computeOpPushTx` to compute the BIP-143 sighash preimage and OP_PUSH_TX signature:
+
+```typescript
+import { computeOpPushTx } from 'runar-sdk';
+
+const { sigHex, preimageHex } = computeOpPushTx(
+  txHex,       // raw transaction hex (with placeholder unlocking scripts)
+  inputIndex,  // the contract input index (usually 0)
+  subscript,   // locking script of the UTXO being spent (hex)
+  satoshis,    // satoshi value of the UTXO being spent
+);
+```
+
+This is called internally by `RunarContract.call()` for stateful contracts, but is exposed for manual transaction building workflows. The function uses the OP_PUSH_TX technique with private key k=1 (public key = generator point G).
 
 ---
 

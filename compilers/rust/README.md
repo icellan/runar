@@ -45,13 +45,17 @@ The parsing frontend uses **SWC** (Speedy Web Compiler) for parsing `.runar.ts` 
 
 Why SWC instead of tree-sitter or a custom parser? SWC provides a typed Rust AST rather than a generic CST, reducing the amount of manual tree-walking needed. It is also the fastest TypeScript parser available, which matters for large projects. The Rust ecosystem already depends heavily on SWC for tooling (Next.js, Parcel, Deno), so it is well-maintained.
 
-Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.rs`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
+Multi-format source files (`.runar.sol`, `.runar.move`, `.runar.rs`, `.runar.py`) are parsed by hand-written recursive descent parsers that produce the same Rúnar AST.
 
 ### Dedicated Codegen Modules
 
 - `src/codegen/ec.rs` — EC point operations (`ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, etc.)
 - `src/codegen/slh_dsa.rs` — SLH-DSA (SPHINCS+) signature verification
 - `src/codegen/optimizer.rs` — Peephole optimizer (runs on Stack IR between stack lowering and emit)
+
+### ANF EC Optimizer (Pass 4.5)
+
+The `src/frontend/anf_optimize.rs` module implements 12 algebraic EC simplification rules that run between ANF lowering and stack lowering. This pass is always enabled and eliminates redundant EC operations (e.g., `ecAdd(P, ecNegate(P))` → identity, `ecMul(G, k)` → `ecMulGen(k)`).
 
 ---
 
