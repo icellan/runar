@@ -106,7 +106,7 @@ class Counter extends StatefulSmartContract {
 **How it works:**
 
 1. The `count` property is mutable (no `readonly`), making this a stateful contract. The `= 0n` initializer gives it a default value, so it doesn't need to be passed as a constructor argument.
-2. Extending `StatefulSmartContract` tells the compiler to automatically handle the OP_PUSH_TX pattern. For every public method, the compiler injects a preimage check at entry.
+2. Extending `StatefulSmartContract` (or `InductiveSmartContract` for chain provenance) tells the compiler to automatically handle the OP_PUSH_TX pattern. For every public method, the compiler injects a preimage check at entry.
 3. `this.count++` / `this.count--` updates the in-memory state.
 4. Because these methods mutate state, the compiler automatically appends a state continuation assertion at the end — it serializes the updated state, hashes it, and verifies the transaction output carries the new state forward.
 

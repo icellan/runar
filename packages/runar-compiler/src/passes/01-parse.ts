@@ -88,11 +88,11 @@ export function parse(source: string, fileName?: string): ParseResult {
 
   const sourceFile = project.createSourceFile(file, source);
 
-  // Find the class that extends SmartContract or StatefulSmartContract
-  const VALID_BASE_CLASSES = new Set(['SmartContract', 'StatefulSmartContract']);
+  // Find the class that extends SmartContract, StatefulSmartContract, or InductiveSmartContract
+  const VALID_BASE_CLASSES = new Set(['SmartContract', 'StatefulSmartContract', 'InductiveSmartContract']);
   const classes = sourceFile.getClasses();
   let contractClass: ClassDeclaration | undefined;
-  let detectedParentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+  let detectedParentClass: 'SmartContract' | 'StatefulSmartContract' | 'InductiveSmartContract' = 'SmartContract';
 
   for (const cls of classes) {
     const ext = cls.getExtends();
@@ -107,7 +107,7 @@ export function parse(source: string, fileName?: string): ParseResult {
           ));
         }
         contractClass = cls;
-        detectedParentClass = baseText as 'SmartContract' | 'StatefulSmartContract';
+        detectedParentClass = baseText as 'SmartContract' | 'StatefulSmartContract' | 'InductiveSmartContract';
       }
     }
   }
@@ -125,6 +125,11 @@ export function parse(source: string, fileName?: string): ParseResult {
 
   // Extract properties
   const properties = parseProperties(contractClass, file, errors);
+
+  // For InductiveSmartContract, inject internal fields after developer properties
+  if (detectedParentClass === 'InductiveSmartContract') {
+    injectInductiveInternalProps(properties, file);
+  }
 
   // Extract constructor
   const ctors = contractClass.getConstructors();
@@ -145,6 +150,10 @@ export function parse(source: string, fileName?: string): ParseResult {
     };
   } else {
     constructorNode = parseConstructor(ctors[0]!, file, errors);
+    // For InductiveSmartContract, inject internal params/args into constructor
+    if (detectedParentClass === 'InductiveSmartContract') {
+      injectInductiveConstructorFields(constructorNode);
+    }
   }
 
   // Extract methods
@@ -161,6 +170,59 @@ export function parse(source: string, fileName?: string): ParseResult {
   };
 
   return { contract, errors };
+}
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract: synthetic internal field injection
+// ---------------------------------------------------------------------------
+
+/** Internal fields auto-appended to InductiveSmartContract properties. */
+const INDUCTIVE_INTERNAL_FIELDS = ['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint'] as const;
+
+const BYTESTRING_TYPE: TypeNode = { kind: 'primitive_type', name: 'ByteString' };
+
+function injectInductiveInternalProps(properties: PropertyNode[], file: string): void {
+  const syntheticLoc: SourceLocation = { file, line: 0, column: 0 };
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    properties.push({
+      kind: 'property',
+      name,
+      type: BYTESTRING_TYPE,
+      readonly: false,
+      sourceLocation: syntheticLoc,
+    });
+  }
+}
+
+function injectInductiveConstructorFields(ctor: MethodNode): void {
+  // Add internal field params to constructor
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.params.push({ kind: 'param', name, type: BYTESTRING_TYPE });
+  }
+
+  // Add internal field args to super() call (first statement)
+  if (ctor.body.length > 0) {
+    const firstStmt = ctor.body[0]!;
+    if (firstStmt.kind === 'expression_statement' &&
+        firstStmt.expression.kind === 'call_expr' &&
+        firstStmt.expression.callee.kind === 'identifier' &&
+        firstStmt.expression.callee.name === 'super') {
+      for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+        firstStmt.expression.args.push({ kind: 'identifier', name });
+      }
+    }
+  }
+
+  // Add this._field = _field assignments
+  const syntheticLoc: SourceLocation = { file: '', line: 0, column: 0 };
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.body.push({
+      kind: 'assignment',
+      target: { kind: 'property_access', property: name },
+      value: { kind: 'identifier', name },
+      sourceLocation: syntheticLoc,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------

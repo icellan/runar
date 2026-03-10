@@ -209,7 +209,7 @@ class MoveParser {
       if (this.current().type === ';') this.advance();
     }
 
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'InductiveSmartContract' = 'SmartContract';
     const properties: PropertyNode[] = [];
     const methods: MethodNode[] = [];
 
@@ -222,10 +222,16 @@ class MoveParser {
         // Struct name (skip, should match module name)
         if (this.current().type === 'ident') this.advance();
 
-        // Optional "has key, store" abilities
+        // Optional "has key, store, inductive" abilities
+        let hasInductiveAbility = false;
         if (this.current().type === 'has') {
           this.advance();
-          while (this.current().type !== '{' && this.current().type !== 'eof') this.advance();
+          while (this.current().type !== '{' && this.current().type !== 'eof') {
+            if (this.current().type === 'ident' && this.current().value === 'inductive') {
+              hasInductiveAbility = true;
+            }
+            this.advance();
+          }
         }
 
         this.expect('{');
@@ -268,8 +274,10 @@ class MoveParser {
         }
         this.expect('}');
 
-        // If the struct is not marked resource, check for "stateful" marker
-        if (isResource || hasMutableField) {
+        // Determine parent class from struct markers
+        if (hasInductiveAbility) {
+          parentClass = 'InductiveSmartContract';
+        } else if (isResource || hasMutableField) {
           parentClass = 'StatefulSmartContract';
         }
       } else if (this.current().type === 'public' || this.current().type === 'fun') {
@@ -312,6 +320,11 @@ class MoveParser {
       visibility: 'public',
       sourceLocation: loc,
     };
+
+    // For InductiveSmartContract, inject internal fields
+    if (parentClass === 'InductiveSmartContract') {
+      injectInductiveInternalFields(properties, constructorNode, this.file);
+    }
 
     const contract: ContractNode = {
       kind: 'contract',
@@ -778,4 +791,54 @@ export function parseMoveSource(source: string, fileName?: string): ParseResult 
   const tokens = tokenize(source);
   const parser = new MoveParser(tokens, file);
   return parser.parse();
+}
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract: synthetic internal field injection
+// ---------------------------------------------------------------------------
+
+const INDUCTIVE_INTERNAL_FIELDS = ['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint'] as const;
+const BYTESTRING_TYPE: TypeNode = { kind: 'primitive_type', name: 'ByteString' };
+
+function injectInductiveInternalFields(
+  properties: PropertyNode[],
+  ctor: MethodNode,
+  file: string,
+): void {
+  const syntheticLoc: SourceLocation = { file, line: 0, column: 0 };
+
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    properties.push({
+      kind: 'property',
+      name,
+      type: BYTESTRING_TYPE,
+      readonly: false,
+      sourceLocation: syntheticLoc,
+    });
+  }
+
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.params.push({ kind: 'param', name, type: BYTESTRING_TYPE });
+  }
+
+  if (ctor.body.length > 0) {
+    const firstStmt = ctor.body[0]!;
+    if (firstStmt.kind === 'expression_statement' &&
+        firstStmt.expression.kind === 'call_expr' &&
+        firstStmt.expression.callee.kind === 'identifier' &&
+        firstStmt.expression.callee.name === 'super') {
+      for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+        firstStmt.expression.args.push({ kind: 'identifier', name });
+      }
+    }
+  }
+
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.body.push({
+      kind: 'assignment',
+      target: { kind: 'property_access', property: name },
+      value: { kind: 'identifier', name },
+      sourceLocation: syntheticLoc,
+    });
+  }
 }

@@ -61,7 +61,7 @@ func Parse(source []byte, fileName string) *ParseResult {
 
 	contract := p.findContract(root)
 	if contract == nil {
-		return &ParseResult{Errors: append(p.errors, "no class extending SmartContract or StatefulSmartContract found")}
+		return &ParseResult{Errors: append(p.errors, "no class extending SmartContract, StatefulSmartContract, or InductiveSmartContract found")}
 	}
 
 	return &ParseResult{
@@ -150,10 +150,13 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 		return nil
 	}
 
-	// The heritage clause should contain "SmartContract" or "StatefulSmartContract"
+	// The heritage clause should contain "SmartContract", "StatefulSmartContract", or "InductiveSmartContract"
+	// Check InductiveSmartContract FIRST since it contains "StatefulSmartContract" as a substring
 	heritageText := p.nodeText(heritage)
 	parentClass := ""
-	if strings.Contains(heritageText, "StatefulSmartContract") {
+	if strings.Contains(heritageText, "InductiveSmartContract") {
+		parentClass = "InductiveSmartContract"
+	} else if strings.Contains(heritageText, "StatefulSmartContract") {
 		parentClass = "StatefulSmartContract"
 	} else if strings.Contains(heritageText, "SmartContract") {
 		parentClass = "SmartContract"
@@ -213,13 +216,85 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 		constructor = &defaultCtor
 	}
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        className,
 		ParentClass: parentClass,
 		Properties:  properties,
 		Constructor: *constructor,
 		Methods:     methods,
 		SourceFile:  p.fileName,
+	}
+
+	if contract.ParentClass == "InductiveSmartContract" {
+		injectInductiveInternalFields(contract)
+	}
+
+	return contract
+}
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract internal fields injection
+// ---------------------------------------------------------------------------
+
+// injectInductiveInternalFields adds the three internal tracking fields
+// (_genesisOutpoint, _parentOutpoint, _grandparentOutpoint) to an
+// InductiveSmartContract. These are ByteString properties that track
+// the chain lineage. They are appended to properties, constructor params,
+// super() args, and constructor body assignments.
+func injectInductiveInternalFields(contract *ContractNode) {
+	internalFields := []string{"_genesisOutpoint", "_parentOutpoint", "_grandparentOutpoint"}
+	syntheticLoc := SourceLocation{File: contract.SourceFile, Line: 0, Column: 0}
+
+	// Add properties
+	for _, name := range internalFields {
+		contract.Properties = append(contract.Properties, PropertyNode{
+			Name:           name,
+			Type:           PrimitiveType{Name: "ByteString"},
+			Readonly:       false,
+			SourceLocation: syntheticLoc,
+		})
+	}
+
+	// Add constructor params
+	for _, name := range internalFields {
+		contract.Constructor.Params = append(contract.Constructor.Params, ParamNode{
+			Name: name,
+			Type: PrimitiveType{Name: "ByteString"},
+		})
+	}
+
+	// Add args to the super() call in the constructor body
+	if len(contract.Constructor.Body) > 0 {
+		if es, ok := contract.Constructor.Body[0].(ExpressionStmt); ok {
+			if call, ok := es.Expr.(CallExpr); ok {
+				// Check if callee is super (Identifier) or super. (MemberExpr)
+				isSuperCall := false
+				if id, ok := call.Callee.(Identifier); ok && id.Name == "super" {
+					isSuperCall = true
+				}
+				if me, ok := call.Callee.(MemberExpr); ok {
+					if id, ok := me.Object.(Identifier); ok && id.Name == "super" {
+						isSuperCall = true
+					}
+				}
+				if isSuperCall {
+					for _, name := range internalFields {
+						call.Args = append(call.Args, Identifier{Name: name})
+					}
+					es.Expr = call
+					contract.Constructor.Body[0] = es
+				}
+			}
+		}
+	}
+
+	// Add property assignments to constructor body
+	for _, name := range internalFields {
+		contract.Constructor.Body = append(contract.Constructor.Body, AssignmentStmt{
+			Target:         PropertyAccessExpr{Property: name},
+			Value:          Identifier{Name: name},
+			SourceLocation: syntheticLoc,
+		})
 	}
 }
 

@@ -265,8 +265,10 @@ impl<'a> TypeChecker<'a> {
             prop_types.insert(prop.name.clone(), type_node_to_ttype(&prop.prop_type));
         }
 
-        // For StatefulSmartContract, add the implicit txPreimage property
-        if contract.parent_class == "StatefulSmartContract" {
+        // For StatefulSmartContract and InductiveSmartContract, add the implicit txPreimage property
+        if contract.parent_class == "StatefulSmartContract"
+            || contract.parent_class == "InductiveSmartContract"
+        {
             prop_types.insert("txPreimage".to_string(), "SigHashPreimage".to_string());
         }
 

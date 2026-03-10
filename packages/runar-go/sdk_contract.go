@@ -253,6 +253,7 @@ func (c *RunarContract) PrepareCall(
 	isStateful := len(c.Artifact.StateFields) > 0
 	methodNeedsChange := false
 	methodNeedsNewAmount := false
+	isInductive := false
 	for _, p := range method.Params {
 		if p.Name == "_changePKH" {
 			methodNeedsChange = true
@@ -260,13 +261,24 @@ func (c *RunarContract) PrepareCall(
 		if p.Name == "_newAmount" {
 			methodNeedsNewAmount = true
 		}
+		if p.Name == "_parentHashState" {
+			isInductive = true
+		}
 	}
 	var userParams []ABIParam
-	if isStateful {
+	if isStateful || isInductive {
 		for _, p := range method.Params {
-			if p.Type != "SigHashPreimage" && p.Name != "_changePKH" && p.Name != "_changeAmount" && p.Name != "_newAmount" {
-				userParams = append(userParams, p)
+			if p.Type == "SigHashPreimage" ||
+				p.Name == "_changePKH" ||
+				p.Name == "_changeAmount" ||
+				p.Name == "_newAmount" ||
+				p.Name == "_parentHashState" ||
+				p.Name == "_parentTailBlock1" ||
+				p.Name == "_parentTailBlock2" ||
+				p.Name == "_parentRawTailLen" {
+				continue
 			}
+			userParams = append(userParams, p)
 		}
 	} else {
 		userParams = method.Params
@@ -297,6 +309,28 @@ func (c *RunarContract) PrepareCall(
 	}
 	if changeAddress == "" {
 		changeAddress = address
+	}
+
+	// For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+	// params from the parent transaction (the tx that created the current UTXO).
+	// These are pushed in the unlock script between user args and txPreimage.
+	inductiveParamsHex := ""
+	if isInductive {
+		parentTx, inductiveErr := provider.GetTransaction(c.currentUtxo.Txid)
+		if inductiveErr != nil {
+			return nil, fmt.Errorf("RunarContract.PrepareCall: fetching parent tx for InductiveSmartContract: %w", inductiveErr)
+		}
+		if parentTx.Raw == "" {
+			return nil, fmt.Errorf("RunarContract.PrepareCall: provider returned transaction without raw hex, needed for inductive parent tx verification")
+		}
+		partial, partialErr := ComputePartialSha256ForInductive(parentTx.Raw)
+		if partialErr != nil {
+			return nil, fmt.Errorf("RunarContract.PrepareCall: computing partial SHA-256 for inductive: %w", partialErr)
+		}
+		inductiveParamsHex = EncodePushData(partial.ParentHashState) +
+			EncodePushData(partial.ParentTailBlock1) +
+			EncodePushData(partial.ParentTailBlock2) +
+			encodeScriptNumber(int64(partial.ParentRawTailLen))
 	}
 
 	// Detect auto-compute params (user passed nil)
@@ -381,7 +415,7 @@ func (c *RunarContract) PrepareCall(
 			methodName, resolvedArgs, signer, options,
 			isStateful, needsOpPushTx, methodNeedsChange,
 			sigIndices, prevoutsIndices, preimageIndex,
-			methodSelectorHex, changePKHHex, contractUtxo,
+			methodSelectorHex, changePKHHex, inductiveParamsHex, contractUtxo,
 		)
 	}
 
@@ -596,6 +630,7 @@ func (c *RunarContract) PrepareCall(
 				argsHex +
 				changeHex +
 				newAmountHex +
+				inductiveParamsHex +
 				EncodePushData(preimageHexStr) +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
@@ -745,14 +780,15 @@ func (c *RunarContract) PrepareCall(
 		changePKHHex:      changePKHHex,
 		changeAmount:      changeAmount,
 		methodNeedsNewAmount: methodNeedsNewAmount,
-		newAmount:         newSatoshis,
-		preimageIndex:     preimageIndex,
-		contractUtxo:      contractUtxo,
-		newLockingScript:  newLockingScript,
-		newSatoshis:       newSatoshis,
-		hasMultiOutput:    hasMultiOutput,
-		contractOutputs:   contractOutputs,
-		codeSepIdx:        codeSepIdx,
+		newAmount:            newSatoshis,
+		inductiveParamsHex:   inductiveParamsHex,
+		preimageIndex:        preimageIndex,
+		contractUtxo:         contractUtxo,
+		newLockingScript:     newLockingScript,
+		newSatoshis:          newSatoshis,
+		hasMultiOutput:       hasMultiOutput,
+		contractOutputs:      contractOutputs,
+		codeSepIdx:           codeSepIdx,
 	}, nil
 }
 
@@ -798,6 +834,7 @@ func (c *RunarContract) FinalizeCall(
 			argsHex +
 			changeHex +
 			newAmountHex +
+			prepared.inductiveParamsHex +
 			EncodePushData(prepared.Preimage) +
 			prepared.methodSelectorHex
 	} else if prepared.needsOpPushTx {
@@ -1160,6 +1197,7 @@ func (c *RunarContract) prepareCallTerminal(
 	preimageIndex int,
 	methodSelectorHex string,
 	changePKHHex string,
+	inductiveParamsHex string,
 	contractUtxo UTXO,
 ) (*PreparedCall, error) {
 	termOutputs := options.TerminalOutputs
@@ -1218,6 +1256,7 @@ func (c *RunarContract) prepareCallTerminal(
 			unlockStr := c.buildStatefulPrefix(opSigHexStr, false) +
 				argsHex +
 				changeHex +
+				inductiveParamsHex +
 				EncodePushData(preimageHexStr) +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
@@ -1299,14 +1338,15 @@ func (c *RunarContract) prepareCallTerminal(
 		changePKHHex:      changePKHHex,
 		changeAmount:      0,
 		methodNeedsNewAmount: false,
-		newAmount:         0,
-		preimageIndex:     preimageIndex,
-		contractUtxo:      contractUtxo,
-		newLockingScript:  "",
-		newSatoshis:       0,
-		hasMultiOutput:    false,
-		contractOutputs:   nil,
-		codeSepIdx:        termCodeSepIdx,
+		newAmount:            0,
+		inductiveParamsHex:   inductiveParamsHex,
+		preimageIndex:        preimageIndex,
+		contractUtxo:         contractUtxo,
+		newLockingScript:     "",
+		newSatoshis:          0,
+		hasMultiOutput:       false,
+		contractOutputs:      nil,
+		codeSepIdx:           termCodeSepIdx,
 	}, nil
 }
 

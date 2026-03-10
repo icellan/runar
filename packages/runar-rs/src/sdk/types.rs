@@ -54,6 +54,20 @@ pub struct DeployOptions {
     pub change_address: Option<String>,
 }
 
+/// Describes one continuation output for multi-output methods.
+#[derive(Debug, Clone)]
+pub struct OutputSpec {
+    pub satoshis: i64,
+    pub state: HashMap<String, SdkValue>,
+}
+
+/// A single output to include in the call transaction.
+#[derive(Debug, Clone)]
+pub struct CallOutput {
+    pub locking_script: String,
+    pub satoshis: i64,
+}
+
 /// Options for calling a contract method.
 #[derive(Debug, Clone, Default)]
 pub struct CallOptions {
@@ -65,6 +79,9 @@ pub struct CallOptions {
     /// Multiple continuation outputs for multi-output methods (e.g., transfer).
     /// When provided, replaces the single continuation output from `new_state`.
     pub outputs: Option<Vec<OutputSpec>>,
+    /// After a multi-output call, which output index to track as the
+    /// contract's continuation UTXO. Default: last output.
+    pub continuation_output_index: Option<usize>,
     /// Additional contract UTXOs as inputs (e.g., merge, swap).
     /// Each input is signed with the same method and args as the primary call,
     /// with OP_PUSH_TX and Sig auto-computed per input.
@@ -89,13 +106,6 @@ pub struct CallOptions {
 pub struct TerminalOutput {
     pub script_hex: String,
     pub satoshis: i64,
-}
-
-/// Specification for a single continuation output in multi-output calls.
-#[derive(Debug, Clone)]
-pub struct OutputSpec {
-    pub satoshis: i64,
-    pub state: HashMap<String, SdkValue>,
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +264,7 @@ pub struct PreparedCall {
     pub(crate) change_amount: i64,
     pub(crate) method_needs_new_amount: bool,
     pub(crate) new_amount: i64,
+    pub(crate) inductive_params_hex: String,
     pub(crate) preimage_index: Option<usize>,
     pub(crate) contract_utxo: Utxo,
     pub(crate) new_locking_script: String,

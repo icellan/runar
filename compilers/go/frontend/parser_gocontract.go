@@ -74,7 +74,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 				continue
 			}
 
-			// Check for runar.SmartContract / runar.StatefulSmartContract embed
+			// Check for runar.SmartContract / runar.StatefulSmartContract / runar.InductiveSmartContract embed
 			found := false
 			for _, field := range structType.Fields.List {
 				if sel, ok := field.Type.(*ast.SelectorExpr); ok {
@@ -85,6 +85,9 @@ func (p *goContractParser) extractContract() *ContractNode {
 							found = true
 						case "StatefulSmartContract":
 							parentClass = "StatefulSmartContract"
+							found = true
+						case "InductiveSmartContract":
+							parentClass = "InductiveSmartContract"
 							found = true
 						}
 					}
@@ -289,7 +292,7 @@ func (p *goContractParser) extractContract() *ContractNode {
 		})
 	}
 
-	return &ContractNode{
+	contract := &ContractNode{
 		Name:        contractName,
 		ParentClass: parentClass,
 		Properties:  properties,
@@ -303,6 +306,12 @@ func (p *goContractParser) extractContract() *ContractNode {
 		Methods:    methods,
 		SourceFile: p.fileName,
 	}
+
+	if contract.ParentClass == "InductiveSmartContract" {
+		injectInductiveInternalFields(contract)
+	}
+
+	return contract
 }
 
 func (p *goContractParser) resolveType(expr ast.Expr) TypeNode {

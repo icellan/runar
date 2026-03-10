@@ -364,12 +364,17 @@ impl RunarContract {
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
-        let user_params: Vec<&AbiParam> = if is_stateful {
+        let is_inductive = method.params.iter().any(|p| p.name == "_parentHashState");
+        let user_params: Vec<&AbiParam> = if is_stateful || is_inductive {
             method.params.iter().filter(|p| {
                 p.param_type != "SigHashPreimage"
                     && p.name != "_changePKH"
                     && p.name != "_changeAmount"
                     && p.name != "_newAmount"
+                    && p.name != "_parentHashState"
+                    && p.name != "_parentTailBlock1"
+                    && p.name != "_parentTailBlock2"
+                    && p.name != "_parentRawTailLen"
             }).collect()
         } else {
             method.params.iter().collect()
@@ -394,6 +399,21 @@ impl RunarContract {
         let change_address = options
             .and_then(|o| o.change_address.as_deref())
             .unwrap_or(&address);
+        // For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+        // params from the parent transaction (the tx that created the current UTXO).
+        // These are pushed in the unlock script between user args and txPreimage.
+        let mut inductive_params_hex = String::new();
+        if is_inductive {
+            let parent_tx = provider.get_transaction(&current_utxo.txid)?;
+            let raw = parent_tx.raw.ok_or_else(|| {
+                "RunarContract.call: provider returned transaction without raw hex, needed for inductive parent tx verification".to_string()
+            })?;
+            let partial = crate::sdk::sha256_compress::compute_partial_sha256_for_inductive(&raw)?;
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_hash_state));
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block1));
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block2));
+            inductive_params_hex.push_str(&encode_script_number(partial.parent_raw_tail_len as i64));
+        }
 
         // Detect Sig/PubKey/SigHashPreimage/ByteString params that need auto-compute (user passed Auto)
         let mut resolved_args: Vec<SdkValue> = args.to_vec();
@@ -469,6 +489,7 @@ impl RunarContract {
                 is_stateful, needs_op_push_tx, method_needs_change,
                 &sig_indices, &prevouts_indices, preimage_index,
                 &method_selector_hex, &change_pkh_hex,
+                &inductive_params_hex,
             );
         }
 
@@ -699,11 +720,12 @@ impl RunarContract {
                 prefix.push_str(&encode_push_data(&op_sig));
 
                 let unlock = format!(
-                    "{}{}{}{}{}{}",
+                    "{}{}{}{}{}{}{}",
                     prefix,
                     user_args_hex,
                     change_hex,
                     new_amount_hex,
+                    inductive_params_hex,
                     encode_push_data(&preimage),
                     method_selector_hex,
                 );
@@ -874,6 +896,7 @@ impl RunarContract {
             change_amount,
             method_needs_new_amount,
             new_amount: new_satoshis.unwrap_or(current_utxo.satoshis),
+            inductive_params_hex,
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: new_locking_script.unwrap_or_default(),
@@ -919,11 +942,12 @@ impl RunarContract {
                 new_amount_hex.push_str(&encode_arg(&SdkValue::Int(prepared.new_amount)));
             }
             format!(
-                "{}{}{}{}{}{}",
+                "{}{}{}{}{}{}{}",
                 self.build_stateful_prefix(&prepared.op_push_tx_sig, prepared.method_needs_change),
                 args_hex,
                 change_hex,
                 new_amount_hex,
+                prepared.inductive_params_hex,
                 encode_push_data(&prepared.preimage),
                 prepared.method_selector_hex,
             )
@@ -1003,6 +1027,7 @@ impl RunarContract {
         preimage_index: Option<usize>,
         method_selector_hex: &str,
         change_pkh_hex: &str,
+        inductive_params_hex: &str,
     ) -> Result<PreparedCall, String> {
         let term_code_sep_idx = self.get_code_sep_index(self.find_method_index(method_name));
 
@@ -1058,10 +1083,11 @@ impl RunarContract {
                 }
                 // Terminal never needs code part
                 let unlock = format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     encode_push_data(&op_sig),
                     args_hex,
                     change_hex,
+                    inductive_params_hex,
                     encode_push_data(&preimage),
                     method_selector_hex,
                 );
@@ -1146,6 +1172,7 @@ impl RunarContract {
             change_amount: 0,
             method_needs_new_amount: false,
             new_amount: 0,
+            inductive_params_hex: inductive_params_hex.to_string(),
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: String::new(),

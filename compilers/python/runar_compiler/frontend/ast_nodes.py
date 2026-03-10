@@ -289,7 +289,7 @@ class ContractNode:
     """The parsed representation of a Runar smart contract class."""
 
     name: str = ""
-    parent_class: str = ""  # "SmartContract" or "StatefulSmartContract"
+    parent_class: str = ""  # "SmartContract", "StatefulSmartContract", or "InductiveSmartContract"
     properties: list[PropertyNode] = field(default_factory=list)
     constructor: MethodNode = field(default_factory=MethodNode)
     methods: list[MethodNode] = field(default_factory=list)

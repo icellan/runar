@@ -33,8 +33,7 @@ type AdditionalContractInput struct {
 // The transaction:
 //   - Input 0: the current contract UTXO with the given unlocking script.
 //   - Additional inputs: funding UTXOs if provided.
-//   - Output 0 (optional): new contract UTXO with updated locking script
-//     (for stateful contracts).
+//   - Continuation outputs: one or more contract outputs (for stateful contracts).
 //   - Last output (optional): change.
 //
 // Returns the transaction hex (with unlocking script for input 0 already
@@ -151,7 +150,7 @@ func BuildCallTransaction(
 	}
 	tx += encodeVarInt(numOutputs)
 
-	// Contract outputs
+	// Contract continuation outputs
 	for _, co := range contractOutputs {
 		tx += toLittleEndian64(co.Satoshis)
 		tx += encodeVarInt(len(co.Script) / 2)

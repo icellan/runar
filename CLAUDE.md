@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless) or `StatefulSmartContract` (stateful), and the compiler produces Bitcoin Script locking scripts.
+Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `InductiveSmartContract` (stateful with backward chain verification), and the compiler produces Bitcoin Script locking scripts.
 
 Four independent compiler implementations (TypeScript, Go, Rust, Python) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, or Python syntax — all formats compile to the same AST and produce identical Bitcoin Script.
 
@@ -115,14 +115,20 @@ When adding a new frontend format parser:
 - Add format docs in `docs/formats/`
 
 ### Four Compilers Must Stay in Sync
-Any language feature change must be implemented in TypeScript, Go, Rust, AND Python. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 25 golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 4 compilers must pass.
+Any language feature change must be implemented in TypeScript, Go, Rust, AND Python. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 26 golden-file tests (including WOTS+, SLH-DSA, EC primitives, and inductive contracts) that all 4 compilers must pass.
 
 ### Contract Model
-- `SmartContract` — stateless, all properties `readonly`, developer writes full logic
-- `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit
+Three base classes, discriminated by `parentClass` on `ContractNode`:
+
+- **`SmartContract`** — Stateless. All properties are `readonly`. Developer writes full logic. No compiler-injected code. Each method is an independent spending path. Used for P2PKH, multisig, hash locks, etc.
+
+- **`StatefulSmartContract`** — Stateful. Compiler auto-injects `checkPreimage` (OP_PUSH_TX) at method entry and state continuation at method exit. Mutable properties become on-chain state stored after OP_RETURN in the locking script. Each spend creates a new UTXO with updated state. Used for counters, tokens, games, etc.
+
+- **`InductiveSmartContract`** — Extends `StatefulSmartContract` with backward chain verification. In addition to state management, the compiler auto-injects verification that the parent transaction is authentic by reconstructing its txid using partial SHA-256 (`sha256Compress`). Three internal properties are auto-injected: `_genesisOutpoint`, `_parentOutpoint`, `_grandparentOutpoint` (36 bytes each). On each spend, the contract verifies: (1) parent txid matches the outpoint in the current preimage, (2) genesis outpoint is consistent across the chain, (3) parent-grandparent linking is correct. Genesis detection uses a zero sentinel (36 zero bytes). Uses 4 implicit unlock params: `_parentHashState` (32B), `_parentTailBlock1` (64B), `_parentTailBlock2` (64B), `_parentRawTailLen` (~1B) — constant 161 bytes regardless of parent tx size. See `docs/inductive-contracts.md` for full details.
+
+Other contract model details:
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic; values are positional matching mutable properties in declaration order
 - `this.addRawOutput(satoshis, scriptBytes)` — raw output intrinsic; creates an output with caller-specified script bytes instead of the contract's own codePart
-- `parentClass` field on `ContractNode` discriminates between the two base classes
 - Only Rúnar built-in functions and contract methods are allowed — the type checker rejects calls to unknown functions like `Math.floor()` or `console.log()`
 - **Property initializers**: Properties can have `= value` defaults (literal values only: BigIntLiteral, BoolLiteral, ByteStringLiteral). Initialized properties are excluded from auto-generated constructors. Go/Rust DSL formats use a private `init()` method pattern instead of inline syntax. The AST `PropertyNode` has an optional `initializer` field; ANF `initialValue` is populated from it.
 

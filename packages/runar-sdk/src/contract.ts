@@ -11,6 +11,7 @@ import { buildCallTransaction, toLittleEndian32, toLittleEndian64, encodeVarInt,
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
+import { computePartialSha256ForInductive } from './sha256-compress.js';
 import { Utils, Hash, Transaction as BsvTransaction } from '@bsv/sdk';
 
 /**
@@ -343,13 +344,18 @@ export class RunarContract {
       this.artifact.stateFields.length > 0;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
-    const userParams = isStateful
+    const isInductive = method.params.some((p) => p.name === '_parentHashState');
+    const userParams = isStateful || isInductive
       ? method.params.filter(
           (p) =>
             p.type !== 'SigHashPreimage' &&
             p.name !== '_changePKH' &&
             p.name !== '_changeAmount' &&
-            p.name !== '_newAmount',
+            p.name !== '_newAmount' &&
+            p.name !== '_parentHashState' &&
+            p.name !== '_parentTailBlock1' &&
+            p.name !== '_parentTailBlock2' &&
+            p.name !== '_parentRawTailLen',
         )
       : method.params;
 
@@ -368,6 +374,24 @@ export class RunarContract {
     const contractUtxo: UTXO = { ...this.currentUtxo };
     const address = await signer.getAddress();
     const changeAddress = options?.changeAddress ?? address;
+    // For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+    // params from the parent transaction (the tx that created the current UTXO).
+    // These are pushed in the unlock script between user args and txPreimage.
+    let inductiveParamsHex = '';
+    if (isInductive) {
+      const parentTx = await provider.getTransaction(this.currentUtxo.txid);
+      if (!parentTx.raw) {
+        throw new Error(
+          'RunarContract.call: provider returned transaction without raw hex, needed for inductive parent tx verification',
+        );
+      }
+      const partial = computePartialSha256ForInductive(parentTx.raw);
+      inductiveParamsHex =
+        encodePushData(partial.parentHashState) +
+        encodePushData(partial.parentTailBlock1) +
+        encodePushData(partial.parentTailBlock2) +
+        encodeScriptNumber(BigInt(partial.parentRawTailLen));
+    }
 
     // Detect auto-compute params (user passed null)
     const sigIndices: number[] = [];
@@ -467,7 +491,7 @@ export class RunarContract {
           if (methodNeedsChange && changePKHHex) {
             changeHex = encodePushData(changePKHHex) + encodeArg(0n);
           }
-          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + encodePushData(preimage) + methodSelectorHex;
+          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + inductiveParamsHex + encodePushData(preimage) + methodSelectorHex;
           return { unlock, opSig, preimage };
         };
 
@@ -568,12 +592,17 @@ export class RunarContract {
         const stateHex = serializeState(this.artifact.stateFields!, out.state);
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
       });
+      // Track which output is the continuation for state tracking
+      const contIdx = options!.continuationOutputIndex ?? (options!.outputs!.length - 1);
+      const contOutput = options!.outputs![contIdx];
+      if (contOutput) {
+        this._state = { ...this._state, ...contOutput.state };
+      }
     } else if (isStateful) {
       newSatoshis = options?.satoshis ?? this.currentUtxo.satoshis;
       if (options?.newState) {
-        this._state = { ...this._state, ...options.newState };
+        this._state = { ...this._state, ...options.newState }
       }
-      newLockingScript = this.getLockingScript();
     }
 
     const feeRate = await provider.getFeeRate();
@@ -687,7 +716,7 @@ export class RunarContract {
         if (methodNeedsNewAmount) {
           newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
         }
-        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
+        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + inductiveParamsHex + encodePushData(preimage) + methodSelectorHex;
         return { unlock, opSig, preimage };
       };
 

@@ -650,7 +650,7 @@ class _PyParser:
             parent_class = parent_tok.value
             self.expect(TOK_RPAREN)
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in ("SmartContract", "StatefulSmartContract", "InductiveSmartContract"):
             raise ValueError(f"unknown parent class: {parent_class}")
 
         self.expect(TOK_COLON)

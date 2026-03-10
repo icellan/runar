@@ -9,6 +9,7 @@ pub mod rpc_provider;
 pub mod signer;
 pub mod contract;
 pub mod oppushtx;
+pub mod sha256_compress;
 
 pub use types::*;
 pub use state::{serialize_state, deserialize_state, extract_state_from_script, find_last_op_return};
@@ -20,3 +21,4 @@ pub use signer::{Signer, LocalSigner, ExternalSigner, MockSigner};
 pub use contract::RunarContract;
 pub use types::PreparedCall;
 pub use oppushtx::compute_op_push_tx;
+pub use sha256_compress::{sha256_compress_block, compute_partial_sha256_for_inductive, PartialSha256Result, SHA256_K, SHA256_INIT};

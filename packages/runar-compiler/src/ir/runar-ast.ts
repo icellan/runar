@@ -60,7 +60,7 @@ export type TypeNode = PrimitiveTypeNode | FixedArrayTypeNode | CustomTypeNode;
 export interface ContractNode {
   kind: 'contract';
   name: string;
-  parentClass: 'SmartContract' | 'StatefulSmartContract';
+  parentClass: 'SmartContract' | 'StatefulSmartContract' | 'InductiveSmartContract';
   properties: PropertyNode[];
   constructor: MethodNode;
   methods: MethodNode[];

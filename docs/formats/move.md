@@ -38,6 +38,12 @@ module P2PKH {
 
 ```move
 module ContractName {
+    use runar::SmartContract;
+    // or
+    use runar::StatefulSmartContract;
+    // or
+    use runar::InductiveSmartContract;
+
     use runar::types::{PubKey, Sig};
     use runar::crypto::{check_sig};
 
@@ -45,7 +51,7 @@ module ContractName {
 }
 ```
 
-The `use` declarations import types and built-in functions. Use `runar::types::{...}` for type imports and `runar::crypto::{...}` for cryptographic builtins. The contract model (stateless vs stateful) is determined by the struct keyword: plain `struct` for stateless contracts (SmartContract), `resource struct` for stateful contracts (StatefulSmartContract).
+The `use` declaration specifies the base class. `runar::SmartContract` for stateless contracts, `runar::StatefulSmartContract` for stateful contracts, `runar::InductiveSmartContract` for stateful contracts with backward chain verification. Additional `use` declarations import types and built-in functions. Use `runar::types::{...}` for type imports and `runar::crypto::{...}` for cryptographic builtins.
 
 ### Resource Struct
 

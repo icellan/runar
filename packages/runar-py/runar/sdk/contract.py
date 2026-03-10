@@ -18,6 +18,7 @@ from runar.sdk.state import (
     encode_push_data,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.sha256_compress import compute_partial_sha256_for_inductive
 
 
 class RunarContract:
@@ -209,13 +210,18 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
-        if is_stateful:
+        is_inductive = any(p.name == '_parentHashState' for p in method.params)
+        if is_stateful or is_inductive:
             user_params = [
                 p for p in method.params
                 if p.type != 'SigHashPreimage'
                 and p.name != '_changePKH'
                 and p.name != '_changeAmount'
                 and p.name != '_newAmount'
+                and p.name != '_parentHashState'
+                and p.name != '_parentTailBlock1'
+                and p.name != '_parentTailBlock2'
+                and p.name != '_parentRawTailLen'
             ]
         else:
             user_params = method.params
@@ -289,6 +295,25 @@ class RunarContract:
             ).digest()
             change_pkh_hex = hash160_bytes.hex()
 
+        # For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+        # params from the parent transaction (the tx that created the current UTXO).
+        # These are pushed in the unlock script between user args and txPreimage.
+        inductive_params_hex = ''
+        if is_inductive:
+            parent_tx = provider.get_transaction(self._current_utxo.txid)
+            if not parent_tx.raw:
+                raise RuntimeError(
+                    'RunarContract.call: provider returned transaction without raw hex, '
+                    'needed for inductive parent tx verification'
+                )
+            partial = compute_partial_sha256_for_inductive(parent_tx.raw)
+            inductive_params_hex = (
+                encode_push_data(partial['parent_hash_state']) +
+                encode_push_data(partial['parent_tail_block1']) +
+                encode_push_data(partial['parent_tail_block2']) +
+                _encode_script_number(partial['parent_raw_tail_len'])
+            )
+
         # -------------------------------------------------------------------
         # Terminal method path: exact outputs, no funding, no change
         # -------------------------------------------------------------------
@@ -298,6 +323,7 @@ class RunarContract:
                 is_stateful, needs_op_push_tx, method_needs_change,
                 sig_indices, prevouts_indices, preimage_index,
                 method_selector_hex, change_pkh_hex, contract_utxo,
+                inductive_params_hex=inductive_params_hex,
             )
 
         # -------------------------------------------------------------------
@@ -462,6 +488,7 @@ class RunarContract:
                     args_hex +
                     change_hex +
                     new_amount_hex +
+                    inductive_params_hex +
                     encode_push_data(preimage) +
                     method_selector_hex
                 )
@@ -595,6 +622,7 @@ class RunarContract:
             has_multi_output=bool(has_multi_output),
             contract_outputs=contract_outputs or [],
             code_sep_idx=code_sep_idx,
+            inductive_params_hex=inductive_params_hex,
         )
 
     def finalize_call(
@@ -637,6 +665,7 @@ class RunarContract:
                 args_hex +
                 change_hex +
                 new_amount_hex +
+                prepared.inductive_params_hex +
                 encode_push_data(prepared.preimage) +
                 prepared.method_selector_hex
             )
@@ -775,6 +804,7 @@ class RunarContract:
         method_selector_hex: str,
         change_pkh_hex: str,
         contract_utxo: Utxo,
+        inductive_params_hex: str = '',
     ) -> PreparedCall:
         """Handle the terminal method code path for prepare_call."""
         # Normalize terminal outputs
@@ -837,6 +867,7 @@ class RunarContract:
                     self._build_stateful_prefix(op_sig, False) +
                     args_hex +
                     change_hex +
+                    inductive_params_hex +
                     encode_push_data(preimage) +
                     method_selector_hex
                 )
@@ -907,6 +938,7 @@ class RunarContract:
             has_multi_output=False,
             contract_outputs=[],
             code_sep_idx=term_code_sep_idx,
+            inductive_params_hex=inductive_params_hex,
         )
 
     # -- Code separator helpers --

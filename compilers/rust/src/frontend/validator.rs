@@ -181,8 +181,8 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
         }
     }
 
-    // Public methods must end with an assert() call (unless StatefulSmartContract,
-    // where the compiler auto-injects the final assert)
+    // Public methods must end with an assert() call (unless StatefulSmartContract or
+    // InductiveSmartContract, where the compiler auto-injects the final assert)
     if method.visibility == Visibility::Public && contract.parent_class == "SmartContract" {
         if !ends_with_assert(&method.body) {
             errors.push(format!(

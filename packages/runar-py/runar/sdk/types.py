@@ -203,6 +203,7 @@ class PreparedCall:
     has_multi_output: bool = False
     contract_outputs: list[dict] = field(default_factory=list)
     code_sep_idx: int = -1  # adjusted OP_CODESEPARATOR byte offset, -1 if none
+    inductive_params_hex: str = ''  # pre-computed partial SHA-256 params for inductive contracts
 
 
 # SdkValue is the union of types that can be passed as contract arguments

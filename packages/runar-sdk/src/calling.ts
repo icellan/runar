@@ -5,14 +5,19 @@
 import type { UTXO } from './types.js';
 import { buildP2PKHScript } from './script-utils.js';
 
+/** A single output to include in the call transaction. */
+export interface CallOutput {
+  lockingScript: string;
+  satoshis: number;
+}
+
 /**
  * Build a raw transaction that spends a contract UTXO (method call).
  *
  * The transaction:
  * - Input 0: the current contract UTXO with the given unlocking script.
  * - Additional inputs: funding UTXOs if provided.
- * - Output 0 (optional): new contract UTXO with updated locking script
- *   (for stateful contracts).
+ * - Continuation outputs: one or more contract outputs (for stateful contracts).
  * - Last output (optional): change.
  *
  * Returns the unsigned transaction hex (with unlocking script for input 0
@@ -33,18 +38,22 @@ export function buildCallTransaction(
     /** Additional contract inputs with their own unlocking scripts (for merge). */
     additionalContractInputs?: Array<{ utxo: UTXO; unlockingScript: string }>;
   },
+  /** For multi-output methods: multiple continuation outputs (legacy). */
+  multiOutputs?: CallOutput[],
 ): { txHex: string; inputCount: number; changeAmount: number } {
   const extraContractInputs = options?.additionalContractInputs ?? [];
   const allUtxos = [currentUtxo, ...extraContractInputs.map((i) => i.utxo), ...(additionalUtxos ?? [])];
 
   const totalInput = allUtxos.reduce((sum, u) => sum + u.satoshis, 0);
 
-  // Determine contract outputs: multi-output takes priority over single
+  // Determine contract outputs: explicit options take priority, then multiOutputs, then single
   const contractOutputs: Array<{ script: string; satoshis: number }> =
     options?.contractOutputs ??
-    (newLockingScript
-      ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
-      : []);
+    (multiOutputs && multiOutputs.length > 0
+      ? multiOutputs.map((o) => ({ script: o.lockingScript, satoshis: o.satoshis }))
+      : newLockingScript
+        ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
+        : []);
 
   const contractOutputSats = contractOutputs.reduce((sum, o) => sum + o.satoshis, 0);
 
@@ -112,7 +121,7 @@ export function buildCallTransaction(
   if (change > 0 && (changeAddress || changeScript)) numOutputs++;
   tx += encodeVarInt(numOutputs);
 
-  // Contract outputs
+  // Contract continuation outputs
   for (const co of contractOutputs) {
     tx += toLittleEndian64(co.satoshis);
     tx += encodeVarInt(co.script.length / 2);

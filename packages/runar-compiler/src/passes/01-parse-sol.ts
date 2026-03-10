@@ -222,11 +222,12 @@ class SolParser {
     const nameToken = this.expect('ident');
     const contractName = nameToken.value;
 
-    // Optional: is SmartContract / StatefulSmartContract
-    let parentClass: 'SmartContract' | 'StatefulSmartContract' = 'SmartContract';
+    // Optional: is SmartContract / StatefulSmartContract / InductiveSmartContract
+    let parentClass: 'SmartContract' | 'StatefulSmartContract' | 'InductiveSmartContract' = 'SmartContract';
     if (this.match('is')) {
       const parent = this.expect('ident').value;
       if (parent === 'StatefulSmartContract') parentClass = 'StatefulSmartContract';
+      else if (parent === 'InductiveSmartContract') parentClass = 'InductiveSmartContract';
     }
 
     this.expect('{');
@@ -277,6 +278,11 @@ class SolParser {
         visibility: 'public',
         sourceLocation: loc,
       };
+    }
+
+    // For InductiveSmartContract, inject internal fields
+    if (parentClass === 'InductiveSmartContract') {
+      injectInductiveInternalFields(properties, constructorNode, this.file);
     }
 
     const contract: ContractNode = {
@@ -847,4 +853,58 @@ export function parseSolSource(source: string, fileName?: string): ParseResult {
   const tokens = tokenize(source);
   const parser = new SolParser(tokens, file);
   return parser.parse();
+}
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract: synthetic internal field injection
+// ---------------------------------------------------------------------------
+
+const INDUCTIVE_INTERNAL_FIELDS = ['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint'] as const;
+const BYTESTRING_TYPE: TypeNode = { kind: 'primitive_type', name: 'ByteString' };
+
+function injectInductiveInternalFields(
+  properties: PropertyNode[],
+  ctor: MethodNode,
+  file: string,
+): void {
+  const syntheticLoc: SourceLocation = { file, line: 0, column: 0 };
+
+  // Append internal properties
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    properties.push({
+      kind: 'property',
+      name,
+      type: BYTESTRING_TYPE,
+      readonly: false,
+      sourceLocation: syntheticLoc,
+    });
+  }
+
+  // Append constructor params
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.params.push({ kind: 'param', name, type: BYTESTRING_TYPE });
+  }
+
+  // Append super() args
+  if (ctor.body.length > 0) {
+    const firstStmt = ctor.body[0]!;
+    if (firstStmt.kind === 'expression_statement' &&
+        firstStmt.expression.kind === 'call_expr' &&
+        firstStmt.expression.callee.kind === 'identifier' &&
+        firstStmt.expression.callee.name === 'super') {
+      for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+        firstStmt.expression.args.push({ kind: 'identifier', name });
+      }
+    }
+  }
+
+  // Append property assignments
+  for (const name of INDUCTIVE_INTERNAL_FIELDS) {
+    ctor.body.push({
+      kind: 'assignment',
+      target: { kind: 'property_access', property: name },
+      value: { kind: 'identifier', name },
+      sourceLocation: syntheticLoc,
+    });
+  }
 }

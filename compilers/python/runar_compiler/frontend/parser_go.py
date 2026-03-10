@@ -749,6 +749,8 @@ class _GoParser:
                     parent_class = "SmartContract"
                 elif embed_name == "StatefulSmartContract":
                     parent_class = "StatefulSmartContract"
+                elif embed_name == "InductiveSmartContract":
+                    parent_class = "InductiveSmartContract"
                 self.skip_semicolons()
                 continue
 

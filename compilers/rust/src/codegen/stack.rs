@@ -140,6 +140,7 @@ fn unaryop_opcodes(op: &str) -> Option<Vec<&'static str>> {
         "!" => Some(vec!["OP_NOT"]),
         "-" => Some(vec!["OP_NEGATE"]),
         "~" => Some(vec!["OP_INVERT"]),
+        "unpack" => Some(vec!["OP_BIN2NUM"]),
         _ => None,
     }
 }

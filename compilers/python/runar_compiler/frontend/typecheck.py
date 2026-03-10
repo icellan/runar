@@ -252,8 +252,8 @@ class _TypeChecker:
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
 
-        # For StatefulSmartContract, add the implicit txPreimage property
-        if contract.parent_class == "StatefulSmartContract":
+        # For StatefulSmartContract/InductiveSmartContract, add the implicit txPreimage property
+        if contract.parent_class in ("StatefulSmartContract", "InductiveSmartContract"):
             self.prop_types["txPreimage"] = "SigHashPreimage"
 
         for method in contract.methods:

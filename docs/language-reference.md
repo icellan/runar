@@ -6,7 +6,7 @@ Rúnar is a strict subset of TypeScript designed for compilation to Bitcoin SV S
 
 ## Contract Structure
 
-A Rúnar source file contains exactly one contract class that extends `SmartContract` (stateless) or `StatefulSmartContract` (stateful):
+A Rúnar source file contains exactly one contract class that extends `SmartContract` (stateless), `StatefulSmartContract` (stateful), or `InductiveSmartContract` (stateful with backward chain verification):
 
 **Stateless contract** — all properties are `readonly`:
 
@@ -50,9 +50,11 @@ class Counter extends StatefulSmartContract {
 
 `StatefulSmartContract` automatically handles the OP_PUSH_TX pattern: preimage verification at method entry and state continuation at exit for any method that modifies state. Access preimage fields via `this.txPreimage`.
 
+`InductiveSmartContract` extends `StatefulSmartContract` with backward chain verification -- each transaction verifies its parent's authenticity, ensuring the entire UTXO lineage back to genesis is valid. See [Inductive Contracts](inductive-contracts.md).
+
 ### Rules
 
-- One class per file, extending `SmartContract` or `StatefulSmartContract`.
+- One class per file, extending `SmartContract`, `StatefulSmartContract`, or `InductiveSmartContract`.
 - No decorators, no generics on the class.
 - Imports are restricted to `runar-lang` (or `runar` / `runar/builtins`).
 
@@ -80,7 +82,7 @@ count: bigint;
 
 - Initialized in the constructor. Can be reassigned in public methods.
 - Changes are propagated across transactions using the OP_PUSH_TX pattern.
-- Having any mutable property makes the contract **stateful**. Use `StatefulSmartContract` as the base class.
+- Having any mutable property makes the contract **stateful**. Use `StatefulSmartContract` (or `InductiveSmartContract` for chain provenance) as the base class.
 
 ### Property Initializers
 
@@ -147,7 +149,7 @@ public unlock(sig: Sig, pubKey: PubKey) {
 ```
 
 - Must return `void`.
-- In `SmartContract`, must end with an `assert(...)` call as the final statement. In `StatefulSmartContract`, the compiler auto-injects the final assert.
+- In `SmartContract`, must end with an `assert(...)` call as the final statement. In `StatefulSmartContract` and `InductiveSmartContract`, the compiler auto-injects the final assert.
 - Parameters form part of the unlocking script (scriptSig).
 - When a contract has multiple public methods, a dispatch table is generated. The unlocking script includes a method index.
 
@@ -458,11 +460,11 @@ private helper(x: bigint): bigint {
 
 ### Preimage (Stateful Contracts)
 
-In `StatefulSmartContract`, `checkPreimage` and state continuation are handled automatically by the compiler. The preimage is available via `this.txPreimage`. Use the `extract*` functions to read specific fields:
+In `StatefulSmartContract` and `InductiveSmartContract`, `checkPreimage` and state continuation are handled automatically by the compiler. The preimage is available via `this.txPreimage`. Use the `extract*` functions to read specific fields:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `this.txPreimage` | `SigHashPreimage` | Implicit preimage property (StatefulSmartContract only) |
+| `this.txPreimage` | `SigHashPreimage` | Implicit preimage property (StatefulSmartContract / InductiveSmartContract) |
 | `extractVersion` | `(preimage: SigHashPreimage) => bigint` | Extract tx version (nVersion, 4 bytes at offset 0) |
 | `extractHashPrevouts` | `(preimage: SigHashPreimage) => Sha256` | Extract hashPrevouts (32 bytes at offset 4) |
 | `extractHashSequence` | `(preimage: SigHashPreimage) => Sha256` | Extract hashSequence (32 bytes at offset 36) |

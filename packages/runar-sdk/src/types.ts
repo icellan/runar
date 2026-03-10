@@ -36,6 +36,19 @@ export interface DeployOptions {
   changeAddress?: string;
 }
 
+/** Describes one continuation output for multi-output methods. */
+export interface OutputSpec {
+  satoshis: number;
+  state: Record<string, unknown>;
+}
+
+/** Result returned from a multi-output call. */
+export interface CallResult {
+  txid: string;
+  tx: Transaction;
+  outputs: Array<{ outputIndex: number; satoshis: number; script: string }>;
+}
+
 /**
  * Result of `prepareCall()` — contains everything needed for external signing
  * and subsequent `finalizeCall()`.
@@ -77,20 +90,26 @@ export interface PreparedCall {
 }
 
 export interface CallOptions {
-  satoshis?: number; // for next output (stateful)
+  satoshis?: number; // for next output (stateful, single-output)
   changeAddress?: string;
   /** Override the public key used for the change output (hex-encoded).
    *  Defaults to the signer's public key. */
   changePubKey?: string;
   /** New state values for the continuation output (stateful contracts). */
   newState?: Record<string, unknown>;
-
   /**
    * Multiple continuation outputs for multi-output methods (e.g., `transfer`).
    * Each entry specifies the satoshis and state for one output UTXO.
    * When provided, replaces the single continuation output from `newState`.
    */
-  outputs?: Array<{ satoshis: number; state: Record<string, unknown> }>;
+  outputs?: OutputSpec[];
+
+  /**
+   * After a multi-output call, which output index to track as the
+   * contract's continuation UTXO. Default: last output (typically the
+   * "change" or self-continuation output).
+   */
+  continuationOutputIndex?: number;
 
   /**
    * Additional contract UTXOs to include as inputs (e.g., for merge, swap,

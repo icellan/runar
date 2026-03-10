@@ -111,7 +111,162 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
   for (const method of contract.methods) {
     const methodCtx = new LoweringContext(contract);
 
-    if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
+    if (contract.parentClass === 'InductiveSmartContract' && method.visibility === 'public') {
+      // ---------------------------------------------------------------
+      // InductiveSmartContract public method lowering
+      // ---------------------------------------------------------------
+
+      // Register implicit parameters: partial SHA-256 tail blocks + txPreimage
+      methodCtx.addParam('_parentHashState');
+      methodCtx.addParam('_parentTailBlock1');
+      methodCtx.addParam('_parentTailBlock2');
+      methodCtx.addParam('_parentRawTailLen');
+      methodCtx.addParam('txPreimage');
+
+      // 1. Inject checkPreimage(txPreimage) at the start
+      const preimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+      const checkResult = methodCtx.emit({ kind: 'check_preimage', preimage: preimageRef });
+      methodCtx.emit({ kind: 'assert', value: checkResult });
+
+      // 2. Verify parent tx authenticity via partial SHA-256:
+      //    mid = sha256Compress(_parentHashState, _parentTailBlock1)
+      //    singleHash = sha256Compress(mid, _parentTailBlock2)
+      //    parentTxId = sha256(singleHash)  // double-SHA256 for txid
+      //    assert(parentTxId === left(extractOutpoint(txPreimage), 32))
+      const hashState = methodCtx.emit({ kind: 'load_param', name: '_parentHashState' });
+      const tailBlock1 = methodCtx.emit({ kind: 'load_param', name: '_parentTailBlock1' });
+      const mid = methodCtx.emit({ kind: 'call', func: 'sha256Compress', args: [hashState, tailBlock1] });
+      const tailBlock2 = methodCtx.emit({ kind: 'load_param', name: '_parentTailBlock2' });
+      const singleHash = methodCtx.emit({ kind: 'call', func: 'sha256Compress', args: [mid, tailBlock2] });
+      const parentTxId = methodCtx.emit({ kind: 'call', func: 'sha256', args: [singleHash] });
+      const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+      const outpointRef = methodCtx.emit({ kind: 'call', func: 'extractOutpoint', args: [preimageRef2] });
+      const thirtyTwo = methodCtx.emit({ kind: 'load_const', value: 32n });
+      const parentTxIdFromPreimage = methodCtx.emit({ kind: 'call', func: 'left', args: [outpointRef, thirtyTwo] });
+      const parentHashEq = methodCtx.emit({ kind: 'bin_op', op: '===', left: parentTxId, right: parentTxIdFromPreimage, result_type: 'bytes' });
+      methodCtx.emit({ kind: 'assert', value: parentHashEq });
+
+      // 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
+      const genesisRef = methodCtx.emit({ kind: 'load_prop', name: '_genesisOutpoint' });
+      const zeroSentinel = methodCtx.emit({ kind: 'load_const', value: '0'.repeat(72) }); // 36 bytes = 72 hex chars
+      const isGenesis = methodCtx.emit({ kind: 'bin_op', op: '===', left: genesisRef, right: zeroSentinel, result_type: 'bytes' });
+
+      // Genesis branch: set _genesisOutpoint = extractOutpoint(txPreimage)
+      const genesisCtx = methodCtx.subContext();
+      const gpRef = genesisCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+      const currentOutpoint = genesisCtx.emit({ kind: 'call', func: 'extractOutpoint', args: [gpRef] });
+      genesisCtx.emit({ kind: 'update_prop', name: '_genesisOutpoint', value: currentOutpoint });
+      methodCtx.syncCounter(genesisCtx);
+
+      // Non-genesis branch: verify chain consistency using tail block extraction
+      const nonGenesisCtx = methodCtx.subContext();
+
+      // Concatenate the two tail blocks to get 128 bytes of tail data
+      const tb1 = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentTailBlock1' });
+      const tb2 = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentTailBlock2' });
+      const tailData = nonGenesisCtx.emit({ kind: 'call', func: 'cat', args: [tb1, tb2] });
+
+      // Internal fields (111 bytes) are at the end of the raw tx data,
+      // just before the 4-byte locktime. Use _parentRawTailLen to compute the offset.
+      // fieldStart = _parentRawTailLen - 4 (locktime) - 111 (3 fields * 37 bytes)
+      const rawTailLen = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentRawTailLen' });
+      const four = nonGenesisCtx.emit({ kind: 'load_const', value: 4n });
+      const oneEleven = nonGenesisCtx.emit({ kind: 'load_const', value: 111n });
+      const beforeLocktime = nonGenesisCtx.emit({ kind: 'bin_op', op: '-', left: rawTailLen, right: four });
+      const fieldStart = nonGenesisCtx.emit({ kind: 'bin_op', op: '-', left: beforeLocktime, right: oneEleven });
+
+      // Extract 111 bytes of internal fields from tailData:
+      // mid(tailData, fieldStart, 111) = right(left(tailData, fieldStart + 111), 111)
+      const fieldEnd = nonGenesisCtx.emit({ kind: 'bin_op', op: '+', left: fieldStart, right: oneEleven });
+      const prefixAndFields = nonGenesisCtx.emit({ kind: 'call', func: 'left', args: [tailData, fieldEnd] });
+      const internalFieldsWithPrefixes = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [prefixAndFields, oneEleven] });
+
+      // Now extract each 37-byte field (1 push opcode + 36 data bytes)
+      const thirtySevenC = nonGenesisCtx.emit({ kind: 'load_const', value: 37n });
+      const thirtySixC = nonGenesisCtx.emit({ kind: 'load_const', value: 36n });
+
+      // parentGenesis: bytes [1..37) (skip push opcode at byte 0)
+      const parentGenesisRaw = nonGenesisCtx.emit({ kind: 'call', func: 'left', args: [internalFieldsWithPrefixes, thirtySevenC] });
+      const parentGenesis = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [parentGenesisRaw, thirtySixC] });
+
+      // parentParentOutpoint: bytes [38..74) (skip push opcode at byte 37)
+      const seventyFourC = nonGenesisCtx.emit({ kind: 'load_const', value: 74n });
+      const parentParentOutpointRaw = nonGenesisCtx.emit({ kind: 'call', func: 'left', args: [internalFieldsWithPrefixes, seventyFourC] });
+      const parentParentOutpointWithPrefix = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [parentParentOutpointRaw, thirtySevenC] });
+      const parentParentOutpoint = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [parentParentOutpointWithPrefix, thirtySixC] });
+
+      // Assert: parentGenesis === _genesisOutpoint (same lineage)
+      const myGenesis = nonGenesisCtx.emit({ kind: 'load_prop', name: '_genesisOutpoint' });
+      const genesisEq = nonGenesisCtx.emit({ kind: 'bin_op', op: '===', left: parentGenesis, right: myGenesis, result_type: 'bytes' });
+      nonGenesisCtx.emit({ kind: 'assert', value: genesisEq });
+
+      // Assert: parentParentOutpoint === _grandparentOutpoint (chain links match)
+      const myGrandparent = nonGenesisCtx.emit({ kind: 'load_prop', name: '_grandparentOutpoint' });
+      const chainEq = nonGenesisCtx.emit({ kind: 'bin_op', op: '===', left: parentParentOutpoint, right: myGrandparent, result_type: 'bytes' });
+      nonGenesisCtx.emit({ kind: 'assert', value: chainEq });
+      methodCtx.syncCounter(nonGenesisCtx);
+
+      // Emit the if/else
+      methodCtx.emit({
+        kind: 'if',
+        cond: isGenesis,
+        then: genesisCtx.bindings,
+        else: nonGenesisCtx.bindings,
+      });
+
+      // 4. Inject internal field updates BEFORE the developer body, so that
+      //    addOutput calls in the developer's code pick up the updated values
+      //    via auto-appended load_prop references.
+      //    _grandparentOutpoint = _parentOutpoint
+      const oldParent = methodCtx.emit({ kind: 'load_prop', name: '_parentOutpoint' });
+      methodCtx.emit({ kind: 'update_prop', name: '_grandparentOutpoint', value: oldParent });
+      //    _parentOutpoint = extractOutpoint(txPreimage)
+      const preimageRef3 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+      const currentOutpoint2 = methodCtx.emit({ kind: 'call', func: 'extractOutpoint', args: [preimageRef3] });
+      methodCtx.emit({ kind: 'update_prop', name: '_parentOutpoint', value: currentOutpoint2 });
+
+      // 5. Lower the developer's method body
+      lowerStatements(method.body, methodCtx);
+
+      // 6. State continuation (same as StatefulSmartContract)
+      const addOutputRefs = methodCtx.getAddOutputRefs();
+      if (addOutputRefs.length > 0) {
+        let accumulated = addOutputRefs[0]!;
+        for (let i = 1; i < addOutputRefs.length; i++) {
+          accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, addOutputRefs[i]!] });
+        }
+        const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
+        const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+        const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
+        const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
+        methodCtx.emit({ kind: 'assert', value: eqRef });
+      } else {
+        // InductiveSmartContract always mutates state (internal fields)
+        const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
+        const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [stateScriptRef] });
+        const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
+        const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
+        const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
+        methodCtx.emit({ kind: 'assert', value: eqRef });
+      }
+
+      // Append implicit params: partial SHA-256 tail blocks + txPreimage
+      const augmentedParams: ParamNode[] = [
+        ...method.params,
+        { kind: 'param', name: '_parentHashState', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentTailBlock1', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentTailBlock2', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentRawTailLen', type: { kind: 'primitive_type', name: 'bigint' } },
+        { kind: 'param', name: 'txPreimage', type: { kind: 'primitive_type', name: 'SigHashPreimage' } },
+      ];
+
+      result.push({
+        name: method.name,
+        params: lowerParams(augmentedParams),
+        body: methodCtx.bindings,
+        isPublic: true,
+      });
+    } else if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
       // Determine if this method verifies hashOutputs (needs change output support).
       // Methods that use addOutput or mutate state need hashOutputs verification.
       // Non-mutating methods (like close/destroy) don't verify outputs.
@@ -301,6 +456,11 @@ class LoweringContext {
 
   isProperty(name: string): boolean {
     return this.contract.properties.some(p => p.name === name);
+  }
+
+  /** Get the contract node. */
+  getContract(): ContractNode {
+    return this.contract;
   }
 
   /** Track an addOutput binding ref for multi-output continuation. */
@@ -759,6 +919,17 @@ function lowerCallExpr(
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
+
+    // For InductiveSmartContract, auto-append internal field values.
+    // The internal fields have already been updated (update_prop) before the
+    // developer's body, so load_prop returns the correct new-generation values.
+    if (ctx.getContract().parentClass === 'InductiveSmartContract') {
+      const genesisRef = ctx.emit({ kind: 'load_prop', name: '_genesisOutpoint' });
+      const parentRef = ctx.emit({ kind: 'load_prop', name: '_parentOutpoint' });
+      const grandparentRef = ctx.emit({ kind: 'load_prop', name: '_grandparentOutpoint' });
+      stateValues.push(genesisRef, parentRef, grandparentRef);
+    }
+
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
     ctx.addOutputRef(ref);
     return ref;

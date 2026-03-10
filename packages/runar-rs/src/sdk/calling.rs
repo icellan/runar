@@ -32,7 +32,7 @@ pub struct CallTxOptions {
 /// - Input 0: the current contract UTXO with the given unlocking script.
 /// - Additional contract inputs (if provided via options): with their own unlock scripts.
 /// - Additional P2PKH funding inputs if provided.
-/// - Contract outputs (multi-output or single continuation).
+/// - Contract continuation outputs (multi-output or single continuation).
 /// - Last output (optional): change.
 ///
 /// Returns the transaction hex (with unlocking script for input 0 already
@@ -90,7 +90,6 @@ pub fn build_call_transaction_ext(
 
     // Determine contract outputs: multi-output takes priority over single
     let contract_outputs: Vec<ContractOutput> = if let Some(cos) = options.and_then(|o| o.contract_outputs.as_ref()) {
-        // Already provided externally — borrow as references for output
         cos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
     } else if let Some(nls) = new_locking_script {
         vec![ContractOutput {
@@ -170,7 +169,7 @@ pub fn build_call_transaction_ext(
     }
     tx.push_str(&encode_varint(num_outputs));
 
-    // Contract outputs
+    // Contract continuation outputs
     for co in &contract_outputs {
         tx.push_str(&to_little_endian_64(co.satoshis));
         tx.push_str(&encode_varint((co.script.len() / 2) as u64));

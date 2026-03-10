@@ -15,6 +15,7 @@ from runar.sdk.deployment import build_deploy_transaction, select_utxos, estimat
 from runar.sdk.calling import build_call_transaction, insert_unlocking_script
 from runar.sdk.state import serialize_state, deserialize_state, find_last_op_return
 from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.sha256_compress import sha256_compress_block, compute_partial_sha256_for_inductive
 
 __all__ = [
     'Utxo', 'Transaction', 'TxInput', 'TxOutput',
@@ -28,4 +29,5 @@ __all__ = [
     'build_call_transaction', 'insert_unlocking_script',
     'serialize_state', 'deserialize_state', 'find_last_op_return',
     'compute_op_push_tx',
+    'sha256_compress_block', 'compute_partial_sha256_for_inductive',
 ]

@@ -103,6 +103,7 @@ const UNARYOP_OPCODES: Record<string, string[]> = {
   '!': ['OP_NOT'],
   '-': ['OP_NEGATE'],
   '~': ['OP_INVERT'],
+  'unpack': ['OP_BIN2NUM'],
 };
 
 // ---------------------------------------------------------------------------
@@ -1750,6 +1751,21 @@ class LoweringContext {
     this.trackDepth();
   }
 
+  /**
+   * Extract an output script from a raw Bitcoin transaction.
+   *
+   * Parses the raw tx bytes on the stack to extract the script at the given
+   * output index. V1 handles 1-byte varints (< 253 inputs/outputs), covering
+   * 99%+ of real transactions.
+   *
+   * Algorithm:
+   *   1. Skip version (4 bytes)
+   *   2. Read inputCount varint (1 byte for V1)
+   *   3. For each input, skip: prevTxId(32) + prevVout(4) + varint(scriptSig.len) + scriptSig + sequence(4)
+   *   4. Read outputCount varint (1 byte for V1)
+   *   5. Skip to target output index: for each output, skip satoshis(8) + varint(scriptLen) + script
+   *   6. At target output: skip satoshis(8), read varint(scriptLen), extract script
+   */
   /**
    * add_raw_output(satoshis, scriptBytes) — builds a raw output serialization:
    *   amount(8LE) + varint(scriptLen) + scriptBytes

@@ -42,17 +42,32 @@ type DeployOptions struct {
 	ChangeAddress string `json:"changeAddress,omitempty"`
 }
 
+// OutputSpec describes one continuation output for multi-output methods.
+type OutputSpec struct {
+	Satoshis int64                  `json:"satoshis"`
+	State    map[string]interface{} `json:"state"`
+}
+
+// CallOutput describes a single output in the call transaction.
+type CallOutput struct {
+	LockingScript string `json:"lockingScript"`
+	Satoshis      int64  `json:"satoshis"`
+}
+
 // CallOptions specifies options for calling a contract method.
 type CallOptions struct {
 	Satoshis      int64                  `json:"satoshis,omitempty"`
 	ChangeAddress string                 `json:"changeAddress,omitempty"`
 	ChangePubKey  string                 `json:"changePubKey,omitempty"` // Override public key for change output (hex-encoded). Defaults to signer's pubkey.
 	NewState      map[string]interface{} `json:"newState,omitempty"`
-
 	// Multiple continuation outputs for multi-output methods (e.g., transfer).
 	// Each entry specifies the satoshis and state for one output UTXO.
 	// When provided, replaces the single continuation output from NewState.
 	Outputs []OutputSpec `json:"outputs,omitempty"`
+
+	// After a multi-output call, which output index to track as the
+	// contract's continuation UTXO. Default: last output.
+	ContinuationOutputIndex int `json:"continuationOutputIndex,omitempty"`
 
 	// Additional contract UTXOs to include as inputs (e.g., for merge, swap,
 	// or any multi-input spending pattern). Each UTXO's unlocking script uses
@@ -79,12 +94,6 @@ type TerminalOutput struct {
 	Satoshis  int64  `json:"satoshis"`
 }
 
-// OutputSpec specifies a single continuation output for multi-output calls.
-type OutputSpec struct {
-	Satoshis int64                  `json:"satoshis"`
-	State    map[string]interface{} `json:"state"`
-}
-
 // PreparedCall holds all data from a prepared (but not yet signed) method call.
 // Public fields are for external signer coordination. Internal fields (lowercase)
 // are consumed by FinalizeCall().
@@ -107,8 +116,9 @@ type PreparedCall struct {
 	changePKHHex      string
 	changeAmount      int64
 	methodNeedsNewAmount bool
-	newAmount         int64
-	preimageIndex     int
+	newAmount            int64
+	inductiveParamsHex   string
+	preimageIndex        int
 	contractUtxo      UTXO
 	newLockingScript  string
 	newSatoshis       int64

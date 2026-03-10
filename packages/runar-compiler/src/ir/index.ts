@@ -56,6 +56,7 @@ export type {
   UpdateProp,
   GetStateScript,
   CheckPreimage,
+  DeserializeState,
   AddOutput,
   AddRawOutput,
 } from './anf-ir.js';

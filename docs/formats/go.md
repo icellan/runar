@@ -8,7 +8,7 @@
 
 ## Overview
 
-The Go format lets you write Rúnar contracts as idiomatic Go code. Contracts are Go structs embedding `runar.SmartContract` or `runar.StatefulSmartContract`, with methods defined as receiver functions. The Go compiler parses these directly -- no intermediate conversion to TypeScript.
+The Go format lets you write Rúnar contracts as idiomatic Go code. Contracts are Go structs embedding `runar.SmartContract`, `runar.StatefulSmartContract`, or `runar.InductiveSmartContract`, with methods defined as receiver functions. The Go compiler parses these directly -- no intermediate conversion to TypeScript.
 
 This format is **only supported by the Go compiler** (`compilers/go`). The TypeScript and Rust compilers cannot parse `.runar.go` files. If you need cross-compiler portability, use the TypeScript format instead.
 
@@ -35,7 +35,7 @@ type P2PKH struct {
 }
 ```
 
-- Embed `runar.SmartContract` or `runar.StatefulSmartContract` as the first field (anonymous embed).
+- Embed `runar.SmartContract`, `runar.StatefulSmartContract`, or `runar.InductiveSmartContract` as the first field (anonymous embed).
 - Properties are struct fields with `runar.Type` types.
 - The `runar:"readonly"` struct tag marks immutable properties.
 - Fields without the `readonly` tag are mutable (stateful).

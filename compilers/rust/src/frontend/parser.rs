@@ -109,7 +109,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let class_decl = match contract_class {
         Some(c) => c,
         None => {
-            errors.push("No class extending SmartContract or StatefulSmartContract found".to_string());
+            errors.push("No class extending SmartContract, StatefulSmartContract, or InductiveSmartContract found".to_string());
             return ParseResult {
                 contract: None,
                 errors,
@@ -129,7 +129,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     // Extract methods
     let methods = parse_methods(class, file, &mut errors);
 
-    let contract = ContractNode {
+    let mut contract = ContractNode {
         name: contract_name,
         parent_class: detected_parent_class.to_string(),
         properties,
@@ -137,6 +137,10 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
         methods,
         source_file: file.to_string(),
     };
+
+    if contract.parent_class == "InductiveSmartContract" {
+        inject_inductive_internal_fields(&mut contract, file);
+    }
 
     ParseResult {
         contract: Some(contract),
@@ -152,7 +156,7 @@ fn get_base_class_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Ident(ident) => {
             let name = ident.sym.as_ref();
-            if name == "SmartContract" || name == "StatefulSmartContract" {
+            if name == "SmartContract" || name == "StatefulSmartContract" || name == "InductiveSmartContract" {
                 Some(name)
             } else {
                 None
@@ -1107,6 +1111,73 @@ fn bigint_to_i64(bigint_lit: &swc::BigInt) -> i64 {
     use std::str::FromStr;
     let s = bigint_lit.value.to_string();
     i64::from_str(&s).unwrap_or(0)
+}
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract: synthetic internal field injection
+// ---------------------------------------------------------------------------
+
+/// Internal fields auto-appended to InductiveSmartContract properties.
+const INDUCTIVE_INTERNAL_FIELDS: &[&str] = &["_genesisOutpoint", "_parentOutpoint", "_grandparentOutpoint"];
+
+/// Inject internal fields (_genesisOutpoint, _parentOutpoint, _grandparentOutpoint)
+/// into an InductiveSmartContract. Adds mutable ByteString properties, constructor
+/// params, super() args, and property assignments.
+pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str) {
+    let synthetic_loc = SourceLocation {
+        file: file.to_string(),
+        line: 0,
+        column: 0,
+    };
+
+    // 1. Add properties
+    for &name in INDUCTIVE_INTERNAL_FIELDS {
+        contract.properties.push(PropertyNode {
+            name: name.to_string(),
+            prop_type: TypeNode::Primitive(PrimitiveTypeName::ByteString),
+            readonly: false,
+            initializer: None,
+            source_location: synthetic_loc.clone(),
+        });
+    }
+
+    // 2. Add constructor params
+    for &name in INDUCTIVE_INTERNAL_FIELDS {
+        contract.constructor.params.push(ParamNode {
+            name: name.to_string(),
+            param_type: TypeNode::Primitive(PrimitiveTypeName::ByteString),
+        });
+    }
+
+    // 3. Add internal field args to super() call (first statement)
+    if !contract.constructor.body.is_empty() {
+        if let Statement::ExpressionStatement { expression, .. } = &mut contract.constructor.body[0] {
+            if let Expression::CallExpr { callee, args } = expression {
+                if let Expression::Identifier { name } = callee.as_ref() {
+                    if name == "super" {
+                        for &field_name in INDUCTIVE_INTERNAL_FIELDS {
+                            args.push(Expression::Identifier {
+                                name: field_name.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Add this._field = _field assignments
+    for &name in INDUCTIVE_INTERNAL_FIELDS {
+        contract.constructor.body.push(Statement::Assignment {
+            target: Expression::PropertyAccess {
+                property: name.to_string(),
+            },
+            value: Expression::Identifier {
+                name: name.to_string(),
+            },
+            source_location: synthetic_loc.clone(),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------

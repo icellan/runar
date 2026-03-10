@@ -312,3 +312,57 @@ export abstract class StatefulSmartContract extends SmartContract {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// InductiveSmartContract base class
+// ---------------------------------------------------------------------------
+
+/**
+ * Base class for inductive Rúnar smart contracts.
+ *
+ * Extends {@link StatefulSmartContract} with automatic backward verification
+ * via mathematical induction on the UTXO chain. Each transaction verifies
+ * its parent had the same covenant code and consistent lineage metadata.
+ * Since the parent also verified *its* parent, the entire chain back to
+ * genesis is proven valid inductively.
+ *
+ * The compiler auto-injects three internal state fields:
+ * - `_genesisOutpoint` — immutable identity of the token lineage
+ * - `_parentOutpoint` — outpoint of the parent UTXO
+ * - `_grandparentOutpoint` — outpoint of the grandparent UTXO
+ *
+ * And an implicit `parentTx: ByteString` parameter on all public methods
+ * (the raw bytes of the parent transaction, provided by the SDK).
+ *
+ * Developers write code identical to StatefulSmartContract — all inductive
+ * machinery is compiler-injected:
+ *
+ * ```ts
+ * import { InductiveSmartContract, assert, checkSig } from 'runar-lang';
+ * import type { PubKey, Sig } from 'runar-lang';
+ *
+ * class InductiveToken extends InductiveSmartContract {
+ *   owner: PubKey;
+ *   balance: bigint;
+ *   readonly tokenId: ByteString;
+ *
+ *   constructor(owner: PubKey, balance: bigint, tokenId: ByteString) {
+ *     super(owner, balance, tokenId);
+ *     this.owner = owner;
+ *     this.balance = balance;
+ *     this.tokenId = tokenId;
+ *   }
+ *
+ *   public transfer(sig: Sig, to: PubKey, amount: bigint, sats: bigint) {
+ *     assert(checkSig(sig, this.owner));
+ *     assert(amount > 0n && amount <= this.balance);
+ *     this.addOutput(sats, to, amount);
+ *     this.addOutput(sats, this.owner, this.balance - amount);
+ *   }
+ * }
+ * ```
+ */
+export abstract class InductiveSmartContract extends StatefulSmartContract {
+  // All inductive machinery is compiler-injected.
+  // No additional API surface needed.
+}
