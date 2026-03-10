@@ -25,6 +25,7 @@ Each pass lives in its own file under `packages/runar-compiler/src/passes/`:
 | `05-stack-lower.ts` | Stack Lower | ANF IR | Stack IR |
 | `slh-dsa-codegen.ts` | SLH-DSA Codegen | (called by Pass 5) | Stack IR fragment |
 | `ec-codegen.ts` | EC Codegen | (called by Pass 5) | Stack IR fragment |
+| `sha256-codegen.ts` | SHA-256 Codegen | (called by Pass 5) | Stack IR fragment |
 | `06-emit.ts` | Emit | Stack IR | Bitcoin Script (hex) |
 
 The key benefit of this approach: each pass can be tested and verified in isolation. You can unit-test Pass 4 without caring about Passes 1-3, and you can swap out Pass 1 entirely (as the Go and Rust compilers do) while keeping Passes 4-6.
@@ -267,6 +268,30 @@ The EC codegen is replicated across all four compilers:
 - Python: `compilers/python/runar_compiler/codegen/ec.py`
 
 All four produce byte-identical Bitcoin Script, verified by the conformance suite.
+
+### SHA-256 Compression Codegen
+
+The `sha256Compress` and `sha256Finalize` built-in functions are handled by a dedicated codegen module:
+
+- **SHA-256 codegen** (`sha256-codegen.ts`): Inlines one round of SHA-256 compression (~3000 opcodes, ~74 KB of script). Uses little-endian stack representation during computation for efficiency (3 ops for LE-to-number vs 15 for BE). Bitwise operations (AND, OR, XOR, INVERT) work endian-agnostic on equal-length byte arrays. Rotation uses arithmetic (`OP_DIV`/`OP_MUL`/`OP_MOD`) instead of `OP_LSHIFT` for numeric correctness.
+
+The SHA-256 codegen is replicated across all four compilers:
+- TypeScript: `packages/runar-compiler/src/passes/sha256-codegen.ts`
+- Go: `compilers/go/codegen/sha256.go`
+- Rust: `compilers/rust/src/codegen/sha256.rs`
+- Python: `compilers/python/runar_compiler/codegen/sha256.py`
+
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
+
+### OP_CODESEPARATOR
+
+For stateful contracts, the compiler automatically inserts `OP_CODESEPARATOR` (opcode `0xab`) before the `checkPreimage` verification sequence. This causes `OP_CHECKSIG` to use only the script bytes after the separator as the scriptCode in the BIP-143 sighash preimage, reducing preimage size for large scripts and enabling scripts larger than ~32 KB.
+
+The emit pass tracks the byte offset of each `OP_CODESEPARATOR` and records it in the artifact as `codeSeparatorIndex` (last separator offset) and `codeSeparatorIndices` (per-method offsets for multi-method contracts). The SDK uses these offsets to:
+
+1. Trim the subscript when computing the BIP-143 sighash for OP_PUSH_TX signatures.
+2. Trim the subscript when computing user `checkSig` signatures (stateful contracts only -- stateless contracts have `checkSig` before the separator, so the full script is used).
+3. Push the `_codePart` implicit parameter (the code script without state) in the unlocking script for methods that create continuation outputs.
 
 ---
 

@@ -85,6 +85,8 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['verifySLHDSA_SHA2_192f', { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
   ['verifySLHDSA_SHA2_256s', { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
   ['verifySLHDSA_SHA2_256f', { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
+  ['sha256Compress',  { params: ['ByteString', 'ByteString'], returnType: 'ByteString' }],
+  ['sha256Finalize',  { params: ['ByteString', 'ByteString', 'bigint'], returnType: 'ByteString' }],
   ['abs',          { params: ['bigint'], returnType: 'bigint' }],
   ['min',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],
   ['max',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],
@@ -650,18 +652,21 @@ class TypeChecker {
       return BIGINT;
     }
 
-    // Bitwise operators: bigint x bigint -> bigint
+    // Bitwise operators: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
     const bitwiseOps = new Set(['&', '|', '^']);
     if (bitwiseOps.has(expr.op)) {
+      if (isByteFamily(leftType) && isByteFamily(rightType)) {
+        return BYTESTRING;
+      }
       if (!isBigintFamily(leftType)) {
         this.errors.push(makeDiagnostic(
-          `Left operand of '${expr.op}' must be bigint, got '${leftType}'`,
+          `Left operand of '${expr.op}' must be bigint or ByteString, got '${leftType}'`,
           'error',
         ));
       }
       if (!isBigintFamily(rightType)) {
         this.errors.push(makeDiagnostic(
-          `Right operand of '${expr.op}' must be bigint, got '${rightType}'`,
+          `Right operand of '${expr.op}' must be bigint or ByteString, got '${rightType}'`,
           'error',
         ));
       }
@@ -697,9 +702,12 @@ class TypeChecker {
         return BIGINT;
 
       case '~':
+        if (isByteFamily(operandType)) {
+          return BYTESTRING;
+        }
         if (!isBigintFamily(operandType)) {
           this.errors.push(makeDiagnostic(
-            `Operand of '~' must be bigint, got '${operandType}'`,
+            `Operand of '~' must be bigint or ByteString, got '${operandType}'`,
             'error',
           ));
         }

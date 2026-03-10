@@ -71,6 +71,8 @@ var builtinFunctions = map[string]funcSig{
 	"ecMakePoint":        {params: []string{"bigint", "bigint"}, returnType: "Point"},
 	"ecPointX":           {params: []string{"Point"}, returnType: "bigint"},
 	"ecPointY":           {params: []string{"Point"}, returnType: "bigint"},
+	"sha256Compress":    {params: []string{"ByteString", "ByteString"}, returnType: "ByteString"},
+	"sha256Finalize":    {params: []string{"ByteString", "ByteString", "bigint"}, returnType: "ByteString"},
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
@@ -155,6 +157,10 @@ func isSubtype(actual, expected string) bool {
 
 func isBigintFamily(t string) bool {
 	return bigintSubtypes[t]
+}
+
+func isByteFamily(t string) bool {
+	return byteStringSubtypes[t]
 }
 
 // ---------------------------------------------------------------------------
@@ -498,12 +504,25 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 		}
 		return "boolean"
 
-	case "&", "|", "^", "<<", ">>":
+	case "<<", ">>":
 		if !isBigintFamily(leftType) {
 			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
 		}
 		if !isBigintFamily(rightType) {
 			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint, got '%s'", e.Op, rightType))
+		}
+		return "bigint"
+
+	case "&", "|", "^":
+		// Bitwise operators: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
+		if isByteFamily(leftType) && isByteFamily(rightType) {
+			return "ByteString"
+		}
+		if !isBigintFamily(leftType) {
+			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint or ByteString, got '%s'", e.Op, leftType))
+		}
+		if !isBigintFamily(rightType) {
+			tc.addError(fmt.Sprintf("right operand of '%s' must be bigint or ByteString, got '%s'", e.Op, rightType))
 		}
 		return "bigint"
 	}
@@ -526,8 +545,12 @@ func (tc *typeChecker) checkUnaryExpr(e UnaryExpr, env *typeEnv) string {
 		}
 		return "bigint"
 	case "~":
+		// Bitwise NOT: bigint -> bigint, or ByteString -> ByteString
+		if isByteFamily(operandType) {
+			return "ByteString"
+		}
 		if !isBigintFamily(operandType) {
-			tc.addError(fmt.Sprintf("operand of '~' must be bigint, got '%s'", operandType))
+			tc.addError(fmt.Sprintf("operand of '~' must be bigint or ByteString, got '%s'", operandType))
 		}
 		return "bigint"
 	}
@@ -573,7 +596,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if pa.Property == "getStateScript" {
 			return "ByteString"
 		}
-		if pa.Property == "addOutput" {
+		if pa.Property == "addOutput" || pa.Property == "addRawOutput" {
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}

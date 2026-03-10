@@ -107,7 +107,7 @@ var knownKinds = map[string]bool{
 	"check_preimage":        true,
 	"deserialize_state":     true,
 	"add_output":            true,
-	"extract_parent_output": true,
+	"add_raw_output":        true,
 }
 
 func validateBindings(bindings []ANFBinding, methodName string) error {

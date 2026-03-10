@@ -127,9 +127,11 @@ type ConstructorSlot struct {
 
 // EmitResult holds the outputs of the emission pass.
 type EmitResult struct {
-	ScriptHex        string
-	ScriptAsm        string
-	ConstructorSlots []ConstructorSlot
+	ScriptHex              string
+	ScriptAsm              string
+	ConstructorSlots       []ConstructorSlot
+	CodeSeparatorIndex     int   // -1 if no OP_CODESEPARATOR was emitted
+	CodeSeparatorIndices   []int // per-method byte offsets
 }
 
 // ---------------------------------------------------------------------------
@@ -137,14 +139,16 @@ type EmitResult struct {
 // ---------------------------------------------------------------------------
 
 type emitContext struct {
-	hexParts         []string
-	asmParts         []string
-	byteLength       int
-	constructorSlots []ConstructorSlot
+	hexParts               []string
+	asmParts               []string
+	byteLength             int
+	constructorSlots       []ConstructorSlot
+	codeSeparatorIndex     int
+	codeSeparatorIndices   []int
 }
 
 func newEmitContext() *emitContext {
-	return &emitContext{}
+	return &emitContext{codeSeparatorIndex: -1}
 }
 
 func (ctx *emitContext) appendHex(h string) {
@@ -160,6 +164,10 @@ func (ctx *emitContext) emitOpcode(name string) error {
 	b, ok := opcodes[name]
 	if !ok {
 		return fmt.Errorf("unknown opcode: %s", name)
+	}
+	if name == "OP_CODESEPARATOR" {
+		ctx.codeSeparatorIndex = ctx.byteLength
+		ctx.codeSeparatorIndices = append(ctx.codeSeparatorIndices, ctx.byteLength)
 	}
 	ctx.appendHex(fmt.Sprintf("%02x", b))
 	ctx.appendAsm(name)
@@ -424,7 +432,7 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 	}
 
 	if len(publicMethods) == 0 {
-		return &EmitResult{ScriptHex: "", ScriptAsm: "", ConstructorSlots: nil}, nil
+		return &EmitResult{ScriptHex: "", ScriptAsm: "", ConstructorSlots: nil, CodeSeparatorIndex: -1}, nil
 	}
 
 	if len(publicMethods) == 1 {
@@ -442,9 +450,11 @@ func Emit(methods []StackMethod) (*EmitResult, error) {
 	}
 
 	return &EmitResult{
-		ScriptHex:        ctx.getHex(),
-		ScriptAsm:        ctx.getAsm(),
-		ConstructorSlots: ctx.constructorSlots,
+		ScriptHex:            ctx.getHex(),
+		ScriptAsm:            ctx.getAsm(),
+		ConstructorSlots:     ctx.constructorSlots,
+		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
+		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 	}, nil
 }
 
@@ -468,7 +478,9 @@ func emitMethodDispatch(methods []StackMethod, ctx *emitContext) error {
 				return err
 			}
 		} else {
-			if err := ctx.emitOpcode("OP_DROP"); err != nil {
+			// Last method — verify the index matches (fail-closed for invalid selectors)
+			ctx.emitPush(bigIntPush(int64(i)))
+			if err := ctx.emitOpcode("OP_NUMEQUALVERIFY"); err != nil {
 				return err
 			}
 		}
@@ -505,8 +517,10 @@ func EmitMethod(method *StackMethod) (*EmitResult, error) {
 		}
 	}
 	return &EmitResult{
-		ScriptHex:        ctx.getHex(),
-		ScriptAsm:        ctx.getAsm(),
-		ConstructorSlots: ctx.constructorSlots,
+		ScriptHex:            ctx.getHex(),
+		ScriptAsm:            ctx.getAsm(),
+		ConstructorSlots:     ctx.constructorSlots,
+		CodeSeparatorIndex:   ctx.codeSeparatorIndex,
+		CodeSeparatorIndices: ctx.codeSeparatorIndices,
 	}, nil
 }

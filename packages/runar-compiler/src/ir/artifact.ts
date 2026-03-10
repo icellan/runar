@@ -104,6 +104,9 @@ export interface RunarArtifact {
   /** Byte offsets of constructor parameter placeholders in the script */
   constructorSlots?: ConstructorSlot[];
 
+  /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash) */
+  codeSeparatorIndex?: number;
+
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
 }

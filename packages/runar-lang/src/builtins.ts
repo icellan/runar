@@ -65,6 +65,26 @@ export function hash256(_data: ByteString): Sha256 {
   return compilerStub('hash256');
 }
 
+/**
+ * One round of SHA-256 compression.
+ * Takes a 32-byte intermediate state and a 64-byte message block,
+ * returns the 32-byte updated state.
+ * Compiled to inlined SHA-256 compression opcodes (~3000 ops).
+ */
+export function sha256Compress(_state: ByteString, _block: ByteString): ByteString {
+  return compilerStub('sha256Compress');
+}
+
+/**
+ * Finalize a partial SHA-256 hash.
+ * Takes the intermediate state, remaining message bytes (< 64 bytes),
+ * and the total message bit length. Applies SHA-256 padding and runs
+ * the final 1-2 compression rounds.
+ */
+export function sha256Finalize(_state: ByteString, _remaining: ByteString, _msgBitLen: bigint): ByteString {
+  return compilerStub('sha256Finalize');
+}
+
 // ---------------------------------------------------------------------------
 // Signature verification
 // ---------------------------------------------------------------------------

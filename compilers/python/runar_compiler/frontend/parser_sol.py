@@ -387,7 +387,7 @@ class _SolParser:
             parent_tok = self.expect(TOK_IDENT)
             parent_class = parent_tok.value
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in ("SmartContract", "StatefulSmartContract", "InductiveSmartContract"):
             raise ValueError(f"unknown parent class: {parent_class}")
 
         self.expect(TOK_LBRACE)

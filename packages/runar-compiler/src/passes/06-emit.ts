@@ -147,6 +147,12 @@ export interface EmitResult {
   sourceMap: SourceMapping[];
   /** Byte offsets of constructor parameter placeholders */
   constructorSlots: ConstructorSlot[];
+  /** Byte offset of OP_CODESEPARATOR in the script (undefined if not present).
+   *  For multi-method contracts, this is the LAST separator's offset. */
+  codeSeparatorIndex?: number;
+  /** Per-method OP_CODESEPARATOR byte offsets, in method emission order.
+   *  Index 0 = first public method, index 1 = second, etc. */
+  codeSeparatorIndices?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -329,6 +335,10 @@ class EmitContext {
   private byteLength = 0;
   readonly sourceMap: SourceMapping[] = [];
   readonly constructorSlots: ConstructorSlot[] = [];
+  /** Byte offset of the last OP_CODESEPARATOR (undefined if none emitted) */
+  codeSeparatorIndex?: number;
+  /** Per-method OP_CODESEPARATOR byte offsets (in method emission order) */
+  readonly codeSeparatorIndices: number[] = [];
 
   appendHex(hex: string): void {
     this.hexParts.push(hex);
@@ -347,6 +357,10 @@ class EmitContext {
     const byte = OPCODES[name];
     if (byte === undefined) {
       throw new Error(`Unknown opcode: ${name}`);
+    }
+    if (name === 'OP_CODESEPARATOR') {
+      this.codeSeparatorIndex = this.byteLength;
+      this.codeSeparatorIndices.push(this.byteLength);
     }
     this.appendHex(byteToHex(byte));
     this.appendAsm(name);
@@ -509,6 +523,8 @@ export function emit(program: StackProgram): EmitResult {
     scriptAsm: ctx.getAsm(),
     sourceMap: ctx.sourceMap,
     constructorSlots: ctx.constructorSlots,
+    codeSeparatorIndex: ctx.codeSeparatorIndex,
+    codeSeparatorIndices: ctx.codeSeparatorIndices.length > 0 ? ctx.codeSeparatorIndices : undefined,
   };
 }
 
@@ -536,8 +552,9 @@ function emitMethodDispatch(methods: StackMethod[], ctx: EmitContext): void {
       // Drop the method index since we matched
       ctx.emitOpcode('OP_DROP');
     } else {
-      // Last method — drop the index (no need to check, it's the default)
-      ctx.emitOpcode('OP_DROP');
+      // Last method — verify the index matches (fail-closed for invalid selectors)
+      ctx.emitPush(BigInt(i));
+      ctx.emitOpcode('OP_NUMEQUALVERIFY');
     }
 
     for (const op of method.ops) {

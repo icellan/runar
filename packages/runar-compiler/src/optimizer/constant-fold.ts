@@ -397,7 +397,7 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
     case 'add_output':
       return value;
 
-    case 'extract_parent_output':
+    case 'add_raw_output':
       return value;
   }
 }
@@ -516,9 +516,9 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
       for (const sv of value.stateValues) refs.add(sv);
       refs.add(value.preimage);
       break;
-    case 'extract_parent_output':
-      refs.add(value.rawTx);
-      refs.add(value.outputIndex);
+    case 'add_raw_output':
+      refs.add(value.satoshis);
+      refs.add(value.scriptBytes);
       break;
   }
 }
@@ -530,6 +530,7 @@ function hasSideEffect(value: ANFValue): boolean {
     case 'check_preimage':
     case 'deserialize_state':
     case 'add_output':
+    case 'add_raw_output':
     case 'call':        // calls may have side effects (e.g. assert)
     case 'method_call': // method calls may have side effects
       return true;

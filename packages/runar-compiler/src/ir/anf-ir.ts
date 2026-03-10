@@ -80,6 +80,7 @@ export interface UnaryOp {
   kind: 'unary_op';
   op: string;
   operand: string; // reference to a temp name
+  result_type?: string; // operand type hint: "bytes" for ByteString, omitted for numeric
 }
 
 export interface Call {
@@ -141,10 +142,10 @@ export interface AddOutput {
   preimage: string;       // reference to a temp holding the verified preimage (for codePart extraction)
 }
 
-export interface ExtractParentOutput {
-  kind: 'extract_parent_output';
-  rawTx: string;        // ref to raw transaction bytes
-  outputIndex: string;   // ref to output index
+export interface AddRawOutput {
+  kind: 'add_raw_output';
+  satoshis: string;      // reference to a temp holding satoshis bigint
+  scriptBytes: string;   // reference to a temp holding ByteString script
 }
 
 export type ANFValue =
@@ -163,4 +164,4 @@ export type ANFValue =
   | CheckPreimage
   | DeserializeState
   | AddOutput
-  | ExtractParentOutput;
+  | AddRawOutput;

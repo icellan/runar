@@ -81,6 +81,8 @@ class Artifact:
     asm: str = ""
     state_fields: list[StateField] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
+    code_separator_index: int | None = None
+    code_separator_indices: list[int] | None = None
     build_timestamp: str = ""
 
 
@@ -223,6 +225,8 @@ def compile_from_program(program: ANFProgram) -> Artifact:
         emit_result.script_hex,
         emit_result.script_asm,
         emit_result.constructor_slots,
+        emit_result.code_separator_index,
+        emit_result.code_separator_indices,
     )
 
 
@@ -296,6 +300,8 @@ def _assemble_artifact(
     script_hex: str,
     script_asm: str,
     constructor_slots: list[ConstructorSlot],
+    code_separator_index: int = -1,
+    code_separator_indices: list[int] | None = None,
 ) -> Artifact:
     """Build the final output artifact from the compilation products."""
     # Build ABI
@@ -329,6 +335,9 @@ def _assemble_artifact(
             is_terminal=is_terminal,
         ))
 
+    cs_index = code_separator_index if code_separator_index >= 0 else None
+    cs_indices = code_separator_indices if code_separator_indices else None
+
     return Artifact(
         version=SCHEMA_VERSION,
         compiler_version=COMPILER_VERSION,
@@ -341,6 +350,8 @@ def _assemble_artifact(
         asm=script_asm,
         state_fields=state_fields,
         constructor_slots=constructor_slots,
+        code_separator_index=cs_index,
+        code_separator_indices=cs_indices,
         build_timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     )
 
@@ -385,6 +396,10 @@ def artifact_to_json(artifact: Artifact) -> str:
             {"paramIndex": cs.param_index, "byteOffset": cs.byte_offset}
             for cs in artifact.constructor_slots
         ]
+    if artifact.code_separator_index is not None:
+        d["codeSeparatorIndex"] = artifact.code_separator_index
+    if artifact.code_separator_indices is not None:
+        d["codeSeparatorIndices"] = artifact.code_separator_indices
     d["buildTimestamp"] = artifact.build_timestamp
     return json.dumps(d, indent=2)
 

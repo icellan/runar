@@ -457,6 +457,25 @@ describe('Pass 6: Emit', () => {
       expect(result.scriptAsm).toContain('OP_ENDIF');
     });
 
+    it('emits fail-closed dispatch for last method', () => {
+      const source = `
+        class Multi extends SmartContract {
+          readonly pk1: PubKey;
+          readonly pk2: PubKey;
+          constructor(pk1: PubKey, pk2: PubKey) {
+            super(pk1, pk2);
+            this.pk1 = pk1;
+            this.pk2 = pk2;
+          }
+          public spend1(sig: Sig) { assert(checkSig(sig, this.pk1)); }
+          public spend2(sig: Sig) { assert(checkSig(sig, this.pk2)); }
+        }
+      `;
+      const result = compileToEmit(source);
+      // Last method should use NUMEQUALVERIFY (fail-closed) instead of DROP
+      expect(result.scriptAsm).toContain('OP_NUMEQUALVERIFY');
+    });
+
     it('emits no dispatch for single public method', () => {
       const source = `
         class C extends SmartContract {

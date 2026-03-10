@@ -29,14 +29,21 @@ def compute_op_push_tx(
     input_index: int,
     subscript: str,
     satoshis: int,
+    code_separator_index: int = -1,
 ) -> tuple[str, str]:
     """Compute the OP_PUSH_TX DER signature and BIP-143 preimage.
 
     Returns (sig_hex, preimage_hex) where sig_hex includes the sighash byte.
     """
+    # If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
+    effective_subscript = subscript
+    if code_separator_index >= 0:
+        trim_pos = (code_separator_index + 1) * 2
+        if trim_pos <= len(subscript):
+            effective_subscript = subscript[trim_pos:]
     tx_bytes = bytes.fromhex(tx_hex)
     tx = _parse_raw_tx(tx_bytes)
-    subscript_bytes = bytes.fromhex(subscript)
+    subscript_bytes = bytes.fromhex(effective_subscript)
 
     preimage = _bip143_preimage(tx, input_index, subscript_bytes, satoshis)
     sighash = _sha256d(preimage)

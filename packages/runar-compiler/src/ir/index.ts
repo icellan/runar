@@ -58,7 +58,7 @@ export type {
   CheckPreimage,
   DeserializeState,
   AddOutput,
-  ExtractParentOutput,
+  AddRawOutput,
 } from './anf-ir.js';
 
 // Stack IR types

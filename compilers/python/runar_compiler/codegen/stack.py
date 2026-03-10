@@ -256,6 +256,9 @@ def collect_refs(value: ANFValue) -> list[str]:
         refs.extend(value.state_values)
         if value.preimage:
             refs.append(value.preimage)
+    elif kind == "add_raw_output":
+        refs.append(value.satoshis)
+        refs.append(value.script_bytes)
 
     return refs
 
@@ -296,6 +299,77 @@ class _LoweringContext:
     def emit_op(self, op: StackOp) -> None:
         self.ops.append(op)
         self._track_depth()
+
+    def emit_varint_encoding(self) -> None:
+        """Emit Bitcoin varint encoding of the length on top of the stack.
+
+        Expects stack: [..., script, len]
+        Leaves stack:  [..., script, varint_bytes]
+
+        OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need
+        2 bytes (sign bit). To produce a correct 1-byte unsigned varint,
+        we use OP_NUM2BIN 2 then SPLIT to extract only the low byte.
+        Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+        """
+        # Stack: [..., script, len]
+        self.emit_op(StackOp(op="dup"))  # [script, len, len]
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(253)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()  # pop condition
+
+        # Then: 1-byte varint (len < 253)
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # lowByte
+        self.sm.push("")  # highByte
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+
+        # Else: 0xfd + 2-byte LE varint (len >= 253)
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # low2bytes
+        self.sm.push("")  # high2bytes
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0xFD]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        # --- Stack: [..., script, varint] ---
 
     # -----------------------------------------------------------------
     # bring_to_top
@@ -442,6 +516,8 @@ class _LoweringContext:
             self._lower_deserialize_state(value.preimage, binding_index, last_uses)
         elif kind == "add_output":
             self._lower_add_output(name, value.satoshis, value.state_values, value.preimage, binding_index, last_uses)
+        elif kind == "add_raw_output":
+            self._lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
 
     # -----------------------------------------------------------------
     # Individual lowering methods
@@ -554,6 +630,9 @@ class _LoweringContext:
             self.emit_op(StackOp(op="opcode", code="OP_EQUAL"))
             if op == "!==":
                 self.emit_op(StackOp(op="opcode", code="OP_NOT"))
+        elif result_type == "bytes" and op == "+":
+            # ByteString concatenation: + on byte types emits OP_CAT, not OP_ADD.
+            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         else:
             opcodes = BINOP_OPCODES.get(op)
             if opcodes is None:
@@ -619,6 +698,14 @@ class _LoweringContext:
         if func_name.startswith("verifySLHDSA_SHA2_"):
             param_key = func_name[len("verifySLHDSA_"):]
             self._lower_verify_slh_dsa(binding_name, param_key, args, binding_index, last_uses)
+            return
+
+        if func_name == "sha256Compress":
+            self._lower_sha256_compress(binding_name, args, binding_index, last_uses)
+            return
+
+        if func_name == "sha256Finalize":
+            self._lower_sha256_finalize(binding_name, args, binding_index, last_uses)
             return
 
         if _is_ec_builtin(func_name):
@@ -1043,114 +1130,88 @@ class _LoweringContext:
 
     def _lower_compute_state_output_hash(self, binding_name: str, args: list[str],
                                          binding_index: int, last_uses: dict[str, int]) -> None:
-        # Compute fixed state serialization length
-        state_len = 0
-        for p in self.properties:
-            if p.readonly:
-                continue
-            if p.type == "bigint":
-                state_len += 8
-            elif p.type == "boolean":
-                state_len += 1
-            elif p.type == "PubKey":
-                state_len += 33
-            elif p.type == "Addr":
-                state_len += 20
-            elif p.type == "Sha256":
-                state_len += 32
-            elif p.type == "Point":
-                state_len += 64
-            else:
-                raise RuntimeError(f"computeStateOutputHash: unsupported mutable property type: {p.type}")
-
+        """Uses _codePart implicit parameter for the code portion and extracts
+        the amount from the preimage's scriptCode field."""
         preimage_ref = args[0]
         state_bytes_ref = args[1]
 
-        # Bring stateBytes then preimage to top
-        self.bring_to_top(state_bytes_ref, self._is_last_use(state_bytes_ref, binding_index, last_uses))
-        self.bring_to_top(preimage_ref, self._is_last_use(preimage_ref, binding_index, last_uses))
+        # Bring stateBytes to stack first.
+        state_last = self._is_last_use(state_bytes_ref, binding_index, last_uses)
+        self.bring_to_top(state_bytes_ref, state_last)
 
-        # Step 1: Extract middle: varint + scriptCode + amount
-        self.emit_op(StackOp(op="push", value=big_int_push(104)))
+        # Extract amount from preimage for the continuation output.
+        pre_last = self._is_last_use(preimage_ref, binding_index, last_uses)
+        self.bring_to_top(preimage_ref, pre_last)
+
+        # Extract amount: last 52 bytes, take 8 bytes at offset 0.
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.emit_op(StackOp(op="push", value=big_int_push(52)))  # 8 (amount) + 44 (tail)
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))  # [prefix, amountAndTail]
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")  # prefix
-        self.sm.push("")  # rest
-        self.emit_op(StackOp(op="nip"))
+        self.sm.push("")  # amountAndTail
+        self.emit_op(StackOp(op="nip"))  # drop prefix
         self.sm.pop()
         self.sm.pop()
-        self.sm.push("")  # rest
-
-        # Drop last 44 bytes
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(44)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # middle
-        self.sm.push("")  # tail44
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
-        # Step 2: Split off amount (last 8 bytes), save to altstack
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
         self.sm.push("")
         self.emit_op(StackOp(op="push", value=big_int_push(8)))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))  # [amount(8), tail(44)]
         self.sm.pop()
         self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+sc
         self.sm.push("")  # amount
+        self.sm.push("")  # tail
+        self.emit_op(StackOp(op="drop"))  # drop tail
+        self.sm.pop()
+        # --- Stack: [..., stateBytes, amount(8LE)] ---
+
+        # Save amount to altstack
         self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
         self.sm.pop()
 
-        # Step 3: Strip state + OP_RETURN from end
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(state_len + 1)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+code
-        self.sm.push("")  # opReturn+state
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
+        # Bring _codePart to top (PICK -- never consume, reused across outputs)
+        self.bring_to_top("_codePart", False)
+        # --- Stack: [..., stateBytes, codePart] ---
 
-        # Step 4: Append OP_RETURN byte
+        # Append OP_RETURN + stateBytes
         self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., stateBytes, codePart+OP_RETURN] ---
 
-        # Step 5: Swap and CAT to append stateBytes
         self.emit_op(StackOp(op="swap"))
         self.sm.swap()
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
 
-        # Step 6: Prepend amount from altstack
+        # Compute varint prefix for script length
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_varint_encoding()
+
+        # Prepend varint to script
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        # --- Stack: [..., varint+script] ---
+
+        # Prepend amount from altstack
         self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
         self.sm.push("")
         self.emit_op(StackOp(op="swap"))
@@ -1159,8 +1220,9 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., amount+varint+script] ---
 
-        # Step 7: Hash with SHA256d
+        # Hash with SHA256d
         self.emit_op(StackOp(op="opcode", code="OP_HASH256"))
 
         self.sm.pop()
@@ -1173,34 +1235,22 @@ class _LoweringContext:
 
     def _lower_compute_state_output(self, binding_name: str, args: list[str],
                                      binding_index: int, last_uses: dict[str, int]) -> None:
-        """Same as computeStateOutputHash but WITHOUT the final OP_HASH256."""
-        # Compute fixed state serialization length
-        state_len = 0
-        for p in self.properties:
-            if p.readonly:
-                continue
-            if p.type == "bigint":
-                state_len += 8
-            elif p.type == "boolean":
-                state_len += 1
-            elif p.type == "PubKey":
-                state_len += 33
-            elif p.type == "Addr":
-                state_len += 20
-            elif p.type == "Sha256":
-                state_len += 32
-            elif p.type == "Point":
-                state_len += 64
-            else:
-                raise RuntimeError(f"computeStateOutput: unsupported mutable property type: {p.type}")
-
+        """computeStateOutput(preimage, stateBytes, newAmount) -- builds the
+        continuation output using _newAmount instead of sourceSatoshis.
+        Uses _codePart implicit parameter instead of extracting from preimage."""
         preimage_ref = args[0]
         state_bytes_ref = args[1]
         new_amount_ref = args[2]
 
-        # Bring newAmount, stateBytes, then preimage to top
-        self.bring_to_top(new_amount_ref, self._is_last_use(new_amount_ref, binding_index, last_uses))
-        # Convert _newAmount (script number) to 8-byte LE and save to altstack
+        # Consume preimage ref (no longer needed -- we use _codePart and _newAmount).
+        pre_last = self._is_last_use(preimage_ref, binding_index, last_uses)
+        self.bring_to_top(preimage_ref, pre_last)
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # Step 1: Convert _newAmount to 8-byte LE and save to altstack.
+        amount_last = self._is_last_use(new_amount_ref, binding_index, last_uses)
+        self.bring_to_top(new_amount_ref, amount_last)
         self.emit_op(StackOp(op="push", value=big_int_push(8)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
@@ -1210,90 +1260,46 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_TOALTSTACK"))
         self.sm.pop()
 
-        self.bring_to_top(state_bytes_ref, self._is_last_use(state_bytes_ref, binding_index, last_uses))
-        self.bring_to_top(preimage_ref, self._is_last_use(preimage_ref, binding_index, last_uses))
+        # Step 2: Bring stateBytes to stack.
+        state_last = self._is_last_use(state_bytes_ref, binding_index, last_uses)
+        self.bring_to_top(state_bytes_ref, state_last)
 
-        # Step 1: Extract middle: varint + scriptCode + amount
-        self.emit_op(StackOp(op="push", value=big_int_push(104)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # prefix
-        self.sm.push("")  # rest
-        self.emit_op(StackOp(op="nip"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # rest
+        # Step 3: Bring _codePart to top (PICK -- never consume, reused across outputs)
+        self.bring_to_top("_codePart", False)
+        # --- Stack: [..., stateBytes, codePart] ---
 
-        # Drop last 44 bytes
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(44)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # middle
-        self.sm.push("")  # tail44
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
-        # Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(8)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+sc
-        self.sm.push("")  # amount
-        self.emit_op(StackOp(op="drop"))  # drop sourceSatoshis — replaced by _newAmount
-        self.sm.pop()
-
-        # Step 3: Strip state + OP_RETURN from end
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(state_len + 1)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+code
-        self.sm.push("")  # opReturn+state
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
-        # Step 4: Append OP_RETURN byte
+        # Step 4: Append OP_RETURN + stateBytes
         self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., stateBytes, codePart+OP_RETURN] ---
 
-        # Step 5: Swap and CAT to append stateBytes
         self.emit_op(StackOp(op="swap"))
         self.sm.swap()
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
 
-        # Step 6: Prepend _newAmount (8-byte LE) from altstack
+        # Step 5: Compute varint prefix for script length
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_varint_encoding()
+
+        # Prepend varint to script
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        # --- Stack: [..., varint+script] ---
+
+        # Step 6: Prepend _newAmount (8-byte LE) from altstack.
         self.emit_op(StackOp(op="opcode", code="OP_FROMALTSTACK"))
         self.sm.push("")
         self.emit_op(StackOp(op="swap"))
@@ -1302,7 +1308,7 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
-        # --- Stack: [..., fullOutputSerialization] --- (NO hash)
+        # --- Stack: [..., amount(8LE)+varint+script] --- (NO hash)
 
         self.sm.pop()
         self.sm.push(binding_name)
@@ -1503,108 +1509,29 @@ class _LoweringContext:
     # -----------------------------------------------------------------
 
     def _lower_add_output(self, binding_name: str, satoshis: str,
-                          state_values: list[str], preimage: str,
+                          state_values: list[str], _preimage: str,
                           binding_index: int,
                           last_uses: dict[str, int]) -> None:
         # Build a full BIP-143 output serialization:
         #   amount(8LE) + varint(scriptLen) + codePart + OP_RETURN + stateBytes
+        # Uses _codePart implicit parameter (passed by SDK) instead of extracting
+        # codePart from the preimage. This is simpler and works with OP_CODESEPARATOR.
         state_props = [p for p in self.properties if not p.readonly]
 
-        # Compute fixed state serialization length.
-        state_len = 0
-        for p in state_props:
-            if p.type == "bigint":
-                state_len += 8
-            elif p.type == "boolean":
-                state_len += 1
-            elif p.type == "PubKey":
-                state_len += 33
-            elif p.type == "Addr":
-                state_len += 20
-            elif p.type == "Sha256":
-                state_len += 32
-            elif p.type == "Point":
-                state_len += 64
-            else:
-                raise RuntimeError(f"addOutput: unsupported mutable property type: {p.type}")
+        # Step 1: Bring _codePart to top (PICK -- never consume, reused across outputs)
+        self.bring_to_top("_codePart", False)
+        # --- Stack: [..., codePart] ---
 
-        # --- Extract varint + codePart from preimage ---
-        pre_is_last = self._is_last_use(preimage, binding_index, last_uses)
-        self.bring_to_top(preimage, pre_is_last)
-
-        # Step 1: Extract middle: varint + scriptCode + amount.
-        self.emit_op(StackOp(op="push", value=big_int_push(104)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # prefix
-        self.sm.push("")  # rest
-        self.emit_op(StackOp(op="nip"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # rest
-
-        # Drop last 44 bytes.
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(44)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # middle
-        self.sm.push("")  # tail44
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
-        # Step 2: Split off amount (last 8 bytes) and drop it.
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(8)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+sc
-        self.sm.push("")  # amount
-        self.emit_op(StackOp(op="drop"))  # drop amount
-        self.sm.pop()
-
-        # Step 3: Strip state + OP_RETURN from end.
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(state_len + 1)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # varint+code
-        self.sm.push("")  # opReturn+state
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
-        # Step 4: Append OP_RETURN byte.
+        # Step 2: Append OP_RETURN byte (0x6a).
         self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x6A]))))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
+        # --- Stack: [..., codePart+OP_RETURN] ---
 
-        # Step 5: Serialize each state value and concatenate.
+        # Step 3: Serialize each state value and concatenate.
         for i in range(min(len(state_values), len(state_props))):
             value_ref = state_values[i]
             prop = state_props[i]
@@ -1612,6 +1539,7 @@ class _LoweringContext:
             is_last = self._is_last_use(value_ref, binding_index, last_uses)
             self.bring_to_top(value_ref, is_last)
 
+            # Convert numeric/boolean values to fixed-width bytes
             if prop.type == "bigint":
                 self.emit_op(StackOp(op="push", value=big_int_push(8)))
                 self.sm.push("")
@@ -1622,11 +1550,30 @@ class _LoweringContext:
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()
+            # Byte types used as-is
 
+            # Concatenate with accumulator
             self.sm.pop()
             self.sm.pop()
             self.emit_op(StackOp(op="opcode", code="OP_CAT"))
             self.sm.push("")
+
+        # --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
+
+        # Step 4: Compute varint prefix for the full script length.
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))  # [script, len]
+        self.sm.push("")
+        self.emit_varint_encoding()
+        # --- Stack: [..., script, varint] ---
+
+        # Step 5: Prepend varint to script: SWAP CAT
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        # --- Stack: [..., varint+script] ---
 
         # Step 6: Prepend satoshis as 8-byte LE.
         is_last_sat = self._is_last_use(satoshis, binding_index, last_uses)
@@ -1634,7 +1581,58 @@ class _LoweringContext:
         self.emit_op(StackOp(op="push", value=big_int_push(8)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()  # pop the width
+        # Stack: [..., varint+script, satoshis(8LE)]
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
         self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))  # satoshis || varint+script
+        self.sm.push("")
+        # --- Stack: [..., amount(8LE)+varint+scriptPubKey] ---
+
+        # Rename top to binding name
+        self.sm.pop()
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # add_raw_output
+    # -----------------------------------------------------------------
+
+    def _lower_add_raw_output(self, binding_name: str, satoshis: str,
+                               script_bytes: str, binding_index: int,
+                               last_uses: dict[str, int]) -> None:
+        """Build a raw output serialization:
+          amount(8LE) + varint(scriptLen) + scriptBytes
+        The scriptBytes are used as-is (no codePart/state insertion).
+        """
+        # Step 1: Bring scriptBytes to top
+        script_is_last = self._is_last_use(script_bytes, binding_index, last_uses)
+        self.bring_to_top(script_bytes, script_is_last)
+
+        # Step 2: Compute varint prefix for script length
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_varint_encoding()
+        # --- Stack: [..., script, varint] ---
+
+        # Step 3: Prepend varint to script: SWAP CAT
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        # Step 4: Prepend satoshis as 8-byte LE
+        sat_is_last = self._is_last_use(satoshis, binding_index, last_uses)
+        self.bring_to_top(satoshis, sat_is_last)
+        self.emit_op(StackOp(op="push", value=big_int_push(8)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()  # pop width
+        # Stack: [..., varint+script, satoshis(8LE)]
         self.emit_op(StackOp(op="swap"))
         self.sm.swap()
         self.sm.pop()
@@ -1653,6 +1651,11 @@ class _LoweringContext:
 
     def _lower_check_preimage(self, binding_name: str, preimage: str,
                               binding_index: int, last_uses: dict[str, int]) -> None:
+        # Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
+        # preimage is only the code after this point. This reduces preimage size
+        # for large scripts and is required for scripts > ~32KB.
+        self.emit_op(StackOp(op="opcode", code="OP_CODESEPARATOR"))
+
         # Step 1: Bring preimage to top (non-consuming)
         is_last = self._is_last_use(preimage, binding_index, last_uses)
         self.bring_to_top(preimage, is_last)
@@ -2700,6 +2703,40 @@ class _LoweringContext:
         self._track_depth()
 
     # -----------------------------------------------------------------
+    # SHA-256 compression
+    # -----------------------------------------------------------------
+
+    def _lower_sha256_compress(self, binding_name: str, args: list[str],
+                                binding_index: int, last_uses: dict[str, int]) -> None:
+        if len(args) < 2:
+            raise RuntimeError("sha256Compress requires 2 arguments: state, block")
+        for arg in args:
+            self.bring_to_top(arg, self._is_last_use(arg, binding_index, last_uses))
+        for _ in range(2):
+            self.sm.pop()
+
+        from runar_compiler.codegen.sha256 import emit_sha256_compress
+        emit_sha256_compress(lambda op: self.emit_op(op))
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    def _lower_sha256_finalize(self, binding_name: str, args: list[str],
+                                binding_index: int, last_uses: dict[str, int]) -> None:
+        if len(args) < 3:
+            raise RuntimeError("sha256Finalize requires 3 arguments: state, remaining, msgBitLen")
+        for arg in args:
+            self.bring_to_top(arg, self._is_last_use(arg, binding_index, last_uses))
+        for _ in range(3):
+            self.sm.pop()
+
+        from runar_compiler.codegen.sha256 import emit_sha256_finalize
+        emit_sha256_finalize(lambda op: self.emit_op(op))
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
     # EC builtins
     # -----------------------------------------------------------------
 
@@ -2773,6 +2810,29 @@ def _method_uses_check_preimage(bindings: list[ANFBinding]) -> bool:
     return False
 
 
+def _method_uses_code_part(bindings: list[ANFBinding]) -> bool:
+    """Check whether a method has add_output, add_raw_output, or computeStateOutput/
+    computeStateOutputHash calls (recursively). Only methods that construct
+    continuation outputs need the _codePart implicit parameter."""
+    for b in bindings:
+        if b.value.kind in ("add_output", "add_raw_output"):
+            return True
+        # Single-output stateful continuation uses computeStateOutput/computeStateOutputHash
+        if b.value.kind == "call" and getattr(b.value, "func", None) in ("computeStateOutput", "computeStateOutputHash"):
+            return True
+        # Recurse into if-else branches and loops
+        if b.value.kind == "if":
+            then_bindings = getattr(b.value, "then", None) or []
+            else_bindings = getattr(b.value, "else_", None) or []
+            if _method_uses_code_part(then_bindings) or _method_uses_code_part(else_bindings):
+                return True
+        if b.value.kind == "loop":
+            body_bindings = getattr(b.value, "body", None) or []
+            if _method_uses_code_part(body_bindings):
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -2808,10 +2868,18 @@ def _lower_method_with_private_methods(
 ) -> StackMethod:
     param_names = [p.name for p in method.params]
 
-    # If the method uses checkPreimage, the unlocking script pushes an
-    # implicit <sig> before all declared parameters (OP_PUSH_TX pattern).
+    # If the method uses checkPreimage, the unlocking script pushes implicit
+    # params before all declared parameters (OP_PUSH_TX pattern).
+    # _codePart: full code script (locking script minus state) as ByteString
+    # _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
+    # These are inserted at the base of the stack so they can be consumed later.
     if _method_uses_check_preimage(method.body):
         param_names = ["_opPushTxSig"] + param_names
+        # _codePart is only needed when the method has add_output or add_raw_output
+        # (it provides the code script for continuation output construction).
+        # Stateless contracts and terminal methods don't use it.
+        if _method_uses_code_part(method.body):
+            param_names = ["_codePart"] + param_names
 
     ctx = _LoweringContext(param_names, properties)
     ctx.private_methods = private_methods

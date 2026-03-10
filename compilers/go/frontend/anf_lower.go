@@ -59,6 +59,8 @@ var byteReturningFunctions = map[string]bool{
 	"ecNegate":           true,
 	"ecMakePoint":        true,
 	"ecEncodeCompressed": true,
+	"sha256Compress":     true,
+	"sha256Finalize":     true,
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
@@ -171,8 +173,11 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// InductiveSmartContract public method lowering
 			// ---------------------------------------------------------------
 
-			// Register implicit parameters: parentTx + txPreimage
-			methodCtx.addParam("parentTx")
+			// Register implicit parameters: partial SHA-256 tail blocks + txPreimage
+			methodCtx.addParam("_parentHashState")
+			methodCtx.addParam("_parentTailBlock1")
+			methodCtx.addParam("_parentTailBlock2")
+			methodCtx.addParam("_parentRawTailLen")
 			methodCtx.addParam("txPreimage")
 
 			// 1. Inject checkPreimage(txPreimage) at the start
@@ -180,15 +185,22 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			checkResult := methodCtx.emit(ir.ANFValue{Kind: "check_preimage", Preimage: preimageRef})
 			methodCtx.emit(makeAssert(checkResult))
 
-			// 2. Verify parent tx authenticity:
-			//    assert(hash256(parentTx) === left(extractOutpoint(txPreimage), 32))
-			parentTxRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "parentTx"})
-			parentTxHash := methodCtx.emit(makeCall("hash256", []string{parentTxRef}))
+			// 2. Verify parent tx authenticity via partial SHA-256:
+			//    mid = sha256Compress(_parentHashState, _parentTailBlock1)
+			//    singleHash = sha256Compress(mid, _parentTailBlock2)
+			//    parentTxId = sha256(singleHash)  // double-SHA256 for txid
+			//    assert(parentTxId === left(extractOutpoint(txPreimage), 32))
+			hashState := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentHashState"})
+			tailBlock1 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentTailBlock1"})
+			mid := methodCtx.emit(makeCall("sha256Compress", []string{hashState, tailBlock1}))
+			tailBlock2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentTailBlock2"})
+			singleHash := methodCtx.emit(makeCall("sha256Compress", []string{mid, tailBlock2}))
+			parentTxId := methodCtx.emit(makeCall("sha256", []string{singleHash}))
 			preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 			outpointRef := methodCtx.emit(makeCall("extractOutpoint", []string{preimageRef2}))
 			thirtyTwo := methodCtx.emit(makeLoadConstInt(32))
 			parentTxIdFromPreimage := methodCtx.emit(makeCall("left", []string{outpointRef, thirtyTwo}))
-			parentHashEq := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: parentTxHash, Right: parentTxIdFromPreimage, ResultType: "bytes"})
+			parentHashEq := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: parentTxId, Right: parentTxIdFromPreimage, ResultType: "bytes"})
 			methodCtx.emit(makeAssert(parentHashEq))
 
 			// 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
@@ -203,45 +215,42 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			genesisCtx.emit(makeUpdateProp("_genesisOutpoint", currentOutpoint))
 			methodCtx.syncCounter(genesisCtx)
 
-			// Non-genesis branch: verify chain consistency
+			// Non-genesis branch: verify chain consistency using tail block extraction
 			nonGenesisCtx := methodCtx.subContext()
-			// Extract parent output script via extract_parent_output
-			ptxRef := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "parentTx"})
-			// Derive output index dynamically from the current transaction's outpoint.
-			// The outpoint is 36 bytes: 32-byte txid + 4-byte vout (little-endian).
-			// We extract the last 4 bytes (vout) and convert to a number via OP_BIN2NUM.
-			preimageForIdx := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
-			outpointForIdx := nonGenesisCtx.emit(makeCall("extractOutpoint", []string{preimageForIdx}))
-			fourC := nonGenesisCtx.emit(makeLoadConstInt(4))
-			outputIdxBytes := nonGenesisCtx.emit(makeCall("right", []string{outpointForIdx, fourC}))
-			outputIdx := nonGenesisCtx.emit(ir.ANFValue{Kind: "unary_op", Op: "unpack", Operand: outputIdxBytes})
-			parentScript := nonGenesisCtx.emit(ir.ANFValue{Kind: "extract_parent_output", RawTx: ptxRef, OutputIndex: outputIdx})
 
-			// Extract internal fields from the END of parent script
-			// Internal fields are the last 111 bytes (3 * 37 bytes: 1 push opcode + 36 data bytes each)
-			parentScriptLen := nonGenesisCtx.emit(makeCall("len", []string{parentScript}))
+			// Concatenate the two tail blocks to get 128 bytes of tail data
+			tb1 := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentTailBlock1"})
+			tb2 := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentTailBlock2"})
+			tailData := nonGenesisCtx.emit(makeCall("cat", []string{tb1, tb2}))
+
+			// Internal fields (111 bytes) are at the end of the raw tx data,
+			// just before the 4-byte locktime. Use _parentRawTailLen to compute the offset.
+			// fieldStart = _parentRawTailLen - 4 (locktime) - 111 (3 fields * 37 bytes)
+			rawTailLen := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_parentRawTailLen"})
+			four := nonGenesisCtx.emit(makeLoadConstInt(4))
 			oneEleven := nonGenesisCtx.emit(makeLoadConstInt(111))
-			prefixLen := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "-", Left: parentScriptLen, Right: oneEleven})
-			_ = prefixLen
-			internalFieldsWithPrefixes := nonGenesisCtx.emit(makeCall("right", []string{parentScript, oneEleven}))
+			beforeLocktime := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "-", Left: rawTailLen, Right: four})
+			fieldStart := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "-", Left: beforeLocktime, Right: oneEleven})
+
+			// Extract 111 bytes of internal fields from tailData:
+			// mid(tailData, fieldStart, 111) = right(left(tailData, fieldStart + 111), 111)
+			fieldEnd := nonGenesisCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "+", Left: fieldStart, Right: oneEleven})
+			prefixAndFields := nonGenesisCtx.emit(makeCall("left", []string{tailData, fieldEnd}))
+			internalFieldsWithPrefixes := nonGenesisCtx.emit(makeCall("right", []string{prefixAndFields, oneEleven}))
 
 			// Now extract each 37-byte field (1 push opcode + 36 data bytes)
 			thirtySevenC := nonGenesisCtx.emit(makeLoadConstInt(37))
 			thirtySixC := nonGenesisCtx.emit(makeLoadConstInt(36))
-			_ = thirtySixC
 
-			// parentGenesis: left(internalFieldsWithPrefixes, 37), then right(_, 36) to skip push opcode
+			// parentGenesis: bytes [1..37) (skip push opcode at byte 0)
 			parentGenesisRaw := nonGenesisCtx.emit(makeCall("left", []string{internalFieldsWithPrefixes, thirtySevenC}))
-			thirtySixC2 := nonGenesisCtx.emit(makeLoadConstInt(36))
-			parentGenesis := nonGenesisCtx.emit(makeCall("right", []string{parentGenesisRaw, thirtySixC2}))
+			parentGenesis := nonGenesisCtx.emit(makeCall("right", []string{parentGenesisRaw, thirtySixC}))
 
-			// parentParentOutpoint: left(internalFieldsWithPrefixes, 74), then right(_, 37), then right(_, 36)
+			// parentParentOutpoint: bytes [38..74) (skip push opcode at byte 37)
 			seventyFourC := nonGenesisCtx.emit(makeLoadConstInt(74))
 			parentParentOutpointRaw := nonGenesisCtx.emit(makeCall("left", []string{internalFieldsWithPrefixes, seventyFourC}))
-			thirtySevenC2 := nonGenesisCtx.emit(makeLoadConstInt(37))
-			parentParentOutpointWithPrefix := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointRaw, thirtySevenC2}))
-			thirtySixC3 := nonGenesisCtx.emit(makeLoadConstInt(36))
-			parentParentOutpoint := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointWithPrefix, thirtySixC3}))
+			parentParentOutpointWithPrefix := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointRaw, thirtySevenC}))
+			parentParentOutpoint := nonGenesisCtx.emit(makeCall("right", []string{parentParentOutpointWithPrefix, thirtySixC}))
 
 			// Assert: parentGenesis === _genesisOutpoint (same lineage)
 			myGenesis := nonGenesisCtx.emit(ir.ANFValue{Kind: "load_prop", Name: "_genesisOutpoint"})
@@ -299,9 +308,12 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 				methodCtx.emit(makeAssert(eqRef))
 			}
 
-			// Append implicit params: parentTx + txPreimage
+			// Append implicit params: partial SHA-256 tail blocks + txPreimage
 			augmentedParams := append(lowerParams(method.Params),
-				ir.ANFParam{Name: "parentTx", Type: "ByteString"},
+				ir.ANFParam{Name: "_parentHashState", Type: "ByteString"},
+				ir.ANFParam{Name: "_parentTailBlock1", Type: "ByteString"},
+				ir.ANFParam{Name: "_parentTailBlock2", Type: "ByteString"},
+				ir.ANFParam{Name: "_parentRawTailLen", Type: "bigint"},
 				ir.ANFParam{Name: "txPreimage", Type: "SigHashPreimage"},
 			)
 
@@ -829,12 +841,25 @@ func (ctx *lowerCtx) lowerExprToRef(expr Expression) string {
 		if (e.Op == "===" || e.Op == "!==") && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
 			resultType = "bytes"
 		}
+		// For +, annotate byte-typed operands so stack lowering can emit OP_CAT.
+		if e.Op == "+" && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
+			resultType = "bytes"
+		}
+		// For bitwise &, |, ^, annotate byte-typed operands.
+		if (e.Op == "&" || e.Op == "|" || e.Op == "^") && (isByteTypedExpr(e.Left, ctx) || isByteTypedExpr(e.Right, ctx)) {
+			resultType = "bytes"
+		}
 
 		return ctx.emit(ir.ANFValue{Kind: "bin_op", Op: e.Op, Left: leftRef, Right: rightRef, ResultType: resultType})
 
 	case UnaryExpr:
 		operandRef := ctx.lowerExprToRef(e.Operand)
-		return ctx.emit(ir.ANFValue{Kind: "unary_op", Op: e.Op, Operand: operandRef})
+		unaryValue := ir.ANFValue{Kind: "unary_op", Op: e.Op, Operand: operandRef}
+		// For ~, annotate byte-typed operands so downstream passes know the result is bytes.
+		if e.Op == "~" && isByteTypedExpr(e.Operand, ctx) {
+			unaryValue.ResultType = "bytes"
+		}
+		return ctx.emit(unaryValue)
 
 	case CallExpr:
 		return ctx.lowerCallExpr(e)
@@ -960,8 +985,7 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 			grandparentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_grandparentOutpoint"})
 			stateValues = append(stateValues, genesisRef, parentRef, grandparentRef)
 		}
-		preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
-		ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: preimageRef})
+		ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
 		ctx.addOutputRef(ref)
 		return ref
 	}
@@ -977,8 +1001,27 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 				grandparentRef := ctx.emit(ir.ANFValue{Kind: "load_prop", Name: "_grandparentOutpoint"})
 				stateValues = append(stateValues, genesisRef, parentRef, grandparentRef)
 			}
-			preimageRef := ctx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
-			ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: preimageRef})
+			ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
+			ctx.addOutputRef(ref)
+			return ref
+		}
+	}
+
+	// this.addRawOutput(satoshis, scriptBytes) -> special node
+	if pa, ok := callee.(PropertyAccessExpr); ok && pa.Property == "addRawOutput" {
+		argRefs := ctx.lowerArgs(e.Args)
+		satoshis := argRefs[0]
+		scriptBytes := argRefs[1]
+		ref := ctx.emit(ir.ANFValue{Kind: "add_raw_output", Satoshis: satoshis, ScriptBytes: scriptBytes})
+		ctx.addOutputRef(ref)
+		return ref
+	}
+	if me, ok := callee.(MemberExpr); ok {
+		if id, ok := me.Object.(Identifier); ok && id.Name == "this" && me.Property == "addRawOutput" {
+			argRefs := ctx.lowerArgs(e.Args)
+			satoshis := argRefs[0]
+			scriptBytes := argRefs[1]
+			ref := ctx.emit(ir.ANFValue{Kind: "add_raw_output", Satoshis: satoshis, ScriptBytes: scriptBytes})
 			ctx.addOutputRef(ref)
 			return ref
 		}
@@ -1263,11 +1306,11 @@ func stmtHasAddOutput(stmt Statement) bool {
 
 func exprHasAddOutput(expr Expression) bool {
 	if ce, ok := expr.(CallExpr); ok {
-		if pa, ok := ce.Callee.(PropertyAccessExpr); ok && pa.Property == "addOutput" {
+		if pa, ok := ce.Callee.(PropertyAccessExpr); ok && (pa.Property == "addOutput" || pa.Property == "addRawOutput") {
 			return true
 		}
 		if me, ok := ce.Callee.(MemberExpr); ok {
-			if id, ok := me.Object.(Identifier); ok && id.Name == "this" && me.Property == "addOutput" {
+			if id, ok := me.Object.(Identifier); ok && id.Name == "this" && (me.Property == "addOutput" || me.Property == "addRawOutput") {
 				return true
 			}
 		}

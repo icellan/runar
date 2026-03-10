@@ -41,7 +41,7 @@ const KNOWN_KINDS: &[&str] = &[
     "check_preimage",
     "deserialize_state",
     "add_output",
-    "extract_parent_output",
+    "add_raw_output",
 ];
 
 fn kind_name(value: &ANFValue) -> &'static str {
@@ -61,7 +61,7 @@ fn kind_name(value: &ANFValue) -> &'static str {
         ANFValue::CheckPreimage { .. } => "check_preimage",
         ANFValue::DeserializeState { .. } => "deserialize_state",
         ANFValue::AddOutput { .. } => "add_output",
-        ANFValue::ExtractParentOutput { .. } => "extract_parent_output",
+        ANFValue::AddRawOutput { .. } => "add_raw_output",
     }
 }
 

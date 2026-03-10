@@ -271,54 +271,23 @@ func TestNFT_Burn(t *testing.T) {
 	}
 	t.Logf("deployed: %s", deployTxid)
 
-	// --- Raw spending path (sig depends on final tx) ---
-
-	contractUTXO := contract.GetCurrentUtxo()
-	if contractUTXO == nil {
-		t.Fatalf("no current UTXO after deploy")
-	}
-
-	// burn(sig) — method 1. The script just verifies checkSig and doesn't
-	// check the output hash (no addOutput calls), so a plain spend works.
-	spendTx, err := helpers.BuildSpendTx(
-		&helpers.UTXO{
-			Txid:     contractUTXO.Txid,
-			Vout:     contractUTXO.OutputIndex,
-			Satoshis: contractUTXO.Satoshis,
-			Script:   contractUTXO.Script,
+	// burn(sig) via SDK terminal call — method 1. The script verifies
+	// checkSig but doesn't addOutput, so we use TerminalOutputs to
+	// specify the exact output (P2PKH to owner).
+	callOpts := &runar.CallOptions{
+		TerminalOutputs: []runar.TerminalOutput{
+			{ScriptHex: owner.P2PKHScript(), Satoshis: 4500},
 		},
-		owner.P2PKHScript(),
-		4500,
+	}
+	txid, _, err := contract.Call(
+		"burn",
+		[]interface{}{nil}, // sig placeholder — auto-signed by SDK
+		provider, signer, callOpts,
 	)
 	if err != nil {
-		t.Fatalf("build spend: %v", err)
+		t.Fatalf("burn failed: %v", err)
 	}
-
-	sigHex, err := helpers.SignInput(spendTx, 0, owner.PrivKey)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
-	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
-	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
-	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// burn is method 1
-	// Unlocking: <opPushTxSig> <sig> <txPreimage> <methodIndex=1>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(1) // burn
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid := helpers.AssertTxAccepted(t, spendTx.Hex())
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("burn TX: %s", txid)
 }
 
 func TestNFT_WrongOwner_Rejected(t *testing.T) {

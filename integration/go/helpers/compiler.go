@@ -220,7 +220,7 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 		})
 	}
 
-	return &runar.RunarArtifact{
+	artifact := &runar.RunarArtifact{
 		Version:          "runar-v0.1.0",
 		CompilerVersion:  "integration-test",
 		ContractName:     program.ContractName,
@@ -232,7 +232,15 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 			Constructor: runar.ABIConstructor{Params: ctorParams},
 			Methods:     abiMethods,
 		},
-	}, nil
+	}
+	if emitResult.CodeSeparatorIndex >= 0 {
+		idx := emitResult.CodeSeparatorIndex
+		artifact.CodeSeparatorIndex = &idx
+	}
+	if len(emitResult.CodeSeparatorIndices) > 0 {
+		artifact.CodeSeparatorIndices = emitResult.CodeSeparatorIndices
+	}
+	return artifact, nil
 }
 
 // CompileContract2 is like CompileContract but takes source as a string.

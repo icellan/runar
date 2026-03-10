@@ -59,42 +59,28 @@ func TestAuction_Close(t *testing.T) {
 
 	contract, _ := deployAuction(t, auctioneer, bidder, 1000, 0)
 
-	// Get the deployed UTXO via SDK, convert to helper UTXO for raw spending
-	utxo := helpers.SDKUtxoToHelper(contract.GetCurrentUtxo())
-
-	// Build spend TX: close pays out to auctioneer
-	receiverScript := auctioneer.P2PKHScript()
-	spendTx, err := helpers.BuildSpendTx(utxo, receiverScript, 4500)
+	// close(sig) via SDK terminal call — method 1. The close method verifies
+	// checkSig but doesn't addOutput, so we use TerminalOutputs.
+	provider := helpers.NewRPCProvider()
+	signer, err := helpers.SDKSignerFromWallet(auctioneer)
 	if err != nil {
-		t.Fatalf("build spend: %v", err)
+		t.Fatalf("signer: %v", err)
 	}
 
-	sigHex, err := helpers.SignInput(spendTx, 0, auctioneer.PrivKey)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	callOpts := &runar.CallOptions{
+		TerminalOutputs: []runar.TerminalOutput{
+			{ScriptHex: auctioneer.P2PKHScript(), Satoshis: 4500},
+		},
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	// close(sig: Sig) -- method index 1
-	// OP_PUSH_TX for stateful
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
+	txid, _, err := contract.Call(
+		"close",
+		[]interface{}{nil}, // sig placeholder — auto-signed by SDK
+		provider, signer, callOpts,
+	)
 	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
+		t.Fatalf("close failed: %v", err)
 	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// Unlocking: <opPushTxSig> <sig> <txPreimage> <methodIndex=1>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(preimageBytes) +
-		helpers.EncodeMethodIndex(1) // close
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid := helpers.AssertTxAccepted(t, spendTx.Hex())
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("close TX: %s", txid)
 }
 
 func TestAuction_Compile(t *testing.T) {

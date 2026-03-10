@@ -22,6 +22,27 @@ pub fn compute_op_push_tx(
     subscript: &str,
     satoshis: i64,
 ) -> Result<(String, String), String> {
+    compute_op_push_tx_with_code_sep(tx_hex, input_index, subscript, satoshis, -1)
+}
+
+/// Like `compute_op_push_tx` but supports OP_CODESEPARATOR.
+/// When `code_separator_index` >= 0, the scriptCode in the BIP-143 preimage uses only
+/// the portion of subscript after the OP_CODESEPARATOR byte offset.
+pub fn compute_op_push_tx_with_code_sep(
+    tx_hex: &str,
+    input_index: usize,
+    subscript: &str,
+    satoshis: i64,
+    code_separator_index: i64,
+) -> Result<(String, String), String> {
+    let mut effective_subscript = subscript.to_string();
+    if code_separator_index >= 0 {
+        let trim_pos = ((code_separator_index as usize) + 1) * 2;
+        if trim_pos <= subscript.len() {
+            effective_subscript = subscript[trim_pos..].to_string();
+        }
+    }
+
     let tx_bytes = hex_to_bytes(tx_hex)?;
     let tx = parse_raw_tx(&tx_bytes)?;
 
@@ -33,7 +54,7 @@ pub fn compute_op_push_tx(
         ));
     }
 
-    let subscript_bytes = hex_to_bytes(subscript)?;
+    let subscript_bytes = hex_to_bytes(&effective_subscript)?;
 
     // Compute BIP-143 preimage (raw bytes, not hashed)
     let preimage = bip143_preimage(&tx, input_index, &subscript_bytes, satoshis as u64, SIGHASH_ALL_FORKID);

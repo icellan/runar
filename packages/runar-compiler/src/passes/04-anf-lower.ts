@@ -29,6 +29,7 @@ import type {
   ANFValue,
   ANFProperty,
   BinOp,
+  ANFUnaryOp,
 } from '../ir/index.js';
 
 // ---------------------------------------------------------------------------
@@ -115,8 +116,11 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // InductiveSmartContract public method lowering
       // ---------------------------------------------------------------
 
-      // Register implicit parameters: parentTx + txPreimage
-      methodCtx.addParam('parentTx');
+      // Register implicit parameters: partial SHA-256 tail blocks + txPreimage
+      methodCtx.addParam('_parentHashState');
+      methodCtx.addParam('_parentTailBlock1');
+      methodCtx.addParam('_parentTailBlock2');
+      methodCtx.addParam('_parentRawTailLen');
       methodCtx.addParam('txPreimage');
 
       // 1. Inject checkPreimage(txPreimage) at the start
@@ -124,15 +128,22 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       const checkResult = methodCtx.emit({ kind: 'check_preimage', preimage: preimageRef });
       methodCtx.emit({ kind: 'assert', value: checkResult });
 
-      // 2. Verify parent tx authenticity:
-      //    assert(hash256(parentTx) === left(extractOutpoint(txPreimage), 32))
-      const parentTxRef = methodCtx.emit({ kind: 'load_param', name: 'parentTx' });
-      const parentTxHash = methodCtx.emit({ kind: 'call', func: 'hash256', args: [parentTxRef] });
+      // 2. Verify parent tx authenticity via partial SHA-256:
+      //    mid = sha256Compress(_parentHashState, _parentTailBlock1)
+      //    singleHash = sha256Compress(mid, _parentTailBlock2)
+      //    parentTxId = sha256(singleHash)  // double-SHA256 for txid
+      //    assert(parentTxId === left(extractOutpoint(txPreimage), 32))
+      const hashState = methodCtx.emit({ kind: 'load_param', name: '_parentHashState' });
+      const tailBlock1 = methodCtx.emit({ kind: 'load_param', name: '_parentTailBlock1' });
+      const mid = methodCtx.emit({ kind: 'call', func: 'sha256Compress', args: [hashState, tailBlock1] });
+      const tailBlock2 = methodCtx.emit({ kind: 'load_param', name: '_parentTailBlock2' });
+      const singleHash = methodCtx.emit({ kind: 'call', func: 'sha256Compress', args: [mid, tailBlock2] });
+      const parentTxId = methodCtx.emit({ kind: 'call', func: 'sha256', args: [singleHash] });
       const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
       const outpointRef = methodCtx.emit({ kind: 'call', func: 'extractOutpoint', args: [preimageRef2] });
       const thirtyTwo = methodCtx.emit({ kind: 'load_const', value: 32n });
       const parentTxIdFromPreimage = methodCtx.emit({ kind: 'call', func: 'left', args: [outpointRef, thirtyTwo] });
-      const parentHashEq = methodCtx.emit({ kind: 'bin_op', op: '===', left: parentTxHash, right: parentTxIdFromPreimage, result_type: 'bytes' });
+      const parentHashEq = methodCtx.emit({ kind: 'bin_op', op: '===', left: parentTxId, right: parentTxIdFromPreimage, result_type: 'bytes' });
       methodCtx.emit({ kind: 'assert', value: parentHashEq });
 
       // 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
@@ -147,29 +158,28 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       genesisCtx.emit({ kind: 'update_prop', name: '_genesisOutpoint', value: currentOutpoint });
       methodCtx.syncCounter(genesisCtx);
 
-      // Non-genesis branch: verify chain consistency
+      // Non-genesis branch: verify chain consistency using tail block extraction
       const nonGenesisCtx = methodCtx.subContext();
-      // Extract parent output script via extract_parent_output
-      const ptxRef = nonGenesisCtx.emit({ kind: 'load_param', name: 'parentTx' });
-      // Derive output index dynamically from the current transaction's outpoint.
-      // The outpoint is 36 bytes: 32-byte txid + 4-byte vout (little-endian).
-      // We extract the last 4 bytes (vout) and convert to a number via OP_BIN2NUM.
-      const preimageForIdx = nonGenesisCtx.emit({ kind: 'load_param', name: 'txPreimage' });
-      const outpointForIdx = nonGenesisCtx.emit({ kind: 'call', func: 'extractOutpoint', args: [preimageForIdx] });
-      const four = nonGenesisCtx.emit({ kind: 'load_const', value: 4n });
-      const outputIdxBytes = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [outpointForIdx, four] });
-      const outputIdx = nonGenesisCtx.emit({ kind: 'unary_op', op: 'unpack', operand: outputIdxBytes });
-      const parentScript = nonGenesisCtx.emit({ kind: 'extract_parent_output', rawTx: ptxRef, outputIndex: outputIdx });
 
-      // Extract internal fields from the END of parent script
-      // Internal fields are the last 108 bytes of push data (3 fields * 36 bytes)
-      // Each push-data field in Script is: 0x24 (push 36 bytes) + 36 bytes = 37 bytes
-      // Total: 3 * 37 = 111 bytes from the end of the script
-      // But we extract the push DATA, not including the push opcode.
-      // Extract the last 111 bytes of the parent script (3 fields * 37 bytes with push prefix).
-      // Each field is: 0x24 (OP_PUSHDATA 36 bytes) + 36 bytes data = 37 bytes per field.
+      // Concatenate the two tail blocks to get 128 bytes of tail data
+      const tb1 = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentTailBlock1' });
+      const tb2 = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentTailBlock2' });
+      const tailData = nonGenesisCtx.emit({ kind: 'call', func: 'cat', args: [tb1, tb2] });
+
+      // Internal fields (111 bytes) are at the end of the raw tx data,
+      // just before the 4-byte locktime. Use _parentRawTailLen to compute the offset.
+      // fieldStart = _parentRawTailLen - 4 (locktime) - 111 (3 fields * 37 bytes)
+      const rawTailLen = nonGenesisCtx.emit({ kind: 'load_param', name: '_parentRawTailLen' });
+      const four = nonGenesisCtx.emit({ kind: 'load_const', value: 4n });
       const oneEleven = nonGenesisCtx.emit({ kind: 'load_const', value: 111n });
-      const internalFieldsWithPrefixes = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [parentScript, oneEleven] });
+      const beforeLocktime = nonGenesisCtx.emit({ kind: 'bin_op', op: '-', left: rawTailLen, right: four });
+      const fieldStart = nonGenesisCtx.emit({ kind: 'bin_op', op: '-', left: beforeLocktime, right: oneEleven });
+
+      // Extract 111 bytes of internal fields from tailData:
+      // mid(tailData, fieldStart, 111) = right(left(tailData, fieldStart + 111), 111)
+      const fieldEnd = nonGenesisCtx.emit({ kind: 'bin_op', op: '+', left: fieldStart, right: oneEleven });
+      const prefixAndFields = nonGenesisCtx.emit({ kind: 'call', func: 'left', args: [tailData, fieldEnd] });
+      const internalFieldsWithPrefixes = nonGenesisCtx.emit({ kind: 'call', func: 'right', args: [prefixAndFields, oneEleven] });
 
       // Now extract each 37-byte field (1 push opcode + 36 data bytes)
       const thirtySevenC = nonGenesisCtx.emit({ kind: 'load_const', value: 37n });
@@ -240,10 +250,13 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
         methodCtx.emit({ kind: 'assert', value: eqRef });
       }
 
-      // Append implicit params: parentTx + txPreimage
+      // Append implicit params: partial SHA-256 tail blocks + txPreimage
       const augmentedParams: ParamNode[] = [
         ...method.params,
-        { kind: 'param', name: 'parentTx', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentHashState', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentTailBlock1', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentTailBlock2', type: { kind: 'primitive_type', name: 'ByteString' } },
+        { kind: 'param', name: '_parentRawTailLen', type: { kind: 'primitive_type', name: 'bigint' } },
         { kind: 'param', name: 'txPreimage', type: { kind: 'primitive_type', name: 'SigHashPreimage' } },
       ];
 
@@ -849,6 +862,12 @@ function lowerBinaryExpr(
       binOp.result_type = 'bytes';
     }
   }
+  // For bitwise &, |, ^, annotate byte-typed operands.
+  if (expr.op === '&' || expr.op === '|' || expr.op === '^') {
+    if (isByteTypedExpr(expr.left, ctx) || isByteTypedExpr(expr.right, ctx)) {
+      binOp.result_type = 'bytes';
+    }
+  }
   return ctx.emit(binOp);
 }
 
@@ -857,7 +876,12 @@ function lowerUnaryExpr(
   ctx: LoweringContext,
 ): string {
   const operandRef = lowerExprToRef(expr.operand, ctx);
-  return ctx.emit({ kind: 'unary_op', op: expr.op, operand: operandRef });
+  const unaryOp: ANFUnaryOp = { kind: 'unary_op', op: expr.op, operand: operandRef };
+  // For ~, annotate byte-typed operands so downstream passes know the result is bytes.
+  if (expr.op === '~' && isByteTypedExpr(expr.operand, ctx)) {
+    unaryOp.result_type = 'bytes';
+  }
+  return ctx.emit(unaryOp);
 }
 
 function lowerCallExpr(
@@ -906,8 +930,17 @@ function lowerCallExpr(
       stateValues.push(genesisRef, parentRef, grandparentRef);
     }
 
-    const preimageRef = ctx.emit({ kind: 'load_param', name: 'txPreimage' });
-    const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: preimageRef });
+    const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
+    ctx.addOutputRef(ref);
+    return ref;
+  }
+
+  // this.addRawOutput(satoshis, scriptBytes) -> special node
+  if (callee.kind === 'property_access' && callee.property === 'addRawOutput') {
+    const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    const satoshis = argRefs[0]!;
+    const scriptBytes = argRefs[1]!;
+    const ref = ctx.emit({ kind: 'add_raw_output', satoshis, scriptBytes });
     ctx.addOutputRef(ref);
     return ref;
   }
@@ -1195,7 +1228,8 @@ function stmtHasAddOutput(stmt: Statement): boolean {
 }
 
 function exprHasAddOutput(expr: Expression): boolean {
-  if (expr.kind === 'call_expr' && expr.callee.kind === 'property_access' && expr.callee.property === 'addOutput') {
+  if (expr.kind === 'call_expr' && expr.callee.kind === 'property_access' &&
+      (expr.callee.property === 'addOutput' || expr.callee.property === 'addRawOutput')) {
     return true;
   }
   return false;

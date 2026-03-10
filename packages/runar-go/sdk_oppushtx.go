@@ -37,6 +37,13 @@ func init() {
 //
 // Returns the DER signature (with sighash flag) and the preimage, both as raw bytes.
 func ComputeOpPushTx(txHex string, inputIndex int, subscript string, satoshis int64) ([]byte, []byte, error) {
+	return ComputeOpPushTxWithCodeSep(txHex, inputIndex, subscript, satoshis, -1)
+}
+
+// ComputeOpPushTxWithCodeSep is like ComputeOpPushTx but supports OP_CODESEPARATOR.
+// When codeSeparatorIndex >= 0, the scriptCode in the BIP-143 preimage uses only the
+// portion of the subscript AFTER the OP_CODESEPARATOR byte at that offset.
+func ComputeOpPushTxWithCodeSep(txHex string, inputIndex int, subscript string, satoshis int64, codeSeparatorIndex int) ([]byte, []byte, error) {
 	tx, err := transaction.NewTransactionFromHex(txHex)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse transaction: %w", err)
@@ -46,7 +53,14 @@ func ComputeOpPushTx(txHex string, inputIndex int, subscript string, satoshis in
 		return nil, nil, fmt.Errorf("input index %d out of range (%d inputs)", inputIndex, len(tx.Inputs))
 	}
 
-	lockScript, err := script.NewFromHex(subscript)
+	// If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
+	scriptCode := subscript
+	if codeSeparatorIndex >= 0 {
+		// Each byte is 2 hex chars. Skip past the separator byte (+1 byte = +2 hex chars).
+		scriptCode = subscript[(codeSeparatorIndex+1)*2:]
+	}
+
+	lockScript, err := script.NewFromHex(scriptCode)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse subscript: %w", err)
 	}

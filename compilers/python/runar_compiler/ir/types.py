@@ -134,6 +134,9 @@ class ANFValue:
     satoshis: str | None = None
     state_values: list[str] | None = None
 
+    # -- add_raw_output ----------------------------------------------------
+    script_bytes: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Constant decoding
@@ -243,6 +246,7 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     v.preimage = d.get("preimage")
     v.satoshis = d.get("satoshis")
     v.state_values = d.get("stateValues")
+    v.script_bytes = d.get("scriptBytes")
 
     # Nested bindings
     if "then" in d and d["then"] is not None:

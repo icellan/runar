@@ -33,7 +33,7 @@ import { SmartContract, assert, PubKey, Sig, Addr, ByteString, SigHashPreimage, 
  * @param owner     - Owner's compressed public key (33 bytes). Only the
  *                    corresponding private key can produce a valid `sig`.
  * @param recipient - Recipient address hash (20 bytes, hash160 of pubkey).
- * @param minAmount - Minimum satoshi value the spending transaction must
+ * @param minAmount - Exact satoshi value the spending transaction must
  *                    include in its output, enforced by the covenant rule.
  */
 class CovenantVault extends SmartContract {
@@ -41,7 +41,7 @@ class CovenantVault extends SmartContract {
   readonly owner: PubKey;
   /** Recipient address (20-byte hash160 of the recipient's public key). */
   readonly recipient: Addr;
-  /** Minimum output amount in satoshis enforced by the covenant. */
+  /** Exact output amount in satoshis enforced by the covenant. */
   readonly minAmount: bigint;
 
   constructor(owner: PubKey, recipient: Addr, minAmount: bigint) {
@@ -54,11 +54,12 @@ class CovenantVault extends SmartContract {
   /**
    * Spend funds held by this covenant.
    *
-   * Enforces that the spending transaction creates a P2PKH output to
-   * the designated recipient with at least `minAmount` satoshis. The
-   * output is constructed on-chain and verified against the sighash
-   * preimage's hashOutputs field, ensuring the covenant is enforced
-   * at the consensus level.
+   * Enforces that the spending transaction creates exactly one P2PKH output
+   * to the designated recipient with exactly `minAmount` satoshis. The
+   * expected output is constructed on-chain and its hash is verified against
+   * the sighash preimage's hashOutputs field, which commits to all outputs.
+   * This means the transaction must have this single exact output — no
+   * additional outputs or different amounts are permitted.
    *
    * @param sig        - ECDSA signature from the owner (~72 bytes DER).
    * @param txPreimage - Sighash preimage (variable length) used by

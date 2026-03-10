@@ -581,6 +581,8 @@ mod tests {
             script: "76a988ac".to_string(),
             state_fields: None,
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
         let result = extract_state_from_script(&artifact, "76a988ac");
         assert!(result.is_none());
@@ -598,6 +600,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: Some(vec![]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
         let result = extract_state_from_script(&artifact, "51");
         assert!(result.is_none());
@@ -616,6 +620,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: Some(fields),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
         // Script with no 0x6a anywhere
         let result = extract_state_from_script(&artifact, "5193885187");
@@ -643,6 +649,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: Some(fields),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script);
@@ -676,6 +684,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: Some(fields),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).unwrap();
@@ -702,6 +712,8 @@ mod tests {
             script: "ac".to_string(),
             state_fields: Some(fields),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let result = extract_state_from_script(&artifact, &full_script).unwrap();

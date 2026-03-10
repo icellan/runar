@@ -124,6 +124,19 @@ class FungibleToken extends StatefulSmartContract {
 
 The arguments after `satoshis` correspond to the mutable properties in declaration order (`owner`, `balance`). The compiler verifies this at typecheck time.
 
+### Raw Outputs with `addRawOutput`
+
+For outputs with arbitrary scripts (not stateful continuations), use `addRawOutput`:
+
+```typescript
+this.addRawOutput(satoshis, scriptBytes);
+```
+
+- **`satoshis`**: `bigint` -- the output value.
+- **`scriptBytes`**: `ByteString` -- the complete locking script bytes.
+
+Unlike `addOutput`, which wraps the contract's own code with updated state, `addRawOutput` uses the caller-specified script bytes directly. This enables protocols that need heterogeneous outputs (e.g., paying to a P2PKH address alongside a contract continuation).
+
 ---
 
 ## Compiling to Artifacts

@@ -106,6 +106,8 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "ecMakePoint":        FuncSig(params=["bigint", "bigint"], return_type="Point"),
     "ecPointX":           FuncSig(params=["Point"], return_type="bigint"),
     "ecPointY":           FuncSig(params=["Point"], return_type="bigint"),
+    "sha256Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
+    "sha256Finalize":    FuncSig(params=["ByteString", "ByteString", "bigint"], return_type="ByteString"),
     "abs":               FuncSig(params=["bigint"], return_type="bigint"),
     "min":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),
     "max":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),
@@ -190,6 +192,11 @@ def is_bigint_family(t: str) -> bool:
     return t in _BIGINT_SUBTYPES
 
 
+def _is_byte_family(t: str) -> bool:
+    """Return True if *t* belongs to the ByteString type family."""
+    return t in _BYTESTRING_SUBTYPES
+
+
 # ---------------------------------------------------------------------------
 # Type environment
 # ---------------------------------------------------------------------------
@@ -245,8 +252,8 @@ class _TypeChecker:
         for prop in contract.properties:
             self.prop_types[prop.name] = _type_node_to_string(prop.type)
 
-        # For StatefulSmartContract, add the implicit txPreimage property
-        if contract.parent_class == "StatefulSmartContract":
+        # For StatefulSmartContract/InductiveSmartContract, add the implicit txPreimage property
+        if contract.parent_class in ("StatefulSmartContract", "InductiveSmartContract"):
             self.prop_types["txPreimage"] = "SigHashPreimage"
 
         for method in contract.methods:
@@ -488,7 +495,7 @@ class _TypeChecker:
                 )
             return "boolean"
 
-        if e.op in ("&", "|", "^", "<<", ">>"):
+        if e.op in ("<<", ">>"):
             if not is_bigint_family(left_type):
                 self._add_error(
                     f"left operand of '{e.op}' must be bigint, got '{left_type}'"
@@ -496,6 +503,20 @@ class _TypeChecker:
             if not is_bigint_family(right_type):
                 self._add_error(
                     f"right operand of '{e.op}' must be bigint, got '{right_type}'"
+                )
+            return "bigint"
+
+        # Bitwise operators: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
+        if e.op in ("&", "|", "^"):
+            if _is_byte_family(left_type) and _is_byte_family(right_type):
+                return "ByteString"
+            if not is_bigint_family(left_type):
+                self._add_error(
+                    f"left operand of '{e.op}' must be bigint or ByteString, got '{left_type}'"
+                )
+            if not is_bigint_family(right_type):
+                self._add_error(
+                    f"right operand of '{e.op}' must be bigint or ByteString, got '{right_type}'"
                 )
             return "bigint"
 
@@ -523,9 +544,11 @@ class _TypeChecker:
             return "bigint"
 
         if e.op == "~":
+            if _is_byte_family(operand_type):
+                return "ByteString"
             if not is_bigint_family(operand_type):
                 self._add_error(
-                    f"operand of '~' must be bigint, got '{operand_type}'"
+                    f"operand of '~' must be bigint or ByteString, got '{operand_type}'"
                 )
             return "bigint"
 
@@ -573,6 +596,10 @@ class _TypeChecker:
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "void"
+            if prop == "addRawOutput":
+                for arg in e.args:
+                    self._infer_expr_type(arg, env)
+                return "void"
             if prop in self.method_sigs:
                 return self._check_call_args(prop, self.method_sigs[prop], e.args, env)
             self.errors.append(
@@ -593,6 +620,10 @@ class _TypeChecker:
                 if e.callee.property == "getStateScript":
                     return "ByteString"
                 if e.callee.property == "addOutput":
+                    for arg in e.args:
+                        self._infer_expr_type(arg, env)
+                    return "void"
+                if e.callee.property == "addRawOutput":
                     for arg in e.args:
                         self._infer_expr_type(arg, env)
                     return "void"

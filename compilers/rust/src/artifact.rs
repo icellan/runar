@@ -69,6 +69,10 @@ pub struct RunarArtifact {
     pub state_fields: Vec<StateField>,
     #[serde(rename = "constructorSlots", skip_serializing_if = "Vec::is_empty", default)]
     pub constructor_slots: Vec<ConstructorSlot>,
+    #[serde(rename = "codeSeparatorIndex", skip_serializing_if = "Option::is_none")]
+    pub code_separator_index: Option<usize>,
+    #[serde(rename = "codeSeparatorIndices", skip_serializing_if = "Option::is_none")]
+    pub code_separator_indices: Option<Vec<usize>>,
     #[serde(rename = "buildTimestamp")]
     pub build_timestamp: String,
 }
@@ -86,6 +90,8 @@ pub fn assemble_artifact(
     script_hex: &str,
     script_asm: &str,
     constructor_slots: Vec<ConstructorSlot>,
+    code_separator_index: i64,
+    code_separator_indices: Vec<usize>,
 ) -> RunarArtifact {
     // Build constructor params from properties
     let constructor_params: Vec<ABIParam> = program
@@ -142,6 +148,17 @@ pub fn assemble_artifact(
     // Timestamp
     let now = chrono_lite_utc_now();
 
+    let cs_index = if code_separator_index >= 0 {
+        Some(code_separator_index as usize)
+    } else {
+        None
+    };
+    let cs_indices = if code_separator_indices.is_empty() {
+        None
+    } else {
+        Some(code_separator_indices)
+    };
+
     RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
@@ -156,6 +173,8 @@ pub fn assemble_artifact(
         asm: script_asm.to_string(),
         state_fields,
         constructor_slots,
+        code_separator_index: cs_index,
+        code_separator_indices: cs_indices,
         build_timestamp: now,
     }
 }

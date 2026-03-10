@@ -40,3 +40,12 @@ class StatefulSmartContract(SmartContract):
     def reset_outputs(self) -> None:
         """Reset the outputs list."""
         self._outputs = []
+
+
+class InductiveSmartContract(StatefulSmartContract):
+    """Base class for inductive Runar smart contracts.
+
+    Extends StatefulSmartContract with backward chain verification.
+    All inductive machinery is compiler-injected.
+    """
+    pass

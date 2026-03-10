@@ -28,6 +28,9 @@ const opPushTxPrivKey = PrivateKey.fromHex('000000000000000000000000000000000000
  * @param inputIndex - The contract input index (usually 0)
  * @param subscript  - The locking script of the UTXO being spent (hex)
  * @param satoshis   - The satoshi value of the UTXO being spent
+ * @param codeSeparatorIndex - Byte offset of OP_CODESEPARATOR in the locking script (optional).
+ *                             When present, the scriptCode in BIP-143 is the portion AFTER
+ *                             the OP_CODESEPARATOR (excluding the separator byte itself).
  * @returns Object with `sigHex` (DER + sighash byte) and `preimageHex` (raw preimage)
  */
 export function computeOpPushTx(
@@ -35,6 +38,7 @@ export function computeOpPushTx(
   inputIndex: number,
   subscript: string,
   satoshis: number,
+  codeSeparatorIndex?: number,
 ): { sigHex: string; preimageHex: string } {
   const tx = Transaction.fromHex(txHex);
   const input = tx.inputs[inputIndex]!;
@@ -52,6 +56,14 @@ export function computeOpPushTx(
     lockingScript: out.lockingScript,
   }));
 
+  // If OP_CODESEPARATOR is present, use only the script after it as scriptCode.
+  // The separator byte itself (0xab) is excluded from the scriptCode.
+  let scriptCode = subscript;
+  if (codeSeparatorIndex !== undefined) {
+    // Each byte is 2 hex chars. Skip past the separator byte (+1 byte = +2 hex chars).
+    scriptCode = subscript.slice((codeSeparatorIndex + 1) * 2);
+  }
+
   // Compute BIP-143 preimage
   const preimage = TransactionSignature.format({
     sourceTXID: input.sourceTXID!,
@@ -61,7 +73,7 @@ export function computeOpPushTx(
     otherInputs: otherInputs as Parameters<typeof TransactionSignature.format>[0]['otherInputs'],
     outputs: outputs as unknown as Parameters<typeof TransactionSignature.format>[0]['outputs'],
     inputIndex,
-    subscript: Script.fromHex(subscript) as unknown as Parameters<typeof TransactionSignature.format>[0]['subscript'],
+    subscript: Script.fromHex(scriptCode) as unknown as Parameters<typeof TransactionSignature.format>[0]['subscript'],
     inputSequence: input.sequence!,
     lockTime: tx.lockTime,
     scope: SIGHASH_ALL_FORKID,

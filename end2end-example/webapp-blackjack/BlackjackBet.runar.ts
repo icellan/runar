@@ -1,5 +1,16 @@
 import { StatefulSmartContract, assert, PubKey, Sig, ByteString, RabinSig, RabinPubKey, checkSig, verifyRabinSig, num2bin, cat, hash160, hash256, extractOutputHash } from 'runar-lang';
 
+/**
+ * BlackjackBet -- a blackjack wager with oracle-attested outcomes.
+ *
+ * Oracle replay note: The oracle signs `cat(outcomeType, oracleThreshold,
+ * nonce)`. The oracleThreshold field binds signatures to this contract's
+ * parameters, providing partial domain separation. However, the same signed
+ * message structure is used across settleBlackjack, settleWin, and
+ * settleLoss -- only the outcomeType value differentiates them. For
+ * production contracts, consider including the contract's UTXO outpoint or
+ * locking script hash in the oracle message to prevent cross-contract replay.
+ */
 class BlackjackBet extends StatefulSmartContract {
   readonly playerPubKey: PubKey;
   readonly housePubKey: PubKey;

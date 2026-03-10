@@ -339,15 +339,8 @@
         {
           "name": "t27",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t28",
-          "value": {
             "kind": "add_output",
-            "preimage": "t27",
+            "preimage": "",
             "satoshis": "t23",
             "stateValues": [
               "t24",
@@ -357,82 +350,75 @@
           }
         },
         {
-          "name": "t29",
+          "name": "t28",
           "value": {
             "kind": "load_param",
             "name": "amount"
           }
         },
         {
-          "name": "t30",
+          "name": "t29",
           "value": {
             "kind": "bin_op",
-            "left": "t29",
+            "left": "t28",
             "op": "<",
             "right": "totalBalance"
           }
         },
         {
-          "name": "t38",
+          "name": "t36",
           "value": {
-            "cond": "t30",
+            "cond": "t29",
             "else": [],
             "kind": "if",
             "then": [
               {
-                "name": "t31",
+                "name": "t30",
                 "value": {
                   "kind": "load_param",
                   "name": "outputSatoshis"
                 }
               },
               {
-                "name": "t32",
+                "name": "t31",
                 "value": {
                   "kind": "load_prop",
                   "name": "owner"
                 }
               },
               {
-                "name": "t33",
+                "name": "t32",
                 "value": {
                   "kind": "load_param",
                   "name": "amount"
                 }
               },
               {
-                "name": "t34",
+                "name": "t33",
                 "value": {
                   "kind": "bin_op",
                   "left": "totalBalance",
                   "op": "-",
-                  "right": "t33"
+                  "right": "t32"
                 }
               },
               {
-                "name": "t35",
+                "name": "t34",
                 "value": {
                   "kind": "load_const",
                   "value": 0
                 }
               },
               {
-                "name": "t36",
-                "value": {
-                  "kind": "load_param",
-                  "name": "txPreimage"
-                }
-              },
-              {
-                "name": "t37",
+                "name": "t35",
                 "value": {
                   "kind": "add_output",
-                  "preimage": "t36",
-                  "satoshis": "t31",
+                  "preimage": "",
+                  "satoshis": "t30",
                   "stateValues": [
-                    "t32",
-                    "t34",
-                    "t35"
+                    "t31",
+                    "t33",
+                    "t34"
                   ]
                 }
               }
@@ -440,27 +426,49 @@
           }
         },
         {
-          "name": "t39",
+          "name": "t37",
           "value": {
             "kind": "load_param",
             "name": "_changePKH"
           }
         },
         {
-          "name": "t40",
+          "name": "t38",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
+          "name": "t39",
+          "value": {
+            "args": [
+              "t37",
+              "t38"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t40",
+          "value": {
+            "args": [
+              "t27",
+              "t36"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
           "name": "t41",
           "value": {
             "args": [
-              "t39",
-              "t40"
+              "t40",
+              "t39"
             ],
-            "func": "buildChangeOutput",
+            "func": "cat",
             "kind": "call"
           }
         },
@@ -468,22 +476,17 @@
           "name": "t42",
           "value": {
             "args": [
-              "t28",
-              "t38"
+              "t41"
             ],
-            "func": "cat",
+            "func": "hash256",
             "kind": "call"
           }
         },
         {
           "name": "t43",
           "value": {
-            "args": [
-              "t42",
-              "t41"
-            ],
-            "func": "cat",
-            "kind": "call"
+            "kind": "load_param",
+            "name": "txPreimage"
           }
         },
         {
@@ -492,42 +495,25 @@
             "args": [
               "t43"
             ],
-            "func": "hash256",
+            "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
           "name": "t45",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
+            "kind": "bin_op",
+            "left": "t42",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t44"
           }
         },
         {
           "name": "t46",
           "value": {
-            "args": [
-              "t45"
-            ],
-            "func": "extractOutputHash",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t47",
-          "value": {
-            "kind": "bin_op",
-            "left": "t44",
-            "op": "===",
-            "result_type": "bytes",
-            "right": "t46"
-          }
-        },
-        {
-          "name": "t48",
-          "value": {
             "kind": "assert",
-            "value": "t47"
+            "value": "t45"
           }
         }
       ],
@@ -710,15 +696,8 @@
         {
           "name": "t19",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t20",
-          "value": {
             "kind": "add_output",
-            "preimage": "t19",
+            "preimage": "",
             "satoshis": "t13",
             "stateValues": [
               "t14",
@@ -728,27 +707,38 @@
           }
         },
         {
-          "name": "t21",
+          "name": "t20",
           "value": {
             "kind": "load_param",
             "name": "_changePKH"
           }
         },
         {
-          "name": "t22",
+          "name": "t21",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
+          "name": "t22",
+          "value": {
+            "args": [
+              "t20",
+              "t21"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
           "name": "t23",
           "value": {
             "args": [
-              "t21",
+              "t19",
               "t22"
             ],
-            "func": "buildChangeOutput",
+            "func": "cat",
             "kind": "call"
           }
         },
@@ -756,55 +746,44 @@
           "name": "t24",
           "value": {
             "args": [
-              "t20",
               "t23"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t25",
-          "value": {
-            "args": [
-              "t24"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t26",
+          "name": "t25",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t27",
+          "name": "t26",
           "value": {
             "args": [
-              "t26"
+              "t25"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t28",
+          "name": "t27",
           "value": {
             "kind": "bin_op",
-            "left": "t25",
+            "left": "t24",
             "op": "===",
             "result_type": "bytes",
-            "right": "t27"
+            "right": "t26"
           }
         },
         {
-          "name": "t29",
+          "name": "t28",
           "value": {
             "kind": "assert",
-            "value": "t28"
+            "value": "t27"
           }
         }
       ],
@@ -1122,47 +1101,40 @@
           }
         },
         {
-          "name": "t43",
+          "name": "t41",
           "value": {
             "cond": "t32",
             "else": [
               {
-                "name": "t38",
+                "name": "t37",
                 "value": {
                   "kind": "load_param",
                   "name": "outputSatoshis"
                 }
               },
               {
-                "name": "t39",
+                "name": "t38",
                 "value": {
                   "kind": "load_prop",
                   "name": "owner"
                 }
               },
               {
-                "name": "t40",
+                "name": "t39",
                 "value": {
                   "kind": "load_param",
                   "name": "otherBalance"
                 }
               },
               {
-                "name": "t41",
-                "value": {
-                  "kind": "load_param",
-                  "name": "txPreimage"
-                }
-              },
-              {
-                "name": "t42",
+                "name": "t40",
                 "value": {
                   "kind": "add_output",
-                  "preimage": "t41",
-                  "satoshis": "t38",
+                  "preimage": "",
+                  "satoshis": "t37",
                   "stateValues": [
+                    "t38",
                     "t39",
-                    "t40",
                     "myBalance"
                   ]
                 }
@@ -1194,15 +1166,8 @@
               {
                 "name": "t36",
                 "value": {
-                  "kind": "load_param",
-                  "name": "txPreimage"
-                }
-              },
-              {
-                "name": "t37",
-                "value": {
                   "kind": "add_output",
-                  "preimage": "t36",
+                  "preimage": "",
                   "satoshis": "t33",
                   "stateValues": [
                     "t34",
@@ -1215,39 +1180,56 @@
           }
         },
         {
-          "name": "t44",
+          "name": "t42",
           "value": {
             "kind": "load_param",
             "name": "_changePKH"
           }
         },
         {
-          "name": "t45",
+          "name": "t43",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
-          "name": "t46",
+          "name": "t44",
           "value": {
             "args": [
-              "t44",
-              "t45"
+              "t42",
+              "t43"
             ],
             "func": "buildChangeOutput",
             "kind": "call"
           }
         },
         {
-          "name": "t47",
+          "name": "t45",
           "value": {
             "args": [
-              "t43",
-              "t46"
+              "t41",
+              "t44"
             ],
             "func": "cat",
             "kind": "call"
+          }
+        },
+        {
+          "name": "t46",
+          "value": {
+            "args": [
+              "t45"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t47",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
           }
         },
         {
@@ -1256,42 +1238,25 @@
             "args": [
               "t47"
             ],
-            "func": "hash256",
+            "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
           "name": "t49",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
+            "kind": "bin_op",
+            "left": "t46",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t48"
           }
         },
         {
           "name": "t50",
           "value": {
-            "args": [
-              "t49"
-            ],
-            "func": "extractOutputHash",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t51",
-          "value": {
-            "kind": "bin_op",
-            "left": "t48",
-            "op": "===",
-            "result_type": "bytes",
-            "right": "t50"
-          }
-        },
-        {
-          "name": "t52",
-          "value": {
             "kind": "assert",
-            "value": "t51"
+            "value": "t49"
           }
         }
       ],

@@ -663,8 +663,30 @@ impl<'a> TypeChecker<'a> {
                 BOOLEAN.to_string()
             }
 
-            // Bitwise / shift: bigint x bigint -> bigint
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            // Bitwise &, |, ^: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                if is_bytestring_subtype(&left_type) && is_bytestring_subtype(&right_type) {
+                    return BYTESTRING.to_string();
+                }
+                if !is_bigint_family(&left_type) {
+                    self.errors.push(format!(
+                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                        op.as_str(),
+                        left_type
+                    ));
+                }
+                if !is_bigint_family(&right_type) {
+                    self.errors.push(format!(
+                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                        op.as_str(),
+                        right_type
+                    ));
+                }
+                BIGINT.to_string()
+            }
+
+            // Shift: bigint x bigint -> bigint
+            BinaryOp::Shl | BinaryOp::Shr => {
                 if !is_bigint_family(&left_type) {
                     self.errors.push(format!(
                         "Left operand of '{}' must be bigint, got '{}'",
@@ -712,9 +734,12 @@ impl<'a> TypeChecker<'a> {
                 BIGINT.to_string()
             }
             UnaryOp::BitNot => {
+                if is_bytestring_subtype(&operand_type) {
+                    return BYTESTRING.to_string();
+                }
                 if !is_bigint_family(&operand_type) {
                     self.errors.push(format!(
-                        "Operand of '~' must be bigint, got '{}'",
+                        "Operand of '~' must be bigint or ByteString, got '{}'",
                         operand_type
                     ));
                 }
@@ -781,7 +806,7 @@ impl<'a> TypeChecker<'a> {
                 return BYTESTRING.to_string();
             }
 
-            if property == "addOutput" {
+            if property == "addOutput" || property == "addRawOutput" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
                 }

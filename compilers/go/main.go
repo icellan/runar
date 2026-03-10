@@ -54,7 +54,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
 			os.Exit(1)
 		}
-		ensureElseFields(raw)
+		ensureIRFields(raw)
 		irJSON, err := json.MarshalIndent(raw, "", "  ")
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "JSON error: %v\n", err)
@@ -104,24 +104,31 @@ func main() {
 	}
 }
 
-// ensureElseFields walks a generic JSON map and adds "else": [] to any
-// ANF value object with kind "if" that is missing the "else" field.
-// This matches the TS compiler which always emits else: [].
-func ensureElseFields(v interface{}) {
+// ensureIRFields walks a generic JSON map and patches up fields that Go's
+// omitempty drops but the TS compiler always emits:
+//   - "else": [] on "if" ANF nodes
+//   - "preimage": "" on "add_output" ANF nodes
+func ensureIRFields(v interface{}) {
 	switch val := v.(type) {
 	case map[string]interface{}:
-		// If this is a binding value with kind "if", ensure "else" exists
-		if kind, ok := val["kind"]; ok && kind == "if" {
-			if _, hasElse := val["else"]; !hasElse {
-				val["else"] = []interface{}{}
+		if kind, ok := val["kind"]; ok {
+			if kind == "if" {
+				if _, hasElse := val["else"]; !hasElse {
+					val["else"] = []interface{}{}
+				}
+			}
+			if kind == "add_output" {
+				if _, hasPreimage := val["preimage"]; !hasPreimage {
+					val["preimage"] = ""
+				}
 			}
 		}
 		for _, child := range val {
-			ensureElseFields(child)
+			ensureIRFields(child)
 		}
 	case []interface{}:
 		for _, item := range val {
-			ensureElseFields(item)
+			ensureIRFields(item)
 		}
 	}
 }

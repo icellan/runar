@@ -304,7 +304,69 @@ describe('Pass 3: Type-Check', () => {
         }
       `;
       const result = typecheckSource(source);
-      expect(hasError(result, "must be bigint")).toBe(true);
+      expect(hasError(result, "must be bigint or ByteString")).toBe(true);
+    });
+
+    it('allows bitwise operators on ByteString operands', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly mask: ByteString;
+
+          constructor(mask: ByteString) {
+            super(mask);
+            this.mask = mask;
+          }
+
+          public m(data: ByteString) {
+            const b1: ByteString = data & this.mask;
+            const b2: ByteString = data | this.mask;
+            const b3: ByteString = data ^ this.mask;
+            assert(len(b1) > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('allows ~ (bitwise NOT) on ByteString', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly data: ByteString;
+
+          constructor(data: ByteString) {
+            super(data);
+            this.data = data;
+          }
+
+          public m() {
+            const inv: ByteString = ~this.data;
+            assert(len(inv) > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('reports error for mixed bigint & ByteString in bitwise op', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+
+          constructor(x: bigint) {
+            super(x);
+            this.x = x;
+          }
+
+          public m(data: ByteString) {
+            const b: ByteString = data & this.x;
+            assert(len(b) > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors.length).toBeGreaterThan(0);
     });
   });
 

@@ -154,6 +154,8 @@ pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, S
         &emit_result.script_hex,
         &emit_result.script_asm,
         emit_result.constructor_slots,
+        emit_result.code_separator_index,
+        emit_result.code_separator_indices,
     );
     Ok(artifact)
 }

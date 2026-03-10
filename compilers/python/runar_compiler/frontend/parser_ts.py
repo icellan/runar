@@ -506,9 +506,9 @@ class _TsParser:
             parent_tok = self.expect(TOK_IDENT)
             parent_class = parent_tok.value
 
-        if parent_class not in ("SmartContract", "StatefulSmartContract"):
+        if parent_class not in ("SmartContract", "StatefulSmartContract", "InductiveSmartContract"):
             raise ValueError(
-                f"no class extending SmartContract or StatefulSmartContract found"
+                f"no class extending SmartContract, StatefulSmartContract, or InductiveSmartContract found"
             )
 
         self.expect(TOK_LBRACE)
@@ -547,6 +547,11 @@ class _TsParser:
                 visibility="public",
                 source_location=SourceLocation(file=self.file_name, line=1, column=0),
             )
+
+        # For InductiveSmartContract, inject internal fields after developer properties
+        if parent_class == "InductiveSmartContract":
+            _inject_inductive_internal_props(properties, self.file_name)
+            _inject_inductive_constructor_fields(constructor)
 
         return ContractNode(
             name=contract_name,
@@ -1332,6 +1337,55 @@ def _parse_number(s: str) -> Expression:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# InductiveSmartContract: synthetic internal field injection
+# ---------------------------------------------------------------------------
+
+_INDUCTIVE_INTERNAL_FIELDS = ("_genesisOutpoint", "_parentOutpoint", "_grandparentOutpoint")
+
+
+def _inject_inductive_internal_props(properties: list[PropertyNode], file: str) -> None:
+    """Append the three internal ByteString fields for InductiveSmartContract."""
+    synthetic_loc = SourceLocation(file=file, line=0, column=0)
+    for name in _INDUCTIVE_INTERNAL_FIELDS:
+        properties.append(PropertyNode(
+            name=name,
+            type=PrimitiveType(name="ByteString"),
+            readonly=False,
+            source_location=synthetic_loc,
+        ))
+
+
+def _inject_inductive_constructor_fields(ctor: MethodNode) -> None:
+    """Inject internal field params, super() args, and assignments into the constructor."""
+    bs_type = PrimitiveType(name="ByteString")
+
+    # Add internal field params to constructor
+    for name in _INDUCTIVE_INTERNAL_FIELDS:
+        ctor.params.append(ParamNode(name=name, type=bs_type))
+
+    # Add internal field args to super() call (first statement)
+    if ctor.body:
+        first_stmt = ctor.body[0]
+        if (
+            isinstance(first_stmt, ExpressionStmt)
+            and isinstance(first_stmt.expr, CallExpr)
+            and isinstance(first_stmt.expr.callee, Identifier)
+            and first_stmt.expr.callee.name == "super"
+        ):
+            for name in _INDUCTIVE_INTERNAL_FIELDS:
+                first_stmt.expr.args.append(Identifier(name=name))
+
+    # Add this._field = _field assignments
+    synthetic_loc = SourceLocation(file="", line=0, column=0)
+    for name in _INDUCTIVE_INTERNAL_FIELDS:
+        ctor.body.append(AssignmentStmt(
+            target=PropertyAccessExpr(property=name),
+            value=Identifier(name=name),
+            source_location=synthetic_loc,
+        ))
+
 
 def parse_ts(source: str, file_name: str) -> ParseResult:
     """Parse a TypeScript-syntax Runar contract (.runar.ts)."""

@@ -620,6 +620,9 @@ The compiled contract artifact. See `spec/artifact-format.md` for the full schem
 - `script: string` (hex template)
 - `asm: string`
 - `stateFields: StateField[]`
+- `constructorSlots: ConstructorSlot[]` -- byte offsets for constructor parameter placeholders
+- `codeSeparatorIndex?: number` -- byte offset of the last `OP_CODESEPARATOR` in the script (present for stateful contracts)
+- `codeSeparatorIndices?: number[]` -- per-method `OP_CODESEPARATOR` byte offsets (for multi-method stateful contracts)
 
 ---
 

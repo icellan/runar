@@ -124,6 +124,10 @@ pub struct RunarArtifact {
     pub state_fields: Option<Vec<StateField>>,
     #[serde(default)]
     pub constructor_slots: Option<Vec<ConstructorSlot>>,
+    #[serde(default, rename = "codeSeparatorIndex")]
+    pub code_separator_index: Option<usize>,
+    #[serde(default, rename = "codeSeparatorIndices")]
+    pub code_separator_indices: Option<Vec<usize>>,
 }
 
 /// The ABI (Application Binary Interface) of a contract.
@@ -260,12 +264,14 @@ pub struct PreparedCall {
     pub(crate) change_amount: i64,
     pub(crate) method_needs_new_amount: bool,
     pub(crate) new_amount: i64,
+    pub(crate) inductive_params_hex: String,
     pub(crate) preimage_index: Option<usize>,
     pub(crate) contract_utxo: Utxo,
     pub(crate) new_locking_script: String,
     pub(crate) new_satoshis: i64,
     pub(crate) has_multi_output: bool,
     pub(crate) contract_outputs: Vec<ContractOutputEntry>,
+    pub(crate) code_sep_idx: i64,
 }
 
 /// A contract output entry stored in PreparedCall (script + satoshis).

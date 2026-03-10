@@ -1302,5 +1302,324 @@ func hexToBytes(h string) []byte {
 	return b
 }
 
+// ---------------------------------------------------------------------------
+// Part 9: SHA-256 Compression Script Execution (go-sdk interpreter)
+// ---------------------------------------------------------------------------
+// These tests verify sha256Compress codegen correctness using the Go BSV SDK
+// interpreter, which correctly handles OP_LSHIFT/OP_RSHIFT on byte arrays.
+
+// compileRúnarInline compiles an inline Rúnar source string with constructor args.
+func compileRúnarInline(source, argsJSON, fileName string) (string, error) {
+	// Escape backticks in source for template literal
+	escaped := strings.ReplaceAll(source, "`", "\\`")
+	escaped = strings.ReplaceAll(escaped, "$", "\\$")
+	code := fmt.Sprintf(`
+const { compile } = require('./packages/runar-compiler/dist/index.js');
+const src = `+"`%s`"+`;
+const args = JSON.parse('%s', (k,v) => typeof v === 'string' && /^-?\d+$/.test(v) ? BigInt(v) : v);
+const r = compile(src, { fileName: '%s', constructorArgs: args });
+if (!r.success || !r.scriptHex) {
+  const errs = r.diagnostics.filter(d => d.severity === 'error').map(d => d.message).join('\\n');
+  process.stderr.write(errs);
+  process.exit(1);
+}
+process.stdout.write(r.scriptHex);
+`, escaped, argsJSON, fileName)
+
+	cmd := exec.Command("node", "-e", code)
+	cmd.Dir = ".." // project root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("compilation failed: %w\n%s", err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// sha256Pad pads a message (hex) to SHA-256 blocks per FIPS 180-4 Section 5.1.1.
+func sha256Pad(msgHex string) string {
+	msgBytes := len(msgHex) / 2
+	bitLen := msgBytes * 8
+
+	padded := msgHex + "80"
+	for (len(padded)/2)%64 != 56 {
+		padded += "00"
+	}
+	padded += fmt.Sprintf("%016x", bitLen)
+	return padded
+}
+
+const sha256Init = "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+
+const sha256CompressSource = `
+class Sha256CompressTest extends SmartContract {
+  readonly expected: ByteString;
+
+  constructor(expected: ByteString) {
+    super(expected);
+    this.expected = expected;
+  }
+
+  public verify(state: ByteString, block: ByteString) {
+    const result = sha256Compress(state, block);
+    assert(result === this.expected);
+  }
+}
+`
+
+const sha256CrossVerifySource = `
+class Sha256CrossVerify extends SmartContract {
+  readonly initState: ByteString;
+
+  constructor(initState: ByteString) {
+    super(initState);
+    this.initState = initState;
+  }
+
+  public verify(message: ByteString, paddedBlock: ByteString) {
+    const compressed = sha256Compress(this.initState, paddedBlock);
+    const native = sha256(message);
+    assert(compressed === native);
+  }
+}
+`
+
+const sha256TwoBlockSource = `
+class Sha256TwoBlock extends SmartContract {
+  readonly initState: ByteString;
+
+  constructor(initState: ByteString) {
+    super(initState);
+    this.initState = initState;
+  }
+
+  public verify(message: ByteString, block1: ByteString, block2: ByteString) {
+    const mid = sha256Compress(this.initState, block1);
+    const final = sha256Compress(mid, block2);
+    const native = sha256(message);
+    assert(final === native);
+  }
+}
+`
+
+func TestSha256Compress_ABC(t *testing.T) {
+	block := "6162638000000000000000000000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000000000000000000000000018"
+	expected := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+	lockingHex, err := compileRúnarInline(sha256CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestSha256Compress_Empty(t *testing.T) {
+	block := "8000000000000000000000000000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000000000000000000000000000"
+	expected := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+	lockingHex, err := compileRúnarInline(sha256CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestSha256Compress_RejectsWrongHash(t *testing.T) {
+	block := "6162638000000000000000000000000000000000000000000000000000000000" +
+		"0000000000000000000000000000000000000000000000000000000000000018"
+	expected := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	lockingHex, err := compileRúnarInline(sha256CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err == nil {
+		t.Fatal("expected script failure with wrong hash but execution succeeded")
+	}
+}
+
+func TestSha256Compress_CrossVerify(t *testing.T) {
+	// Cross-verify sha256Compress against OP_SHA256 for several messages
+	messages := []struct {
+		name string
+		hex  string
+	}{
+		{"abc", "616263"},
+		{"empty", ""},
+		{"one byte 0x42", "42"},
+		{"55 bytes (max single-block)", strings.Repeat("aa", 55)},
+		{"Hello, SHA-256!", hex.EncodeToString([]byte("Hello, SHA-256!"))},
+	}
+
+	for _, msg := range messages {
+		t.Run(msg.name, func(t *testing.T) {
+			padded := sha256Pad(msg.hex)
+			if len(padded)/2 != 64 {
+				t.Fatalf("expected single 64-byte block, got %d bytes", len(padded)/2)
+			}
+
+			lockingHex, err := compileRúnarInline(sha256CrossVerifySource,
+				fmt.Sprintf(`{"initState":"%s"}`, sha256Init), "Sha256CrossVerify.runar.ts")
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			msgBytes, _ := hex.DecodeString(msg.hex)
+			paddedBytes, _ := hex.DecodeString(padded)
+			unlockingHex := encodePushBytes(msgBytes) + encodePushBytes(paddedBytes)
+
+			if err := executeScript(lockingHex, unlockingHex); err != nil {
+				t.Fatalf("execution failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSha256Compress_TwoBlock(t *testing.T) {
+	// Two-block messages that require chained compression
+	messages := []struct {
+		name string
+		hex  string
+	}{
+		{"56 bytes", strings.Repeat("bb", 56)},
+		{"64 bytes", strings.Repeat("cc", 64)},
+		{"100 bytes", strings.Repeat("dd", 100)},
+	}
+
+	for _, msg := range messages {
+		t.Run(msg.name, func(t *testing.T) {
+			padded := sha256Pad(msg.hex)
+			if len(padded)/2 != 128 {
+				t.Fatalf("expected 128-byte padded result, got %d bytes", len(padded)/2)
+			}
+
+			block1 := padded[:128]  // first 64 bytes
+			block2 := padded[128:]  // second 64 bytes
+
+			lockingHex, err := compileRúnarInline(sha256TwoBlockSource,
+				fmt.Sprintf(`{"initState":"%s"}`, sha256Init), "Sha256TwoBlock.runar.ts")
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			msgBytes, _ := hex.DecodeString(msg.hex)
+			block1Bytes, _ := hex.DecodeString(block1)
+			block2Bytes, _ := hex.DecodeString(block2)
+			unlockingHex := encodePushBytes(msgBytes) + encodePushBytes(block1Bytes) + encodePushBytes(block2Bytes)
+
+			if err := executeScript(lockingHex, unlockingHex); err != nil {
+				t.Fatalf("execution failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSha256Compress_NonInitialState(t *testing.T) {
+	// Use the hash of "abc" as initial state for a second compression
+	midState := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+	block := sha256Pad(strings.Repeat("ff", 10))
+
+	// Compute expected via Go's reference: sha256Compress(midState, block)
+	expected := referenceSha256Compress(midState, block)
+
+	lockingHex, err := compileRúnarInline(sha256CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(midState)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+// referenceSha256Compress implements one SHA-256 compression round in pure Go.
+func referenceSha256Compress(stateHex, blockHex string) string {
+	rotr := func(x uint32, n uint) uint32 { return (x >> n) | (x << (32 - n)) }
+
+	stateBytes, _ := hex.DecodeString(stateHex)
+	blockBytes, _ := hex.DecodeString(blockHex)
+
+	var H [8]uint32
+	for i := 0; i < 8; i++ {
+		H[i] = binary.BigEndian.Uint32(stateBytes[i*4:])
+	}
+
+	var W [64]uint32
+	for i := 0; i < 16; i++ {
+		W[i] = binary.BigEndian.Uint32(blockBytes[i*4:])
+	}
+	for t := 16; t < 64; t++ {
+		s0 := rotr(W[t-15], 7) ^ rotr(W[t-15], 18) ^ (W[t-15] >> 3)
+		s1 := rotr(W[t-2], 17) ^ rotr(W[t-2], 19) ^ (W[t-2] >> 10)
+		W[t] = s1 + W[t-7] + s0 + W[t-16]
+	}
+
+	K := [64]uint32{
+		0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+		0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+		0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+		0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+		0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+		0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+		0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+		0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+		0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+		0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+		0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+		0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+		0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+		0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+		0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+		0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+	}
+
+	a, b, c, d, e, f, g, h := H[0], H[1], H[2], H[3], H[4], H[5], H[6], H[7]
+	for t := 0; t < 64; t++ {
+		S1 := rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
+		ch := (e & f) ^ (^e & g)
+		T1 := h + S1 + ch + K[t] + W[t]
+		S0 := rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
+		maj := (a & b) ^ (a & c) ^ (b & c)
+		T2 := S0 + maj
+		h = g; g = f; f = e; e = d + T1
+		d = c; c = b; b = a; a = T1 + T2
+	}
+
+	result := make([]byte, 32)
+	finals := [8]uint32{a + H[0], b + H[1], c + H[2], d + H[3], e + H[4], f + H[5], g + H[6], h + H[7]}
+	for i, v := range finals {
+		binary.BigEndian.PutUint32(result[i*4:], v)
+	}
+	return hex.EncodeToString(result)
+}
+
 // Ensure the binary and big packages are used.
 var _ = binary.LittleEndian

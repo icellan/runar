@@ -215,15 +215,8 @@
         {
           "name": "t15",
           "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t16",
-          "value": {
             "kind": "add_output",
-            "preimage": "t15",
+            "preimage": "",
             "satoshis": "t13",
             "stateValues": [
               "t14"
@@ -231,27 +224,38 @@
           }
         },
         {
-          "name": "t17",
+          "name": "t16",
           "value": {
             "kind": "load_param",
             "name": "_changePKH"
           }
         },
         {
-          "name": "t18",
+          "name": "t17",
           "value": {
             "kind": "load_param",
             "name": "_changeAmount"
           }
         },
         {
+          "name": "t18",
+          "value": {
+            "args": [
+              "t16",
+              "t17"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
           "name": "t19",
           "value": {
             "args": [
-              "t17",
+              "t15",
               "t18"
             ],
-            "func": "buildChangeOutput",
+            "func": "cat",
             "kind": "call"
           }
         },
@@ -259,55 +263,44 @@
           "name": "t20",
           "value": {
             "args": [
-              "t16",
               "t19"
-            ],
-            "func": "cat",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t21",
-          "value": {
-            "args": [
-              "t20"
             ],
             "func": "hash256",
             "kind": "call"
           }
         },
         {
-          "name": "t22",
+          "name": "t21",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t23",
+          "name": "t22",
           "value": {
             "args": [
-              "t22"
+              "t21"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t24",
+          "name": "t23",
           "value": {
             "kind": "bin_op",
-            "left": "t21",
+            "left": "t20",
             "op": "===",
             "result_type": "bytes",
-            "right": "t23"
+            "right": "t22"
           }
         },
         {
-          "name": "t25",
+          "name": "t24",
           "value": {
             "kind": "assert",
-            "value": "t24"
+            "value": "t23"
           }
         }
       ],

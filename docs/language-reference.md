@@ -268,7 +268,7 @@ Both `==` and `===` have identical semantics in Rúnar (no type coercion). The c
 
 Both operands are always evaluated (eager evaluation). At the ANF IR level, both sides are lowered as flat `bin_op` nodes -- there is no short-circuit lowering. At the Stack IR/opcode level, these compile to `OP_BOOLAND` and `OP_BOOLOR` respectively.
 
-### Bitwise (operands: `bigint`)
+### Bitwise (operands: `bigint` or `ByteString`)
 
 | Operator | Description | Opcode |
 |----------|-------------|--------|
@@ -276,6 +276,8 @@ Both operands are always evaluated (eager evaluation). At the ANF IR level, both
 | `a \| b` | Bitwise OR | `OP_OR` |
 | `a ^ b` | Bitwise XOR | `OP_XOR` |
 | `~a` | Bitwise NOT | `OP_INVERT` |
+
+Bitwise operators work on both `bigint` and `ByteString` operands. When both operands are `ByteString` (or a ByteString subtype), the result is `ByteString`. When both are `bigint`, the result is `bigint`. Mixing `bigint` and `ByteString` is a compile-time error. For `ByteString` operands, both values must have equal length at runtime.
 
 ### Shift (operands: `bigint`)
 
@@ -380,6 +382,8 @@ private helper(x: bigint): bigint {
 | `sha256` | `(data: ByteString) => Sha256` | `OP_SHA256` |
 | `ripemd160` | `(data: ByteString) => Ripemd160` | `OP_RIPEMD160` |
 | `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
+| `sha256Compress` | `(state: ByteString, block: ByteString) => ByteString` | One round of SHA-256 compression. Takes a 32-byte intermediate state and a 64-byte message block, returns the updated 32-byte state. Inlines ~3000 opcodes. |
+| `sha256Finalize` | `(state: ByteString, remaining: ByteString, msgBitLen: bigint) => ByteString` | Finalize a partial SHA-256 hash. Applies padding to the remaining bytes (< 64 bytes) and runs 1-2 final compression rounds. Returns the final 32-byte hash. |
 
 ### Byte Operations
 

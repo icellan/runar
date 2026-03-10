@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use sha2::{Sha256, Digest};
 use super::types::*;
 use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return};
-use super::oppushtx::compute_op_push_tx;
+use super::oppushtx::compute_op_push_tx_with_code_sep;
 use super::deployment::{
     build_deploy_transaction, select_utxos,
     build_p2pkh_script_from_address, encode_varint,
@@ -306,9 +306,18 @@ impl RunarContract {
         let mut signatures = HashMap::new();
         let contract_utxo = prepared.contract_utxo.clone();
         for &idx in &prepared.sig_indices {
+            // Stateful: user checkSig is AFTER OP_CODESEPARATOR — trim subscript.
+            // Stateless: user checkSig is BEFORE — use full script.
+            let mut subscript = contract_utxo.script.clone();
+            if prepared.is_stateful && prepared.code_sep_idx >= 0 {
+                let trim_pos = ((prepared.code_sep_idx as usize) + 1) * 2;
+                if trim_pos <= subscript.len() {
+                    subscript = subscript[trim_pos..].to_string();
+                }
+            }
             let sig = signer.sign(
                 &prepared.tx_hex, 0,
-                &contract_utxo.script, contract_utxo.satoshis, None,
+                &subscript, contract_utxo.satoshis, None,
             )?;
             signatures.insert(idx, sig);
         }
@@ -355,12 +364,17 @@ impl RunarContract {
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
-        let user_params: Vec<&AbiParam> = if is_stateful {
+        let is_inductive = method.params.iter().any(|p| p.name == "_parentHashState");
+        let user_params: Vec<&AbiParam> = if is_stateful || is_inductive {
             method.params.iter().filter(|p| {
                 p.param_type != "SigHashPreimage"
                     && p.name != "_changePKH"
                     && p.name != "_changeAmount"
                     && p.name != "_newAmount"
+                    && p.name != "_parentHashState"
+                    && p.name != "_parentTailBlock1"
+                    && p.name != "_parentTailBlock2"
+                    && p.name != "_parentRawTailLen"
             }).collect()
         } else {
             method.params.iter().collect()
@@ -385,20 +399,21 @@ impl RunarContract {
         let change_address = options
             .and_then(|o| o.change_address.as_deref())
             .unwrap_or(&address);
-        // For InductiveSmartContract methods, detect if the ABI includes a
-        // "parentTx" implicit parameter. If so, fetch the raw parent transaction
-        // (the tx that created the current UTXO) and prepend it to the unlocking
-        // script before the regular arguments and method selector.
-        let mut _parent_tx_prefix = String::new();
-        let has_parent_tx_param = method.params.iter().any(|p| p.name == "parentTx");
-        if has_parent_tx_param {
+        // For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+        // params from the parent transaction (the tx that created the current UTXO).
+        // These are pushed in the unlock script between user args and txPreimage.
+        let mut inductive_params_hex = String::new();
+        if is_inductive {
             let parent_tx = provider.get_transaction(&current_utxo.txid)?;
             let raw = parent_tx.raw.ok_or_else(|| {
-                "RunarContract.call: provider returned transaction without raw hex, needed for parentTx (InductiveSmartContract)".to_string()
+                "RunarContract.call: provider returned transaction without raw hex, needed for inductive parent tx verification".to_string()
             })?;
-            _parent_tx_prefix = encode_push_data(&raw);
+            let partial = crate::sdk::sha256_compress::compute_partial_sha256_for_inductive(&raw)?;
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_hash_state));
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block1));
+            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block2));
+            inductive_params_hex.push_str(&encode_script_number(partial.parent_raw_tail_len as i64));
         }
-        // TODO: integrate _parent_tx_prefix into unlocking script assembly
 
         // Detect Sig/PubKey/SigHashPreimage/ByteString params that need auto-compute (user passed Auto)
         let mut resolved_args: Vec<SdkValue> = args.to_vec();
@@ -474,6 +489,7 @@ impl RunarContract {
                 is_stateful, needs_op_push_tx, method_needs_change,
                 &sig_indices, &prevouts_indices, preimage_index,
                 &method_selector_hex, &change_pkh_hex,
+                &inductive_params_hex,
             );
         }
 
@@ -482,10 +498,10 @@ impl RunarContract {
         // -------------------------------------------------------------------
 
         let unlocking_script = if needs_op_push_tx {
-            // Prepend placeholder _opPushTxSig before user args
+            // Prepend placeholder prefix (optionally _codePart + _opPushTxSig) before user args
             format!(
                 "{}{}",
-                encode_push_data(&"00".repeat(72)),
+                self.build_stateful_prefix(&"00".repeat(72), method_needs_change),
                 self.build_unlocking_script(method_name, &resolved_args)?
             )
         } else {
@@ -580,7 +596,7 @@ impl RunarContract {
                 .unwrap_or(&resolved_args);
             format!(
                 "{}{}",
-                encode_push_data(&"00".repeat(72)),
+                self.build_stateful_prefix(&"00".repeat(72), method_needs_change),
                 self.build_unlocking_script(method_name, args_for_placeholder).unwrap_or_default(),
             )
         }).collect();
@@ -635,6 +651,14 @@ impl RunarContract {
         let mut final_op_push_tx_sig = String::new();
         let mut final_preimage = String::new();
 
+        let method_index = self.find_method_index(method_name);
+        let code_sep_idx = self.get_code_sep_index(method_index);
+        let code_part_for_prefix = if method_needs_change && self.has_code_separator() {
+            Some(self.get_code_part_hex())
+        } else {
+            None
+        };
+
         if is_stateful {
             // Helper closure to build a stateful unlock for a given input.
             // For input_idx===0 (primary), keeps placeholder Sig params.
@@ -645,12 +669,20 @@ impl RunarContract {
                                           resolved_args: &mut Vec<SdkValue>,
                                           method_selector_hex: &str,
                                           tx_change_amount: i64| -> Result<(String, String, String), String> {
-                let (op_sig, preimage) = compute_op_push_tx(tx, input_idx, subscript, sats)?;
+                let (op_sig, preimage) = compute_op_push_tx_with_code_sep(tx, input_idx, subscript, sats, code_sep_idx)?;
 
                 // Only sign Sig params for extra inputs, not the primary
                 if input_idx > 0 {
+                    // In stateful contracts, user checkSig is AFTER OP_CODESEPARATOR — trim.
+                    let mut sig_subscript = subscript.to_string();
+                    if code_sep_idx >= 0 {
+                        let trim_pos = ((code_sep_idx as usize) + 1) * 2;
+                        if trim_pos <= sig_subscript.len() {
+                            sig_subscript = sig_subscript[trim_pos..].to_string();
+                        }
+                    }
                     for &idx in sig_indices {
-                        let real_sig = signer.sign(tx, input_idx, subscript, sats, None)?;
+                        let real_sig = signer.sign(tx, input_idx, &sig_subscript, sats, None)?;
                         resolved_args[idx] = SdkValue::Bytes(real_sig);
                     }
                 }
@@ -680,12 +712,20 @@ impl RunarContract {
                     new_amount_hex.push_str(&encode_arg(&SdkValue::Int(new_satoshis.unwrap_or(current_utxo.satoshis))));
                 }
 
+                // Build prefix: optionally _codePart + _opPushTxSig
+                let mut prefix = String::new();
+                if let Some(ref cp) = code_part_for_prefix {
+                    prefix.push_str(&encode_push_data(cp));
+                }
+                prefix.push_str(&encode_push_data(&op_sig));
+
                 let unlock = format!(
-                    "{}{}{}{}{}{}",
-                    encode_push_data(&op_sig),
+                    "{}{}{}{}{}{}{}",
+                    prefix,
                     user_args_hex,
                     change_hex,
                     new_amount_hex,
+                    inductive_params_hex,
                     encode_push_data(&preimage),
                     method_selector_hex,
                 );
@@ -780,8 +820,8 @@ impl RunarContract {
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless: keep placeholder sigs, compute OP_PUSH_TX
             if needs_op_push_tx {
-                let (sig_hex, preimage_hex) = compute_op_push_tx(
-                    &signed_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                let (sig_hex, preimage_hex) = compute_op_push_tx_with_code_sep(
+                    &signed_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx,
                 )?;
                 final_op_push_tx_sig = sig_hex;
                 if let Some(idx) = preimage_index {
@@ -791,11 +831,11 @@ impl RunarContract {
             // Don't sign Sig params — keep placeholders
             let mut real_unlocking_script = self.build_unlocking_script(method_name, &resolved_args)?;
             if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
-                real_unlocking_script = format!("{}{}", encode_push_data(&final_op_push_tx_sig), real_unlocking_script);
+                real_unlocking_script = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlocking_script);
 
                 let tmp_tx = insert_unlocking_script(&signed_tx, 0, &real_unlocking_script)?;
-                let (final_sig, final_pre) = compute_op_push_tx(
-                    &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                let (final_sig, final_pre) = compute_op_push_tx_with_code_sep(
+                    &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis, code_sep_idx,
                 )?;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(final_pre.clone());
@@ -804,7 +844,7 @@ impl RunarContract {
                 final_preimage = final_pre;
                 real_unlocking_script = format!(
                     "{}{}",
-                    encode_push_data(&final_op_push_tx_sig),
+                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
                     self.build_unlocking_script(method_name, &resolved_args)?
                 );
             }
@@ -856,12 +896,14 @@ impl RunarContract {
             change_amount,
             method_needs_new_amount,
             new_amount: new_satoshis.unwrap_or(current_utxo.satoshis),
+            inductive_params_hex,
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: new_locking_script.unwrap_or_default(),
             new_satoshis: new_satoshis.unwrap_or(0),
             has_multi_output,
             contract_outputs: prepared_contract_outputs,
+            code_sep_idx,
         })
     }
 
@@ -900,11 +942,12 @@ impl RunarContract {
                 new_amount_hex.push_str(&encode_arg(&SdkValue::Int(prepared.new_amount)));
             }
             format!(
-                "{}{}{}{}{}{}",
-                encode_push_data(&prepared.op_push_tx_sig),
+                "{}{}{}{}{}{}{}",
+                self.build_stateful_prefix(&prepared.op_push_tx_sig, prepared.method_needs_change),
                 args_hex,
                 change_hex,
                 new_amount_hex,
+                prepared.inductive_params_hex,
                 encode_push_data(&prepared.preimage),
                 prepared.method_selector_hex,
             )
@@ -915,7 +958,7 @@ impl RunarContract {
             }
             format!(
                 "{}{}",
-                encode_push_data(&prepared.op_push_tx_sig),
+                self.build_stateful_prefix(&prepared.op_push_tx_sig, false),
                 self.build_unlocking_script(&prepared.method_name, &resolved_args)?,
             )
         } else {
@@ -984,12 +1027,16 @@ impl RunarContract {
         preimage_index: Option<usize>,
         method_selector_hex: &str,
         change_pkh_hex: &str,
+        inductive_params_hex: &str,
     ) -> Result<PreparedCall, String> {
+        let term_code_sep_idx = self.get_code_sep_index(self.find_method_index(method_name));
+
         // Build placeholder unlocking script
+        // Terminal never needs code part (needsCodePart = false)
         let term_unlock_script = if needs_op_push_tx {
             format!(
                 "{}{}",
-                encode_push_data(&"00".repeat(72)),
+                self.build_stateful_prefix(&"00".repeat(72), false),
                 self.build_unlocking_script(method_name, resolved_args)?
             )
         } else {
@@ -1023,7 +1070,7 @@ impl RunarContract {
         if is_stateful {
             // Build stateful terminal unlock with PLACEHOLDER user sigs
             let build_unlock = |tx: &str, args: &Vec<SdkValue>| -> Result<(String, String, String), String> {
-                let (op_sig, preimage) = compute_op_push_tx(tx, 0, &current_utxo.script, current_utxo.satoshis)?;
+                let (op_sig, preimage) = compute_op_push_tx_with_code_sep(tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx)?;
                 let mut args_hex = String::new();
                 for arg in args.iter() {
                     args_hex.push_str(&encode_arg(arg));
@@ -1034,11 +1081,13 @@ impl RunarContract {
                     change_hex.push_str(&encode_push_data(change_pkh_hex));
                     change_hex.push_str(&encode_arg(&SdkValue::Int(0)));
                 }
+                // Terminal never needs code part
                 let unlock = format!(
-                    "{}{}{}{}{}",
+                    "{}{}{}{}{}{}",
                     encode_push_data(&op_sig),
                     args_hex,
                     change_hex,
+                    inductive_params_hex,
                     encode_push_data(&preimage),
                     method_selector_hex,
                 );
@@ -1057,8 +1106,8 @@ impl RunarContract {
         } else if needs_op_push_tx || !sig_indices.is_empty() {
             // Stateless terminal — keep placeholder sigs
             if needs_op_push_tx {
-                let (sig_hex, preimage_hex) = compute_op_push_tx(
-                    &term_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                let (sig_hex, preimage_hex) = compute_op_push_tx_with_code_sep(
+                    &term_tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx,
                 )?;
                 final_op_push_tx_sig = sig_hex;
                 if let Some(idx) = preimage_index {
@@ -1068,10 +1117,10 @@ impl RunarContract {
             // Don't sign Sig params — keep 72-byte placeholders
             let mut real_unlock = self.build_unlocking_script(method_name, resolved_args)?;
             if needs_op_push_tx && !final_op_push_tx_sig.is_empty() {
-                real_unlock = format!("{}{}", encode_push_data(&final_op_push_tx_sig), real_unlock);
+                real_unlock = format!("{}{}", self.build_stateful_prefix(&final_op_push_tx_sig, false), real_unlock);
                 let tmp_tx = insert_unlocking_script(&term_tx, 0, &real_unlock)?;
-                let (final_sig, final_pre) = compute_op_push_tx(
-                    &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis,
+                let (final_sig, final_pre) = compute_op_push_tx_with_code_sep(
+                    &tmp_tx, 0, &current_utxo.script, current_utxo.satoshis, term_code_sep_idx,
                 )?;
                 if let Some(idx) = preimage_index {
                     resolved_args[idx] = SdkValue::Bytes(final_pre.clone());
@@ -1080,7 +1129,7 @@ impl RunarContract {
                 final_preimage = final_pre;
                 real_unlock = format!(
                     "{}{}",
-                    encode_push_data(&final_op_push_tx_sig),
+                    self.build_stateful_prefix(&final_op_push_tx_sig, false),
                     self.build_unlocking_script(method_name, resolved_args)?
                 );
             }
@@ -1123,12 +1172,14 @@ impl RunarContract {
             change_amount: 0,
             method_needs_new_amount: false,
             new_amount: 0,
+            inductive_params_hex: inductive_params_hex.to_string(),
             preimage_index,
             contract_utxo: current_utxo.clone(),
             new_locking_script: String::new(),
             new_satoshis: 0,
             has_multi_output: false,
             contract_outputs: vec![],
+            code_sep_idx: term_code_sep_idx,
         })
     }
 
@@ -1347,6 +1398,62 @@ impl RunarContract {
             .iter()
             .find(|m| m.name == name && m.is_public)
             .cloned()
+    }
+
+    /// Get the code part hex (code script without state).
+    fn get_code_part_hex(&self) -> String {
+        self.code_script.clone().unwrap_or_else(|| self.build_code_script())
+    }
+
+    /// Adjust code separator byte offset for constructor arg substitution.
+    fn adjust_code_sep_offset(&self, base_offset: usize) -> usize {
+        if let Some(ref slots) = self.artifact.constructor_slots {
+            let mut shift: isize = 0;
+            for slot in slots {
+                if slot.byte_offset < base_offset {
+                    let encoded = encode_arg(&self.constructor_args[slot.param_index]);
+                    shift += (encoded.len() / 2) as isize - 1; // encoded bytes minus 1-byte placeholder
+                }
+            }
+            (base_offset as isize + shift) as usize
+        } else {
+            base_offset
+        }
+    }
+
+    /// Get the adjusted code separator index for a method.
+    fn get_code_sep_index(&self, method_index: usize) -> i64 {
+        if let Some(ref indices) = self.artifact.code_separator_indices {
+            if method_index < indices.len() {
+                return self.adjust_code_sep_offset(indices[method_index]) as i64;
+            }
+        }
+        if let Some(idx) = self.artifact.code_separator_index {
+            return self.adjust_code_sep_offset(idx) as i64;
+        }
+        -1
+    }
+
+    /// Whether the artifact has OP_CODESEPARATOR.
+    fn has_code_separator(&self) -> bool {
+        self.artifact.code_separator_index.is_some()
+            || self.artifact.code_separator_indices.as_ref().map_or(false, |v| !v.is_empty())
+    }
+
+    /// Build the prefix for a stateful unlocking script: optionally _codePart + _opPushTxSig.
+    fn build_stateful_prefix(&self, op_sig_hex: &str, needs_code_part: bool) -> String {
+        let mut prefix = String::new();
+        if needs_code_part && self.has_code_separator() {
+            prefix.push_str(&encode_push_data(&self.get_code_part_hex()));
+        }
+        prefix.push_str(&encode_push_data(op_sig_hex));
+        prefix
+    }
+
+    /// Find the public method index for a method name, or 0 if not found.
+    fn find_method_index(&self, name: &str) -> usize {
+        let public_methods: Vec<&AbiMethod> = self.artifact.abi.methods.iter().filter(|m| m.is_public).collect();
+        public_methods.iter().position(|m| m.name == name).unwrap_or(0)
     }
 }
 
@@ -1574,6 +1681,8 @@ mod tests {
             script: script.to_string(),
             state_fields: None,
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         }
     }
 
@@ -1629,6 +1738,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: None,
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
         RunarContract::new(artifact, vec![]);
     }
@@ -1662,6 +1773,8 @@ mod tests {
                 param_index: 0,
                 byte_offset: 2,
             }]),
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(
@@ -1696,6 +1809,8 @@ mod tests {
                 ConstructorSlot { param_index: 0, byte_offset: 0 },
                 ConstructorSlot { param_index: 1, byte_offset: 2 },
             ]),
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(
@@ -1726,6 +1841,8 @@ mod tests {
             script: "76a90088ac".to_string(),
             state_fields: None,
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let pub_key_hash = "ab".repeat(20);
@@ -1757,6 +1874,8 @@ mod tests {
             script: "009c69".to_string(),
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
@@ -1780,6 +1899,8 @@ mod tests {
             script: "00930088".to_string(),
             state_fields: None,
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(42)]);
@@ -2183,6 +2304,8 @@ mod tests {
             script: code_hex.to_string(),
             state_fields: Some(state_fields),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
@@ -2255,6 +2378,8 @@ mod tests {
             script: "51".to_string(),
             state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None }]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
@@ -2293,6 +2418,8 @@ mod tests {
                 StateField { name: "metadata".to_string(), field_type: "ByteString".to_string(), index: 2, initial_value: None },
             ]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(
@@ -2510,6 +2637,8 @@ mod tests {
                 initial_value: Some(serde_json::Value::String("0n".to_string())),
             }]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2533,6 +2662,8 @@ mod tests {
                 initial_value: Some(serde_json::Value::String("1000n".to_string())),
             }]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2556,6 +2687,8 @@ mod tests {
                 initial_value: Some(serde_json::Value::String("-42n".to_string())),
             }]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2579,6 +2712,8 @@ mod tests {
                 initial_value: Some(serde_json::Value::String("0n".to_string())),
             }]),
             constructor_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);

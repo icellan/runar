@@ -91,6 +91,8 @@ class RunarArtifact:
     state_fields: list[StateField] = field(default_factory=list)
     constructor_slots: list[ConstructorSlot] = field(default_factory=list)
     build_timestamp: str = ''
+    code_separator_index: int | None = None
+    code_separator_indices: list[int] | None = None
 
     @staticmethod
     def from_dict(d: dict) -> RunarArtifact:
@@ -129,6 +131,8 @@ class RunarArtifact:
             state_fields=state_fields,
             constructor_slots=ctor_slots,
             build_timestamp=d.get('buildTimestamp', ''),
+            code_separator_index=d.get('codeSeparatorIndex'),
+            code_separator_indices=d.get('codeSeparatorIndices'),
         )
 
 
@@ -198,6 +202,8 @@ class PreparedCall:
     new_satoshis: int = 0
     has_multi_output: bool = False
     contract_outputs: list[dict] = field(default_factory=list)
+    code_sep_idx: int = -1  # adjusted OP_CODESEPARATOR byte offset, -1 if none
+    inductive_params_hex: str = ''  # pre-computed partial SHA-256 params for inductive contracts
 
 
 # SdkValue is the union of types that can be passed as contract arguments

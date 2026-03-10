@@ -9,5 +9,6 @@ pub mod ec;
 pub mod emit;
 pub mod opcodes;
 pub mod optimizer;
+pub mod sha256;
 pub mod slh_dsa;
 pub mod stack;

@@ -18,6 +18,7 @@ from runar.sdk.state import (
     encode_push_data,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.sha256_compress import compute_partial_sha256_for_inductive
 
 
 class RunarContract:
@@ -152,9 +153,16 @@ class RunarContract:
         prepared = self.prepare_call(method_name, args, provider, signer, options)
         signatures: dict[int, str] = {}
         for idx in prepared.sig_indices:
+            # Stateful: user checkSig is AFTER OP_CODESEPARATOR — trim subscript
+            # Stateless: user checkSig is BEFORE — use full script
+            subscript = prepared.contract_utxo.script
+            if prepared.is_stateful and prepared.code_sep_idx >= 0:
+                trim_pos = (prepared.code_sep_idx + 1) * 2
+                if trim_pos <= len(subscript):
+                    subscript = subscript[trim_pos:]
             signatures[idx] = signer.sign(
                 prepared.tx_hex, 0,
-                prepared.contract_utxo.script,
+                subscript,
                 prepared.contract_utxo.satoshis,
             )
         return self.finalize_call(prepared, signatures, provider)
@@ -202,13 +210,18 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
-        if is_stateful:
+        is_inductive = any(p.name == '_parentHashState' for p in method.params)
+        if is_stateful or is_inductive:
             user_params = [
                 p for p in method.params
                 if p.type != 'SigHashPreimage'
                 and p.name != '_changePKH'
                 and p.name != '_changeAmount'
                 and p.name != '_newAmount'
+                and p.name != '_parentHashState'
+                and p.name != '_parentTailBlock1'
+                and p.name != '_parentTailBlock2'
+                and p.name != '_parentRawTailLen'
             ]
         else:
             user_params = method.params
@@ -269,6 +282,9 @@ class RunarContract:
                         method_selector_hex = _encode_script_number(mi)
                         break
 
+        # Compute code separator index for this method
+        code_sep_idx = self._get_code_sep_index(self._find_method_index(method_name))
+
         # Compute change PKH for stateful methods that need it
         change_pkh_hex = ''
         if is_stateful and method_needs_change:
@@ -279,6 +295,25 @@ class RunarContract:
             ).digest()
             change_pkh_hex = hash160_bytes.hex()
 
+        # For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
+        # params from the parent transaction (the tx that created the current UTXO).
+        # These are pushed in the unlock script between user args and txPreimage.
+        inductive_params_hex = ''
+        if is_inductive:
+            parent_tx = provider.get_transaction(self._current_utxo.txid)
+            if not parent_tx.raw:
+                raise RuntimeError(
+                    'RunarContract.call: provider returned transaction without raw hex, '
+                    'needed for inductive parent tx verification'
+                )
+            partial = compute_partial_sha256_for_inductive(parent_tx.raw)
+            inductive_params_hex = (
+                encode_push_data(partial['parent_hash_state']) +
+                encode_push_data(partial['parent_tail_block1']) +
+                encode_push_data(partial['parent_tail_block2']) +
+                _encode_script_number(partial['parent_raw_tail_len'])
+            )
+
         # -------------------------------------------------------------------
         # Terminal method path: exact outputs, no funding, no change
         # -------------------------------------------------------------------
@@ -288,14 +323,15 @@ class RunarContract:
                 is_stateful, needs_op_push_tx, method_needs_change,
                 sig_indices, prevouts_indices, preimage_index,
                 method_selector_hex, change_pkh_hex, contract_utxo,
+                inductive_params_hex=inductive_params_hex,
             )
 
         # -------------------------------------------------------------------
         # Non-terminal path
         # -------------------------------------------------------------------
         if needs_op_push_tx:
-            # Prepend placeholder _opPushTxSig before user args
-            unlocking_script = encode_push_data('00' * 72) + \
+            # Prepend placeholder prefix (optionally _codePart + _opPushTxSig)
+            unlocking_script = self._build_stateful_prefix('00' * 72, method_needs_change) + \
                 self.build_unlocking_script(method_name, resolved_args)
         else:
             unlocking_script = self.build_unlocking_script(method_name, resolved_args)
@@ -386,7 +422,7 @@ class RunarContract:
         for i in range(len(extra_contract_utxos)):
             args_for_placeholder = resolved_per_input_args[i] if resolved_per_input_args and i < len(resolved_per_input_args) else resolved_args
             extra_unlock_placeholders.append(
-                encode_push_data('00' * 72) + self.build_unlocking_script(method_name, args_for_placeholder)
+                self._build_stateful_prefix('00' * 72, method_needs_change) + self.build_unlocking_script(method_name, args_for_placeholder)
             )
 
         tx_hex, input_count, change_amount = build_call_transaction(
@@ -420,13 +456,18 @@ class RunarContract:
             # keeps placeholder Sig params.  For input_idx>0 (extra), signs
             # with signer.
             def _build_stateful_unlock(tx: str, input_idx: int, subscript: str, sats: int, args_override: list | None = None, tx_change_amount: int = 0, pi: list[int] | None = None) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, input_idx, subscript, sats)
+                op_sig, preimage = compute_op_push_tx(tx, input_idx, subscript, sats, code_sep_idx)
                 base_args = args_override if args_override is not None else resolved_args
                 input_args = list(base_args)
                 # Only sign Sig params for extra inputs, not the primary
                 if input_idx > 0:
+                    sig_subscript = subscript
+                    if code_sep_idx >= 0:
+                        trim_pos = (code_sep_idx + 1) * 2
+                        if trim_pos <= len(subscript):
+                            sig_subscript = subscript[trim_pos:]
                     for idx in sig_indices:
-                        input_args[idx] = signer.sign(tx, input_idx, subscript, sats)
+                        input_args[idx] = signer.sign(tx, input_idx, sig_subscript, sats)
                 # Resolve ByteString prevouts
                 if pi:
                     all_prevouts_hex = _extract_all_prevouts(tx)
@@ -443,10 +484,11 @@ class RunarContract:
                 if method_needs_new_amount:
                     new_amount_hex = _encode_script_number(new_satoshis)
                 unlock = (
-                    encode_push_data(op_sig) +
+                    self._build_stateful_prefix(op_sig, method_needs_change) +
                     args_hex +
                     change_hex +
                     new_amount_hex +
+                    inductive_params_hex +
                     encode_push_data(preimage) +
                     method_selector_hex
                 )
@@ -530,22 +572,22 @@ class RunarContract:
             # Stateless: keep placeholder sigs, compute OP_PUSH_TX
             if needs_op_push_tx:
                 sig_hex, preimage_hex = compute_op_push_tx(
-                    signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
+                    signed_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                 )
                 final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
             # Don't sign Sig params -- keep placeholders
             real_unlocking_script = self.build_unlocking_script(method_name, resolved_args)
             if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlocking_script = encode_push_data(final_op_push_tx_sig) + real_unlocking_script
+                real_unlocking_script = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlocking_script
                 tmp_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
                 final_sig, final_pre = compute_op_push_tx(
-                    tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis,
+                    tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
                 )
                 resolved_args[preimage_index] = final_pre
                 final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlocking_script = encode_push_data(final_sig) + \
+                real_unlocking_script = self._build_stateful_prefix(final_sig, False) + \
                     self.build_unlocking_script(method_name, resolved_args)
             signed_tx = insert_unlocking_script(signed_tx, 0, real_unlocking_script)
             if not final_preimage and needs_op_push_tx:
@@ -579,6 +621,8 @@ class RunarContract:
             new_satoshis=new_satoshis,
             has_multi_output=bool(has_multi_output),
             contract_outputs=contract_outputs or [],
+            code_sep_idx=code_sep_idx,
+            inductive_params_hex=inductive_params_hex,
         )
 
     def finalize_call(
@@ -617,17 +661,18 @@ class RunarContract:
             if prepared.method_needs_new_amount:
                 new_amount_hex = _encode_script_number(prepared.new_amount)
             primary_unlock = (
-                encode_push_data(prepared.op_push_tx_sig) +
+                self._build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_needs_change) +
                 args_hex +
                 change_hex +
                 new_amount_hex +
+                prepared.inductive_params_hex +
                 encode_push_data(prepared.preimage) +
                 prepared.method_selector_hex
             )
         elif prepared.needs_op_push_tx:
             if prepared.preimage_index >= 0:
                 resolved_args[prepared.preimage_index] = prepared.preimage
-            primary_unlock = encode_push_data(prepared.op_push_tx_sig) + \
+            primary_unlock = self._build_stateful_prefix(prepared.op_push_tx_sig, False) + \
                 self.build_unlocking_script(prepared.method_name, resolved_args)
         else:
             primary_unlock = self.build_unlocking_script(prepared.method_name, resolved_args)
@@ -759,6 +804,7 @@ class RunarContract:
         method_selector_hex: str,
         change_pkh_hex: str,
         contract_utxo: Utxo,
+        inductive_params_hex: str = '',
     ) -> PreparedCall:
         """Handle the terminal method code path for prepare_call."""
         # Normalize terminal outputs
@@ -776,7 +822,7 @@ class RunarContract:
 
         # Build placeholder unlocking script
         if needs_op_push_tx:
-            term_unlock_script = encode_push_data('00' * 72) + \
+            term_unlock_script = self._build_stateful_prefix('00' * 72, False) + \
                 self.build_unlocking_script(method_name, resolved_args)
         else:
             term_unlock_script = self.build_unlocking_script(method_name, resolved_args)
@@ -803,10 +849,12 @@ class RunarContract:
         final_op_push_tx_sig = ''
         final_preimage = ''
 
+        term_code_sep_idx = self._get_code_sep_index(self._find_method_index(method_name))
+
         if is_stateful:
             # Build stateful terminal unlock with PLACEHOLDER user sigs
             def build_stateful_terminal_unlock(tx: str) -> tuple[str, str, str]:
-                op_sig, preimage = compute_op_push_tx(tx, 0, contract_utxo.script, contract_utxo.satoshis)
+                op_sig, preimage = compute_op_push_tx(tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx)
                 # Keep placeholder Sig params (don't sign for primary)
                 args_hex = ''
                 for arg in resolved_args:
@@ -816,9 +864,10 @@ class RunarContract:
                 if method_needs_change and change_pkh_hex:
                     change_hex = encode_push_data(change_pkh_hex) + _encode_script_number(0)
                 unlock = (
-                    encode_push_data(op_sig) +
+                    self._build_stateful_prefix(op_sig, False) +
                     args_hex +
                     change_hex +
+                    inductive_params_hex +
                     encode_push_data(preimage) +
                     method_selector_hex
                 )
@@ -838,7 +887,7 @@ class RunarContract:
             # Stateless terminal -- keep placeholder sigs
             if needs_op_push_tx:
                 sig_hex, preimage_hex = compute_op_push_tx(
-                    term_tx, 0, contract_utxo.script, contract_utxo.satoshis,
+                    term_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                 )
                 final_op_push_tx_sig = sig_hex
                 resolved_args[preimage_index] = preimage_hex
@@ -846,15 +895,15 @@ class RunarContract:
             # Don't sign Sig params -- keep 72-byte placeholders
             real_unlock = self.build_unlocking_script(method_name, resolved_args)
             if needs_op_push_tx and final_op_push_tx_sig:
-                real_unlock = encode_push_data(final_op_push_tx_sig) + real_unlock
+                real_unlock = self._build_stateful_prefix(final_op_push_tx_sig, False) + real_unlock
                 tmp_tx = insert_unlocking_script(term_tx, 0, real_unlock)
                 final_sig, final_pre = compute_op_push_tx(
-                    tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis,
+                    tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, term_code_sep_idx,
                 )
                 resolved_args[preimage_index] = final_pre
                 final_op_push_tx_sig = final_sig
                 final_preimage = final_pre
-                real_unlock = encode_push_data(final_sig) + \
+                real_unlock = self._build_stateful_prefix(final_sig, False) + \
                     self.build_unlocking_script(method_name, resolved_args)
             term_tx = insert_unlocking_script(term_tx, 0, real_unlock)
             if not final_preimage and needs_op_push_tx:
@@ -888,7 +937,53 @@ class RunarContract:
             new_satoshis=0,
             has_multi_output=False,
             contract_outputs=[],
+            code_sep_idx=term_code_sep_idx,
+            inductive_params_hex=inductive_params_hex,
         )
+
+    # -- Code separator helpers --
+
+    def _get_code_part_hex(self) -> str:
+        """Get the code part (code script without state)."""
+        return self._code_script or self._build_code_script()
+
+    def _adjust_code_sep_offset(self, base_offset: int) -> int:
+        """Adjust code separator byte offset for constructor arg substitution."""
+        if not self.artifact.constructor_slots:
+            return base_offset
+        shift = 0
+        for slot in self.artifact.constructor_slots:
+            if slot.byte_offset < base_offset:
+                encoded = _encode_arg(self._constructor_args[slot.param_index])
+                shift += len(encoded) // 2 - 1  # encoded bytes minus 1-byte placeholder
+        return base_offset + shift
+
+    def _get_code_sep_index(self, method_index: int) -> int:
+        """Get the adjusted code separator index for a method, or -1 if none."""
+        if self.artifact.code_separator_indices and 0 <= method_index < len(self.artifact.code_separator_indices):
+            return self._adjust_code_sep_offset(self.artifact.code_separator_indices[method_index])
+        if self.artifact.code_separator_index is not None:
+            return self._adjust_code_sep_offset(self.artifact.code_separator_index)
+        return -1
+
+    def _has_code_separator(self) -> bool:
+        return self.artifact.code_separator_index is not None or bool(self.artifact.code_separator_indices)
+
+    def _build_stateful_prefix(self, op_sig_hex: str, needs_code_part: bool) -> str:
+        """Build prefix: optionally _codePart + _opPushTxSig."""
+        prefix = ''
+        if needs_code_part and self._has_code_separator():
+            prefix += encode_push_data(self._get_code_part_hex())
+        prefix += encode_push_data(op_sig_hex)
+        return prefix
+
+    def _find_method_index(self, name: str) -> int:
+        """Find the index of a public method by name."""
+        public_methods = self._get_public_methods()
+        for i, m in enumerate(public_methods):
+            if m.name == name:
+                return i
+        return 0
 
     # -- Private helpers --
 

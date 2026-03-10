@@ -51,6 +51,6 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@bsv/sdk": "^2.0.5"
+    "@bsv/sdk": "^2.0.7"
   }
 }

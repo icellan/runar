@@ -34,6 +34,8 @@ pub struct EmitResult {
     pub script_hex: String,
     pub script_asm: String,
     pub constructor_slots: Vec<ConstructorSlot>,
+    pub code_separator_index: i64,
+    pub code_separator_indices: Vec<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,8 @@ struct EmitContext {
     asm_parts: Vec<String>,
     byte_length: usize,
     constructor_slots: Vec<ConstructorSlot>,
+    code_separator_index: i64,
+    code_separator_indices: Vec<usize>,
 }
 
 impl EmitContext {
@@ -54,6 +58,8 @@ impl EmitContext {
             asm_parts: Vec::new(),
             byte_length: 0,
             constructor_slots: Vec::new(),
+            code_separator_index: -1,
+            code_separator_indices: Vec::new(),
         }
     }
 
@@ -65,6 +71,10 @@ impl EmitContext {
     fn emit_opcode(&mut self, name: &str) -> Result<(), String> {
         let byte = opcode_byte(name)
             .ok_or_else(|| format!("unknown opcode: {}", name))?;
+        if name == "OP_CODESEPARATOR" {
+            self.code_separator_index = self.byte_length as i64;
+            self.code_separator_indices.push(self.byte_length);
+        }
         self.append_hex(&format!("{:02x}", byte));
         self.asm_parts.push(name.to_string());
         Ok(())
@@ -308,6 +318,8 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
             script_hex: String::new(),
             script_asm: String::new(),
             constructor_slots: Vec::new(),
+            code_separator_index: -1,
+            code_separator_indices: Vec::new(),
         });
     }
 
@@ -324,6 +336,8 @@ pub fn emit(methods: &[StackMethod]) -> Result<EmitResult, String> {
         script_hex: ctx.get_hex(),
         script_asm: ctx.get_asm(),
         constructor_slots: ctx.constructor_slots,
+        code_separator_index: ctx.code_separator_index,
+        code_separator_indices: ctx.code_separator_indices,
     })
 }
 
@@ -341,7 +355,9 @@ fn emit_method_dispatch(
             ctx.emit_opcode("OP_IF")?;
             ctx.emit_opcode("OP_DROP")?;
         } else {
-            ctx.emit_opcode("OP_DROP")?;
+            // Last method — verify the index matches (fail-closed for invalid selectors)
+            ctx.emit_push(&PushValue::Int(i as i128));
+            ctx.emit_opcode("OP_NUMEQUALVERIFY")?;
         }
 
         for op in &method.ops {
@@ -371,6 +387,8 @@ pub fn emit_method(method: &StackMethod) -> Result<EmitResult, String> {
         script_hex: ctx.get_hex(),
         script_asm: ctx.get_asm(),
         constructor_slots: ctx.constructor_slots,
+        code_separator_index: ctx.code_separator_index,
+        code_separator_indices: ctx.code_separator_indices,
     })
 }
 

@@ -42,6 +42,15 @@ export { computeOpPushTx } from './oppushtx.js';
 // Script utilities
 export { buildP2PKHScript } from './script-utils.js';
 
+// SHA-256 compression (inductive contracts)
+export {
+  sha256CompressBlock,
+  computePartialSha256ForInductive,
+  SHA256_K,
+  SHA256_INIT,
+} from './sha256-compress.js';
+export type { PartialSha256Result } from './sha256-compress.js';
+
 // Token management
 export { TokenWallet } from './tokens.js';
 

@@ -66,7 +66,7 @@ describe('PostQuantumWallet (Hybrid ECDSA + WOTS+)', () => {
 
     // Tamper with WOTS signature
     const tampered = new Uint8Array(wotsSig);
-    tampered[100] ^= 0xff;
+    tampered[100]! ^= 0xff;
 
     const result = contract.call('spend', {
       wotsSig: toHex(tampered),

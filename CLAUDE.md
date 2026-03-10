@@ -115,14 +115,20 @@ When adding a new frontend format parser:
 - Add format docs in `docs/formats/`
 
 ### Four Compilers Must Stay in Sync
-Any language feature change must be implemented in TypeScript, Go, Rust, AND Python. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 25 golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 4 compilers must pass.
+Any language feature change must be implemented in TypeScript, Go, Rust, AND Python. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 26 golden-file tests (including WOTS+, SLH-DSA, EC primitives, and inductive contracts) that all 4 compilers must pass.
 
 ### Contract Model
-- `SmartContract` — stateless, all properties `readonly`, developer writes full logic
-- `StatefulSmartContract` — compiler auto-injects `checkPreimage` at method entry and state continuation at exit
-- `InductiveSmartContract` — extends `StatefulSmartContract` with backward chain verification (verifies parent tx authenticity via hash, checks lineage consistency and chain linking)
+Three base classes, discriminated by `parentClass` on `ContractNode`:
+
+- **`SmartContract`** — Stateless. All properties are `readonly`. Developer writes full logic. No compiler-injected code. Each method is an independent spending path. Used for P2PKH, multisig, hash locks, etc.
+
+- **`StatefulSmartContract`** — Stateful. Compiler auto-injects `checkPreimage` (OP_PUSH_TX) at method entry and state continuation at method exit. Mutable properties become on-chain state stored after OP_RETURN in the locking script. Each spend creates a new UTXO with updated state. Used for counters, tokens, games, etc.
+
+- **`InductiveSmartContract`** — Extends `StatefulSmartContract` with backward chain verification. In addition to state management, the compiler auto-injects verification that the parent transaction is authentic by reconstructing its txid using partial SHA-256 (`sha256Compress`). Three internal properties are auto-injected: `_genesisOutpoint`, `_parentOutpoint`, `_grandparentOutpoint` (36 bytes each). On each spend, the contract verifies: (1) parent txid matches the outpoint in the current preimage, (2) genesis outpoint is consistent across the chain, (3) parent-grandparent linking is correct. Genesis detection uses a zero sentinel (36 zero bytes). Uses 4 implicit unlock params: `_parentHashState` (32B), `_parentTailBlock1` (64B), `_parentTailBlock2` (64B), `_parentRawTailLen` (~1B) — constant 161 bytes regardless of parent tx size. See `docs/inductive-contracts.md` for full details.
+
+Other contract model details:
 - `this.addOutput(satoshis, ...values)` — multi-output intrinsic; values are positional matching mutable properties in declaration order
-- `parentClass` field on `ContractNode` discriminates between the three base classes
+- `this.addRawOutput(satoshis, scriptBytes)` — raw output intrinsic; creates an output with caller-specified script bytes instead of the contract's own codePart
 - Only Rúnar built-in functions and contract methods are allowed — the type checker rejects calls to unknown functions like `Math.floor()` or `console.log()`
 - **Property initializers**: Properties can have `= value` defaults (literal values only: BigIntLiteral, BoolLiteral, ByteStringLiteral). Initialized properties are excluded from auto-generated constructors. Go/Rust DSL formats use a private `init()` method pattern instead of inline syntax. The AST `PropertyNode` has an optional `initializer` field; ANF `initialValue` is populated from it.
 
@@ -231,6 +237,11 @@ Key SDK concepts:
 - Built-in EC (secp256k1) functions: `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`
 - `Point` type: 64-byte ByteString subtype (x[32] || y[32], big-endian unsigned, no prefix byte). EC constants: `EC_P`, `EC_N`, `EC_G` (from `runar-lang/src/ec.ts`)
 - Shift operators `<<` and `>>` compile to `OP_LSHIFT` and `OP_RSHIFT`
+- Bitwise operators (`&`, `|`, `^`, `~`) work on both `bigint` and `ByteString` operands
+- `sha256Compress(state, block)` and `sha256Finalize(state, remaining, msgBitLen)` for partial SHA-256 verification
+- `this.addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script bytes (not stateful continuations)
+- OP_CODESEPARATOR is automatically inserted for stateful contracts; artifact includes `codeSeparatorIndex` and `codeSeparatorIndices` fields
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
 - SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python)
 - EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python)
+- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python)

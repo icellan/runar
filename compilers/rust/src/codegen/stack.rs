@@ -301,9 +301,9 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
                 refs.push(preimage.clone());
             }
         }
-        ANFValue::ExtractParentOutput { raw_tx, output_index } => {
-            refs.push(raw_tx.clone());
-            refs.push(output_index.clone());
+        ANFValue::AddRawOutput { satoshis, script_bytes } => {
+            refs.push(satoshis.clone());
+            refs.push(script_bytes.clone());
         }
     }
     refs
@@ -350,6 +350,81 @@ impl LoweringContext {
     fn emit_op(&mut self, op: StackOp) {
         self.ops.push(op);
         self.track_depth();
+    }
+
+    /// Emit a Bitcoin varint encoding of the length on top of the stack.
+    ///
+    /// Expects stack: `[..., script, len]`
+    /// Leaves stack:  `[..., script, varint_bytes]`
+    ///
+    /// OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need 2 bytes
+    /// (sign bit). To produce a correct 1-byte unsigned varint, we use
+    /// OP_NUM2BIN 2 then SPLIT to extract only the low byte.
+    /// Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+    fn emit_varint_encoding(&mut self) {
+        // Stack: [..., script, len]
+        self.emit_op(StackOp::Dup); // [script, len, len]
+        self.sm.dup();
+        self.emit_op(StackOp::Push(PushValue::Int(253))); // [script, len, len, 253]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into())); // [script, len, isSmall]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop(); // pop condition
+
+        // Then: 1-byte varint (len < 253)
+        // Use NUM2BIN 2 to avoid sign-magnitude issue for values 128-252,
+        // then take only the first (low) byte via SPLIT.
+        self.emit_op(StackOp::Push(PushValue::Int(2))); // [script, len, 2]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_2bytes]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(1))); // [script, len_2bytes, 1]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [script, lowByte, highByte]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // lowByte
+        self.sm.push(""); // highByte
+        self.emit_op(StackOp::Drop); // [script, lowByte]
+        self.sm.pop();
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+
+        // Else: 0xfd + 2-byte LE varint (len >= 253)
+        // Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
+        // then take only the first 2 (low) bytes via SPLIT.
+        self.emit_op(StackOp::Push(PushValue::Int(4))); // [script, len, 4]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_4bytes]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(2))); // [script, len_4bytes, 2]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [script, low2bytes, high2bytes]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // low2bytes
+        self.sm.push(""); // high2bytes
+        self.emit_op(StackOp::Drop); // [script, low2bytes]
+        self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0xfd])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        // --- Stack: [..., script, varint] ---
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -489,7 +564,7 @@ impl LoweringContext {
             } => {
                 self.lower_bin_op(name, op, left, right, binding_index, last_uses, result_type.as_deref());
             }
-            ANFValue::UnaryOp { op, operand } => {
+            ANFValue::UnaryOp { op, operand, .. } => {
                 self.lower_unary_op(name, op, operand, binding_index, last_uses);
             }
             ANFValue::Call {
@@ -540,8 +615,8 @@ impl LoweringContext {
             ANFValue::AddOutput { satoshis, state_values, preimage } => {
                 self.lower_add_output(name, satoshis, state_values, preimage, binding_index, last_uses);
             }
-            ANFValue::ExtractParentOutput { raw_tx, output_index } => {
-                self.lower_extract_parent_output(name, raw_tx, output_index, binding_index, last_uses);
+            ANFValue::AddRawOutput { satoshis, script_bytes } => {
+                self.lower_add_raw_output(name, satoshis, script_bytes, binding_index, last_uses);
             }
         }
     }
@@ -793,6 +868,16 @@ impl LoweringContext {
         if func_name.starts_with("verifySLHDSA_") {
             let param_key = func_name.trim_start_matches("verifySLHDSA_");
             self.lower_verify_slh_dsa(binding_name, param_key, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "sha256Compress" {
+            self.lower_sha256_compress(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "sha256Finalize" {
+            self.lower_sha256_finalize(binding_name, args, binding_index, last_uses);
             return;
         }
 
@@ -1327,9 +1412,8 @@ impl LoweringContext {
     }
 
     /// Builds the full BIP-143 output serialization for a single-output stateful
-    /// continuation and hashes it with SHA256d. Extracts varint+scriptCode+amount
-    /// from the preimage, replaces state bytes with new state, builds:
-    /// amount(8LE) + varint(scriptLen) + codePart + OP_RETURN + stateBytes.
+    /// continuation and hashes it with SHA256d. Uses _codePart implicit parameter
+    /// for the code portion and extracts the amount from the preimage.
     fn lower_compute_state_output_hash(
         &mut self,
         binding_name: &str,
@@ -1337,118 +1421,85 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &std::collections::HashMap<String, usize>,
     ) {
-        // Compute fixed state serialization length from non-readonly properties.
-        let mut state_len: usize = 0;
-        for p in &self.properties {
-            if p.readonly {
-                continue;
-            }
-            state_len += match p.prop_type.as_str() {
-                "bigint" => 8,
-                "boolean" => 1,
-                "PubKey" => 33,
-                "Addr" => 20,
-                "Sha256" => 32,
-                "Point" => 64,
-                _ => panic!(
-                    "computeStateOutputHash: unsupported mutable property type '{}' for '{}'",
-                    p.prop_type, p.name
-                ),
-            };
-        }
-
         let preimage_ref = &args[0];
         let state_bytes_ref = &args[1];
 
-        // Bring stateBytes then preimage to top.
+        // Bring stateBytes to stack first.
         let sb_last = self.is_last_use(state_bytes_ref, binding_index, last_uses);
         self.bring_to_top(state_bytes_ref, sb_last);
+
+        // Extract amount from preimage for the continuation output.
         let pre_last = self.is_last_use(preimage_ref, binding_index, last_uses);
         self.bring_to_top(preimage_ref, pre_last);
 
-        // Stack: [..., stateBytes, preimage]
-
-        // Step 1: Extract middle: varint + scriptCode + amount.
-        self.emit_op(StackOp::Push(PushValue::Int(104)));
+        // Extract amount: last 52 bytes, take 8 bytes at offset 0.
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [prefix, rest]
-        self.sm.pop(); // 104
-        self.sm.pop(); // preimage
+        self.emit_op(StackOp::Push(PushValue::Int(52))); // 8 (amount) + 44 (tail)
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [prefix, amountAndTail]
+        self.sm.pop();
+        self.sm.pop();
         self.sm.push(""); // prefix
-        self.sm.push(""); // rest
+        self.sm.push(""); // amountAndTail
         self.emit_op(StackOp::Nip); // drop prefix
         self.sm.pop();
         self.sm.pop();
-        self.sm.push(""); // rest
-
-        // Drop last 44 bytes.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into())); // [rest, restLen]
-        self.sm.push(""); // restLen (1 push for OP_SIZE)
-        self.emit_op(StackOp::Push(PushValue::Int(44)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [middle, tail44]
-        self.sm.pop(); // position
-        self.sm.pop(); // rest
-        self.sm.push(""); // middle
-        self.sm.push(""); // tail44
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-
-        // Step 2: Split off amount (last 8 bytes), save to altstack.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
         self.sm.push("");
         self.emit_op(StackOp::Push(PushValue::Int(8)));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [amount(8), tail(44)]
         self.sm.pop();
         self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+sc, amount]
-        self.sm.pop(); // position
-        self.sm.pop(); // middle
-        self.sm.push(""); // varint+sc
         self.sm.push(""); // amount
+        self.sm.push(""); // tail
+        self.emit_op(StackOp::Drop); // drop tail
+        self.sm.pop();
+        // --- Stack: [..., stateBytes, amount(8LE)] ---
+
+        // Save amount to altstack
         self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
         self.sm.pop();
 
-        // Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int((state_len + 1) as i128)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+code, opReturn+state]
-        self.sm.pop(); // position
-        self.sm.pop(); // varint+sc
-        self.sm.push(""); // varint+code
-        self.sm.push(""); // opReturn+state
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
+        // Bring _codePart to top (PICK — never consume, reused across outputs)
+        self.bring_to_top("_codePart", false);
+        // --- Stack: [..., stateBytes, codePart] ---
 
-        // Step 4: Append OP_RETURN byte (0x6a as data).
+        // Append OP_RETURN + stateBytes
         self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
+        // --- Stack: [..., stateBytes, codePart+OP_RETURN] ---
 
-        // Step 5: Swap and CAT to append stateBytes.
         self.emit_op(StackOp::Swap);
         self.sm.swap();
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
+        // --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
 
-        // Step 6: Prepend amount from altstack.
+        // Compute varint prefix for script length
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_varint_encoding();
+
+        // Prepend varint to script
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        // Prepend amount from altstack
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.sm.push("");
         self.emit_op(StackOp::Swap);
@@ -1458,7 +1509,7 @@ impl LoweringContext {
         self.sm.pop();
         self.sm.push("");
 
-        // Step 7: Hash with SHA256d.
+        // Hash with SHA256d
         self.emit_op(StackOp::Opcode("OP_HASH256".into()));
 
         self.sm.pop();
@@ -1466,10 +1517,9 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// `computeStateOutput(preimage, stateBytes, newAmount)` — same as `computeStateOutputHash`
-    /// but returns raw output bytes WITHOUT the final OP_HASH256. This allows the
-    /// caller to concatenate additional outputs (e.g., change output) before hashing.
-    /// Uses _newAmount instead of sourceSatoshis from the preimage.
+    /// `computeStateOutput(preimage, stateBytes, newAmount)` — builds the continuation
+    /// output using _newAmount and _codePart instead of extracting from preimage.
+    /// Returns raw output bytes WITHOUT the final OP_HASH256.
     fn lower_compute_state_output(
         &mut self,
         binding_name: &str,
@@ -1477,31 +1527,17 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &std::collections::HashMap<String, usize>,
     ) {
-        // Compute fixed state serialization length from non-readonly properties.
-        let mut state_len: usize = 0;
-        for p in &self.properties {
-            if p.readonly {
-                continue;
-            }
-            state_len += match p.prop_type.as_str() {
-                "bigint" => 8,
-                "boolean" => 1,
-                "PubKey" => 33,
-                "Addr" => 20,
-                "Sha256" => 32,
-                "Point" => 64,
-                _ => panic!(
-                    "computeStateOutput: unsupported mutable property type '{}' for '{}'",
-                    p.prop_type, p.name
-                ),
-            };
-        }
-
         let preimage_ref = &args[0];
         let state_bytes_ref = &args[1];
         let new_amount_ref = &args[2];
 
-        // Bring newAmount to top, convert to 8-byte LE, save to altstack.
+        // Consume preimage ref (no longer needed — we use _codePart and _newAmount).
+        let pre_last = self.is_last_use(preimage_ref, binding_index, last_uses);
+        self.bring_to_top(preimage_ref, pre_last);
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // Step 1: Convert _newAmount to 8-byte LE and save to altstack.
         let amount_last = self.is_last_use(new_amount_ref, binding_index, last_uses);
         self.bring_to_top(new_amount_ref, amount_last);
         self.emit_op(StackOp::Push(PushValue::Int(8)));
@@ -1513,95 +1549,45 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_TOALTSTACK".into()));
         self.sm.pop();
 
-        // Bring stateBytes then preimage to top.
+        // Step 2: Bring stateBytes to stack.
         let sb_last = self.is_last_use(state_bytes_ref, binding_index, last_uses);
         self.bring_to_top(state_bytes_ref, sb_last);
-        let pre_last = self.is_last_use(preimage_ref, binding_index, last_uses);
-        self.bring_to_top(preimage_ref, pre_last);
 
-        // Stack: [..., stateBytes, preimage]
+        // Step 3: Bring _codePart to top (PICK — never consume, reused across outputs)
+        self.bring_to_top("_codePart", false);
+        // --- Stack: [..., stateBytes, codePart] ---
 
-        // Step 1: Extract middle: varint + scriptCode + amount.
-        self.emit_op(StackOp::Push(PushValue::Int(104)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [prefix, rest]
-        self.sm.pop(); // 104
-        self.sm.pop(); // preimage
-        self.sm.push(""); // prefix
-        self.sm.push(""); // rest
-        self.emit_op(StackOp::Nip); // drop prefix
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // rest
-
-        // Drop last 44 bytes.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into())); // [rest, restLen]
-        self.sm.push(""); // restLen (1 push for OP_SIZE)
-        self.emit_op(StackOp::Push(PushValue::Int(44)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [middle, tail44]
-        self.sm.pop(); // position
-        self.sm.pop(); // rest
-        self.sm.push(""); // middle
-        self.sm.push(""); // tail44
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-
-        // Step 2: Split off amount (last 8 bytes) and DROP it — we use _newAmount instead.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(8)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+sc, amount]
-        self.sm.pop(); // position
-        self.sm.pop(); // middle
-        self.sm.push(""); // varint+sc
-        self.sm.push(""); // amount
-        self.emit_op(StackOp::Drop); // drop sourceSatoshis — replaced by _newAmount
-        self.sm.pop();
-
-        // Step 3: Strip state + OP_RETURN from end (stateLen + 1 bytes).
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int((state_len + 1) as i128)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [varint+code, opReturn+state]
-        self.sm.pop(); // position
-        self.sm.pop(); // varint+sc
-        self.sm.push(""); // varint+code
-        self.sm.push(""); // opReturn+state
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-
-        // Step 4: Append OP_RETURN byte (0x6a as data).
+        // Step 4: Append OP_RETURN + stateBytes
         self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
+        // --- Stack: [..., stateBytes, codePart+OP_RETURN] ---
 
-        // Step 5: Swap and CAT to append stateBytes.
         self.emit_op(StackOp::Swap);
         self.sm.swap();
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
+        // --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
 
-        // Step 6: Prepend _newAmount (8-byte LE) from altstack.
+        // Step 5: Compute varint prefix for script length
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_varint_encoding();
+
+        // Step 6: Prepend varint to script
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        // Step 7: Prepend _newAmount (8-byte LE) from altstack.
         self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".into()));
         self.sm.push("");
         self.emit_op(StackOp::Swap);
@@ -1681,12 +1667,14 @@ impl LoweringContext {
         binding_name: &str,
         satoshis: &str,
         state_values: &[String],
-        preimage: &str,
+        _preimage: &str,
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
         // Build a full BIP-143 output serialization:
         //   amount(8LE) + varint(scriptLen) + codePart + OP_RETURN + stateBytes
+        // Uses _codePart implicit parameter (passed by SDK) instead of extracting
+        // codePart from the preimage. This is simpler and works with OP_CODESEPARATOR.
 
         let state_props: Vec<ANFProperty> = self
             .properties
@@ -1695,97 +1683,20 @@ impl LoweringContext {
             .cloned()
             .collect();
 
-        // Compute fixed state serialization length.
-        let mut state_len: usize = 0;
-        for p in &state_props {
-            state_len += match p.prop_type.as_str() {
-                "bigint" => 8,
-                "boolean" => 1,
-                "PubKey" => 33,
-                "Addr" => 20,
-                "Sha256" => 32,
-                "Point" => 64,
-                _ => panic!("addOutput: unsupported mutable property type '{}'", p.prop_type),
-            };
-        }
+        // Step 1: Bring _codePart to top (PICK — never consume, reused across outputs)
+        self.bring_to_top("_codePart", false);
+        // --- Stack: [..., codePart] ---
 
-        // --- Extract varint + codePart from preimage ---
-        let pre_is_last = self.is_last_use(preimage, binding_index, last_uses);
-        self.bring_to_top(preimage, pre_is_last);
-
-        // Step 1: Extract middle: varint + scriptCode + amount.
-        self.emit_op(StackOp::Push(PushValue::Int(104)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // prefix
-        self.sm.push(""); // rest
-        self.emit_op(StackOp::Nip);
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // rest
-
-        // Drop last 44 bytes.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(44)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // middle
-        self.sm.push(""); // tail44
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-
-        // Step 2: Split off amount (last 8 bytes) and drop it.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(8)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // varint+sc
-        self.sm.push(""); // amount
-        self.emit_op(StackOp::Drop); // drop amount
-        self.sm.pop();
-
-        // Step 3: Strip state + OP_RETURN from end.
-        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int((state_len + 1) as i128)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // varint+code
-        self.sm.push(""); // opReturn+state
-        self.emit_op(StackOp::Drop);
-        self.sm.pop();
-
-        // Step 4: Append OP_RETURN byte.
+        // Step 2: Append OP_RETURN byte (0x6a).
         self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x6a])));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
+        // --- Stack: [..., codePart+OP_RETURN] ---
 
-        // Step 5: Serialize each state value and concatenate.
+        // Step 3: Serialize each state value and concatenate.
         for (i, value_ref) in state_values.iter().enumerate() {
             if i >= state_props.len() {
                 break;
@@ -1812,6 +1723,22 @@ impl LoweringContext {
             self.emit_op(StackOp::Opcode("OP_CAT".to_string()));
             self.sm.push("");
         }
+        // --- Stack: [..., codePart+OP_RETURN+stateBytes] ---
+
+        // Step 4: Compute varint prefix for the full script length.
+        self.emit_op(StackOp::Opcode("OP_SIZE".into())); // [script, len]
+        self.sm.push("");
+        self.emit_varint_encoding();
+        // --- Stack: [..., script, varint] ---
+
+        // Step 5: Prepend varint to script: SWAP CAT
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        // --- Stack: [..., varint+script] ---
 
         // Step 6: Prepend satoshis as 8-byte LE.
         let is_last_satoshis = self.is_last_use(satoshis, binding_index, last_uses);
@@ -1819,13 +1746,15 @@ impl LoweringContext {
         self.emit_op(StackOp::Push(PushValue::Int(8)));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
-        self.sm.pop();
+        self.sm.pop(); // pop the width
+        // Stack: [..., varint+script, satoshis(8LE)]
         self.emit_op(StackOp::Swap);
         self.sm.swap();
         self.sm.pop();
         self.sm.pop();
         self.emit_op(StackOp::Opcode("OP_CAT".to_string())); // satoshis || varint+script
         self.sm.push("");
+        // --- Stack: [..., amount(8LE)+varint+scriptPubKey] ---
 
         // Rename top to binding name
         self.sm.pop();
@@ -1833,242 +1762,49 @@ impl LoweringContext {
         self.track_depth();
     }
 
-    /// Lower extract_parent_output: parse a raw Bitcoin transaction on the stack
-    /// to extract the locking script from output index 0 (the continuation output).
-    ///
-    /// Uses OP_SPLIT chains to parse the raw tx:
-    ///   1. Skip version (4 bytes)
-    ///   2. Read inputCount (1-byte varint)
-    ///   3. Skip each input (up to 4, unrolled)
-    ///   4. Read outputCount (1-byte varint, ignored for idx 0)
-    ///   5. Skip satoshis (8 bytes), read scriptLen (1-byte varint), extract script
-    fn lower_extract_parent_output(
+    /// `add_raw_output(satoshis, scriptBytes)` — builds a raw output serialization:
+    ///   amount(8LE) + varint(scriptLen) + scriptBytes
+    /// The scriptBytes are used as-is (no codePart/state insertion).
+    fn lower_add_raw_output(
         &mut self,
         binding_name: &str,
-        raw_tx: &str,
-        output_index: &str,
+        satoshis: &str,
+        script_bytes: &str,
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        // Extract the output script at the given output_index from a raw Bitcoin tx.
-        // Supports output indices 0-3 via an unrolled output-skipping loop.
+        // Step 1: Bring scriptBytes to top
+        let script_is_last = self.is_last_use(script_bytes, binding_index, last_uses);
+        self.bring_to_top(script_bytes, script_is_last);
 
-        // Bring rawTx to top
-        let is_last_raw_tx = self.is_last_use(raw_tx, binding_index, last_uses);
-        self.bring_to_top(raw_tx, is_last_raw_tx);
-
-        // --- Step 1: Skip version (4 bytes) ---
-        self.emit_op(StackOp::Push(PushValue::Int(4)));
+        // Step 2: Compute varint prefix for script length
+        self.emit_op(StackOp::Opcode("OP_SIZE".to_string())); // [script, len]
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // version (left)
-        self.sm.push(""); // remainder (right)
-        self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // remainder
+        self.emit_varint_encoding();
+        // --- Stack: [..., script, varint] ---
 
-        // --- Step 2: Read inputCount (1 byte varint) ---
-        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        // Step 3: Prepend varint to script: SWAP CAT
+        self.emit_op(StackOp::Swap); // [varint, script]
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".to_string())); // [varint+script]
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // inputCountByte (left)
-        self.sm.push(""); // remainder (right)
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
 
-        // --- Step 3: Skip each input (unrolled, up to 4) ---
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-        self.sm.pop();
-
-        for _i in 0..4 {
-            self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".to_string()));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_0NOTEQUAL".to_string()));
-            self.emit_op(StackOp::Opcode("OP_IF".to_string()));
-
-            self.emit_op(StackOp::Opcode("OP_1SUB".to_string()));
-            self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-
-            // Skip 36 bytes (prevTxId + prevVout)
-            self.emit_op(StackOp::Push(PushValue::Int(36)));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-
-            // Read 1-byte varint for scriptSig length
-            self.emit_op(StackOp::Push(PushValue::Int(1)));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
-
-            // Skip scriptLen + 4 (sequence) bytes
-            self.emit_op(StackOp::Push(PushValue::Int(4)));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_ADD".to_string()));
-            self.sm.pop();
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-
-            self.emit_op(StackOp::Opcode("OP_ELSE".to_string()));
-            self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".to_string()));
-        }
-
-        // Clean up input counter from alt stack
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".to_string()));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_DROP".to_string()));
-        self.sm.pop();
-
-        // --- Step 4: Read outputCount (1 byte varint) and discard ---
-        self.emit_op(StackOp::Push(PushValue::Int(1)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // outputCountByte
-        self.sm.push(""); // remainder
-        self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // remainder
-
-        // --- Step 5: Bring outputIndex to top, push to alt stack as counter ---
-        let is_last_output_index = self.is_last_use(output_index, binding_index, last_uses);
-        self.bring_to_top(output_index, is_last_output_index);
-        self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-        self.sm.pop();
-
-        // --- Step 6: Unrolled output-skipping loop (up to 4 iterations) ---
-        // Each output: 8 bytes (satoshis) + 1-byte varint (scriptLen) + script bytes
-        for _i in 0..4 {
-            self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".to_string()));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_DUP".to_string()));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_0NOTEQUAL".to_string()));
-            self.emit_op(StackOp::Opcode("OP_IF".to_string()));
-
-            self.emit_op(StackOp::Opcode("OP_1SUB".to_string()));
-            self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-
-            // Skip 8 bytes (satoshis)
-            self.emit_op(StackOp::Push(PushValue::Int(8)));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-
-            // Read 1-byte varint for script length
-            self.emit_op(StackOp::Push(PushValue::Int(1)));
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
-
-            // Skip scriptLen bytes
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-            self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-            self.sm.pop();
-            self.sm.pop();
-            self.sm.push("");
-
-            self.emit_op(StackOp::Opcode("OP_ELSE".to_string()));
-            self.emit_op(StackOp::Opcode("OP_TOALTSTACK".to_string()));
-            self.emit_op(StackOp::Opcode("OP_ENDIF".to_string()));
-        }
-
-        // Clean up output counter from alt stack
-        self.emit_op(StackOp::Opcode("OP_FROMALTSTACK".to_string()));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_DROP".to_string()));
-        self.sm.pop();
-
-        // --- Step 7: Extract the target output's script ---
-        // Skip satoshis (8 bytes)
+        // Step 4: Prepend satoshis as 8-byte LE
+        let sat_is_last = self.is_last_use(satoshis, binding_index, last_uses);
+        self.bring_to_top(satoshis, sat_is_last);
         self.emit_op(StackOp::Push(PushValue::Int(8)));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
+        self.sm.pop(); // pop width
+        // Stack: [..., varint+script, satoshis(8LE)]
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
         self.sm.pop();
         self.sm.pop();
-        self.sm.push(""); // satoshis
-        self.sm.push(""); // rest
-        self.emit_op(StackOp::Opcode("OP_NIP".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // rest
-
-        // Read 1-byte varint for script length
-        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        self.emit_op(StackOp::Opcode("OP_CAT".to_string())); // satoshis || varint+script
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // scriptLenByte
-        self.sm.push(""); // rest
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
-
-        // Extract the script bytes
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SWAP".to_string()));
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop(); // scriptLen
-        self.sm.pop(); // rest
-        self.sm.push(""); // script
-        self.sm.push(""); // remainder
-        self.emit_op(StackOp::Opcode("OP_DROP".to_string()));
-        self.sm.pop(); // drop remainder
 
         // Rename top to binding name
         self.sm.pop();
@@ -2114,6 +1850,11 @@ impl LoweringContext {
         //   After push G:                  [..., preimage, _opPushTxSig, null(G)]
         //   After OP_CHECKSIG:             [..., preimage, null(result)]
         //   After OP_VERIFY:               [..., preimage]
+
+        // Step 0: Emit OP_CODESEPARATOR so that the scriptCode in the BIP-143
+        // preimage is only the code after this point. This reduces preimage size
+        // for large scripts and is required for scripts > ~32KB.
+        self.emit_op(StackOp::Opcode("OP_CODESEPARATOR".to_string()));
 
         // Step 1: Bring preimage to top.
         let is_last = self.is_last_use(preimage, binding_index, last_uses);
@@ -3152,6 +2893,60 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    // =========================================================================
+    // SHA-256 compression -- delegates to sha256.rs
+    // =========================================================================
+
+    fn lower_sha256_compress(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 2,
+            "sha256Compress requires 2 arguments: state, block"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..2 {
+            self.sm.pop();
+        }
+
+        super::sha256::emit_sha256_compress(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_sha256_finalize(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 3,
+            "sha256Finalize requires 3 arguments: state, remaining, msgBitLen"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..3 {
+            self.sm.pop();
+        }
+
+        super::sha256::emit_sha256_finalize(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
     fn lower_ec_builtin(
         &mut self,
         binding_name: &str,
@@ -3628,6 +3423,19 @@ fn method_uses_check_preimage(bindings: &[ANFBinding]) -> bool {
     bindings.iter().any(|b| matches!(&b.value, ANFValue::CheckPreimage { .. }))
 }
 
+/// Check whether a method has add_output, add_raw_output, or computeStateOutput/
+/// computeStateOutputHash calls (recursively). Only methods that construct
+/// continuation outputs need the _codePart implicit parameter.
+fn method_uses_code_part(bindings: &[ANFBinding]) -> bool {
+    bindings.iter().any(|b| match &b.value {
+        ANFValue::AddOutput { .. } | ANFValue::AddRawOutput { .. } => true,
+        ANFValue::Call { func, .. } if func == "computeStateOutput" || func == "computeStateOutputHash" => true,
+        ANFValue::If { then, else_branch, .. } => method_uses_code_part(then) || method_uses_code_part(else_branch),
+        ANFValue::Loop { body, .. } => method_uses_code_part(body),
+        _ => false,
+    })
+}
+
 fn lower_method_with_private_methods(
     method: &ANFMethod,
     properties: &[ANFProperty],
@@ -3635,12 +3443,19 @@ fn lower_method_with_private_methods(
 ) -> Result<StackMethod, String> {
     let mut param_names: Vec<String> = method.params.iter().map(|p| p.name.clone()).collect();
 
-    // If the method uses checkPreimage, the unlocking script pushes an
-    // implicit <sig> before all declared parameters (OP_PUSH_TX pattern).
-    // Insert _opPushTxSig at the base of the stack so it can be consumed
-    // by lower_check_preimage later.
+    // If the method uses checkPreimage, the unlocking script pushes implicit
+    // params before all declared parameters (OP_PUSH_TX pattern).
+    // _codePart: full code script (locking script minus state) as ByteString
+    // _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
+    // These are inserted at the base of the stack so they can be consumed later.
     if method_uses_check_preimage(&method.body) {
         param_names.insert(0, "_opPushTxSig".to_string());
+        // _codePart is only needed when the method has add_output or add_raw_output
+        // (it provides the code script for continuation output construction).
+        // Stateless contracts and terminal methods don't use it.
+        if method_uses_code_part(&method.body) {
+            param_names.insert(0, "_codePart".to_string());
+        }
     }
 
     let mut ctx = LoweringContext::new(&param_names, properties);

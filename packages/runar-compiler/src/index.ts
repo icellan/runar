@@ -264,7 +264,11 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       stackProgram,
       emitResult.scriptHex,
       emitResult.scriptAsm,
-      { constructorSlots: emitResult.constructorSlots },
+      {
+        constructorSlots: emitResult.constructorSlots,
+        codeSeparatorIndex: emitResult.codeSeparatorIndex,
+        codeSeparatorIndices: emitResult.codeSeparatorIndices,
+      },
     );
 
     return {

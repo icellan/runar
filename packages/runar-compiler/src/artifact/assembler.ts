@@ -101,6 +101,13 @@ export interface RunarArtifact {
   /** Byte offsets of constructor parameter placeholders in the script */
   constructorSlots?: ConstructorSlot[];
 
+  /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash).
+   *  For multi-method contracts, use codeSeparatorIndices instead. */
+  codeSeparatorIndex?: number;
+
+  /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
+  codeSeparatorIndices?: number[];
+
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
 }
@@ -120,6 +127,10 @@ export interface AssembleOptions {
   compilerVersion?: string;
   /** Constructor parameter placeholder byte offsets from the emitter. */
   constructorSlots?: ConstructorSlot[];
+  /** Byte offset of OP_CODESEPARATOR in the locking script. */
+  codeSeparatorIndex?: number;
+  /** Per-method OP_CODESEPARATOR byte offsets. */
+  codeSeparatorIndices?: number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +324,14 @@ export function assembleArtifact(
   // Constructor slots (only if there are placeholder byte offsets)
   if (options?.constructorSlots && options.constructorSlots.length > 0) {
     artifact.constructorSlots = options.constructorSlots;
+  }
+
+  // OP_CODESEPARATOR byte offsets (only for stateful contracts)
+  if (options?.codeSeparatorIndex !== undefined) {
+    artifact.codeSeparatorIndex = options.codeSeparatorIndex;
+  }
+  if (options?.codeSeparatorIndices && options.codeSeparatorIndices.length > 0) {
+    artifact.codeSeparatorIndices = options.codeSeparatorIndices;
   }
 
   return artifact;

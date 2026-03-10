@@ -33,7 +33,7 @@ from runar.ec import (
     ec_point_x, ec_point_y,
     EC_P, EC_N, EC_G,
 )
-from runar.base import SmartContract, StatefulSmartContract
+from runar.base import SmartContract, StatefulSmartContract, InductiveSmartContract
 from runar.decorators import public
 from runar.compile_check import compile_check
 
@@ -55,7 +55,7 @@ __all__ = [
     # Decorators
     'public',
     # Base classes
-    'SmartContract', 'StatefulSmartContract',
+    'SmartContract', 'StatefulSmartContract', 'InductiveSmartContract',
     # Assertions
     'assert_',
     # Crypto

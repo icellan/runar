@@ -177,7 +177,7 @@ class _ValidationContext:
         # where the compiler auto-injects the final assert)
         if (
             method.visibility == "public"
-            and self.contract.parent_class != "StatefulSmartContract"
+            and self.contract.parent_class not in ("StatefulSmartContract", "InductiveSmartContract")
         ):
             if not _ends_with_assert(method.body):
                 self._add_error(

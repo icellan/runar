@@ -116,13 +116,15 @@ type PreparedCall struct {
 	changePKHHex      string
 	changeAmount      int64
 	methodNeedsNewAmount bool
-	newAmount         int64
-	preimageIndex     int
+	newAmount            int64
+	inductiveParamsHex   string
+	preimageIndex        int
 	contractUtxo      UTXO
 	newLockingScript  string
 	newSatoshis       int64
 	hasMultiOutput    bool
 	contractOutputs   []ContractOutput
+	codeSepIdx        int // adjusted OP_CODESEPARATOR byte offset, -1 if none
 }
 
 // ---------------------------------------------------------------------------
@@ -131,15 +133,17 @@ type PreparedCall struct {
 
 // RunarArtifact is the compiled output of a Runar compiler.
 type RunarArtifact struct {
-	Version          string            `json:"version"`
-	CompilerVersion  string            `json:"compilerVersion"`
-	ContractName     string            `json:"contractName"`
-	ABI              ABI               `json:"abi"`
-	Script           string            `json:"script"`
-	ASM              string            `json:"asm"`
-	StateFields      []StateField      `json:"stateFields,omitempty"`
-	ConstructorSlots []ConstructorSlot `json:"constructorSlots,omitempty"`
-	BuildTimestamp   string            `json:"buildTimestamp"`
+	Version                string            `json:"version"`
+	CompilerVersion        string            `json:"compilerVersion"`
+	ContractName           string            `json:"contractName"`
+	ABI                    ABI               `json:"abi"`
+	Script                 string            `json:"script"`
+	ASM                    string            `json:"asm"`
+	StateFields            []StateField      `json:"stateFields,omitempty"`
+	ConstructorSlots       []ConstructorSlot `json:"constructorSlots,omitempty"`
+	BuildTimestamp         string            `json:"buildTimestamp"`
+	CodeSeparatorIndex     *int              `json:"codeSeparatorIndex,omitempty"`
+	CodeSeparatorIndices   []int             `json:"codeSeparatorIndices,omitempty"`
 }
 
 // ABI describes the contract's public interface.

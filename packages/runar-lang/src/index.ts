@@ -300,6 +300,17 @@ export abstract class StatefulSmartContract extends SmartContract {
       'StatefulSmartContract.addOutput() cannot be called at runtime — compile this contract.',
     );
   }
+
+  /**
+   * Adds a raw output with caller-specified script bytes.
+   * The script is used as-is without wrapping in the contract's codePart.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected addRawOutput(_satoshis: bigint, _scriptBytes: ByteString): void {
+    throw new Error(
+      'StatefulSmartContract.addRawOutput() cannot be called at runtime — compile this contract.',
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

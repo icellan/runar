@@ -116,46 +116,28 @@ func TestCovenantVault_ValidSpend(t *testing.T) {
 
 	contract := deployCovenantVault(t, owner, recipient, minAmount)
 
-	// Get UTXO from SDK contract, convert for raw spending
-	utxo := helpers.SDKUtxoToHelper(contract.GetCurrentUtxo())
-
-	// Build spend TX with the EXACT output the covenant expects:
-	// A P2PKH output to the recipient for minAmount satoshis.
-	// The covenant verifies hash256(expectedOutput) == extractOutputHash(txPreimage),
-	// where expectedOutput = num2bin(minAmount, 8) || "1976a914" || recipient || "88ac"
-	recipientScript := recipient.P2PKHScript()
-	spendTx, err := helpers.BuildSpendTx(utxo, recipientScript, minAmount)
+	// spend(sig, txPreimage) via SDK terminal call — the covenant verifies
+	// the output hash matches a P2PKH to the registered recipient.
+	provider := helpers.NewRPCProvider()
+	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
-		t.Fatalf("build spend: %v", err)
+		t.Fatalf("signer: %v", err)
 	}
 
-	// Sign with owner's key
-	sigHex, err := helpers.SignInput(spendTx, 0, owner.PrivKey)
-	if err != nil {
-		t.Fatalf("sign: %v", err)
+	callOpts := &runar.CallOptions{
+		TerminalOutputs: []runar.TerminalOutput{
+			{ScriptHex: recipient.P2PKHScript(), Satoshis: minAmount},
+		},
 	}
-	sigBytes, _ := hex.DecodeString(sigHex)
-
-	// OP_PUSH_TX for checkPreimage
-	opPushTxSigHex, preimageHex, err := helpers.SignOpPushTx(spendTx, 0)
+	txid, _, err := contract.Call(
+		"spend",
+		[]interface{}{nil, nil}, // sig + txPreimage — auto-computed by SDK
+		provider, signer, callOpts,
+	)
 	if err != nil {
-		t.Fatalf("op_push_tx: %v", err)
+		t.Fatalf("spend failed: %v", err)
 	}
-	opPushTxSigBytes, _ := hex.DecodeString(opPushTxSigHex)
-	preimageBytes, _ := hex.DecodeString(preimageHex)
-
-	// spend(sig: Sig, txPreimage: SigHashPreimage)
-	// Compiler inserts implicit _opPushTxSig before declared params.
-	// Unlocking script order: <opPushTxSig> <sig> <txPreimage>
-	unlockHex := helpers.EncodePushBytes(opPushTxSigBytes) +
-		helpers.EncodePushBytes(sigBytes) +
-		helpers.EncodePushBytes(preimageBytes)
-
-	unlockScript, _ := script.NewFromHex(unlockHex)
-	spendTx.Inputs[0].UnlockingScript = unlockScript
-
-	txid := helpers.AssertTxAccepted(t, spendTx.Hex())
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("spend TX: %s", txid)
 }
 
 // TestCovenantVault_WrongOutput_Rejected verifies the covenant rejects a transaction
