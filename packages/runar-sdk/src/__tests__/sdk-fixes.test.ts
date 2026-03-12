@@ -6,7 +6,7 @@ import { MockProvider } from '../providers/mock.js';
 import { LocalSigner } from '../signers/local.js';
 import { serializeState, deserializeState } from '../state.js';
 import type { RunarArtifact, StateField } from 'runar-ir-schema';
-import type { Transaction, UTXO } from '../types.js';
+import type { TransactionData, UTXO } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -37,7 +37,7 @@ function makeUtxo(satoshis: number, index = 0): UTXO {
 function makeTx(
   txid: string,
   outputs: Array<{ satoshis: number; script: string }>,
-): Transaction {
+): TransactionData {
   return {
     txid,
     version: 1,
@@ -455,18 +455,20 @@ describe('fee estimation with actual script sizes', () => {
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
     // Small unlocking script (1 byte)
-    const { txHex: smallTx } = buildCallTransaction(
+    const { tx: smallTxObj } = buildCallTransaction(
       utxo, '51', undefined, undefined, 'addr', changeScript,
     );
 
     // Large unlocking script (200 bytes)
-    const { txHex: largeTx } = buildCallTransaction(
+    const { tx: largeTxObj } = buildCallTransaction(
       utxo, 'aa'.repeat(200), undefined, undefined, 'addr', changeScript,
     );
 
     // The larger unlocking script should result in less change (higher fee)
     // We can verify this indirectly: larger tx should have smaller change output
     // Both txs have the same total input, so fee difference = change difference
+    const smallTx = smallTxObj.toHex();
+    const largeTx = largeTxObj.toHex();
     expect(largeTx.length).toBeGreaterThan(smallTx.length);
   });
 });

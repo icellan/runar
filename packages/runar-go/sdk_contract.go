@@ -8,6 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bsv-blockchain/go-sdk/chainhash"
+	sdkscript "github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	"golang.org/x/crypto/ripemd160"
 )
 
@@ -77,7 +80,7 @@ func (c *RunarContract) Deploy(
 	provider Provider,
 	signer Signer,
 	options DeployOptions,
-) (string, *Transaction, error) {
+) (string, *TransactionData, error) {
 	if provider == nil {
 		provider = c.provider
 	}
@@ -114,7 +117,7 @@ func (c *RunarContract) Deploy(
 
 	// Build the deploy transaction
 	changeScript := BuildP2PKHScript(changeAddress)
-	txHex, inputCount, err := BuildDeployTransaction(
+	deployTx, inputCount, err := BuildDeployTransaction(
 		lockingScript,
 		utxos,
 		options.Satoshis,
@@ -127,10 +130,9 @@ func (c *RunarContract) Deploy(
 	}
 
 	// Sign all inputs
-	signedTx := txHex
 	for i := 0; i < inputCount; i++ {
 		utxo := utxos[i]
-		sig, err := signer.Sign(signedTx, i, utxo.Script, utxo.Satoshis, nil)
+		sig, err := signer.Sign(deployTx.Hex(), i, utxo.Script, utxo.Satoshis, nil)
 		if err != nil {
 			return "", nil, fmt.Errorf("RunarContract.Deploy: signing input %d: %w", i, err)
 		}
@@ -139,12 +141,13 @@ func (c *RunarContract) Deploy(
 			return "", nil, fmt.Errorf("RunarContract.Deploy: getting public key: %w", err)
 		}
 		// Build P2PKH unlocking script: <sig> <pubkey>
-		unlockScript := EncodePushData(sig) + EncodePushData(pubKey)
-		signedTx = InsertUnlockingScript(signedTx, i, unlockScript)
+		unlockScriptHex := EncodePushData(sig) + EncodePushData(pubKey)
+		unlockLS, _ := sdkscript.NewFromHex(unlockScriptHex)
+		deployTx.Inputs[i].UnlockingScript = unlockLS
 	}
 
 	// Broadcast
-	txid, err := provider.Broadcast(signedTx)
+	txid, err := provider.Broadcast(deployTx)
 	if err != nil {
 		return "", nil, fmt.Errorf("RunarContract.Deploy: broadcasting: %w", err)
 	}
@@ -160,11 +163,11 @@ func (c *RunarContract) Deploy(
 	tx, err := provider.GetTransaction(txid)
 	if err != nil {
 		// Fallback: construct a minimal transaction from what we know
-		tx = &Transaction{
+		tx = &TransactionData{
 			Txid:    txid,
 			Version: 1,
 			Outputs: []TxOutput{{Satoshis: options.Satoshis, Script: lockingScript}},
-			Raw:     signedTx,
+			Raw:     deployTx.Hex(),
 		}
 	}
 
@@ -180,7 +183,7 @@ func (c *RunarContract) Call(
 	provider Provider,
 	signer Signer,
 	options *CallOptions,
-) (string, *Transaction, error) {
+) (string, *TransactionData, error) {
 	if provider == nil {
 		provider = c.provider
 	}
@@ -511,7 +514,7 @@ func (c *RunarContract) PrepareCall(
 		}
 	}
 
-	txHex, inputCount, changeAmount := BuildCallTransaction(
+	callTx, inputCount, changeAmount := BuildCallTransaction(
 		contractUtxo,
 		unlockingScript,
 		newLockingScript,
@@ -524,7 +527,7 @@ func (c *RunarContract) PrepareCall(
 	)
 
 	// Sign P2PKH funding inputs (after contract inputs)
-	signedTx := txHex
+	signedTx := callTx.Hex()
 	p2pkhStartIdx := 1 + len(extraContractUtxos)
 	for i := p2pkhStartIdx; i < inputCount; i++ {
 		utxoIdx := i - p2pkhStartIdx
@@ -628,7 +631,7 @@ func (c *RunarContract) PrepareCall(
 				}
 			}
 		}
-		txHex, inputCount, changeAmount = BuildCallTransaction(
+		rebuildTx, rebuildCount, rebuildChange := BuildCallTransaction(
 			contractUtxo,
 			input0Unlock,
 			newLockingScript,
@@ -639,7 +642,9 @@ func (c *RunarContract) PrepareCall(
 			feeRate,
 			rebuildOpts,
 		)
-		signedTx = txHex
+		inputCount = rebuildCount
+		changeAmount = rebuildChange
+		signedTx = rebuildTx.Hex()
 
 		// Second pass: recompute with final tx (preimage changes with unlock size)
 		finalInput0Unlock, opSig, preim, err := buildStatefulUnlock(signedTx, 0, contractUtxo.Script, contractUtxo.Satoshis, resolvedArgs, changeAmount)
@@ -762,7 +767,7 @@ func (c *RunarContract) FinalizeCall(
 	prepared *PreparedCall,
 	signatures map[int]string,
 	provider Provider,
-) (string, *Transaction, error) {
+) (string, *TransactionData, error) {
 	if provider == nil {
 		provider = c.provider
 	}
@@ -810,7 +815,13 @@ func (c *RunarContract) FinalizeCall(
 		primaryUnlock = c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
 	}
 
-	finalTx := InsertUnlockingScript(prepared.TxHex, 0, primaryUnlock)
+	finalTxHex := InsertUnlockingScript(prepared.TxHex, 0, primaryUnlock)
+
+	// Parse final hex to Transaction for broadcast
+	finalTx, parseErr := transaction.NewTransactionFromHex(finalTxHex)
+	if parseErr != nil {
+		return "", nil, fmt.Errorf("RunarContract.FinalizeCall: parsing tx: %w", parseErr)
+	}
 
 	// Broadcast
 	txid, err := provider.Broadcast(finalTx)
@@ -841,10 +852,10 @@ func (c *RunarContract) FinalizeCall(
 
 	tx, err := provider.GetTransaction(txid)
 	if err != nil {
-		tx = &Transaction{
+		tx = &TransactionData{
 			Txid:    txid,
 			Version: 1,
-			Raw:     finalTx,
+			Raw:     finalTxHex,
 		}
 	}
 
@@ -1173,27 +1184,28 @@ func (c *RunarContract) prepareCallTerminal(
 		termUnlockScript = c.BuildUnlockingScript(methodName, resolvedArgs)
 	}
 
-	// Build raw transaction: single input (contract UTXO), exact outputs
-	buildTerminalTx := func(unlock string) string {
-		var tx string
-		tx += toLittleEndian32(1) // version
-		tx += encodeVarInt(1)     // input count: just the contract UTXO
-		tx += reverseHex(contractUtxo.Txid)
-		tx += toLittleEndian32(contractUtxo.OutputIndex)
-		tx += encodeVarInt(len(unlock) / 2)
-		tx += unlock
-		tx += "ffffffff" // sequence
-		tx += encodeVarInt(len(termOutputs))
+	// Build terminal transaction using go-sdk Transaction
+	buildTerminalTx := func(unlock string) *transaction.Transaction {
+		ttx := transaction.NewTransaction()
+		unlockLS, _ := sdkscript.NewFromHex(unlock)
+		ttx.AddInput(&transaction.TransactionInput{
+			SourceTXID:       txidToChainHash(contractUtxo.Txid),
+			SourceTxOutIndex: uint32(contractUtxo.OutputIndex),
+			UnlockingScript:  unlockLS,
+			SequenceNumber:   0xffffffff,
+		})
 		for _, out := range termOutputs {
-			tx += toLittleEndian64(out.Satoshis)
-			tx += encodeVarInt(len(out.ScriptHex) / 2)
-			tx += out.ScriptHex
+			outLS, _ := sdkscript.NewFromHex(out.ScriptHex)
+			ttx.AddOutput(&transaction.TransactionOutput{
+				Satoshis:      uint64(out.Satoshis),
+				LockingScript: outLS,
+			})
 		}
-		tx += toLittleEndian32(0) // locktime
-		return tx
+		return ttx
 	}
 
-	termTx := buildTerminalTx(termUnlockScript)
+	termTxObj := buildTerminalTx(termUnlockScript)
+	termTx := termTxObj.Hex()
 	finalOpPushTxSig := ""
 	finalPreimage := ""
 
@@ -1228,7 +1240,7 @@ func (c *RunarContract) prepareCallTerminal(
 		if err != nil {
 			return nil, fmt.Errorf("RunarContract.PrepareCall terminal: %w", err)
 		}
-		termTx = buildTerminalTx(firstUnlock)
+		termTx = buildTerminalTx(firstUnlock).Hex()
 
 		// Second pass
 		secondUnlock, opSig, preim, err := buildUnlock(termTx)
@@ -1455,5 +1467,11 @@ func encodeBigIntScriptNumber(n *big.Int) string {
 	}
 
 	return EncodePushData(bytesToHex(le))
+}
+
+// txidToChainHash converts a 64-char hex txid to a *chainhash.Hash for go-sdk.
+func txidToChainHash(txid string) *chainhash.Hash {
+	h, _ := chainhash.NewHashFromHex(txid)
+	return h
 }
 

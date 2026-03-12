@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use sha2::{Sha256, Digest};
+use bsv::transaction::Transaction as BsvTransaction;
 use super::types::*;
 use super::state::{serialize_state, extract_state_from_script, encode_push_data, find_last_op_return};
 use super::oppushtx::compute_op_push_tx_with_code_sep;
@@ -15,6 +16,11 @@ use super::calling::{build_call_transaction_ext, CallTxOptions, ContractOutput, 
 use super::provider::Provider;
 use super::signer::Signer;
 use crate::prelude::hash160 as compute_hash160;
+
+/// Convert a raw transaction hex string to a BSV SDK Transaction object for broadcasting.
+fn hex_to_bsv_tx(hex: &str) -> Result<BsvTransaction, String> {
+    BsvTransaction::from_hex(hex).map_err(|e| format!("hex_to_bsv_tx: {}", e))
+}
 
 /// Runtime wrapper for a compiled Rúnar contract.
 ///
@@ -109,7 +115,7 @@ impl RunarContract {
     }
 
     /// Deploy using the connected provider and signer.
-    pub fn deploy_connected(&mut self, options: &DeployOptions) -> Result<(String, Transaction), String> {
+    pub fn deploy_connected(&mut self, options: &DeployOptions) -> Result<(String, TransactionData), String> {
         let provider = self.connected_provider.as_mut().ok_or_else(|| {
             "No provider connected. Call connect() first.".to_string()
         })?;
@@ -135,7 +141,7 @@ impl RunarContract {
         method_name: &str,
         args: &[SdkValue],
         options: Option<&CallOptions>,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         let provider = self.connected_provider.as_mut().ok_or_else(|| {
             "No provider connected. Call connect() first.".to_string()
         })?;
@@ -174,7 +180,7 @@ impl RunarContract {
         &mut self,
         prepared: &PreparedCall,
         signatures: &HashMap<usize, String>,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         let provider = self.connected_provider.as_mut().ok_or_else(|| {
             "No provider connected. Call connect() first.".to_string()
         })?;
@@ -196,7 +202,7 @@ impl RunarContract {
         provider: &mut dyn Provider,
         signer: &dyn Signer,
         options: &DeployOptions,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         self.deploy_inner(provider, signer, options)
     }
 
@@ -205,7 +211,7 @@ impl RunarContract {
         provider: &mut dyn Provider,
         signer: &dyn Signer,
         options: &DeployOptions,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         let address = signer.get_address()?;
         let change_address = options
             .change_address
@@ -247,7 +253,8 @@ impl RunarContract {
         }
 
         // Broadcast
-        let txid = provider.broadcast(&signed_tx)?;
+        let bsv_tx = hex_to_bsv_tx(&signed_tx)?;
+        let txid = provider.broadcast(&bsv_tx)?;
 
         // Track the deployed UTXO
         self.current_utxo = Some(Utxo {
@@ -259,7 +266,7 @@ impl RunarContract {
 
         let tx = provider.get_transaction(&txid).unwrap_or_else(|_| {
             // Fallback: construct a minimal transaction from what we know
-            Transaction {
+            TransactionData {
                 txid: txid.clone(),
                 version: 1,
                 inputs: vec![],
@@ -290,7 +297,7 @@ impl RunarContract {
         provider: &mut dyn Provider,
         signer: &dyn Signer,
         options: Option<&CallOptions>,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         self.call_inner(provider, signer, method_name, args, options)
     }
 
@@ -301,7 +308,7 @@ impl RunarContract {
         method_name: &str,
         args: &[SdkValue],
         options: Option<&CallOptions>,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         let prepared = self.prepare_call(method_name, args, provider, signer, options)?;
         let mut signatures = HashMap::new();
         let contract_utxo = prepared.contract_utxo.clone();
@@ -894,7 +901,7 @@ impl RunarContract {
         prepared: &PreparedCall,
         signatures: &HashMap<usize, String>,
         provider: &mut dyn Provider,
-    ) -> Result<(String, Transaction), String> {
+    ) -> Result<(String, TransactionData), String> {
         // Replace placeholder sigs with real signatures
         let mut resolved_args = prepared.resolved_args.clone();
         for &idx in &prepared.sig_indices {
@@ -945,7 +952,8 @@ impl RunarContract {
         let final_tx = insert_unlocking_script(&prepared.tx_hex, 0, &primary_unlock)?;
 
         // Broadcast
-        let txid = provider.broadcast(&final_tx)?;
+        let bsv_tx = hex_to_bsv_tx(&final_tx)?;
+        let txid = provider.broadcast(&bsv_tx)?;
 
         // Update tracked UTXO
         if prepared.is_stateful && prepared.has_multi_output && !prepared.contract_outputs.is_empty() {
@@ -969,7 +977,7 @@ impl RunarContract {
         }
 
         let tx = provider.get_transaction(&txid).unwrap_or_else(|_| {
-            Transaction {
+            TransactionData {
                 txid: txid.clone(),
                 version: 1,
                 inputs: vec![],
@@ -1673,8 +1681,8 @@ mod tests {
         }
     }
 
-    fn make_tx(txid: &str, outputs: Vec<TxOutput>) -> Transaction {
-        Transaction {
+    fn make_tx(txid: &str, outputs: Vec<TxOutput>) -> TransactionData {
+        TransactionData {
             txid: txid.to_string(),
             version: 1,
             inputs: vec![TxInput {

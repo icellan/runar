@@ -110,8 +110,8 @@ describe('buildCallTransaction — transaction structure', () => {
     const utxo = makeUtxo(100000);
     const unlockingScript = '4830'.padEnd(144, 'aa'); // mock 72-byte sig push
 
-    const { txHex } = buildCallTransaction(utxo, unlockingScript);
-    const parsed = parseTxHex(txHex);
+    const { tx } = buildCallTransaction(utxo, unlockingScript);
+    const parsed = parseTxHex(tx.toHex());
 
     expect(parsed.version).toBe(1);
     expect(parsed.locktime).toBe(0);
@@ -119,7 +119,8 @@ describe('buildCallTransaction — transaction structure', () => {
 
   it('produces valid hex output', () => {
     const utxo = makeUtxo(100000);
-    const { txHex } = buildCallTransaction(utxo, '51');
+    const { tx } = buildCallTransaction(utxo, '51');
+    const txHex = tx.toHex();
 
     expect(txHex).toBeDefined();
     expect(txHex.length).toBeGreaterThan(0);
@@ -130,8 +131,8 @@ describe('buildCallTransaction — transaction structure', () => {
     const utxo = makeUtxo(100000);
     const unlockingScript = 'aabb';
 
-    const { txHex } = buildCallTransaction(utxo, unlockingScript);
-    const parsed = parseTxHex(txHex);
+    const { tx } = buildCallTransaction(utxo, unlockingScript);
+    const parsed = parseTxHex(tx.toHex());
 
     // Input 0 should contain the unlocking script
     expect(parsed.inputs[0]!.script).toBe(unlockingScript);
@@ -142,7 +143,7 @@ describe('buildCallTransaction — transaction structure', () => {
     const utxo = makeUtxo(100000);
     const additional = [makeUtxo(50000, 1), makeUtxo(30000, 2)];
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -151,7 +152,7 @@ describe('buildCallTransaction — transaction structure', () => {
       '76a914' + 'ff'.repeat(20) + '88ac',
       additional,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     for (const input of parsed.inputs) {
       expect(input.sequence).toBe(0xffffffff);
@@ -160,8 +161,8 @@ describe('buildCallTransaction — transaction structure', () => {
 
   it('encodes the contract UTXO txid in reversed byte order (Bitcoin wire format)', () => {
     const utxo = makeUtxo(100000);
-    const { txHex } = buildCallTransaction(utxo, '51');
-    const parsed = parseTxHex(txHex);
+    const { tx } = buildCallTransaction(utxo, '51');
+    const parsed = parseTxHex(tx.toHex());
 
     // The prevTxid in the wire format should be the reverse of the UTXO txid
     expect(parsed.inputs[0]!.prevTxid).toBe(reverseHex(utxo.txid));
@@ -175,8 +176,8 @@ describe('buildCallTransaction — transaction structure', () => {
 describe('buildCallTransaction — inputs', () => {
   it('creates exactly 1 input for contract UTXO only (no additional UTXOs)', () => {
     const utxo = makeUtxo(100000);
-    const { txHex, inputCount } = buildCallTransaction(utxo, '51');
-    const parsed = parseTxHex(txHex);
+    const { tx, inputCount } = buildCallTransaction(utxo, '51');
+    const parsed = parseTxHex(tx.toHex());
 
     expect(inputCount).toBe(1);
     expect(parsed.inputCount).toBe(1);
@@ -188,7 +189,7 @@ describe('buildCallTransaction — inputs', () => {
     const additional = [makeUtxo(50000, 1), makeUtxo(30000, 2)];
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex, inputCount } = buildCallTransaction(
+    const { tx, inputCount } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -197,7 +198,7 @@ describe('buildCallTransaction — inputs', () => {
       changeScript,
       additional,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     expect(inputCount).toBe(3);
     expect(parsed.inputCount).toBe(3);
@@ -212,8 +213,8 @@ describe('buildCallTransaction — inputs', () => {
 
   it('references the correct output index from the contract UTXO', () => {
     const utxo = makeUtxo(100000, 3);
-    const { txHex } = buildCallTransaction(utxo, '51');
-    const parsed = parseTxHex(txHex);
+    const { tx } = buildCallTransaction(utxo, '51');
+    const parsed = parseTxHex(tx.toHex());
 
     expect(parsed.inputs[0]!.prevIndex).toBe(3);
   });
@@ -230,7 +231,7 @@ describe('buildCallTransaction — stateful outputs', () => {
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       newLockingScript,
@@ -238,7 +239,7 @@ describe('buildCallTransaction — stateful outputs', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // First output should be the contract continuation
     expect(parsed.outputs[0]!.script).toBe(newLockingScript);
@@ -250,7 +251,7 @@ describe('buildCallTransaction — stateful outputs', () => {
     const newLockingScript = '51';
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '00',
       newLockingScript,
@@ -258,7 +259,7 @@ describe('buildCallTransaction — stateful outputs', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Output 0 satoshis should default to the input UTXO satoshis
     expect(parsed.outputs[0]!.satoshis).toBe(75000);
@@ -268,7 +269,7 @@ describe('buildCallTransaction — stateful outputs', () => {
     const utxo = makeUtxo(100000);
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -276,7 +277,7 @@ describe('buildCallTransaction — stateful outputs', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // For stateless: only change output (no contract continuation output)
     // The change output script should be the change script
@@ -297,7 +298,7 @@ describe('buildCallTransaction — change and fees', () => {
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '00',
       newLockingScript,
@@ -305,7 +306,7 @@ describe('buildCallTransaction — change and fees', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
     // Change = 100000 - 50000 - 96 = 49904
@@ -324,7 +325,7 @@ describe('buildCallTransaction — change and fees', () => {
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '00',
       newLockingScript,
@@ -332,7 +333,7 @@ describe('buildCallTransaction — change and fees', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Only the contract output, no change output
     expect(parsed.outputCount).toBe(1);
@@ -348,7 +349,7 @@ describe('buildCallTransaction — change and fees', () => {
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '00',
       newLockingScript,
@@ -356,7 +357,7 @@ describe('buildCallTransaction — change and fees', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // No change output since change <= 0
     expect(parsed.outputCount).toBe(1);
@@ -369,7 +370,7 @@ describe('buildCallTransaction — change and fees', () => {
     const newSatoshis = 40000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '00',
       newLockingScript,
@@ -378,7 +379,7 @@ describe('buildCallTransaction — change and fees', () => {
       changeScript,
       additional,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Fee: input0(42) + additional(148) + contractOut(10) + changeOut(34) + overhead(10) = 244
     // Total input: 50000 + 30000 = 80000
@@ -393,7 +394,7 @@ describe('buildCallTransaction — change and fees', () => {
     const threeAdditional = [makeUtxo(100000, 1), makeUtxo(100000, 2), makeUtxo(100000, 3)];
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex: txHex1 } = buildCallTransaction(
+    const { tx: tx1 } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -402,7 +403,7 @@ describe('buildCallTransaction — change and fees', () => {
       changeScript,
     );
 
-    const { txHex: txHex4 } = buildCallTransaction(
+    const { tx: tx4 } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -412,8 +413,8 @@ describe('buildCallTransaction — change and fees', () => {
       threeAdditional,
     );
 
-    const parsed1 = parseTxHex(txHex1);
-    const parsed4 = parseTxHex(txHex4);
+    const parsed1 = parseTxHex(tx1.toHex());
+    const parsed4 = parseTxHex(tx4.toHex());
 
     // Both are stateless (no contract output), so just change output
     // 1 input: fee = input0(42) + changeOut(34) + overhead(10) = 86; change = 200000 - 86 = 199914
@@ -436,7 +437,7 @@ describe('buildCallTransaction — stateless call', () => {
     const utxo = makeUtxo(100000);
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -444,7 +445,7 @@ describe('buildCallTransaction — stateless call', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Fee: input0(42) + changeOut(34) + overhead(10) = 86
     // Change: 100000 - 0 - 86 = 99914
@@ -459,7 +460,7 @@ describe('buildCallTransaction — stateless call', () => {
     const utxo = makeUtxo(86);
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -467,7 +468,7 @@ describe('buildCallTransaction — stateless call', () => {
       'changeaddr',
       changeScript,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Change = 192 - 0 - 192 = 0 → no change output
     expect(parsed.outputCount).toBe(0);
@@ -488,7 +489,7 @@ describe('buildCallTransaction — P2PKH address decoding', () => {
     const expectedHash160 = '77bff20c60e522dfaa3350c39b030a5d004e839a';
 
     const utxo = makeUtxo(100000);
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
@@ -496,7 +497,7 @@ describe('buildCallTransaction — P2PKH address decoding', () => {
       knownAddress,
     );
 
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // If there's a change output, check it contains the correct P2PKH script
     if (parsed.outputCount > 0) {
@@ -510,14 +511,14 @@ describe('buildCallTransaction — P2PKH address decoding', () => {
   it('still accepts a raw 40-char hex hash directly', () => {
     const rawHash = 'aabbccdd'.repeat(5); // 40 hex chars = 20 bytes
     const utxo = makeUtxo(100000);
-    const { txHex } = buildCallTransaction(
+    const { tx } = buildCallTransaction(
       utxo,
       '51',
       undefined,
       undefined,
       rawHash,
     );
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     if (parsed.outputCount > 0) {
       const changeOutput = parsed.outputs[parsed.outputCount - 1]!;

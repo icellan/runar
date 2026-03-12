@@ -2,17 +2,17 @@
 // runar-sdk/deployment.ts -- Transaction construction for contract deployment
 // ---------------------------------------------------------------------------
 
+import { Transaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import type { UTXO } from './types.js';
 import { buildP2PKHScript } from './script-utils.js';
 
 /**
- * Build a raw transaction that creates an output with the given locking
- * script. The transaction consumes the provided UTXOs, places the contract
- * output first, and sends any remaining value (minus fees) to a change
- * address.
+ * Build a transaction that creates an output with the given locking script.
+ * The transaction consumes the provided UTXOs, places the contract output
+ * first, and sends any remaining value (minus fees) to a change address.
  *
- * Returns the unsigned transaction hex and the number of inputs (needed so
- * the caller knows how many inputs to sign).
+ * Returns the unsigned Transaction object and the number of inputs (needed
+ * so the caller knows how many inputs to sign).
  */
 export function buildDeployTransaction(
   lockingScript: string,
@@ -21,7 +21,7 @@ export function buildDeployTransaction(
   changeAddress: string,
   changeScript: string,
   feeRate: number = 1,
-): { txHex: string; inputCount: number } {
+): { tx: Transaction; inputCount: number } {
   if (utxos.length === 0) {
     throw new Error('buildDeployTransaction: no UTXOs provided');
   }
@@ -36,96 +36,34 @@ export function buildDeployTransaction(
     );
   }
 
-  // Build raw transaction using Bitcoin wire format
-  let tx = '';
+  const tx = new Transaction();
 
-  // Version (4 bytes LE)
-  tx += toLittleEndian32(1);
-
-  // Input count (varint)
-  tx += encodeVarInt(utxos.length);
-
-  // Inputs (unsigned -- scriptSig is empty)
+  // Inputs (unsigned — no unlocking script)
   for (const utxo of utxos) {
-    // Previous txid (32 bytes, internal byte order = reversed hex)
-    tx += reverseHex(utxo.txid);
-    // Previous output index (4 bytes LE)
-    tx += toLittleEndian32(utxo.outputIndex);
-    // ScriptSig length + script (empty for unsigned)
-    tx += '00';
-    // Sequence (4 bytes LE) -- 0xffffffff
-    tx += 'ffffffff';
+    tx.addInput({
+      sourceTXID: utxo.txid,
+      sourceOutputIndex: utxo.outputIndex,
+      unlockingScript: new UnlockingScript(),
+      sequence: 0xffffffff,
+    });
   }
-
-  // Output count
-  const hasChange = change > 0;
-  const outputCount = hasChange ? 2 : 1;
-  tx += encodeVarInt(outputCount);
 
   // Output 0: contract locking script
-  tx += toLittleEndian64(satoshis);
-  tx += encodeVarInt(lockingScript.length / 2);
-  tx += lockingScript;
+  tx.addOutput({
+    satoshis,
+    lockingScript: LockingScript.fromHex(lockingScript),
+  });
 
   // Output 1: change (if any)
-  if (hasChange) {
+  if (change > 0) {
     const actualChangeScript = changeScript || buildP2PKHScript(changeAddress);
-    tx += toLittleEndian64(change);
-    tx += encodeVarInt(actualChangeScript.length / 2);
-    tx += actualChangeScript;
+    tx.addOutput({
+      satoshis: change,
+      lockingScript: LockingScript.fromHex(actualChangeScript),
+    });
   }
 
-  // Locktime (4 bytes LE)
-  tx += toLittleEndian32(0);
-
-  return { txHex: tx, inputCount: utxos.length };
-}
-
-// ---------------------------------------------------------------------------
-// Bitcoin wire format helpers
-// ---------------------------------------------------------------------------
-
-function toLittleEndian32(n: number): string {
-  const buf = new ArrayBuffer(4);
-  new DataView(buf).setUint32(0, n, true);
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function toLittleEndian64(n: number): string {
-  // For satoshi values that fit in a standard JS number (< 2^53)
-  const lo = n & 0xffffffff;
-  const hi = Math.floor(n / 0x100000000) & 0xffffffff;
-  return toLittleEndian32(lo) + toLittleEndian32(hi);
-}
-
-function encodeVarInt(n: number): string {
-  if (n < 0xfd) {
-    return n.toString(16).padStart(2, '0');
-  } else if (n <= 0xffff) {
-    return 'fd' + toLittleEndian16(n);
-  } else if (n <= 0xffffffff) {
-    return 'fe' + toLittleEndian32(n);
-  } else {
-    return 'ff' + toLittleEndian64(n);
-  }
-}
-
-function toLittleEndian16(n: number): string {
-  const buf = new ArrayBuffer(2);
-  new DataView(buf).setUint16(0, n, true);
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function reverseHex(hex: string): string {
-  const pairs: string[] = [];
-  for (let i = 0; i < hex.length; i += 2) {
-    pairs.push(hex.slice(i, i + 2));
-  }
-  return pairs.reverse().join('');
+  return { tx, inputCount: utxos.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -196,4 +134,3 @@ export function selectUtxos(
   // Return all UTXOs; buildDeployTransaction will throw if still insufficient
   return selected;
 }
-

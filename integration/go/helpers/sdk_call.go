@@ -22,7 +22,7 @@ func CallStatelessWithAutoSign(
 	provider runar.Provider,
 	signer runar.Signer,
 	signArgsFn func(txHex string) ([]interface{}, error),
-) (string, *runar.Transaction, error) {
+) (string, *runar.TransactionData, error) {
 	return contract.Call(methodName, nil, provider, signer, nil)
 }
 

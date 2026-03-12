@@ -3,7 +3,7 @@
 from __future__ import annotations
 import hashlib
 from runar.sdk.types import (
-    RunarArtifact, Utxo, Transaction, TxOutput,
+    RunarArtifact, Utxo, TransactionData, TxOutput,
     DeployOptions, CallOptions, OutputSpec, TerminalOutput, PreparedCall,
 )
 from runar.sdk.provider import Provider
@@ -81,7 +81,7 @@ class RunarContract:
         provider: Provider | None = None,
         signer: Signer | None = None,
         options: DeployOptions | None = None,
-    ) -> tuple[str, Transaction]:
+    ) -> tuple[str, TransactionData]:
         """Deploy the contract. Returns (txid, transaction)."""
         provider = provider or self._provider
         signer = signer or self._signer
@@ -125,7 +125,7 @@ class RunarContract:
         try:
             tx = provider.get_transaction(txid)
         except Exception:
-            tx = Transaction(
+            tx = TransactionData(
                 txid=txid, version=1,
                 outputs=[TxOutput(satoshis=opts.satoshis, script=locking_script)],
                 raw=signed_tx,
@@ -140,7 +140,7 @@ class RunarContract:
         provider: Provider | None = None,
         signer: Signer | None = None,
         options: CallOptions | None = None,
-    ) -> tuple[str, Transaction]:
+    ) -> tuple[str, TransactionData]:
         """Invoke a public method (spend the UTXO). Returns (txid, transaction)."""
         provider = provider or self._provider
         signer = signer or self._signer
@@ -602,7 +602,7 @@ class RunarContract:
         prepared: PreparedCall,
         signatures: dict[int, str],
         provider: Provider | None = None,
-    ) -> tuple[str, Transaction]:
+    ) -> tuple[str, TransactionData]:
         """Complete a prepared call by injecting external signatures and broadcasting.
 
         Args:
@@ -673,7 +673,7 @@ class RunarContract:
         try:
             tx = provider.get_transaction(txid)
         except Exception:
-            tx = Transaction(txid=txid, version=1, raw=final_tx)
+            tx = TransactionData(txid=txid, version=1, raw=final_tx)
 
         return txid, tx
 

@@ -93,7 +93,7 @@ describe('buildDeployTransaction', () => {
   it('produces a non-empty hex string', () => {
     const lockingScript = '76a914' + '00'.repeat(20) + '88ac'; // P2PKH
     const utxos = [makeUtxo(100000)];
-    const { txHex, inputCount } = buildDeployTransaction(
+    const { tx, inputCount } = buildDeployTransaction(
       lockingScript,
       utxos,
       50000,
@@ -101,6 +101,7 @@ describe('buildDeployTransaction', () => {
       '76a914' + 'ff'.repeat(20) + '88ac',
     );
 
+    const txHex = tx.toHex();
     expect(txHex).toBeDefined();
     expect(txHex.length).toBeGreaterThan(0);
     expect(inputCount).toBe(1);
@@ -113,7 +114,7 @@ describe('buildDeployTransaction', () => {
     const utxos = [makeUtxo(100000)];
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex } = buildDeployTransaction(
+    const { tx } = buildDeployTransaction(
       lockingScript,
       utxos,
       50000,
@@ -121,7 +122,7 @@ describe('buildDeployTransaction', () => {
       changeScript,
     );
 
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
 
     // Version 1
     expect(parsed.version).toBe(1);
@@ -155,7 +156,7 @@ describe('buildDeployTransaction', () => {
     const utxos = [makeUtxo(30000, 0), makeUtxo(40000, 1), makeUtxo(50000, 2)];
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
-    const { txHex, inputCount } = buildDeployTransaction(
+    const { tx, inputCount } = buildDeployTransaction(
       lockingScript,
       utxos,
       50000,
@@ -165,7 +166,7 @@ describe('buildDeployTransaction', () => {
 
     expect(inputCount).toBe(3);
 
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
     expect(parsed.inputCount).toBe(3);
     expect(parsed.inputs.length).toBe(3);
   });
@@ -189,7 +190,7 @@ describe('buildDeployTransaction', () => {
     //   = 10 + 148 + 10 + 34 = 202
     // So totalInput = satoshis + fee = 50000 + 202 = 50202
     const utxos = [makeUtxo(50202)];
-    const { txHex } = buildDeployTransaction(
+    const { tx } = buildDeployTransaction(
       '51',
       utxos,
       50000,
@@ -197,7 +198,7 @@ describe('buildDeployTransaction', () => {
       '51',
     );
 
-    const parsed = parseTxHex(txHex);
+    const parsed = parseTxHex(tx.toHex());
     expect(parsed.outputCount).toBe(1);
   });
 });

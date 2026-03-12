@@ -2,7 +2,14 @@
 // runar-sdk/types.ts — Shared types for on-chain interaction
 // ---------------------------------------------------------------------------
 
-export interface Transaction {
+import type { Transaction as BsvTransaction } from '@bsv/sdk';
+
+/**
+ * Plain data shape returned by Provider.getTransaction().
+ * Renamed from `Transaction` to avoid collision with the @bsv/sdk Transaction class
+ * which is now the primary transaction type used throughout the SDK.
+ */
+export interface TransactionData {
   txid: string;
   version: number;
   inputs: TxInput[];
@@ -10,6 +17,9 @@ export interface Transaction {
   locktime: number;
   raw?: string; // raw hex
 }
+
+/** Re-export @bsv/sdk Transaction as the primary transaction type. */
+export type { BsvTransaction as Transaction };
 
 export interface TxInput {
   txid: string;
@@ -40,7 +50,7 @@ export interface DeployOptions {
  * Result of `prepareCall()` — contains everything needed for external signing
  * and subsequent `finalizeCall()`.
  *
- * Public fields (`sighash`, `preimage`, `opPushTxSig`, `txHex`, `sigIndices`)
+ * Public fields (`sighash`, `preimage`, `opPushTxSig`, `tx`, `sigIndices`)
  * are for external signer coordination. Fields prefixed with `_` are opaque
  * internals consumed by `finalizeCall()`.
  */
@@ -51,8 +61,8 @@ export interface PreparedCall {
   preimage: string;
   /** OP_PUSH_TX DER signature + sighash byte (hex). Empty if not needed. */
   opPushTxSig: string;
-  /** Built transaction hex (P2PKH funding signed, primary contract input uses placeholder sigs). */
-  txHex: string;
+  /** Built transaction (P2PKH funding signed, primary contract input uses placeholder sigs). */
+  tx: BsvTransaction;
   /** User-visible arg positions that need external Sig values. */
   sigIndices: number[];
 
@@ -121,4 +131,11 @@ export interface CallOptions {
    * Each output specifies the exact locking script hex and satoshis.
    */
   terminalOutputs?: Array<{ scriptHex: string; satoshis: number }>;
+
+  /**
+   * Additional funding UTXOs to include as P2PKH inputs for terminal
+   * method calls. Enables terminal methods to receive additional funds
+   * when the contract's own balance is insufficient for outputs + fees.
+   */
+  fundingUtxos?: UTXO[];
 }

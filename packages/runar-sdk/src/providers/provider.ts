@@ -2,14 +2,19 @@
 // runar-sdk/providers/provider.ts — Provider interface for blockchain access
 // ---------------------------------------------------------------------------
 
-import type { Transaction, UTXO } from '../types.js';
+import type { Transaction } from '@bsv/sdk';
+import type { TransactionData, UTXO } from '../types.js';
 
 export interface Provider {
-  /** Fetch a transaction by its txid. */
-  getTransaction(txid: string): Promise<Transaction>;
+  /** Fetch a transaction by its txid (as a plain data shape). */
+  getTransaction(txid: string): Promise<TransactionData>;
 
-  /** Broadcast a raw transaction hex. Returns the txid on success. */
-  broadcast(rawTx: string): Promise<string>;
+  /**
+   * Broadcast a transaction. Returns the txid on success.
+   * Accepts a @bsv/sdk Transaction object — implementations call
+   * `tx.toHex()` (or `tx.toHexEF()` for ARC) as needed.
+   */
+  broadcast(tx: Transaction): Promise<string>;
 
   /** Get all UTXOs for a given address. */
   getUtxos(address: string): Promise<UTXO[]>;

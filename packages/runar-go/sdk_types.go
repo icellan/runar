@@ -12,8 +12,8 @@ type UTXO struct {
 	Script      string `json:"script"` // hex-encoded locking script
 }
 
-// Transaction represents a parsed Bitcoin transaction.
-type Transaction struct {
+// TransactionData represents a parsed Bitcoin transaction (data shape for getTransaction return).
+type TransactionData struct {
 	Txid     string     `json:"txid"`
 	Version  int        `json:"version"`
 	Inputs   []TxInput  `json:"inputs"`
@@ -93,7 +93,7 @@ type PreparedCall struct {
 	Sighash     string `json:"sighash"`     // 64-char hex — BIP-143 hash external signers sign
 	Preimage    string `json:"preimage"`    // hex — full BIP-143 preimage
 	OpPushTxSig string `json:"opPushTxSig"` // hex — OP_PUSH_TX DER sig (empty if not needed)
-	TxHex       string `json:"txHex"`       // hex — built TX (P2PKH funding signed, primary contract input uses placeholder sigs)
+	TxHex       string `json:"txHex"`       // hex — built TX (for backward compat / JSON serialization)
 	SigIndices  []int  `json:"sigIndices"`  // which user-visible arg positions need external Sig values
 
 	// Internal — consumed by FinalizeCall()

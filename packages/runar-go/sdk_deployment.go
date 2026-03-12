@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/bsv-blockchain/go-sdk/script"
+	sdkscript "github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // ---------------------------------------------------------------------------
@@ -19,12 +20,12 @@ const (
 	txOverhead      = 10  // version(4) + input varint(1) + output varint(1) + locktime(4)
 )
 
-// BuildDeployTransaction builds a raw transaction hex that creates an output
+// BuildDeployTransaction builds an unsigned Transaction that creates an output
 // with the given locking script. The transaction consumes the provided UTXOs,
 // places the contract output first, and sends any remaining value (minus fees)
 // to a change address.
 //
-// Returns the unsigned transaction hex and the number of inputs.
+// Returns the unsigned Transaction object and the number of inputs.
 func BuildDeployTransaction(
 	lockingScript string,
 	utxos []UTXO,
@@ -32,9 +33,9 @@ func BuildDeployTransaction(
 	changeAddress string,
 	changeScript string,
 	feeRate ...int64,
-) (txHex string, inputCount int, err error) {
+) (tx *transaction.Transaction, inputCount int, err error) {
 	if len(utxos) == 0 {
-		return "", 0, fmt.Errorf("buildDeployTransaction: no UTXOs provided")
+		return nil, 0, fmt.Errorf("buildDeployTransaction: no UTXOs provided")
 	}
 
 	var totalInput int64
@@ -46,58 +47,46 @@ func BuildDeployTransaction(
 	change := totalInput - satoshis - fee
 
 	if change < 0 {
-		return "", 0, fmt.Errorf(
+		return nil, 0, fmt.Errorf(
 			"buildDeployTransaction: insufficient funds. Need %d sats, have %d",
 			satoshis+fee, totalInput,
 		)
 	}
 
-	var tx string
+	tx = transaction.NewTransaction()
 
-	// Version (4 bytes LE)
-	tx += toLittleEndian32(1)
-
-	// Input count (varint)
-	tx += encodeVarInt(len(utxos))
-
-	// Inputs (unsigned — scriptSig is empty)
+	// Inputs (unsigned — empty unlocking script)
 	for _, utxo := range utxos {
-		// Previous txid (32 bytes, reversed byte order)
-		tx += reverseHex(utxo.Txid)
-		// Previous output index (4 bytes LE)
-		tx += toLittleEndian32(utxo.OutputIndex)
-		// ScriptSig length + script (empty for unsigned)
-		tx += "00"
-		// Sequence (4 bytes LE) — 0xffffffff
-		tx += "ffffffff"
+		if err := tx.AddInputFrom(utxo.Txid, uint32(utxo.OutputIndex), utxo.Script, uint64(utxo.Satoshis), nil); err != nil {
+			return nil, 0, fmt.Errorf("buildDeployTransaction: add input: %w", err)
+		}
 	}
-
-	// Output count
-	hasChange := change > 0
-	outputCount := 1
-	if hasChange {
-		outputCount = 2
-	}
-	tx += encodeVarInt(outputCount)
 
 	// Output 0: contract locking script
-	tx += toLittleEndian64(satoshis)
-	tx += encodeVarInt(len(lockingScript) / 2)
-	tx += lockingScript
+	lockScript, err := sdkscript.NewFromHex(lockingScript)
+	if err != nil {
+		return nil, 0, fmt.Errorf("buildDeployTransaction: invalid locking script: %w", err)
+	}
+	tx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      uint64(satoshis),
+		LockingScript: lockScript,
+	})
 
 	// Output 1: change (if any)
-	if hasChange {
+	if change > 0 {
 		actualChangeScript := changeScript
 		if actualChangeScript == "" {
 			actualChangeScript = BuildP2PKHScript(changeAddress)
 		}
-		tx += toLittleEndian64(change)
-		tx += encodeVarInt(len(actualChangeScript) / 2)
-		tx += actualChangeScript
+		changeLS, err := sdkscript.NewFromHex(actualChangeScript)
+		if err != nil {
+			return nil, 0, fmt.Errorf("buildDeployTransaction: invalid change script: %w", err)
+		}
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(change),
+			LockingScript: changeLS,
+		})
 	}
-
-	// Locktime (4 bytes LE)
-	tx += toLittleEndian32(0)
 
 	return tx, len(utxos), nil
 }
@@ -143,7 +132,7 @@ func EstimateDeployFee(numInputs int, lockingScriptByteLen int, feeRate ...int64
 }
 
 // ---------------------------------------------------------------------------
-// Bitcoin wire format helpers
+// Bitcoin wire format helpers (kept for fee estimation and other callers)
 // ---------------------------------------------------------------------------
 
 func toLittleEndian32(n int) string {
@@ -173,10 +162,10 @@ func encodeVarInt(n int) string {
 	return "ff" + toLittleEndian64(int64(n))
 }
 
-func reverseHex(hex string) string {
-	pairs := make([]string, len(hex)/2)
-	for i := 0; i < len(hex); i += 2 {
-		pairs[i/2] = hex[i : i+2]
+func reverseHex(h string) string {
+	pairs := make([]string, len(h)/2)
+	for i := 0; i < len(h); i += 2 {
+		pairs[i/2] = h[i : i+2]
 	}
 	// Reverse
 	for i, j := 0, len(pairs)-1; i < j; i, j = i+1, j-1 {
@@ -213,7 +202,7 @@ func BuildP2PKHScript(address string) string {
 	pubKeyHash := address
 	if len(address) != 40 || !isHex(address) {
 		// Decode Base58Check address to extract the 20-byte pubkey hash
-		addr, err := script.NewAddressFromString(address)
+		addr, err := sdkscript.NewAddressFromString(address)
 		if err != nil {
 			panic(fmt.Sprintf("BuildP2PKHScript: invalid address %q: %v", address, err))
 		}

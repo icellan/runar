@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 from abc import ABC, abstractmethod
-from runar.sdk.types import Transaction, Utxo
+from runar.sdk.types import TransactionData, Utxo
 
 
 class Provider(ABC):
     """Abstracts blockchain access for UTXO lookup and broadcast."""
 
     @abstractmethod
-    def get_transaction(self, txid: str) -> Transaction:
+    def get_transaction(self, txid: str) -> TransactionData:
         """Fetch a transaction by its txid."""
         ...
 
     @abstractmethod
-    def broadcast(self, raw_tx: str) -> str:
-        """Send a raw transaction hex to the network. Returns the txid."""
+    def broadcast(self, tx) -> str:
+        """Send a transaction to the network. Returns the txid.
+
+        Accepts either a bsv-sdk Transaction object (calls tx.hex()) or a raw
+        hex string for backward compatibility.
+        """
         ...
 
     @abstractmethod
@@ -48,7 +52,8 @@ class MockProvider(Provider):
     """In-memory provider for unit tests and local development."""
 
     def __init__(self, network: str = 'testnet'):
-        self._transactions: dict[str, Transaction] = {}
+        self._transactions: dict[str, TransactionData] = {}
+        self._raw_transactions: dict[str, str] = {}
         self._utxos: dict[str, list[Utxo]] = {}
         self._contract_utxos: dict[str, Utxo] = {}
         self._broadcasted_txs: list[str] = []
@@ -56,7 +61,7 @@ class MockProvider(Provider):
         self._broadcast_count = 0
         self._fee_rate = 1
 
-    def add_transaction(self, tx: Transaction) -> None:
+    def add_transaction(self, tx: TransactionData) -> None:
         self._transactions[tx.txid] = tx
 
     def add_utxo(self, address: str, utxo: Utxo) -> None:
@@ -75,18 +80,25 @@ class MockProvider(Provider):
 
     # -- Provider interface --
 
-    def get_transaction(self, txid: str) -> Transaction:
+    def get_transaction(self, txid: str) -> TransactionData:
         tx = self._transactions.get(txid)
         if tx is None:
             raise RuntimeError(f"MockProvider: transaction {txid} not found")
         return tx
 
-    def broadcast(self, raw_tx: str) -> str:
+    def broadcast(self, tx) -> str:
+        # Accept either a bsv-sdk Transaction object or a raw hex string
+        if isinstance(tx, str):
+            raw_tx = tx
+        else:
+            raw_tx = tx.hex()
         self._broadcasted_txs.append(raw_tx)
+        # Auto-store raw hex for subsequent get_raw_transaction lookups
         self._broadcast_count += 1
         fake_txid = _mock_hash64(
             f"mock-broadcast-{self._broadcast_count}-{raw_tx[:16]}"
         )
+        self._raw_transactions[fake_txid] = raw_tx
         return fake_txid
 
     def get_utxos(self, address: str) -> list[Utxo]:
@@ -102,6 +114,9 @@ class MockProvider(Provider):
         return self._fee_rate
 
     def get_raw_transaction(self, txid: str) -> str:
+        # Check auto-stored raw hex from broadcasts first
+        if txid in self._raw_transactions:
+            return self._raw_transactions[txid]
         tx = self._transactions.get(txid)
         if tx is None:
             raise RuntimeError(f"MockProvider: transaction {txid} not found")

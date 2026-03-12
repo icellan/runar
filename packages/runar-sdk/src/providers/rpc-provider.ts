@@ -2,8 +2,9 @@
 // runar-sdk/providers/rpc-provider.ts — JSON-RPC provider for Bitcoin nodes
 // ---------------------------------------------------------------------------
 
+import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
-import type { Transaction, TxOutput, UTXO } from '../types.js';
+import type { TransactionData, TxOutput, UTXO } from '../types.js';
 
 export interface RPCProviderOptions {
   /** Auto-mine 1 block after broadcast (for regtest). Default: false. */
@@ -70,7 +71,7 @@ export class RPCProvider implements Provider {
     }
   }
 
-  async getTransaction(txid: string): Promise<Transaction> {
+  async getTransaction(txid: string): Promise<TransactionData> {
     const raw = (await this.rpcCall('getrawtransaction', txid, true)) as Record<string, unknown>;
     const rawHex = raw.hex as string;
 
@@ -96,7 +97,8 @@ export class RPCProvider implements Provider {
     };
   }
 
-  async broadcast(rawTx: string): Promise<string> {
+  async broadcast(tx: Transaction): Promise<string> {
+    const rawTx = tx.toHex();
     const txid = (await this.rpcCall('sendrawtransaction', rawTx)) as string;
     if (this.autoMine) {
       await this.mine(1);

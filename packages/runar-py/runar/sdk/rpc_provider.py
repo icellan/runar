@@ -12,7 +12,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from runar.sdk.provider import Provider
-from runar.sdk.types import Transaction, TxOutput, Utxo
+from runar.sdk.types import TransactionData, TxOutput, Utxo
 
 
 class RPCProvider(Provider):
@@ -80,7 +80,7 @@ class RPCProvider(Provider):
     def _mine(self, blocks: int) -> None:
         self._rpc_call('generate', blocks)
 
-    def get_transaction(self, txid: str) -> Transaction:
+    def get_transaction(self, txid: str) -> TransactionData:
         raw = self._rpc_call('getrawtransaction', txid, True)
         assert isinstance(raw, dict)
         raw_hex = raw.get('hex', '')
@@ -93,14 +93,19 @@ class RPCProvider(Provider):
             script_hex = sp.get('hex', '')
             outputs.append(TxOutput(satoshis=sats, script=script_hex))
 
-        return Transaction(
+        return TransactionData(
             txid=txid,
             version=1,
             outputs=outputs,
             raw=raw_hex,
         )
 
-    def broadcast(self, raw_tx: str) -> str:
+    def broadcast(self, tx) -> str:
+        # Accept either a bsv-sdk Transaction object or a raw hex string
+        if isinstance(tx, str):
+            raw_tx = tx
+        else:
+            raw_tx = tx.hex()
         txid = self._rpc_call('sendrawtransaction', raw_tx)
         assert isinstance(txid, str)
         if self._auto_mine:

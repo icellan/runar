@@ -24,23 +24,23 @@ const opPushTxPrivKey = PrivateKey.fromHex('000000000000000000000000000000000000
 /**
  * Compute the OP_PUSH_TX DER signature and BIP-143 preimage for a contract input.
  *
- * @param txHex      - The raw transaction hex (with placeholder unlocking scripts)
- * @param inputIndex - The contract input index (usually 0)
- * @param subscript  - The locking script of the UTXO being spent (hex)
- * @param satoshis   - The satoshi value of the UTXO being spent
+ * @param txOrHex     - The Transaction object or raw hex string
+ * @param inputIndex  - The contract input index (usually 0)
+ * @param subscript   - The locking script of the UTXO being spent (hex)
+ * @param satoshis    - The satoshi value of the UTXO being spent
  * @param codeSeparatorIndex - Byte offset of OP_CODESEPARATOR in the locking script (optional).
  *                             When present, the scriptCode in BIP-143 is the portion AFTER
  *                             the OP_CODESEPARATOR (excluding the separator byte itself).
  * @returns Object with `sigHex` (DER + sighash byte) and `preimageHex` (raw preimage)
  */
 export function computeOpPushTx(
-  txHex: string,
+  txOrHex: Transaction | string,
   inputIndex: number,
   subscript: string,
   satoshis: number,
   codeSeparatorIndex?: number,
 ): { sigHex: string; preimageHex: string } {
-  const tx = Transaction.fromHex(txHex);
+  const tx = typeof txOrHex === 'string' ? Transaction.fromHex(txOrHex) : txOrHex;
   const input = tx.inputs[inputIndex]!;
 
   const otherInputs = tx.inputs

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/bsv-blockchain/go-sdk/transaction"
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
@@ -18,7 +19,7 @@ func NewRPCProvider() *RPCProvider {
 	return &RPCProvider{network: "regtest"}
 }
 
-func (p *RPCProvider) GetTransaction(txid string) (*runar.Transaction, error) {
+func (p *RPCProvider) GetTransaction(txid string) (*runar.TransactionData, error) {
 	raw, err := GetRawTransaction(txid)
 	if err != nil {
 		return nil, err
@@ -42,7 +43,7 @@ func (p *RPCProvider) GetTransaction(txid string) (*runar.Transaction, error) {
 		}
 	}
 
-	return &runar.Transaction{
+	return &runar.TransactionData{
 		Txid:    txid,
 		Version: 1,
 		Outputs: outputs,
@@ -50,7 +51,8 @@ func (p *RPCProvider) GetTransaction(txid string) (*runar.Transaction, error) {
 	}, nil
 }
 
-func (p *RPCProvider) Broadcast(rawTx string) (string, error) {
+func (p *RPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
+	rawTx := tx.Hex()
 	txid, err := SendRawTransaction(rawTx)
 	if err != nil {
 		return "", err

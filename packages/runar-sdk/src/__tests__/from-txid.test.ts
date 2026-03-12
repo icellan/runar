@@ -3,7 +3,7 @@ import { RunarContract } from '../contract.js';
 import { MockProvider } from '../providers/mock.js';
 import { serializeState } from '../state.js';
 import type { RunarArtifact, StateField } from 'runar-ir-schema';
-import type { Transaction } from '../types.js';
+import type { TransactionData } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -27,7 +27,7 @@ const FAKE_TXID = 'aa'.repeat(32); // 64 hex chars
 function makeTx(
   txid: string,
   outputs: Array<{ satoshis: number; script: string }>,
-): Transaction {
+): TransactionData {
   return {
     txid,
     version: 1,

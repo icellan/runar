@@ -5,13 +5,25 @@
 import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
-import type { Transaction, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
+import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
-import { buildCallTransaction, toLittleEndian32, toLittleEndian64, encodeVarInt, reverseHex } from './calling.js';
+import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
-import { Utils, Hash, Transaction as BsvTransaction } from '@bsv/sdk';
+import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
+
+/**
+ * Invalidate the @bsv/sdk Transaction's serialization caches after
+ * directly modifying inputs/outputs. The SDK caches toHex()/toBinary()
+ * results and only invalidates them through addInput/addOutput.
+ */
+function invalidateTxCache(tx: BsvTransaction): void {
+  const t = tx as unknown as Record<string, unknown>;
+  t.hexCache = undefined;
+  t.rawBytesCache = undefined;
+  t.cachedHash = undefined;
+}
 
 /**
  * Runtime wrapper for a compiled Runar contract.
@@ -119,17 +131,17 @@ export class RunarContract {
    * Provider and signer can be passed explicitly or omitted to use
    * the ones stored via `connect()`.
    */
-  async deploy(options: DeployOptions): Promise<{ txid: string; tx: Transaction }>;
+  async deploy(options: DeployOptions): Promise<{ txid: string; tx: TransactionData }>;
   async deploy(
     provider: Provider,
     signer: Signer,
     options: DeployOptions,
-  ): Promise<{ txid: string; tx: Transaction }>;
+  ): Promise<{ txid: string; tx: TransactionData }>;
   async deploy(
     providerOrOptions: Provider | DeployOptions,
     maybeSigner?: Signer,
     maybeOptions?: DeployOptions,
-  ): Promise<{ txid: string; tx: Transaction }> {
+  ): Promise<{ txid: string; tx: TransactionData }> {
     let provider: Provider;
     let signer: Signer;
     let options: DeployOptions;
@@ -149,8 +161,6 @@ export class RunarContract {
       signer = resolved.signer;
       options = providerOrOptions as DeployOptions;
     } else {
-      // Explicit: deploy(provider, signer, options) — options in maybeSigner slot shouldn't happen
-      // but handle gracefully
       throw new Error(
         'RunarContract.deploy: invalid arguments. Pass (options) or (provider, signer, options).',
       );
@@ -171,7 +181,7 @@ export class RunarContract {
 
     // Build the deploy transaction
     const changeScript = buildP2PKHScript(changeAddress);
-    const { txHex, inputCount } = buildDeployTransaction(
+    const { tx, inputCount } = buildDeployTransaction(
       lockingScript,
       utxos,
       deploySatoshis,
@@ -180,19 +190,20 @@ export class RunarContract {
       feeRate,
     );
 
-    // Sign all inputs
-    let signedTx = txHex;
+    // Sign all inputs — need unsigned hex for signer
+    const unsignedHex = tx.toHex();
     for (let i = 0; i < inputCount; i++) {
       const utxo = utxos[i]!;
-      const sig = await signer.sign(signedTx, i, utxo.script, utxo.satoshis);
+      const sig = await signer.sign(unsignedHex, i, utxo.script, utxo.satoshis);
       const pubKey = await signer.getPublicKey();
       // Build P2PKH unlocking script: <sig> <pubkey>
       const unlockScript = encodePushData(sig) + encodePushData(pubKey);
-      signedTx = insertUnlockingScript(signedTx, i, unlockScript);
+      tx.inputs[i]!.unlockingScript = UnlockingScript.fromHex(unlockScript);
     }
+    invalidateTxCache(tx);
 
     // Broadcast
-    const txid = await provider.broadcast(signedTx);
+    const txid = await provider.broadcast(tx);
 
     // Track the deployed UTXO
     this.currentUtxo = {
@@ -202,7 +213,7 @@ export class RunarContract {
       script: lockingScript,
     };
 
-    const tx = await provider.getTransaction(txid).catch((err) => {
+    const txData = await provider.getTransaction(txid).catch((err) => {
       console.warn('Failed to fetch transaction after broadcast:', err);
       return {
         txid,
@@ -210,11 +221,11 @@ export class RunarContract {
         inputs: [],
         outputs: [{ satoshis: deploySatoshis, script: lockingScript }],
         locktime: 0,
-        raw: signedTx,
+        raw: tx.toHex(),
       };
     });
 
-    return { txid, tx };
+    return { txid, tx: txData };
   }
 
   // -------------------------------------------------------------------------
@@ -232,21 +243,21 @@ export class RunarContract {
     methodName: string,
     args: unknown[],
     options?: CallOptions,
-  ): Promise<{ txid: string; tx: Transaction }>;
+  ): Promise<{ txid: string; tx: TransactionData }>;
   async call(
     methodName: string,
     args: unknown[],
     provider: Provider,
     signer: Signer,
     options?: CallOptions,
-  ): Promise<{ txid: string; tx: Transaction }>;
+  ): Promise<{ txid: string; tx: TransactionData }>;
   async call(
     methodName: string,
     args: unknown[],
     providerOrOptions?: Provider | CallOptions,
     maybeSigner?: Signer,
     maybeOptions?: CallOptions,
-  ): Promise<{ txid: string; tx: Transaction }> {
+  ): Promise<{ txid: string; tx: TransactionData }> {
     // If explicit provider/signer passed, temporarily connect them for
     // prepareCall / finalizeCall which use the connected references.
     if (maybeSigner !== undefined) {
@@ -301,9 +312,10 @@ export class RunarContract {
       : prepared._contractUtxo.script;
 
     const signatures: Record<number, string> = {};
+    const txHex = prepared.tx.toHex();
     for (const idx of prepared.sigIndices) {
       signatures[idx] = await signer.sign(
-        prepared.txHex, 0, sigSubscript,
+        txHex, 0, sigSubscript,
         prepared._contractUtxo.satoshis,
       );
     }
@@ -432,23 +444,21 @@ export class RunarContract {
         termUnlockScript = this.buildUnlockingScript(methodName, resolvedArgs);
       }
 
-      const buildTerminalTx = (unlock: string): string => {
-        let tx = '';
-        tx += toLittleEndian32(1);
-        tx += encodeVarInt(1);
-        tx += reverseHex(contractUtxo.txid);
-        tx += toLittleEndian32(contractUtxo.outputIndex);
-        tx += encodeVarInt(unlock.length / 2);
-        tx += unlock;
-        tx += 'ffffffff';
-        tx += encodeVarInt(terminalOutputs.length);
+      const buildTerminalTx = (unlock: string): BsvTransaction => {
+        const ttx = new BsvTransaction();
+        ttx.addInput({
+          sourceTXID: contractUtxo.txid,
+          sourceOutputIndex: contractUtxo.outputIndex,
+          unlockingScript: UnlockingScript.fromHex(unlock),
+          sequence: 0xffffffff,
+        });
         for (const out of terminalOutputs) {
-          tx += toLittleEndian64(out.satoshis);
-          tx += encodeVarInt(out.scriptHex.length / 2);
-          tx += out.scriptHex;
+          ttx.addOutput({
+            satoshis: out.satoshis,
+            lockingScript: LockingScript.fromHex(out.scriptHex),
+          });
         }
-        tx += toLittleEndian32(0);
-        return tx;
+        return ttx;
       };
 
       let termTx = buildTerminalTx(termUnlockScript);
@@ -457,7 +467,7 @@ export class RunarContract {
 
       if (isStateful) {
         // Build stateful terminal unlock with PLACEHOLDER user sigs
-        const buildUnlock = (tx: string): { unlock: string; opSig: string; preimage: string } => {
+        const buildUnlock = (tx: BsvTransaction): { unlock: string; opSig: string; preimage: string } => {
           const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
             tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
@@ -477,7 +487,8 @@ export class RunarContract {
 
         // Second pass
         const second = buildUnlock(termTx);
-        termTx = insertUnlockingScript(termTx, 0, second.unlock);
+        termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(second.unlock);
+        invalidateTxCache(termTx);
         finalOpPushTxSig = second.opSig;
         finalPreimage = second.preimage;
       } else if (needsOpPushTx || sigIndices.length > 0) {
@@ -493,9 +504,10 @@ export class RunarContract {
         let realUnlock = this.buildUnlockingScript(methodName, resolvedArgs);
         if (needsOpPushTx && finalOpPushTxSig) {
           realUnlock = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlock;
-          const tmpTx = insertUnlockingScript(termTx, 0, realUnlock);
+          termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
+          invalidateTxCache(termTx);
           const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
-            tmpTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
+            termTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
           );
           resolvedArgs[preimageIndex] = finalPre;
           finalOpPushTxSig = finalSig;
@@ -503,7 +515,8 @@ export class RunarContract {
           realUnlock = this.buildStatefulPrefix(finalSig) +
             this.buildUnlockingScript(methodName, resolvedArgs);
         }
-        termTx = insertUnlockingScript(termTx, 0, realUnlock);
+        termTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlock);
+        invalidateTxCache(termTx);
         if (!finalPreimage && needsOpPushTx) {
           finalPreimage = resolvedArgs[preimageIndex] as string;
         }
@@ -521,7 +534,7 @@ export class RunarContract {
         sighash,
         preimage: finalPreimage,
         opPushTxSig: finalOpPushTxSig,
-        txHex: termTx,
+        tx: termTx,
         sigIndices,
         _methodName: methodName,
         _resolvedArgs: resolvedArgs,
@@ -609,7 +622,7 @@ export class RunarContract {
       return encodePushData('00'.repeat(72)) + this.buildUnlockingScript(methodName, argsForPlaceholder);
     });
 
-    let { txHex, inputCount, changeAmount } = buildCallTransaction(
+    let { tx, inputCount, changeAmount } = buildCallTransaction(
       this.currentUtxo,
       unlockingScript,
       newLockingScript,
@@ -627,15 +640,17 @@ export class RunarContract {
     );
 
     // Sign P2PKH funding inputs
-    let signedTx = txHex;
+    let txHex = tx.toHex();
     const p2pkhStartIdx = 1 + extraContractUtxos.length;
     for (let i = p2pkhStartIdx; i < inputCount; i++) {
       const utxo = additionalUtxos[i - p2pkhStartIdx];
       if (utxo) {
-        const sig = await signer.sign(signedTx, i, utxo.script, utxo.satoshis);
+        const sig = await signer.sign(txHex, i, utxo.script, utxo.satoshis);
         const pubKey = await signer.getPublicKey();
         const unlockScript = encodePushData(sig) + encodePushData(pubKey);
-        signedTx = insertUnlockingScript(signedTx, i, unlockScript);
+        tx.inputs[i]!.unlockingScript = UnlockingScript.fromHex(unlockScript);
+        invalidateTxCache(tx);
+        txHex = tx.toHex();
       }
     }
 
@@ -648,11 +663,11 @@ export class RunarContract {
       // Helper: build a stateful unlock. For inputIdx===0 (primary), keeps
       // placeholder Sig params. For inputIdx>0 (extra), signs with signer.
       const buildStatefulUnlock = async (
-        tx: string, inputIdx: number, subscript: string, sats: number,
+        currentTx: BsvTransaction, inputIdx: number, subscript: string, sats: number,
         argsOverride?: unknown[], txChangeAmount?: number,
       ): Promise<{ unlock: string; opSig: string; preimage: string }> => {
         const { sigHex: opSig, preimageHex: preimage } = this.computeOpPushTxWithCodeSep(
-          tx, inputIdx, subscript, sats, methodIndex,
+          currentTx, inputIdx, subscript, sats, methodIndex,
         );
         const baseArgs = argsOverride ?? resolvedArgs;
         const inputArgs = [...baseArgs];
@@ -660,14 +675,14 @@ export class RunarContract {
         if (inputIdx > 0) {
           // Stateful: user checkSig is AFTER OP_CODESEPARATOR — use trimmed script.
           const trimmedSubscript = this.getSubscriptForSigning(subscript, methodIndex);
+          const currentHex = currentTx.toHex();
           for (const idx of sigIndices) {
-            inputArgs[idx] = await signer.sign(tx, inputIdx, trimmedSubscript, sats);
+            inputArgs[idx] = await signer.sign(currentHex, inputIdx, trimmedSubscript, sats);
           }
         }
         if (prevoutsIndices.length > 0) {
-          const parsedTx = BsvTransaction.fromHex(tx);
           let allPrevoutsHex = '';
-          for (const inp of parsedTx.inputs) {
+          for (const inp of currentTx.inputs) {
             const txidLE = inp.sourceTXID!.match(/.{2}/g)!.reverse().join('');
             const voutLE = inp.sourceOutputIndex.toString(16).padStart(8, '0')
               .match(/.{2}/g)!.reverse().join('');
@@ -693,19 +708,19 @@ export class RunarContract {
 
       // First pass
       const { unlock: input0Unlock } = await buildStatefulUnlock(
-        signedTx, 0, contractUtxo.script, contractUtxo.satoshis,
+        tx, 0, contractUtxo.script, contractUtxo.satoshis,
         undefined, changeAmount,
       );
       const extraUnlocks: string[] = [];
       for (let i = 0; i < extraContractUtxos.length; i++) {
         const mu = extraContractUtxos[i]!;
         const extraArgs = perInputArgs?.[i] ? resolvedPerInputArgs?.[i] : undefined;
-        const { unlock } = await buildStatefulUnlock(signedTx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount);
+        const { unlock } = await buildStatefulUnlock(tx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount);
         extraUnlocks.push(unlock);
       }
 
       // Rebuild TX with real unlocking scripts
-      ({ txHex, inputCount, changeAmount } = buildCallTransaction(
+      ({ tx, inputCount, changeAmount } = buildCallTransaction(
         this.currentUtxo,
         input0Unlock,
         newLockingScript,
@@ -721,41 +736,44 @@ export class RunarContract {
             : undefined,
         },
       ));
-      signedTx = txHex;
 
       // Second pass: recompute with final tx
       const { unlock: finalInput0Unlock, opSig, preimage } = await buildStatefulUnlock(
-        signedTx, 0, contractUtxo.script, contractUtxo.satoshis,
+        tx, 0, contractUtxo.script, contractUtxo.satoshis,
         undefined, changeAmount,
       );
       finalOpPushTxSig = opSig;
       finalPreimage = preimage;
-      signedTx = insertUnlockingScript(signedTx, 0, finalInput0Unlock);
+      tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(finalInput0Unlock);
+      invalidateTxCache(tx);
 
       for (let i = 0; i < extraContractUtxos.length; i++) {
         const mu = extraContractUtxos[i]!;
         const extraArgs = perInputArgs?.[i] ? resolvedPerInputArgs?.[i] : undefined;
-        const { unlock: finalMergeUnlock } = await buildStatefulUnlock(signedTx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount);
-        signedTx = insertUnlockingScript(signedTx, i + 1, finalMergeUnlock);
+        const { unlock: finalMergeUnlock } = await buildStatefulUnlock(tx, i + 1, mu.script, mu.satoshis, extraArgs, changeAmount);
+        tx.inputs[i + 1]!.unlockingScript = UnlockingScript.fromHex(finalMergeUnlock);
+        invalidateTxCache(tx);
       }
 
       // Re-sign P2PKH funding inputs
+      txHex = tx.toHex();
       for (let i = p2pkhStartIdx; i < inputCount; i++) {
         const utxo = additionalUtxos[i - p2pkhStartIdx];
         if (utxo) {
-          const sig = await signer.sign(signedTx, i, utxo.script, utxo.satoshis);
+          const sig = await signer.sign(txHex, i, utxo.script, utxo.satoshis);
           const pubKey = await signer.getPublicKey();
           const unlockScript = encodePushData(sig) + encodePushData(pubKey);
-          signedTx = insertUnlockingScript(signedTx, i, unlockScript);
+          tx.inputs[i]!.unlockingScript = UnlockingScript.fromHex(unlockScript);
+          invalidateTxCache(tx);
+          txHex = tx.toHex();
         }
       }
 
       // Update resolvedArgs with real prevouts so finalizeCall can
       // rebuild the primary unlock with correct allPrevouts values.
       if (prevoutsIndices.length > 0) {
-        const parsedTx = BsvTransaction.fromHex(signedTx);
         let allPrevoutsHex = '';
-        for (const inp of parsedTx.inputs) {
+        for (const inp of tx.inputs) {
           const txidLE = inp.sourceTXID!.match(/.{2}/g)!.reverse().join('');
           const voutLE = inp.sourceOutputIndex.toString(16).padStart(8, '0')
             .match(/.{2}/g)!.reverse().join('');
@@ -769,7 +787,7 @@ export class RunarContract {
       // Stateless: keep placeholder sigs, compute OP_PUSH_TX
       if (needsOpPushTx) {
         const { sigHex, preimageHex } = this.computeOpPushTxWithCodeSep(
-          signedTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
+          tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
         finalOpPushTxSig = sigHex;
         resolvedArgs[preimageIndex] = preimageHex;
@@ -778,9 +796,10 @@ export class RunarContract {
       let realUnlockingScript = this.buildUnlockingScript(methodName, resolvedArgs);
       if (needsOpPushTx && finalOpPushTxSig) {
         realUnlockingScript = this.buildStatefulPrefix(finalOpPushTxSig) + realUnlockingScript;
-        const tmpTx = insertUnlockingScript(signedTx, 0, realUnlockingScript);
+        tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
+        invalidateTxCache(tx);
         const { sigHex: finalSig, preimageHex: finalPre } = this.computeOpPushTxWithCodeSep(
-          tmpTx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
+          tx, 0, contractUtxo.script, contractUtxo.satoshis, methodIndex,
         );
         resolvedArgs[preimageIndex] = finalPre;
         finalOpPushTxSig = finalSig;
@@ -788,7 +807,8 @@ export class RunarContract {
         realUnlockingScript = this.buildStatefulPrefix(finalSig) +
           this.buildUnlockingScript(methodName, resolvedArgs);
       }
-      signedTx = insertUnlockingScript(signedTx, 0, realUnlockingScript);
+      tx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(realUnlockingScript);
+      invalidateTxCache(tx);
       if (!finalPreimage && needsOpPushTx) {
         finalPreimage = resolvedArgs[preimageIndex] as string;
       }
@@ -806,7 +826,7 @@ export class RunarContract {
       sighash,
       preimage: finalPreimage,
       opPushTxSig: finalOpPushTxSig,
-      txHex: signedTx,
+      tx,
       sigIndices,
       _methodName: methodName,
       _resolvedArgs: resolvedArgs,
@@ -838,7 +858,7 @@ export class RunarContract {
   async finalizeCall(
     prepared: PreparedCall,
     signatures: Record<number, string>,
-  ): Promise<{ txid: string; tx: Transaction }> {
+  ): Promise<{ txid: string; tx: TransactionData }> {
     const { provider } = this.resolveProviderSigner();
 
     // Replace placeholder sigs with real signatures
@@ -882,7 +902,9 @@ export class RunarContract {
     }
 
     // Insert primary unlock into the transaction
-    let finalTx = insertUnlockingScript(prepared.txHex, 0, primaryUnlock);
+    const finalTx = prepared.tx;
+    finalTx.inputs[0]!.unlockingScript = UnlockingScript.fromHex(primaryUnlock);
+    invalidateTxCache(finalTx);
 
     // Broadcast
     const txid = await provider.broadcast(finalTx);
@@ -908,7 +930,7 @@ export class RunarContract {
       this.currentUtxo = null;
     }
 
-    const tx = await provider.getTransaction(txid).catch((err) => {
+    const txData = await provider.getTransaction(txid).catch((err) => {
       console.warn('Failed to fetch transaction after broadcast:', err);
       return {
         txid,
@@ -916,11 +938,11 @@ export class RunarContract {
         inputs: [],
         outputs: [],
         locktime: 0,
-        raw: finalTx,
+        raw: finalTx.toHex(),
       };
     });
 
-    return { txid, tx };
+    return { txid, tx: txData };
   }
 
   // -------------------------------------------------------------------------
@@ -1078,7 +1100,7 @@ export class RunarContract {
    * falls back to the single codeSeparatorIndex.
    */
   private computeOpPushTxWithCodeSep(
-    txHex: string,
+    tx: BsvTransaction,
     inputIndex: number,
     subscript: string,
     satoshis: number,
@@ -1093,7 +1115,7 @@ export class RunarContract {
       codeSepIdx = this.adjustCodeSepOffset(codeSepIdx);
     }
     return computeOpPushTx(
-      txHex, inputIndex, subscript, satoshis,
+      tx, inputIndex, subscript, satoshis,
       codeSepIdx,
     );
   }
@@ -1284,121 +1306,4 @@ function encodePushData(dataHex: string): string {
     const b3 = ((len >> 24) & 0xff).toString(16).padStart(2, '0');
     return '4e' + b0 + b1 + b2 + b3 + dataHex;
   }
-}
-
-
-/**
- * Insert an unlocking script into a raw transaction at a specific input index.
- *
- * Parses the raw transaction hex to locate the target input's scriptSig field,
- * replaces it with the provided unlocking script, and returns the modified
- * transaction hex.
- */
-function insertUnlockingScript(
-  txHex: string,
-  inputIndex: number,
-  unlockScript: string,
-): string {
-  let pos = 0;
-
-  // Skip version (4 bytes = 8 hex chars)
-  pos += 8;
-
-  // Read input count
-  const { value: inputCount, hexLen: icLen } = readVarIntHex(txHex, pos);
-  pos += icLen;
-
-  if (inputIndex >= inputCount) {
-    throw new Error(
-      `insertUnlockingScript: input index ${inputIndex} out of range (${inputCount} inputs)`,
-    );
-  }
-
-  for (let i = 0; i < inputCount; i++) {
-    // Skip prevTxid (32 bytes = 64 hex chars)
-    pos += 64;
-    // Skip prevOutputIndex (4 bytes = 8 hex chars)
-    pos += 8;
-
-    // Read scriptSig length
-    const { value: scriptLen, hexLen: slLen } = readVarIntHex(txHex, pos);
-
-    if (i === inputIndex) {
-      // Build the replacement: new varint length + new script data
-      const newScriptByteLen = unlockScript.length / 2;
-      const newVarInt = writeVarIntHex(newScriptByteLen);
-
-      const before = txHex.slice(0, pos);
-      const after = txHex.slice(pos + slLen + scriptLen * 2);
-      return before + newVarInt + unlockScript + after;
-    }
-
-    // Skip this input's scriptSig + sequence (4 bytes = 8 hex chars)
-    pos += slLen + scriptLen * 2 + 8;
-  }
-
-  // Should be unreachable due to the range check above
-  throw new Error(
-    `insertUnlockingScript: input index ${inputIndex} out of range`,
-  );
-}
-
-/**
- * Read a Bitcoin varint from a hex string at the given position.
- * Returns the decoded value and the number of hex characters consumed.
- */
-function readVarIntHex(
-  hex: string,
-  pos: number,
-): { value: number; hexLen: number } {
-  const first = parseInt(hex.slice(pos, pos + 2), 16);
-  if (first < 0xfd) {
-    return { value: first, hexLen: 2 };
-  }
-  if (first === 0xfd) {
-    const lo = parseInt(hex.slice(pos + 2, pos + 4), 16);
-    const hi = parseInt(hex.slice(pos + 4, pos + 6), 16);
-    return { value: lo | (hi << 8), hexLen: 6 };
-  }
-  if (first === 0xfe) {
-    const b0 = parseInt(hex.slice(pos + 2, pos + 4), 16);
-    const b1 = parseInt(hex.slice(pos + 4, pos + 6), 16);
-    const b2 = parseInt(hex.slice(pos + 6, pos + 8), 16);
-    const b3 = parseInt(hex.slice(pos + 8, pos + 10), 16);
-    return {
-      value: (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) >>> 0,
-      hexLen: 10,
-    };
-  }
-  // 0xff -- 8-byte varint; handle the low 4 bytes (sufficient for scripts)
-  const b0 = parseInt(hex.slice(pos + 2, pos + 4), 16);
-  const b1 = parseInt(hex.slice(pos + 4, pos + 6), 16);
-  const b2 = parseInt(hex.slice(pos + 6, pos + 8), 16);
-  const b3 = parseInt(hex.slice(pos + 8, pos + 10), 16);
-  return {
-    value: (b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)) >>> 0,
-    hexLen: 18,
-  };
-}
-
-/**
- * Encode a number as a Bitcoin varint in hex.
- */
-function writeVarIntHex(n: number): string {
-  if (n < 0xfd) {
-    return n.toString(16).padStart(2, '0');
-  }
-  if (n <= 0xffff) {
-    const lo = (n & 0xff).toString(16).padStart(2, '0');
-    const hi = ((n >> 8) & 0xff).toString(16).padStart(2, '0');
-    return 'fd' + lo + hi;
-  }
-  if (n <= 0xffffffff) {
-    const b0 = (n & 0xff).toString(16).padStart(2, '0');
-    const b1 = ((n >> 8) & 0xff).toString(16).padStart(2, '0');
-    const b2 = ((n >> 16) & 0xff).toString(16).padStart(2, '0');
-    const b3 = ((n >> 24) & 0xff).toString(16).padStart(2, '0');
-    return 'fe' + b0 + b1 + b2 + b3;
-  }
-  throw new Error('writeVarIntHex: value too large');
 }

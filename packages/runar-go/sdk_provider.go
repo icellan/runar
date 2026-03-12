@@ -3,6 +3,8 @@ package runar
 import (
 	"fmt"
 	"strings"
+
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // ---------------------------------------------------------------------------
@@ -12,10 +14,10 @@ import (
 // Provider abstracts blockchain access for UTXO lookup and broadcast.
 type Provider interface {
 	// GetTransaction fetches a transaction by its txid.
-	GetTransaction(txid string) (*Transaction, error)
+	GetTransaction(txid string) (*TransactionData, error)
 
-	// Broadcast sends a raw transaction hex to the network. Returns the txid.
-	Broadcast(rawTx string) (string, error)
+	// Broadcast sends a transaction to the network. Returns the txid.
+	Broadcast(tx *transaction.Transaction) (string, error)
 
 	// GetUtxos returns all UTXOs for a given address.
 	GetUtxos(address string) ([]UTXO, error)
@@ -43,13 +45,14 @@ type Provider interface {
 // It stores transactions and UTXOs that can be injected via helper methods,
 // and records all broadcasts for assertion in tests.
 type MockProvider struct {
-	transactions   map[string]*Transaction
-	utxos          map[string][]UTXO
-	contractUtxos  map[string]*UTXO
-	broadcastedTxs []string
-	network        string
-	broadcastCount int
-	feeRate        int64
+	transactions    map[string]*TransactionData
+	rawTransactions map[string]string
+	utxos           map[string][]UTXO
+	contractUtxos   map[string]*UTXO
+	broadcastedTxs  []string
+	network         string
+	broadcastCount  int
+	feeRate         int64
 }
 
 // NewMockProvider creates a new MockProvider for the given network.
@@ -58,17 +61,21 @@ func NewMockProvider(network string) *MockProvider {
 		network = "testnet"
 	}
 	return &MockProvider{
-		transactions:  make(map[string]*Transaction),
-		utxos:         make(map[string][]UTXO),
-		contractUtxos: make(map[string]*UTXO),
-		network:       network,
-		feeRate:       1,
+		transactions:    make(map[string]*TransactionData),
+		rawTransactions: make(map[string]string),
+		utxos:           make(map[string][]UTXO),
+		contractUtxos:   make(map[string]*UTXO),
+		network:         network,
+		feeRate:         1,
 	}
 }
 
 // AddTransaction injects a transaction into the mock store.
-func (m *MockProvider) AddTransaction(tx *Transaction) {
+func (m *MockProvider) AddTransaction(tx *TransactionData) {
 	m.transactions[tx.Txid] = tx
+	if tx.Raw != "" {
+		m.rawTransactions[tx.Txid] = tx.Raw
+	}
 }
 
 // AddUtxo injects a UTXO for the given address.
@@ -87,7 +94,7 @@ func (m *MockProvider) GetBroadcastedTxs() []string {
 }
 
 // GetTransaction fetches a transaction from the mock store.
-func (m *MockProvider) GetTransaction(txid string) (*Transaction, error) {
+func (m *MockProvider) GetTransaction(txid string) (*TransactionData, error) {
 	tx, ok := m.transactions[txid]
 	if !ok {
 		return nil, fmt.Errorf("MockProvider: transaction %s not found", txid)
@@ -95,11 +102,22 @@ func (m *MockProvider) GetTransaction(txid string) (*Transaction, error) {
 	return tx, nil
 }
 
-// Broadcast records the raw tx and returns a deterministic fake txid.
-func (m *MockProvider) Broadcast(rawTx string) (string, error) {
+// Broadcast records the transaction and returns a deterministic fake txid.
+func (m *MockProvider) Broadcast(tx *transaction.Transaction) (string, error) {
+	rawTx := tx.Hex()
 	m.broadcastedTxs = append(m.broadcastedTxs, rawTx)
 	m.broadcastCount++
-	fakeTxid := mockHash64(fmt.Sprintf("mock-broadcast-%d-%s", m.broadcastCount, rawTx[:min(16, len(rawTx))]))
+	prefix := rawTx
+	if len(prefix) > 16 {
+		prefix = prefix[:16]
+	}
+	fakeTxid := mockHash64(fmt.Sprintf("mock-broadcast-%d-%s", m.broadcastCount, prefix))
+
+	// Auto-store raw hex for subsequent getRawTransaction lookups
+	if _, ok := m.transactions[fakeTxid]; !ok {
+		m.rawTransactions[fakeTxid] = rawTx
+	}
+
 	return fakeTxid, nil
 }
 
@@ -124,6 +142,10 @@ func (m *MockProvider) GetNetwork() string {
 
 // GetRawTransaction returns the raw hex of a stored transaction.
 func (m *MockProvider) GetRawTransaction(txid string) (string, error) {
+	// Check raw transactions first (populated by broadcast)
+	if raw, ok := m.rawTransactions[txid]; ok {
+		return raw, nil
+	}
 	tx, ok := m.transactions[txid]
 	if !ok {
 		return "", fmt.Errorf("MockProvider: transaction %s not found", txid)

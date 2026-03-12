@@ -31,14 +31,18 @@ class TxOutput:
 
 
 @dataclass
-class Transaction:
-    """A parsed Bitcoin transaction."""
+class TransactionData:
+    """A parsed Bitcoin transaction (data shape for get_transaction return)."""
     txid: str
     version: int = 1
     inputs: list[TxInput] = field(default_factory=list)
     outputs: list[TxOutput] = field(default_factory=list)
     locktime: int = 0
     raw: str = ''
+
+
+# Backward compatibility alias
+Transaction = TransactionData
 
 
 @dataclass

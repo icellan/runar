@@ -4,6 +4,7 @@
 
 // Types
 export type {
+  TransactionData,
   Transaction,
   TxInput,
   TxOutput,

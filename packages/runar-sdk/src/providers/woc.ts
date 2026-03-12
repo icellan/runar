@@ -2,8 +2,9 @@
 // runar-sdk/providers/woc.ts — WhatsOnChain provider (HTTP-based BSV API)
 // ---------------------------------------------------------------------------
 
+import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
-import type { Transaction, TxInput, TxOutput, UTXO } from '../types.js';
+import type { TransactionData, TxInput, TxOutput, UTXO } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // WoC API response shapes (partial)
@@ -61,7 +62,7 @@ export class WhatsOnChainProvider implements Provider {
         : 'https://api.whatsonchain.com/v1/bsv/test';
   }
 
-  async getTransaction(txid: string): Promise<Transaction> {
+  async getTransaction(txid: string): Promise<TransactionData> {
     const resp = await fetch(`${this.baseUrl}/tx/hash/${txid}`);
     if (!resp.ok) {
       throw new Error(`WoC getTransaction failed (${resp.status}): ${await resp.text()}`);
@@ -90,7 +91,8 @@ export class WhatsOnChainProvider implements Provider {
     };
   }
 
-  async broadcast(rawTx: string): Promise<string> {
+  async broadcast(tx: Transaction): Promise<string> {
+    const rawTx = tx.toHex();
     const resp = await fetch(`${this.baseUrl}/tx/raw`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

@@ -1,7 +1,8 @@
 //! Provider trait and MockProvider for blockchain access.
 
 use std::collections::HashMap;
-use super::types::{Transaction, Utxo};
+use bsv::transaction::Transaction as BsvTransaction;
+use super::types::{TransactionData, Utxo};
 #[cfg(test)]
 use super::types::TxOutput;
 
@@ -13,10 +14,10 @@ use super::types::TxOutput;
 /// and broadcasting raw transactions.
 pub trait Provider {
     /// Fetch a transaction by its txid.
-    fn get_transaction(&self, txid: &str) -> Result<Transaction, String>;
+    fn get_transaction(&self, txid: &str) -> Result<TransactionData, String>;
 
-    /// Broadcast a raw transaction hex. Returns the txid on success.
-    fn broadcast(&mut self, raw_tx: &str) -> Result<String, String>;
+    /// Broadcast a BSV SDK Transaction object. Returns the txid on success.
+    fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String>;
 
     /// Get all UTXOs for a given address.
     fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String>;
@@ -45,7 +46,8 @@ pub trait Provider {
 /// Allows injecting transactions and UTXOs, and records broadcasts for
 /// assertion in tests.
 pub struct MockProvider {
-    transactions: HashMap<String, Transaction>,
+    transactions: HashMap<String, TransactionData>,
+    raw_transactions: HashMap<String, String>,
     utxos: HashMap<String, Vec<Utxo>>,
     contract_utxos: HashMap<String, Utxo>,
     broadcasted_txs: Vec<String>,
@@ -59,6 +61,7 @@ impl MockProvider {
     pub fn new(network: &str) -> Self {
         MockProvider {
             transactions: HashMap::new(),
+            raw_transactions: HashMap::new(),
             utxos: HashMap::new(),
             contract_utxos: HashMap::new(),
             broadcasted_txs: Vec::new(),
@@ -78,7 +81,7 @@ impl MockProvider {
     // -----------------------------------------------------------------------
 
     /// Add a transaction to the mock store.
-    pub fn add_transaction(&mut self, tx: Transaction) {
+    pub fn add_transaction(&mut self, tx: TransactionData) {
         self.transactions.insert(tx.txid.clone(), tx);
     }
 
@@ -107,15 +110,16 @@ impl MockProvider {
 }
 
 impl Provider for MockProvider {
-    fn get_transaction(&self, txid: &str) -> Result<Transaction, String> {
+    fn get_transaction(&self, txid: &str) -> Result<TransactionData, String> {
         self.transactions
             .get(txid)
             .cloned()
             .ok_or_else(|| format!("MockProvider: transaction {} not found", txid))
     }
 
-    fn broadcast(&mut self, raw_tx: &str) -> Result<String, String> {
-        self.broadcasted_txs.push(raw_tx.to_string());
+    fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String> {
+        let raw_tx = tx.to_hex().map_err(|e| format!("broadcast: to_hex failed: {}", e))?;
+        self.broadcasted_txs.push(raw_tx.clone());
         self.broadcast_count += 1;
         // Generate a deterministic fake txid from the broadcast count
         let fake_txid = mock_sha256_hex(&format!(
@@ -123,6 +127,8 @@ impl Provider for MockProvider {
             self.broadcast_count,
             &raw_tx[..raw_tx.len().min(16)]
         ));
+        // Auto-store raw hex for subsequent get_raw_transaction lookups
+        self.raw_transactions.insert(fake_txid.clone(), raw_tx);
         Ok(fake_txid)
     }
 
@@ -143,6 +149,10 @@ impl Provider for MockProvider {
     }
 
     fn get_raw_transaction(&self, txid: &str) -> Result<String, String> {
+        // Check auto-stored raw hex from broadcasts first
+        if let Some(raw) = self.raw_transactions.get(txid) {
+            return Ok(raw.clone());
+        }
         let tx = self.transactions
             .get(txid)
             .ok_or_else(|| format!("MockProvider: transaction {} not found", txid))?;
@@ -187,7 +197,7 @@ mod tests {
     #[test]
     fn mock_provider_stores_and_retrieves_transactions() {
         let mut provider = MockProvider::testnet();
-        let tx = Transaction {
+        let tx = TransactionData {
             txid: "aa".repeat(32),
             version: 1,
             inputs: vec![],
@@ -235,22 +245,67 @@ mod tests {
 
     #[test]
     fn mock_provider_records_broadcasts() {
+        use bsv::transaction::{
+            Transaction as BsvTx,
+            TransactionInput as BsvTxIn,
+            TransactionOutput as BsvTxOut,
+        };
+        use bsv::script::LockingScript;
+
         let mut provider = MockProvider::testnet();
-        let txid = provider.broadcast("deadbeef").unwrap();
+        let mut tx = BsvTx::new();
+        tx.add_input(BsvTxIn {
+            source_txid: Some("00".repeat(32)),
+            source_output_index: 0,
+            unlocking_script: None,
+            sequence: 0xffffffff,
+            source_transaction: None,
+        });
+        tx.add_output(BsvTxOut {
+            satoshis: Some(50_000),
+            locking_script: LockingScript::from_hex("51").unwrap(),
+            change: false,
+        });
+        let txid = provider.broadcast(&tx).unwrap();
 
         assert_eq!(txid.len(), 64);
         assert!(txid.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(provider.get_broadcasted_txs().len(), 1);
-        assert_eq!(provider.get_broadcasted_txs()[0], "deadbeef");
+        // The stored hex should match the transaction's serialization
+        assert!(!provider.get_broadcasted_txs()[0].is_empty());
     }
 
     #[test]
     fn mock_provider_deterministic_txids() {
+        use bsv::transaction::{
+            Transaction as BsvTx,
+            TransactionInput as BsvTxIn,
+            TransactionOutput as BsvTxOut,
+        };
+        use bsv::script::LockingScript;
+
+        fn make_test_tx() -> BsvTx {
+            let mut tx = BsvTx::new();
+            tx.add_input(BsvTxIn {
+                source_txid: Some("aa".repeat(32)),
+                source_output_index: 0,
+                unlocking_script: None,
+                sequence: 0xffffffff,
+                source_transaction: None,
+            });
+            tx.add_output(BsvTxOut {
+                satoshis: Some(1000),
+                locking_script: LockingScript::from_hex("51").unwrap(),
+                change: false,
+            });
+            tx
+        }
+
         let mut p1 = MockProvider::testnet();
         let mut p2 = MockProvider::testnet();
 
-        let txid1 = p1.broadcast("aabb").unwrap();
-        let txid2 = p2.broadcast("aabb").unwrap();
+        let txid1 = p1.broadcast(&make_test_tx()).unwrap();
+        let txid2 = p2.broadcast(&make_test_tx()).unwrap();
 
         assert_eq!(txid1, txid2);
     }

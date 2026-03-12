@@ -2,8 +2,9 @@
 // runar-sdk/providers/mock.ts — Mock provider for testing
 // ---------------------------------------------------------------------------
 
+import type { Transaction } from '@bsv/sdk';
 import type { Provider } from './provider.js';
-import type { Transaction, UTXO } from '../types.js';
+import type { TransactionData, UTXO } from '../types.js';
 
 /**
  * In-memory mock provider for unit tests and local development.
@@ -12,10 +13,12 @@ import type { Transaction, UTXO } from '../types.js';
  * assertion in tests.
  */
 export class MockProvider implements Provider {
-  private readonly transactions: Map<string, Transaction> = new Map();
+  private readonly transactions: Map<string, TransactionData> = new Map();
+  private readonly rawTransactions: Map<string, string> = new Map();
   private readonly utxos: Map<string, UTXO[]> = new Map();
   private readonly contractUtxos: Map<string, UTXO> = new Map();
   private readonly broadcastedTxs: string[] = [];
+  private readonly broadcastedTxObjects: Transaction[] = [];
   private readonly network: 'mainnet' | 'testnet';
   private broadcastCount = 0;
   private feeRate = 1;
@@ -28,8 +31,11 @@ export class MockProvider implements Provider {
   // Test data injection
   // -------------------------------------------------------------------------
 
-  addTransaction(tx: Transaction): void {
+  addTransaction(tx: TransactionData): void {
     this.transactions.set(tx.txid, tx);
+    if (tx.raw) {
+      this.rawTransactions.set(tx.txid, tx.raw);
+    }
   }
 
   addUtxo(address: string, utxo: UTXO): void {
@@ -47,11 +53,16 @@ export class MockProvider implements Provider {
     return this.broadcastedTxs;
   }
 
+  /** Get all Transaction objects that were broadcast through this provider. */
+  getBroadcastedTxObjects(): readonly Transaction[] {
+    return this.broadcastedTxObjects;
+  }
+
   // -------------------------------------------------------------------------
   // Provider implementation
   // -------------------------------------------------------------------------
 
-  async getTransaction(txid: string): Promise<Transaction> {
+  async getTransaction(txid: string): Promise<TransactionData> {
     const tx = this.transactions.get(txid);
     if (!tx) {
       throw new Error(`MockProvider: transaction ${txid} not found`);
@@ -59,11 +70,18 @@ export class MockProvider implements Provider {
     return tx;
   }
 
-  async broadcast(rawTx: string): Promise<string> {
+  async broadcast(tx: Transaction): Promise<string> {
+    const rawTx = tx.toHex();
     this.broadcastedTxs.push(rawTx);
+    this.broadcastedTxObjects.push(tx);
     this.broadcastCount++;
+
     // Generate a deterministic fake txid from the broadcast count
     const fakeTxid = sha256Hex(`mock-broadcast-${this.broadcastCount}-${rawTx.slice(0, 16)}`);
+
+    // Auto-store raw hex for subsequent getRawTransaction lookups
+    this.rawTransactions.set(fakeTxid, rawTx);
+
     return fakeTxid;
   }
 
@@ -84,6 +102,8 @@ export class MockProvider implements Provider {
   }
 
   async getRawTransaction(txid: string): Promise<string> {
+    const raw = this.rawTransactions.get(txid);
+    if (raw) return raw;
     const tx = this.transactions.get(txid);
     if (!tx) {
       throw new Error(`MockProvider: transaction ${txid} not found`);

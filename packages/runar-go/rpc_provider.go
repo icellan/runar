@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync/atomic"
 	"time"
+
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // ---------------------------------------------------------------------------
@@ -128,7 +130,7 @@ func truncate(s string, maxLen int) string {
 // ---------------------------------------------------------------------------
 
 // GetTransaction fetches a transaction by txid using getrawtransaction (verbose).
-func (p *RPCProvider) GetTransaction(txid string) (*Transaction, error) {
+func (p *RPCProvider) GetTransaction(txid string) (*TransactionData, error) {
 	// Use int 1 for verbose (works with both SV Node and Teranode).
 	result, err := p.rpcCall("getrawtransaction", txid, 1)
 	if err != nil {
@@ -159,7 +161,7 @@ func (p *RPCProvider) GetTransaction(txid string) (*Transaction, error) {
 		}
 	}
 
-	return &Transaction{
+	return &TransactionData{
 		Txid:    txid,
 		Version: 1,
 		Outputs: outputs,
@@ -167,9 +169,10 @@ func (p *RPCProvider) GetTransaction(txid string) (*Transaction, error) {
 	}, nil
 }
 
-// Broadcast sends a raw transaction hex via sendrawtransaction.
+// Broadcast sends a transaction via sendrawtransaction.
 // If autoMine is enabled (regtest mode), it mines 1 block after broadcast.
-func (p *RPCProvider) Broadcast(rawTx string) (string, error) {
+func (p *RPCProvider) Broadcast(tx *transaction.Transaction) (string, error) {
+	rawTx := tx.Hex()
 	result, err := p.rpcCall("sendrawtransaction", rawTx)
 	if err != nil {
 		return "", fmt.Errorf("sendrawtransaction: %w", err)

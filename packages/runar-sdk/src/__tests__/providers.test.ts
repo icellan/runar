@@ -1,6 +1,23 @@
 import { describe, it, expect } from 'vitest';
 import { MockProvider } from '../providers/mock.js';
-import type { Transaction, UTXO } from '../types.js';
+import { Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
+import type { TransactionData, UTXO } from '../types.js';
+
+/** Create a minimal valid BsvTransaction for broadcast testing. */
+function makeBsvTx(marker?: string): BsvTransaction {
+  const tx = new BsvTransaction();
+  tx.addInput({
+    sourceTXID: '00'.repeat(32),
+    sourceOutputIndex: 0,
+    unlockingScript: new UnlockingScript(),
+    sequence: 0xffffffff,
+  });
+  tx.addOutput({
+    satoshis: 50000,
+    lockingScript: LockingScript.fromHex(marker || '51'),
+  });
+  return tx;
+}
 
 // ---------------------------------------------------------------------------
 // MockProvider: transactions
@@ -9,7 +26,7 @@ import type { Transaction, UTXO } from '../types.js';
 describe('MockProvider: transactions', () => {
   it('add a transaction and get it back', async () => {
     const provider = new MockProvider();
-    const tx: Transaction = {
+    const tx: TransactionData = {
       txid: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
       version: 1,
       inputs: [{
@@ -129,8 +146,8 @@ describe('MockProvider: contract UTXOs', () => {
 describe('MockProvider: broadcast', () => {
   it('broadcast returns a txid', async () => {
     const provider = new MockProvider();
-    const rawTx = '01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0100f2052a010000001976a914aabbccdd88ac00000000';
-    const txid = await provider.broadcast(rawTx);
+    const tx = makeBsvTx();
+    const txid = await provider.broadcast(tx);
     expect(txid).toBeDefined();
     expect(typeof txid).toBe('string');
     expect(txid.length).toBe(64); // txid should be 64 hex chars
@@ -138,23 +155,40 @@ describe('MockProvider: broadcast', () => {
 
   it('records broadcasted transactions', async () => {
     const provider = new MockProvider();
-    const rawTx1 = 'deadbeef';
-    const rawTx2 = 'cafebabe';
+    const tx1 = makeBsvTx('5151'); // distinct script
+    const tx2 = makeBsvTx('5252'); // distinct script
 
-    await provider.broadcast(rawTx1);
-    await provider.broadcast(rawTx2);
+    await provider.broadcast(tx1);
+    await provider.broadcast(tx2);
 
     const broadcasted = provider.getBroadcastedTxs();
     expect(broadcasted.length).toBe(2);
-    expect(broadcasted[0]).toBe(rawTx1);
-    expect(broadcasted[1]).toBe(rawTx2);
+    expect(broadcasted[0]).toBe(tx1.toHex());
+    expect(broadcasted[1]).toBe(tx2.toHex());
+  });
+
+  it('records broadcasted Transaction objects', async () => {
+    const provider = new MockProvider();
+    const tx = makeBsvTx();
+    await provider.broadcast(tx);
+    const txObjects = provider.getBroadcastedTxObjects();
+    expect(txObjects.length).toBe(1);
+    expect(txObjects[0]).toBe(tx);
   });
 
   it('returns different txids for different broadcasts', async () => {
     const provider = new MockProvider();
-    const txid1 = await provider.broadcast('tx1');
-    const txid2 = await provider.broadcast('tx2');
+    const txid1 = await provider.broadcast(makeBsvTx('aa'));
+    const txid2 = await provider.broadcast(makeBsvTx('bb'));
     expect(txid1).not.toBe(txid2);
+  });
+
+  it('auto-stores raw hex for getRawTransaction after broadcast', async () => {
+    const provider = new MockProvider();
+    const tx = makeBsvTx();
+    const txid = await provider.broadcast(tx);
+    const rawHex = await provider.getRawTransaction(txid);
+    expect(rawHex).toBe(tx.toHex());
   });
 });
 
@@ -181,7 +215,7 @@ describe('MockProvider: network', () => {
 describe('MockProvider: getRawTransaction', () => {
   it('returns raw hex when available', async () => {
     const provider = new MockProvider();
-    const tx: Transaction = {
+    const tx: TransactionData = {
       txid: 'aa'.repeat(32),
       version: 1,
       inputs: [],
@@ -204,7 +238,7 @@ describe('MockProvider: getRawTransaction', () => {
 
   it('throws when transaction has no raw hex', async () => {
     const provider = new MockProvider();
-    const tx: Transaction = {
+    const tx: TransactionData = {
       txid: 'bb'.repeat(32),
       version: 1,
       inputs: [],

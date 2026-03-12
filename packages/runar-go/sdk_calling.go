@@ -2,6 +2,10 @@ package runar
 
 import (
 	"fmt"
+
+	"github.com/bsv-blockchain/go-sdk/chainhash"
+	sdkscript "github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // BuildCallOptions provides optional parameters for BuildCallTransaction.
@@ -28,7 +32,7 @@ type AdditionalContractInput struct {
 // Transaction construction for method invocation
 // ---------------------------------------------------------------------------
 
-// BuildCallTransaction builds a raw transaction that spends a contract UTXO.
+// BuildCallTransaction builds a Transaction that spends a contract UTXO.
 //
 // The transaction:
 //   - Input 0: the current contract UTXO with the given unlocking script.
@@ -37,8 +41,8 @@ type AdditionalContractInput struct {
 //     (for stateful contracts).
 //   - Last output (optional): change.
 //
-// Returns the transaction hex (with unlocking script for input 0 already
-// placed) and the total input count.
+// Returns the Transaction object (with unlocking script for input 0
+// already placed) and the total input count.
 func BuildCallTransaction(
 	currentUtxo UTXO,
 	unlockingScript string,
@@ -49,7 +53,7 @@ func BuildCallTransaction(
 	additionalUtxos []UTXO,
 	feeRate int64,
 	opts ...*BuildCallOptions,
-) (txHex string, inputCount int, changeAmount int64) {
+) (tx *transaction.Transaction, inputCount int, changeAmount int64) {
 	var extraContractInputs []AdditionalContractInput
 	var contractOutputs []ContractOutput
 	if len(opts) > 0 && opts[0] != nil {
@@ -111,51 +115,49 @@ func BuildCallTransaction(
 
 	change := totalInput - contractOutputSats - fee
 
-	// Build raw transaction
-	var tx string
-
-	// Version (4 bytes LE)
-	tx += toLittleEndian32(1)
-
-	// Input count
-	tx += encodeVarInt(len(allUtxos))
+	// Build Transaction object
+	tx = transaction.NewTransaction()
 
 	// Input 0: primary contract UTXO with unlocking script
-	tx += reverseHex(currentUtxo.Txid)
-	tx += toLittleEndian32(currentUtxo.OutputIndex)
-	tx += encodeVarInt(len(unlockingScript) / 2)
-	tx += unlockingScript
-	tx += "ffffffff"
+	unlockLS, _ := sdkscript.NewFromHex(unlockingScript)
+	hash0, _ := chainhash.NewHashFromHex(currentUtxo.Txid)
+	tx.AddInput(&transaction.TransactionInput{
+		SourceTXID:       hash0,
+		SourceTxOutIndex: uint32(currentUtxo.OutputIndex),
+		UnlockingScript:  unlockLS,
+		SequenceNumber:   0xffffffff,
+	})
 
 	// Additional contract inputs (with their own unlocking scripts)
 	for _, ci := range extraContractInputs {
-		tx += reverseHex(ci.Utxo.Txid)
-		tx += toLittleEndian32(ci.Utxo.OutputIndex)
-		tx += encodeVarInt(len(ci.UnlockingScript) / 2)
-		tx += ci.UnlockingScript
-		tx += "ffffffff"
+		ciUnlock, _ := sdkscript.NewFromHex(ci.UnlockingScript)
+		ciHash, _ := chainhash.NewHashFromHex(ci.Utxo.Txid)
+		tx.AddInput(&transaction.TransactionInput{
+			SourceTXID:       ciHash,
+			SourceTxOutIndex: uint32(ci.Utxo.OutputIndex),
+			UnlockingScript:  ciUnlock,
+			SequenceNumber:   0xffffffff,
+		})
 	}
 
-	// P2PKH funding inputs (unsigned)
+	// P2PKH funding inputs (unsigned — empty script)
 	for _, utxo := range additionalUtxos {
-		tx += reverseHex(utxo.Txid)
-		tx += toLittleEndian32(utxo.OutputIndex)
-		tx += "00" // empty scriptSig
-		tx += "ffffffff"
+		fundHash, _ := chainhash.NewHashFromHex(utxo.Txid)
+		tx.AddInput(&transaction.TransactionInput{
+			SourceTXID:       fundHash,
+			SourceTxOutIndex: uint32(utxo.OutputIndex),
+			UnlockingScript:  &sdkscript.Script{},
+			SequenceNumber:   0xffffffff,
+		})
 	}
-
-	// Output count
-	numOutputs := len(contractOutputs)
-	if change > 0 && (changeAddress != "" || changeScript != "") {
-		numOutputs++
-	}
-	tx += encodeVarInt(numOutputs)
 
 	// Contract outputs
 	for _, co := range contractOutputs {
-		tx += toLittleEndian64(co.Satoshis)
-		tx += encodeVarInt(len(co.Script) / 2)
-		tx += co.Script
+		ls, _ := sdkscript.NewFromHex(co.Script)
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(co.Satoshis),
+			LockingScript: ls,
+		})
 	}
 
 	// Change output
@@ -164,13 +166,12 @@ func BuildCallTransaction(
 		if actualChangeScript == "" {
 			actualChangeScript = BuildP2PKHScript(changeAddress)
 		}
-		tx += toLittleEndian64(change)
-		tx += encodeVarInt(len(actualChangeScript) / 2)
-		tx += actualChangeScript
+		changeLS, _ := sdkscript.NewFromHex(actualChangeScript)
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(change),
+			LockingScript: changeLS,
+		})
 	}
-
-	// Locktime
-	tx += toLittleEndian32(0)
 
 	retChange := int64(0)
 	if change > 0 {
@@ -180,12 +181,11 @@ func BuildCallTransaction(
 }
 
 // ---------------------------------------------------------------------------
-// Insert unlocking script into a raw transaction
+// Helpers
 // ---------------------------------------------------------------------------
 
-// InsertUnlockingScript parses a raw transaction hex, locates the target
-// input's scriptSig field, replaces it with the provided unlocking script,
-// and returns the modified transaction hex.
+// InsertUnlockingScript is kept for backward compatibility but should be
+// avoided in new code — prefer setting tx.Inputs[i].UnlockingScript directly.
 func InsertUnlockingScript(txHex string, inputIndex int, unlockScript string) string {
 	pos := 0
 

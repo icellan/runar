@@ -2,11 +2,12 @@
 // runar-sdk/calling.ts — Transaction construction for method invocation
 // ---------------------------------------------------------------------------
 
+import { Transaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import type { UTXO } from './types.js';
 import { buildP2PKHScript } from './script-utils.js';
 
 /**
- * Build a raw transaction that spends a contract UTXO (method call).
+ * Build a transaction that spends a contract UTXO (method call).
  *
  * The transaction:
  * - Input 0: the current contract UTXO with the given unlocking script.
@@ -15,7 +16,7 @@ import { buildP2PKHScript } from './script-utils.js';
  *   (for stateful contracts).
  * - Last output (optional): change.
  *
- * Returns the unsigned transaction hex (with unlocking script for input 0
+ * Returns the Transaction object (with unlocking script for input 0
  * already placed) and the total input count.
  */
 export function buildCallTransaction(
@@ -33,7 +34,7 @@ export function buildCallTransaction(
     /** Additional contract inputs with their own unlocking scripts (for merge). */
     additionalContractInputs?: Array<{ utxo: UTXO; unlockingScript: string }>;
   },
-): { txHex: string; inputCount: number; changeAmount: number } {
+): { tx: Transaction; inputCount: number; changeAmount: number } {
   const extraContractInputs = options?.additionalContractInputs ?? [];
   const allUtxos = [currentUtxo, ...extraContractInputs.map((i) => i.utxo), ...(additionalUtxos ?? [])];
 
@@ -72,110 +73,63 @@ export function buildCallTransaction(
 
   const change = totalInput - contractOutputSats - fee;
 
-  // Build raw transaction
-  let tx = '';
-
-  // Version (4 bytes LE)
-  tx += toLittleEndian32(1);
-
-  // Input count
-  tx += encodeVarInt(allUtxos.length);
+  // Build Transaction object
+  const tx = new Transaction();
 
   // Input 0: primary contract UTXO with unlocking script
-  tx += reverseHex(currentUtxo.txid);
-  tx += toLittleEndian32(currentUtxo.outputIndex);
-  tx += encodeVarInt(unlockingScript.length / 2);
-  tx += unlockingScript;
-  tx += 'ffffffff';
+  tx.addInput({
+    sourceTXID: currentUtxo.txid,
+    sourceOutputIndex: currentUtxo.outputIndex,
+    unlockingScript: UnlockingScript.fromHex(unlockingScript),
+    sequence: 0xffffffff,
+  });
 
   // Additional contract inputs (with their own unlocking scripts)
   for (const ci of extraContractInputs) {
-    tx += reverseHex(ci.utxo.txid);
-    tx += toLittleEndian32(ci.utxo.outputIndex);
-    tx += encodeVarInt(ci.unlockingScript.length / 2);
-    tx += ci.unlockingScript;
-    tx += 'ffffffff';
+    tx.addInput({
+      sourceTXID: ci.utxo.txid,
+      sourceOutputIndex: ci.utxo.outputIndex,
+      unlockingScript: UnlockingScript.fromHex(ci.unlockingScript),
+      sequence: 0xffffffff,
+    });
   }
 
   // P2PKH funding inputs (unsigned)
   if (additionalUtxos) {
     for (const utxo of additionalUtxos) {
-      tx += reverseHex(utxo.txid);
-      tx += toLittleEndian32(utxo.outputIndex);
-      tx += '00'; // empty scriptSig
-      tx += 'ffffffff';
+      tx.addInput({
+        sourceTXID: utxo.txid,
+        sourceOutputIndex: utxo.outputIndex,
+        unlockingScript: new UnlockingScript(),
+        sequence: 0xffffffff,
+      });
     }
   }
 
-  // Output count
-  let numOutputs = contractOutputs.length;
-  if (change > 0 && (changeAddress || changeScript)) numOutputs++;
-  tx += encodeVarInt(numOutputs);
-
   // Contract outputs
   for (const co of contractOutputs) {
-    tx += toLittleEndian64(co.satoshis);
-    tx += encodeVarInt(co.script.length / 2);
-    tx += co.script;
+    tx.addOutput({
+      satoshis: co.satoshis,
+      lockingScript: LockingScript.fromHex(co.script),
+    });
   }
 
   // Change output
   if (change > 0 && (changeAddress || changeScript)) {
     const actualChangeScript =
       changeScript || buildP2PKHScript(changeAddress!);
-    tx += toLittleEndian64(change);
-    tx += encodeVarInt(actualChangeScript.length / 2);
-    tx += actualChangeScript;
+    tx.addOutput({
+      satoshis: change,
+      lockingScript: LockingScript.fromHex(actualChangeScript),
+    });
   }
 
-  // Locktime
-  tx += toLittleEndian32(0);
-
-  return { txHex: tx, inputCount: allUtxos.length, changeAmount: change > 0 ? change : 0 };
+  return { tx, inputCount: allUtxos.length, changeAmount: change > 0 ? change : 0 };
 }
 
 // ---------------------------------------------------------------------------
-// Bitcoin wire format helpers
+// Helpers
 // ---------------------------------------------------------------------------
-
-export function toLittleEndian32(n: number): string {
-  const buf = new ArrayBuffer(4);
-  new DataView(buf).setUint32(0, n, true);
-  return Array.from(new Uint8Array(buf))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-export function toLittleEndian64(n: number): string {
-  const lo = n & 0xffffffff;
-  const hi = Math.floor(n / 0x100000000) & 0xffffffff;
-  return toLittleEndian32(lo) + toLittleEndian32(hi);
-}
-
-export function encodeVarInt(n: number): string {
-  if (n < 0xfd) {
-    return n.toString(16).padStart(2, '0');
-  } else if (n <= 0xffff) {
-    const buf = new ArrayBuffer(2);
-    new DataView(buf).setUint16(0, n, true);
-    const hex = Array.from(new Uint8Array(buf))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-    return 'fd' + hex;
-  } else if (n <= 0xffffffff) {
-    return 'fe' + toLittleEndian32(n);
-  } else {
-    return 'ff' + toLittleEndian64(n);
-  }
-}
-
-export function reverseHex(hex: string): string {
-  const pairs: string[] = [];
-  for (let i = 0; i < hex.length; i += 2) {
-    pairs.push(hex.slice(i, i + 2));
-  }
-  return pairs.reverse().join('');
-}
 
 function varIntByteSize(n: number): number {
   if (n < 0xfd) return 1;
@@ -183,4 +137,3 @@ function varIntByteSize(n: number): number {
   if (n <= 0xffffffff) return 5;
   return 9;
 }
-

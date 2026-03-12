@@ -91,7 +91,7 @@ export class TokenWallet {
         const additionalUtxos = await this.provider.getUtxos(changeAddress);
         const changeScript = buildP2PKHScript(changeAddress);
 
-        const { txHex: prelimTxHex } = buildCallTransaction(
+        const { tx: prelimTx } = buildCallTransaction(
           utxo,
           prelimUnlock,
           undefined, // FungibleToken is stateless (SmartContract base)
@@ -103,7 +103,7 @@ export class TokenWallet {
         );
 
         // Sign input 0 against the contract UTXO's locking script
-        const sig = await this.signer.sign(prelimTxHex, 0, utxo.script, utxo.satoshis);
+        const sig = await this.signer.sign(prelimTx.toHex(), 0, utxo.script, utxo.satoshis);
 
         const result = await contract.call(
           'transfer',
@@ -167,7 +167,7 @@ export class TokenWallet {
     const additionalUtxos = await this.provider.getUtxos(changeAddress);
     const changeScript = buildP2PKHScript(changeAddress);
 
-    const { txHex: prelimTxHex } = buildCallTransaction(
+    const { tx: prelimTx } = buildCallTransaction(
       firstUtxo,
       prelimUnlock,
       undefined,
@@ -179,7 +179,7 @@ export class TokenWallet {
     );
 
     // Sign input 0 against the first contract UTXO's locking script
-    const sig = await this.signer.sign(prelimTxHex, 0, firstUtxo.script, firstUtxo.satoshis);
+    const sig = await this.signer.sign(prelimTx.toHex(), 0, firstUtxo.script, firstUtxo.satoshis);
 
     const result = await contract.call(
       'merge',
