@@ -22,3 +22,12 @@ def test_unlock_wrong_key():
     c = P2PKH(pub_key_hash=hash160(pk))
     with pytest.raises(AssertionError):
         c.unlock(mock_sig(), wrong_pk)
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "P2PKH.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "P2PKH.runar.py")

@@ -764,6 +764,17 @@ describe('Optimizer: Peephole (Stack IR)', () => {
       const result = optimizeStackIR(ops);
       expect(result).toEqual([{ op: 'opcode', code: 'OP_CHECKMULTISIGVERIFY' }]);
     });
+
+    it('fuses string-form OP_EQUAL + OP_VERIFY into EQUALVERIFY', () => {
+      // Both ops are in OpcodeOp form (op: 'opcode', code: string).
+      // This exercises the opcode-string path of the VERIFY fusion rule.
+      const ops: StackOp[] = [
+        { op: 'opcode', code: 'OP_EQUAL' },
+        { op: 'opcode', code: 'OP_VERIFY' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([{ op: 'opcode', code: 'OP_EQUALVERIFY' }]);
+    });
   });
 
   describe('arithmetic identity elimination', () => {
@@ -810,6 +821,33 @@ describe('Optimizer: Peephole (Stack IR)', () => {
     it('removes PUSH x followed by DROP', () => {
       const ops: StackOp[] = [
         { op: 'push', value: 99n },
+        { op: 'drop' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([]);
+    });
+
+    it('removes PUSH(bytes) followed by DROP', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: Uint8Array.from([0xde, 0xad, 0xbe, 0xef]) },
+        { op: 'drop' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([]);
+    });
+
+    it('removes PUSH(-1) followed by DROP', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: -1n },
+        { op: 'drop' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([]);
+    });
+
+    it('removes PUSH(false) followed by DROP', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: false },
         { op: 'drop' },
       ];
       const result = optimizeStackIR(ops);
@@ -872,6 +910,53 @@ describe('Optimizer: Peephole (Stack IR)', () => {
         },
       ]);
     });
+
+    it('removes SWAP SWAP in then-branch independently', () => {
+      const ops: StackOp[] = [
+        {
+          op: 'if',
+          then: [
+            { op: 'swap' },
+            { op: 'swap' },
+          ],
+          else: [{ op: 'push', value: 2n }],
+        },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([
+        {
+          op: 'if',
+          then: [],
+          else: [{ op: 'push', value: 2n }],
+        },
+      ]);
+    });
+
+    it('optimizes both then-branch and else-branch independently', () => {
+      // then-branch: SWAP SWAP → removed
+      // else-branch: OP_NOT OP_NOT → removed
+      const ops: StackOp[] = [
+        {
+          op: 'if',
+          then: [
+            { op: 'swap' },
+            { op: 'swap' },
+          ],
+          else: [
+            { op: 'opcode', code: 'OP_NOT' },
+            { op: 'opcode', code: 'OP_NOT' },
+          ],
+        },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([
+        {
+          op: 'if',
+          then: [],
+          else: [],
+        },
+      ]);
+    });
   });
 
   describe('iterative fixed-point', () => {
@@ -904,6 +989,63 @@ describe('Optimizer: Peephole (Stack IR)', () => {
   });
 
   // -----------------------------------------------------------------------
+  // Edge cases: empty and single-op inputs
+  // -----------------------------------------------------------------------
+
+  describe('edge cases', () => {
+    it('returns empty array for empty input', () => {
+      const result = optimizeStackIR([]);
+      expect(result).toEqual([]);
+    });
+
+    it('leaves a single push op unchanged', () => {
+      const ops: StackOp[] = [{ op: 'push', value: 42n }];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual(ops);
+    });
+
+    it('leaves a single opcode unchanged', () => {
+      const ops: StackOp[] = [{ op: 'opcode', code: 'OP_HASH160' }];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual(ops);
+    });
+
+    it('leaves a single dup unchanged', () => {
+      const ops: StackOp[] = [{ op: 'dup' }];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual(ops);
+    });
+
+    it('handles PUSH bool followed by DROP', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: true },
+        { op: 'drop' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([]);
+    });
+
+    it('handles PUSH bytes followed by DROP', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: new Uint8Array([0xde, 0xad]) },
+        { op: 'drop' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual([]);
+    });
+
+    it('leaves an unrelated pair unchanged', () => {
+      // OP_HASH160 followed by OP_ADD — no rule applies
+      const ops: StackOp[] = [
+        { op: 'opcode', code: 'OP_HASH160' },
+        { op: 'opcode', code: 'OP_ADD' },
+      ];
+      const result = optimizeStackIR(ops);
+      expect(result).toEqual(ops);
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // New rules: Roll/Pick simplification
   // -----------------------------------------------------------------------
 
@@ -912,6 +1054,7 @@ describe('Optimizer: Peephole (Stack IR)', () => {
       const ops: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
       expect(optimizeStackIR(ops)).toEqual([]);
     });
+
 
     it('replaces PUSH 1 + Roll(1) with Swap', () => {
       const ops: StackOp[] = [{ op: 'push', value: 1n }, { op: 'roll', depth: 1 }];
@@ -931,6 +1074,38 @@ describe('Optimizer: Peephole (Stack IR)', () => {
     it('replaces PUSH 1 + Pick(1) with Over', () => {
       const ops: StackOp[] = [{ op: 'push', value: 1n }, { op: 'pick', depth: 1 }];
       expect(optimizeStackIR(ops)).toEqual([{ op: 'over' }]);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Opcode-string Roll/Pick forms
+  // SLH-DSA codegen emits Opcode("OP_ROLL") string form instead of typed
+  // Roll/Pick ops. The peephole optimizer currently does NOT reduce these
+  // (it only reduces the typed roll/pick forms above).
+  // -----------------------------------------------------------------------
+
+  describe('opcode-string Roll/Pick forms', () => {
+    it('does NOT optimize PUSH(0) + opcode OP_ROLL (string form, typed form is optimized)', () => {
+      // Typed roll{0} is optimized away. Opcode-string OP_ROLL is not.
+      // POTENTIAL BUG: OP_ROLL string form and OP_PICK string form are not
+      // reduced by the same rules as typed Roll/Pick ops. Go/Rust/Python
+      // compilers may handle this differently.
+      const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'roll', depth: 0 }];
+      expect(optimizeStackIR(typedOps)).toEqual([]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_ROLL' }];
+      // Currently passes through unchanged (not optimized)
+      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
+    });
+
+    it('does NOT optimize PUSH(0) + opcode OP_PICK (string form, typed form is optimized)', () => {
+      // Typed pick{0} → dup. Opcode-string OP_PICK is not reduced.
+      const typedOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'pick', depth: 0 }];
+      expect(optimizeStackIR(typedOps)).toEqual([{ op: 'dup' }]);
+
+      const stringOps: StackOp[] = [{ op: 'push', value: 0n }, { op: 'opcode', code: 'OP_PICK' }];
+      // Currently passes through unchanged (not optimized)
+      expect(optimizeStackIR(stringOps)).toEqual(stringOps);
     });
   });
 
@@ -987,6 +1162,25 @@ describe('Optimizer: Peephole (Stack IR)', () => {
         { op: 'opcode', code: 'OP_MUL' },
       ];
       expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: 42n }]);
+    });
+
+    it('constant-folds SUB that produces a negative result', () => {
+      // Stack semantics: PUSH(3), PUSH(10), SUB → 3 - 10 = -7
+      const ops: StackOp[] = [
+        { op: 'push', value: 3n },
+        { op: 'push', value: 10n },
+        { op: 'opcode', code: 'OP_SUB' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: -7n }]);
+    });
+
+    it('constant-folds ADD with large values (1000 + 999 = 1999)', () => {
+      const ops: StackOp[] = [
+        { op: 'push', value: 1000n },
+        { op: 'push', value: 999n },
+        { op: 'opcode', code: 'OP_ADD' },
+      ];
+      expect(optimizeStackIR(ops)).toEqual([{ op: 'push', value: 1999n }]);
     });
   });
 

@@ -90,6 +90,7 @@ var builtinFunctions = map[string]funcSig{
 	"log2":              {params: []string{"bigint"}, returnType: "bigint"},
 	"bool":              {params: []string{"bigint"}, returnType: "boolean"},
 	"reverseBytes":      {params: []string{"ByteString"}, returnType: "ByteString"},
+	"split":             {params: []string{"ByteString", "bigint"}, returnType: "ByteString"},
 	"left":              {params: []string{"ByteString", "bigint"}, returnType: "ByteString"},
 	"right":             {params: []string{"ByteString", "bigint"}, returnType: "ByteString"},
 	"int2str":           {params: []string{"bigint", "bigint"}, returnType: "ByteString"},
@@ -464,8 +465,21 @@ func (tc *typeChecker) checkBinaryExpr(e BinaryExpr, env *typeEnv) string {
 	rightType := tc.inferExprType(e.Right, env)
 
 	// Arithmetic: bigint x bigint -> bigint
+	// Special case: ByteString + ByteString -> ByteString (OP_CAT / byte concatenation)
 	switch e.Op {
-	case "+", "-", "*", "/", "%":
+	case "+":
+		if isByteFamily(leftType) && isByteFamily(rightType) {
+			return "ByteString"
+		}
+		if !isBigintFamily(leftType) {
+			tc.addError(fmt.Sprintf("left operand of '+' must be bigint or ByteString, got '%s'", leftType))
+		}
+		if !isBigintFamily(rightType) {
+			tc.addError(fmt.Sprintf("right operand of '+' must be bigint or ByteString, got '%s'", rightType))
+		}
+		return "bigint"
+
+	case "-", "*", "/", "%":
 		if !isBigintFamily(leftType) {
 			tc.addError(fmt.Sprintf("left operand of '%s' must be bigint, got '%s'", e.Op, leftType))
 		}

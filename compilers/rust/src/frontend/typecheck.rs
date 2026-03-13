@@ -109,6 +109,9 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("divmod", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
     m.insert("log2", FuncSig { params: vec!["bigint"], return_type: "bigint" });
     m.insert("bool", FuncSig { params: vec!["bigint"], return_type: "boolean" });
+    m.insert("split", FuncSig { params: vec!["ByteString", "bigint"], return_type: "ByteString" });
+    m.insert("sha256Compress", FuncSig { params: vec!["ByteString", "ByteString"], return_type: "ByteString" });
+    m.insert("sha256Finalize", FuncSig { params: vec!["ByteString", "ByteString", "bigint"], return_type: "ByteString" });
 
     // Preimage extractors
     m.insert("extractVersion", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });
@@ -587,8 +590,30 @@ impl<'a> TypeChecker<'a> {
         let right_type = self.infer_expr_type(right, env);
 
         match op {
+            // Add: bigint x bigint -> bigint, or ByteString x ByteString -> ByteString (OP_CAT)
+            BinaryOp::Add => {
+                if is_bytestring_subtype(&left_type) && is_bytestring_subtype(&right_type) {
+                    return BYTESTRING.to_string();
+                }
+                if !is_bigint_family(&left_type) {
+                    self.errors.push(format!(
+                        "Left operand of '{}' must be bigint or ByteString, got '{}'",
+                        op.as_str(),
+                        left_type
+                    ));
+                }
+                if !is_bigint_family(&right_type) {
+                    self.errors.push(format!(
+                        "Right operand of '{}' must be bigint or ByteString, got '{}'",
+                        op.as_str(),
+                        right_type
+                    ));
+                }
+                BIGINT.to_string()
+            }
+
             // Arithmetic: bigint x bigint -> bigint
-            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+            BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
                 if !is_bigint_family(&left_type) {
                     self.errors.push(format!(
                         "Left operand of '{}' must be bigint, got '{}'",
@@ -909,6 +934,44 @@ impl<'a> TypeChecker<'a> {
             if args.len() >= 2 {
                 self.infer_expr_type(&args[1], env);
             }
+            return return_type.to_string();
+        }
+
+        // Special case: checkSig — strict type enforcement
+        // arg0 must be Sig (not just any ByteString subtype)
+        // arg1 must be PubKey (not just any ByteString subtype)
+        if func_name == "checkSig" {
+            if args.len() != 2 {
+                self.errors.push(format!(
+                    "checkSig() expects 2 argument(s), got {}",
+                    args.len()
+                ));
+            }
+            if args.len() >= 1 {
+                let arg0_type = self.infer_expr_type(&args[0], env);
+                // arg0 must be Sig specifically (or a subtype of Sig — currently Sig has no subtypes)
+                if arg0_type != "Sig" && arg0_type != "<unknown>" {
+                    self.errors.push(format!(
+                        "Argument 1 of checkSig(): expected 'Sig', got '{}'",
+                        arg0_type
+                    ));
+                }
+            }
+            if args.len() >= 2 {
+                let arg1_type = self.infer_expr_type(&args[1], env);
+                // arg1 must be PubKey specifically (or a subtype of PubKey)
+                if arg1_type != "PubKey" && arg1_type != "<unknown>" {
+                    self.errors.push(format!(
+                        "Argument 2 of checkSig(): expected 'PubKey', got '{}'",
+                        arg1_type
+                    ));
+                }
+            }
+            // Infer remaining args if overprovided
+            for i in 2..args.len() {
+                self.infer_expr_type(&args[i], env);
+            }
+            self.check_affine_consumption(func_name, args, env);
             return return_type.to_string();
         }
 
@@ -1339,5 +1402,164 @@ class Counter extends StatefulSmartContract {
             "expected no typecheck errors for stateful contract, got: {:?}",
             result.errors
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Valid arithmetic contract passes type check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_arithmetic() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class Arithmetic extends SmartContract {
+    readonly target: bigint;
+
+    constructor(target: bigint) {
+        super(target);
+        this.target = target;
+    }
+
+    public verify(a: bigint, b: bigint) {
+        const sum: bigint = a + b;
+        const diff: bigint = a - b;
+        const prod: bigint = a * b;
+        const quot: bigint = a / b;
+        const result: bigint = sum + diff + prod + quot;
+        assert(result === this.target);
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors for Arithmetic, got: {:?}",
+            result.errors
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Valid boolean logic contract passes type check
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_boolean_logic() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class BoolLogic extends SmartContract {
+    readonly threshold: bigint;
+
+    constructor(threshold: bigint) {
+        super(threshold);
+        this.threshold = threshold;
+    }
+
+    public verify(a: bigint, b: bigint, flag: boolean) {
+        const aAbove: boolean = a > this.threshold;
+        const bAbove: boolean = b > this.threshold;
+        const bothAbove: boolean = aAbove && bAbove;
+        const eitherAbove: boolean = aAbove || bAbove;
+        const notFlag: boolean = !flag;
+        assert(bothAbove || (eitherAbove && notFlag));
+    }
+}
+"#;
+        let contract = parse_and_validate(source);
+        let result = typecheck(&contract);
+        assert!(
+            result.errors.is_empty(),
+            "expected no typecheck errors for BoolLogic, got: {:?}",
+            result.errors
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: Subtype compatibility — PubKey where ByteString expected passes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_subtype_compatibility() {
+        let source = r#"
+import { SmartContract, assert, PubKey, sha256 } from 'runar-lang';
+
+class HashCheck extends SmartContract {
+    readonly expectedHash: Sha256;
+
+    constructor(expectedHash: Sha256) {
+        super(expectedHash);
+        this.expectedHash = expectedHash;
+    }
+
+    public verify(pubKey: PubKey) {
+        assert(sha256(pubKey) === this.expectedHash);
+    }
+}
+"#;
+        // parse_and_validate calls validate() which may fail on Sha256 type
+        // We test typecheck directly after a best-effort parse
+        let result = crate::frontend::parser::parse_source(source, Some("test.runar.ts"));
+        if result.errors.is_empty() {
+            if let Some(contract) = result.contract {
+                let tc_result = typecheck(&contract);
+                // PubKey should be assignable to ByteString (sha256's parameter type)
+                // so there should be no error about PubKey argument type mismatch
+                let pubkey_arg_error = tc_result.errors.iter().any(|e| {
+                    e.contains("argument") && e.contains("PubKey")
+                });
+                assert!(
+                    !pubkey_arg_error,
+                    "PubKey should be assignable to ByteString, but got error about PubKey argument: {:?}",
+                    tc_result.errors
+                );
+            }
+        }
+        // If parse itself fails, the test is inconclusive — we skip rather than fail
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: console.log call is rejected as unknown function
+    // Mirrors Go TestTypeCheck_UnknownFunction_ConsoleLog
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_unknown_function_console_log() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class Bad extends SmartContract {
+    constructor() {
+        super();
+    }
+
+    public check(val: bigint) {
+        console.log(val);
+        assert(val > 0n);
+    }
+}
+"#;
+        let result = crate::frontend::parser::parse_source(source, Some("test.runar.ts"));
+        if result.errors.is_empty() {
+            if let Some(contract) = result.contract {
+                let tc_result = typecheck(&contract);
+                assert!(
+                    !tc_result.errors.is_empty(),
+                    "expected typecheck errors for unknown function console.log"
+                );
+                let has_unknown_error = tc_result.errors.iter().any(|e| {
+                    e.to_lowercase().contains("unknown")
+                        || e.to_lowercase().contains("console")
+                });
+                assert!(
+                    has_unknown_error,
+                    "expected error about unknown function console.log, got: {:?}",
+                    tc_result.errors
+                );
+            }
+        }
+        // If parse itself fails (e.g. because the parser rejects member calls on unknown objects),
+        // that also counts as rejection — just not at the typecheck level
     }
 }

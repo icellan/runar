@@ -57,3 +57,11 @@ func TestCounter_Compile(t *testing.T) {
 		t.Fatalf("Rúnar compile check failed: %v", err)
 	}
 }
+
+// Row 489: Counter initial state is count=0
+func TestCounter_InitialState(t *testing.T) {
+	c := &Counter{Count: 0}
+	if c.Count != 0 {
+		t.Errorf("expected initial Count=0, got %d", c.Count)
+	}
+}

@@ -144,3 +144,47 @@ def test_slhdsa_signed_wrong_message():
             sig=ecdsa_sig_b,  # Different from what SLH-DSA signed
             pub_key=ecdsa_pub_key,
         )
+
+
+@pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed")
+def test_spend_multiple_messages():
+    """The same SLH-DSA keypair can sign multiple different messages (stateless)."""
+    ecdsa_pub_key = mock_pub_key()
+    ecdsa_pub_key_hash = hash160(ecdsa_pub_key)
+
+    kp = get_slh_kp()
+    slhdsa_pub_key_hash = hash160(kp.pk)
+
+    c = SPHINCSWallet(
+        ecdsa_pub_key_hash=ecdsa_pub_key_hash,
+        slhdsa_pub_key_hash=slhdsa_pub_key_hash,
+    )
+
+    # First spend
+    ecdsa_sig1 = mock_sig()
+    slhdsa_sig1 = kp.sign(ecdsa_sig1)
+    c.spend(
+        slhdsa_sig=slhdsa_sig1,
+        slhdsa_pub_key=kp.pk,
+        sig=ecdsa_sig1,
+        pub_key=ecdsa_pub_key,
+    )
+
+    # Second spend with different sig (SLH-DSA is stateless, no key reuse concern)
+    ecdsa_sig2 = b'\x30\x44' + b'\x00' * 70
+    slhdsa_sig2 = kp.sign(ecdsa_sig2)
+    c.spend(
+        slhdsa_sig=slhdsa_sig2,
+        slhdsa_pub_key=kp.pk,
+        sig=ecdsa_sig2,
+        pub_key=ecdsa_pub_key,
+    )
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "SPHINCSWallet.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "SPHINCSWallet.runar.py")

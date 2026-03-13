@@ -1823,3 +1823,466 @@ fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
 
     result
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::parser::parse_source;
+    use crate::frontend::typecheck::typecheck;
+    use crate::frontend::validator::validate;
+
+    /// Helper: parse → validate → typecheck → return ContractNode.
+    fn must_lower_to_anf(source: &str) -> ContractNode {
+        let result = parse_source(source, Some("test.runar.ts"));
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let contract = result.contract.expect("expected a contract from parse");
+
+        let val_result = validate(&contract);
+        assert!(
+            val_result.errors.is_empty(),
+            "validation errors: {:?}",
+            val_result.errors
+        );
+
+        let tc_result = typecheck(&contract);
+        assert!(
+            tc_result.errors.is_empty(),
+            "type check errors: {:?}",
+            tc_result.errors
+        );
+
+        contract
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_has_properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_has_properties() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        assert_eq!(program.contract_name, "P2PKH");
+
+        assert_eq!(
+            program.properties.len(),
+            1,
+            "expected 1 property, got {}",
+            program.properties.len()
+        );
+        let prop = &program.properties[0];
+        assert_eq!(
+            prop.name, "pubKeyHash",
+            "expected property name 'pubKeyHash', got '{}'",
+            prop.name
+        );
+        assert_eq!(
+            prop.prop_type, "Addr",
+            "expected property type 'Addr', got '{}'",
+            prop.prop_type
+        );
+        assert!(prop.readonly, "expected property to be readonly");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_unlock_has_bindings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_unlock_has_bindings() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let unlock = program
+            .methods
+            .iter()
+            .find(|m| m.name == "unlock")
+            .expect("could not find 'unlock' method in ANF output");
+
+        assert!(unlock.is_public, "expected unlock method to be public");
+
+        assert_eq!(
+            unlock.params.len(),
+            2,
+            "expected 2 params (sig, pubKey), got {}",
+            unlock.params.len()
+        );
+        assert_eq!(unlock.params[0].name, "sig");
+        assert_eq!(unlock.params[0].param_type, "Sig");
+        assert_eq!(unlock.params[1].name, "pubKey");
+        assert_eq!(unlock.params[1].param_type, "PubKey");
+
+        // Count binding kinds — must have at least: 2 load_param, 2 call, 1
+        // load_prop, 1 bin_op, 2 assert.
+        let mut load_param_count = 0usize;
+        let mut call_count = 0usize;
+        let mut load_prop_count = 0usize;
+        let mut bin_op_count = 0usize;
+        let mut assert_count = 0usize;
+
+        for b in &unlock.body {
+            match &b.value {
+                ANFValue::LoadParam { .. } => load_param_count += 1,
+                ANFValue::LoadProp { .. } => load_prop_count += 1,
+                ANFValue::Call { .. } => call_count += 1,
+                ANFValue::BinOp { .. } => bin_op_count += 1,
+                ANFValue::Assert { .. } => assert_count += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            load_param_count >= 2,
+            "expected at least 2 load_param bindings, got {}",
+            load_param_count
+        );
+        assert!(
+            call_count >= 2,
+            "expected at least 2 call bindings (hash160, checkSig), got {}",
+            call_count
+        );
+        assert!(
+            load_prop_count >= 1,
+            "expected at least 1 load_prop binding (pubKeyHash), got {}",
+            load_prop_count
+        );
+        assert!(
+            bin_op_count >= 1,
+            "expected at least 1 bin_op binding (===), got {}",
+            bin_op_count
+        );
+        assert!(
+            assert_count >= 2,
+            "expected at least 2 assert bindings, got {}",
+            assert_count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_binding_details
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_binding_details() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let unlock = program
+            .methods
+            .iter()
+            .find(|m| m.name == "unlock")
+            .expect("could not find 'unlock' method");
+
+        // Verify call to hash160 with 1 argument
+        let hash160_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::Call { func, .. } if func == "hash160")
+        });
+        assert!(
+            hash160_binding.is_some(),
+            "expected a call to hash160 in unlock method bindings"
+        );
+        if let Some(b) = hash160_binding {
+            if let ANFValue::Call { args, .. } = &b.value {
+                assert_eq!(
+                    args.len(),
+                    1,
+                    "hash160 should have 1 arg, got {}",
+                    args.len()
+                );
+            }
+        }
+
+        // Verify call to checkSig with 2 arguments
+        let checksig_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::Call { func, .. } if func == "checkSig")
+        });
+        assert!(
+            checksig_binding.is_some(),
+            "expected a call to checkSig in unlock method bindings"
+        );
+        if let Some(b) = checksig_binding {
+            if let ANFValue::Call { args, .. } = &b.value {
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "checkSig should have 2 args, got {}",
+                    args.len()
+                );
+            }
+        }
+
+        // Verify bin_op === has result_type "bytes" (byte-typed equality)
+        let eq_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "===")
+        });
+        assert!(
+            eq_binding.is_some(),
+            "expected a bin_op === in unlock method bindings"
+        );
+        if let Some(b) = eq_binding {
+            if let ANFValue::BinOp { result_type, .. } = &b.value {
+                assert_eq!(
+                    result_type.as_deref(),
+                    Some("bytes"),
+                    "expected bin_op === to have result_type 'bytes' (byte-typed equality), got {:?}",
+                    result_type
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // test_constructor_included
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_constructor_included() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class Simple extends SmartContract {
+  readonly x: bigint;
+
+  constructor(x: bigint) {
+    super(x);
+    this.x = x;
+  }
+
+  public check(val: bigint): void {
+    assert(val === this.x);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        assert!(
+            program.methods.len() >= 2,
+            "expected at least 2 methods (constructor + check), got {}",
+            program.methods.len()
+        );
+
+        let ctor = &program.methods[0];
+        assert_eq!(
+            ctor.name, "constructor",
+            "expected first method to be 'constructor', got '{}'",
+            ctor.name
+        );
+        assert!(!ctor.is_public, "constructor should not be public");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_arithmetic_bindings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_arithmetic_bindings() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class ArithTest extends SmartContract {
+  readonly target: bigint;
+
+  constructor(target: bigint) {
+    super(target);
+    this.target = target;
+  }
+
+  public verify(a: bigint, b: bigint): void {
+    assert(a + b === this.target);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let verify = program
+            .methods
+            .iter()
+            .find(|m| m.name == "verify")
+            .expect("could not find 'verify' method");
+
+        // Should have a bin_op + for a + b
+        let add_binding = verify.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "+")
+        });
+        assert!(
+            add_binding.is_some(),
+            "expected bin_op + in verify method for 'a + b'"
+        );
+
+        // Should have a bin_op === for equality check
+        let eq_binding = verify.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "===")
+        });
+        assert!(
+            eq_binding.is_some(),
+            "expected bin_op === in verify method"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_if_else_lowering
+    // Mirrors Python test_anf_lower_if_else
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_if_else_lowering() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class IfElse extends SmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(value: bigint, mode: boolean): void {
+    let result: bigint = 0n;
+    if (mode) {
+      result = value + this.limit;
+    } else {
+      result = value - this.limit;
+    }
+    assert(result > 0n);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let check = program
+            .methods
+            .iter()
+            .find(|m| m.name == "check")
+            .expect("could not find 'check' method");
+
+        // The if/else construct should produce an ANFValue::If binding
+        let has_if_binding = check
+            .body
+            .iter()
+            .any(|b| matches!(b.value, ANFValue::If { .. }));
+
+        assert!(
+            has_if_binding,
+            "expected an 'if' binding in the ANF output for the if/else construct, got: {:?}",
+            check.body.iter().map(|b| format!("{:?}", b.value)).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_stateful_has_implicit_params
+    // Mirrors Python test_typecheck_valid_stateful (checks implicit params in ANF)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stateful_has_implicit_params() {
+        let source = r#"
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public increment(amount: bigint): void {
+    this.count = this.count + amount;
+    assert(this.count > 0n);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let increment = program
+            .methods
+            .iter()
+            .find(|m| m.name == "increment")
+            .expect("could not find 'increment' method");
+
+        // A StatefulSmartContract public method should have implicit params injected:
+        // txPreimage, _changePKH, _changeAmount
+        let param_names: Vec<&str> = increment.params.iter().map(|p| p.name.as_str()).collect();
+
+        assert!(
+            param_names.contains(&"txPreimage"),
+            "stateful method should have 'txPreimage' as an implicit param, got: {:?}",
+            param_names
+        );
+        assert!(
+            param_names.contains(&"_changePKH"),
+            "stateful method should have '_changePKH' as an implicit param, got: {:?}",
+            param_names
+        );
+        assert!(
+            param_names.contains(&"_changeAmount"),
+            "stateful method should have '_changeAmount' as an implicit param, got: {:?}",
+            param_names
+        );
+    }
+}

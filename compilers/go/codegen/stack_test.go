@@ -918,6 +918,296 @@ func TestSqrt_ZeroGuard(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// TestLowerToStack_MaxStackDepth — MaxStackDepth should be tracked after lowering
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_MaxStackDepth(t *testing.T) {
+	program := p2pkhProgram()
+	methods := mustLowerToStackOps(t, program)
+
+	var unlock *StackMethod
+	for i := range methods {
+		if methods[i].Name == "unlock" {
+			unlock = &methods[i]
+			break
+		}
+	}
+	if unlock == nil {
+		t.Fatal("could not find 'unlock' stack method")
+	}
+
+	if unlock.MaxStackDepth <= 0 {
+		t.Errorf("expected MaxStackDepth > 0 after lowering P2PKH, got %d", unlock.MaxStackDepth)
+	}
+	// P2PKH has 2 params + some intermediates, so depth should be reasonable
+	if unlock.MaxStackDepth > 10 {
+		t.Errorf("expected MaxStackDepth <= 10 for P2PKH, got %d", unlock.MaxStackDepth)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLowerToStack_WithInitialValues_NoPlaceholderOps — properties with initial
+// values should not produce Placeholder ops
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_WithInitialValues_NoPlaceholderOps(t *testing.T) {
+	// A property with an initialValue is baked in; the value is not a constructor arg
+	// and should not produce a Placeholder op in the emitted script.
+	program := &ir.ANFProgram{
+		ContractName: "BoundedCounter",
+		Properties: []ir.ANFProperty{
+			{Name: "pubKeyHash", Type: "Addr", Readonly: true, InitialValue: "aabbccdd"},
+		},
+		Methods: []ir.ANFMethod{
+			{
+				Name:     "constructor",
+				Params:   []ir.ANFParam{{Name: "pubKeyHash", Type: "Addr"}},
+				Body:     nil,
+				IsPublic: false,
+			},
+			{
+				Name: "unlock",
+				Params: []ir.ANFParam{
+					{Name: "sig", Type: "Sig"},
+					{Name: "pubKey", Type: "PubKey"},
+				},
+				Body:     buildP2PKHBody(),
+				IsPublic: true,
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+	var unlock *StackMethod
+	for i := range methods {
+		if methods[i].Name == "unlock" {
+			unlock = &methods[i]
+			break
+		}
+	}
+	if unlock == nil {
+		t.Fatal("could not find 'unlock' stack method")
+	}
+
+	var placeholders []StackOp
+	collectPlaceholders(unlock.Ops, &placeholders)
+
+	if len(placeholders) != 0 {
+		t.Errorf("with initial values, expected no Placeholder ops, found %d", len(placeholders))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLowerToStack_PushLargeBigint — large integer constant should produce a
+// Push op (not an OP_1..OP_16 small-int opcode)
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_PushLargeBigint(t *testing.T) {
+	assertRef, _ := marshalString("t2")
+	program := &ir.ANFProgram{
+		ContractName: "LargeConst",
+		Properties:   []ir.ANFProperty{},
+		Methods: []ir.ANFMethod{
+			{
+				Name:     "constructor",
+				Params:   []ir.ANFParam{},
+				Body:     nil,
+				IsPublic: false,
+			},
+			{
+				Name:   "check",
+				Params: []ir.ANFParam{{Name: "x", Type: "bigint"}},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "x"}},
+					{Name: "t1", Value: ir.ANFValue{
+						Kind:        "load_const",
+						RawValue:    []byte("1000"),
+						ConstBigInt: big.NewInt(1000),
+						ConstInt:    func() *int64 { v := int64(1000); return &v }(),
+					}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t0", Right: "t1"}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t2"}},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+	var check *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			check = &methods[i]
+			break
+		}
+	}
+	if check == nil {
+		t.Fatal("could not find 'check' stack method")
+	}
+
+	// Find the push op for the constant 1000
+	var pushOps []StackOp
+	for _, op := range check.Ops {
+		if op.Op == "push" {
+			pushOps = append(pushOps, op)
+		}
+	}
+	if len(pushOps) == 0 {
+		t.Fatalf("expected at least one push op for constant 1000, got none in: %s", opsToString(check.Ops))
+	}
+
+	// Find the push op for bigint 1000
+	var constPush *StackOp
+	for i := range pushOps {
+		if pushOps[i].Value.Kind == "bigint" && pushOps[i].Value.BigInt != nil && pushOps[i].Value.BigInt.Cmp(big.NewInt(1000)) == 0 {
+			constPush = &pushOps[i]
+			break
+		}
+	}
+	if constPush == nil {
+		t.Errorf("expected a push of bigint 1000 in ops: %s", opsToString(check.Ops))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLowerToStack_PushValueEncodesCorrectly — constant 1000 should encode
+// to script number bytes e803 (little-endian)
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_PushValueEncodesCorrectly(t *testing.T) {
+	// 1000 in script number encoding: 0xe8, 0x03 (little-endian sign-magnitude)
+	// push length = 2, so encoded as: 02 e8 03 (3 bytes = 6 hex chars)
+	n := big.NewInt(1000)
+	hexStr, _ := encodePushBigInt(n)
+
+	if hexStr == "" {
+		t.Fatal("encodePushBigInt(1000) returned empty hex")
+	}
+	// 1000 needs 2 bytes of script number data; total push = 3 bytes = 6 hex chars
+	if len(hexStr) < 6 {
+		t.Errorf("1000 should need at least 2 bytes of push data (6 hex chars), got: %s", hexStr)
+	}
+	// The script number bytes for 1000 are e803
+	if !strings.Contains(hexStr, "e803") {
+		t.Errorf("expected hex for 1000 to contain 'e803' (little-endian), got: %s", hexStr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestLowerToStack_RefAliasing — if-else with @ref alias compiles without panic
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_RefAliasing(t *testing.T) {
+	// Build an ANF program where an if-else assigns to the same local in both
+	// branches, which causes the compiler to emit a @ref alias binding.
+	// The simplest form: load_const "@ref:someName" as a load_const binding.
+	assertRef, _ := marshalString("t5")
+	program := &ir.ANFProgram{
+		ContractName: "RefAlias",
+		Properties:   []ir.ANFProperty{},
+		Methods: []ir.ANFMethod{
+			{
+				Name:     "constructor",
+				Params:   []ir.ANFParam{},
+				Body:     nil,
+				IsPublic: false,
+			},
+			{
+				Name:   "check",
+				Params: []ir.ANFParam{
+					{Name: "cond", Type: "boolean"},
+					{Name: "x", Type: "bigint"},
+				},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "cond"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "load_param", Name: "x"}},
+					// Simulate an if-else that both branches compute something and
+					// the result is aliased via @ref in the outer scope.
+					{Name: "t2", Value: ir.ANFValue{
+						Kind: "if",
+						Cond: "t0",
+						Then: []ir.ANFBinding{
+							{Name: "t3", Value: ir.ANFValue{Kind: "load_const", RawValue: []byte("1"), ConstBigInt: big.NewInt(1)}},
+						},
+						Else: []ir.ANFBinding{
+							{Name: "t4", Value: ir.ANFValue{Kind: "load_const", RawValue: []byte("2"), ConstBigInt: big.NewInt(2)}},
+						},
+					}},
+					// After the if-else, the result ref references t2
+					{Name: "t5", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t1", Right: "t2"}},
+					{Name: "t6", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t5"}},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+
+	// Should not panic and should produce non-empty stack ops
+	methods, err := LowerToStack(program)
+	if err != nil {
+		t.Fatalf("LowerToStack failed: %v", err)
+	}
+
+	var check *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			check = &methods[i]
+			break
+		}
+	}
+	if check == nil {
+		t.Fatal("could not find 'check' stack method")
+	}
+
+	if len(check.Ops) == 0 {
+		t.Error("expected non-empty stack ops for if-else with aliasing")
+	}
+
+	t.Logf("ref-aliasing ops: %s", opsToString(check.Ops))
+}
+
+// ---------------------------------------------------------------------------
+// TestLowerToStack_StackDepthInvariant — max_stack_depth > 0 and ops non-empty
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_StackDepthInvariant(t *testing.T) {
+	program := p2pkhProgram()
+	methods := mustLowerToStackOps(t, program)
+
+	var unlock *StackMethod
+	for i := range methods {
+		if methods[i].Name == "unlock" {
+			unlock = &methods[i]
+			break
+		}
+	}
+	if unlock == nil {
+		t.Fatal("could not find 'unlock' stack method")
+	}
+
+	// MaxStackDepth must be > 0 after lowering
+	if unlock.MaxStackDepth <= 0 {
+		t.Errorf("expected MaxStackDepth > 0, got %d", unlock.MaxStackDepth)
+	}
+
+	// Ops list must be non-empty
+	if len(unlock.Ops) == 0 {
+		t.Error("expected non-empty stack ops for P2PKH unlock")
+	}
+
+	// Verify no PICK/ROLL depth exceeds MaxStackDepth (basic sanity check)
+	for _, op := range unlock.Ops {
+		if op.Op == "pick" || op.Op == "roll" {
+			if op.Depth >= unlock.MaxStackDepth {
+				t.Errorf("op %s with depth %d exceeds MaxStackDepth %d", op.Op, op.Depth, unlock.MaxStackDepth)
+			}
+		}
+	}
+
+	t.Logf("P2PKH unlock MaxStackDepth=%d, ops=%d", unlock.MaxStackDepth, len(unlock.Ops))
+}
+
 // reverseBytes must not emit OP_REVERSE (non-existent opcode)
 // ---------------------------------------------------------------------------
 
@@ -967,5 +1257,367 @@ func TestReverseBytes_NoOpReverse(t *testing.T) {
 	}
 	if !strings.Contains(output, "OP_CAT") {
 		t.Error("Output should contain OP_CAT")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 190: ByteString concatenation emits OP_CAT (not OP_ADD)
+// ---------------------------------------------------------------------------
+
+func TestStack_ByteStringConcat_EmitsCAT(t *testing.T) {
+	assertRef, _ := marshalString("t3")
+	program := &ir.ANFProgram{
+		ContractName: "CatTest",
+		Properties: []ir.ANFProperty{
+			{Name: "expected", Type: "ByteString", Readonly: true},
+		},
+		Methods: []ir.ANFMethod{
+			{Name: "constructor", Params: []ir.ANFParam{{Name: "expected", Type: "ByteString"}}, Body: nil, IsPublic: false},
+			{
+				Name:     "check",
+				IsPublic: true,
+				Params: []ir.ANFParam{
+					{Name: "a", Type: "ByteString"},
+					{Name: "b", Type: "ByteString"},
+				},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "a"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "load_param", Name: "b"}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "bin_op", Op: "+", Left: "t0", Right: "t1", ResultType: "bytes"}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "load_prop", Name: "expected"}},
+					{Name: "t4", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t2", Right: "t3", ResultType: "bytes"}},
+					{Name: "t5", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t4"}},
+				},
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+	var checkMethod *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			checkMethod = &methods[i]
+			break
+		}
+	}
+	if checkMethod == nil {
+		t.Fatal("expected 'check' method")
+	}
+
+	// Collect op codes
+	var opCodes []string
+	var collectCodes func(ops []StackOp)
+	collectCodes = func(ops []StackOp) {
+		for _, op := range ops {
+			if op.Op == "opcode" {
+				opCodes = append(opCodes, op.Code)
+			}
+			collectCodes(op.Then)
+			collectCodes(op.Else)
+		}
+	}
+	collectCodes(checkMethod.Ops)
+
+	hasCat := false
+	hasAdd := false
+	for _, code := range opCodes {
+		if code == "OP_CAT" {
+			hasCat = true
+		}
+		if code == "OP_ADD" {
+			hasAdd = true
+		}
+	}
+
+	if !hasCat {
+		t.Error("expected OP_CAT for ByteString concatenation, not found")
+	}
+	if hasAdd {
+		t.Error("ByteString concatenation should NOT emit OP_ADD")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 191: ByteString indexing uses OP_SPLIT + NIP + DROP + OP_BIN2NUM
+// ---------------------------------------------------------------------------
+
+func TestStack_ByteStringIndexing_EmitsSplit(t *testing.T) {
+	assertRef, _ := marshalString("t3")
+	program := &ir.ANFProgram{
+		ContractName: "IndexTest",
+		Properties: []ir.ANFProperty{
+			{Name: "expected", Type: "bigint", Readonly: true},
+		},
+		Methods: []ir.ANFMethod{
+			{Name: "constructor", Params: []ir.ANFParam{{Name: "expected", Type: "bigint"}}, Body: nil, IsPublic: false},
+			{
+				Name:     "check",
+				IsPublic: true,
+				Params:   []ir.ANFParam{{Name: "data", Type: "ByteString"}},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "data"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "load_const", RawValue: []byte("0")}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "call", Func: "__array_access", Args: []string{"t0", "t1"}}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "load_prop", Name: "expected"}},
+					{Name: "t4", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t2", Right: "t3", ResultType: "bytes"}},
+					{Name: "t5", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t4"}},
+				},
+			},
+		},
+	}
+
+	methods, err := LowerToStack(program)
+	if err != nil {
+		t.Fatalf("LowerToStack failed: %v", err)
+	}
+
+	var checkMethod *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			checkMethod = &methods[i]
+			break
+		}
+	}
+	if checkMethod == nil {
+		t.Fatal("expected 'check' method")
+	}
+
+	var opCodes []string
+	var collectCodes func(ops []StackOp)
+	collectCodes = func(ops []StackOp) {
+		for _, op := range ops {
+			if op.Op == "opcode" {
+				opCodes = append(opCodes, op.Code)
+			}
+			collectCodes(op.Then)
+			collectCodes(op.Else)
+		}
+	}
+	collectCodes(checkMethod.Ops)
+
+	hasSplit := false
+	for _, code := range opCodes {
+		if code == "OP_SPLIT" {
+			hasSplit = true
+		}
+	}
+	if !hasSplit {
+		t.Errorf("expected OP_SPLIT for ByteString indexing, got ops: %v", opCodes)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 192: OP_CHECKSIG emitted for checkSig call
+// ---------------------------------------------------------------------------
+
+func TestStack_CheckSig_EmitsOPCHECKSIG(t *testing.T) {
+	methods := mustLowerToStackOps(t, p2pkhProgram())
+	var unlockMethod *StackMethod
+	for i := range methods {
+		if methods[i].Name == "unlock" {
+			unlockMethod = &methods[i]
+			break
+		}
+	}
+	if unlockMethod == nil {
+		t.Fatal("expected 'unlock' method")
+	}
+
+	var opCodes []string
+	var collectCodes func(ops []StackOp)
+	collectCodes = func(ops []StackOp) {
+		for _, op := range ops {
+			if op.Op == "opcode" {
+				opCodes = append(opCodes, op.Code)
+			}
+			collectCodes(op.Then)
+			collectCodes(op.Else)
+		}
+	}
+	collectCodes(unlockMethod.Ops)
+
+	found := false
+	for _, code := range opCodes {
+		if code == "OP_CHECKSIG" || code == "OP_CHECKSIGVERIFY" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected OP_CHECKSIG or OP_CHECKSIGVERIFY in unlock method, got: %v", opCodes)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 204: right() uses OP_SIZE OP_SUB OP_SPLIT + NIP
+// ---------------------------------------------------------------------------
+
+func TestStack_Right_EmitsSizeSubSplit(t *testing.T) {
+	assertRef, _ := marshalString("t3")
+	program := &ir.ANFProgram{
+		ContractName: "RightTest",
+		Properties: []ir.ANFProperty{
+			{Name: "expected", Type: "ByteString", Readonly: true},
+		},
+		Methods: []ir.ANFMethod{
+			{Name: "constructor", Params: []ir.ANFParam{{Name: "expected", Type: "ByteString"}}, Body: nil, IsPublic: false},
+			{
+				Name:     "check",
+				IsPublic: true,
+				Params:   []ir.ANFParam{{Name: "data", Type: "ByteString"}},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "data"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "load_const", RawValue: []byte("2")}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "call", Func: "right", Args: []string{"t0", "t1"}}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "load_prop", Name: "expected"}},
+					{Name: "t4", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t2", Right: "t3", ResultType: "bytes"}},
+					{Name: "t5", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t4"}},
+				},
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+	var checkMethod *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			checkMethod = &methods[i]
+			break
+		}
+	}
+	if checkMethod == nil {
+		t.Fatal("expected 'check' method")
+	}
+
+	var opCodes []string
+	var collectCodes func(ops []StackOp)
+	collectCodes = func(ops []StackOp) {
+		for _, op := range ops {
+			if op.Op == "opcode" {
+				opCodes = append(opCodes, op.Code)
+			}
+			collectCodes(op.Then)
+			collectCodes(op.Else)
+		}
+	}
+	collectCodes(checkMethod.Ops)
+
+	hasSize := false
+	hasSub := false
+	hasSplit := false
+	for _, code := range opCodes {
+		switch code {
+		case "OP_SIZE":
+			hasSize = true
+		case "OP_SUB":
+			hasSub = true
+		case "OP_SPLIT":
+			hasSplit = true
+		}
+	}
+
+	if !hasSize {
+		t.Error("right() should emit OP_SIZE")
+	}
+	if !hasSub {
+		t.Error("right() should emit OP_SUB")
+	}
+	if !hasSplit {
+		t.Error("right() should emit OP_SPLIT")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 205: sign() uses OP_DUP OP_IF guard with OP_ABS and OP_DIV
+// ---------------------------------------------------------------------------
+
+func TestStack_Sign_EmitsDupIfGuardWithAbsDiv(t *testing.T) {
+	assertRef, _ := marshalString("t2")
+	program := &ir.ANFProgram{
+		ContractName: "SignTest",
+		Properties: []ir.ANFProperty{
+			{Name: "expected", Type: "bigint", Readonly: true},
+		},
+		Methods: []ir.ANFMethod{
+			{Name: "constructor", Params: []ir.ANFParam{{Name: "expected", Type: "bigint"}}, Body: nil, IsPublic: false},
+			{
+				Name:     "check",
+				IsPublic: true,
+				Params:   []ir.ANFParam{{Name: "a", Type: "bigint"}},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "a"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "call", Func: "sign", Args: []string{"t0"}}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "load_prop", Name: "expected"}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "bin_op", Op: "===", Left: "t1", Right: "t2", ResultType: "bytes"}},
+					{Name: "t4", Value: ir.ANFValue{Kind: "assert", RawValue: assertRef, ValueRef: "t3"}},
+				},
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+	var checkMethod *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			checkMethod = &methods[i]
+			break
+		}
+	}
+	if checkMethod == nil {
+		t.Fatal("expected 'check' method")
+	}
+
+	// sign() should produce a DUP (for zero-guard) and if-op with OP_ABS and OP_DIV
+	hasDup := false
+	hasIf := false
+	var hasAbs, hasDiv bool
+	var checkOps func(ops []StackOp)
+	checkOps = func(ops []StackOp) {
+		for _, op := range ops {
+			if op.Op == "dup" || (op.Op == "opcode" && op.Code == "OP_DUP") {
+				hasDup = true
+			}
+			if op.Op == "if" {
+				hasIf = true
+				for _, thenOp := range op.Then {
+					if thenOp.Op == "opcode" && thenOp.Code == "OP_ABS" {
+						hasAbs = true
+					}
+					if thenOp.Op == "opcode" && thenOp.Code == "OP_DIV" {
+						hasDiv = true
+					}
+				}
+			}
+			checkOps(op.Then)
+			checkOps(op.Else)
+		}
+	}
+	checkOps(checkMethod.Ops)
+
+	if !hasDup {
+		t.Error("sign() should emit OP_DUP for zero-guard")
+	}
+	if !hasIf {
+		t.Error("sign() should emit if-op for zero-guard")
+	}
+	if !hasAbs {
+		t.Error("sign() should emit OP_ABS in then-branch")
+	}
+	if !hasDiv {
+		t.Error("sign() should emit OP_DIV in then-branch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 208: Large bigint constant (100000) encoded as "a08601"
+// ---------------------------------------------------------------------------
+
+func TestStack_LargeBigintConst_100000_Encoding(t *testing.T) {
+	n := new(big.Int).SetInt64(100000)
+	hexStr, _ := EncodePushBigInt(n)
+	// 100000 in little-endian script number: 100000 = 0x0186A0
+	// Script number LE bytes: 0xa0, 0x86, 0x01 → "a08601"
+	if hexStr != "03a08601" {
+		t.Errorf("expected 100000 to encode as '03a08601' (len-prefixed LE), got '%s'", hexStr)
 	}
 }

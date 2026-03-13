@@ -55,6 +55,25 @@ describe('Pass 6: Emit', () => {
   // Valid hex output
   // ---------------------------------------------------------------------------
 
+  describe('determinism', () => {
+    it('produces identical output for two compilations of the same contract (deterministic)', () => {
+      const source = `
+        class P2PKH extends SmartContract {
+          readonly pubKeyHash: Sha256;
+          constructor(pubKeyHash: Sha256) { super(pubKeyHash); this.pubKeyHash = pubKeyHash; }
+          public unlock(sig: Sig, pubKey: PubKey) {
+            assert(hash160(pubKey) === this.pubKeyHash);
+            assert(checkSig(sig, pubKey));
+          }
+        }
+      `;
+      const result1 = compileToEmit(source);
+      const result2 = compileToEmit(source);
+      expect(result1.scriptHex).toBe(result2.scriptHex);
+      expect(result1.scriptAsm).toBe(result2.scriptAsm);
+    });
+  });
+
   describe('hex output', () => {
     it('emits valid hex string for a simple contract', () => {
       const source = `
@@ -280,6 +299,23 @@ describe('Pass 6: Emit', () => {
       expect(result.scriptAsm).toBe('OP_0');
     });
 
+    it('encodes 75-byte data with direct length prefix (no OP_PUSHDATA1)', () => {
+      // 75 bytes (0x4b) is the threshold: 0x01..0x4b use a 1-byte direct length prefix.
+      // Only 76+ bytes trigger OP_PUSHDATA1 (0x4c).
+      const data = new Uint8Array(75).fill(0xaa);
+      const method: StackMethod = {
+        name: 'test',
+        ops: [{ op: 'push', value: data }],
+        maxStackDepth: 1,
+      };
+      const result = emitMethod(method);
+      // Should start with 4b (75 decimal), NOT 4c (OP_PUSHDATA1)
+      expect(result.scriptHex.startsWith('4b')).toBe(true);
+      expect(result.scriptHex.startsWith('4c')).toBe(false);
+      // Total length: 1 (prefix) + 75 (data) = 76 bytes = 152 hex chars
+      expect(result.scriptHex).toHaveLength(152);
+    });
+
     it('encodes data between 76-255 bytes with OP_PUSHDATA1', () => {
       const data = new Uint8Array(80).fill(0xab);
       const method: StackMethod = {
@@ -290,6 +326,19 @@ describe('Pass 6: Emit', () => {
       const result = emitMethod(method);
       // Should start with 4c (OP_PUSHDATA1) followed by length byte 50 (80 decimal)
       expect(result.scriptHex.startsWith('4c50')).toBe(true);
+    });
+
+    it('encodes data of 256+ bytes with OP_PUSHDATA2 prefix', () => {
+      // 256 bytes — requires PUSHDATA2 (0x4d), length as 2-byte little-endian
+      const data = new Uint8Array(256).fill(0xcc);
+      const method: StackMethod = {
+        name: 'test',
+        ops: [{ op: 'push', value: data }],
+        maxStackDepth: 1,
+      };
+      const result = emitMethod(method);
+      // Should start with 4d (OP_PUSHDATA2) followed by length 256 as LE 2 bytes: 00 01
+      expect(result.scriptHex.startsWith('4d0001')).toBe(true);
     });
   });
 

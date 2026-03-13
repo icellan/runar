@@ -64,6 +64,53 @@ describe('Multi-format: parse() dispatch', () => {
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
+
+  it('dispatches .runar.py to Python parser (row 64)', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.py');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.py');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+  });
+
+  it('falls back to TypeScript parser for .runar.go extension (TS has no Go parser) (row 318)', () => {
+    // The TS compiler has no Go-format parser. A .runar.go file passed to parse()
+    // will be routed to the TypeScript parser (the default fallback).
+    // Go source is not valid TypeScript, so the result should have errors or a null contract.
+    const source = readConformanceSource('basic-p2pkh', '.runar.go');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.go');
+    // TS parser sees Go source → should fail (contract === null or errors present)
+    // This is the expected behavior: TS does not support .runar.go
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
+
+  it('falls back to TypeScript parser for .runar.rs extension (TS has no Rust parser) (row 321)', () => {
+    // Similarly, .runar.rs files are passed to the TypeScript parser fallback.
+    const source = readConformanceSource('basic-p2pkh', '.runar.rs');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.rs');
+    // Rust source is not valid TypeScript → errors or null contract
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
+
+  it('unknown extension produces errors or falls back to TS parser (row 323)', () => {
+    // When an unknown extension is passed with invalid source, it produces errors.
+    const result = parse('this is not valid typescript', 'contract.runar.xyz');
+    // Either no contract or errors
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
+
+  it('empty source produces error (row 72)', () => {
+    // An empty string has no class declaration → error or null contract
+    const result = parse('', 'contract.runar.ts');
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

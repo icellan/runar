@@ -1,3 +1,4 @@
+import pytest
 from pathlib import Path
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -198,3 +199,40 @@ def test_check_mul_gen_on_curve_large_scalar():
     """Even very large scalars produce valid curve points."""
     c = ECDemo(pt=PT)
     c.check_mul_gen_on_curve(EC_N - 1)
+
+
+def test_check_x_wrong():
+    """Wrong x-coordinate value fails."""
+    c = ECDemo(pt=PT)
+    with pytest.raises(AssertionError):
+        c.check_x(PT_X + 1)
+
+
+def test_check_y_wrong():
+    """Wrong y-coordinate value fails."""
+    c = ECDemo(pt=PT)
+    with pytest.raises(AssertionError):
+        c.check_y(PT_Y + 1)
+
+
+def test_check_make_point_wrong():
+    """Wrong expected coordinates fail."""
+    c = ECDemo(pt=PT)
+    with pytest.raises(AssertionError):
+        c.check_make_point(PT_X, PT_Y, PT_X + 1, PT_Y)
+
+
+def test_check_add_wrong():
+    """Wrong result coordinates for ec_add fail."""
+    c = ECDemo(pt=PT)
+    with pytest.raises(AssertionError):
+        c.check_add(PT2, PT_X, PT_Y)  # PT_X/PT_Y is not the sum
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "ECDemo.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "ECDemo.runar.py")

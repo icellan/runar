@@ -447,6 +447,10 @@ class _TypeChecker:
         left_type = self._infer_expr_type(e.left, env)
         right_type = self._infer_expr_type(e.right, env)
 
+        # ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
+        if e.op == "+" and _is_byte_family(left_type) and _is_byte_family(right_type):
+            return "ByteString"
+
         # Arithmetic: bigint x bigint -> bigint
         if e.op in ("+", "-", "*", "/", "%"):
             if not is_bigint_family(left_type):

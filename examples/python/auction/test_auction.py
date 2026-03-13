@@ -42,3 +42,49 @@ def test_close():
         deadline=0,  # deadline in the past
     )
     c.close(mock_sig())
+
+
+def test_bid_must_be_higher():
+    c = Auction(
+        auctioneer=mock_pub_key(),
+        highest_bidder=mock_pub_key(),
+        highest_bid=100,
+        deadline=1000,
+    )
+    with pytest.raises(AssertionError):
+        c.bid(mock_sig(), mock_pub_key(), 50)
+
+
+def test_multiple_bids():
+    c = Auction(
+        auctioneer=mock_pub_key(),
+        highest_bidder=mock_pub_key(),
+        highest_bid=100,
+        deadline=1000,
+    )
+    bidder1 = b'\x03' + b'\x01' * 32
+    bidder2 = b'\x03' + b'\x02' * 32
+    c.bid(mock_sig(), bidder1, 200)
+    assert c.highest_bid == 200
+    c.bid(mock_sig(), bidder2, 300)
+    assert c.highest_bid == 300
+
+
+def test_close_before_deadline_fails():
+    c = Auction(
+        auctioneer=mock_pub_key(),
+        highest_bidder=mock_pub_key(),
+        highest_bid=100,
+        deadline=1000,
+    )
+    with pytest.raises(AssertionError):
+        c.close(mock_sig())
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "Auction.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "Auction.runar.py")

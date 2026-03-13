@@ -126,3 +126,59 @@ class TestMove:
             game = make_playing_game()
             game.move(pos, PLAYER_X, mock_sig())
             assert getattr(game, f"c{pos}") == 1
+
+    def test_move_rejects_invalid_position(self):
+        """Position 9 (out of range) is rejected."""
+        game = make_playing_game()
+        with pytest.raises(AssertionError):
+            game.move(9, PLAYER_X, mock_sig())
+
+
+class TestWinDetection:
+
+    def test_check_win_row(self):
+        """X wins with top row (positions 0, 1, 2)."""
+        game = make_playing_game(c0=1, c1=1)
+        assert game.check_win_after_move(2, 1)
+
+    def test_check_win_column(self):
+        """X wins with left column (positions 0, 3, 6)."""
+        game = make_playing_game(c0=1, c3=1)
+        assert game.check_win_after_move(6, 1)
+
+    def test_check_win_diagonal(self):
+        """X wins with main diagonal (positions 0, 4, 8)."""
+        game = make_playing_game(c0=1, c4=1)
+        assert game.check_win_after_move(8, 1)
+
+    def test_check_win_anti_diagonal(self):
+        """O wins with anti-diagonal (positions 2, 4, 6)."""
+        game = make_playing_game(c2=2, c4=2)
+        assert game.check_win_after_move(6, 2)
+
+    def test_no_win(self):
+        """No winning condition when positions don't form a line."""
+        game = make_playing_game(c0=1, c1=2)
+        assert not game.check_win_after_move(2, 1)
+
+
+class TestCountOccupied:
+
+    def test_count_occupied_empty(self):
+        """Empty board has 0 occupied cells."""
+        game = make_playing_game()
+        assert game.count_occupied() == 0
+
+    def test_count_occupied_some(self):
+        """Count returns correct number of occupied cells."""
+        game = make_playing_game(c0=1, c4=2, c8=1)
+        assert game.count_occupied() == 3
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "TicTacToe.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "TicTacToe.runar.py")

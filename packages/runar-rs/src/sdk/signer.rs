@@ -628,6 +628,18 @@ mod tests {
         assert!(!sig.is_empty());
     }
 
+    // Row 386: MockSigner signature ends with sighash byte 0x41 (SIGHASH_ALL | SIGHASH_FORKID)
+    #[test]
+    fn mock_signer_sign_ends_with_sighash_byte_41() {
+        let signer = MockSigner::new();
+        let sig = signer.sign("deadbeef", 0, "51", 1000, None).unwrap();
+        assert!(
+            sig.ends_with("41"),
+            "MockSigner signature should end with sighash byte 0x41; got: {}",
+            sig
+        );
+    }
+
     #[test]
     fn external_signer_delegates_to_callbacks() {
         let signer = ExternalSigner::new(

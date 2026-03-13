@@ -194,3 +194,107 @@ func TestWithin(t *testing.T) {
 	if Within(10, 0, 10) { t.Error("10 should NOT be within [0,10)") }
 	if Within(-1, 0, 10) { t.Error("-1 should NOT be within [0,10)") }
 }
+
+func TestSafediv_Positive(t *testing.T) {
+	if got := Safediv(10, 3); got != 3 {
+		t.Errorf("Safediv(10, 3): expected 3, got %d", got)
+	}
+}
+
+func TestSafediv_TruncatesTowardZero(t *testing.T) {
+	// Go integer division truncates toward zero, so -7/2 == -3.
+	if got := Safediv(-7, 2); got != -3 {
+		t.Errorf("Safediv(-7, 2): expected -3, got %d", got)
+	}
+}
+
+func TestSafediv_ByZeroPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected Safediv(1, 0) to panic")
+		}
+	}()
+	Safediv(1, 0)
+}
+
+func TestSafemod_Positive(t *testing.T) {
+	if got := Safemod(10, 3); got != 1 {
+		t.Errorf("Safemod(10, 3): expected 1, got %d", got)
+	}
+}
+
+func TestSafemod_Negative(t *testing.T) {
+	// Go's % operator preserves the sign of the dividend: -7 % 3 == -1.
+	if got := Safemod(-7, 3); got != -1 {
+		t.Errorf("Safemod(-7, 3): expected -1, got %d", got)
+	}
+}
+
+func TestSafemod_ByZeroPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected Safemod(1, 0) to panic")
+		}
+	}()
+	Safemod(1, 0)
+}
+
+func TestClamp_WithinRange(t *testing.T) {
+	if got := Clamp(5, 0, 10); got != 5 {
+		t.Errorf("Clamp(5, 0, 10): expected 5, got %d", got)
+	}
+}
+
+func TestClamp_Below(t *testing.T) {
+	if got := Clamp(-1, 0, 10); got != 0 {
+		t.Errorf("Clamp(-1, 0, 10): expected 0, got %d", got)
+	}
+}
+
+func TestClamp_Above(t *testing.T) {
+	if got := Clamp(15, 0, 10); got != 10 {
+		t.Errorf("Clamp(15, 0, 10): expected 10, got %d", got)
+	}
+}
+
+func TestSign_Positive(t *testing.T) {
+	if got := Sign(42); got != 1 {
+		t.Errorf("Sign(42): expected 1, got %d", got)
+	}
+}
+
+func TestSign_Negative(t *testing.T) {
+	if got := Sign(-42); got != -1 {
+		t.Errorf("Sign(-42): expected -1, got %d", got)
+	}
+}
+
+func TestSign_Zero(t *testing.T) {
+	if got := Sign(0); got != 0 {
+		t.Errorf("Sign(0): expected 0, got %d", got)
+	}
+}
+
+func TestSqrt_PerfectSquare(t *testing.T) {
+	if got := Sqrt(9); got != 3 {
+		t.Errorf("Sqrt(9): expected 3, got %d", got)
+	}
+}
+
+func TestSqrt_NonPerfect(t *testing.T) {
+	if got := Sqrt(10); got != 3 {
+		t.Errorf("Sqrt(10): expected 3 (floor), got %d", got)
+	}
+}
+
+func TestLog2_PowerOfTwo(t *testing.T) {
+	if got := Log2(8); got != 3 {
+		t.Errorf("Log2(8): expected 3, got %d", got)
+	}
+}
+
+func TestLog2_NonPower(t *testing.T) {
+	if got := Log2(9); got != 3 {
+		t.Errorf("Log2(9): expected 3 (floor), got %d", got)
+	}
+}

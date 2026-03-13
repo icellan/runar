@@ -759,6 +759,11 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if funcName == "__array_access" {
+		ctx.lowerArrayAccess(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if funcName == "substr" {
 		ctx.lowerSubstr(bindingName, args, bindingIndex, lastUses)
 		return

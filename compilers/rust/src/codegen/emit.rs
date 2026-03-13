@@ -559,4 +559,583 @@ mod tests {
         assert!(result.script_asm.contains("OP_TRUE"));
         assert!(result.script_asm.contains("OP_FALSE"));
     }
+
+    // -----------------------------------------------------------------------
+    // Test: byte offset accounts for push-data (placeholder after push has offset > 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_byte_offset_with_push_data() {
+        // Push the number 17 — encoded as 0x01 0x11 (2 bytes: length prefix + value)
+        // Then a placeholder at offset 2
+        let method = StackMethod {
+            name: "check".to_string(),
+            ops: vec![
+                StackOp::Push(PushValue::Int(17)), // 2 bytes: 01 11
+                StackOp::Placeholder {
+                    param_index: 0,
+                    param_name: "x".to_string(),
+                },
+                StackOp::Opcode("OP_ADD".to_string()),
+            ],
+            max_stack_depth: 2,
+        };
+
+        let result = emit_method(&method).expect("emit should succeed");
+        assert_eq!(
+            result.constructor_slots.len(),
+            1,
+            "expected 1 constructor slot"
+        );
+
+        let slot = &result.constructor_slots[0];
+        // Push 17 takes 2 bytes (0x01 length prefix + 0x11 value), so placeholder is at offset 2
+        assert_eq!(
+            slot.byte_offset, 2,
+            "expected byteOffset=2 (after push 17 = 2 bytes), got {}",
+            slot.byte_offset
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: simple opcode sequence produces correct hex
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_simple_sequence_hex() {
+        let method = StackMethod {
+            name: "check".to_string(),
+            ops: vec![
+                StackOp::Opcode("OP_DUP".to_string()),
+                StackOp::Opcode("OP_HASH160".to_string()),
+            ],
+            max_stack_depth: 1,
+        };
+
+        let result = emit_method(&method).expect("emit should succeed");
+        // OP_DUP = 0x76, OP_HASH160 = 0xa9
+        assert_eq!(
+            result.script_hex, "76a9",
+            "expected hex '76a9' for DUP+HASH160, got: {}",
+            result.script_hex
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: CHECKSIG + VERIFY becomes CHECKSIGVERIFY via peephole optimization
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_peephole_optimization_applied() {
+        use super::super::optimizer::optimize_stack_ops;
+
+        let ops = vec![
+            StackOp::Opcode("OP_CHECKSIG".to_string()),
+            StackOp::Opcode("OP_VERIFY".to_string()),
+            StackOp::Opcode("OP_1".to_string()),
+        ];
+
+        let optimized_ops = optimize_stack_ops(&ops);
+        let method = StackMethod {
+            name: "check".to_string(),
+            ops: optimized_ops,
+            max_stack_depth: 1,
+        };
+
+        let result = emit_method(&method).expect("emit should succeed");
+
+        // After peephole: CHECKSIG + VERIFY -> CHECKSIGVERIFY (0xad), then OP_1 (0x51)
+        assert_eq!(
+            result.script_hex, "ad51",
+            "expected 'ad51' (CHECKSIGVERIFY + OP_1) after peephole, got: {}",
+            result.script_hex
+        );
+        assert!(
+            result.script_asm.contains("OP_CHECKSIGVERIFY"),
+            "expected OP_CHECKSIGVERIFY in ASM, got: {}",
+            result.script_asm
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: multi-method contract emits OP_IF / OP_ELSE / OP_ENDIF
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_method_dispatch_produces_if_else() {
+        use super::super::stack::lower_to_stack;
+        use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFValue};
+
+        let program = ANFProgram {
+            contract_name: "Multi".to_string(),
+            properties: vec![],
+            methods: vec![
+                ANFMethod {
+                    name: "constructor".to_string(),
+                    params: vec![],
+                    body: vec![],
+                    is_public: false,
+                },
+                ANFMethod {
+                    name: "m1".to_string(),
+                    params: vec![ANFParam {
+                        name: "x".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "x".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(1)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+                ANFMethod {
+                    name: "m2".to_string(),
+                    params: vec![ANFParam {
+                        name: "y".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "y".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(2)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+            ],
+        };
+
+        let methods = lower_to_stack(&program).expect("lower_to_stack should succeed");
+
+        // Apply peephole optimization as the compiler pipeline does
+        use super::super::optimizer::optimize_stack_ops;
+        let optimized: Vec<StackMethod> = methods
+            .iter()
+            .map(|m| StackMethod {
+                name: m.name.clone(),
+                ops: optimize_stack_ops(&m.ops),
+                max_stack_depth: m.max_stack_depth,
+            })
+            .collect();
+
+        let result = emit(&optimized).expect("emit should succeed");
+
+        // Multi-method dispatch should emit OP_IF / OP_ELSE / OP_ENDIF
+        assert!(
+            result.script_asm.contains("OP_IF"),
+            "expected OP_IF in multi-method dispatch, got: {}",
+            result.script_asm
+        );
+        assert!(
+            result.script_asm.contains("OP_ELSE"),
+            "expected OP_ELSE in multi-method dispatch, got: {}",
+            result.script_asm
+        );
+        assert!(
+            result.script_asm.contains("OP_ENDIF"),
+            "expected OP_ENDIF in multi-method dispatch, got: {}",
+            result.script_asm
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: byte offset accounts for preceding single-byte opcodes
+    // Mirrors Go TestEmit_ByteOffsetAccountsForPrecedingOpcodes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_byte_offset_accounts_for_preceding_opcodes() {
+        // OP_DUP (1 byte: 0x76) + OP_HASH160 (1 byte: 0xa9) before Placeholder
+        // => placeholder should be at byte offset 2
+        let method = StackMethod {
+            name: "check".to_string(),
+            ops: vec![
+                StackOp::Opcode("OP_DUP".to_string()),       // 1 byte
+                StackOp::Opcode("OP_HASH160".to_string()),   // 1 byte
+                StackOp::Placeholder {
+                    param_index: 0,
+                    param_name: "pubKeyHash".to_string(),
+                },
+                StackOp::Opcode("OP_EQUALVERIFY".to_string()),
+                StackOp::Opcode("OP_CHECKSIG".to_string()),
+            ],
+            max_stack_depth: 2,
+        };
+
+        let result = emit_method(&method).expect("emit should succeed");
+        assert_eq!(result.constructor_slots.len(), 1, "expected 1 constructor slot");
+
+        let slot = &result.constructor_slots[0];
+        // OP_DUP (1 byte) + OP_HASH160 (1 byte) = 2 bytes before placeholder
+        assert_eq!(
+            slot.byte_offset, 2,
+            "expected byteOffset=2 (after OP_DUP + OP_HASH160), got {}",
+            slot.byte_offset
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: full P2PKH pipeline produces non-empty script and constructor slots
+    // Mirrors Go TestEmit_FullP2PKH
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_full_p2pkh() {
+        use super::super::stack::lower_to_stack;
+        use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFValue};
+
+        let program = ANFProgram {
+            contract_name: "P2PKH".to_string(),
+            properties: vec![ANFProperty {
+                name: "pubKeyHash".to_string(),
+                prop_type: "Addr".to_string(),
+                readonly: true,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "unlock".to_string(),
+                params: vec![
+                    ANFParam { name: "sig".to_string(), param_type: "Sig".to_string() },
+                    ANFParam { name: "pubKey".to_string(), param_type: "PubKey".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "pubKey".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "hash160".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::LoadProp { name: "pubKeyHash".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "===".to_string(),
+                            left: "t1".to_string(),
+                            right: "t2".to_string(),
+                            result_type: Some("bytes".to_string()),
+                        },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::Assert { value: "t3".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t5".to_string(),
+                        value: ANFValue::LoadParam { name: "sig".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t6".to_string(),
+                        value: ANFValue::LoadParam { name: "pubKey".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t7".to_string(),
+                        value: ANFValue::Call {
+                            func: "checkSig".to_string(),
+                            args: vec!["t5".to_string(), "t6".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t8".to_string(),
+                        value: ANFValue::Assert { value: "t7".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let stack_methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let result = emit(&stack_methods).expect("emit should succeed");
+
+        assert!(
+            !result.script_hex.is_empty(),
+            "P2PKH should produce non-empty script hex"
+        );
+        assert!(
+            !result.constructor_slots.is_empty(),
+            "P2PKH should have at least one constructor slot for pubKeyHash"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M10: integers 17+ use push prefix (not OP_17 opcode)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m10_integer_17_uses_push_prefix_not_op17() {
+        let method = StackMethod {
+            name: "test".to_string(),
+            ops: vec![StackOp::Push(PushValue::Int(17))],
+            max_stack_depth: 1,
+        };
+        let result = emit_method(&method).expect("emit should succeed");
+        // OP_17 would be 0x61. A push-data encoded 17 would be "0111" (length 1, value 0x11).
+        assert!(
+            !result.script_hex.starts_with("61"),
+            "17 should NOT be encoded as OP_17 (0x61); OP_1..OP_16 are for 1–16 only. got: {}",
+            result.script_hex
+        );
+        // Should use push-data prefix: 01 followed by the value byte 11
+        assert!(
+            result.script_hex.contains("11"),
+            "17 (0x11) should appear in the script hex; got: {}",
+            result.script_hex
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M12: 256-byte data → OP_PUSHDATA2
+    // 256-byte array → hex starts with "4d0001"
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m12_256_byte_data_uses_pushdata2() {
+        let data = vec![0xabu8; 256];
+        let method = StackMethod {
+            name: "test".to_string(),
+            ops: vec![StackOp::Push(PushValue::Bytes(data))],
+            max_stack_depth: 1,
+        };
+        let result = emit_method(&method).expect("emit should succeed");
+        // OP_PUSHDATA2 = 0x4d, followed by length in 2 bytes LE: 256 = 0x0001 LE = 00 01
+        assert!(
+            result.script_hex.starts_with("4d0001"),
+            "256-byte push should use OP_PUSHDATA2 prefix '4d0001', got: {}",
+            &result.script_hex[..result.script_hex.len().min(12)]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M19: sha256 contract has OP_SHA256 in ASM
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m19_sha256_contract_has_op_sha256_in_asm() {
+        use super::super::stack::lower_to_stack;
+        use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFValue};
+
+        let program = ANFProgram {
+            contract_name: "Sha256Test".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "check".to_string(),
+                params: vec![ANFParam {
+                    name: "data".to_string(),
+                    param_type: "ByteString".to_string(),
+                }],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "data".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "sha256".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::Assert { value: "t1".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let stack_methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let result = emit(&stack_methods).expect("emit should succeed");
+        assert!(
+            result.script_asm.contains("OP_SHA256"),
+            "sha256() call should produce OP_SHA256 in ASM; got: {}",
+            result.script_asm
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M21: OP_DUP encodes 0x76
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m21_op_dup_encodes_0x76() {
+        let method = StackMethod {
+            name: "test".to_string(),
+            ops: vec![StackOp::Dup],
+            max_stack_depth: 1,
+        };
+        let result = emit_method(&method).expect("emit should succeed");
+        assert_eq!(
+            result.script_hex, "76",
+            "OP_DUP should encode as 0x76; got: {}",
+            result.script_hex
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M22: OP_SWAP encodes 0x7c
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m22_op_swap_encodes_0x7c() {
+        let method = StackMethod {
+            name: "test".to_string(),
+            ops: vec![StackOp::Swap],
+            max_stack_depth: 2,
+        };
+        let result = emit_method(&method).expect("emit should succeed");
+        assert_eq!(
+            result.script_hex, "7c",
+            "OP_SWAP should encode as 0x7c; got: {}",
+            result.script_hex
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M24: if without else → no OP_ELSE
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m24_if_without_else_no_op_else() {
+        let method = StackMethod {
+            name: "test".to_string(),
+            ops: vec![StackOp::If {
+                then_ops: vec![StackOp::Opcode("OP_DROP".to_string())],
+                else_ops: vec![],
+            }],
+            max_stack_depth: 1,
+        };
+        let result = emit_method(&method).expect("emit should succeed");
+        assert!(
+            !result.script_asm.contains("OP_ELSE"),
+            "if with empty else branch should NOT contain OP_ELSE; got asm: {}",
+            result.script_asm
+        );
+        assert!(
+            result.script_asm.contains("OP_IF"),
+            "should still contain OP_IF; got asm: {}",
+            result.script_asm
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // M25: single method → no dispatch (no OP_IF for method selection)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_m25_single_method_no_dispatch() {
+        use super::super::stack::lower_to_stack;
+        use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFValue};
+
+        // A program with a single public method (plus constructor) — no method dispatch needed
+        let program = ANFProgram {
+            contract_name: "Single".to_string(),
+            properties: vec![ANFProperty {
+                name: "x".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: true,
+                initial_value: None,
+            }],
+            methods: vec![
+                ANFMethod {
+                    name: "constructor".to_string(),
+                    params: vec![ANFParam {
+                        name: "x".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![],
+                    is_public: false,
+                },
+                ANFMethod {
+                    name: "check".to_string(),
+                    params: vec![ANFParam {
+                        name: "v".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "v".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadProp { name: "x".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+            ],
+        };
+
+        let stack_methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let result = emit(&stack_methods).expect("emit should succeed");
+
+        // With a single public method, there should be no OP_IF method dispatch
+        // (the dispatch table is only needed for 2+ public methods)
+        assert!(
+            !result.script_asm.contains("OP_IF"),
+            "single public method should NOT produce OP_IF dispatch; got asm: {}",
+            result.script_asm
+        );
+    }
 }

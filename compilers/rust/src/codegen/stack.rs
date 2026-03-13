@@ -781,7 +781,10 @@ impl LoweringContext {
         self.sm.pop();
 
         // For equality operators, choose OP_EQUAL vs OP_NUMEQUAL based on operand type.
-        if result_type == Some("bytes") && (op == "===" || op == "!==") {
+        // For addition, choose OP_CAT vs OP_ADD based on operand type.
+        if result_type == Some("bytes") && op == "+" {
+            self.emit_op(StackOp::Opcode("OP_CAT".to_string()));
+        } else if result_type == Some("bytes") && (op == "===" || op == "!==") {
             self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
             if op == "!==" {
                 self.emit_op(StackOp::Opcode("OP_NOT".to_string()));
@@ -4520,6 +4523,448 @@ mod tests {
             opcodes.contains(&"OP_SIZE".to_string()),
             "reverseBytes should emit OP_SIZE for length check, got: {:?}",
             opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: only public methods appear in stack output (method count)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_method_count_matches_public_methods() {
+        // P2PKH program has 1 public method (unlock) and 1 constructor (non-public)
+        let program = p2pkh_program();
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        // Should have exactly 1 method (unlock) — constructor is skipped
+        assert_eq!(
+            methods.len(),
+            1,
+            "expected 1 stack method (unlock), got {}: {:?}",
+            methods.len(),
+            methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert_eq!(methods[0].name, "unlock");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: multi-method contract has correct number of StackMethods
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_method_dispatch() {
+        let program = ANFProgram {
+            contract_name: "Multi".to_string(),
+            properties: vec![],
+            methods: vec![
+                ANFMethod {
+                    name: "constructor".to_string(),
+                    params: vec![],
+                    body: vec![],
+                    is_public: false,
+                },
+                ANFMethod {
+                    name: "method1".to_string(),
+                    params: vec![ANFParam {
+                        name: "x".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "x".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(42)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+                ANFMethod {
+                    name: "method2".to_string(),
+                    params: vec![ANFParam {
+                        name: "y".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "y".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(100)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+            ],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        assert_eq!(
+            methods.len(),
+            2,
+            "expected 2 stack methods, got {}: {:?}",
+            methods.len(),
+            methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: extractOutputs uses offset 40, not 44
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_outputs_uses_offset_40() {
+        let program = ANFProgram {
+            contract_name: "OutputsCheck".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "check".to_string(),
+                params: vec![ANFParam {
+                    name: "preimage".to_string(),
+                    param_type: "SigHashPreimage".to_string(),
+                }],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "preimage".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "extractOutputs".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::Assert { value: "t1".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        // The offset for extractOutputs should be 40 (hashOutputs(32) + nLocktime(4) + sighashType(4))
+        // Encoded as PUSH(40)
+        assert!(
+            opcodes.contains(&"PUSH(40)".to_string()),
+            "expected PUSH(40) for extractOutputs offset, got: {:?}",
+            opcodes
+        );
+        // Must NOT use the old incorrect offset 44
+        assert!(
+            !opcodes.contains(&"PUSH(44)".to_string()),
+            "extractOutputs should NOT use offset 44, got: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: arithmetic binary op (a + b) produces OP_ADD in stack output
+    // Mirrors Go TestLowerToStack_ArithmeticOps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_arithmetic_ops_contains_add() {
+        // Contract: verify(a, b) { assert(a + b === target) }
+        let program = ANFProgram {
+            contract_name: "ArithCheck".to_string(),
+            properties: vec![ANFProperty {
+                name: "target".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: true,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "verify".to_string(),
+                params: vec![
+                    ANFParam { name: "a".to_string(), param_type: "bigint".to_string() },
+                    ANFParam { name: "b".to_string(), param_type: "bigint".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "a".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::LoadParam { name: "b".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "+".to_string(),
+                            left: "t0".to_string(),
+                            right: "t1".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::LoadProp { name: "target".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "===".to_string(),
+                            left: "t2".to_string(),
+                            right: "t3".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t5".to_string(),
+                        value: ANFValue::Assert { value: "t4".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        // The a + b operation should emit OP_ADD
+        assert!(
+            opcodes.contains(&"OP_ADD".to_string()),
+            "expected OP_ADD in stack ops for 'a + b', got: {:?}",
+            opcodes
+        );
+
+        // The === comparison should emit OP_NUMEQUAL
+        assert!(
+            opcodes.contains(&"OP_NUMEQUAL".to_string()),
+            "expected OP_NUMEQUAL in stack ops for '===', got: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S18: PICK/ROLL depth ≤ max_stack_depth (stack invariant)
+    // After lowering P2PKH, verify no Pick or Roll references a depth ≥ max_stack_depth
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_s18_pick_roll_depth_within_max_stack_depth() {
+        let program = p2pkh_program();
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        let max_depth = methods[0].max_stack_depth;
+
+        fn check_ops(ops: &[StackOp], max_depth: usize) {
+            for op in ops {
+                match op {
+                    StackOp::Pick { depth } => {
+                        assert!(
+                            *depth < max_depth,
+                            "Pick depth {} must be < max_stack_depth {}",
+                            depth,
+                            max_depth
+                        );
+                    }
+                    StackOp::Roll { depth } => {
+                        assert!(
+                            *depth < max_depth,
+                            "Roll depth {} must be < max_stack_depth {}",
+                            depth,
+                            max_depth
+                        );
+                    }
+                    StackOp::If { then_ops, else_ops } => {
+                        check_ops(then_ops, max_depth);
+                        check_ops(else_ops, max_depth);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        check_ops(&methods[0].ops, max_depth);
+    }
+
+    // -----------------------------------------------------------------------
+    // Row 190: ByteString concatenation (bin_op "+", result_type="bytes") → OP_CAT
+    // Row 189 (bigint add) → OP_ADD is already tested above.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bytestring_concat_emits_op_cat() {
+        let program = ANFProgram {
+            contract_name: "CatCheck".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "verify".to_string(),
+                params: vec![
+                    ANFParam { name: "a".to_string(), param_type: "ByteString".to_string() },
+                    ANFParam { name: "b".to_string(), param_type: "ByteString".to_string() },
+                    ANFParam { name: "expected".to_string(), param_type: "ByteString".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "a".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::LoadParam { name: "b".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "+".to_string(),
+                            left: "t0".to_string(),
+                            right: "t1".to_string(),
+                            result_type: Some("bytes".to_string()), // ByteString concat
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::LoadParam { name: "expected".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "===".to_string(),
+                            left: "t2".to_string(),
+                            right: "t3".to_string(),
+                            result_type: Some("bytes".to_string()),
+                        },
+                    },
+                    ANFBinding {
+                        name: "t5".to_string(),
+                        value: ANFValue::Assert { value: "t4".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        assert!(
+            opcodes.contains(&"OP_CAT".to_string()),
+            "ByteString '+' (result_type='bytes') should emit OP_CAT; got opcodes: {:?}",
+            opcodes
+        );
+        assert!(
+            !opcodes.contains(&"OP_ADD".to_string()),
+            "ByteString '+' should NOT emit OP_ADD (that's for bigint); got opcodes: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Row 201: log2 emits exactly 64 if-ops with OP_DIV+OP_1ADD
+    // (bit-scanning: 64 iterations, one per bit of a 64-bit integer)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_log2_emits_64_if_ops() {
+        let program = ANFProgram {
+            contract_name: "TestLog2Count".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "check".to_string(),
+                params: vec![
+                    ANFParam { name: "n".to_string(), param_type: "bigint".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "n".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "log2".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::LoadConst {
+                            value: serde_json::Value::Number(serde_json::Number::from(0)),
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::BinOp {
+                            op: ">=".to_string(),
+                            left: "t1".to_string(),
+                            right: "t2".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::Assert { value: "t3".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        // Count OP_IF occurrences — there should be exactly 64 (one per bit)
+        fn count_if_ops(ops: &[StackOp]) -> usize {
+            let mut count = 0;
+            for op in ops {
+                match op {
+                    StackOp::If { then_ops, else_ops } => {
+                        count += 1;
+                        count += count_if_ops(then_ops);
+                        count += count_if_ops(else_ops);
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
+
+        let if_count = count_if_ops(&methods[0].ops);
+        assert_eq!(
+            if_count, 64,
+            "log2 should emit exactly 64 if-ops (one per bit); got {} if-ops",
+            if_count
         );
     }
 }

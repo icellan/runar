@@ -82,3 +82,18 @@ def test_send_uses_merge_balance():
     c = FungibleToken(owner=pk, balance=60, merge_balance=40, token_id=b'\xab' * 16)
     c.send(mock_sig(), recipient, 546)
     assert len(c._outputs) == 1
+
+
+def test_transfer_zero_amount_fails():
+    c = FungibleToken(owner=mock_pub_key(), balance=1000, merge_balance=0, token_id=b'\xab' * 16)
+    with pytest.raises(AssertionError):
+        c.transfer(mock_sig(), mock_pub_key(), 0, 546)
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "FungibleTokenExample.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "FungibleTokenExample.runar.py")

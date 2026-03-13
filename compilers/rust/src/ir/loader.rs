@@ -607,4 +607,40 @@ mod tests {
             panic!("expected Loop binding");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // I9: loadIR — empty param type rejected
+    // Method param with `type: ""` → Err result
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_i9_load_ir_empty_param_type_rejected() {
+        let json = r#"{
+            "contractName": "Bad",
+            "properties": [],
+            "methods": [
+                {
+                    "name": "test",
+                    "params": [{ "name": "x", "type": "" }],
+                    "body": [
+                        { "name": "_t0", "value": { "kind": "load_const", "value": true } },
+                        { "name": "_t1", "value": { "kind": "assert", "value": "_t0" } }
+                    ],
+                    "isPublic": true
+                }
+            ]
+        }"#;
+        let result = load_ir_from_str(json);
+        assert!(
+            result.is_err(),
+            "method param with empty type should produce an Err; got: {:?}",
+            result.ok()
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("empty type") || err.contains("type") || err.contains("param"),
+            "error should mention empty type or param; got: {}",
+            err
+        );
+    }
 }

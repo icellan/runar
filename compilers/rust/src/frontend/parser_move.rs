@@ -1689,4 +1689,93 @@ module test {
         // Constructor body: super(a, b) + this.a = a + this.b = b
         assert_eq!(contract.constructor.body.len(), 3);
     }
+
+    // -----------------------------------------------------------------------
+    // Test: malformed Move produces an error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_syntax_error() {
+        // Missing module name
+        let source = r#"
+module {
+    // missing name
+}
+"#;
+
+        let result = parse_move(source, Some("bad.runar.move"));
+        // Should either produce errors or fail to produce a valid contract
+        let is_bad = !result.errors.is_empty() || result.contract.is_none();
+        assert!(
+            is_bad,
+            "expected errors or no contract for invalid Move syntax"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: contract with multiple public functions all parsed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multiple_methods() {
+        let source = r#"
+module multi {
+    struct Multi has SmartContract {
+        x: bigint,
+    }
+
+    public fun method1(self: &Multi, a: bigint) {
+        assert!(a == self.x);
+    }
+
+    public fun method2(self: &Multi, b: bigint) {
+        assert!(b == self.x);
+    }
+}
+"#;
+
+        let result = parse_move(source, Some("Multi.runar.move"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(
+            contract.methods.len(),
+            2,
+            "expected 2 methods, got {}",
+            contract.methods.len()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: property types and method visibility are parsed correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_properties_and_methods() {
+        let source = r#"
+module adder {
+    struct Adder has SmartContract {
+        target: bigint,
+    }
+
+    public fun verify(self: &Adder, a: bigint, b: bigint) {
+        assert!(a + b == self.target);
+    }
+}
+"#;
+
+        let result = parse_move(source, Some("Adder.runar.move"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+
+        assert!(contract.properties.len() >= 1, "expected at least 1 property");
+        assert_eq!(contract.properties[0].name, "target");
+
+        assert_eq!(contract.methods.len(), 1, "expected 1 method");
+        assert_eq!(contract.methods[0].name, "verify");
+        assert_eq!(
+            contract.methods[0].visibility,
+            Visibility::Public,
+            "expected method to be public"
+        );
+    }
 }

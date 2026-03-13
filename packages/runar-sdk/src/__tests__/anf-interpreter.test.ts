@@ -639,3 +639,88 @@ describe('ANF interpreter: preserves unmodified state', () => {
     expect(result.b).toBe(42n);
   });
 });
+
+// ---------------------------------------------------------------------------
+// num2bin / bin2num roundtrip (row 470)
+// ---------------------------------------------------------------------------
+
+describe('ANF interpreter: num2bin / bin2num roundtrip', () => {
+  it('num2bin(42, 4) produces 4-byte little-endian hex "2a000000"', () => {
+    // Build an ANF program that calls num2bin and stores the result in state.
+    const anf = makeANF({
+      contractName: 'Num2BinTest',
+      properties: [
+        { name: 'result', type: 'ByteString', readonly: false },
+      ],
+      methods: [{
+        name: 'run',
+        params: [],
+        body: [
+          { name: 't0', value: { kind: 'load_const', value: 42n } },
+          { name: 't1', value: { kind: 'load_const', value: 4n } },
+          { name: 't2', value: { kind: 'call', func: 'num2bin', args: ['t0', 't1'] } },
+          { name: 't3', value: { kind: 'update_prop', name: 'result', value: 't2' } },
+        ],
+        isPublic: true,
+      }],
+    });
+
+    const state = computeNewState(anf, 'run', { result: '' }, {});
+    expect(state.result).toBe('2a000000');
+  });
+
+  it('bin2num("2a000000") produces 42n', () => {
+    // Build an ANF program that calls bin2num on a hex value and stores result.
+    const anf = makeANF({
+      contractName: 'Bin2NumTest',
+      properties: [
+        { name: 'result', type: 'bigint', readonly: false },
+      ],
+      methods: [{
+        name: 'run',
+        params: [],
+        body: [
+          { name: 't0', value: { kind: 'load_const', value: '2a000000' } },
+          { name: 't1', value: { kind: 'call', func: 'bin2num', args: ['t0'] } },
+          { name: 't2', value: { kind: 'update_prop', name: 'result', value: 't1' } },
+        ],
+        isPublic: true,
+      }],
+    });
+
+    const state = computeNewState(anf, 'run', { result: 0n }, {});
+    expect(state.result).toBe(42n);
+  });
+
+  it('num2bin/bin2num round-trip preserves value for various inputs', () => {
+    // Test that bin2num(num2bin(n, 8)) === n for several values.
+    const testCases: [bigint, number][] = [
+      [0n, 4],
+      [1n, 4],
+      [255n, 4],
+      [1000n, 4],
+      [0xdeadn, 8],
+    ];
+
+    for (const [n, size] of testCases) {
+      const num2binANF = makeANF({
+        contractName: 'RoundTrip',
+        properties: [{ name: 'result', type: 'bigint', readonly: false }],
+        methods: [{
+          name: 'run',
+          params: [],
+          body: [
+            { name: 'n', value: { kind: 'load_const', value: n } },
+            { name: 's', value: { kind: 'load_const', value: BigInt(size) } },
+            { name: 'encoded', value: { kind: 'call', func: 'num2bin', args: ['n', 's'] } },
+            { name: 'decoded', value: { kind: 'call', func: 'bin2num', args: ['encoded'] } },
+            { name: 'upd', value: { kind: 'update_prop', name: 'result', value: 'decoded' } },
+          ],
+          isPublic: true,
+        }],
+      });
+      const state = computeNewState(num2binANF, 'run', { result: 0n }, {});
+      expect(state.result).toBe(n);
+    }
+  });
+});

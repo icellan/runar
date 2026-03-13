@@ -49,3 +49,12 @@ def test_schnorr_wrong_s():
         pass
     except Exception:
         pass  # any failure is acceptable for wrong s
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "SchnorrZKP.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "SchnorrZKP.runar.py")

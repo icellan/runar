@@ -157,8 +157,7 @@ fn test_scale_then_normalize() {
 // Rúnar compile check
 // ---------------------------------------------------------------------------
 
-// Note: compile_check is skipped for this contract because the Rust Rúnar
-// parser does not yet infer return types from private method signatures.
-// The type checker sees private methods returning void instead of bigint,
-// causing false type errors. The business logic is fully tested above
-// via native Rust execution.
+#[test]
+fn test_compile() {
+    runar::compile_check(include_str!("FunctionPatterns.runar.rs"), "FunctionPatterns.runar.rs").unwrap();
+}

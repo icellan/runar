@@ -133,6 +133,21 @@ pub fn compile_source_str_to_ir(
     Ok(frontend::anf_optimize::optimize_ec(anf_program))
 }
 
+/// Run only the parse + validate passes on a source string.
+/// Returns `(errors, warnings)`. Exposed for testing warnings.
+pub fn frontend_validate(source: &str, file_name: Option<&str>) -> (Vec<String>, Vec<String>) {
+    let parse_result = frontend::parser::parse_source(source, file_name);
+    if !parse_result.errors.is_empty() {
+        return (parse_result.errors, vec![]);
+    }
+    let contract = match parse_result.contract {
+        Some(c) => c,
+        None => return (vec!["No contract found".to_string()], vec![]),
+    };
+    let result = frontend::validator::validate(&contract);
+    (result.errors, result.warnings)
+}
+
 /// Compile a parsed ANF program to a Rúnar artifact.
 pub fn compile_from_program(program: &ir::ANFProgram) -> Result<RunarArtifact, String> {
     // Pass 4.5: EC optimization (in case we receive unoptimized ANF from IR)

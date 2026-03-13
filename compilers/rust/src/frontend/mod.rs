@@ -10,6 +10,7 @@ pub mod anf_lower;
 pub mod anf_optimize;
 pub mod ast;
 pub mod parser;
+pub mod parser_gocontract;
 pub mod parser_move;
 pub mod parser_python;
 pub mod parser_rustmacro;

@@ -130,3 +130,12 @@ def test_wots_signed_wrong_message():
             sig=ecdsa_sig_b,  # Different from what WOTS signed
             pub_key=ecdsa_pub_key,
         )
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "PostQuantumWallet.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "PostQuantumWallet.runar.py")

@@ -215,6 +215,29 @@ func TestValidateIR_EmptyParamName(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Row 304: Empty param type → validation error
+// ---------------------------------------------------------------------------
+
+func TestValidateIR_EmptyParamType(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Test",
+		Properties:   []ANFProperty{},
+		Methods: []ANFMethod{
+			{
+				Name:     "check",
+				Params:   []ANFParam{{Name: "x", Type: ""}},
+				Body:     nil,
+				IsPublic: true,
+			},
+		},
+	}
+	err := ValidateIR(program)
+	if err == nil {
+		t.Fatal("expected error for empty param type")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: ValidateIR rejects empty property name
 // ---------------------------------------------------------------------------
 
@@ -342,6 +365,234 @@ func TestLoadIRFromBytes_InvalidJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for invalid JSON")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: LoadIRFromBytes with a method that has no bindings is valid
+// ---------------------------------------------------------------------------
+
+func TestLoadIRFromBytes_EmptyMethodsValid(t *testing.T) {
+	irJSON := `{
+		"contractName": "Empty",
+		"properties": [],
+		"methods": [
+			{
+				"name": "noop",
+				"params": [],
+				"body": [
+					{"name": "t0", "value": {"kind": "load_const", "value": true}},
+					{"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+				],
+				"isPublic": true
+			}
+		]
+	}`
+
+	program, err := LoadIRFromBytes([]byte(irJSON))
+	if err != nil {
+		t.Fatalf("LoadIRFromBytes failed for empty-method IR: %v", err)
+	}
+
+	if program.ContractName != "Empty" {
+		t.Errorf("expected contractName=Empty, got %s", program.ContractName)
+	}
+	if len(program.Properties) != 0 {
+		t.Errorf("expected 0 properties, got %d", len(program.Properties))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: ValidateIR rejects empty property type
+// ---------------------------------------------------------------------------
+
+func TestValidateIR_EmptyPropertyType(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Bad",
+		Properties: []ANFProperty{
+			{Name: "x", Type: ""},
+		},
+		Methods: []ANFMethod{},
+	}
+	err := ValidateIR(program)
+	if err == nil {
+		t.Fatal("expected error for empty property type, got nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Round-trip preserves initial_value on a property
+// ---------------------------------------------------------------------------
+
+func TestLoadIRFromBytes_RoundTrip_WithInitialValue(t *testing.T) {
+	irJSON := `{
+		"contractName": "InitTest",
+		"properties": [
+			{"name": "value", "type": "bigint", "readonly": true, "initialValue": 100}
+		],
+		"methods": [
+			{
+				"name": "check",
+				"params": [],
+				"body": [
+					{"name": "t0", "value": {"kind": "load_const", "value": true}},
+					{"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+				],
+				"isPublic": true
+			}
+		]
+	}`
+
+	program, err := LoadIRFromBytes([]byte(irJSON))
+	if err != nil {
+		t.Fatalf("LoadIRFromBytes failed: %v", err)
+	}
+
+	if len(program.Properties) != 1 {
+		t.Fatalf("expected 1 property, got %d", len(program.Properties))
+	}
+	prop := program.Properties[0]
+	if prop.InitialValue == nil {
+		t.Fatal("expected InitialValue to be non-nil after round-trip")
+	}
+	// JSON numbers decode to float64 in interface{}; compare numerically
+	var iv float64
+	switch v := prop.InitialValue.(type) {
+	case float64:
+		iv = v
+	case json.Number:
+		f, _ := v.Float64()
+		iv = f
+	default:
+		t.Fatalf("unexpected InitialValue type %T", prop.InitialValue)
+	}
+	if iv != 100 {
+		t.Errorf("expected InitialValue=100, got %v", prop.InitialValue)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Round-trip with if-bindings and loop-bindings
+// ---------------------------------------------------------------------------
+
+func TestLoadIRFromBytes_RoundTrip_IfAndLoop(t *testing.T) {
+	irJSON := `{
+		"contractName": "Nested",
+		"properties": [],
+		"methods": [
+			{
+				"name": "test",
+				"params": [],
+				"body": [
+					{"name": "cond", "value": {"kind": "load_const", "value": true}},
+					{
+						"name": "ifExpr",
+						"value": {
+							"kind": "if",
+							"cond": "cond",
+							"then": [
+								{"name": "t", "value": {"kind": "load_const", "value": 1}}
+							],
+							"else": [
+								{"name": "e", "value": {"kind": "load_const", "value": 2}}
+							]
+						}
+					},
+					{
+						"name": "loopExpr",
+						"value": {
+							"kind": "loop",
+							"count": 5,
+							"iterVar": "i",
+							"body": [
+								{"name": "lb", "value": {"kind": "load_const", "value": 0}}
+							]
+						}
+					}
+				],
+				"isPublic": true
+			}
+		]
+	}`
+
+	program, err := LoadIRFromBytes([]byte(irJSON))
+	if err != nil {
+		t.Fatalf("LoadIRFromBytes failed: %v", err)
+	}
+
+	if program.ContractName != "Nested" {
+		t.Errorf("expected contractName=Nested, got %s", program.ContractName)
+	}
+	if len(program.Methods) != 1 {
+		t.Fatalf("expected 1 method, got %d", len(program.Methods))
+	}
+
+	body := program.Methods[0].Body
+	if len(body) != 3 {
+		t.Fatalf("expected 3 bindings, got %d", len(body))
+	}
+
+	// Verify if survived
+	ifBinding := body[1]
+	if ifBinding.Value.Kind != "if" {
+		t.Errorf("expected kind='if', got '%s'", ifBinding.Value.Kind)
+	}
+	if ifBinding.Value.Cond != "cond" {
+		t.Errorf("expected cond='cond', got '%s'", ifBinding.Value.Cond)
+	}
+	if len(ifBinding.Value.Then) != 1 {
+		t.Errorf("expected 1 then-binding, got %d", len(ifBinding.Value.Then))
+	}
+	if len(ifBinding.Value.Else) != 1 {
+		t.Errorf("expected 1 else-binding, got %d", len(ifBinding.Value.Else))
+	}
+
+	// Verify loop survived
+	loopBinding := body[2]
+	if loopBinding.Value.Kind != "loop" {
+		t.Errorf("expected kind='loop', got '%s'", loopBinding.Value.Kind)
+	}
+	if loopBinding.Value.Count != 5 {
+		t.Errorf("expected count=5, got %d", loopBinding.Value.Count)
+	}
+	if len(loopBinding.Value.Body) != 1 {
+		t.Errorf("expected 1 loop body binding, got %d", len(loopBinding.Value.Body))
+	}
+	if loopBinding.Value.IterVar != "i" {
+		t.Errorf("expected iterVar='i', got '%s'", loopBinding.Value.IterVar)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test I19: loadIR — empty binding name rejected
+// ---------------------------------------------------------------------------
+
+func TestValidateIR_EmptyBindingName(t *testing.T) {
+	program := &ANFProgram{
+		ContractName: "Test",
+		Properties:   []ANFProperty{},
+		Methods: []ANFMethod{
+			{
+				Name:   "check",
+				Params: nil,
+				Body: []ANFBinding{
+					{
+						// Empty name — should be rejected
+						Name: "",
+						Value: ANFValue{
+							Kind: "load_const",
+						},
+					},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+
+	err := ValidateIR(program)
+	if err == nil {
+		t.Fatal("expected error for empty binding name, got nil")
+	}
+	t.Logf("got expected error: %v", err)
 }
 
 // ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ import pytest
 from runar.sdk.state import (
     serialize_state, deserialize_state, extract_state_from_script,
     find_last_op_return, encode_push_data, decode_push_data,
+    _encode_state_value,
 )
 from runar.sdk.types import StateField, RunarArtifact, Abi, AbiMethod
 
@@ -74,6 +75,33 @@ class TestStateRoundTrip:
         result = deserialize_state(fields, hex_out)
         assert result['a'] == 10
         assert result['b'] == 20
+
+    def test_large_bigint_round_trip(self):
+        """A very large bigint (> 32-bit range) serializes and deserializes correctly."""
+        fields = [StateField(name='count', type='bigint', index=0)]
+        hex_out = serialize_state(fields, {'count': 999999999999})
+        result = deserialize_state(fields, hex_out)
+        assert result['count'] == 999999999999
+
+    def test_bigint_and_bool_together(self):
+        """A state with one bigint and one bool field both round-trip correctly."""
+        fields = [
+            StateField(name='count', type='bigint', index=0),
+            StateField(name='active', type='bool', index=1),
+        ]
+        values = {'count': 100, 'active': True}
+        hex_out = serialize_state(fields, values)
+        result = deserialize_state(fields, hex_out)
+        assert result['count'] == 100
+        assert result['active'] is True
+
+    @pytest.mark.parametrize('value', [0, 1, -1, 127, 128, 255, 256, -128, -256, 1000])
+    def test_various_bigints_round_trip(self, value):
+        """Multiple bigint values all serialize and deserialize correctly."""
+        fields = [StateField(name='v', type='bigint', index=0)]
+        hex_out = serialize_state(fields, {'v': value})
+        result = deserialize_state(fields, hex_out)
+        assert result['v'] == value, f"failed for value {value}"
 
 
 # ---------------------------------------------------------------------------
@@ -168,3 +196,90 @@ class TestPushDataRoundTrip:
         encoded = encode_push_data(data_hex)
         decoded, consumed = decode_push_data(encoded, 0)
         assert decoded == data_hex
+
+
+# ---------------------------------------------------------------------------
+# extract_state_from_script — end-to-end tests
+# ---------------------------------------------------------------------------
+
+class TestExtractStateEndToEnd:
+    def test_extract_state_finds_last_op_return(self):
+        """When a script has a 0x6a inside a push data segment followed by a real OP_RETURN,
+        extract_state_from_script reads state from after the real (last) OP_RETURN."""
+        fields = [StateField(name='count', type='bigint', index=0)]
+        artifact = _make_artifact(fields)
+
+        state_hex = serialize_state(fields, {'count': 42})
+        # '016a' = PUSH 1 byte (0x6a) — the 0x6a here is push data, not OP_RETURN
+        # '93'   = OP_ADD (filler opcode)
+        # '6a'   = real OP_RETURN
+        # state_hex = serialized state after the real OP_RETURN
+        full_script = '016a' + '93' + '6a' + state_hex
+
+        result = extract_state_from_script(artifact, full_script)
+        assert result is not None
+        assert result['count'] == 42
+
+    def test_roundtrip_via_extract_state(self):
+        """Full end-to-end: serialize state → embed in locking script → extract → verify."""
+        fields = [
+            StateField(name='count', type='bigint', index=0),
+            StateField(name='owner', type='PubKey', index=1),
+            StateField(name='active', type='bool', index=2),
+        ]
+        pubkey_hex = 'ab' * 33  # 33-byte PubKey
+        values = {'count': 7, 'owner': pubkey_hex, 'active': True}
+
+        state_hex = serialize_state(fields, values)
+        # Build a locking script: OP_TRUE + OP_RETURN + state bytes
+        full_script = '51' + '6a' + state_hex
+
+        artifact = _make_artifact(fields, script='51')
+        result = extract_state_from_script(artifact, full_script)
+
+        assert result is not None
+        assert result['count'] == 7
+        assert result['owner'] == pubkey_hex
+        assert result['active'] is True
+
+
+# ---------------------------------------------------------------------------
+# encode_state_value — row 370-372, 374
+# ---------------------------------------------------------------------------
+
+class TestEncodeStateValue:
+    def test_bool_true_encodes_as_01(self):
+        """bool true → raw byte '01' (row 370)."""
+        result = _encode_state_value(True, 'bool')
+        assert result == '01'
+
+    def test_bool_false_encodes_as_00(self):
+        """bool false → raw byte '00' (row 371)."""
+        result = _encode_state_value(False, 'bool')
+        assert result == '00'
+
+    def test_bool_true_via_serialize(self):
+        """bool true encodes to '01' when accessed via serialize_state (row 372)."""
+        fields = [StateField(name='flag', type='bool', index=0)]
+        hex_out = serialize_state(fields, {'flag': True})
+        # State hex should start with '01' for true
+        assert hex_out == '01'
+
+    def test_bool_false_via_serialize(self):
+        """bool false encodes to '00' when accessed via serialize_state."""
+        fields = [StateField(name='flag', type='bool', index=0)]
+        hex_out = serialize_state(fields, {'flag': False})
+        assert hex_out == '00'
+
+    def test_pubkey_encodes_as_raw_hex(self):
+        """PubKey encodes as raw hex without any push-data prefix (row 374)."""
+        pubkey_hex = '02' + 'ab' * 32  # 33 bytes
+        result = _encode_state_value(pubkey_hex, 'PubKey')
+        # Should be the raw hex, no push prefix
+        assert result == pubkey_hex
+        assert len(result) == 66  # 33 bytes * 2 hex chars
+
+    def test_bigint_zero_encodes_to_8_zero_bytes(self):
+        """bigint 0 → 8 zero bytes LE (row 369)."""
+        result = _encode_state_value(0, 'bigint')
+        assert result == '0000000000000000'

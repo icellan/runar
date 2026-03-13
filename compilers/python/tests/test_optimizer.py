@@ -214,6 +214,26 @@ class TestWindow2Optimizations:
         result = optimize_stack_ops(ops)
         assert len(result) == 0
 
+    def test_push_negative_one_drop_removed(self):
+        """PUSH(-1) DROP should be eliminated (negative int push is still a push).
+        Mirrors Rust test_push_negative_one_drop_removed."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=-1)),
+            StackOp(op="drop"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 0
+
+    def test_only_push1_triggers_1add_not_push2(self):
+        """PUSH(2) ADD should NOT become OP_1ADD — only PUSH(1) ADD triggers that rule.
+        Mirrors Rust test_only_push1_triggers_1add_not_push2."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=2)),
+            StackOp(op="opcode", code="OP_ADD"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 2
+
 
 # ---------------------------------------------------------------------------
 # 3-op optimizations (constant folding)
@@ -250,6 +270,19 @@ class TestWindow3Optimizations:
         result = optimize_stack_ops(ops)
         assert len(result) == 1
         assert result[0].value.big_int == 30
+
+    def test_const_fold_sub_produces_negative(self):
+        """PUSH(3) PUSH(7) SUB -> PUSH(-4) (3 - 7 = -4, negative result is valid).
+        Mirrors Rust test_const_fold_sub_produces_negative."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=3)),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=7)),
+            StackOp(op="opcode", code="OP_SUB"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "push"
+        assert result[0].value.big_int == -4
 
     def test_push_push_div_not_folded(self):
         """Division is not constant-folded (not in the rules)."""
@@ -429,6 +462,176 @@ class TestNestedIfOptimization:
 # ---------------------------------------------------------------------------
 # Iterative convergence
 # ---------------------------------------------------------------------------
+
+class TestAdditionalCoverage:
+    def test_large_value_constant_fold(self):
+        """PUSH(1000) PUSH(999) ADD -> PUSH(1999)."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=1000)),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=999)),
+            StackOp(op="opcode", code="OP_ADD"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "push"
+        assert result[0].value.big_int == 1999
+
+    def test_multiple_swap_swap_pairs_removed(self):
+        """A long sequence with two SWAP SWAP pairs: both pairs are removed."""
+        ops = [
+            StackOp(op="opcode", code="OP_ADD"),
+            StackOp(op="swap"),
+            StackOp(op="swap"),
+            StackOp(op="opcode", code="OP_MUL"),
+            StackOp(op="swap"),
+            StackOp(op="swap"),
+            StackOp(op="opcode", code="OP_SUB"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 3
+        assert result[0].code == "OP_ADD"
+        assert result[1].code == "OP_MUL"
+        assert result[2].code == "OP_SUB"
+
+    def test_chain_fold_with_context(self):
+        """DUP PUSH(3) ADD PUSH(7) ADD -> DUP PUSH(10) ADD (4-op chain fold on the tail)."""
+        ops = [
+            StackOp(op="dup"),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=3)),
+            StackOp(op="opcode", code="OP_ADD"),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=7)),
+            StackOp(op="opcode", code="OP_ADD"),
+        ]
+        result = optimize_stack_ops(ops)
+        # The 4-op window (PUSH 3, ADD, PUSH 7, ADD) folds to (PUSH 10, ADD)
+        assert len(result) == 3
+        assert result[0].op == "dup"
+        assert result[1].op == "push"
+        assert result[1].value.big_int == 10
+        assert result[2].code == "OP_ADD"
+
+
+class TestStringFormFusing:
+    def test_string_equalverify_fuses(self):
+        """Opcode string 'OP_EQUAL' followed by OP_VERIFY (typed) should fuse to OP_EQUALVERIFY."""
+        ops = [
+            StackOp(op="opcode", code="OP_EQUAL"),
+            StackOp(op="opcode", code="OP_VERIFY"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].code == "OP_EQUALVERIFY"
+
+    def test_string_checksigverify_fuses(self):
+        """Opcode string 'OP_CHECKSIG' + OP_VERIFY should fuse to OP_CHECKSIGVERIFY."""
+        ops = [
+            StackOp(op="opcode", code="OP_CHECKSIG"),
+            StackOp(op="opcode", code="OP_VERIFY"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].code == "OP_CHECKSIGVERIFY"
+
+
+class TestStringFormRollPick:
+    # NOTE: The optimizer's _match_window2 only handles typed b.op=="roll" and
+    # b.op=="pick" stack ops, NOT string-form OP_ROLL/OP_PICK opcodes. The SLH-DSA
+    # codegen emits Opcode("OP_ROLL") strings, so these patterns should be handled.
+    # These tests are marked xfail to document this source code gap.
+
+    def test_push0_opcode_roll_string_removed(self):
+        """Push(0) followed by Opcode('OP_ROLL') string form -> empty (roll 0 is no-op)."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=0)),
+            StackOp(op="opcode", code="OP_ROLL"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 0
+
+    def test_push1_opcode_roll_string_becomes_swap(self):
+        """Push(1) followed by Opcode('OP_ROLL') string form -> SWAP."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=1)),
+            StackOp(op="opcode", code="OP_ROLL"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "swap"
+
+    def test_push2_opcode_roll_string_becomes_rot(self):
+        """Push(2) followed by Opcode('OP_ROLL') string form -> ROT."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=2)),
+            StackOp(op="opcode", code="OP_ROLL"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "rot"
+
+    def test_push0_opcode_pick_string_becomes_dup(self):
+        """Push(0) followed by Opcode('OP_PICK') string form -> DUP."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=0)),
+            StackOp(op="opcode", code="OP_PICK"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "dup"
+
+    def test_push1_opcode_pick_string_becomes_over(self):
+        """Push(1) followed by Opcode('OP_PICK') string form -> OVER."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=1)),
+            StackOp(op="opcode", code="OP_PICK"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1
+        assert result[0].op == "over"
+
+
+# ---------------------------------------------------------------------------
+# Gap tests: O32, O33
+# ---------------------------------------------------------------------------
+
+class TestOptimizerGaps:
+    # O32: division NOT constant-folded
+    def test_o32_division_not_constant_folded(self):
+        """PUSH(6) PUSH(2) OP_DIV → sequence unchanged (division not folded)."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=6)),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=2)),
+            StackOp(op="opcode", code="OP_DIV"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 3, (
+            f"expected 3 ops (division not constant-folded), got {len(result)}: "
+            f"{[op.op for op in result]}"
+        )
+        assert result[2].op == "opcode" and result[2].code == "OP_DIV", (
+            f"expected OP_DIV unchanged, got: {result[2]}"
+        )
+
+    # O33: negative constant fold result for subtraction
+    def test_o33_negative_constant_fold_sub(self):
+        """PUSH(3) PUSH(10) OP_SUB → PUSH(-7).
+        Bitcoin Script SUB pops TOS (10) then 2nd (3) and computes: 3 - 10 = -7."""
+        ops = [
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=3)),
+            StackOp(op="push", value=PushValue(kind="bigint", big_int=10)),
+            StackOp(op="opcode", code="OP_SUB"),
+        ]
+        result = optimize_stack_ops(ops)
+        assert len(result) == 1, (
+            f"expected constant folding to produce 1 PUSH op, got {len(result)}: "
+            f"{[op.op for op in result]}"
+        )
+        assert result[0].op == "push", f"expected push op, got: {result[0].op}"
+        # In Bitcoin Script: a SUB b = second - top = 3 - 10 = -7
+        assert result[0].value.big_int == -7, (
+            f"expected PUSH(-7) for PUSH(3) PUSH(10) SUB (second - top = 3-10 = -7), "
+            f"got: {result[0].value.big_int}"
+        )
+
 
 class TestIterativeConvergence:
     def test_multi_pass_optimization(self):

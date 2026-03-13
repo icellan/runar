@@ -36,3 +36,12 @@ def test_reset():
     assert c.count == 7
     c.reset()
     assert c.count == 0
+
+
+def test_compile():
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "BoundedCounter.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "BoundedCounter.runar.py")

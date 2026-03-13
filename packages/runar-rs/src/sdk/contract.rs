@@ -2184,6 +2184,33 @@ mod tests {
         assert!(result.unwrap_err().contains("no UTXOs"));
     }
 
+    // Row 332: Error on insufficient funds — a UTXO that is too small to
+    // cover both the requested satoshis and the fee causes a panic from
+    // build_deploy_transaction.
+    #[test]
+    #[should_panic(expected = "insufficient funds")]
+    fn deploy_fails_insufficient_funds() {
+        let artifact = make_artifact("51", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+
+        let signer = MockSigner::new();
+        let mut provider = MockProvider::testnet();
+        let address = signer.get_address().unwrap();
+        // Add a UTXO that is far too small (1 satoshi) to fund a 50_000-sat deployment.
+        provider.add_utxo(&address, Utxo {
+            txid: "cc".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: format!("76a914{}88ac", "00".repeat(20)),
+        });
+
+        // This will panic inside build_deploy_transaction with "insufficient funds".
+        let _ = contract.deploy(&mut provider, &signer, &DeployOptions {
+            satoshis: 50_000,
+            change_address: None,
+        });
+    }
+
     #[test]
     fn call_fails_not_deployed() {
         let artifact = make_artifact(

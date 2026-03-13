@@ -32,3 +32,22 @@ def test_decrement_at_zero_fails():
     c = Counter(count=0)
     with pytest.raises(AssertionError):
         c.decrement()
+
+
+def test_increment_then_decrement():
+    c = Counter(count=0)
+    c.increment()
+    c.increment()
+    c.increment()
+    c.decrement()
+    assert c.count == 2
+
+
+def test_compile():
+    import os
+    from pathlib import Path
+    from runar import compile_check
+    source_path = str(Path(__file__).parent / "Counter.runar.py")
+    with open(source_path) as f:
+        source = f.read()
+    compile_check(source, "Counter.runar.py")
