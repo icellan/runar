@@ -112,13 +112,14 @@ class TestMove:
         assert game.c4 == 2
         assert game.turn == 1  # X's turn
 
-        # X plays position 2 to win top row (0,1,2)
-        # move_and_win is a terminal method — may fail on extract_output_hash
-        # in unit tests since there's no real preimage
-        try:
-            game.move_and_win(2, PLAYER_X, mock_sig(), "00", 0)
-        except Exception:
-            pass  # Terminal methods depend on preimage
+        # X plays position 2 to win top row (0,1,2).
+        # Pre-compute the payout hash so extract_output_hash returns the right value.
+        from runar import hash160, hash256, num2bin, cat
+        total_payout = game.bet_amount * 2
+        payout = cat(cat(num2bin(total_payout, 8), game.p2pkh_prefix),
+                     cat(hash160(PLAYER_X), game.p2pkh_suffix))
+        game.tx_preimage = hash256(payout)
+        game.move_and_win(2, PLAYER_X, mock_sig(), "00", 0)
 
     def test_all_positions(self):
         """Each board position (0-8) can be played."""

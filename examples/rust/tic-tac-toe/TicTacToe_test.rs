@@ -138,13 +138,21 @@ impl TicTacToe {
         count
     }
 
-    fn move_and_win(&mut self, position: Bigint, player: PubKey, sig: &Sig, _change_pkh: ByteString, _change_amount: Bigint) {
+    fn move_and_win(&mut self, position: Bigint, player: PubKey, sig: &Sig, change_pkh: ByteString, change_amount: Bigint) {
         assert!(self.status == 1);
         assert!(check_sig(sig, &player));
         self.assert_correct_player(player.clone());
         self.assert_cell_empty(position);
         assert!(self.check_win_after_move(position, self.turn));
-        // Terminal method — output hash verification skipped in unit tests
+
+        let total_payout = self.bet_amount * 2;
+        let payout = cat(&cat(&cat(&num2bin(&total_payout, 8), &self.p2pkh_prefix), &hash160(&player)), &self.p2pkh_suffix);
+        if change_amount > 0 {
+            let change = cat(&cat(&cat(&num2bin(&change_amount, 8), &self.p2pkh_prefix), &change_pkh), &self.p2pkh_suffix);
+            assert!(hash256(&cat(&payout, &change)) == extract_output_hash(&self.tx_preimage));
+        } else {
+            assert!(hash256(&payout) == extract_output_hash(&self.tx_preimage));
+        }
     }
 }
 
@@ -278,7 +286,11 @@ fn test_full_game_join_and_moves() {
     assert_eq!(game.c4, 2);
     assert_eq!(game.turn, 1); // X's turn
 
-    // X plays position 2 to win top row (0,1,2)
+    // X plays position 2 to win top row (0,1,2).
+    // Pre-compute the payout hash so extract_output_hash returns the right value.
+    let total_payout = game.bet_amount * 2;
+    let payout = cat(&cat(&cat(&num2bin(&total_payout, 8), &game.p2pkh_prefix), &hash160(&player_x())), &game.p2pkh_suffix);
+    game.tx_preimage = hash256(&payout);
     game.move_and_win(2, player_x(), &mock_sig(), b"00".to_vec(), 0);
 }
 

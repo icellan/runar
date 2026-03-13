@@ -13,9 +13,6 @@
 import { describe, it, expect } from 'vitest';
 import type {
   ANFProgram,
-  ANFProperty,
-  ANFMethod,
-  ANFParam,
   ANFBinding,
   ANFValue,
 } from '../ir/index.js';
@@ -108,7 +105,7 @@ function validateBindings(bindings: ANFBinding[], methodName: string): void {
     if (!binding.name) {
       throw new Error(`IR validation: method ${methodName} binding[${i}] has empty name`);
     }
-    const kind = (binding.value as Record<string, unknown>)['kind'] as string | undefined;
+    const kind = (binding.value as unknown as Record<string, unknown>)['kind'] as string | undefined;
     if (!kind) {
       throw new Error(`IR validation: method ${methodName} binding ${binding.name} has empty kind`);
     }
@@ -574,19 +571,19 @@ describe('IR Loader: loadANFFromJson', () => {
 
       // if-binding survived
       const ifBinding = body[1]!;
-      expect((ifBinding.value as Record<string, unknown>)['kind']).toBe('if');
-      expect((ifBinding.value as Record<string, unknown>)['cond']).toBe('cond');
-      const thenBindings = (ifBinding.value as Record<string, unknown>)['then'] as ANFBinding[];
-      const elseBindings = (ifBinding.value as Record<string, unknown>)['else'] as ANFBinding[];
+      expect((ifBinding.value as unknown as Record<string, unknown>)['kind']).toBe('if');
+      expect((ifBinding.value as unknown as Record<string, unknown>)['cond']).toBe('cond');
+      const thenBindings = (ifBinding.value as unknown as Record<string, unknown>)['then'] as ANFBinding[];
+      const elseBindings = (ifBinding.value as unknown as Record<string, unknown>)['else'] as ANFBinding[];
       expect(thenBindings).toHaveLength(1);
       expect(elseBindings).toHaveLength(1);
 
       // loop-binding survived
       const loopBinding = body[2]!;
-      expect((loopBinding.value as Record<string, unknown>)['kind']).toBe('loop');
-      expect((loopBinding.value as Record<string, unknown>)['count']).toBe(5);
-      expect((loopBinding.value as Record<string, unknown>)['iterVar']).toBe('i');
-      const loopBody = (loopBinding.value as Record<string, unknown>)['body'] as ANFBinding[];
+      expect((loopBinding.value as unknown as Record<string, unknown>)['kind']).toBe('loop');
+      expect((loopBinding.value as unknown as Record<string, unknown>)['count']).toBe(5);
+      expect((loopBinding.value as unknown as Record<string, unknown>)['iterVar']).toBe('i');
+      const loopBody = (loopBinding.value as unknown as Record<string, unknown>)['body'] as ANFBinding[];
       expect(loopBody).toHaveLength(1);
     });
   });

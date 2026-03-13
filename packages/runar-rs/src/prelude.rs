@@ -183,9 +183,16 @@ pub fn extract_locktime(_p: &[u8]) -> Int {
     0
 }
 
-/// Returns 32 zero bytes in test mode.
-pub fn extract_output_hash(_p: &[u8]) -> ByteString {
-    vec![0u8; 32]
+/// Returns the first 32 bytes of the preimage in test mode.
+/// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
+/// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.
+/// Falls back to 32 zero bytes when the preimage is unset or shorter than 32 bytes.
+pub fn extract_output_hash(p: &[u8]) -> ByteString {
+    if p.len() >= 32 {
+        p[..32].to_vec()
+    } else {
+        vec![0u8; 32]
+    }
 }
 
 /// Returns `hash256([0u8; 72])` in test mode.

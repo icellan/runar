@@ -1675,12 +1675,7 @@ describe('Pass 5: Stack Lower', () => {
       );
       expect(offset40Push).toBeDefined();
 
-      // Also verify PUSH(44) is NOT the extraction offset (old bug)
-      const offset44Push = pushOps.find(
-        o => typeof o.value === 'bigint' && o.value === 44n,
-      );
-      // 44n should NOT appear as an extraction offset in extractOutputHash
-      // (it may appear elsewhere for other purposes, but let's confirm 40n is present)
+      // 40n should appear as an extraction offset in extractOutputHash (not 44n, old bug)
       expect(offset40Push).toBeDefined();
     });
 

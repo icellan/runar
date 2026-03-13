@@ -245,20 +245,24 @@ export class RunarInterpreter {
 
       case 'if_statement': {
         const cond = this.evalExpr(stmt.condition, env, methods);
+        let ifReturnVal: RunarValue | undefined;
         if (this.toBool(cond)) {
           env.pushScope();
           try {
-            this.executeStatements(stmt.then, env, methods);
+            ifReturnVal = this.executeStatements(stmt.then, env, methods);
           } finally {
             env.popScope();
           }
         } else if (stmt.else) {
           env.pushScope();
           try {
-            this.executeStatements(stmt.else, env, methods);
+            ifReturnVal = this.executeStatements(stmt.else, env, methods);
           } finally {
             env.popScope();
           }
+        }
+        if (ifReturnVal !== undefined) {
+          throw new ReturnException(ifReturnVal);
         }
         break;
       }
@@ -276,10 +280,14 @@ export class RunarInterpreter {
               throw new Error('Loop iteration limit exceeded');
             }
             env.pushScope();
+            let forReturnVal: RunarValue | undefined;
             try {
-              this.executeStatements(stmt.body, env, methods);
+              forReturnVal = this.executeStatements(stmt.body, env, methods);
             } finally {
               env.popScope();
+            }
+            if (forReturnVal !== undefined) {
+              throw new ReturnException(forReturnVal);
             }
             this.executeStatement(stmt.update, env, methods);
           }

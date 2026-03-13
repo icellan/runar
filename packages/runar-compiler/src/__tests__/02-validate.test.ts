@@ -642,6 +642,7 @@ describe('Validator: contract name validation', () => {
         visibility: 'public',
         params: [],
         body: [],
+        sourceLocation: { file: 'test.runar.ts', line: 1, column: 0 },
       },
     };
     const result = validate(contract);

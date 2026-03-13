@@ -62,20 +62,39 @@ def verify_slh_dsa_sha2_256f(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return _slh_verify(msg, sig, pubkey, 'sha2_256f')
 
 
+# -- Byte coercion -----------------------------------------------------------
+
+def _as_bytes(x) -> bytes:
+    """Accept both raw bytes/bytearray and hex-encoded strings.
+
+    In Rúnar, ByteString literals are hex strings (e.g. "1976a914" = 4 bytes).
+    This mirrors the TypeScript interpreter which hex-decodes string literals.
+    """
+    if isinstance(x, (bytes, bytearray)):
+        return bytes(x)
+    if isinstance(x, str):
+        return bytes.fromhex(x)
+    raise TypeError(f"Expected bytes or hex-encoded string, got {type(x).__name__}")
+
+
 # -- Real Hash Functions -----------------------------------------------------
 
-def hash160(data: bytes) -> bytes:
+def hash160(data) -> bytes:
     """RIPEMD160(SHA256(data))"""
+    data = _as_bytes(data)
     return hashlib.new('ripemd160', hashlib.sha256(data).digest()).digest()
 
-def hash256(data: bytes) -> bytes:
+def hash256(data) -> bytes:
     """SHA256(SHA256(data))"""
+    data = _as_bytes(data)
     return hashlib.sha256(hashlib.sha256(data).digest()).digest()
 
-def sha256(data: bytes) -> bytes:
+def sha256(data) -> bytes:
+    data = _as_bytes(data)
     return hashlib.sha256(data).digest()
 
-def ripemd160(data: bytes) -> bytes:
+def ripemd160(data) -> bytes:
+    data = _as_bytes(data)
     return hashlib.new('ripemd160', data).digest()
 
 
@@ -84,7 +103,14 @@ def ripemd160(data: bytes) -> bytes:
 def extract_locktime(preimage: bytes) -> int:
     return 0
 
-def extract_output_hash(preimage: bytes) -> bytes:
+def extract_output_hash(preimage) -> bytes:
+    """Returns the first 32 bytes of the preimage in test mode.
+    Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
+    hash256(outputs) == extract_output_hash(tx_preimage) passes.
+    Falls back to 32 zero bytes when the preimage is shorter than 32 bytes."""
+    preimage = _as_bytes(preimage)
+    if len(preimage) >= 32:
+        return preimage[:32]
     return b'\x00' * 32
 
 def extract_amount(preimage: bytes) -> int:
@@ -221,17 +247,17 @@ def bin2num(data: bytes) -> int:
         result = (result << 8) | data[i]
     return -result if negative else result
 
-def cat(a: bytes, b: bytes) -> bytes:
-    return a + b
+def cat(a, b) -> bytes:
+    return _as_bytes(a) + _as_bytes(b)
 
-def substr(data: bytes, start: int, length: int) -> bytes:
-    return data[start:start + length]
+def substr(data, start: int, length: int) -> bytes:
+    return _as_bytes(data)[start:start + length]
 
-def reverse_bytes(data: bytes) -> bytes:
-    return data[::-1]
+def reverse_bytes(data) -> bytes:
+    return _as_bytes(data)[::-1]
 
-def len_(data: bytes) -> int:
-    return len(data)
+def len_(data) -> int:
+    return len(_as_bytes(data))
 
 
 # -- Test Helpers ------------------------------------------------------------

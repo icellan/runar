@@ -2,7 +2,44 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { TestContract } from 'runar-testing';
+
+// ---------------------------------------------------------------------------
+// Byte-level helpers for pre-computing terminal method output hashes.
+// Used to configure setMockPreimageBytes so hash256(payout) == extractOutputHash.
+// ---------------------------------------------------------------------------
+
+function hexToU8(hex: string): Uint8Array {
+  const buf = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) buf[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  return buf;
+}
+function catU8(...arrays: Uint8Array[]): Uint8Array {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) { out.set(a, off); off += a.length; }
+  return out;
+}
+function num2binU8(v: bigint, len: bigint): Uint8Array {
+  const buf = new Uint8Array(Number(len));
+  let abs = v < 0n ? -v : v;
+  for (let i = 0; i < Number(len) && abs > 0n; i++) { buf[i] = Number(abs & 0xffn); abs >>= 8n; }
+  if (v < 0n) buf[Number(len) - 1] |= 0x80;
+  return buf;
+}
+function hash160U8(data: Uint8Array): Uint8Array {
+  const sha = createHash('sha256').update(data).digest();
+  return new Uint8Array(createHash('ripemd160').update(sha).digest());
+}
+function hash256U8(data: Uint8Array): Uint8Array {
+  const h1 = createHash('sha256').update(data).digest();
+  return new Uint8Array(createHash('sha256').update(h1).digest());
+}
+function p2pkhOutput(satoshis: bigint, playerHex: string, prefixHex: string, suffixHex: string): Uint8Array {
+  return catU8(num2binU8(satoshis, 8n), hexToU8(prefixHex), hash160U8(hexToU8(playerHex)), hexToU8(suffixHex));
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'TicTacToe.runar.ts'), 'utf8');
@@ -111,9 +148,12 @@ describe('TicTacToe', () => {
         c3: 2n, c4: 2n,
         turn: 1n,
       });
-      const result = game.call('moveAndWin', { position: 2n, player: PLAYER_X, sig: MOCK_SIG });
-      // Terminal method — output hash may not match in mock mode
-      expect(result.success === true || result.success === false).toBe(true);
+      // Pre-compute the payout hash so extractOutputHash returns it.
+      const payout = p2pkhOutput(BET_AMOUNT * 2n, PLAYER_X, P2PKH_PREFIX, P2PKH_SUFFIX);
+      game.setMockPreimageBytes({ outputHash: hash256U8(payout) });
+      const result = game.call('moveAndWin', { position: 2n, player: PLAYER_X, sig: MOCK_SIG, changePKH: '00', changeAmount: 0n });
+      if (!result.success) console.error('moveAndWin error:', result.error);
+      expect(result.success).toBe(true);
     });
   });
 
@@ -125,8 +165,12 @@ describe('TicTacToe', () => {
         c6: 2n, c7: 1n,
         turn: 2n,
       });
-      const result = game.call('moveAndTie', { position: 8n, player: PLAYER_O, sig: MOCK_SIG });
-      expect(result.success === true || result.success === false).toBe(true);
+      // Pre-compute the tie payout hash (split between both players).
+      const out1 = p2pkhOutput(BET_AMOUNT, PLAYER_X, P2PKH_PREFIX, P2PKH_SUFFIX);
+      const out2 = p2pkhOutput(BET_AMOUNT, PLAYER_O, P2PKH_PREFIX, P2PKH_SUFFIX);
+      game.setMockPreimageBytes({ outputHash: hash256U8(catU8(out1, out2)) });
+      const result = game.call('moveAndTie', { position: 8n, player: PLAYER_O, sig: MOCK_SIG, changePKH: '00', changeAmount: 0n });
+      expect(result.success).toBe(true);
     });
   });
 
@@ -151,10 +195,12 @@ describe('TicTacToe', () => {
       expect(game.state.c4).toBe(2n);
       expect(game.state.turn).toBe(1n); // X's turn
 
-      // X plays position 2 to win top row (0,1,2)
-      const winResult = game.call('moveAndWin', { position: 2n, player: PLAYER_X, sig: MOCK_SIG });
-      // Terminal method — extractOutputHash may not match in mock mode
-      expect(winResult.success === true || winResult.success === false).toBe(true);
+      // X plays position 2 to win top row (0,1,2).
+      // Pre-compute payout hash so extractOutputHash returns the right value.
+      const payout = p2pkhOutput(BET_AMOUNT * 2n, PLAYER_X, P2PKH_PREFIX, P2PKH_SUFFIX);
+      game.setMockPreimageBytes({ outputHash: hash256U8(payout) });
+      const winResult = game.call('moveAndWin', { position: 2n, player: PLAYER_X, sig: MOCK_SIG, changePKH: '00', changeAmount: 0n });
+      expect(winResult.success).toBe(true);
     });
   });
 });
