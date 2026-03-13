@@ -1187,6 +1187,7 @@ const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
     "sha256", "ripemd160", "hash160", "hash256", "cat", "num2bin", "int2str",
     "reverseBytes", "substr", "left", "right",
     "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
+    "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
 ];
 
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).

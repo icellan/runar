@@ -18,6 +18,7 @@
  */
 
 import type { StackOp } from '../ir/index.js';
+import { Emitter, u32ToLE } from './codegen-emitter.js';
 
 // SHA-256 round constants
 const K: number[] = [
@@ -39,243 +40,82 @@ const K: number[] = [
   0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-/** Encode a uint32 as 4-byte little-endian (precomputed at codegen time). */
-function u32ToLE(n: number): Uint8Array {
-  return new Uint8Array([n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff]);
+// =========================================================================
+// SHA-256 sigma/ch/maj functions (standalone, take Emitter parameter)
+// =========================================================================
+// The LE→BE→sigma→BE→LE pattern costs 24 ops wrapper overhead per sigma call,
+// but each ROTR drops from 17 ops (arithmetic) to 7 ops (native shifts),
+// netting ~6 ops saved per big sigma and ~4 per small sigma.
+
+/** Σ0(a) = ROTR(2)^ROTR(13)^ROTR(22). [a(LE)] → [Σ0(LE)]. Net: 0. */
+function bigSigma0(em: Emitter): void {
+  em.reverseBytes4();
+  em.dup(); em.dup();
+  em.rotrBE(2); em.swap(); em.rotrBE(13);
+  em.binOp('OP_XOR');
+  em.swap(); em.rotrBE(22);
+  em.binOp('OP_XOR');
+  em.reverseBytes4();
 }
 
-// =========================================================================
-// Emitter with depth tracking
-// =========================================================================
+/** Σ1(e) = ROTR(6)^ROTR(11)^ROTR(25). [e(LE)] → [Σ1(LE)]. Net: 0. */
+function bigSigma1(em: Emitter): void {
+  em.reverseBytes4();
+  em.dup(); em.dup();
+  em.rotrBE(6); em.swap(); em.rotrBE(11);
+  em.binOp('OP_XOR');
+  em.swap(); em.rotrBE(25);
+  em.binOp('OP_XOR');
+  em.reverseBytes4();
+}
 
-class Emitter {
-  readonly ops: StackOp[] = [];
-  depth: number;
-  altDepth = 0;
+/** σ0(x) = ROTR(7)^ROTR(18)^SHR(3). [x(LE)] → [σ0(LE)]. Net: 0. */
+function smallSigma0(em: Emitter): void {
+  em.reverseBytes4();
+  em.dup(); em.dup();
+  em.rotrBE(7); em.swap(); em.rotrBE(18);
+  em.binOp('OP_XOR');
+  em.swap(); em.shrBE(3);
+  em.binOp('OP_XOR');
+  em.reverseBytes4();
+}
 
-  constructor(initialDepth: number) { this.depth = initialDepth; }
+/** σ1(x) = ROTR(17)^ROTR(19)^SHR(10). [x(LE)] → [σ1(LE)]. Net: 0. */
+function smallSigma1(em: Emitter): void {
+  em.reverseBytes4();
+  em.dup(); em.dup();
+  em.rotrBE(17); em.swap(); em.rotrBE(19);
+  em.binOp('OP_XOR');
+  em.swap(); em.shrBE(10);
+  em.binOp('OP_XOR');
+  em.reverseBytes4();
+}
 
-  private e(sop: StackOp): void { this.ops.push(sop); }
+/** Ch(e,f,g) = (e&f)^(~e&g). [e, f, g] (g=TOS), all LE → [Ch(LE)]. Net: -2. */
+function ch(em: Emitter): void {
+  em.rot();
+  em.dup();
+  em.uniOp('OP_INVERT');
+  em.rot();
+  em.binOp('OP_AND');
+  em.toAlt();
+  em.binOp('OP_AND');
+  em.fromAlt();
+  em.binOp('OP_XOR');
+}
 
-  /** Push a raw op without depth tracking (for splicing pre-generated ops). */
-  e_raw(sop: StackOp): void { this.ops.push(sop); }
-
-  oc(code: string): void { this.e({ op: 'opcode', code }); }
-
-  pushI(v: bigint): void { this.e({ op: 'push', value: v }); this.depth++; }
-  pushB(v: Uint8Array): void { this.e({ op: 'push', value: v }); this.depth++; }
-
-  dup(): void { this.e({ op: 'dup' }); this.depth++; }
-  drop(): void { this.e({ op: 'drop' }); this.depth--; }
-  swap(): void { this.e({ op: 'swap' }); }
-  over(): void { this.e({ op: 'over' }); this.depth++; }
-  nip(): void { this.e({ op: 'nip' }); this.depth--; }
-  rot(): void { this.e({ op: 'rot' }); }
-
-  pick(d: number): void {
-    if (d === 0) { this.dup(); return; }
-    if (d === 1) { this.over(); return; }
-    this.pushI(BigInt(d));
-    this.e({ op: 'pick', depth: d });
-  }
-
-  roll(d: number): void {
-    if (d === 0) return;
-    if (d === 1) { this.swap(); return; }
-    if (d === 2) { this.rot(); return; }
-    this.pushI(BigInt(d));
-    this.e({ op: 'roll', depth: d });
-    this.depth--;
-  }
-
-  toAlt(): void { this.oc('OP_TOALTSTACK'); this.depth--; this.altDepth++; }
-  fromAlt(): void { this.oc('OP_FROMALTSTACK'); this.depth++; this.altDepth--; }
-
-  binOp(code: string): void { this.oc(code); this.depth--; }
-  uniOp(code: string): void { this.oc(code); }
-  dup2(): void { this.oc('OP_2DUP'); this.depth += 2; }
-
-  split(): void { this.oc('OP_SPLIT'); }
-  split4(): void { this.pushI(4n); this.split(); }
-
-  assert(expected: number, msg: string): void {
-    if (this.depth !== expected) {
-      throw new Error(`SHA256 codegen: ${msg}. Expected depth ${expected}, got ${this.depth}`);
-    }
-  }
-
-  // --- Byte reversal (only for BE↔LE conversion at boundaries) ---
-
-  /** Reverse 4 bytes on TOS: [abcd] → [dcba]. Net: 0. 12 ops. */
-  reverseBytes4(): void {
-    this.pushI(1n); this.split();
-    this.pushI(1n); this.split();
-    this.pushI(1n); this.split();
-    this.swap(); this.binOp('OP_CAT');
-    this.swap(); this.binOp('OP_CAT');
-    this.swap(); this.binOp('OP_CAT');
-  }
-
-  // --- LE ↔ Numeric conversions (cheap — no byte reversal) ---
-
-  /** Convert 4-byte LE to unsigned script number. [le4] → [num]. Net: 0. 3 ops. */
-  le2num(): void {
-    this.pushB(new Uint8Array([0x00]));  // unsigned padding
-    this.binOp('OP_CAT');
-    this.uniOp('OP_BIN2NUM');
-  }
-
-  /** Convert script number to 4-byte LE (truncates to 32 bits). [num] → [le4]. Net: 0. 5 ops. */
-  num2le(): void {
-    this.pushI(5n);
-    this.binOp('OP_NUM2BIN');   // 5-byte LE
-    this.pushI(4n);
-    this.split();               // [4-byte LE, overflow+sign]
-    this.drop();                // discard overflow byte
-  }
-
-  // --- LE arithmetic ---
-
-  /** [a(LE), b(LE)] → [(a+b mod 2^32)(LE)]. Net: -1. 13 ops. */
-  add32(): void {
-    this.le2num();
-    this.swap();
-    this.le2num();
-    this.binOp('OP_ADD');
-    this.num2le();
-  }
-
-  /** Add N LE values. [v0..vN-1] (vN-1=TOS) → [sum(LE)]. Net: -(N-1). */
-  addN(n: number): void {
-    if (n < 2) return;
-    this.le2num();
-    for (let i = 1; i < n; i++) {
-      this.swap();
-      this.le2num();
-      this.binOp('OP_ADD');
-    }
-    this.num2le();
-  }
-
-  // --- ROTR/SHR using OP_LSHIFT/OP_RSHIFT (native BE byte-array shifts) ---
-
-  /**
-   * ROTR(x, n) on BE 4-byte value. [x_BE] → [rotated_BE]. Net: 0. 7 ops.
-   * ROTR(x,n) = (x >> n) | (x << (32-n))
-   */
-  rotrBE(n: number): void {
-    this.dup();                            // [x, x]
-    this.pushI(BigInt(n));
-    this.binOp('OP_RSHIFT');               // [x, x>>n]
-    this.swap();                           // [x>>n, x]
-    this.pushI(BigInt(32 - n));
-    this.binOp('OP_LSHIFT');               // [x>>n, x<<(32-n)]
-    this.binOp('OP_OR');                   // [ROTR result]
-  }
-
-  /** SHR(x, n) on BE 4-byte value. [x_BE] → [shifted_BE]. Net: 0. 2 ops. */
-  shrBE(n: number): void {
-    this.pushI(BigInt(n));
-    this.binOp('OP_RSHIFT');
-  }
-
-  // --- SHA-256 sigma functions (LE values, internally convert to BE for shifts) ---
-  // The LE→BE→sigma→BE→LE pattern costs 24 ops wrapper overhead per sigma call,
-  // but each ROTR drops from 17 ops (arithmetic) to 7 ops (native shifts),
-  // netting ~6 ops saved per big sigma and ~4 per small sigma.
-  // The real win is bytes: arithmetic ROTR uses 5-6 byte push constants (2^n, 2^32)
-  // while native shifts use 1-2 byte push amounts. Net: ~6.5KB smaller script.
-
-  /** Σ0(a) = ROTR(2)^ROTR(13)^ROTR(22). [a(LE)] → [Σ0(LE)]. Net: 0. */
-  bigSigma0(): void {
-    this.reverseBytes4();                  // LE → BE
-    this.dup(); this.dup();
-    this.rotrBE(2); this.swap(); this.rotrBE(13);
-    this.binOp('OP_XOR');
-    this.swap(); this.rotrBE(22);
-    this.binOp('OP_XOR');
-    this.reverseBytes4();                  // BE → LE
-  }
-
-  /** Σ1(e) = ROTR(6)^ROTR(11)^ROTR(25). [e(LE)] → [Σ1(LE)]. Net: 0. */
-  bigSigma1(): void {
-    this.reverseBytes4();
-    this.dup(); this.dup();
-    this.rotrBE(6); this.swap(); this.rotrBE(11);
-    this.binOp('OP_XOR');
-    this.swap(); this.rotrBE(25);
-    this.binOp('OP_XOR');
-    this.reverseBytes4();
-  }
-
-  /** σ0(x) = ROTR(7)^ROTR(18)^SHR(3). [x(LE)] → [σ0(LE)]. Net: 0. */
-  smallSigma0(): void {
-    this.reverseBytes4();
-    this.dup(); this.dup();
-    this.rotrBE(7); this.swap(); this.rotrBE(18);
-    this.binOp('OP_XOR');
-    this.swap(); this.shrBE(3);
-    this.binOp('OP_XOR');
-    this.reverseBytes4();
-  }
-
-  /** σ1(x) = ROTR(17)^ROTR(19)^SHR(10). [x(LE)] → [σ1(LE)]. Net: 0. */
-  smallSigma1(): void {
-    this.reverseBytes4();
-    this.dup(); this.dup();
-    this.rotrBE(17); this.swap(); this.rotrBE(19);
-    this.binOp('OP_XOR');
-    this.swap(); this.shrBE(10);
-    this.binOp('OP_XOR');
-    this.reverseBytes4();
-  }
-
-  /** Ch(e,f,g) = (e&f)^(~e&g). [e, f, g] (g=TOS), all LE → [Ch(LE)]. Net: -2. */
-  ch(): void {
-    this.rot();
-    this.dup();
-    this.uniOp('OP_INVERT');
-    this.rot();
-    this.binOp('OP_AND');
-    this.toAlt();
-    this.binOp('OP_AND');
-    this.fromAlt();
-    this.binOp('OP_XOR');
-  }
-
-  /** Maj(a,b,c) = (a&b)|(c&(a^b)). [a, b, c] (c=TOS), all LE → [Maj(LE)]. Net: -2. */
-  maj(): void {
-    this.toAlt();
-    this.dup2();
-    this.binOp('OP_AND');
-    this.toAlt();
-    this.binOp('OP_XOR');
-    this.fromAlt();
-    this.swap();
-    this.fromAlt();
-    this.binOp('OP_AND');
-    this.binOp('OP_OR');
-  }
-
-  /** Convert N × BE words on TOS to LE, preserving stack order.
-   *  Uses alt stack round-trip (push all, pop all = identity order). */
-  beWordsToLE(n: number): void {
-    for (let i = 0; i < n; i++) { this.reverseBytes4(); this.toAlt(); }
-    for (let i = 0; i < n; i++) this.fromAlt();
-  }
-
-  /** Convert 8 × BE words on TOS to LE AND reverse order.
-   *  Pre:  [a(deep)..h(TOS)] as BE.
-   *  Post: [h(deep)..a(TOS)] as LE.
-   *  Uses roll to process from bottom, so alt gets a first → a pops last → a on TOS. */
-  beWordsToLEReversed8(): void {
-    for (let i = 7; i >= 0; i--) {
-      this.roll(i);          // bring deepest remaining to TOS
-      this.reverseBytes4();  // BE → LE
-      this.toAlt();
-    }
-    for (let i = 0; i < 8; i++) this.fromAlt();
-  }
+/** Maj(a,b,c) = (a&b)|(c&(a^b)). [a, b, c] (c=TOS), all LE → [Maj(LE)]. Net: -2. */
+function maj(em: Emitter): void {
+  em.toAlt();
+  em.dup2();
+  em.binOp('OP_AND');
+  em.toAlt();
+  em.binOp('OP_XOR');
+  em.fromAlt();
+  em.swap();
+  em.fromAlt();
+  em.binOp('OP_AND');
+  em.binOp('OP_OR');
 }
 
 // =========================================================================
@@ -303,9 +143,9 @@ function generateCompressOps(): StackOp[] {
 
   // Phase 2: W expansion
   for (let _t = 16; _t < 64; _t++) {
-    em.over(); em.smallSigma1();
+    em.over(); smallSigma1(em);
     em.pick(6 + 1);
-    em.pick(14 + 2); em.smallSigma0();
+    em.pick(14 + 2); smallSigma0(em);
     em.pick(15 + 3);
     em.addN(4);
   }
@@ -478,11 +318,11 @@ function emitRound(em: Emitter, t: number): void {
   // Compute all 5 components, then batch-add with addN(5).
 
   em.pick(4);                             // e copy                    (+1)
-  em.bigSigma1();                         // Σ1(e)                     (0)
+  bigSigma1(em);                         // Σ1(e)                     (0)
   // Stack: Σ1(0) a(1) b(2) c(3) d(4) e(5) f(6) g(7) h(8)
 
   em.pick(5); em.pick(7); em.pick(9);    // e, f, g copies            (+3)
-  em.ch();                                // Ch(e,f,g)                 (-2) → net +2
+  ch(em);                                // Ch(e,f,g)                 (-2) → net +2
   // Stack: Ch(0) Σ1(1) a(2) b(3) c(4) d(5) e(6) f(7) g(8) h(9)
 
   em.pick(9);                             // h copy                    (+1) → net +3
@@ -497,11 +337,11 @@ function emitRound(em: Emitter, t: number): void {
   em.dup(); em.toAlt();                  // save T1 copy to alt
 
   em.pick(1);                             // a copy                    (+1) → net +2
-  em.bigSigma0();                         // Σ0(a)                     (0)
+  bigSigma0(em);                         // Σ0(a)                     (0)
   // Stack: Σ0(0) T1(1) a(2) b(3) c(4) d(5) e(6) f(7) g(8) h(9)
 
   em.pick(2); em.pick(4); em.pick(6);   // a, b, c copies            (+3) → net +5
-  em.maj();                               // Maj(a,b,c)                (-2) → net +3
+  maj(em);                               // Maj(a,b,c)                (-2) → net +3
   em.add32();                             // T2 = Σ0 + Maj            (-1) → net +2
   // Stack: T2(0) T1(1) a(2) b(3) c(4) d(5) e(6) f(7) g(8) h(9)
 

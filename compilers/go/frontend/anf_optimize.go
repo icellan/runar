@@ -443,15 +443,15 @@ func collectAllRefs(bindings []ir.ANFBinding) map[string]bool {
 func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 	switch v.Kind {
 	case "load_param":
-		name := v.Name
-		if strings.HasPrefix(name, "@ref:") {
-			name = strings.TrimPrefix(name, "@ref:")
-		}
-		refs[name] = true
+		// Do NOT track @ref: targets here — matches TS collectRefsFromValue
+		// which breaks on load_param without collecting refs.
 	case "load_prop":
 		// references the property by name, not a binding
 	case "load_const":
-		// no references
+		// Track @ref: aliases as references to prevent DCE
+		if v.ConstString != nil && strings.HasPrefix(*v.ConstString, "@ref:") {
+			refs[strings.TrimPrefix(*v.ConstString, "@ref:")] = true
+		}
 	case "bin_op":
 		refs[v.Left] = true
 		refs[v.Right] = true

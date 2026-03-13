@@ -366,8 +366,10 @@ fn test_dead_bindings_eliminated_after_rule1() {
         !names.contains(&"t1"),
         "dead binding t1 (INFINITY) should be eliminated after Rule 1; still present in: {names:?}"
     );
-    // t0, t2, t3 must remain
-    assert!(names.contains(&"t0"), "t0 should remain");
+    // t0 is also eliminated: load_param @ref: does not mark targets as used
+    // (matches TS collectRefsFromValue which skips load_param without collecting refs)
+    assert!(!names.contains(&"t0"), "t0 should be eliminated (only referenced via load_param @ref:)");
+    // t2, t3 must remain
     assert!(names.contains(&"t2"), "t2 should remain");
     assert!(names.contains(&"t3"), "t3 should remain");
 }

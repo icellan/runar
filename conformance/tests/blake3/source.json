@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/blake3/Blake3Test.runar.ts",
+    ".runar.sol": "../../../examples/sol/blake3/Blake3Test.runar.sol",
+    ".runar.move": "../../../examples/move/blake3/Blake3Test.runar.move",
+    ".runar.go": "../../../examples/go/blake3/Blake3Test.runar.go",
+    ".runar.rs": "../../../examples/rust/blake3/Blake3Test.runar.rs",
+    ".runar.py": "../../../examples/python/blake3/Blake3Test.runar.py"
+  }
+}

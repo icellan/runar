@@ -112,6 +112,8 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("split", FuncSig { params: vec!["ByteString", "bigint"], return_type: "ByteString" });
     m.insert("sha256Compress", FuncSig { params: vec!["ByteString", "ByteString"], return_type: "ByteString" });
     m.insert("sha256Finalize", FuncSig { params: vec!["ByteString", "ByteString", "bigint"], return_type: "ByteString" });
+    m.insert("blake3Compress", FuncSig { params: vec!["ByteString", "ByteString"], return_type: "ByteString" });
+    m.insert("blake3Hash", FuncSig { params: vec!["ByteString"], return_type: "ByteString" });
 
     // Preimage extractors
     m.insert("extractVersion", FuncSig { params: vec!["SigHashPreimage"], return_type: "bigint" });

@@ -716,6 +716,14 @@ class _LoweringContext:
             self._lower_sha256_finalize(binding_name, args, binding_index, last_uses)
             return
 
+        if func_name == "blake3Compress":
+            self._lower_blake3_compress(binding_name, args, binding_index, last_uses)
+            return
+
+        if func_name == "blake3Hash":
+            self._lower_blake3_hash(binding_name, args, binding_index, last_uses)
+            return
+
         if _is_ec_builtin(func_name):
             self._lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
             return
@@ -2834,6 +2842,40 @@ class _LoweringContext:
 
         from runar_compiler.codegen.sha256 import emit_sha256_finalize
         emit_sha256_finalize(lambda op: self.emit_op(op))
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # BLAKE3 compression
+    # -----------------------------------------------------------------
+
+    def _lower_blake3_compress(self, binding_name: str, args: list[str],
+                                binding_index: int, last_uses: dict[str, int]) -> None:
+        if len(args) < 2:
+            raise RuntimeError("blake3Compress requires 2 arguments: chainingValue, block")
+        for arg in args:
+            self.bring_to_top(arg, self._is_last_use(arg, binding_index, last_uses))
+        for _ in range(2):
+            self.sm.pop()
+
+        from runar_compiler.codegen.blake3 import emit_blake3_compress
+        emit_blake3_compress(lambda op: self.emit_op(op))
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    def _lower_blake3_hash(self, binding_name: str, args: list[str],
+                            binding_index: int, last_uses: dict[str, int]) -> None:
+        if len(args) < 1:
+            raise RuntimeError("blake3Hash requires 1 argument: message")
+        for arg in args:
+            self.bring_to_top(arg, self._is_last_use(arg, binding_index, last_uses))
+        for _ in range(1):
+            self.sm.pop()
+
+        from runar_compiler.codegen.blake3 import emit_blake3_hash
+        emit_blake3_hash(lambda op: self.emit_op(op))
 
         self.sm.push(binding_name)
         self._track_depth()

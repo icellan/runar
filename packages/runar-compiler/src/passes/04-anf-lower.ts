@@ -964,6 +964,7 @@ const BYTE_RETURNING_FUNCTIONS = new Set([
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
   'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
   'extractVersion', 'extractLocktime', 'extractSigHashType',
+  'blake3Compress', 'blake3Hash',
 ]);
 
 /**

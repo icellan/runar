@@ -868,22 +868,53 @@ export class ScriptVM {
         if (byte === Opcode.OP_LSHIFT) {
           this.countOp();
           const shift = this.popNum();
-          const val = this.popNum();
+          const val = this.pop(); // raw byte array, not number
           if (shift < 0n) {
             throw new ScriptError('OP_LSHIFT: negative shift');
           }
-          this.pushNum(val << shift);
+          const n = Number(shift);
+          if (val.length === 0 || n === 0) { this.push(val); continue; }
+          // Treat byte array as big-endian unsigned integer
+          let num = 0n;
+          for (let j = 0; j < val.length; j++) {
+            num = (num << 8n) | BigInt(val[j]!);
+          }
+          // Shift left, mask to original byte count
+          const bitLen = BigInt(val.length * 8);
+          num = (num << BigInt(n)) & ((1n << bitLen) - 1n);
+          // Convert back to big-endian bytes (same length)
+          const result = new Uint8Array(val.length);
+          for (let j = val.length - 1; j >= 0; j--) {
+            result[j] = Number(num & 0xFFn);
+            num >>= 8n;
+          }
+          this.push(result);
           continue;
         }
 
         if (byte === Opcode.OP_RSHIFT) {
           this.countOp();
           const shift = this.popNum();
-          const val = this.popNum();
+          const val = this.pop(); // raw byte array, not number
           if (shift < 0n) {
             throw new ScriptError('OP_RSHIFT: negative shift');
           }
-          this.pushNum(val >> shift);
+          const n = Number(shift);
+          if (val.length === 0 || n === 0) { this.push(val); continue; }
+          // Treat byte array as big-endian unsigned integer
+          let num = 0n;
+          for (let j = 0; j < val.length; j++) {
+            num = (num << 8n) | BigInt(val[j]!);
+          }
+          // Shift right (zero-fill from MSB side)
+          num = num >> BigInt(n);
+          // Convert back to big-endian bytes (same length)
+          const result2 = new Uint8Array(val.length);
+          for (let j = val.length - 1; j >= 0; j--) {
+            result2[j] = Number(num & 0xFFn);
+            num >>= 8n;
+          }
+          this.push(result2);
           continue;
         }
 

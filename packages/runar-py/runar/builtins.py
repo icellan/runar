@@ -77,6 +77,22 @@ def _as_bytes(x) -> bytes:
     raise TypeError(f"Expected bytes or hex-encoded string, got {type(x).__name__}")
 
 
+# -- Mock BLAKE3 Functions (compiler intrinsics — stubs return 32 zero bytes)
+
+def blake3_compress(chaining_value, block) -> bytes:
+    """Mock BLAKE3 single-block compression.
+    In compiled Bitcoin Script this expands to ~10,000 opcodes.
+    Returns 32 zero bytes for business-logic testing."""
+    return b'\x00' * 32
+
+def blake3_hash(message) -> bytes:
+    """Mock BLAKE3 hash for messages up to 64 bytes.
+    In compiled Bitcoin Script this uses the IV as the chaining value and
+    applies zero-padding before calling the compression function.
+    Returns 32 zero bytes for business-logic testing."""
+    return b'\x00' * 32
+
+
 # -- Real Hash Functions -----------------------------------------------------
 
 def hash160(data) -> bytes:

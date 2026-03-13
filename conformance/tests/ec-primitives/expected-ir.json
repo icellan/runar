@@ -848,6 +848,13 @@
     {
       "body": [
         {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "@ref:t0"
+          }
+        },
+        {
           "name": "result",
           "value": {
             "kind": "load_const",

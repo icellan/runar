@@ -210,6 +210,25 @@ func Ripemd160Func(data ByteString) Ripemd160Hash {
 }
 
 // ---------------------------------------------------------------------------
+// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// ---------------------------------------------------------------------------
+
+// Blake3Compress is a mock BLAKE3 single-block compression.
+// In compiled Bitcoin Script this expands to ~10,000 opcodes.
+// The mock returns 32 zero bytes for business-logic testing.
+func Blake3Compress(chainingValue, block ByteString) ByteString {
+	return ByteString(make([]byte, 32))
+}
+
+// Blake3Hash is a mock BLAKE3 hash for messages up to 64 bytes.
+// In compiled Bitcoin Script this uses the IV as the chaining value and
+// applies zero-padding before calling the compression function.
+// The mock returns 32 zero bytes for business-logic testing.
+func Blake3Hash(message ByteString) ByteString {
+	return ByteString(make([]byte, 32))
+}
+
+// ---------------------------------------------------------------------------
 // Mock preimage extraction functions
 // ---------------------------------------------------------------------------
 

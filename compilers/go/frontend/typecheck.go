@@ -73,6 +73,8 @@ var builtinFunctions = map[string]funcSig{
 	"ecPointY":           {params: []string{"Point"}, returnType: "bigint"},
 	"sha256Compress":    {params: []string{"ByteString", "ByteString"}, returnType: "ByteString"},
 	"sha256Finalize":    {params: []string{"ByteString", "ByteString", "bigint"}, returnType: "ByteString"},
+	"blake3Compress":    {params: []string{"ByteString", "ByteString"}, returnType: "ByteString"},
+	"blake3Hash":        {params: []string{"ByteString"}, returnType: "ByteString"},
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},

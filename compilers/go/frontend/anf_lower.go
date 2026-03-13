@@ -68,6 +68,8 @@ var byteReturningFunctions = map[string]bool{
 	"ecEncodeCompressed": true,
 	"sha256Compress":     true,
 	"sha256Finalize":     true,
+	"blake3Compress":     true,
+	"blake3Hash":         true,
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {

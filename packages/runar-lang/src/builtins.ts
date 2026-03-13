@@ -85,6 +85,25 @@ export function sha256Finalize(_state: ByteString, _remaining: ByteString, _msgB
   return compilerStub('sha256Finalize');
 }
 
+/**
+ * BLAKE3 single-block compression.
+ * Takes a 32-byte chaining value and a 64-byte message block.
+ * Returns the 32-byte hash output.
+ * Compiled to inlined BLAKE3 compression opcodes.
+ */
+export function blake3Compress(_chainingValue: ByteString, _block: ByteString): ByteString {
+  return compilerStub('blake3Compress');
+}
+
+/**
+ * Full BLAKE3 hash for messages up to 64 bytes.
+ * Uses the IV as the chaining value, applies zero-padding,
+ * and returns the 32-byte hash.
+ */
+export function blake3Hash(_message: ByteString): ByteString {
+  return compilerStub('blake3Hash');
+}
+
 // ---------------------------------------------------------------------------
 // Signature verification
 // ---------------------------------------------------------------------------

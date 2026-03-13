@@ -106,6 +106,8 @@ _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
     "ecNegate",
     "ecMakePoint",
     "ecEncodeCompressed",
+    "blake3Compress",
+    "blake3Hash",
 })
 
 

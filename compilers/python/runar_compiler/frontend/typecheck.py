@@ -108,6 +108,8 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "ecPointY":           FuncSig(params=["Point"], return_type="bigint"),
     "sha256Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
     "sha256Finalize":    FuncSig(params=["ByteString", "ByteString", "bigint"], return_type="ByteString"),
+    "blake3Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
+    "blake3Hash":        FuncSig(params=["ByteString"], return_type="ByteString"),
     "abs":               FuncSig(params=["bigint"], return_type="bigint"),
     "min":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),
     "max":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),

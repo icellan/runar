@@ -892,6 +892,16 @@ impl LoweringContext {
             return;
         }
 
+        if func_name == "blake3Compress" {
+            self.lower_blake3_compress(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "blake3Hash" {
+            self.lower_blake3_hash(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
         if is_ec_builtin(func_name) {
             self.lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses);
             return;
@@ -3063,6 +3073,56 @@ impl LoweringContext {
         }
 
         super::sha256::emit_sha256_finalize(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_blake3_compress(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 2,
+            "blake3Compress requires 2 arguments: chainingValue, block"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..2 {
+            self.sm.pop();
+        }
+
+        super::blake3::emit_blake3_compress(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_blake3_hash(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 1,
+            "blake3Hash requires 1 argument: message"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..1 {
+            self.sm.pop();
+        }
+
+        super::blake3::emit_blake3_hash(&mut |op| self.ops.push(op));
 
         self.sm.push(binding_name);
         self.track_depth();

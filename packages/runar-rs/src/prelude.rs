@@ -175,6 +175,25 @@ pub fn ripemd160(data: &[u8]) -> Ripemd160 {
 }
 
 // ---------------------------------------------------------------------------
+// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// ---------------------------------------------------------------------------
+
+/// Mock BLAKE3 single-block compression.
+/// In compiled Bitcoin Script this expands to ~10,000 opcodes.
+/// The mock returns 32 zero bytes for business-logic testing.
+pub fn blake3_compress(_chaining_value: &[u8], _block: &[u8]) -> ByteString {
+    vec![0u8; 32]
+}
+
+/// Mock BLAKE3 hash for messages up to 64 bytes.
+/// In compiled Bitcoin Script this uses the IV as the chaining value and
+/// applies zero-padding before calling the compression function.
+/// The mock returns 32 zero bytes for business-logic testing.
+pub fn blake3_hash(_message: &[u8]) -> ByteString {
+    vec![0u8; 32]
+}
+
+// ---------------------------------------------------------------------------
 // Mock preimage extraction functions
 // ---------------------------------------------------------------------------
 

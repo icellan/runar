@@ -51,13 +51,14 @@ export class ScriptExecutionContract {
     source: string,
     constructorArgs: Record<string, bigint | boolean | string>,
     fileName?: string,
+    compileOptions?: Partial<CompileOptions>,
   ): ScriptExecutionContract {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { compile } = require('runar-compiler') as {
       compile: (source: string, options?: CompileOptions) => CompileResult;
     };
 
-    const result = compile(source, { fileName, constructorArgs });
+    const result = compile(source, { fileName, constructorArgs, ...compileOptions });
     if (!result.success || !result.artifact || !result.scriptHex) {
       const errors = result.diagnostics
         .filter(d => d.severity === 'error')

@@ -87,6 +87,8 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['verifySLHDSA_SHA2_256f', { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
   ['sha256Compress',  { params: ['ByteString', 'ByteString'], returnType: 'ByteString' }],
   ['sha256Finalize',  { params: ['ByteString', 'ByteString', 'bigint'], returnType: 'ByteString' }],
+  ['blake3Compress',  { params: ['ByteString', 'ByteString'], returnType: 'ByteString' }],
+  ['blake3Hash',      { params: ['ByteString'], returnType: 'ByteString' }],
   ['abs',          { params: ['bigint'], returnType: 'bigint' }],
   ['min',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],
   ['max',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],

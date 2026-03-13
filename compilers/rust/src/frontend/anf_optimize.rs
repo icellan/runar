@@ -367,15 +367,19 @@ fn try_rewrite(
 /// Collect all referenced binding names from a value.
 fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
     match value {
-        ANFValue::LoadParam { name } => {
-            // Handle @ref: aliases
-            if let Some(target) = name.strip_prefix("@ref:") {
-                refs.insert(target.to_string());
-            } else {
-                refs.insert(name.clone());
+        ANFValue::LoadParam { .. } => {
+            // Do NOT track @ref: targets here — matches TS collectRefsFromValue
+            // which breaks on load_param without collecting refs.
+        }
+        ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
+        ANFValue::LoadConst { value } => {
+            // Track @ref: aliases as references to prevent DCE
+            if let serde_json::Value::String(s) = value {
+                if let Some(target) = s.strip_prefix("@ref:") {
+                    refs.insert(target.to_string());
+                }
             }
         }
-        ANFValue::LoadProp { .. } | ANFValue::LoadConst { .. } | ANFValue::GetStateScript {} => {}
         ANFValue::BinOp { left, right, .. } => {
             refs.insert(left.clone());
             refs.insert(right.clone());

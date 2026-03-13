@@ -24,6 +24,7 @@ from runar.builtins import (
     verify_slh_dsa_sha2_128s, verify_slh_dsa_sha2_128f,
     verify_slh_dsa_sha2_192s, verify_slh_dsa_sha2_192f,
     verify_slh_dsa_sha2_256s, verify_slh_dsa_sha2_256f,
+    blake3_compress, blake3_hash,
 )
 from runar.wots import wots_keygen, wots_sign, WOTSKeyPair
 from runar.slhdsa_impl import slh_keygen, slh_verify, SLHKeyPair
@@ -79,6 +80,8 @@ __all__ = [
     'ec_add', 'ec_mul', 'ec_mul_gen', 'ec_negate', 'ec_on_curve',
     'ec_mod_reduce', 'ec_encode_compressed', 'ec_make_point',
     'ec_point_x', 'ec_point_y', 'EC_P', 'EC_N', 'EC_G',
+    # BLAKE3
+    'blake3_compress', 'blake3_hash',
     # Test helpers
     'mock_sig', 'mock_pub_key', 'mock_preimage',
     # WOTS+ keygen/sign

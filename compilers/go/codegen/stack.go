@@ -795,6 +795,16 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if funcName == "blake3Compress" {
+		ctx.lowerBlake3Compress(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "blake3Hash" {
+		ctx.lowerBlake3Hash(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if isEcBuiltin(funcName) {
 		ctx.lowerEcBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
 		return
@@ -3392,6 +3402,42 @@ func (ctx *loweringContext) lowerSha256Finalize(bindingName string, args []strin
 	}
 
 	EmitSha256Finalize(func(op StackOp) { ctx.emitOp(op) })
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// BLAKE3 compression — delegates to blake3.go
+// ---------------------------------------------------------------------------
+
+func (ctx *loweringContext) lowerBlake3Compress(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	if len(args) < 2 {
+		panic("blake3Compress requires 2 arguments: chainingValue, block")
+	}
+	for _, arg := range args {
+		ctx.bringToTop(arg, ctx.isLastUse(arg, bindingIndex, lastUses))
+	}
+	for i := 0; i < 2; i++ {
+		ctx.sm.pop()
+	}
+
+	EmitBlake3Compress(func(op StackOp) { ctx.emitOp(op) })
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+func (ctx *loweringContext) lowerBlake3Hash(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	if len(args) < 1 {
+		panic("blake3Hash requires 1 argument: message")
+	}
+	for _, arg := range args {
+		ctx.bringToTop(arg, ctx.isLastUse(arg, bindingIndex, lastUses))
+	}
+	ctx.sm.pop()
+
+	EmitBlake3Hash(func(op StackOp) { ctx.emitOp(op) })
 
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()

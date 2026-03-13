@@ -327,14 +327,18 @@ def _eliminate_dead_bindings(method: ANFMethod) -> None:
 def _collect_refs(v: ANFValue, used: set[str]) -> None:
     """Walk an ANFValue and collect all binding name references.
 
-    Matches TS ``collectRefsFromValue`` in constant-fold.ts: load_const,
-    load_param, and load_prop do NOT contribute refs (the stack lowerer
-    independently handles @ref: aliases).
+    Matches TS ``collectRefsFromValue`` in constant-fold.ts.
     """
-    # For load_const / load_param / load_prop, TS just breaks without
-    # collecting any refs.  We must do the same so dead binding elimination
-    # produces identical results.
-    if v.kind in ("load_const", "load_param", "load_prop", "get_state_script"):
+    if v.kind == "load_param":
+        # Do NOT track @ref: targets here — matches TS collectRefsFromValue
+        # which breaks on load_param without collecting refs.
+        return
+    if v.kind == "load_const":
+        # Track @ref: aliases in load_const values to prevent DCE
+        if v.const_string is not None and v.const_string.startswith("@ref:"):
+            used.add(v.const_string[5:])
+        return
+    if v.kind in ("load_prop", "get_state_script"):
         return
     if v.left is not None:
         used.add(v.left)

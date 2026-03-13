@@ -26,6 +26,7 @@ import {
   emitEcMakePoint, emitEcPointX, emitEcPointY,
 } from './ec-codegen.js';
 import { emitSha256Compress, emitSha256Finalize } from './sha256-codegen.js';
+import { emitBlake3Compress, emitBlake3Hash } from './blake3-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -874,6 +875,16 @@ class LoweringContext {
 
     if (func === 'sha256Finalize') {
       this.lowerSha256Finalize(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    if (func === 'blake3Compress') {
+      this.lowerBlake3Compress(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    if (func === 'blake3Hash') {
+      this.lowerBlake3Hash(bindingName, args, bindingIndex, lastUses);
       return;
     }
 
@@ -3414,6 +3425,50 @@ class LoweringContext {
     for (let i = 0; i < 3; i++) this.stackMap.pop();
 
     emitSha256Finalize((op) => this.emitOp(op));
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // BLAKE3 compression — delegates to blake3-codegen.ts
+  // =========================================================================
+
+  private lowerBlake3Compress(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 2) {
+      throw new Error('blake3Compress requires 2 arguments: chainingValue, block');
+    }
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < 2; i++) this.stackMap.pop();
+
+    emitBlake3Compress((op) => this.emitOp(op));
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  private lowerBlake3Hash(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 1) {
+      throw new Error('blake3Hash requires 1 argument: message');
+    }
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    this.stackMap.pop();
+
+    emitBlake3Hash((op) => this.emitOp(op));
 
     this.stackMap.push(bindingName);
     this.trackDepth();
