@@ -1885,6 +1885,10 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
             body: body.clone(),
             iter_var: iter_var.clone(),
         },
+        ANFValue::SnarkVerify { proof, public_inputs } => ANFValue::SnarkVerify {
+            proof: r(proof),
+            public_inputs: public_inputs.iter().map(|a| r(a)).collect(),
+        },
     }
 }
 

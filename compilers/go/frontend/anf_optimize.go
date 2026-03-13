@@ -1,7 +1,6 @@
 package frontend
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -386,7 +385,6 @@ func makeAlias(b *ir.ANFBinding, target string) {
 func makeInfinityConst(b *ir.ANFBinding) {
 	infHex := infinityHex
 	raw, _ := json.Marshal(infHex)
-	infBytes, _ := hex.DecodeString(infHex)
 	b.Value = ir.ANFValue{
 		Kind:        "load_const",
 		RawValue:    raw,

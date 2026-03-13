@@ -463,7 +463,8 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
         | ANFValue::CheckPreimage { .. }
         | ANFValue::DeserializeState { .. }
         | ANFValue::AddOutput { .. }
-        | ANFValue::AddRawOutput { .. } => value.clone(),
+        | ANFValue::AddRawOutput { .. }
+        | ANFValue::SnarkVerify { .. } => value.clone(),
     }
 }
 

@@ -1599,6 +1599,14 @@ func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
 		return v
 	case "loop":
 		return v
+	case "snark_verify":
+		v.Proof = r(v.Proof)
+		pi := make([]string, len(v.PublicInputs))
+		for i, s := range v.PublicInputs {
+			pi[i] = r(s)
+		}
+		v.PublicInputs = pi
+		return v
 	}
 	return v
 }

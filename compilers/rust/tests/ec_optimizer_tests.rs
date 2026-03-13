@@ -99,10 +99,10 @@ fn test_rule1_ecadd_x_infinity_becomes_alias() {
 
     let t2 = find_binding(body, "t2").expect("binding t2 should be present");
     match &t2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:t0", "Rule 1: expected @ref:t0, got {name}");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:t0", "Rule 1: expected @ref:t0");
         }
-        other => panic!("Rule 1: expected LoadParam(@ref:t0), got {other:?}"),
+        other => panic!("Rule 1: expected LoadConst(@ref:t0), got {other:?}"),
     }
 }
 
@@ -123,10 +123,10 @@ fn test_rule2_ecadd_infinity_x_becomes_alias() {
 
     let t2 = find_binding(body, "t2").expect("binding t2 should be present");
     match &t2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:t1", "Rule 2: expected @ref:t1, got {name}");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:t1", "Rule 2: expected @ref:t1");
         }
-        other => panic!("Rule 2: expected LoadParam(@ref:t1), got {other:?}"),
+        other => panic!("Rule 2: expected LoadConst(@ref:t1), got {other:?}"),
     }
 }
 
@@ -147,10 +147,10 @@ fn test_rule3_ecmul_x_one_becomes_alias() {
 
     let t2 = find_binding(body, "t2").expect("binding t2 should be present");
     match &t2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:t0", "Rule 3: expected @ref:t0, got {name}");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:t0", "Rule 3: expected @ref:t0");
         }
-        other => panic!("Rule 3: expected LoadParam(@ref:t0), got {other:?}"),
+        other => panic!("Rule 3: expected LoadConst(@ref:t0), got {other:?}"),
     }
 }
 
@@ -253,10 +253,10 @@ fn test_rule7_double_negate_eliminates() {
 
     let t2 = find_binding(body, "t2").expect("binding t2 should be present");
     match &t2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:t0", "Rule 7: expected @ref:t0, got {name}");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:t0", "Rule 7: expected @ref:t0");
         }
-        other => panic!("Rule 7: expected LoadParam(@ref:t0), got {other:?}"),
+        other => panic!("Rule 7: expected LoadConst(@ref:t0), got {other:?}"),
     }
 }
 
@@ -553,20 +553,20 @@ fn test_multiple_methods_all_optimized() {
     let b1 = &result.methods[0].body;
     let t2 = find_binding(b1, "t2").expect("t2 in method1 should be present");
     match &t2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:t0", "method1: Rule 1 should alias t2 to t0");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:t0", "method1: Rule 1 should alias t2 to t0");
         }
-        other => panic!("method1: expected LoadParam(@ref:t0), got {other:?}"),
+        other => panic!("method1: expected LoadConst(@ref:t0), got {other:?}"),
     }
 
     // Verify Rule 1 was applied in method2
     let b2 = &result.methods[1].body;
     let m2 = find_binding(b2, "m2").expect("m2 in method2 should be present");
     match &m2.value {
-        ANFValue::LoadParam { name } => {
-            assert_eq!(name, "@ref:m0", "method2: Rule 1 should alias m2 to m0");
+        ANFValue::LoadConst { value } => {
+            assert_eq!(value.as_str().unwrap(), "@ref:m0", "method2: Rule 1 should alias m2 to m0");
         }
-        other => panic!("method2: expected LoadParam(@ref:m0), got {other:?}"),
+        other => panic!("method2: expected LoadConst(@ref:m0), got {other:?}"),
     }
 }
 

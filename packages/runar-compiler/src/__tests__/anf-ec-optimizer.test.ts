@@ -317,20 +317,19 @@ describe('ANF EC Optimizer', () => {
         ]),
       ]);
       const result = optimizeEC(program);
-      // Rule 1: ecAdd(x, INFINITY) → alias to x via load_param @ref:
-      // (TS optimizer uses load_param with @ref: prefix, not load_const)
+      // Rule 1: ecAdd(x, INFINITY) → alias to x via load_const @ref:
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      expect(t2!.value.kind).toBe('load_param');
-      if (t2!.value.kind === 'load_param') {
-        expect(t2!.value.name).toMatch(/^@ref:/);
+      expect(t2!.value.kind).toBe('load_const');
+      if (t2!.value.kind === 'load_const') {
+        expect(String(t2!.value.value)).toMatch(/^@ref:/);
       }
       // Check method2: s2 should also be aliased
       const s2 = findBinding(result, 's2');
       expect(s2).toBeDefined();
-      expect(s2!.value.kind).toBe('load_param');
-      if (s2!.value.kind === 'load_param') {
-        expect(s2!.value.name).toMatch(/^@ref:/);
+      expect(s2!.value.kind).toBe('load_const');
+      if (s2!.value.kind === 'load_const') {
+        expect(String(s2!.value.value)).toMatch(/^@ref:/);
       }
     });
 

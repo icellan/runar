@@ -723,10 +723,10 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
-                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some("@ref:t0"), "expected @ref:t0, got {value}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst(@ref:t0), got {other:?}"),
         }
     }
 
@@ -748,10 +748,10 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
-                assert_eq!(name, "@ref:t1", "expected @ref:t1, got {name}");
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some("@ref:t1"), "expected @ref:t1, got {value}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst(@ref:t1), got {other:?}"),
         }
     }
 
@@ -773,10 +773,10 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
-                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some("@ref:t0"), "expected @ref:t0, got {value}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst(@ref:t0), got {other:?}"),
         }
     }
 
@@ -883,10 +883,10 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
-                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some("@ref:t0"), "expected @ref:t0, got {value}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst(@ref:t0), got {other:?}"),
         }
     }
 

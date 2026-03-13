@@ -243,11 +243,15 @@ func TestANFECOptimizer_Rule1_EcAddXInfinity(t *testing.T) {
 	if t2 == nil {
 		t.Fatal("expected binding t2 to exist")
 	}
-	if t2.Value.Kind != "load_param" {
-		t.Errorf("expected t2.Kind == load_param, got %q", t2.Value.Kind)
+	if t2.Value.Kind != "load_const" {
+		t.Errorf("expected t2.Kind == load_const, got %q", t2.Value.Kind)
 	}
-	if t2.Value.Name != "@ref:t0" {
-		t.Errorf("expected t2.Name == @ref:t0, got %q", t2.Value.Name)
+	if t2.Value.ConstString == nil || *t2.Value.ConstString != "@ref:t0" {
+		got := "<nil>"
+		if t2.Value.ConstString != nil {
+			got = *t2.Value.ConstString
+		}
+		t.Errorf("expected t2.ConstString == @ref:t0, got %q", got)
 	}
 }
 
@@ -270,11 +274,15 @@ func TestANFECOptimizer_Rule2_EcAddInfinityX(t *testing.T) {
 	if t2 == nil {
 		t.Fatal("expected binding t2 to exist")
 	}
-	if t2.Value.Kind != "load_param" {
-		t.Errorf("expected t2.Kind == load_param, got %q", t2.Value.Kind)
+	if t2.Value.Kind != "load_const" {
+		t.Errorf("expected t2.Kind == load_const, got %q", t2.Value.Kind)
 	}
-	if t2.Value.Name != "@ref:t1" {
-		t.Errorf("expected t2.Name == @ref:t1, got %q", t2.Value.Name)
+	if t2.Value.ConstString == nil || *t2.Value.ConstString != "@ref:t1" {
+		got := "<nil>"
+		if t2.Value.ConstString != nil {
+			got = *t2.Value.ConstString
+		}
+		t.Errorf("expected t2.ConstString == @ref:t1, got %q", got)
 	}
 }
 
@@ -297,11 +305,15 @@ func TestANFECOptimizer_Rule3_EcMulByOne(t *testing.T) {
 	if t2 == nil {
 		t.Fatal("expected binding t2 to exist")
 	}
-	if t2.Value.Kind != "load_param" {
-		t.Errorf("expected t2.Kind == load_param, got %q", t2.Value.Kind)
+	if t2.Value.Kind != "load_const" {
+		t.Errorf("expected t2.Kind == load_const, got %q", t2.Value.Kind)
 	}
-	if t2.Value.Name != "@ref:t0" {
-		t.Errorf("expected t2.Name == @ref:t0, got %q", t2.Value.Name)
+	if t2.Value.ConstString == nil || *t2.Value.ConstString != "@ref:t0" {
+		got := "<nil>"
+		if t2.Value.ConstString != nil {
+			got = *t2.Value.ConstString
+		}
+		t.Errorf("expected t2.ConstString == @ref:t0, got %q", got)
 	}
 }
 
@@ -415,11 +427,15 @@ func TestANFECOptimizer_Rule7_DoubleNegate(t *testing.T) {
 	if t2 == nil {
 		t.Fatal("expected binding t2 to exist")
 	}
-	if t2.Value.Kind != "load_param" {
-		t.Errorf("expected t2.Kind == load_param, got %q", t2.Value.Kind)
+	if t2.Value.Kind != "load_const" {
+		t.Errorf("expected t2.Kind == load_const, got %q", t2.Value.Kind)
 	}
-	if t2.Value.Name != "@ref:t0" {
-		t.Errorf("expected t2.Name == @ref:t0, got %q", t2.Value.Name)
+	if t2.Value.ConstString == nil || *t2.Value.ConstString != "@ref:t0" {
+		got := "<nil>"
+		if t2.Value.ConstString != nil {
+			got = *t2.Value.ConstString
+		}
+		t.Errorf("expected t2.ConstString == @ref:t0, got %q", got)
 	}
 }
 

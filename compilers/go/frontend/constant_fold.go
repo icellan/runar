@@ -539,7 +539,7 @@ func foldValue(value *ir.ANFValue, env *constEnv) *ir.ANFValue {
 
 	case "assert", "update_prop", "get_state_script",
 		"check_preimage", "deserialize_state",
-		"add_output", "add_raw_output":
+		"add_output", "add_raw_output", "snark_verify":
 		return value
 	}
 
