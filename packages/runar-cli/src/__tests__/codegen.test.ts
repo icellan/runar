@@ -22,7 +22,7 @@ describe('codegenCommand', () => {
     codegenCommand = mod.codegenCommand;
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: number) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
       throw new Error('process.exit called');
     });
 
@@ -44,7 +44,7 @@ describe('codegenCommand', () => {
     codegenCommand = mod.codegenCommand;
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: number) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
       throw new Error('process.exit called');
     });
 
@@ -67,7 +67,7 @@ describe('codegenCommand', () => {
     codegenCommand = mod.codegenCommand;
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: number) => {
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
       throw new Error('process.exit called');
     });
 
