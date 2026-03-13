@@ -210,11 +210,19 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # InductiveSmartContract public method lowering
             # ---------------------------------------------------------------
 
-            # Register implicit parameters: partial SHA-256 tail blocks + txPreimage
-            method_ctx.add_param("_parentHashState")
-            method_ctx.add_param("_parentTailBlock1")
-            method_ctx.add_param("_parentTailBlock2")
-            method_ctx.add_param("_parentRawTailLen")
+            # Determine if this method needs change output / newAmount (same logic as stateful)
+            needs_change_output = (
+                _method_mutates_state(method, contract)
+                or _method_has_add_output(method)
+            )
+            needs_new_amount = _method_mutates_state(method, contract) and not _method_has_add_output(method)
+
+            # Register implicit parameters: same as StatefulSmartContract
+            if needs_change_output:
+                method_ctx.add_param("_changePKH")
+                method_ctx.add_param("_changeAmount")
+            if needs_new_amount:
+                method_ctx.add_param("_newAmount")
             method_ctx.add_param("txPreimage")
 
             # 1. Inject checkPreimage(txPreimage) at the start
@@ -222,25 +230,13 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             check_result = method_ctx.emit(ANFValue(kind="check_preimage", preimage=preimage_ref))
             method_ctx.emit(_make_assert(check_result))
 
-            # 2. Verify parent tx authenticity via partial SHA-256
-            hash_state = method_ctx.emit(ANFValue(kind="load_param", name="_parentHashState"))
-            tail_block1 = method_ctx.emit(ANFValue(kind="load_param", name="_parentTailBlock1"))
-            mid = method_ctx.emit(_make_call("sha256Compress", [hash_state, tail_block1]))
-            tail_block2 = method_ctx.emit(ANFValue(kind="load_param", name="_parentTailBlock2"))
-            single_hash = method_ctx.emit(_make_call("sha256Compress", [mid, tail_block2]))
-            parent_tx_id = method_ctx.emit(_make_call("sha256", [single_hash]))
-            preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-            outpoint_ref = method_ctx.emit(_make_call("extractOutpoint", [preimage_ref2]))
-            thirty_two = method_ctx.emit(_make_load_const_int(32))
-            parent_txid_from_preimage = method_ctx.emit(_make_call("left", [outpoint_ref, thirty_two]))
-            parent_hash_eq = method_ctx.emit(ANFValue(
-                kind="bin_op", op="===",
-                left=parent_tx_id, right=parent_txid_from_preimage,
-                result_type="bytes",
-            ))
-            method_ctx.emit(_make_assert(parent_hash_eq))
+            # 1b. Deserialize mutable state from the preimage's scriptCode.
+            state_props = [p for p in contract.properties if not p.readonly]
+            if state_props:
+                ds_preimage = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                method_ctx.emit(ANFValue(kind="deserialize_state", preimage=ds_preimage))
 
-            # 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
+            # 2. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
             genesis_ref = method_ctx.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
             zero_sentinel = method_ctx.emit(_make_load_const_string("0" * 72))  # 36 bytes = 72 hex chars
             is_genesis = method_ctx.emit(ANFValue(
@@ -249,122 +245,94 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                 result_type="bytes",
             ))
 
-            # Genesis branch: set _genesisOutpoint = extractOutpoint(txPreimage)
+            # Genesis branch: compute new genesis outpoint = extractOutpoint(txPreimage)
             genesis_ctx = method_ctx.sub_context()
             gp_ref = genesis_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-            current_outpoint = genesis_ctx.emit(_make_call("extractOutpoint", [gp_ref]))
-            genesis_ctx.emit(_make_update_prop("_genesisOutpoint", current_outpoint))
+            genesis_ctx.emit(_make_call("extractOutpoint", [gp_ref]))
             method_ctx.sync_counter(genesis_ctx)
 
-            # Non-genesis branch: verify chain consistency using tail block extraction
+            # Non-genesis branch: verify chain via SNARK, then produce existing _genesisOutpoint
             non_genesis_ctx = method_ctx.sub_context()
-
-            # Concatenate the two tail blocks to get 128 bytes of tail data
-            tb1 = non_genesis_ctx.emit(ANFValue(kind="load_param", name="_parentTailBlock1"))
-            tb2 = non_genesis_ctx.emit(ANFValue(kind="load_param", name="_parentTailBlock2"))
-            tail_data = non_genesis_ctx.emit(_make_call("cat", [tb1, tb2]))
-
-            # Internal fields (111 bytes) are at the end of the raw tx data,
-            # just before the 4-byte locktime.
-            raw_tail_len = non_genesis_ctx.emit(ANFValue(kind="load_param", name="_parentRawTailLen"))
-            four = non_genesis_ctx.emit(_make_load_const_int(4))
-            one_eleven = non_genesis_ctx.emit(_make_load_const_int(111))
-            before_locktime = non_genesis_ctx.emit(ANFValue(kind="bin_op", op="-", left=raw_tail_len, right=four))
-            field_start = non_genesis_ctx.emit(ANFValue(kind="bin_op", op="-", left=before_locktime, right=one_eleven))
-
-            # Extract 111 bytes of internal fields from tailData
-            field_end = non_genesis_ctx.emit(ANFValue(kind="bin_op", op="+", left=field_start, right=one_eleven))
-            prefix_and_fields = non_genesis_ctx.emit(_make_call("left", [tail_data, field_end]))
-            internal_fields = non_genesis_ctx.emit(_make_call("right", [prefix_and_fields, one_eleven]))
-
-            # Extract each 37-byte field (1 push opcode + 36 data bytes)
-            thirty_seven = non_genesis_ctx.emit(_make_load_const_int(37))
-            thirty_six = non_genesis_ctx.emit(_make_load_const_int(36))
-
-            # parentGenesis: bytes [1..37) (skip push opcode at byte 0)
-            parent_genesis_raw = non_genesis_ctx.emit(_make_call("left", [internal_fields, thirty_seven]))
-            parent_genesis = non_genesis_ctx.emit(_make_call("right", [parent_genesis_raw, thirty_six]))
-
-            # parentParentOutpoint: bytes [38..74) (skip push opcode at byte 37)
-            seventy_four = non_genesis_ctx.emit(_make_load_const_int(74))
-            parent_parent_raw = non_genesis_ctx.emit(_make_call("left", [internal_fields, seventy_four]))
-            parent_parent_with_prefix = non_genesis_ctx.emit(_make_call("right", [parent_parent_raw, thirty_seven]))
-            parent_parent_outpoint = non_genesis_ctx.emit(_make_call("right", [parent_parent_with_prefix, thirty_six]))
-
-            # Assert: parentGenesis === _genesisOutpoint (same lineage)
-            my_genesis = non_genesis_ctx.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
-            genesis_eq = non_genesis_ctx.emit(ANFValue(
-                kind="bin_op", op="===",
-                left=parent_genesis, right=my_genesis,
-                result_type="bytes",
+            proof_ref = non_genesis_ctx.emit(ANFValue(kind="load_prop", name="_proof"))
+            genesis_input_ref = non_genesis_ctx.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
+            snark_result = non_genesis_ctx.emit(ANFValue(
+                kind="snark_verify",
+                proof=proof_ref,
+                public_inputs=[genesis_input_ref],
             ))
-            non_genesis_ctx.emit(_make_assert(genesis_eq))
-
-            # Assert: parentParentOutpoint === _grandparentOutpoint (chain links match)
-            my_grandparent = non_genesis_ctx.emit(ANFValue(kind="load_prop", name="_grandparentOutpoint"))
-            chain_eq = non_genesis_ctx.emit(ANFValue(
-                kind="bin_op", op="===",
-                left=parent_parent_outpoint, right=my_grandparent,
-                result_type="bytes",
-            ))
-            non_genesis_ctx.emit(_make_assert(chain_eq))
+            non_genesis_ctx.emit(_make_assert(snark_result))
+            non_genesis_ctx.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
             method_ctx.sync_counter(non_genesis_ctx)
 
-            # Emit the if/else
-            method_ctx.emit(ANFValue(
+            # Emit the if/else — result is the genesis outpoint to use
+            genesis_outpoint_result = method_ctx.emit(ANFValue(
                 kind="if",
                 cond=is_genesis,
                 then=genesis_ctx.bindings,
                 else_=non_genesis_ctx.bindings,
             ))
 
-            # 4. Inject internal field updates BEFORE the developer body
-            old_parent = method_ctx.emit(ANFValue(kind="load_prop", name="_parentOutpoint"))
-            method_ctx.emit(_make_update_prop("_grandparentOutpoint", old_parent))
-            preimage_ref3 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-            current_outpoint2 = method_ctx.emit(_make_call("extractOutpoint", [preimage_ref3]))
-            method_ctx.emit(_make_update_prop("_parentOutpoint", current_outpoint2))
+            # Update _genesisOutpoint outside the if-else (no branch asymmetry)
+            method_ctx.emit(_make_update_prop("_genesisOutpoint", genesis_outpoint_result))
 
-            # 5. Lower the developer's method body
+            # 3. Lower the developer's method body
             method_ctx.lower_statements(method.body)
 
-            # 6. State continuation
+            # 4. State continuation with change support.
+            # Output ordering: same as StatefulSmartContract (covenant first, change last).
             add_output_refs = method_ctx.get_add_output_refs()
-            if add_output_refs:
-                accumulated = add_output_refs[0]
-                for i in range(1, len(add_output_refs)):
-                    accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
-                hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
-                preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-                output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
-                eq_ref = method_ctx.emit(ANFValue(
-                    kind="bin_op", op="===",
-                    left=hash_ref, right=output_hash_ref,
-                    result_type="bytes",
-                ))
-                method_ctx.emit(_make_assert(eq_ref))
-            else:
-                # InductiveSmartContract always mutates state (internal fields)
-                state_script_ref = method_ctx.emit(ANFValue(kind="get_state_script"))
-                hash_ref = method_ctx.emit(_make_call("hash256", [state_script_ref]))
-                preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
-                output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
-                eq_ref = method_ctx.emit(ANFValue(
-                    kind="bin_op", op="===",
-                    left=hash_ref, right=output_hash_ref,
-                    result_type="bytes",
-                ))
-                method_ctx.emit(_make_assert(eq_ref))
+            if add_output_refs or needs_change_output:
+                # Build the P2PKH change output for hashOutputs verification
+                change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
+                change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
+                change_output_ref = method_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
 
-            # ABI params
+                if add_output_refs:
+                    # Multi-output continuation: concat all outputs + change output, hash
+                    accumulated = add_output_refs[0]
+                    for i in range(1, len(add_output_refs)):
+                        accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
+                    accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
+                    hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
+                    preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                    output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref2]))
+                    eq_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op="===",
+                        left=hash_ref, right=output_hash_ref,
+                        result_type="bytes",
+                    ))
+                    method_ctx.emit(_make_assert(eq_ref))
+                else:
+                    # Single-output continuation: build raw output bytes, concat with change, hash
+                    state_script_ref = method_ctx.emit(ANFValue(kind="get_state_script"))
+                    preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                    new_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
+                    contract_output_ref = method_ctx.emit(_make_call("computeStateOutput", [preimage_ref2, state_script_ref, new_amount_ref]))
+                    all_outputs = method_ctx.emit(_make_call("cat", [contract_output_ref, change_output_ref]))
+                    hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
+                    preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
+                    output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
+                    eq_ref = method_ctx.emit(ANFValue(
+                        kind="bin_op", op="===",
+                        left=hash_ref, right=output_hash_ref,
+                        result_type="bytes",
+                    ))
+                    method_ctx.emit(_make_assert(eq_ref))
+
+            # ABI params: same as StatefulSmartContract
             augmented_params = _lower_params(method.params)
-            augmented_params.extend([
-                ANFParam(name="_parentHashState", type="ByteString"),
-                ANFParam(name="_parentTailBlock1", type="ByteString"),
-                ANFParam(name="_parentTailBlock2", type="ByteString"),
-                ANFParam(name="_parentRawTailLen", type="bigint"),
+            if needs_change_output:
+                augmented_params.extend([
+                    ANFParam(name="_changePKH", type="Ripemd160"),
+                    ANFParam(name="_changeAmount", type="bigint"),
+                ])
+            if needs_new_amount:
+                augmented_params.append(
+                    ANFParam(name="_newAmount", type="bigint"),
+                )
+            augmented_params.append(
                 ANFParam(name="txPreimage", type="SigHashPreimage"),
-            ])
+            )
 
             result.append(ANFMethod(
                 name=method.name,
@@ -840,9 +808,8 @@ class _LowerCtx:
             # For InductiveSmartContract, auto-append internal field values
             if self._contract.parent_class == "InductiveSmartContract":
                 genesis_ref = self.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
-                parent_ref = self.emit(ANFValue(kind="load_prop", name="_parentOutpoint"))
-                grandparent_ref = self.emit(ANFValue(kind="load_prop", name="_grandparentOutpoint"))
-                state_values.extend([genesis_ref, parent_ref, grandparent_ref])
+                proof_ref = self.emit(ANFValue(kind="load_prop", name="_proof"))
+                state_values.extend([genesis_ref, proof_ref])
             ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
             self.add_output_ref(ref)
             return ref
@@ -869,9 +836,8 @@ class _LowerCtx:
                 # For InductiveSmartContract, auto-append internal field values
                 if self._contract.parent_class == "InductiveSmartContract":
                     genesis_ref = self.emit(ANFValue(kind="load_prop", name="_genesisOutpoint"))
-                    parent_ref = self.emit(ANFValue(kind="load_prop", name="_parentOutpoint"))
-                    grandparent_ref = self.emit(ANFValue(kind="load_prop", name="_grandparentOutpoint"))
-                    state_values.extend([genesis_ref, parent_ref, grandparent_ref])
+                    proof_ref = self.emit(ANFValue(kind="load_prop", name="_proof"))
+                    state_values.extend([genesis_ref, proof_ref])
                 ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))
                 self.add_output_ref(ref)
                 return ref

@@ -778,6 +778,33 @@ class TypeChecker {
         return BYTESTRING;
       }
 
+      if (methodName === 'addRawOutput') {
+        if (this.contract.parentClass !== 'StatefulSmartContract' && this.contract.parentClass !== 'InductiveSmartContract') {
+          this.errors.push(makeDiagnostic(
+            `addRawOutput() is only available in StatefulSmartContract or InductiveSmartContract`,
+            'error',
+          ));
+          return VOID;
+        }
+        if (this.contract.parentClass === 'InductiveSmartContract') {
+          this.errors.push(makeDiagnostic(
+            `addRawOutput() is not allowed in InductiveSmartContract — raw outputs bypass internal field propagation and break lineage verification. Use addOutput() instead.`,
+            'error',
+          ));
+          return VOID;
+        }
+        if (args.length !== 2) {
+          this.errors.push(makeDiagnostic(
+            `addRawOutput() expects 2 arguments: satoshis and scriptBytes, got ${args.length}`,
+            'error',
+          ));
+        }
+        for (const arg of args) {
+          this.inferExprType(arg, env);
+        }
+        return VOID;
+      }
+
       if (methodName === 'addOutput') {
         if (this.contract.parentClass !== 'StatefulSmartContract' && this.contract.parentClass !== 'InductiveSmartContract') {
           this.errors.push(makeDiagnostic(
@@ -786,7 +813,7 @@ class TypeChecker {
           ));
           return VOID;
         }
-        const INDUCTIVE_INTERNAL = new Set(['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint']);
+        const INDUCTIVE_INTERNAL = new Set(['_genesisOutpoint', '_proof']);
         const mutableProps = this.contract.properties.filter(p =>
           !p.readonly && !(this.contract.parentClass === 'InductiveSmartContract' && INDUCTIVE_INTERNAL.has(p.name))
         );

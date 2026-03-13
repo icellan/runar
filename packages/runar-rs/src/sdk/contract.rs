@@ -371,17 +371,14 @@ impl RunarContract {
         // _changePKH and _changeAmount). The SDK auto-computes these.
         let method_needs_change = method.params.iter().any(|p| p.name == "_changePKH");
         let method_needs_new_amount = method.params.iter().any(|p| p.name == "_newAmount");
-        let is_inductive = method.params.iter().any(|p| p.name == "_parentHashState");
+        let is_inductive = self.artifact.state_fields.as_ref()
+            .map_or(false, |fields| fields.iter().any(|f| f.name == "_genesisOutpoint"));
         let user_params: Vec<&AbiParam> = if is_stateful || is_inductive {
             method.params.iter().filter(|p| {
                 p.param_type != "SigHashPreimage"
                     && p.name != "_changePKH"
                     && p.name != "_changeAmount"
                     && p.name != "_newAmount"
-                    && p.name != "_parentHashState"
-                    && p.name != "_parentTailBlock1"
-                    && p.name != "_parentTailBlock2"
-                    && p.name != "_parentRawTailLen"
             }).collect()
         } else {
             method.params.iter().collect()
@@ -406,21 +403,8 @@ impl RunarContract {
         let change_address = options
             .and_then(|o| o.change_address.as_deref())
             .unwrap_or(&address);
-        // For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
-        // params from the parent transaction (the tx that created the current UTXO).
-        // These are pushed in the unlock script between user args and txPreimage.
-        let mut inductive_params_hex = String::new();
-        if is_inductive {
-            let parent_tx = provider.get_transaction(&current_utxo.txid)?;
-            let raw = parent_tx.raw.ok_or_else(|| {
-                "RunarContract.call: provider returned transaction without raw hex, needed for inductive parent tx verification".to_string()
-            })?;
-            let partial = crate::sdk::sha256_compress::compute_partial_sha256_for_inductive(&raw)?;
-            inductive_params_hex.push_str(&encode_push_data(&partial.parent_hash_state));
-            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block1));
-            inductive_params_hex.push_str(&encode_push_data(&partial.parent_tail_block2));
-            inductive_params_hex.push_str(&encode_script_number(partial.parent_raw_tail_len as i64));
-        }
+        // Inductive contracts no longer need partial SHA-256 params in the unlock script.
+        let inductive_params_hex = String::new();
 
         // Detect Sig/PubKey/SigHashPreimage/ByteString params that need auto-compute (user passed Auto)
         let mut resolved_args: Vec<SdkValue> = args.to_vec();
@@ -530,6 +514,22 @@ impl RunarContract {
 
         let mut contract_outputs: Option<Vec<ContractOutput>> = None;
 
+        // For InductiveSmartContract, compute the updated _genesisOutpoint that the
+        // on-chain script will set: extractOutpoint(preimage) at genesis, unchanged after.
+        let mut inductive_updated_state: HashMap<String, SdkValue> = HashMap::new();
+        if is_inductive {
+            let txid_le = reverse_hex(&current_utxo.txid);
+            let vout_le = to_little_endian_32(current_utxo.output_index);
+            let current_outpoint = format!("{}{}", txid_le, vout_le);
+            let zero_sentinel = "00".repeat(36);
+            let old_genesis = self.state.get("_genesisOutpoint")
+                .and_then(|v| if let SdkValue::Bytes(s) = v { Some(s.clone()) } else { None })
+                .unwrap_or_else(|| zero_sentinel.clone());
+            let is_genesis = old_genesis == zero_sentinel;
+            let new_genesis = if is_genesis { current_outpoint } else { old_genesis };
+            inductive_updated_state.insert("_genesisOutpoint".to_string(), SdkValue::Bytes(new_genesis));
+        }
+
         if is_stateful && has_multi_output {
             // Multi-output: build a locking script for each output
             let code_script = self.code_script.clone().unwrap_or_else(|| self.build_code_script());
@@ -537,7 +537,12 @@ impl RunarContract {
             let outputs = options.unwrap().outputs.as_ref().unwrap();
             contract_outputs = Some(
                 outputs.iter().map(|out| {
-                    let state_hex = serialize_state(state_fields, &out.state);
+                    // Merge auto-managed internal fields with user-provided state
+                    let mut merged_state = out.state.clone();
+                    for (k, v) in &inductive_updated_state {
+                        merged_state.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
+                    let state_hex = serialize_state(state_fields, &merged_state);
                     ContractOutput {
                         script: format!("{}6a{}", code_script, state_hex),
                         satoshis: out.satoshis,
@@ -552,6 +557,10 @@ impl RunarContract {
                     .and_then(|o| o.satoshis)
                     .unwrap_or(current_utxo.satoshis),
             );
+            // For inductive contracts, update _genesisOutpoint before building locking script
+            for (k, v) in &inductive_updated_state {
+                self.state.insert(k.clone(), v.clone());
+            }
             // Apply new state values before building the continuation output
             if let Some(new_state) = options.and_then(|o| o.new_state.as_ref()) {
                 for (k, v) in new_state {

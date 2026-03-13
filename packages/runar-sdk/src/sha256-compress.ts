@@ -197,13 +197,15 @@ function sha256Pad(message: Uint8Array): Uint8Array {
 // ---------------------------------------------------------------------------
 
 export interface PartialSha256Result {
-  /** 32-byte hex: intermediate SHA-256 state after compressing blocks 0..N-3 */
+  /** 32-byte hex: intermediate SHA-256 state after compressing blocks 0..N-4 */
   parentHashState: string;
-  /** 64-byte hex: the (N-1)th block (second-to-last) */
+  /** 64-byte hex: the (N-2)th block (third-to-last) */
   parentTailBlock1: string;
-  /** 64-byte hex: the Nth block (last, contains padding) */
+  /** 64-byte hex: the (N-1)th block (second-to-last) */
   parentTailBlock2: string;
-  /** Number of raw (unpadded) tx bytes in the two tail blocks */
+  /** 64-byte hex: the Nth block (last, contains padding) */
+  parentTailBlock3: string;
+  /** Number of raw (unpadded) tx bytes in the three tail blocks */
   parentRawTailLen: number;
 }
 
@@ -211,43 +213,37 @@ export interface PartialSha256Result {
  * Compute partial SHA-256 for an inductive contract's parent transaction.
  *
  * Instead of pushing the full raw parent tx on-chain, we pre-compute the
- * SHA-256 state up to (but not including) the last 2 blocks. The on-chain
+ * SHA-256 state up to (but not including) the last 3 blocks. The on-chain
  * script receives:
  *   - The intermediate hash state (32 bytes)
- *   - The two tail blocks (64 bytes each)
+ *   - Three tail blocks (64 bytes each)
  *   - The raw tail length (to locate fields within the tail)
+ *
+ * Using 3 tail blocks (192 bytes) guarantees rawTailLen >= 128, which is
+ * always sufficient for field extraction (needs >= 112 bytes: 108 for
+ * internal fields + 4 for locktime).
  *
  * It then completes the double-SHA256 to derive the parent txid and
  * verifies it against the outpoint in the sighash preimage.
  *
  * @param rawTxHex - Full raw transaction hex
- * @returns The 4 partial SHA-256 components needed by the on-chain script
+ * @returns The 5 partial SHA-256 components needed by the on-chain script
  */
 export function computePartialSha256ForInductive(rawTxHex: string): PartialSha256Result {
   const rawBytes = hexToBytes(rawTxHex);
   const padded = sha256Pad(rawBytes);
   const totalBlocks = padded.length / 64;
 
-  if (totalBlocks < 2) {
-    // Any valid Bitcoin tx is at least ~60 bytes, so after SHA-256 padding
-    // we always get >= 2 blocks. But handle the degenerate case: use the
-    // SHA-256 initial state and synthesize a second block of pure padding.
-    // This should never happen in practice.
-    const initState = stateToHex(new Uint32Array(SHA256_INIT));
-    const block1 = bytesToHex(padded.subarray(0, 64));
-    // Create a second block filled with zeros (degenerate padding block)
-    const block2 = '00'.repeat(64);
-    return {
-      parentHashState: initState,
-      parentTailBlock1: block1,
-      parentTailBlock2: block2,
-      parentRawTailLen: rawBytes.length,
-    };
+  if (totalBlocks < 3) {
+    throw new Error(
+      `computePartialSha256ForInductive: transaction too small (${rawBytes.length} bytes, ` +
+      `${totalBlocks} SHA-256 blocks). Inductive contracts require at least 3 blocks.`
+    );
   }
 
-  // Compress all blocks except the last 2 to get intermediate state
+  // Compress all blocks except the last 3 to get intermediate state
   let state: Uint32Array = new Uint32Array(SHA256_INIT);
-  const preHashedBlocks = totalBlocks - 2;
+  const preHashedBlocks = totalBlocks - 3;
   for (let i = 0; i < preHashedBlocks; i++) {
     const block = padded.slice(i * 64, (i + 1) * 64);
     state = sha256CompressBlock(state, block);
@@ -255,14 +251,23 @@ export function computePartialSha256ForInductive(rawTxHex: string): PartialSha25
 
   const tailBlock1 = padded.slice(preHashedBlocks * 64, (preHashedBlocks + 1) * 64);
   const tailBlock2 = padded.slice((preHashedBlocks + 1) * 64, (preHashedBlocks + 2) * 64);
+  const tailBlock3 = padded.slice((preHashedBlocks + 2) * 64, (preHashedBlocks + 3) * 64);
 
   // Raw tail length = total raw bytes minus the bytes already compressed
   const rawTailLen = rawBytes.length - preHashedBlocks * 64;
+
+  if (rawTailLen < 112) {
+    throw new Error(
+      `computePartialSha256ForInductive: rawTailLen ${rawTailLen} < 112. ` +
+      `Internal fields (108 bytes) + locktime (4 bytes) must fit within the tail blocks.`
+    );
+  }
 
   return {
     parentHashState: stateToHex(state),
     parentTailBlock1: bytesToHex(tailBlock1),
     parentTailBlock2: bytesToHex(tailBlock2),
+    parentTailBlock3: bytesToHex(tailBlock3),
     parentRawTailLen: rawTailLen,
   };
 }

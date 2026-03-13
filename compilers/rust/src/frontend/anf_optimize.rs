@@ -141,8 +141,8 @@ fn make_load_const_int(n: i128) -> ANFValue {
 }
 
 fn make_alias(target: &str) -> ANFValue {
-    ANFValue::LoadParam {
-        name: format!("@ref:{}", target),
+    ANFValue::LoadConst {
+        value: serde_json::Value::String(format!("@ref:{}", target)),
     }
 }
 
@@ -375,7 +375,15 @@ fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
                 refs.insert(name.clone());
             }
         }
-        ANFValue::LoadProp { .. } | ANFValue::LoadConst { .. } | ANFValue::GetStateScript {} => {}
+        ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
+        ANFValue::LoadConst { value: v } => {
+            // @ref: values reference another binding — must be tracked as a ref
+            if let Some(s) = v.as_str() {
+                if let Some(target) = s.strip_prefix("@ref:") {
+                    refs.insert(target.to_string());
+                }
+            }
+        }
         ANFValue::BinOp { left, right, .. } => {
             refs.insert(left.clone());
             refs.insert(right.clone());
@@ -441,6 +449,12 @@ fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
             refs.insert(satoshis.clone());
             refs.insert(script_bytes.clone());
         }
+        ANFValue::SnarkVerify { proof, public_inputs } => {
+            refs.insert(proof.clone());
+            for input in public_inputs {
+                refs.insert(input.clone());
+            }
+        }
     }
 }
 
@@ -454,6 +468,7 @@ fn has_side_effect(value: &ANFValue) -> bool {
             | ANFValue::DeserializeState { .. }
             | ANFValue::AddOutput { .. }
             | ANFValue::AddRawOutput { .. }
+            | ANFValue::SnarkVerify { .. }
             | ANFValue::MethodCall { .. }
             | ANFValue::Call { .. }
     )

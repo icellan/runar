@@ -137,6 +137,10 @@ class ANFValue:
     # -- add_raw_output ----------------------------------------------------
     script_bytes: str | None = None
 
+    # -- snark_verify ------------------------------------------------------
+    proof: str | None = None
+    public_inputs: list[str] | None = None
+
 
 # ---------------------------------------------------------------------------
 # Constant decoding
@@ -247,6 +251,8 @@ def _anf_value_from_dict(d: dict[str, Any]) -> ANFValue:
     v.satoshis = d.get("satoshis")
     v.state_values = d.get("stateValues")
     v.script_bytes = d.get("scriptBytes")
+    v.proof = d.get("proof")
+    v.public_inputs = d.get("publicInputs")
 
     # Nested bindings
     if "then" in d and d["then"] is not None:

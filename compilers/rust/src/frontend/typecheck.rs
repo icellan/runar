@@ -806,7 +806,16 @@ impl<'a> TypeChecker<'a> {
                 return BYTESTRING.to_string();
             }
 
-            if property == "addOutput" || property == "addRawOutput" {
+            if property == "addRawOutput" {
+                if self.contract.parent_class == "InductiveSmartContract" {
+                    self.errors.push("addRawOutput() is not allowed in InductiveSmartContract — raw outputs bypass internal field propagation and break lineage verification. Use addOutput() instead.".to_string());
+                }
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                return VOID.to_string();
+            }
+            if property == "addOutput" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
                 }

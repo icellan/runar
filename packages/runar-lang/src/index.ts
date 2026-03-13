@@ -320,19 +320,12 @@ export abstract class StatefulSmartContract extends SmartContract {
 /**
  * Base class for inductive Rúnar smart contracts.
  *
- * Extends {@link StatefulSmartContract} with automatic backward verification
- * via mathematical induction on the UTXO chain. Each transaction verifies
- * its parent had the same covenant code and consistent lineage metadata.
- * Since the parent also verified *its* parent, the entire chain back to
- * genesis is proven valid inductively.
+ * Extends {@link StatefulSmartContract} with automatic genesis tracking
+ * and a ZKP proof slot for backward chain verification.
  *
- * The compiler auto-injects three internal state fields:
- * - `_genesisOutpoint` — immutable identity of the token lineage
- * - `_parentOutpoint` — outpoint of the parent UTXO
- * - `_grandparentOutpoint` — outpoint of the grandparent UTXO
- *
- * And an implicit `parentTx: ByteString` parameter on all public methods
- * (the raw bytes of the parent transaction, provided by the SDK).
+ * The compiler auto-injects two internal state fields:
+ * - `_genesisOutpoint` — immutable identity of the token lineage (36 bytes)
+ * - `_proof` — ZKP proof placeholder (192 bytes, stub for future SNARK verifier)
  *
  * Developers write code identical to StatefulSmartContract — all inductive
  * machinery is compiler-injected:

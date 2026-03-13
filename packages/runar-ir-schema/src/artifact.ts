@@ -114,6 +114,9 @@ export interface RunarArtifact {
   /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
   codeSeparatorIndices?: number[];
 
+  /** Verification key for SNARK-verified inductive contracts (JSON-serialized). */
+  verificationKey?: string;
+
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
 }

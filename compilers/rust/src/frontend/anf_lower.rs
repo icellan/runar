@@ -108,11 +108,20 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // InductiveSmartContract public method lowering
             // ---------------------------------------------------------------
 
-            // Register implicit parameters: partial SHA-256 tail blocks + txPreimage
-            method_ctx.add_param("_parentHashState");
-            method_ctx.add_param("_parentTailBlock1");
-            method_ctx.add_param("_parentTailBlock2");
-            method_ctx.add_param("_parentRawTailLen");
+            // Determine if this method needs change output / newAmount (same logic as stateful)
+            let needs_change_output =
+                method_mutates_state(method, contract) || method_has_add_output(method);
+            let needs_new_amount =
+                method_mutates_state(method, contract) && !method_has_add_output(method);
+
+            // Register implicit parameters: same as StatefulSmartContract
+            if needs_change_output {
+                method_ctx.add_param("_changePKH");
+                method_ctx.add_param("_changeAmount");
+            }
+            if needs_new_amount {
+                method_ctx.add_param("_newAmount");
+            }
             method_ctx.add_param("txPreimage");
 
             // 1. Inject checkPreimage(txPreimage) at the start
@@ -126,57 +135,18 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 value: check_result,
             });
 
-            // 2. Verify parent tx authenticity via partial SHA-256:
-            //    mid = sha256Compress(_parentHashState, _parentTailBlock1)
-            //    singleHash = sha256Compress(mid, _parentTailBlock2)
-            //    parentTxId = sha256(singleHash)  // double-SHA256 for txid
-            //    assert(parentTxId === left(extractOutpoint(txPreimage), 32))
-            let hash_state = method_ctx.emit(ANFValue::LoadParam {
-                name: "_parentHashState".to_string(),
-            });
-            let tail_block1 = method_ctx.emit(ANFValue::LoadParam {
-                name: "_parentTailBlock1".to_string(),
-            });
-            let mid = method_ctx.emit(ANFValue::Call {
-                func: "sha256Compress".to_string(),
-                args: vec![hash_state, tail_block1],
-            });
-            let tail_block2 = method_ctx.emit(ANFValue::LoadParam {
-                name: "_parentTailBlock2".to_string(),
-            });
-            let single_hash = method_ctx.emit(ANFValue::Call {
-                func: "sha256Compress".to_string(),
-                args: vec![mid, tail_block2],
-            });
-            let parent_tx_id = method_ctx.emit(ANFValue::Call {
-                func: "sha256".to_string(),
-                args: vec![single_hash],
-            });
-            let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
-                name: "txPreimage".to_string(),
-            });
-            let outpoint_ref = method_ctx.emit(ANFValue::Call {
-                func: "extractOutpoint".to_string(),
-                args: vec![preimage_ref2],
-            });
-            let thirty_two = method_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(32i64)),
-            });
-            let parent_txid_from_preimage = method_ctx.emit(ANFValue::Call {
-                func: "left".to_string(),
-                args: vec![outpoint_ref, thirty_two],
-            });
-            let parent_hash_eq = method_ctx.emit(ANFValue::BinOp {
-                op: "===".to_string(),
-                left: parent_tx_id,
-                right: parent_txid_from_preimage,
-                result_type: Some("bytes".to_string()),
-            });
-            method_ctx.emit(ANFValue::Assert {
-                value: parent_hash_eq,
-            });
+            // 1b. Deserialize mutable state from the preimage's scriptCode
+            let has_mutable_state = contract.properties.iter().any(|p| !p.readonly);
+            if has_mutable_state {
+                let ds_preimage = method_ctx.emit(ANFValue::LoadParam {
+                    name: "txPreimage".to_string(),
+                });
+                method_ctx.emit(ANFValue::DeserializeState {
+                    preimage: ds_preimage,
+                });
+            }
 
-            // 3. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
+            // 2. Genesis detection: if (_genesisOutpoint === 0x00..00_36)
             let genesis_ref = method_ctx.emit(ANFValue::LoadProp {
                 name: "_genesisOutpoint".to_string(),
             });
@@ -191,246 +161,158 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 result_type: Some("bytes".to_string()),
             });
 
-            // Genesis branch: set _genesisOutpoint = extractOutpoint(txPreimage)
+            // Genesis branch: compute new genesis outpoint = extractOutpoint(txPreimage)
             let mut genesis_ctx = method_ctx.sub_context();
             let gp_ref = genesis_ctx.emit(ANFValue::LoadParam {
                 name: "txPreimage".to_string(),
             });
-            let current_outpoint = genesis_ctx.emit(ANFValue::Call {
+            genesis_ctx.emit(ANFValue::Call {
                 func: "extractOutpoint".to_string(),
                 args: vec![gp_ref],
             });
-            genesis_ctx.emit(ANFValue::UpdateProp {
-                name: "_genesisOutpoint".to_string(),
-                value: current_outpoint,
-            });
             method_ctx.sync_counter(&genesis_ctx);
 
-            // Non-genesis branch: verify chain consistency using tail block extraction
+            // Non-genesis branch: verify snark proof, then produce existing _genesisOutpoint
             let mut non_genesis_ctx = method_ctx.sub_context();
-
-            // Concatenate the two tail blocks to get 128 bytes of tail data
-            let tb1 = non_genesis_ctx.emit(ANFValue::LoadParam {
-                name: "_parentTailBlock1".to_string(),
+            let proof_ref = non_genesis_ctx.emit(ANFValue::LoadProp {
+                name: "_proof".to_string(),
             });
-            let tb2 = non_genesis_ctx.emit(ANFValue::LoadParam {
-                name: "_parentTailBlock2".to_string(),
-            });
-            let tail_data = non_genesis_ctx.emit(ANFValue::Call {
-                func: "cat".to_string(),
-                args: vec![tb1, tb2],
-            });
-
-            // Internal fields (111 bytes) are at the end of the raw tx data,
-            // just before the 4-byte locktime. Use _parentRawTailLen to compute the offset.
-            // fieldStart = _parentRawTailLen - 4 (locktime) - 111 (3 fields * 37 bytes)
-            let raw_tail_len = non_genesis_ctx.emit(ANFValue::LoadParam {
-                name: "_parentRawTailLen".to_string(),
-            });
-            let four = non_genesis_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(4i64)),
-            });
-            let one_eleven = non_genesis_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(111i64)),
-            });
-            let before_locktime = non_genesis_ctx.emit(ANFValue::BinOp {
-                op: "-".to_string(),
-                left: raw_tail_len,
-                right: four,
-                result_type: None,
-            });
-            let field_start = non_genesis_ctx.emit(ANFValue::BinOp {
-                op: "-".to_string(),
-                left: before_locktime,
-                right: one_eleven.clone(),
-                result_type: None,
-            });
-
-            // Extract 111 bytes of internal fields from tailData:
-            // mid(tailData, fieldStart, 111) = right(left(tailData, fieldStart + 111), 111)
-            let field_end = non_genesis_ctx.emit(ANFValue::BinOp {
-                op: "+".to_string(),
-                left: field_start,
-                right: one_eleven.clone(),
-                result_type: None,
-            });
-            let prefix_and_fields = non_genesis_ctx.emit(ANFValue::Call {
-                func: "left".to_string(),
-                args: vec![tail_data, field_end],
-            });
-            let internal_fields_with_prefixes = non_genesis_ctx.emit(ANFValue::Call {
-                func: "right".to_string(),
-                args: vec![prefix_and_fields, one_eleven],
-            });
-
-            // Now extract each 37-byte field (1 push opcode + 36 data bytes)
-            let thirty_seven_c = non_genesis_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(37i64)),
-            });
-            let thirty_six_c = non_genesis_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(36i64)),
-            });
-
-            // parentGenesis: bytes [1..37) (skip push opcode at byte 0)
-            let parent_genesis_raw = non_genesis_ctx.emit(ANFValue::Call {
-                func: "left".to_string(),
-                args: vec![internal_fields_with_prefixes.clone(), thirty_seven_c.clone()],
-            });
-            let parent_genesis = non_genesis_ctx.emit(ANFValue::Call {
-                func: "right".to_string(),
-                args: vec![parent_genesis_raw, thirty_six_c.clone()],
-            });
-
-            // parentParentOutpoint: bytes [38..74) (skip push opcode at byte 37)
-            let seventy_four_c = non_genesis_ctx.emit(ANFValue::LoadConst {
-                value: serde_json::Value::Number(serde_json::Number::from(74i64)),
-            });
-            let parent_parent_outpoint_raw = non_genesis_ctx.emit(ANFValue::Call {
-                func: "left".to_string(),
-                args: vec![internal_fields_with_prefixes, seventy_four_c],
-            });
-            let parent_parent_outpoint_with_prefix = non_genesis_ctx.emit(ANFValue::Call {
-                func: "right".to_string(),
-                args: vec![parent_parent_outpoint_raw, thirty_seven_c],
-            });
-            let parent_parent_outpoint = non_genesis_ctx.emit(ANFValue::Call {
-                func: "right".to_string(),
-                args: vec![parent_parent_outpoint_with_prefix, thirty_six_c],
-            });
-
-            // Assert: parentGenesis === _genesisOutpoint (same lineage)
-            let my_genesis = non_genesis_ctx.emit(ANFValue::LoadProp {
+            let ng_genesis_ref = non_genesis_ctx.emit(ANFValue::LoadProp {
                 name: "_genesisOutpoint".to_string(),
             });
-            let genesis_eq = non_genesis_ctx.emit(ANFValue::BinOp {
-                op: "===".to_string(),
-                left: parent_genesis,
-                right: my_genesis,
-                result_type: Some("bytes".to_string()),
+            let snark_result = non_genesis_ctx.emit(ANFValue::SnarkVerify {
+                proof: proof_ref,
+                public_inputs: vec![ng_genesis_ref.clone()],
             });
             non_genesis_ctx.emit(ANFValue::Assert {
-                value: genesis_eq,
+                value: snark_result,
             });
-
-            // Assert: parentParentOutpoint === _grandparentOutpoint (chain links match)
-            let my_grandparent = non_genesis_ctx.emit(ANFValue::LoadProp {
-                name: "_grandparentOutpoint".to_string(),
-            });
-            let chain_eq = non_genesis_ctx.emit(ANFValue::BinOp {
-                op: "===".to_string(),
-                left: parent_parent_outpoint,
-                right: my_grandparent,
-                result_type: Some("bytes".to_string()),
-            });
-            non_genesis_ctx.emit(ANFValue::Assert {
-                value: chain_eq,
+            non_genesis_ctx.emit(ANFValue::LoadProp {
+                name: "_genesisOutpoint".to_string(),
             });
             method_ctx.sync_counter(&non_genesis_ctx);
 
-            // Emit the if/else
-            method_ctx.emit(ANFValue::If {
+            // Emit the if/else — result is the genesis outpoint to use
+            let genesis_outpoint_result = method_ctx.emit(ANFValue::If {
                 cond: is_genesis,
                 then: genesis_ctx.bindings,
                 else_branch: non_genesis_ctx.bindings,
             });
 
-            // 4. Inject internal field updates BEFORE the developer body, so that
-            //    addOutput calls in the developer's code pick up the updated values
-            //    via auto-appended load_prop references.
-            //    _grandparentOutpoint = _parentOutpoint
-            let old_parent = method_ctx.emit(ANFValue::LoadProp {
-                name: "_parentOutpoint".to_string(),
-            });
+            // Update _genesisOutpoint outside the if-else (no branch asymmetry)
             method_ctx.emit(ANFValue::UpdateProp {
-                name: "_grandparentOutpoint".to_string(),
-                value: old_parent,
-            });
-            //    _parentOutpoint = extractOutpoint(txPreimage)
-            let preimage_ref3 = method_ctx.emit(ANFValue::LoadParam {
-                name: "txPreimage".to_string(),
-            });
-            let current_outpoint2 = method_ctx.emit(ANFValue::Call {
-                func: "extractOutpoint".to_string(),
-                args: vec![preimage_ref3],
-            });
-            method_ctx.emit(ANFValue::UpdateProp {
-                name: "_parentOutpoint".to_string(),
-                value: current_outpoint2,
+                name: "_genesisOutpoint".to_string(),
+                value: genesis_outpoint_result,
             });
 
-            // 5. Lower the developer's method body
+            // 3. Lower the developer's method body
             lower_statements(&method.body, &mut method_ctx);
 
-            // 6. State continuation (same as StatefulSmartContract)
+            // 4. State continuation with change support.
+            // Output order: same as StatefulSmartContract (covenant first, change last).
             let add_output_refs = method_ctx.add_output_refs.clone();
-            if !add_output_refs.is_empty() {
-                // Multi-output continuation
-                let mut accumulated = add_output_refs[0].clone();
-                for i in 1..add_output_refs.len() {
-                    accumulated = method_ctx.emit(ANFValue::Call {
+            if !add_output_refs.is_empty() || needs_change_output {
+                // Build the P2PKH change output for hashOutputs verification
+                let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
+                    name: "_changePKH".to_string(),
+                });
+                let change_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                    name: "_changeAmount".to_string(),
+                });
+                let change_output_ref = method_ctx.emit(ANFValue::Call {
+                    func: "buildChangeOutput".to_string(),
+                    args: vec![change_pkh_ref, change_amount_ref],
+                });
+
+                if !add_output_refs.is_empty() {
+                    // Multi-output: covenant outputs first, then change
+                    let mut accumulated = add_output_refs[0].clone();
+                    for i in 1..add_output_refs.len() {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, add_output_refs[i].clone()],
+                        });
+                    }
+                    // Append change after covenant outputs
+                    let all_outputs = method_ctx.emit(ANFValue::Call {
                         func: "cat".to_string(),
-                        args: vec![accumulated, add_output_refs[i].clone()],
+                        args: vec![accumulated, change_output_ref],
                     });
+                    let hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "hash256".to_string(),
+                        args: vec![all_outputs],
+                    });
+                    let preimage_ref4 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let output_hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractOutputHash".to_string(),
+                        args: vec![preimage_ref4],
+                    });
+                    let eq_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "===".to_string(),
+                        left: hash_ref,
+                        right: output_hash_ref,
+                        result_type: Some("bytes".to_string()),
+                    });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
+                } else {
+                    // Single-output continuation: covenant first, then change
+                    let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
+                    let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let new_amount_ref = method_ctx.emit(ANFValue::LoadParam {
+                        name: "_newAmount".to_string(),
+                    });
+                    let contract_output_ref = method_ctx.emit(ANFValue::Call {
+                        func: "computeStateOutput".to_string(),
+                        args: vec![preimage_ref2, state_script_ref, new_amount_ref],
+                    });
+                    // Covenant first, then change
+                    let all_outputs = method_ctx.emit(ANFValue::Call {
+                        func: "cat".to_string(),
+                        args: vec![contract_output_ref, change_output_ref],
+                    });
+                    let hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "hash256".to_string(),
+                        args: vec![all_outputs],
+                    });
+                    let preimage_ref4 = method_ctx.emit(ANFValue::LoadParam {
+                        name: "txPreimage".to_string(),
+                    });
+                    let output_hash_ref = method_ctx.emit(ANFValue::Call {
+                        func: "extractOutputHash".to_string(),
+                        args: vec![preimage_ref4],
+                    });
+                    let eq_ref = method_ctx.emit(ANFValue::BinOp {
+                        op: "===".to_string(),
+                        left: hash_ref,
+                        right: output_hash_ref,
+                        result_type: Some("bytes".to_string()),
+                    });
+                    method_ctx.emit(ANFValue::Assert { value: eq_ref });
                 }
-                let hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "hash256".to_string(),
-                    args: vec![accumulated],
-                });
-                let preimage_ref4 = method_ctx.emit(ANFValue::LoadParam {
-                    name: "txPreimage".to_string(),
-                });
-                let output_hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "extractOutputHash".to_string(),
-                    args: vec![preimage_ref4],
-                });
-                let eq_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "===".to_string(),
-                    left: hash_ref,
-                    right: output_hash_ref,
-                    result_type: Some("bytes".to_string()),
-                });
-                method_ctx.emit(ANFValue::Assert { value: eq_ref });
-            } else {
-                // InductiveSmartContract always mutates state (internal fields)
-                let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
-                let hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "hash256".to_string(),
-                    args: vec![state_script_ref],
-                });
-                let preimage_ref4 = method_ctx.emit(ANFValue::LoadParam {
-                    name: "txPreimage".to_string(),
-                });
-                let output_hash_ref = method_ctx.emit(ANFValue::Call {
-                    func: "extractOutputHash".to_string(),
-                    args: vec![preimage_ref4],
-                });
-                let eq_ref = method_ctx.emit(ANFValue::BinOp {
-                    op: "===".to_string(),
-                    left: hash_ref,
-                    right: output_hash_ref,
-                    result_type: Some("bytes".to_string()),
-                });
-                method_ctx.emit(ANFValue::Assert { value: eq_ref });
             }
 
-            // Append implicit params: partial SHA-256 tail blocks + txPreimage
+            // Append implicit params: same as StatefulSmartContract
             let mut augmented_params = lower_params(&method.params);
-            augmented_params.push(ANFParam {
-                name: "_parentHashState".to_string(),
-                param_type: "ByteString".to_string(),
-            });
-            augmented_params.push(ANFParam {
-                name: "_parentTailBlock1".to_string(),
-                param_type: "ByteString".to_string(),
-            });
-            augmented_params.push(ANFParam {
-                name: "_parentTailBlock2".to_string(),
-                param_type: "ByteString".to_string(),
-            });
-            augmented_params.push(ANFParam {
-                name: "_parentRawTailLen".to_string(),
-                param_type: "bigint".to_string(),
-            });
+            if needs_change_output {
+                augmented_params.push(ANFParam {
+                    name: "_changePKH".to_string(),
+                    param_type: "Ripemd160".to_string(),
+                });
+                augmented_params.push(ANFParam {
+                    name: "_changeAmount".to_string(),
+                    param_type: "bigint".to_string(),
+                });
+            }
+            if needs_new_amount {
+                augmented_params.push(ANFParam {
+                    name: "_newAmount".to_string(),
+                    param_type: "bigint".to_string(),
+                });
+            }
             augmented_params.push(ANFParam {
                 name: "txPreimage".to_string(),
                 param_type: "SigHashPreimage".to_string(),
@@ -1232,11 +1114,9 @@ fn lower_call_expr(
             // developer's body, so load_prop returns the correct new-generation values.
             if ctx.contract.parent_class == "InductiveSmartContract" {
                 let genesis_ref = ctx.emit(ANFValue::LoadProp { name: "_genesisOutpoint".to_string() });
-                let parent_ref = ctx.emit(ANFValue::LoadProp { name: "_parentOutpoint".to_string() });
-                let grandparent_ref = ctx.emit(ANFValue::LoadProp { name: "_grandparentOutpoint".to_string() });
+                let proof_ref = ctx.emit(ANFValue::LoadProp { name: "_proof".to_string() });
                 state_values.push(genesis_ref);
-                state_values.push(parent_ref);
-                state_values.push(grandparent_ref);
+                state_values.push(proof_ref);
             }
             let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });
             ctx.add_output_refs.push(r.clone());
@@ -1253,11 +1133,9 @@ fn lower_call_expr(
                 // For InductiveSmartContract, auto-append internal field values.
                 if ctx.contract.parent_class == "InductiveSmartContract" {
                     let genesis_ref = ctx.emit(ANFValue::LoadProp { name: "_genesisOutpoint".to_string() });
-                    let parent_ref = ctx.emit(ANFValue::LoadProp { name: "_parentOutpoint".to_string() });
-                    let grandparent_ref = ctx.emit(ANFValue::LoadProp { name: "_grandparentOutpoint".to_string() });
+                    let proof_ref = ctx.emit(ANFValue::LoadProp { name: "_proof".to_string() });
                     state_values.push(genesis_ref);
-                    state_values.push(parent_ref);
-                    state_values.push(grandparent_ref);
+                    state_values.push(proof_ref);
                 }
                 let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });
                 ctx.add_output_refs.push(r.clone());

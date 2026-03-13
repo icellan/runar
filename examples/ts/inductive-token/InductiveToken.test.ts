@@ -15,6 +15,7 @@ const SATS = 1000n;
 
 // Zero outpoint sentinel used for genesis detection
 const ZERO_OUTPOINT = '00'.repeat(36);
+const ZERO_PROOF = '00'.repeat(192);
 
 describe('InductiveToken', () => {
   function makeToken(owner = ALICE, balance = 100n) {
@@ -23,8 +24,7 @@ describe('InductiveToken', () => {
       balance,
       tokenId: TOKEN_ID,
       _genesisOutpoint: ZERO_OUTPOINT,
-      _parentOutpoint: ZERO_OUTPOINT,
-      _grandparentOutpoint: ZERO_OUTPOINT,
+      _proof: ZERO_PROOF,
     });
   }
 
@@ -97,8 +97,7 @@ describe('InductiveToken', () => {
     it('has inductive internal fields in initial state', () => {
       const token = makeToken();
       expect(token.state._genesisOutpoint).toBe(ZERO_OUTPOINT);
-      expect(token.state._parentOutpoint).toBe(ZERO_OUTPOINT);
-      expect(token.state._grandparentOutpoint).toBe(ZERO_OUTPOINT);
+      expect(token.state._proof).toBe(ZERO_PROOF);
     });
   });
 });

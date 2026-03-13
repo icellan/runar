@@ -17,6 +17,10 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.inductive_inject import (
+    inject_inductive_internal_props,
+    inject_inductive_constructor_fields,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -438,14 +442,16 @@ class _MoveParser:
             if self.check_ident("resource") or self.check_ident("struct"):
                 if self.check_ident("resource"):
                     self.advance()  # skip "resource"
-                props = self._parse_move_struct()
+                props, has_inductive = self._parse_move_struct()
                 properties.extend(props)
+                if has_inductive:
+                    parent_class = "InductiveSmartContract"
                 continue
 
             # public fun or fun
             if self.check_ident("public") or self.check_ident("fun"):
                 method, has_mut = self._parse_move_function()
-                if has_mut:
+                if has_mut and parent_class == "SmartContract":
                     parent_class = "StatefulSmartContract"
                 methods.append(method)
                 continue
@@ -457,6 +463,11 @@ class _MoveParser:
 
         # Build constructor from properties
         constructor = self._build_move_constructor(properties)
+
+        # For InductiveSmartContract, inject internal fields after developer properties
+        if parent_class == "InductiveSmartContract":
+            inject_inductive_internal_props(properties, self.file_name)
+            inject_inductive_constructor_fields(constructor)
 
         return ContractNode(
             name=module_name,
@@ -475,16 +486,20 @@ class _MoveParser:
 
     # -- Struct parsing ------------------------------------------------------
 
-    def _parse_move_struct(self) -> list[PropertyNode]:
+    def _parse_move_struct(self) -> tuple[list[PropertyNode], bool]:
+        """Parse a Move struct and return (properties, has_inductive_ability)."""
         self.expect_ident("struct")
 
         # struct name
         self.expect(TOK_IDENT)  # skip struct name (same as module name)
 
-        # Optional: has key, store, copy, drop abilities
+        # Optional: has key, store, copy, drop, inductive abilities
+        has_inductive = False
         if self.check_ident("has"):
             self.advance()
             while self.peek().kind == TOK_IDENT or self.peek().kind == TOK_COMMA:
+                if self.peek().kind == TOK_IDENT and self.peek().value == "inductive":
+                    has_inductive = True
                 self.advance()
 
         self.expect(TOK_LBRACE)
@@ -525,7 +540,7 @@ class _MoveParser:
             self.match(TOK_COMMA)
 
         self.expect(TOK_RBRACE)
-        return props
+        return props, has_inductive
 
     def _parse_move_type_name(self) -> str:
         # Handle & references

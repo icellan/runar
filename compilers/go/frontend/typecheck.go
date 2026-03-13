@@ -596,7 +596,16 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if pa.Property == "getStateScript" {
 			return "ByteString"
 		}
-		if pa.Property == "addOutput" || pa.Property == "addRawOutput" {
+		if pa.Property == "addRawOutput" {
+			if tc.contract.ParentClass == "InductiveSmartContract" {
+				tc.errors = append(tc.errors, "addRawOutput() is not allowed in InductiveSmartContract — raw outputs bypass internal field propagation and break lineage verification. Use addOutput() instead.")
+			}
+			for _, arg := range e.Args {
+				tc.inferExprType(arg, env)
+			}
+			return "void"
+		}
+		if pa.Property == "addOutput" {
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}

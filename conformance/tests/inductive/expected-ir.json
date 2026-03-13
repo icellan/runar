@@ -28,103 +28,80 @@
           "name": "t3",
           "value": {
             "kind": "load_prop",
-            "name": "_parentOutpoint"
+            "name": "_proof"
           }
         },
         {
           "name": "t4",
           "value": {
-            "kind": "load_prop",
-            "name": "_grandparentOutpoint"
-          }
-        },
-        {
-          "name": "t5",
-          "value": {
             "args": [
               "t0",
               "t1",
               "t2",
-              "t3",
-              "t4"
+              "t3"
             ],
             "func": "super",
             "kind": "call"
           }
         },
         {
-          "name": "t6",
-          "value": {
-            "kind": "load_prop",
-            "name": "count"
-          }
-        },
-        {
-          "name": "t7",
-          "value": {
-            "kind": "update_prop",
-            "name": "count",
-            "value": "t6"
-          }
-        },
-        {
-          "name": "t8",
-          "value": {
-            "kind": "load_prop",
-            "name": "maxCount"
-          }
-        },
-        {
-          "name": "t9",
-          "value": {
-            "kind": "update_prop",
-            "name": "maxCount",
-            "value": "t8"
-          }
-        },
-        {
-          "name": "t10",
+          "name": "t5",
           "value": {
             "kind": "load_prop",
             "name": "_genesisOutpoint"
           }
         },
         {
-          "name": "t11",
+          "name": "t6",
           "value": {
             "kind": "update_prop",
             "name": "_genesisOutpoint",
-            "value": "t10"
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_prop",
+            "name": "_proof"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "update_prop",
+            "name": "_proof",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_prop",
+            "name": "count"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "update_prop",
+            "name": "count",
+            "value": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "maxCount"
           }
         },
         {
           "name": "t12",
           "value": {
-            "kind": "load_prop",
-            "name": "_parentOutpoint"
-          }
-        },
-        {
-          "name": "t13",
-          "value": {
             "kind": "update_prop",
-            "name": "_parentOutpoint",
-            "value": "t12"
-          }
-        },
-        {
-          "name": "t14",
-          "value": {
-            "kind": "load_prop",
-            "name": "_grandparentOutpoint"
-          }
-        },
-        {
-          "name": "t15",
-          "value": {
-            "kind": "update_prop",
-            "name": "_grandparentOutpoint",
-            "value": "t14"
+            "name": "maxCount",
+            "value": "t11"
           }
         }
       ],
@@ -144,11 +121,7 @@
           "type": "ByteString"
         },
         {
-          "name": "_parentOutpoint",
-          "type": "ByteString"
-        },
-        {
-          "name": "_grandparentOutpoint",
+          "name": "_proof",
           "type": "ByteString"
         }
       ]
@@ -180,535 +153,285 @@
           "name": "t3",
           "value": {
             "kind": "load_param",
-            "name": "_parentHashState"
+            "name": "txPreimage"
           }
         },
         {
           "name": "t4",
           "value": {
-            "kind": "load_param",
-            "name": "_parentTailBlock1"
+            "kind": "deserialize_state",
+            "preimage": "t3"
           }
         },
         {
           "name": "t5",
-          "value": {
-            "args": [
-              "t3",
-              "t4"
-            ],
-            "func": "sha256Compress",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t6",
-          "value": {
-            "kind": "load_param",
-            "name": "_parentTailBlock2"
-          }
-        },
-        {
-          "name": "t7",
-          "value": {
-            "args": [
-              "t5",
-              "t6"
-            ],
-            "func": "sha256Compress",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t8",
-          "value": {
-            "args": [
-              "t7"
-            ],
-            "func": "sha256",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t9",
-          "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t10",
-          "value": {
-            "args": [
-              "t9"
-            ],
-            "func": "extractOutpoint",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t11",
-          "value": {
-            "kind": "load_const",
-            "value": 32
-          }
-        },
-        {
-          "name": "t12",
-          "value": {
-            "args": [
-              "t10",
-              "t11"
-            ],
-            "func": "left",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t13",
-          "value": {
-            "kind": "bin_op",
-            "left": "t8",
-            "op": "===",
-            "result_type": "bytes",
-            "right": "t12"
-          }
-        },
-        {
-          "name": "t14",
-          "value": {
-            "kind": "assert",
-            "value": "t13"
-          }
-        },
-        {
-          "name": "t15",
           "value": {
             "kind": "load_prop",
             "name": "_genesisOutpoint"
           }
         },
         {
-          "name": "t16",
+          "name": "t6",
           "value": {
             "kind": "load_const",
             "value": "000000000000000000000000000000000000000000000000000000000000000000000000"
           }
         },
         {
-          "name": "t17",
+          "name": "t7",
           "value": {
             "kind": "bin_op",
-            "left": "t15",
+            "left": "t5",
             "op": "===",
             "result_type": "bytes",
-            "right": "t16"
+            "right": "t6"
           }
         },
         {
-          "name": "t46",
+          "name": "t15",
           "value": {
-            "cond": "t17",
+            "cond": "t7",
             "else": [
               {
-                "name": "t21",
+                "name": "t10",
                 "value": {
-                  "kind": "load_param",
-                  "name": "_parentTailBlock1"
+                  "kind": "load_prop",
+                  "name": "_proof"
                 }
               },
               {
-                "name": "t22",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_parentTailBlock2"
-                }
-              },
-              {
-                "name": "t23",
-                "value": {
-                  "args": [
-                    "t21",
-                    "t22"
-                  ],
-                  "func": "cat",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t24",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_parentRawTailLen"
-                }
-              },
-              {
-                "name": "t25",
-                "value": {
-                  "kind": "load_const",
-                  "value": 4
-                }
-              },
-              {
-                "name": "t26",
-                "value": {
-                  "kind": "load_const",
-                  "value": 111
-                }
-              },
-              {
-                "name": "t27",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t24",
-                  "op": "-",
-                  "right": "t25"
-                }
-              },
-              {
-                "name": "t28",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t27",
-                  "op": "-",
-                  "right": "t26"
-                }
-              },
-              {
-                "name": "t29",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t28",
-                  "op": "+",
-                  "right": "t26"
-                }
-              },
-              {
-                "name": "t30",
-                "value": {
-                  "args": [
-                    "t23",
-                    "t29"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t31",
-                "value": {
-                  "args": [
-                    "t30",
-                    "t26"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t32",
-                "value": {
-                  "kind": "load_const",
-                  "value": 37
-                }
-              },
-              {
-                "name": "t33",
-                "value": {
-                  "kind": "load_const",
-                  "value": 36
-                }
-              },
-              {
-                "name": "t34",
-                "value": {
-                  "args": [
-                    "t31",
-                    "t32"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t35",
-                "value": {
-                  "args": [
-                    "t34",
-                    "t33"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t36",
-                "value": {
-                  "kind": "load_const",
-                  "value": 74
-                }
-              },
-              {
-                "name": "t37",
-                "value": {
-                  "args": [
-                    "t31",
-                    "t36"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t38",
-                "value": {
-                  "args": [
-                    "t37",
-                    "t32"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t39",
-                "value": {
-                  "args": [
-                    "t38",
-                    "t33"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t40",
+                "name": "t11",
                 "value": {
                   "kind": "load_prop",
                   "name": "_genesisOutpoint"
                 }
               },
               {
-                "name": "t41",
+                "name": "t12",
                 "value": {
-                  "kind": "bin_op",
-                  "left": "t35",
-                  "op": "===",
-                  "result_type": "bytes",
-                  "right": "t40"
+                  "kind": "snark_verify",
+                  "proof": "t10",
+                  "publicInputs": [
+                    "t11"
+                  ]
                 }
               },
               {
-                "name": "t42",
+                "name": "t13",
                 "value": {
                   "kind": "assert",
-                  "value": "t41"
+                  "value": "t12"
                 }
               },
               {
-                "name": "t43",
+                "name": "t14",
                 "value": {
                   "kind": "load_prop",
-                  "name": "_grandparentOutpoint"
-                }
-              },
-              {
-                "name": "t44",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t39",
-                  "op": "===",
-                  "result_type": "bytes",
-                  "right": "t43"
-                }
-              },
-              {
-                "name": "t45",
-                "value": {
-                  "kind": "assert",
-                  "value": "t44"
+                  "name": "_genesisOutpoint"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t18",
+                "name": "t8",
                 "value": {
                   "kind": "load_param",
                   "name": "txPreimage"
                 }
               },
               {
-                "name": "t19",
+                "name": "t9",
                 "value": {
                   "args": [
-                    "t18"
+                    "t8"
                   ],
                   "func": "extractOutpoint",
                   "kind": "call"
-                }
-              },
-              {
-                "name": "t20",
-                "value": {
-                  "kind": "update_prop",
-                  "name": "_genesisOutpoint",
-                  "value": "t19"
                 }
               }
             ]
           }
         },
         {
-          "name": "t47",
-          "value": {
-            "kind": "load_prop",
-            "name": "_parentOutpoint"
-          }
-        },
-        {
-          "name": "t48",
+          "name": "t16",
           "value": {
             "kind": "update_prop",
-            "name": "_grandparentOutpoint",
-            "value": "t47"
+            "name": "_genesisOutpoint",
+            "value": "t15"
           }
         },
         {
-          "name": "t49",
-          "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t50",
-          "value": {
-            "args": [
-              "t49"
-            ],
-            "func": "extractOutpoint",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t51",
-          "value": {
-            "kind": "update_prop",
-            "name": "_parentOutpoint",
-            "value": "t50"
-          }
-        },
-        {
-          "name": "t52",
+          "name": "t17",
           "value": {
             "kind": "load_prop",
             "name": "count"
           }
         },
         {
-          "name": "t53",
+          "name": "t18",
           "value": {
             "kind": "load_param",
             "name": "amount"
           }
         },
         {
-          "name": "t54",
+          "name": "t19",
           "value": {
             "kind": "bin_op",
-            "left": "t52",
+            "left": "t17",
             "op": "+",
-            "right": "t53"
+            "right": "t18"
           }
         },
         {
-          "name": "t55",
+          "name": "t20",
           "value": {
             "kind": "update_prop",
             "name": "count",
-            "value": "t54"
+            "value": "t19"
           }
         },
         {
-          "name": "t56",
+          "name": "t21",
           "value": {
             "kind": "load_prop",
             "name": "count"
           }
         },
         {
-          "name": "t57",
+          "name": "t22",
           "value": {
             "kind": "load_prop",
             "name": "maxCount"
           }
         },
         {
-          "name": "t58",
+          "name": "t23",
           "value": {
             "kind": "bin_op",
-            "left": "t56",
+            "left": "t21",
             "op": "<=",
-            "right": "t57"
+            "right": "t22"
           }
         },
         {
-          "name": "t59",
+          "name": "t24",
           "value": {
             "kind": "assert",
-            "value": "t58"
+            "value": "t23"
           }
         },
         {
-          "name": "t60",
+          "name": "t25",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "args": [
+              "t25",
+              "t26"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t28",
           "value": {
             "kind": "get_state_script"
           }
         },
         {
-          "name": "t61",
-          "value": {
-            "args": [
-              "t60"
-            ],
-            "func": "hash256",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t62",
+          "name": "t29",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t63",
+          "name": "t30",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t31",
           "value": {
             "args": [
-              "t62"
+              "t29",
+              "t28",
+              "t30"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "args": [
+              "t31",
+              "t27"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "args": [
+              "t32"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "args": [
+              "t34"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t64",
+          "name": "t36",
           "value": {
             "kind": "bin_op",
-            "left": "t61",
+            "left": "t33",
             "op": "===",
             "result_type": "bytes",
-            "right": "t63"
+            "right": "t35"
           }
         },
         {
-          "name": "t65",
+          "name": "t37",
           "value": {
             "kind": "assert",
-            "value": "t64"
+            "value": "t36"
           }
         }
       ],
@@ -720,19 +443,15 @@
           "type": "bigint"
         },
         {
-          "name": "_parentHashState",
-          "type": "ByteString"
+          "name": "_changePKH",
+          "type": "Ripemd160"
         },
         {
-          "name": "_parentTailBlock1",
-          "type": "ByteString"
+          "name": "_changeAmount",
+          "type": "bigint"
         },
         {
-          "name": "_parentTailBlock2",
-          "type": "ByteString"
-        },
-        {
-          "name": "_parentRawTailLen",
+          "name": "_newAmount",
           "type": "bigint"
         },
         {
@@ -768,489 +487,239 @@
           "name": "t3",
           "value": {
             "kind": "load_param",
-            "name": "_parentHashState"
+            "name": "txPreimage"
           }
         },
         {
           "name": "t4",
           "value": {
-            "kind": "load_param",
-            "name": "_parentTailBlock1"
+            "kind": "deserialize_state",
+            "preimage": "t3"
           }
         },
         {
           "name": "t5",
-          "value": {
-            "args": [
-              "t3",
-              "t4"
-            ],
-            "func": "sha256Compress",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t6",
-          "value": {
-            "kind": "load_param",
-            "name": "_parentTailBlock2"
-          }
-        },
-        {
-          "name": "t7",
-          "value": {
-            "args": [
-              "t5",
-              "t6"
-            ],
-            "func": "sha256Compress",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t8",
-          "value": {
-            "args": [
-              "t7"
-            ],
-            "func": "sha256",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t9",
-          "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t10",
-          "value": {
-            "args": [
-              "t9"
-            ],
-            "func": "extractOutpoint",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t11",
-          "value": {
-            "kind": "load_const",
-            "value": 32
-          }
-        },
-        {
-          "name": "t12",
-          "value": {
-            "args": [
-              "t10",
-              "t11"
-            ],
-            "func": "left",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t13",
-          "value": {
-            "kind": "bin_op",
-            "left": "t8",
-            "op": "===",
-            "result_type": "bytes",
-            "right": "t12"
-          }
-        },
-        {
-          "name": "t14",
-          "value": {
-            "kind": "assert",
-            "value": "t13"
-          }
-        },
-        {
-          "name": "t15",
           "value": {
             "kind": "load_prop",
             "name": "_genesisOutpoint"
           }
         },
         {
-          "name": "t16",
+          "name": "t6",
           "value": {
             "kind": "load_const",
             "value": "000000000000000000000000000000000000000000000000000000000000000000000000"
           }
         },
         {
-          "name": "t17",
+          "name": "t7",
           "value": {
             "kind": "bin_op",
-            "left": "t15",
+            "left": "t5",
             "op": "===",
             "result_type": "bytes",
-            "right": "t16"
+            "right": "t6"
           }
         },
         {
-          "name": "t46",
+          "name": "t15",
           "value": {
-            "cond": "t17",
+            "cond": "t7",
             "else": [
               {
-                "name": "t21",
+                "name": "t10",
                 "value": {
-                  "kind": "load_param",
-                  "name": "_parentTailBlock1"
+                  "kind": "load_prop",
+                  "name": "_proof"
                 }
               },
               {
-                "name": "t22",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_parentTailBlock2"
-                }
-              },
-              {
-                "name": "t23",
-                "value": {
-                  "args": [
-                    "t21",
-                    "t22"
-                  ],
-                  "func": "cat",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t24",
-                "value": {
-                  "kind": "load_param",
-                  "name": "_parentRawTailLen"
-                }
-              },
-              {
-                "name": "t25",
-                "value": {
-                  "kind": "load_const",
-                  "value": 4
-                }
-              },
-              {
-                "name": "t26",
-                "value": {
-                  "kind": "load_const",
-                  "value": 111
-                }
-              },
-              {
-                "name": "t27",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t24",
-                  "op": "-",
-                  "right": "t25"
-                }
-              },
-              {
-                "name": "t28",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t27",
-                  "op": "-",
-                  "right": "t26"
-                }
-              },
-              {
-                "name": "t29",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t28",
-                  "op": "+",
-                  "right": "t26"
-                }
-              },
-              {
-                "name": "t30",
-                "value": {
-                  "args": [
-                    "t23",
-                    "t29"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t31",
-                "value": {
-                  "args": [
-                    "t30",
-                    "t26"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t32",
-                "value": {
-                  "kind": "load_const",
-                  "value": 37
-                }
-              },
-              {
-                "name": "t33",
-                "value": {
-                  "kind": "load_const",
-                  "value": 36
-                }
-              },
-              {
-                "name": "t34",
-                "value": {
-                  "args": [
-                    "t31",
-                    "t32"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t35",
-                "value": {
-                  "args": [
-                    "t34",
-                    "t33"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t36",
-                "value": {
-                  "kind": "load_const",
-                  "value": 74
-                }
-              },
-              {
-                "name": "t37",
-                "value": {
-                  "args": [
-                    "t31",
-                    "t36"
-                  ],
-                  "func": "left",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t38",
-                "value": {
-                  "args": [
-                    "t37",
-                    "t32"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t39",
-                "value": {
-                  "args": [
-                    "t38",
-                    "t33"
-                  ],
-                  "func": "right",
-                  "kind": "call"
-                }
-              },
-              {
-                "name": "t40",
+                "name": "t11",
                 "value": {
                   "kind": "load_prop",
                   "name": "_genesisOutpoint"
                 }
               },
               {
-                "name": "t41",
+                "name": "t12",
                 "value": {
-                  "kind": "bin_op",
-                  "left": "t35",
-                  "op": "===",
-                  "result_type": "bytes",
-                  "right": "t40"
+                  "kind": "snark_verify",
+                  "proof": "t10",
+                  "publicInputs": [
+                    "t11"
+                  ]
                 }
               },
               {
-                "name": "t42",
+                "name": "t13",
                 "value": {
                   "kind": "assert",
-                  "value": "t41"
+                  "value": "t12"
                 }
               },
               {
-                "name": "t43",
+                "name": "t14",
                 "value": {
                   "kind": "load_prop",
-                  "name": "_grandparentOutpoint"
-                }
-              },
-              {
-                "name": "t44",
-                "value": {
-                  "kind": "bin_op",
-                  "left": "t39",
-                  "op": "===",
-                  "result_type": "bytes",
-                  "right": "t43"
-                }
-              },
-              {
-                "name": "t45",
-                "value": {
-                  "kind": "assert",
-                  "value": "t44"
+                  "name": "_genesisOutpoint"
                 }
               }
             ],
             "kind": "if",
             "then": [
               {
-                "name": "t18",
+                "name": "t8",
                 "value": {
                   "kind": "load_param",
                   "name": "txPreimage"
                 }
               },
               {
-                "name": "t19",
+                "name": "t9",
                 "value": {
                   "args": [
-                    "t18"
+                    "t8"
                   ],
                   "func": "extractOutpoint",
                   "kind": "call"
-                }
-              },
-              {
-                "name": "t20",
-                "value": {
-                  "kind": "update_prop",
-                  "name": "_genesisOutpoint",
-                  "value": "t19"
                 }
               }
             ]
           }
         },
         {
-          "name": "t47",
-          "value": {
-            "kind": "load_prop",
-            "name": "_parentOutpoint"
-          }
-        },
-        {
-          "name": "t48",
+          "name": "t16",
           "value": {
             "kind": "update_prop",
-            "name": "_grandparentOutpoint",
-            "value": "t47"
+            "name": "_genesisOutpoint",
+            "value": "t15"
           }
         },
         {
-          "name": "t49",
-          "value": {
-            "kind": "load_param",
-            "name": "txPreimage"
-          }
-        },
-        {
-          "name": "t50",
-          "value": {
-            "args": [
-              "t49"
-            ],
-            "func": "extractOutpoint",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t51",
-          "value": {
-            "kind": "update_prop",
-            "name": "_parentOutpoint",
-            "value": "t50"
-          }
-        },
-        {
-          "name": "t52",
+          "name": "t17",
           "value": {
             "kind": "load_const",
             "value": 0
           }
         },
         {
-          "name": "t53",
+          "name": "t18",
           "value": {
             "kind": "update_prop",
             "name": "count",
-            "value": "t52"
+            "value": "t17"
           }
         },
         {
-          "name": "t54",
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "args": [
+              "t19",
+              "t20"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t22",
           "value": {
             "kind": "get_state_script"
           }
         },
         {
-          "name": "t55",
-          "value": {
-            "args": [
-              "t54"
-            ],
-            "func": "hash256",
-            "kind": "call"
-          }
-        },
-        {
-          "name": "t56",
+          "name": "t23",
           "value": {
             "kind": "load_param",
             "name": "txPreimage"
           }
         },
         {
-          "name": "t57",
+          "name": "t24",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t25",
           "value": {
             "args": [
-              "t56"
+              "t23",
+              "t22",
+              "t24"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "args": [
+              "t25",
+              "t21"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "args": [
+              "t26"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "args": [
+              "t28"
             ],
             "func": "extractOutputHash",
             "kind": "call"
           }
         },
         {
-          "name": "t58",
+          "name": "t30",
           "value": {
             "kind": "bin_op",
-            "left": "t55",
+            "left": "t27",
             "op": "===",
             "result_type": "bytes",
-            "right": "t57"
+            "right": "t29"
           }
         },
         {
-          "name": "t59",
+          "name": "t31",
           "value": {
             "kind": "assert",
-            "value": "t58"
+            "value": "t30"
           }
         }
       ],
@@ -1258,19 +727,15 @@
       "name": "reset",
       "params": [
         {
-          "name": "_parentHashState",
-          "type": "ByteString"
+          "name": "_changePKH",
+          "type": "Ripemd160"
         },
         {
-          "name": "_parentTailBlock1",
-          "type": "ByteString"
+          "name": "_changeAmount",
+          "type": "bigint"
         },
         {
-          "name": "_parentTailBlock2",
-          "type": "ByteString"
-        },
-        {
-          "name": "_parentRawTailLen",
+          "name": "_newAmount",
           "type": "bigint"
         },
         {
@@ -1297,12 +762,7 @@
       "type": "ByteString"
     },
     {
-      "name": "_parentOutpoint",
-      "readonly": false,
-      "type": "ByteString"
-    },
-    {
-      "name": "_grandparentOutpoint",
+      "name": "_proof",
       "readonly": false,
       "type": "ByteString"
     }

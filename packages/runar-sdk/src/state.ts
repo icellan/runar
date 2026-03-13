@@ -49,7 +49,7 @@ export function deserializeState(
   let offset = 0;
 
   for (const field of sorted) {
-    const { value, bytesRead } = decodeStateValue(scriptHex, offset, field.type);
+    const { value, bytesRead } = decodeStateValue(scriptHex, offset, field.type, field.name);
     result[field.name] = value;
     offset += bytesRead;
   }
@@ -164,11 +164,14 @@ function encodeStateValue(value: unknown, type: string): string {
     case 'Ripemd160':
     case 'Sha256':
     case 'Point':
+    case 'ByteString':
       // Fixed-size byte types: raw hex, no framing needed.
+      // ByteString state fields (e.g., inductive internal outpoint fields) must use raw
+      // bytes to match the compiler's OP_CAT-based continuation output serialization.
       return String(value);
     default: {
-      // Variable-length types (bytes, ByteString, etc.): use push-data
-      // encoding so the decoder can determine the length.
+      // Variable-length types: use push-data encoding so the decoder can
+      // determine the length.
       const hex = String(value);
       if (hex.length === 0) return '00'; // OP_0
       return encodePushDataState(hex);
@@ -228,6 +231,7 @@ function decodeStateValue(
   hex: string,
   offset: number,
   type: string,
+  name?: string,
 ): { value: unknown; bytesRead: number } {
   switch (type) {
     case 'bool': {
@@ -250,6 +254,18 @@ function decodeStateValue(
       return { value: hex.slice(offset, offset + 64), bytesRead: 64 }; // 32 bytes
     case 'Point':
       return { value: hex.slice(offset, offset + 128), bytesRead: 128 }; // 64 bytes
+    case 'ByteString':
+      // Inductive internal fields: raw hex without push-data encoding.
+      // Size determined by field name.
+      if (name === '_genesisOutpoint') {
+        return { value: hex.slice(offset, offset + 72), bytesRead: 72 }; // 36 bytes
+      } else if (name === '_proof') {
+        return { value: hex.slice(offset, offset + 384), bytesRead: 384 }; // 192 bytes
+      } else {
+        // Unknown ByteString — try push-data decoding
+        const { data, bytesRead } = decodePushData(hex, offset);
+        return { value: data, bytesRead };
+      }
     default: {
       // For unknown types, fall back to push-data decoding
       const { data, bytesRead } = decodePushData(hex, offset);

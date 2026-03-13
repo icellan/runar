@@ -45,14 +45,12 @@ export function buildCallTransaction(
 
   const totalInput = allUtxos.reduce((sum, u) => sum + u.satoshis, 0);
 
-  // Determine contract outputs: explicit options take priority, then multiOutputs, then single
+  // Determine contract outputs: explicit options take priority, then single
   const contractOutputs: Array<{ script: string; satoshis: number }> =
     options?.contractOutputs ??
-    (multiOutputs && multiOutputs.length > 0
-      ? multiOutputs.map((o) => ({ script: o.lockingScript, satoshis: o.satoshis }))
-      : newLockingScript
-        ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
-        : []);
+    (newLockingScript
+      ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
+      : []);
 
   const contractOutputSats = contractOutputs.reduce((sum, o) => sum + o.satoshis, 0);
 
@@ -121,8 +119,9 @@ export function buildCallTransaction(
     });
   }
 
-  // Change output
-  if (change > 0 && (changeAddress || changeScript)) {
+  // Change output (after contract outputs)
+  const hasChange = change > 0 && (changeAddress || changeScript);
+  if (hasChange) {
     const actualChangeScript =
       changeScript || buildP2PKHScript(changeAddress!);
     tx.addOutput({

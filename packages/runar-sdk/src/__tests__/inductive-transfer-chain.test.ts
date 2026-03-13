@@ -26,8 +26,9 @@ function compileContract(sourcePath: string): RunarArtifact {
 }
 
 function setupRealTxidBroadcast(provider: MockProvider, signer: LocalSigner) {
-  provider.broadcast = async (rawTx: string): Promise<string> => {
-    const rawBytes = rawTx.match(/.{2}/g)!.map((b) => parseInt(b, 16));
+  provider.broadcast = async (rawTxOrObj: any): Promise<string> => {
+    const rawTx = typeof rawTxOrObj === 'string' ? rawTxOrObj : rawTxOrObj.toHex();
+    const rawBytes = rawTx.match(/.{2}/g)!.map((b: string) => parseInt(b, 16));
     const hash1 = Hash.sha256(rawBytes);
     const hash2 = Hash.sha256(hash1);
     const txid = Array.from(hash2).reverse().map((b) => b.toString(16).padStart(2, '0')).join('');

@@ -62,7 +62,7 @@ const VALID_PRIMITIVE_TYPES = new Set<string>([
 ]);
 
 /** Reserved internal field names for InductiveSmartContract. */
-const INDUCTIVE_RESERVED_NAMES = new Set(['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint']);
+const INDUCTIVE_RESERVED_NAMES = new Set(['_genesisOutpoint', '_proof']);
 
 function validateProperties(ctx: ValidationContext): void {
   const isStateful = ctx.contract.parentClass === 'StatefulSmartContract' || ctx.contract.parentClass === 'InductiveSmartContract';

@@ -236,13 +236,14 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 // InductiveSmartContract internal fields injection
 // ---------------------------------------------------------------------------
 
-// injectInductiveInternalFields adds the three internal tracking fields
-// (_genesisOutpoint, _parentOutpoint, _grandparentOutpoint) to an
-// InductiveSmartContract. These are ByteString properties that track
-// the chain lineage. They are appended to properties, constructor params,
+// injectInductiveInternalFields adds the internal tracking fields
+// (_genesisOutpoint, _proof) to an InductiveSmartContract.
+// _genesisOutpoint (36 bytes) tracks the chain lineage.
+// _proof (192 bytes) holds the ZKP proof data.
+// They are appended to properties, constructor params,
 // super() args, and constructor body assignments.
 func injectInductiveInternalFields(contract *ContractNode) {
-	internalFields := []string{"_genesisOutpoint", "_parentOutpoint", "_grandparentOutpoint"}
+	internalFields := []string{"_genesisOutpoint", "_proof"}
 	syntheticLoc := SourceLocation{File: contract.SourceFile, Line: 0, Column: 0}
 
 	// Add properties
@@ -288,14 +289,20 @@ func injectInductiveInternalFields(contract *ContractNode) {
 		}
 	}
 
-	// Add property assignments to constructor body
+	// Insert property assignments immediately after super() call (index 0)
+	// so internal fields are available to developer body
+	var assignments []Statement
 	for _, name := range internalFields {
-		contract.Constructor.Body = append(contract.Constructor.Body, AssignmentStmt{
+		assignments = append(assignments, AssignmentStmt{
 			Target:         PropertyAccessExpr{Property: name},
 			Value:          Identifier{Name: name},
 			SourceLocation: syntheticLoc,
 		})
 	}
+	// Insert after super() at index 1
+	tail := make([]Statement, len(contract.Constructor.Body[1:]))
+	copy(tail, contract.Constructor.Body[1:])
+	contract.Constructor.Body = append(contract.Constructor.Body[:1], append(assignments, tail...)...)
 }
 
 // ---------------------------------------------------------------------------

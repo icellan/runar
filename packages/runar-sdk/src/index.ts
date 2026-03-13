@@ -55,6 +55,10 @@ export type { PartialSha256Result } from './sha256-compress.js';
 // Token management
 export { TokenWallet } from './tokens.js';
 
+// Inductive proof management
+export { InductiveProofManager, PROOF_SIZE, ZERO_PROOF } from './inductive-proof.js';
+export type { ProofGenerator } from './inductive-proof.js';
+
 // Code generation
 export { generateTypescript } from './codegen/index.js';
 

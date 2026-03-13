@@ -477,6 +477,57 @@ func ecAffineAdd(t *ECTracker) {
 }
 
 // ===========================================================================
+// Affine point doubling (for ecMul degenerate case)
+// ===========================================================================
+
+// ecAffineDouble performs affine point doubling: 2*P for P=(px, py).
+// Expects px, py on tracker. Consumes both, produces rx, ry.
+//
+// Formula (secp256k1, a=0):
+//
+//	s = 3*px² / (2*py) mod p
+//	rx = s² - 2*px mod p
+//	ry = s*(px - rx) - py mod p
+func ecAffineDouble(t *ECTracker) {
+	// s_num = 3 * px²
+	t.copyToTop("px", "_px_copy")
+	ecFieldSqr(t, "_px_copy", "_px2")
+	t.pushInt("_three_d", 3)
+	ecFieldMul(t, "_px2", "_three_d", "_s_num")
+
+	// s_den = 2 * py
+	t.copyToTop("py", "_py_copy")
+	t.pushInt("_two_d", 2)
+	ecFieldMul(t, "_py_copy", "_two_d", "_s_den")
+
+	// s = s_num / s_den mod p
+	ecFieldInv(t, "_s_den", "_s_den_inv")
+	ecFieldMul(t, "_s_num", "_s_den_inv", "_s")
+
+	// rx = s² - 2*px mod p
+	t.copyToTop("_s", "_s_keep")
+	ecFieldSqr(t, "_s", "_s2")
+	t.copyToTop("px", "_px2b")
+	t.pushInt("_two_d2", 2)
+	ecFieldMul(t, "_px2b", "_two_d2", "_2px")
+	ecFieldSub(t, "_s2", "_2px", "rx")
+
+	// ry = s*(px - rx) - py mod p
+	t.copyToTop("px", "_px3")
+	t.copyToTop("rx", "_rx2")
+	ecFieldSub(t, "_px3", "_rx2", "_px_rx")
+	ecFieldMul(t, "_s_keep", "_px_rx", "_s_px_rx")
+	t.copyToTop("py", "_py2d")
+	ecFieldSub(t, "_s_px_rx", "_py2d", "ry")
+
+	// Clean up original point
+	t.toTop("px")
+	t.drop()
+	t.toTop("py")
+	t.drop()
+}
+
+// ===========================================================================
 // Jacobian point operations (for ecMul)
 // ===========================================================================
 
@@ -685,6 +736,20 @@ func EmitEcMul(emit func(StackOp)) {
 	})
 	t.rename("_k")
 
+	// Pre-compute 2*P via affine doubling and store on altstack.
+	// This handles the degenerate case where the mixed Jacobian-affine addition
+	// hits P+P (H=0 → Z3=0), which happens for ecMul(P, 2).
+	// Computing OUTSIDE the IF/ELSE avoids issues with field ops inside ELSE branches.
+	// Stack: [ax, ay, _k]
+	t.copyToTop("ax", "px")
+	t.copyToTop("ay", "py")
+	ecAffineDouble(t)
+	// Stack: [ax, ay, _k, rx, ry] — ry on top
+	// Push ry first, then rx to altstack so LIFO pop gives rx then ry
+	t.toAlt() // ry → altstack
+	t.toAlt() // rx → altstack
+	// Stack: [ax, ay, _k], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+
 	// Init accumulator = P (bit 257 of k+3n is always 1)
 	t.copyToTop("ax", "jx")
 	t.copyToTop("ay", "jy")
@@ -721,8 +786,48 @@ func EmitEcMul(emit func(StackOp)) {
 		emit(StackOp{Op: "if", Then: addOps, Else: []StackOp{}})
 	}
 
-	// Convert Jacobian to affine
-	ecJacobianToAffine(t, "_rx", "_ry")
+	// Check for degenerate case: Z=0 means the mixed addition hit P+P.
+	// Stack: [ax, ay, _k, jx, jy, jz], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+	t.copyToTop("jz", "_z_chk")
+	t.toTop("_z_chk")
+	t.nm = t.nm[:len(t.nm)-1] // consumed by IF
+
+	// Normal path (Z≠0): Jacobian to affine, discard altstack 2P values
+	var normalOps []StackOp
+	{
+		nt := NewECTracker(append([]string{}, t.nm...), func(op StackOp) { normalOps = append(normalOps, op) })
+		ecJacobianToAffine(nt, "_rx", "_ry")
+		// Discard pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+		nt.fromAlt("_alt_rx_d")
+		nt.toTop("_alt_rx_d")
+		nt.drop()
+		nt.fromAlt("_alt_ry_d")
+		nt.toTop("_alt_ry_d")
+		nt.drop()
+	}
+
+	// Degenerate path (Z=0): drop jx,jy,jz, retrieve 2P from altstack
+	var degOps []StackOp
+	{
+		dt := NewECTracker(append([]string{}, t.nm...), func(op StackOp) { degOps = append(degOps, op) })
+		dt.toTop("jz")
+		dt.drop()
+		dt.toTop("jy")
+		dt.drop()
+		dt.toTop("jx")
+		dt.drop()
+		// Retrieve pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+		dt.fromAlt("_rx")
+		dt.fromAlt("_ry")
+	}
+
+	emit(StackOp{Op: "if", Then: normalOps, Else: degOps})
+	// Both branches leave: [ax, ay, _k, _rx, _ry]
+	t.nm = t.nm[:len(t.nm)-1] // remove jz (consumed/dropped)
+	t.nm = t.nm[:len(t.nm)-1] // remove jy (consumed/dropped)
+	t.nm = t.nm[:len(t.nm)-1] // remove jx (consumed/dropped)
+	t.nm = append(t.nm, "_rx")
+	t.nm = append(t.nm, "_ry")
 
 	// Clean up base point and scalar
 	t.toTop("ax")

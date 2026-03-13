@@ -462,6 +462,54 @@ def _ec_affine_add(t: ECTracker) -> None:
     t.drop()
 
 
+def _ec_affine_double(t: ECTracker) -> None:
+    """Affine point doubling: 2*P for P=(px, py).
+
+    Expects px, py on tracker. Consumes both, produces rx, ry.
+
+    Formula (secp256k1, a=0):
+      s = 3*px^2 / (2*py) mod p
+      rx = s^2 - 2*px mod p
+      ry = s*(px - rx) - py mod p
+    """
+    # s_num = 3 * px^2
+    t.copy_to_top("px", "_px_copy")
+    _ec_field_sqr(t, "_px_copy", "_px2")
+    t.push_int("_three_d", 3)
+    _ec_field_mul(t, "_px2", "_three_d", "_s_num")
+
+    # s_den = 2 * py
+    t.copy_to_top("py", "_py_copy")
+    t.push_int("_two_d", 2)
+    _ec_field_mul(t, "_py_copy", "_two_d", "_s_den")
+
+    # s = s_num / s_den mod p
+    _ec_field_inv(t, "_s_den", "_s_den_inv")
+    _ec_field_mul(t, "_s_num", "_s_den_inv", "_s")
+
+    # rx = s^2 - 2*px mod p
+    t.copy_to_top("_s", "_s_keep")
+    _ec_field_sqr(t, "_s", "_s2")
+    t.copy_to_top("px", "_px2b")
+    t.push_int("_two_d2", 2)
+    _ec_field_mul(t, "_px2b", "_two_d2", "_2px")
+    _ec_field_sub(t, "_s2", "_2px", "rx")
+
+    # ry = s*(px - rx) - py mod p
+    t.copy_to_top("px", "_px3")
+    t.copy_to_top("rx", "_rx2")
+    _ec_field_sub(t, "_px3", "_rx2", "_px_rx")
+    _ec_field_mul(t, "_s_keep", "_px_rx", "_s_px_rx")
+    t.copy_to_top("py", "_py2d")
+    _ec_field_sub(t, "_s_px_rx", "_py2d", "ry")
+
+    # Clean up original point
+    t.to_top("px")
+    t.drop()
+    t.to_top("py")
+    t.drop()
+
+
 # ===========================================================================
 # Jacobian point operations (for ecMul)
 # ===========================================================================
@@ -673,6 +721,20 @@ def emit_ec_mul(emit: Callable) -> None:
     t.raw_block(["_kn2", "_n3"], "_kn3", lambda e: e(_make_stack_op(op="opcode", code="OP_ADD")))
     t.rename("_k")
 
+    # Pre-compute 2*P via affine doubling and store on altstack.
+    # This handles the degenerate case where the mixed Jacobian-affine addition
+    # hits P+P (H=0 -> Z3=0), which happens for ecMul(P, 2).
+    # Computing OUTSIDE the IF/ELSE avoids issues with field ops inside ELSE branches.
+    # Stack: [ax, ay, _k]
+    t.copy_to_top("ax", "px")
+    t.copy_to_top("ay", "py")
+    _ec_affine_double(t)
+    # Stack: [ax, ay, _k, rx, ry] -- ry on top
+    # Push ry first, then rx to altstack so LIFO pop gives rx then ry
+    t.to_alt()  # ry -> altstack
+    t.to_alt()  # rx -> altstack
+    # Stack: [ax, ay, _k], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+
     # Init accumulator = P (bit 257 of k+3n is always 1)
     t.copy_to_top("ax", "jx")
     t.copy_to_top("ay", "jy")
@@ -703,8 +765,48 @@ def emit_ec_mul(emit: Callable) -> None:
         _ec_build_jacobian_add_affine_inline(add_emit, t)
         emit(_make_stack_op(op="if", then=add_ops, else_=[]))
 
-    # Convert Jacobian to affine
-    _ec_jacobian_to_affine(t, "_rx", "_ry")
+    # Check for degenerate case: Z=0 means the mixed addition hit P+P.
+    # Stack: [ax, ay, _k, jx, jy, jz], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+    t.copy_to_top("jz", "_z_chk")
+    t.to_top("_z_chk")
+    t.nm.pop()  # consumed by IF
+
+    # Normal path (Z!=0): Jacobian to affine, discard altstack 2P values
+    normal_ops: list = []
+    def _build_normal(ne):
+        nt = ECTracker(list(t.nm), ne)
+        _ec_jacobian_to_affine(nt, "_rx", "_ry")
+        # Discard pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+        nt.from_alt("_alt_rx_d")
+        nt.to_top("_alt_rx_d")
+        nt.drop()
+        nt.from_alt("_alt_ry_d")
+        nt.to_top("_alt_ry_d")
+        nt.drop()
+    _build_normal(lambda op: normal_ops.append(op))
+
+    # Degenerate path (Z=0): drop jx,jy,jz, retrieve 2P from altstack
+    deg_ops: list = []
+    def _build_deg(de):
+        dt = ECTracker(list(t.nm), de)
+        dt.to_top("jz")
+        dt.drop()
+        dt.to_top("jy")
+        dt.drop()
+        dt.to_top("jx")
+        dt.drop()
+        # Retrieve pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+        dt.from_alt("_rx")
+        dt.from_alt("_ry")
+    _build_deg(lambda op: deg_ops.append(op))
+
+    emit(_make_stack_op(op="if", then=normal_ops, else_=deg_ops))
+    # Both branches leave: [ax, ay, _k, _rx, _ry]
+    t.nm.pop()  # remove jz (consumed/dropped)
+    t.nm.pop()  # remove jy (consumed/dropped)
+    t.nm.pop()  # remove jx (consumed/dropped)
+    t.nm.append("_rx")
+    t.nm.append("_ry")
 
     # Clean up base point and scalar
     t.to_top("ax")

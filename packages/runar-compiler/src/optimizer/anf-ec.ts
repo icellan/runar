@@ -157,7 +157,7 @@ function tryRewrite(
       // Rule 3: ecMul(x, 1) → x (alias)
       if (isConstInt(scalarVal, 1n)) {
         // Return a reference to the point argument
-        return { kind: 'load_param', name: `@ref:${pointArg}` } as ANFValue;
+        return { kind: 'load_const', value: `@ref:${pointArg}` } as ANFValue;
       }
 
       // Rule 12: ecMul(k, G) → ecMulGen(k)
@@ -192,12 +192,12 @@ function tryRewrite(
 
       // Rule 1: ecAdd(x, INFINITY) → x
       if (argIsInfinity(rightArg, valueMap)) {
-        return { kind: 'load_param', name: `@ref:${leftArg}` } as ANFValue;
+        return { kind: 'load_const', value: `@ref:${leftArg}` } as ANFValue;
       }
 
       // Rule 2: ecAdd(INFINITY, x) → x
       if (argIsInfinity(leftArg, valueMap)) {
-        return { kind: 'load_param', name: `@ref:${rightArg}` } as ANFValue;
+        return { kind: 'load_const', value: `@ref:${rightArg}` } as ANFValue;
       }
 
       // Rule 8: ecAdd(x, ecNegate(x)) → INFINITY
@@ -252,7 +252,7 @@ function tryRewrite(
 
       // Rule 7: ecNegate(ecNegate(x)) → x
       if (isCallTo(innerVal, 'ecNegate') && innerVal.args.length === 1) {
-        return { kind: 'load_param', name: `@ref:${innerVal.args[0]!}` } as ANFValue;
+        return { kind: 'load_const', value: `@ref:${innerVal.args[0]!}` } as ANFValue;
       }
 
       return null;

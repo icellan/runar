@@ -161,6 +161,19 @@ importers:
         specifier: ^2.1.0
         version: 2.1.9(@types/node@22.19.13)
 
+  packages/runar-zkp:
+    dependencies:
+      runar-ir-schema:
+        specifier: workspace:*
+        version: link:../runar-ir-schema
+    devDependencies:
+      typescript:
+        specifier: ^5.6.0
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.0
+        version: 2.1.9(@types/node@22.19.13)
+
 packages:
 
   '@babel/runtime@7.28.6':

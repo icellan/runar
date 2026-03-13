@@ -172,7 +172,8 @@ function extractABI(contract: ContractNode): ABI {
   // Constructor
   const constructorParams: ABIParam[] = contract.constructor.params.map(paramToABI);
 
-  const isStateful = contract.parentClass === 'StatefulSmartContract';
+  const isStateful = contract.parentClass === 'StatefulSmartContract' || contract.parentClass === 'InductiveSmartContract';
+
   const mutablePropNames = isStateful
     ? new Set(contract.properties.filter(p => !p.readonly).map(p => p.name))
     : new Set<string>();
@@ -187,6 +188,7 @@ function extractABI(contract: ContractNode): ABI {
       // Methods that mutate state or call addOutput need change output params
       needsChange = methodMutatesState(method.body, mutablePropNames) ||
                     methodHasAddOutput(method.body);
+
       if (needsChange) {
         params.push({ name: '_changePKH', type: 'Ripemd160' });
         params.push({ name: '_changeAmount', type: 'bigint' });

@@ -1,7 +1,7 @@
 package frontend
 
 import (
-	"encoding/hex"
+	"encoding/json"
 	"math/big"
 	"strings"
 
@@ -307,32 +307,35 @@ func isGRef(name string, lookup map[string]*ir.ANFValue) bool {
 	return *v.ConstString == gHex
 }
 
-// makeAlias rewrites a binding to be a load_param referencing another binding via @ref:.
+// makeAlias rewrites a binding to be a load_const with a @ref: value referencing another binding.
 func makeAlias(b *ir.ANFBinding, target string) {
+	ref := "@ref:" + target
+	raw, _ := json.Marshal(ref)
 	b.Value = ir.ANFValue{
-		Kind: "load_param",
-		Name: "@ref:" + target,
+		Kind:        "load_const",
+		RawValue:    raw,
+		ConstString: &ref,
 	}
 }
 
 // makeInfinityConst rewrites a binding to be a load_const with the INFINITY point value.
 func makeInfinityConst(b *ir.ANFBinding) {
 	infHex := infinityHex
-	infBytes, _ := hex.DecodeString(infHex)
+	raw, _ := json.Marshal(infHex)
 	b.Value = ir.ANFValue{
 		Kind:        "load_const",
+		RawValue:    raw,
 		ConstString: &infHex,
-		ConstBigInt: nil,
-		ConstBool:   nil,
 	}
-	_ = infBytes
 }
 
 // makeGConst rewrites a binding to be a load_const with the generator point G value.
 func makeGConst(b *ir.ANFBinding) {
 	g := gHex
+	raw, _ := json.Marshal(g)
 	b.Value = ir.ANFValue{
 		Kind:        "load_const",
+		RawValue:    raw,
 		ConstString: &g,
 	}
 }
@@ -383,7 +386,10 @@ func collectValueRefs(v *ir.ANFValue, refs map[string]bool) {
 	case "load_prop":
 		// references the property by name, not a binding
 	case "load_const":
-		// no references
+		// @ref: values reference another binding — must be tracked as a ref
+		if v.ConstString != nil && strings.HasPrefix(*v.ConstString, "@ref:") {
+			refs[strings.TrimPrefix(*v.ConstString, "@ref:")] = true
+		}
 	case "bin_op":
 		refs[v.Left] = true
 		refs[v.Right] = true

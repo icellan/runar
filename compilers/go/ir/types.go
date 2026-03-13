@@ -116,6 +116,10 @@ type ANFValue struct {
 
 	// add_raw_output
 	ScriptBytes string `json:"scriptBytes,omitempty"`
+
+	// snark_verify
+	Proof        string   `json:"proof,omitempty"`
+	PublicInputs []string `json:"publicInputs,omitempty"`
 }
 
 // DecodeConstants walks the program and decodes the RawValue fields in

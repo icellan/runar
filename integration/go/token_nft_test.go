@@ -180,6 +180,11 @@ func TestNFT_Transfer(t *testing.T) {
 		t.Fatalf("compile: %v", err)
 	}
 	t.Logf("SimpleNFT script: %d bytes", len(artifact.Script)/2)
+	if artifact.CodeSeparatorIndex != nil {
+		t.Logf("codeSepIdx: %d", *artifact.CodeSeparatorIndex)
+	}
+	t.Logf("codeSepIndices: %v", artifact.CodeSeparatorIndices)
+	t.Logf("constructorSlots: %v", artifact.ConstructorSlots)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		owner.PubKeyHex(),

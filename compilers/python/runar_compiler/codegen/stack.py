@@ -259,6 +259,9 @@ def collect_refs(value: ANFValue) -> list[str]:
     elif kind == "add_raw_output":
         refs.append(value.satoshis)
         refs.append(value.script_bytes)
+    elif kind == "snark_verify":
+        refs.append(value.proof)
+        refs.extend(value.public_inputs)
 
     return refs
 
@@ -343,7 +346,20 @@ class _LoweringContext:
 
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
 
-        # Else: 0xfd + 2-byte LE varint (len >= 253)
+        # Else: len >= 253 — nested check for 2-byte vs 4-byte varint
+        self.emit_op(StackOp(op="dup"))  # [script, len, len]
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(65536)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()  # pop condition
+
+        # Then: 0xfd + 2-byte LE varint (253 <= len < 65536)
         self.emit_op(StackOp(op="push", value=big_int_push(4)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
@@ -368,6 +384,34 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_CAT"))
         self.sm.push("")
 
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+
+        # Else: 0xfe + 4-byte LE varint (len >= 65536)
+        self.emit_op(StackOp(op="push", value=big_int_push(5)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")  # low4bytes
+        self.sm.push("")  # highByte
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0xFE]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap"))
+        self.sm.swap()
+        self.sm.pop()
+        self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         # --- Stack: [..., script, varint] ---
 
@@ -518,6 +562,8 @@ class _LoweringContext:
             self._lower_add_output(name, value.satoshis, value.state_values, value.preimage, binding_index, last_uses)
         elif kind == "add_raw_output":
             self._lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
+        elif kind == "snark_verify":
+            self._lower_snark_verify(name, value.proof, value.public_inputs, binding_index, last_uses)
 
     # -----------------------------------------------------------------
     # Individual lowering methods
@@ -940,9 +986,6 @@ class _LoweringContext:
                     else_ctx.sm.push(rolled)
                     else_ctx.emit_op(StackOp(op="drop"))
                     else_ctx.sm.pop()
-            # Push empty bytes as placeholder result
-            else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
-            else_ctx.sm.push("")
         # Handle the reverse case symmetrically (unlikely but safe)
         post_else_names = else_ctx.sm.named_slots()
         else_consumed_names = [n for n in pre_if_names
@@ -965,6 +1008,15 @@ class _LoweringContext:
                     then_ctx.sm.push(rolled)
                     then_ctx.emit_op(StackOp(op="drop"))
                     then_ctx.sm.pop()
+
+        # Push empty-bytes placeholders only where needed to equalize branch depths.
+        # When one branch consumed items that the other didn't (and was reconciled above),
+        # AND the branch didn't produce its own result to compensate, we need a placeholder
+        # so OP_CAT after OP_ENDIF operates on the correct stack depth.
+        if else_ctx.sm.depth() < then_ctx.sm.depth():
+            else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
+            else_ctx.sm.push("")
+        if then_ctx.sm.depth() < else_ctx.sm.depth():
             then_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
             then_ctx.sm.push("")
 
@@ -1392,6 +1444,15 @@ class _LoweringContext:
                 sz = 32
             elif p.type == "Point":
                 sz = 64
+            elif p.type == "Ripemd160":
+                sz = 20
+            elif p.type == "ByteString":
+                if p.name == "_genesisOutpoint":
+                    sz = 36
+                elif p.name == "_proof":
+                    sz = 192
+                else:
+                    raise ValueError(f"deserialize_state: ByteString property '{p.name}' has unknown serialized size")
             else:
                 raise RuntimeError(f"deserialize_state: unsupported type: {p.type}")
             prop_sizes.append(sz)
@@ -1644,6 +1705,34 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.push(binding_name)
         self._track_depth()
+
+    # -----------------------------------------------------------------
+    # snark_verify (STUB)
+    # -----------------------------------------------------------------
+
+    def _lower_snark_verify(self, binding_name: str, proof: str,
+                            public_inputs: list[str], binding_index: int,
+                            last_uses: dict[str, int]) -> None:
+        """snark_verify -- STUB: drops proof and public inputs, pushes OP_TRUE.
+
+        Will be replaced with real Groth16 verifier codegen in a future step.
+        """
+        # Consume (drop) proof from the stack
+        proof_is_last = self._is_last_use(proof, binding_index, last_uses)
+        self.bring_to_top(proof, proof_is_last)
+        self.emit_op(StackOp(op="drop"))
+        self.sm.pop()
+
+        # Consume (drop) each public input from the stack
+        for inp in public_inputs:
+            inp_is_last = self._is_last_use(inp, binding_index, last_uses)
+            self.bring_to_top(inp, inp_is_last)
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # Stub: always return true
+        self.emit_op(StackOp(op="opcode", code="OP_TRUE"))
+        self.sm.push(binding_name)
 
     # -----------------------------------------------------------------
     # check_preimage (OP_PUSH_TX)

@@ -186,3 +186,66 @@ describe('decodeNum2Bin negative zero edge cases', () => {
     expect(result.v).toBe(-128n);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ByteString state fields (inductive internal fields)
+// ---------------------------------------------------------------------------
+
+describe('ByteString state serialization', () => {
+  it('serializes ByteString as raw hex without push-data encoding', () => {
+    const outpoint = 'aa'.repeat(32) + 'bb'.repeat(4); // 36 bytes = 72 hex chars
+    const fields = makeFields({ name: '_genesisOutpoint', type: 'ByteString', index: 0 });
+    const hex = serializeState(fields, { _genesisOutpoint: outpoint });
+    // Raw bytes: should be exactly the outpoint hex (no push-data prefix)
+    expect(hex).toBe(outpoint);
+    expect(hex.length).toBe(72); // 36 bytes * 2
+  });
+
+  it('does NOT add push-data length prefix to ByteString', () => {
+    const proof = 'cc'.repeat(192); // 192 bytes = 384 hex chars
+    const fields = makeFields({ name: '_proof', type: 'ByteString', index: 0 });
+    const hex = serializeState(fields, { _proof: proof });
+    // Raw encoding should be exactly 384 hex chars
+    expect(hex).toBe(proof);
+    expect(hex.length).toBe(384);
+  });
+
+  it('roundtrips ByteString through serialize/deserialize', () => {
+    const outpoint = 'deadbeef'.repeat(9); // 36 bytes
+    const fields = makeFields({ name: '_genesisOutpoint', type: 'ByteString', index: 0 });
+    const hex = serializeState(fields, { _genesisOutpoint: outpoint });
+    const result = deserializeState(fields, hex);
+    expect(result._genesisOutpoint).toBe(outpoint);
+  });
+
+  it('roundtrips inductive state layout: PubKey + bigint + _genesisOutpoint + _proof', () => {
+    const owner = '02' + 'aa'.repeat(32); // 33 bytes
+    const balance = 100n;
+    const genesisOutpoint = 'dd'.repeat(36);  // 36 bytes
+    const proof = 'ee'.repeat(192);            // 192 bytes
+
+    const fields = makeFields(
+      { name: 'owner', type: 'PubKey', index: 0 },
+      { name: 'balance', type: 'bigint', index: 1 },
+      { name: '_genesisOutpoint', type: 'ByteString', index: 2 },
+      { name: '_proof', type: 'ByteString', index: 3 },
+    );
+
+    const values = {
+      owner,
+      balance,
+      _genesisOutpoint: genesisOutpoint,
+      _proof: proof,
+    };
+
+    const hex = serializeState(fields, values);
+    // Total: 33 (PubKey) + 8 (bigint) + 36 (_genesisOutpoint) + 192 (_proof) = 269 bytes = 538 hex chars
+    expect(hex.length).toBe(538);
+
+    const result = deserializeState(fields, hex);
+    expect(result.owner).toBe(owner);
+    expect(result.balance).toBe(balance);
+    expect(result._genesisOutpoint).toBe(genesisOutpoint);
+    expect(result._proof).toBe(proof);
+  });
+});

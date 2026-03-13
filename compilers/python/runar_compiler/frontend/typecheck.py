@@ -597,6 +597,12 @@ class _TypeChecker:
                     self._infer_expr_type(arg, env)
                 return "void"
             if prop == "addRawOutput":
+                if self.contract.parent_class == "InductiveSmartContract":
+                    self.errors.append(
+                        "addRawOutput() is not allowed in InductiveSmartContract "
+                        "-- raw outputs bypass internal field propagation and "
+                        "break lineage verification. Use addOutput() instead."
+                    )
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "void"
@@ -624,6 +630,12 @@ class _TypeChecker:
                         self._infer_expr_type(arg, env)
                     return "void"
                 if e.callee.property == "addRawOutput":
+                    if self.contract.parent_class == "InductiveSmartContract":
+                        self.errors.append(
+                            "addRawOutput() is not allowed in InductiveSmartContract "
+                            "-- raw outputs bypass internal field propagation and "
+                            "break lineage verification. Use addOutput() instead."
+                        )
                     for arg in e.args:
                         self._infer_expr_type(arg, env)
                     return "void"

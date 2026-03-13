@@ -281,6 +281,9 @@ func collectRefs(value *ir.ANFValue) []string {
 	case "add_raw_output":
 		refs = append(refs, value.Satoshis)
 		refs = append(refs, value.ScriptBytes)
+	case "snark_verify":
+		refs = append(refs, value.Proof)
+		refs = append(refs, value.PublicInputs...)
 	}
 
 	return refs
@@ -367,9 +370,20 @@ func (ctx *loweringContext) emitVarintEncoding() {
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
 
-	// Else: 0xfd + 2-byte LE varint (len >= 253)
-	// Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-	// then take only the first 2 (low) bytes via SPLIT.
+	// Else: len >= 253 — nested check for 2-byte vs 4-byte varint
+	ctx.emitOp(StackOp{Op: "dup"}) // [script, len, len]
+	ctx.sm.dup()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(65536)}) // [script, len, len, 65536]
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"}) // [script, len, isMedium]
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop() // pop condition
+
+	// Then: 0xfd + 2-byte LE varint (253 <= len < 65536)
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
 	ctx.sm.push("")
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"}) // [script, len_4bytes]
@@ -394,6 +408,34 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 	ctx.sm.push("")
 
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+
+	// Else: 0xfe + 4-byte LE varint (len >= 65536)
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(5)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"}) // [script, len_5bytes]
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)}) // [script, len_5bytes, 4]
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [script, low4bytes, highByte]
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.sm.push("") // low4bytes
+	ctx.sm.push("") // highByte
+	ctx.emitOp(StackOp{Op: "drop"}) // [script, low4bytes]
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0xfe}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop()
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	// --- Stack: [..., script, varint] ---
 }
@@ -567,6 +609,8 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 		ctx.lowerAddOutput(name, value.Satoshis, value.StateValues, value.Preimage, bindingIndex, lastUses)
 	case "add_raw_output":
 		ctx.lowerAddRawOutput(name, value.Satoshis, value.ScriptBytes, bindingIndex, lastUses)
+	case "snark_verify":
+		ctx.lowerSnarkVerify(name, value.Proof, value.PublicInputs, bindingIndex, lastUses)
 	}
 }
 
@@ -1523,6 +1567,26 @@ func (ctx *loweringContext) lowerBuildChangeOutput(bindingName string, args []st
 	ctx.trackDepth()
 }
 
+// lowerSnarkVerify is a STUB for the snark_verify ANF node.
+// Drops proof and public inputs, pushes OP_TRUE.
+func (ctx *loweringContext) lowerSnarkVerify(bindingName, proof string, publicInputs []string, bindingIndex int, lastUses map[string]int) {
+	proofIsLast := ctx.isLastUse(proof, bindingIndex, lastUses)
+	ctx.bringToTop(proof, proofIsLast)
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+
+	for _, input := range publicInputs {
+		inputIsLast := ctx.isLastUse(input, bindingIndex, lastUses)
+		ctx.bringToTop(input, inputIsLast)
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	}
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_TRUE"})
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
 // lowerDeserializeState extracts mutable property values from the BIP-143
 // preimage's scriptCode field. The state is stored as the last `stateLen`
 // bytes of the scriptCode (after OP_RETURN).
@@ -1554,6 +1618,14 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 			sz = 32
 		case "Point":
 			sz = 64
+		case "ByteString":
+			if p.Name == "_genesisOutpoint" {
+				sz = 36
+			} else if p.Name == "_proof" {
+				sz = 192
+			} else {
+				panic("deserialize_state: ByteString property '" + p.Name + "' has unknown serialized size")
+			}
 		default:
 			panic("deserialize_state: unsupported type: " + p.Type)
 		}

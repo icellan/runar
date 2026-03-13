@@ -129,6 +129,7 @@ _SNAKE_TO_CAMEL = {
     "is_public": "isPublic",
     "iter_var": "iterVar",
     "state_values": "stateValues",
+    "public_inputs": "publicInputs",
     "initial_value": "initialValue",
     "else_": "else",
     # These stay as snake_case to match Go/TS IR format

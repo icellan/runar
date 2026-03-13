@@ -16,6 +16,10 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.inductive_inject import (
+    inject_inductive_internal_props,
+    inject_inductive_constructor_fields,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -676,17 +680,24 @@ class _GoParser:
                 )
             )
 
+        constructor = MethodNode(
+            name="constructor",
+            params=constructor_params,
+            body=constructor_body,
+            visibility="public",
+            source_location=SourceLocation(file=self.file_name, line=1, column=1),
+        )
+
+        # For InductiveSmartContract, inject internal fields after developer properties
+        if parent_class == "InductiveSmartContract":
+            inject_inductive_internal_props(properties, self.file_name)
+            inject_inductive_constructor_fields(constructor)
+
         return ContractNode(
             name=contract_name,
             parent_class=parent_class,
             properties=properties,
-            constructor=MethodNode(
-                name="constructor",
-                params=constructor_params,
-                body=constructor_body,
-                visibility="public",
-                source_location=SourceLocation(file=self.file_name, line=1, column=1),
-            ),
+            constructor=constructor,
             methods=methods,
             source_file=self.file_name,
         )

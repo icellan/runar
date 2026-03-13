@@ -137,6 +137,8 @@ this.addRawOutput(satoshis, scriptBytes);
 
 Unlike `addOutput`, which wraps the contract's own code with updated state, `addRawOutput` uses the caller-specified script bytes directly. This enables protocols that need heterogeneous outputs (e.g., paying to a P2PKH address alongside a contract continuation).
 
+**Note:** `addRawOutput` is **not allowed** in `InductiveSmartContract`. Raw outputs bypass internal field propagation (`_genesisOutpoint`, `_proof`), which would break lineage tracking for any child transaction. The type checker rejects this at compile time.
+
 ---
 
 ## Compiling to Artifacts

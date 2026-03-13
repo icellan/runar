@@ -356,18 +356,14 @@ export class RunarContract {
       this.artifact.stateFields.length > 0;
     const methodNeedsChange = method.params.some((p) => p.name === '_changePKH');
     const methodNeedsNewAmount = method.params.some((p) => p.name === '_newAmount');
-    const isInductive = method.params.some((p) => p.name === '_parentHashState');
+    const isInductive = this.artifact.stateFields?.some(f => f.name === '_genesisOutpoint') ?? false;
     const userParams = isStateful || isInductive
       ? method.params.filter(
           (p) =>
             p.type !== 'SigHashPreimage' &&
             p.name !== '_changePKH' &&
             p.name !== '_changeAmount' &&
-            p.name !== '_newAmount' &&
-            p.name !== '_parentHashState' &&
-            p.name !== '_parentTailBlock1' &&
-            p.name !== '_parentTailBlock2' &&
-            p.name !== '_parentRawTailLen',
+            p.name !== '_newAmount',
         )
       : method.params;
 
@@ -386,25 +382,6 @@ export class RunarContract {
     const contractUtxo: UTXO = { ...this.currentUtxo };
     const address = await signer.getAddress();
     const changeAddress = options?.changeAddress ?? address;
-    // For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
-    // params from the parent transaction (the tx that created the current UTXO).
-    // These are pushed in the unlock script between user args and txPreimage.
-    let inductiveParamsHex = '';
-    if (isInductive) {
-      const parentTx = await provider.getTransaction(this.currentUtxo.txid);
-      if (!parentTx.raw) {
-        throw new Error(
-          'RunarContract.call: provider returned transaction without raw hex, needed for inductive parent tx verification',
-        );
-      }
-      const partial = computePartialSha256ForInductive(parentTx.raw);
-      inductiveParamsHex =
-        encodePushData(partial.parentHashState) +
-        encodePushData(partial.parentTailBlock1) +
-        encodePushData(partial.parentTailBlock2) +
-        encodeScriptNumber(BigInt(partial.parentRawTailLen));
-    }
-
     // Detect auto-compute params (user passed null)
     const sigIndices: number[] = [];
     const prevoutsIndices: number[] = [];
@@ -445,9 +422,9 @@ export class RunarContract {
       }
     }
 
-    // Compute change PKH for stateful methods that need it
+    // Compute change PKH for stateful/inductive methods that need it
     let changePKHHex = '';
-    if (isStateful && methodNeedsChange) {
+    if ((isStateful || isInductive) && methodNeedsChange) {
       const changePubKeyHex = options?.changePubKey ?? await signer.getPublicKey();
       const pubKeyBytes = Utils.toArray(changePubKeyHex, 'hex');
       const hash160Bytes = Hash.hash160(pubKeyBytes);
@@ -501,7 +478,7 @@ export class RunarContract {
           if (methodNeedsChange && changePKHHex) {
             changeHex = encodePushData(changePKHHex) + encodeArg(0n);
           }
-          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + inductiveParamsHex + encodePushData(preimage) + methodSelectorHex;
+          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + encodePushData(preimage) + methodSelectorHex;
           return { unlock, opSig, preimage };
         };
 
@@ -577,6 +554,8 @@ export class RunarContract {
         _newSatoshis: 0,
         _hasMultiOutput: false,
         _contractOutputs: [],
+        _continuationOutputIndex: 0,
+        _isInductive: isInductive,
       };
     }
 
@@ -601,21 +580,52 @@ export class RunarContract {
 
     if (isStateful && hasMultiOutput) {
       const codeScript = this._codeScript ?? this.buildCodeScript();
+
+      // For InductiveSmartContract, compute the updated _genesisOutpoint that the
+      // on-chain script will set: extractOutpoint(preimage) at genesis, unchanged after.
+      let inductiveUpdatedState: Record<string, unknown> = {};
+      if (isInductive && this.currentUtxo) {
+        const txidLE = this.currentUtxo.txid.match(/.{2}/g)!.reverse().join('');
+        const voutLE = this.currentUtxo.outputIndex.toString(16).padStart(8, '0')
+          .match(/.{2}/g)!.reverse().join('');
+        const currentOutpoint = txidLE + voutLE;
+
+        const ZERO_SENTINEL = '00'.repeat(36);
+        const oldGenesis = (this._state._genesisOutpoint as string) ?? ZERO_SENTINEL;
+        const isGenesis = oldGenesis === ZERO_SENTINEL;
+        inductiveUpdatedState = {
+          _genesisOutpoint: isGenesis ? currentOutpoint : oldGenesis,
+        };
+      }
+
       contractOutputs = options!.outputs!.map((out) => {
-        const stateHex = serializeState(this.artifact.stateFields!, out.state);
+        // Merge auto-managed internal fields with user-provided state.
+        const mergedState = { ...this._state, ...inductiveUpdatedState, ...out.state };
+        const stateHex = serializeState(this.artifact.stateFields!, mergedState);
         return { script: codeScript + '6a' + stateHex, satoshis: out.satoshis ?? 1 };
       });
-      // Track which output is the continuation for state tracking
       const contIdx = options!.continuationOutputIndex ?? (options!.outputs!.length - 1);
       const contOutput = options!.outputs![contIdx];
       if (contOutput) {
-        this._state = { ...this._state, ...contOutput.state };
+        this._state = { ...this._state, ...inductiveUpdatedState, ...contOutput.state };
       }
     } else if (isStateful) {
       newSatoshis = options?.satoshis ?? this.currentUtxo.satoshis;
-      if (options?.newState) {
-        this._state = { ...this._state, ...options.newState }
+      // For inductive contracts, update _genesisOutpoint before building locking script
+      if (isInductive && this.currentUtxo) {
+        const txidLE = this.currentUtxo.txid.match(/.{2}/g)!.reverse().join('');
+        const voutLE = this.currentUtxo.outputIndex.toString(16).padStart(8, '0')
+          .match(/.{2}/g)!.reverse().join('');
+        const currentOutpoint = txidLE + voutLE;
+        const ZERO_SENTINEL = '00'.repeat(36);
+        const oldGenesis = (this._state._genesisOutpoint as string) ?? ZERO_SENTINEL;
+        const isGenesis = oldGenesis === ZERO_SENTINEL;
+        this._state._genesisOutpoint = isGenesis ? currentOutpoint : oldGenesis;
       }
+      if (options?.newState) {
+        this._state = { ...this._state, ...options.newState };
+      }
+      newLockingScript = this.getLockingScript();
     }
 
     const feeRate = await provider.getFeeRate();
@@ -665,7 +675,7 @@ export class RunarContract {
         additionalContractInputs: extraContractUtxos.length > 0
           ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
           : undefined,
-      },
+              },
     );
 
     // Sign P2PKH funding inputs
@@ -731,7 +741,7 @@ export class RunarContract {
         if (methodNeedsNewAmount) {
           newAmountHex = encodeArg(BigInt(newSatoshis ?? this.currentUtxo!.satoshis));
         }
-        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + inductiveParamsHex + encodePushData(preimage) + methodSelectorHex;
+        const unlock = this.buildStatefulPrefix(opSig, methodNeedsChange) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
         return { unlock, opSig, preimage };
       };
 
@@ -763,7 +773,7 @@ export class RunarContract {
           additionalContractInputs: extraContractUtxos.length > 0
             ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlocks[i]! }))
             : undefined,
-        },
+                  },
       ));
 
       // Second pass: recompute with final tx
@@ -874,6 +884,8 @@ export class RunarContract {
       _newSatoshis: newSatoshis ?? 0,
       _hasMultiOutput: !!hasMultiOutput,
       _contractOutputs: contractOutputs ?? [],
+      _continuationOutputIndex: hasMultiOutput ? (options?.continuationOutputIndex ?? (options!.outputs!.length - 1)) : 0,
+      _isInductive: isInductive,
     };
   }
 
@@ -940,11 +952,12 @@ export class RunarContract {
 
     // Update tracked UTXO
     if (prepared._isStateful && prepared._hasMultiOutput && prepared._contractOutputs.length > 0) {
+      const contIdx = prepared._continuationOutputIndex;
       this.currentUtxo = {
         txid,
-        outputIndex: 0,
-        satoshis: prepared._contractOutputs[0]!.satoshis,
-        script: prepared._contractOutputs[0]!.script,
+        outputIndex: contIdx,
+        satoshis: prepared._contractOutputs[contIdx]!.satoshis,
+        script: prepared._contractOutputs[contIdx]!.script,
       };
     } else if (prepared._isStateful && prepared._newLockingScript) {
       this.currentUtxo = {

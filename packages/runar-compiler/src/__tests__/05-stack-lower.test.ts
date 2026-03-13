@@ -971,4 +971,87 @@ describe('Pass 5: Stack Lower', () => {
       expect(allOpsJson).toContain('OP_SIZE');
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // InductiveSmartContract stack lowering
+  // ---------------------------------------------------------------------------
+
+  describe('InductiveSmartContract', () => {
+    const inductiveSource = `
+      import { InductiveSmartContract, assert, checkSig } from 'runar-lang';
+      import type { PubKey, Sig, ByteString } from 'runar-lang';
+      class InductiveToken extends InductiveSmartContract {
+        owner: PubKey;
+        balance: bigint;
+        readonly tokenId: ByteString;
+        constructor(owner: PubKey, balance: bigint, tokenId: ByteString) {
+          super(owner, balance, tokenId);
+          this.owner = owner;
+          this.balance = balance;
+          this.tokenId = tokenId;
+        }
+        public send(sig: Sig, to: PubKey, outputSatoshis: bigint) {
+          assert(checkSig(sig, this.owner));
+          this.addOutput(outputSatoshis, to, this.balance);
+        }
+        public transfer(sig: Sig, to: PubKey, amount: bigint, outputSatoshis: bigint) {
+          assert(checkSig(sig, this.owner));
+          assert(amount > 0n);
+          assert(amount <= this.balance);
+          this.addOutput(outputSatoshis, to, amount);
+          this.addOutput(outputSatoshis, this.owner, this.balance - amount);
+        }
+      }
+    `;
+
+    it('compiles send method without errors', () => {
+      const program = compileToStack(inductiveSource);
+      const method = findStackMethod(program, 'send');
+      expect(method.ops.length).toBeGreaterThan(0);
+    });
+
+    it('compiles transfer method (multi-output) without errors', () => {
+      const program = compileToStack(inductiveSource);
+      const method = findStackMethod(program, 'transfer');
+      expect(method.ops.length).toBeGreaterThan(0);
+    });
+
+    it('genesis if/else has balanced stack (OP_IF with OP_ELSE)', () => {
+      const program = compileToStack(inductiveSource);
+      const method = findStackMethod(program, 'send');
+      const allOps = flattenOps(method.ops);
+
+      // The genesis detection produces an OP_IF/OP_ELSE structure
+      const ifOps = allOps.filter(op => op.op === 'if');
+      expect(ifOps.length).toBeGreaterThanOrEqual(1);
+
+      // Both branches should have ops (else is not empty)
+      const genesisIf = ifOps[0]!;
+      expect(genesisIf.then.length).toBeGreaterThan(0);
+      expect(genesisIf.else).toBeDefined();
+      expect(genesisIf.else!.length).toBeGreaterThan(0);
+    });
+
+    it('emits OP_CODESEPARATOR for stateful check_preimage', () => {
+      const program = compileToStack(inductiveSource);
+      const method = findStackMethod(program, 'send');
+      const allOps = flattenOps(method.ops);
+      const codeSeps = allOps.filter(
+        op => op.op === 'opcode' && (op as any).code === 'OP_CODESEPARATOR'
+      );
+      expect(codeSeps.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('emits OP_TRUE stub for snark_verify in non-genesis branch', () => {
+      const program = compileToStack(inductiveSource);
+      const method = findStackMethod(program, 'send');
+      const allOps = flattenOps(method.ops);
+      // The non-genesis branch should contain OP_TRUE from the snark_verify stub
+      const opTrueOps = allOps.filter(
+        op => op.op === 'opcode' && (op as any).code === 'OP_TRUE'
+      );
+      expect(opTrueOps.length).toBeGreaterThanOrEqual(1);
+    });
+
+  });
 });

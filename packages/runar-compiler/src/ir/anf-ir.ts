@@ -148,6 +148,12 @@ export interface AddRawOutput {
   scriptBytes: string;   // reference to a temp holding ByteString script
 }
 
+export interface SnarkVerify {
+  kind: 'snark_verify';
+  proof: string;          // reference to a temp holding the proof ByteString
+  publicInputs: string[]; // references to temps for public inputs (e.g. _genesisOutpoint)
+}
+
 export type ANFValue =
   | LoadParam
   | LoadProp
@@ -164,4 +170,5 @@ export type ANFValue =
   | CheckPreimage
   | DeserializeState
   | AddOutput
-  | AddRawOutput;
+  | AddRawOutput
+  | SnarkVerify;

@@ -4,7 +4,7 @@
 //
 // Provides a pure SHA-256 compression function and a helper that computes
 // partial SHA-256 state for inductive contract parent-tx verification.
-// The on-chain script receives only the last 2 blocks and the intermediate
+// The on-chain script receives only the last 3 blocks and the intermediate
 // hash state, avoiding the need to push the full raw parent tx.
 // ---------------------------------------------------------------------------
 
@@ -185,23 +185,25 @@ fn sha256_pad(message: &[u8]) -> Vec<u8> {
 /// Result of computing partial SHA-256 for an inductive contract's parent tx.
 #[derive(Debug, Clone)]
 pub struct PartialSha256Result {
-    /// 32-byte hex: intermediate SHA-256 state after compressing blocks 0..N-3
+    /// 32-byte hex: intermediate SHA-256 state after compressing blocks 0..N-4
     pub parent_hash_state: String,
-    /// 64-byte hex: the (N-1)th block (second-to-last)
+    /// 64-byte hex: the (N-2)th block (third-to-last)
     pub parent_tail_block1: String,
-    /// 64-byte hex: the Nth block (last, contains padding)
+    /// 64-byte hex: the (N-1)th block (second-to-last)
     pub parent_tail_block2: String,
-    /// Number of raw (unpadded) tx bytes in the two tail blocks
+    /// 64-byte hex: the Nth block (last, contains padding)
+    pub parent_tail_block3: String,
+    /// Number of raw (unpadded) tx bytes in the three tail blocks
     pub parent_raw_tail_len: usize,
 }
 
 /// Compute partial SHA-256 for an inductive contract's parent transaction.
 ///
 /// Instead of pushing the full raw parent tx on-chain, we pre-compute the
-/// SHA-256 state up to (but not including) the last 2 blocks. The on-chain
+/// SHA-256 state up to (but not including) the last 3 blocks. The on-chain
 /// script receives:
 ///   - The intermediate hash state (32 bytes)
-///   - The two tail blocks (64 bytes each)
+///   - The three tail blocks (64 bytes each)
 ///   - The raw tail length (to locate fields within the tail)
 ///
 /// It then completes the double-SHA256 to derive the parent txid and
@@ -211,23 +213,18 @@ pub fn compute_partial_sha256_for_inductive(raw_tx_hex: &str) -> Result<PartialS
     let padded = sha256_pad(&raw_bytes);
     let total_blocks = padded.len() / 64;
 
-    if total_blocks < 2 {
-        // Any valid Bitcoin tx is at least ~60 bytes, so after SHA-256 padding
-        // we always get >= 2 blocks. But handle the degenerate case.
-        let init_state = state_to_hex(&SHA256_INIT);
-        let block1 = bytes_to_hex(&padded[..64]);
-        let block2 = "00".repeat(64);
-        return Ok(PartialSha256Result {
-            parent_hash_state: init_state,
-            parent_tail_block1: block1,
-            parent_tail_block2: block2,
-            parent_raw_tail_len: raw_bytes.len(),
-        });
+    if total_blocks < 3 {
+        return Err(format!(
+            "compute_partial_sha256_for_inductive: need >= 3 SHA-256 blocks but got {}. \
+             Raw tx is {} bytes — inductive contracts require raw_tail_len >= 115.",
+            total_blocks,
+            raw_bytes.len()
+        ));
     }
 
-    // Compress all blocks except the last 2 to get intermediate state
+    // Compress all blocks except the last 3 to get intermediate state
     let mut state = SHA256_INIT;
-    let pre_hashed_blocks = total_blocks - 2;
+    let pre_hashed_blocks = total_blocks - 3;
     for i in 0..pre_hashed_blocks {
         let offset = i * 64;
         let block: [u8; 64] = padded[offset..offset + 64]
@@ -238,16 +235,27 @@ pub fn compute_partial_sha256_for_inductive(raw_tx_hex: &str) -> Result<PartialS
 
     let tail_offset1 = pre_hashed_blocks * 64;
     let tail_offset2 = (pre_hashed_blocks + 1) * 64;
+    let tail_offset3 = (pre_hashed_blocks + 2) * 64;
     let tail_block1 = bytes_to_hex(&padded[tail_offset1..tail_offset1 + 64]);
     let tail_block2 = bytes_to_hex(&padded[tail_offset2..tail_offset2 + 64]);
+    let tail_block3 = bytes_to_hex(&padded[tail_offset3..tail_offset3 + 64]);
 
     // Raw tail length = total raw bytes minus the bytes already compressed
     let raw_tail_len = raw_bytes.len() - pre_hashed_blocks * 64;
+
+    if raw_tail_len < 115 {
+        return Err(format!(
+            "compute_partial_sha256_for_inductive: raw_tail_len is {} but must be >= 115 \
+             to contain the 111-byte internal fields + 4-byte locktime.",
+            raw_tail_len
+        ));
+    }
 
     Ok(PartialSha256Result {
         parent_hash_state: state_to_hex(&state),
         parent_tail_block1: tail_block1,
         parent_tail_block2: tail_block2,
+        parent_tail_block3: tail_block3,
         parent_raw_tail_len: raw_tail_len,
     })
 }
@@ -288,9 +296,9 @@ mod tests {
 
     #[test]
     fn test_partial_sha256_basic() {
-        // A synthetic 200-byte "tx" should produce 4 padded blocks
-        // (200 + 1 + padding + 8 = 256 = 4 * 64)
-        let raw_hex = "ab".repeat(200);
+        // A synthetic 300-byte "tx" should produce 5 padded blocks
+        // (300 + 1 + padding + 8 = 320 = 5 * 64)
+        let raw_hex = "ab".repeat(300);
         let result = compute_partial_sha256_for_inductive(&raw_hex).unwrap();
 
         // parent_hash_state should be 64 hex chars (32 bytes)
@@ -298,19 +306,26 @@ mod tests {
         // tail blocks should each be 128 hex chars (64 bytes)
         assert_eq!(result.parent_tail_block1.len(), 128);
         assert_eq!(result.parent_tail_block2.len(), 128);
-        // raw_tail_len = 200 - 2*64 = 72
-        assert_eq!(result.parent_raw_tail_len, 72);
+        assert_eq!(result.parent_tail_block3.len(), 128);
+        // raw_tail_len = 300 - 2*64 = 172
+        assert_eq!(result.parent_raw_tail_len, 172);
     }
 
     #[test]
     fn test_partial_sha256_small_tx() {
-        // 100-byte tx → padded to 128 bytes (2 blocks), so pre_hashed_blocks = 0
-        // and state = SHA256_INIT
-        let raw_hex = "cd".repeat(100);
+        // 200-byte tx → padded to 256 bytes (4 blocks), so pre_hashed_blocks = 1
+        let raw_hex = "cd".repeat(200);
         let result = compute_partial_sha256_for_inductive(&raw_hex).unwrap();
 
-        assert_eq!(result.parent_hash_state, state_to_hex(&SHA256_INIT));
-        assert_eq!(result.parent_raw_tail_len, 100);
+        assert_eq!(result.parent_raw_tail_len, 136);
+    }
+
+    #[test]
+    fn test_partial_sha256_too_small_tx() {
+        // 100-byte tx → padded to 128 bytes (2 blocks) — not enough for 3 tail blocks
+        let raw_hex = "cd".repeat(100);
+        let result = compute_partial_sha256_for_inductive(&raw_hex);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -322,7 +337,7 @@ mod tests {
 
         let result = compute_partial_sha256_for_inductive(&raw_hex).unwrap();
 
-        // Reconstruct: start from partial state, compress tail blocks
+        // Reconstruct: start from partial state, compress 3 tail blocks
         let state_bytes = hex_to_bytes(&result.parent_hash_state).unwrap();
         let mut state = [0u32; 8];
         for i in 0..8 {
@@ -339,6 +354,10 @@ mod tests {
         let block2_bytes = hex_to_bytes(&result.parent_tail_block2).unwrap();
         let block2: [u8; 64] = block2_bytes.try_into().unwrap();
         state = sha256_compress_block(&state, &block2);
+
+        let block3_bytes = hex_to_bytes(&result.parent_tail_block3).unwrap();
+        let block3: [u8; 64] = block3_bytes.try_into().unwrap();
+        state = sha256_compress_block(&state, &block3);
 
         let mut reconstructed = Vec::with_capacity(32);
         for word in &state {

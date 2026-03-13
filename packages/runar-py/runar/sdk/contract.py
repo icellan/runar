@@ -18,7 +18,6 @@ from runar.sdk.state import (
     encode_push_data,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
-from runar.sdk.sha256_compress import compute_partial_sha256_for_inductive
 
 
 class RunarContract:
@@ -210,7 +209,7 @@ class RunarContract:
         # Filter them out so users only pass their own args.
         method_needs_change = any(p.name == '_changePKH' for p in method.params)
         method_needs_new_amount = any(p.name == '_newAmount' for p in method.params)
-        is_inductive = any(p.name == '_parentHashState' for p in method.params)
+        is_inductive = any(f.name == '_genesisOutpoint' for f in (self.artifact.state_fields or []))
         if is_stateful or is_inductive:
             user_params = [
                 p for p in method.params
@@ -218,10 +217,6 @@ class RunarContract:
                 and p.name != '_changePKH'
                 and p.name != '_changeAmount'
                 and p.name != '_newAmount'
-                and p.name != '_parentHashState'
-                and p.name != '_parentTailBlock1'
-                and p.name != '_parentTailBlock2'
-                and p.name != '_parentRawTailLen'
             ]
         else:
             user_params = method.params
@@ -295,24 +290,7 @@ class RunarContract:
             ).digest()
             change_pkh_hex = hash160_bytes.hex()
 
-        # For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
-        # params from the parent transaction (the tx that created the current UTXO).
-        # These are pushed in the unlock script between user args and txPreimage.
         inductive_params_hex = ''
-        if is_inductive:
-            parent_tx = provider.get_transaction(self._current_utxo.txid)
-            if not parent_tx.raw:
-                raise RuntimeError(
-                    'RunarContract.call: provider returned transaction without raw hex, '
-                    'needed for inductive parent tx verification'
-                )
-            partial = compute_partial_sha256_for_inductive(parent_tx.raw)
-            inductive_params_hex = (
-                encode_push_data(partial['parent_hash_state']) +
-                encode_push_data(partial['parent_tail_block1']) +
-                encode_push_data(partial['parent_tail_block2']) +
-                _encode_script_number(partial['parent_raw_tail_len'])
-            )
 
         # -------------------------------------------------------------------
         # Terminal method path: exact outputs, no funding, no change
@@ -364,6 +342,22 @@ class RunarContract:
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
             code_script = self._code_script or self._build_code_script()
+
+            # For InductiveSmartContract, compute the updated _genesisOutpoint
+            # that the on-chain script will set: extractOutpoint(preimage) at
+            # genesis, unchanged after.
+            inductive_updated_state: dict = {}
+            if is_inductive and self._current_utxo:
+                txid_le = _reverse_hex(self._current_utxo.txid)
+                vout_le = _to_le32(self._current_utxo.output_index)
+                current_outpoint = txid_le + vout_le
+                zero_sentinel = '00' * 36
+                old_genesis = self._state.get('_genesisOutpoint', zero_sentinel) or zero_sentinel
+                is_genesis = old_genesis == zero_sentinel
+                inductive_updated_state = {
+                    '_genesisOutpoint': current_outpoint if is_genesis else old_genesis,
+                }
+
             contract_outputs = []
             for out_spec in opts.outputs:
                 if isinstance(out_spec, dict):
@@ -374,7 +368,11 @@ class RunarContract:
                     sats = out_spec.satoshis
                 else:
                     raise ValueError(f"Invalid output spec: {out_spec}")
-                state_hex = serialize_state(self.artifact.state_fields, state_dict)
+                if is_inductive:
+                    merged_state = {**self._state, **inductive_updated_state, **state_dict}
+                else:
+                    merged_state = state_dict
+                state_hex = serialize_state(self.artifact.state_fields, merged_state)
                 contract_outputs.append({
                     'script': code_script + '6a' + state_hex,
                     'satoshis': sats,
@@ -383,6 +381,15 @@ class RunarContract:
             # For single-output continuations, the on-chain script uses the input amount
             # (extracted from the preimage). The SDK output must match.
             new_satoshis = opts.satoshis if opts.satoshis > 0 else self._current_utxo.satoshis
+            # For inductive contracts, update _genesisOutpoint before building locking script
+            if is_inductive and self._current_utxo:
+                txid_le = _reverse_hex(self._current_utxo.txid)
+                vout_le = _to_le32(self._current_utxo.output_index)
+                current_outpoint = txid_le + vout_le
+                zero_sentinel = '00' * 36
+                old_genesis = self._state.get('_genesisOutpoint', zero_sentinel) or zero_sentinel
+                is_genesis = old_genesis == zero_sentinel
+                self._state['_genesisOutpoint'] = current_outpoint if is_genesis else old_genesis
             if opts.new_state:
                 for k, v in opts.new_state.items():
                     self._state[k] = v

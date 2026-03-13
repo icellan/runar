@@ -260,8 +260,8 @@ def _canonical(name: str, vm: dict[str, ANFValue]) -> str:
 # ---------------------------------------------------------------------------
 
 def _make_ref(name: str) -> ANFValue:
-    """Create a load_param that aliases another binding via @ref:."""
-    return ANFValue(kind="load_param", name=f"@ref:{name}")
+    """Create a load_const that aliases another binding via @ref:."""
+    return ANFValue(kind="load_const", raw_value=f"@ref:{name}", const_string=f"@ref:{name}")
 
 
 def _make_const_hex(hex_str: str) -> ANFValue:
@@ -331,10 +331,17 @@ def _collect_refs(v: ANFValue, used: set[str]) -> None:
     load_param, and load_prop do NOT contribute refs (the stack lowerer
     independently handles @ref: aliases).
     """
-    # For load_const / load_param / load_prop, TS just breaks without
+    # For load_param / load_prop / get_state_script, TS just breaks without
     # collecting any refs.  We must do the same so dead binding elimination
     # produces identical results.
-    if v.kind in ("load_const", "load_param", "load_prop", "get_state_script"):
+    if v.kind in ("load_param", "load_prop", "get_state_script"):
+        return
+    # load_const with @ref: prefix is an alias for another binding — must be
+    # tracked so the target binding isn't incorrectly eliminated as dead.
+    if v.kind == "load_const":
+        cs = v.const_string
+        if cs is not None and cs.startswith("@ref:"):
+            used.add(cs[5:])
         return
     if v.left is not None:
         used.add(v.left)
@@ -358,6 +365,11 @@ def _collect_refs(v: ANFValue, used: set[str]) -> None:
     if v.state_values is not None:
         for sv in v.state_values:
             used.add(sv)
+    if v.proof is not None:
+        used.add(v.proof)
+    if v.public_inputs is not None:
+        for pi in v.public_inputs:
+            used.add(pi)
     if v.then is not None:
         for b in v.then:
             _collect_refs(b.value, used)

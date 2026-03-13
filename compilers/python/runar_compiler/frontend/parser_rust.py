@@ -16,6 +16,10 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.inductive_inject import (
+    inject_inductive_internal_props,
+    inject_inductive_constructor_fields,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +668,11 @@ class _RustParser:
             visibility="public",
             source_location=ctor_loc,
         )
+
+        # For InductiveSmartContract, inject internal fields after developer properties
+        if parent_class == "InductiveSmartContract":
+            inject_inductive_internal_props(properties, self.file_name)
+            inject_inductive_constructor_fields(constructor)
 
         return ContractNode(
             name=contract_name,

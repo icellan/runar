@@ -110,8 +110,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -128,8 +128,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -146,7 +146,7 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      expect(t2!.value.kind).toBe('load_param');
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -163,8 +163,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 

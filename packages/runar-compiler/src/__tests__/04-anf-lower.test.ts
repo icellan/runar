@@ -905,4 +905,117 @@ describe('Pass 4: ANF Lower', () => {
       expect(newAmountParam).toBeUndefined();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // InductiveSmartContract
+  // ---------------------------------------------------------------------------
+
+  describe('InductiveSmartContract', () => {
+    const inductiveSource = `
+      import { InductiveSmartContract, assert, checkSig } from 'runar-lang';
+      import type { PubKey, Sig, ByteString } from 'runar-lang';
+      class InductiveToken extends InductiveSmartContract {
+        owner: PubKey;
+        balance: bigint;
+        readonly tokenId: ByteString;
+        constructor(owner: PubKey, balance: bigint, tokenId: ByteString) {
+          super(owner, balance, tokenId);
+          this.owner = owner;
+          this.balance = balance;
+          this.tokenId = tokenId;
+        }
+        public send(sig: Sig, to: PubKey, outputSatoshis: bigint) {
+          assert(checkSig(sig, this.owner));
+          this.addOutput(outputSatoshis, to, this.balance);
+        }
+        public transfer(sig: Sig, to: PubKey, amount: bigint, outputSatoshis: bigint) {
+          assert(checkSig(sig, this.owner));
+          assert(amount > 0n);
+          assert(amount <= this.balance);
+          this.addOutput(outputSatoshis, to, amount);
+          this.addOutput(outputSatoshis, this.owner, this.balance - amount);
+        }
+      }
+    `;
+
+    it('emits deserialize_state for inductive public methods', () => {
+      const program = lowerSource(inductiveSource);
+      const sendMethod = findMethod(program, 'send');
+
+      // Must have deserialize_state after check_preimage
+      const dsBindings = bindingsOfKind(sendMethod.body, 'deserialize_state');
+      expect(dsBindings.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('emits check_preimage before deserialize_state', () => {
+      const program = lowerSource(inductiveSource);
+      const sendMethod = findMethod(program, 'send');
+
+      const checkIdx = sendMethod.body.findIndex(b => b.value.kind === 'check_preimage');
+      const dsIdx = sendMethod.body.findIndex(b => b.value.kind === 'deserialize_state');
+      expect(checkIdx).toBeGreaterThanOrEqual(0);
+      expect(dsIdx).toBeGreaterThanOrEqual(0);
+      expect(checkIdx).toBeLessThan(dsIdx);
+    });
+
+    it('genesis if/else has update_prop outside the branches', () => {
+      const program = lowerSource(inductiveSource);
+      const sendMethod = findMethod(program, 'send');
+
+      // Find the if-binding for genesis detection
+      const ifBindings = bindingsOfKind(sendMethod.body, 'if');
+      expect(ifBindings.length).toBeGreaterThanOrEqual(1);
+      const genesisIf = ifBindings[0]!;
+
+      // update_prop '_genesisOutpoint' should NOT be inside the then-branch
+      const thenBindings = (genesisIf.value as any).then as ANFBinding[];
+      const thenUpdateProps = thenBindings.filter(
+        b => b.value.kind === 'update_prop' && (b.value as any).name === '_genesisOutpoint'
+      );
+      expect(thenUpdateProps).toHaveLength(0);
+
+      // update_prop '_genesisOutpoint' should be at the method level (after the if)
+      const ifIdx = sendMethod.body.indexOf(genesisIf);
+      const postIfBindings = sendMethod.body.slice(ifIdx + 1);
+      const updateProps = postIfBindings.filter(
+        b => b.value.kind === 'update_prop' && (b.value as any).name === '_genesisOutpoint'
+      );
+      expect(updateProps.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('registers stateful implicit params (same as StatefulSmartContract)', () => {
+      const program = lowerSource(inductiveSource);
+      const sendMethod = findMethod(program, 'send');
+      const paramNames = sendMethod.params.map(p => p.name);
+      expect(paramNames).toContain('_changePKH');
+      expect(paramNames).toContain('_changeAmount');
+      expect(paramNames).toContain('txPreimage');
+    });
+
+    it('non-genesis branch contains snark_verify and ends with load_prop _genesisOutpoint', () => {
+      const program = lowerSource(inductiveSource);
+      const sendMethod = findMethod(program, 'send');
+
+      const ifBindings = bindingsOfKind(sendMethod.body, 'if');
+      const genesisIf = ifBindings[0]!;
+      const elseBindings = (genesisIf.value as any).else as ANFBinding[];
+      expect(elseBindings.length).toBeGreaterThan(0);
+
+      // Should contain snark_verify
+      const snarkBindings = elseBindings.filter(b => b.value.kind === 'snark_verify');
+      expect(snarkBindings).toHaveLength(1);
+      const snark = snarkBindings[0]!.value as any;
+      expect(snark.proof).toBeTruthy();
+      expect(snark.publicInputs).toHaveLength(1);
+
+      // Should assert the snark_verify result
+      const assertBindings = elseBindings.filter(b => b.value.kind === 'assert');
+      expect(assertBindings.length).toBeGreaterThanOrEqual(1);
+
+      // Last binding is load_prop _genesisOutpoint
+      const lastElse = elseBindings[elseBindings.length - 1]!;
+      expect(lastElse.value.kind).toBe('load_prop');
+      expect((lastElse.value as any).name).toBe('_genesisOutpoint');
+    });
+  });
 });

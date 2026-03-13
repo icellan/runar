@@ -1050,4 +1050,46 @@ describe('Pass 3: Type-Check', () => {
       expect(result.errors).toEqual([]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // addRawOutput restriction in InductiveSmartContract
+  // ---------------------------------------------------------------------------
+
+  describe('addRawOutput in InductiveSmartContract', () => {
+    it('rejects addRawOutput in InductiveSmartContract', () => {
+      const source = `
+        class InductiveToken extends InductiveSmartContract {
+          balance: bigint;
+          constructor(balance: bigint) {
+            super(balance);
+          }
+          public spend(amount: bigint, destScript: ByteString) {
+            assert(amount <= this.balance);
+            this.addOutput(1n, this.balance - amount);
+            this.addRawOutput(amount, destScript);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, 'addRawOutput() is not allowed in InductiveSmartContract')).toBe(true);
+    });
+
+    it('allows addRawOutput in StatefulSmartContract', () => {
+      const source = `
+        class StatefulToken extends StatefulSmartContract {
+          balance: bigint;
+          constructor(balance: bigint) {
+            super(balance);
+          }
+          public spend(amount: bigint, destScript: ByteString) {
+            assert(amount <= this.balance);
+            this.addOutput(1n, this.balance - amount);
+            this.addRawOutput(amount, destScript);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, 'addRawOutput')).toBe(false);
+    });
+  });
 });

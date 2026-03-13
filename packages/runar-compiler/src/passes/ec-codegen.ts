@@ -399,6 +399,52 @@ function affineAdd(t: ECTracker): void {
   t.toTop('qy'); t.drop();
 }
 
+/**
+ * Affine point doubling: 2*P for P=(px, py).
+ * Expects px, py on tracker. Consumes both, produces rx, ry.
+ *
+ * Formula (secp256k1, a=0):
+ *   s = 3*px² / (2*py) mod p
+ *   rx = s² - 2*px mod p
+ *   ry = s*(px - rx) - py mod p
+ */
+function affineDouble(t: ECTracker): void {
+  // s_num = 3 * px²
+  t.copyToTop('px', '_px_copy');
+  fieldSqr(t, '_px_copy', '_px2');
+  t.pushInt('_three_d', 3n);
+  fieldMul(t, '_px2', '_three_d', '_s_num');
+
+  // s_den = 2 * py
+  t.copyToTop('py', '_py_copy');
+  t.pushInt('_two_d', 2n);
+  fieldMul(t, '_py_copy', '_two_d', '_s_den');
+
+  // s = s_num / s_den mod p
+  fieldInv(t, '_s_den', '_s_den_inv');
+  fieldMul(t, '_s_num', '_s_den_inv', '_s');
+
+  // rx = s² - 2*px mod p
+  t.copyToTop('_s', '_s_keep');
+  fieldSqr(t, '_s', '_s2');
+  t.copyToTop('px', '_px2b');
+  t.pushInt('_two_d2', 2n);
+  fieldMul(t, '_px2b', '_two_d2', '_2px');
+  fieldSub(t, '_s2', '_2px', 'rx');
+
+  // ry = s*(px - rx) - py mod p
+  t.copyToTop('px', '_px3');
+  t.copyToTop('rx', '_rx2');
+  fieldSub(t, '_px3', '_rx2', '_px_rx');
+  fieldMul(t, '_s_keep', '_px_rx', '_s_px_rx');
+  t.copyToTop('py', '_py2d');
+  fieldSub(t, '_s_px_rx', '_py2d', 'ry');
+
+  // Clean up original point
+  t.toTop('px'); t.drop();
+  t.toTop('py'); t.drop();
+}
+
 // ===========================================================================
 // Jacobian point operations (for ecMul)
 // ===========================================================================
@@ -479,8 +525,10 @@ function jacobianToAffine(t: ECTracker, rxName: string, ryName: string): void {
 // ===========================================================================
 
 /**
- * Build Jacobian mixed-add ops for use inside OP_IF.
- * Uses an inner ECTracker to leverage field arithmetic helpers.
+ * Safe Jacobian mixed-add that handles degenerate cases:
+ *   1. Z=0 (accumulator at infinity): result = (ax, ay, 1)
+ *   2. H=0, R=0 (same point P+P):   use Jacobian doubling
+ *   3. H=0, R≠0 (inverse P+(-P)):   result = infinity (Z=0)
  *
  * Stack layout: [..., ax, ay, _k, jx, jy, jz]
  * After:        [..., ax, ay, _k, jx', jy', jz']
@@ -610,6 +658,20 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   });
   t.rename('_k');
 
+  // Pre-compute 2*P via affine doubling and store on altstack.
+  // This handles the degenerate case where the mixed Jacobian-affine addition
+  // hits P+P (H=0 → Z3=0), which happens for ecMul(P, 2).
+  // Computing OUTSIDE the IF/ELSE avoids issues with field ops inside ELSE branches.
+  // Stack: [ax, ay, _k]
+  t.copyToTop('ax', 'px');
+  t.copyToTop('ay', 'py');
+  affineDouble(t);
+  // Stack: [ax, ay, _k, rx, ry] — ry on top
+  // Push ry first, then rx to altstack so LIFO pop gives rx then ry
+  t.toAlt(); // ry → altstack
+  t.toAlt(); // rx → altstack
+  // Stack: [ax, ay, _k], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+
   // Init accumulator = P (bit 257 of k+3n is always 1)
   t.copyToTop('ax', 'jx');
   t.copyToTop('ay', 'jy');
@@ -645,7 +707,41 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
     emit({ op: 'if', then: addOps, else: [] });
   }
 
-  jacobianToAffine(t, '_rx', '_ry');
+  // Check for degenerate case: Z=0 means the mixed addition hit P+P.
+  // Stack: [ax, ay, _k, jx, jy, jz], Altstack: [ry_2p, rx_2p] (top = rx_2p)
+  t.copyToTop('jz', '_z_chk');
+  t.toTop('_z_chk');
+  t.nm.pop(); // consumed by IF
+
+  // Normal path (Z≠0): Jacobian to affine, discard altstack 2P values
+  const normalOps: StackOp[] = [];
+  {
+    const nt = new ECTracker([...t.nm], (op) => normalOps.push(op));
+    jacobianToAffine(nt, '_rx', '_ry');
+    // Discard pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+    nt.fromAlt('_alt_rx_d'); nt.toTop('_alt_rx_d'); nt.drop();
+    nt.fromAlt('_alt_ry_d'); nt.toTop('_alt_ry_d'); nt.drop();
+  }
+
+  // Degenerate path (Z=0): drop jx,jy,jz, retrieve 2P from altstack
+  const degOps: StackOp[] = [];
+  {
+    const dt = new ECTracker([...t.nm], (op) => degOps.push(op));
+    dt.toTop('jz'); dt.drop();
+    dt.toTop('jy'); dt.drop();
+    dt.toTop('jx'); dt.drop();
+    // Retrieve pre-computed 2P from altstack (LIFO: rx_2p first, then ry_2p)
+    dt.fromAlt('_rx');
+    dt.fromAlt('_ry');
+  }
+
+  emit({ op: 'if', then: normalOps, else: degOps });
+  // Both branches leave: [ax, ay, _k, _rx, _ry]
+  t.nm.pop(); // remove jz (consumed/dropped)
+  t.nm.pop(); // remove jy (consumed/dropped)
+  t.nm.pop(); // remove jx (consumed/dropped)
+  t.nm.push('_rx');
+  t.nm.push('_ry');
 
   // Clean up
   t.toTop('ax'); t.drop();

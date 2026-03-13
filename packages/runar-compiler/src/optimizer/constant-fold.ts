@@ -399,6 +399,9 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
 
     case 'add_raw_output':
       return value;
+
+    case 'snark_verify':
+      return value;
   }
 }
 
@@ -474,8 +477,13 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   switch (value.kind) {
     case 'load_param':
     case 'load_prop':
-    case 'load_const':
     case 'get_state_script':
+      break;
+    case 'load_const':
+      // @ref: values reference another binding — must be tracked as a ref
+      if (typeof value.value === 'string' && value.value.startsWith('@ref:')) {
+        refs.add(value.value.slice(5));
+      }
       break;
     case 'bin_op':
       refs.add(value.left);
@@ -520,6 +528,10 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
       refs.add(value.satoshis);
       refs.add(value.scriptBytes);
       break;
+    case 'snark_verify':
+      refs.add(value.proof);
+      for (const pi of value.publicInputs) refs.add(pi);
+      break;
   }
 }
 
@@ -531,6 +543,7 @@ function hasSideEffect(value: ANFValue): boolean {
     case 'deserialize_state':
     case 'add_output':
     case 'add_raw_output':
+    case 'snark_verify':
     case 'call':        // calls may have side effects (e.g. assert)
     case 'method_call': // method calls may have side effects
       return true;

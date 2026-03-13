@@ -1118,9 +1118,9 @@ fn bigint_to_i64(bigint_lit: &swc::BigInt) -> i64 {
 // ---------------------------------------------------------------------------
 
 /// Internal fields auto-appended to InductiveSmartContract properties.
-const INDUCTIVE_INTERNAL_FIELDS: &[&str] = &["_genesisOutpoint", "_parentOutpoint", "_grandparentOutpoint"];
+const INDUCTIVE_INTERNAL_FIELDS: &[&str] = &["_genesisOutpoint", "_proof"];
 
-/// Inject internal fields (_genesisOutpoint, _parentOutpoint, _grandparentOutpoint)
+/// Inject internal fields (_genesisOutpoint, _proof)
 /// into an InductiveSmartContract. Adds mutable ByteString properties, constructor
 /// params, super() args, and property assignments.
 pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str) {
@@ -1166,9 +1166,10 @@ pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str)
         }
     }
 
-    // 4. Add this._field = _field assignments
+    // 4. Add this._field = _field assignments (insert after super() at index 0)
+    let mut assignments: Vec<Statement> = Vec::new();
     for &name in INDUCTIVE_INTERNAL_FIELDS {
-        contract.constructor.body.push(Statement::Assignment {
+        assignments.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: name.to_string(),
             },
@@ -1178,6 +1179,10 @@ pub fn inject_inductive_internal_fields(contract: &mut ContractNode, file: &str)
             source_location: synthetic_loc.clone(),
         });
     }
+    let tail: Vec<Statement> = contract.constructor.body[1..].to_vec();
+    contract.constructor.body.truncate(1);
+    contract.constructor.body.extend(assignments);
+    contract.constructor.body.extend(tail);
 }
 
 // ---------------------------------------------------------------------------

@@ -177,7 +177,7 @@ export function parse(source: string, fileName?: string): ParseResult {
 // ---------------------------------------------------------------------------
 
 /** Internal fields auto-appended to InductiveSmartContract properties. */
-const INDUCTIVE_INTERNAL_FIELDS = ['_genesisOutpoint', '_parentOutpoint', '_grandparentOutpoint'] as const;
+const INDUCTIVE_INTERNAL_FIELDS = ['_genesisOutpoint', '_proof'] as const;
 
 const BYTESTRING_TYPE: TypeNode = { kind: 'primitive_type', name: 'ByteString' };
 
@@ -213,16 +213,19 @@ function injectInductiveConstructorFields(ctor: MethodNode): void {
     }
   }
 
-  // Add this._field = _field assignments
+  // Add this._field = _field assignments immediately after super() call
   const syntheticLoc: SourceLocation = { file: '', line: 0, column: 0 };
+  const assignments: Statement[] = [];
   for (const name of INDUCTIVE_INTERNAL_FIELDS) {
-    ctor.body.push({
+    assignments.push({
       kind: 'assignment',
       target: { kind: 'property_access', property: name },
       value: { kind: 'identifier', name },
       sourceLocation: syntheticLoc,
     });
   }
+  // Insert after super() (index 0) so internal fields are available to developer body
+  ctor.body.splice(1, 0, ...assignments);
 }
 
 // ---------------------------------------------------------------------------

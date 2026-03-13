@@ -156,6 +156,13 @@ pub enum ANFValue {
         #[serde(rename = "scriptBytes")]
         script_bytes: String,
     },
+
+    #[serde(rename = "snark_verify")]
+    SnarkVerify {
+        proof: String,
+        #[serde(rename = "publicInputs")]
+        public_inputs: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------

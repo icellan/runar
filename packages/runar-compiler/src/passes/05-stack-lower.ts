@@ -249,6 +249,9 @@ function collectRefs(value: ANFValue): string[] {
     case 'add_raw_output':
       refs.push(value.satoshis, value.scriptBytes);
       break;
+    case 'snark_verify':
+      refs.push(value.proof, ...value.publicInputs);
+      break;
     case 'bin_op':
       refs.push(value.left, value.right);
       break;
@@ -357,8 +360,9 @@ class LoweringContext {
    * Leaves stack:  [..., script, varint_bytes]
    *
    * Bitcoin varint format:
-   *   - len < 253:    1 byte (unsigned)
-   *   - len >= 253:   0xfd + 2 bytes unsigned LE
+   *   - len < 253:      1 byte (unsigned)
+   *   - 253 <= len < 65536:  0xfd + 2 bytes unsigned LE
+   *   - len >= 65536:   0xfe + 4 bytes unsigned LE
    *
    * OP_NUM2BIN uses sign-magnitude encoding, so values 128-255 need 2 bytes
    * to avoid the sign bit ambiguity. To produce a correct 1-byte unsigned
@@ -368,6 +372,10 @@ class LoweringContext {
    * Similarly, for 2-byte unsigned LE varints, values >= 32768 would need
    * 3 bytes in sign-magnitude. We use OP_NUM2BIN 4 and SPLIT to extract
    * the low 2 bytes.
+   *
+   * For 4-byte unsigned LE varints (len >= 65536, e.g. inductive contract
+   * output scripts > 64KB), we use OP_NUM2BIN 5 and SPLIT to extract
+   * the low 4 bytes, avoiding sign-bit issues for values >= 2^31.
    */
   private emitVarintEncoding(): void {
     // Stack: [..., script, len]
@@ -404,9 +412,20 @@ class LoweringContext {
 
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
 
-    // Else: 0xfd + 2-byte LE varint (len >= 253)
-    // Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-    // then take only the first 2 (low) bytes via SPLIT.
+    // Else: len >= 253 — need a nested check for 2-byte vs 4-byte varint
+    this.emitOp({ op: 'dup' }); // [script, len, len]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 65536n }); // [script, len, len, 65536]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [script, len, isMedium]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop(); // pop condition
+
+    // Then: 0xfd + 2-byte LE varint (253 <= len < 65536)
     this.emitOp({ op: 'push', value: 4n });
     this.stackMap.push(null);
     this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [script, len_4bytes]
@@ -431,6 +450,36 @@ class LoweringContext {
     this.emitOp({ op: 'opcode', code: 'OP_CAT' });
     this.stackMap.push(null);
 
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+
+    // Else: 0xfe + 4-byte LE varint (len >= 65536)
+    // Use NUM2BIN 5 to handle values up to 2^39 without sign-bit issues,
+    // then SPLIT to extract the low 4 bytes.
+    this.emitOp({ op: 'push', value: 5n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [script, len_5bytes]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 4n }); // [script, len_5bytes, 4]
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [script, low4bytes, highByte]
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null); // low4bytes
+    this.stackMap.push(null); // highByte
+    this.emitOp({ op: 'drop' }); // [script, low4bytes]
+    this.stackMap.pop();
+    this.emitOp({ op: 'push', value: new Uint8Array([0xfe]) });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'swap' });
+    this.stackMap.swap();
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+    this.stackMap.push(null);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // --- Stack: [..., script, varint] ---
   }
@@ -600,6 +649,9 @@ class LoweringContext {
         break;
       case 'add_raw_output':
         this.lowerAddRawOutput(name, value.satoshis, value.scriptBytes, bindingIndex, lastUses);
+        break;
+      case 'snark_verify':
+        this.lowerSnarkVerify(name, value.proof, value.publicInputs, bindingIndex, lastUses);
         break;
     }
   }
@@ -1159,11 +1211,8 @@ class LoweringContext {
           elseCtx.stackMap.pop();
         }
       }
-      // Push empty bytes as placeholder result
-      elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
-      elseCtx.stackMap.push(null);
     }
-    // Handle the reverse case symmetrically (unlikely but safe)
+    // Handle the reverse case symmetrically
     const postElseNames = elseCtx.stackMap.namedSlots();
     const elseConsumedNames: string[] = [];
     for (const name of preIfNames) {
@@ -1191,6 +1240,17 @@ class LoweringContext {
           thenCtx.stackMap.pop();
         }
       }
+    }
+
+    // Push empty-bytes placeholders only where needed to equalize branch depths.
+    // When one branch consumed items that the other didn't (and was reconciled above),
+    // AND the branch didn't produce its own result to compensate, we need a placeholder
+    // so OP_CAT after OP_ENDIF operates on the correct stack depth.
+    if (elseCtx.stackMap.depth < thenCtx.stackMap.depth) {
+      elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
+      elseCtx.stackMap.push(null);
+    }
+    if (thenCtx.stackMap.depth < elseCtx.stackMap.depth) {
       thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
       thenCtx.stackMap.push(null);
     }
@@ -1818,6 +1878,36 @@ class LoweringContext {
   }
 
   /**
+   * snark_verify — STUB: drops proof and public inputs, pushes OP_TRUE.
+   * Will be replaced with real Groth16 verifier codegen in a future step.
+   */
+  private lowerSnarkVerify(
+    bindingName: string,
+    proof: string,
+    publicInputs: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Consume (drop) proof from the stack
+    const proofIsLast = this.isLastUse(proof, bindingIndex, lastUses);
+    this.bringToTop(proof, proofIsLast);
+    this.emitOp({ op: 'drop' });
+    this.stackMap.pop();
+
+    // Consume (drop) each public input from the stack
+    for (const input of publicInputs) {
+      const inputIsLast = this.isLastUse(input, bindingIndex, lastUses);
+      this.bringToTop(input, inputIsLast);
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+    }
+
+    // Stub: always return true
+    this.emitOp({ op: 'opcode', code: 'OP_TRUE' });
+    this.stackMap.push(bindingName);
+  }
+
+  /**
    * deserialize_state(preimage) — extracts mutable property values from the
    * BIP-143 preimage's scriptCode field. The state is stored as the last
    * `stateLen` bytes of the scriptCode (after OP_RETURN).
@@ -1843,8 +1933,19 @@ class LoweringContext {
         case 'boolean': propSizes.push(1); break;
         case 'PubKey': propSizes.push(33); break;
         case 'Addr': propSizes.push(20); break;
+        case 'Ripemd160': propSizes.push(20); break;
         case 'Sha256': propSizes.push(32); break;
         case 'Point': propSizes.push(64); break;
+        case 'ByteString':
+          // ByteString state properties with known fixed sizes (inductive internal fields)
+          if (prop.name === '_genesisOutpoint') {
+            propSizes.push(36);
+          } else if (prop.name === '_proof') {
+            propSizes.push(192);
+          } else {
+            throw new Error(`deserialize_state: ByteString property '${prop.name}' has unknown serialized size`);
+          }
+          break;
         default:
           throw new Error(`deserialize_state: unsupported type '${prop.type}' for '${prop.name}'`);
       }

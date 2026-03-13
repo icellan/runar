@@ -55,7 +55,7 @@ export interface OutputSpec {
 /** Result returned from a multi-output call. */
 export interface CallResult {
   txid: string;
-  tx: Transaction;
+  tx: BsvTransaction;
   outputs: Array<{ outputIndex: number; satoshis: number; script: string }>;
 }
 
@@ -97,6 +97,8 @@ export interface PreparedCall {
   /** @internal */ _newSatoshis: number;
   /** @internal */ _hasMultiOutput: boolean;
   /** @internal */ _contractOutputs: Array<{ script: string; satoshis: number }>;
+  /** @internal */ _continuationOutputIndex: number;
+  /** @internal */ _isInductive: boolean;
 }
 
 export interface CallOptions {

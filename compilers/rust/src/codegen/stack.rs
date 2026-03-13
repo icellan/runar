@@ -305,6 +305,10 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
             refs.push(satoshis.clone());
             refs.push(script_bytes.clone());
         }
+        ANFValue::SnarkVerify { proof, public_inputs } => {
+            refs.push(proof.clone());
+            refs.extend(public_inputs.iter().cloned());
+        }
     }
     refs
 }
@@ -396,9 +400,20 @@ impl LoweringContext {
 
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
 
-        // Else: 0xfd + 2-byte LE varint (len >= 253)
-        // Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-        // then take only the first 2 (low) bytes via SPLIT.
+        // Else: len >= 253 — nested check for 2-byte vs 4-byte varint
+        self.emit_op(StackOp::Dup); // [script, len, len]
+        self.sm.dup();
+        self.emit_op(StackOp::Push(PushValue::Int(65536))); // [script, len, len, 65536]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into())); // [script, len, isMedium]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop(); // pop condition
+
+        // Then: 0xfd + 2-byte LE varint (253 <= len < 65536)
         self.emit_op(StackOp::Push(PushValue::Int(4))); // [script, len, 4]
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_4bytes]
@@ -423,6 +438,34 @@ impl LoweringContext {
         self.emit_op(StackOp::Opcode("OP_CAT".into()));
         self.sm.push("");
 
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+
+        // Else: 0xfe + 4-byte LE varint (len >= 65536)
+        self.emit_op(StackOp::Push(PushValue::Int(5))); // [script, len, 5]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_5bytes]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(4))); // [script, len_5bytes, 4]
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [script, low4bytes, highByte]
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push(""); // low4bytes
+        self.sm.push(""); // highByte
+        self.emit_op(StackOp::Drop); // [script, low4bytes]
+        self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0xfe])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap);
+        self.sm.swap();
+        self.sm.pop();
+        self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         // --- Stack: [..., script, varint] ---
     }
@@ -617,6 +660,9 @@ impl LoweringContext {
             }
             ANFValue::AddRawOutput { satoshis, script_bytes } => {
                 self.lower_add_raw_output(name, satoshis, script_bytes, binding_index, last_uses);
+            }
+            ANFValue::SnarkVerify { proof, public_inputs } => {
+                self.lower_snark_verify(name, proof, public_inputs, binding_index, last_uses);
             }
         }
     }
@@ -1181,9 +1227,6 @@ impl LoweringContext {
                     else_ctx.sm.pop();
                 }
             }
-            // Push empty bytes as placeholder result
-            else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
-            else_ctx.sm.push("");
         }
         // Handle the reverse case symmetrically (unlikely but safe)
         let post_else_names = else_ctx.sm.named_slots();
@@ -1217,6 +1260,17 @@ impl LoweringContext {
                     then_ctx.sm.pop();
                 }
             }
+        }
+
+        // Push empty-bytes placeholders only where needed to equalize branch depths.
+        // When one branch consumed items that the other didn't (and was reconciled above),
+        // AND the branch didn't produce its own result to compensate, we need a placeholder
+        // so OP_CAT after OP_ENDIF operates on the correct stack depth.
+        if else_ctx.sm.depth() < then_ctx.sm.depth() {
+            else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
+            else_ctx.sm.push("");
+        }
+        if then_ctx.sm.depth() < else_ctx.sm.depth() {
             then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
             then_ctx.sm.push("");
         }
@@ -1812,6 +1866,34 @@ impl LoweringContext {
         self.track_depth();
     }
 
+    fn lower_snark_verify(
+        &mut self,
+        binding_name: &str,
+        proof: &str,
+        public_inputs: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // STUB: bring proof to top and DROP
+        let proof_is_last = self.is_last_use(proof, binding_index, last_uses);
+        self.bring_to_top(proof, proof_is_last);
+        self.emit_op(StackOp::Drop);
+        self.sm.pop();
+
+        // Bring each public input to top and DROP
+        for input in public_inputs {
+            let input_is_last = self.is_last_use(input, binding_index, last_uses);
+            self.bring_to_top(input, input_is_last);
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
+        // Push OP_TRUE as the result
+        self.emit_op(StackOp::Opcode("OP_TRUE".to_string()));
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
     fn lower_check_preimage(
         &mut self,
         binding_name: &str,
@@ -1924,9 +2006,21 @@ impl LoweringContext {
                 "bigint" => 8,
                 "boolean" => 1,
                 "PubKey" => 33,
-                "Addr" => 20,
+                "Addr" | "Ripemd160" => 20,
                 "Sha256" => 32,
                 "Point" => 64,
+                "ByteString" => {
+                    if p.name == "_genesisOutpoint" {
+                        36
+                    } else if p.name == "_proof" {
+                        192
+                    } else {
+                        panic!(
+                            "deserialize_state: ByteString property '{}' has unknown serialized size",
+                            p.name
+                        );
+                    }
+                }
                 _ => panic!("deserialize_state: unsupported type: {}", p.prop_type),
             };
             prop_sizes.push(sz);
