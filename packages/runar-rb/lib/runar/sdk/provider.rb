@@ -68,6 +68,7 @@ module Runar
         @utxos            = {}
         @contract_utxos   = {}
         @broadcasted_txs  = []
+        @raw_transactions = {}
         @broadcast_count  = 0
         @network          = network
         @fee_rate         = DEFAULT_FEE_RATE
@@ -111,6 +112,9 @@ module Runar
       end
 
       def get_raw_transaction(txid)
+        # Return auto-stored raw hex from a previous broadcast first.
+        return @raw_transactions[txid] if @raw_transactions.key?(txid)
+
         tx = @transactions[txid]
         raise "MockProvider: transaction #{txid} not found" unless tx
         raise "MockProvider: transaction #{txid} has no raw hex" if tx.raw.to_s.empty?
@@ -121,7 +125,10 @@ module Runar
       def broadcast(raw_tx)
         @broadcasted_txs << raw_tx
         @broadcast_count += 1
-        mock_hash64("mock-broadcast-#{@broadcast_count}-#{raw_tx[0, 16]}")
+        fake_txid = mock_hash64("mock-broadcast-#{@broadcast_count}-#{raw_tx[0, 16]}")
+        # Auto-store raw hex so get_raw_transaction works without an explicit add_transaction call.
+        @raw_transactions[fake_txid] = raw_tx
+        fake_txid
       end
 
       def get_utxos(address)

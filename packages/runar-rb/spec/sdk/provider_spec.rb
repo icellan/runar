@@ -184,5 +184,48 @@ RSpec.describe 'Runar::SDK::Provider' do
         expect(provider.get_fee_rate).to eq(5)
       end
     end
+
+    # -------------------------------------------------------------------------
+    # get_raw_transaction after broadcast
+    # -------------------------------------------------------------------------
+
+    describe '#get_raw_transaction after #broadcast' do
+      it 'returns the raw hex of a transaction that was broadcast' do
+        raw = 'deadbeef01020304'
+        txid = provider.broadcast(raw)
+        expect(provider.get_raw_transaction(txid)).to eq(raw)
+      end
+
+      it 'returns raw hex keyed by the txid returned from broadcast' do
+        raw1 = 'aabbccdd'
+        raw2 = '11223344'
+        txid1 = provider.broadcast(raw1)
+        txid2 = provider.broadcast(raw2)
+        expect(provider.get_raw_transaction(txid1)).to eq(raw1)
+        expect(provider.get_raw_transaction(txid2)).to eq(raw2)
+      end
+
+      it 'prioritizes broadcast-stored hex over add_transaction raw field' do
+        # If both exist for the same txid, broadcast storage wins.
+        raw_broadcast = 'broadcasthex'
+        txid = provider.broadcast(raw_broadcast)
+
+        tx = Runar::SDK::Transaction.new(txid: txid, raw: 'stored_raw')
+        provider.add_transaction(tx)
+
+        expect(provider.get_raw_transaction(txid)).to eq(raw_broadcast)
+      end
+
+      it 'still raises for an unknown txid not seen by broadcast' do
+        expect { provider.get_raw_transaction('unknowntxid') }
+          .to raise_error(RuntimeError, /not found/)
+      end
+
+      it 'still returns raw from add_transaction when txid was not broadcast' do
+        tx = Runar::SDK::Transaction.new(txid: 'abc123', raw: 'hexdata')
+        provider.add_transaction(tx)
+        expect(provider.get_raw_transaction('abc123')).to eq('hexdata')
+      end
+    end
   end
 end
