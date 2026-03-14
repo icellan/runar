@@ -153,6 +153,65 @@ RSpec.describe Runar::Builtins do
       hex = ctx.num2bin(256, 2)
       expect(hex).to eq('0001')
     end
+
+    # Edge cases for sign-bit handling (Bitcoin Script number encoding).
+    # The sign bit always lives in the MSB of the last byte.
+
+    it 'num2bin(0, 1) produces a single zero byte' do
+      expect(ctx.num2bin(0, 1)).to eq('00')
+    end
+
+    it 'num2bin(1, 1) produces 01' do
+      expect(ctx.num2bin(1, 1)).to eq('01')
+    end
+
+    it 'num2bin(-1, 1) sets the sign bit in the only byte' do
+      # 1 with sign bit set in the sole byte: 0x81
+      expect(ctx.num2bin(-1, 1)).to eq('81')
+    end
+
+    it 'num2bin(-1, 2) pads correctly with sign-bit in last byte' do
+      # -1 in 2 bytes: magnitude byte 0x01, sign-only byte 0x80
+      expect(ctx.num2bin(-1, 2)).to eq('0180')
+    end
+
+    it 'num2bin(127, 1) encodes the largest positive 1-byte value' do
+      # 0x7F — MSB is 0, so no extra byte needed
+      expect(ctx.num2bin(127, 1)).to eq('7f')
+    end
+
+    it 'num2bin(128, 2) requires a second byte to avoid sign-bit collision' do
+      # 0x80 would collide with the sign bit in a single byte, so: 0x80 0x00
+      expect(ctx.num2bin(128, 2)).to eq('8000')
+    end
+
+    it 'num2bin(-128, 2) sets sign bit on the extra byte' do
+      # magnitude 0x80 needs its own byte; sign byte becomes 0x80 => 0x80 0x80
+      expect(ctx.num2bin(-128, 2)).to eq('8080')
+    end
+
+    it 'num2bin(-128, 3) pads to requested length with sign bit in last byte' do
+      # magnitude 0x80, one zero pad byte, sign-only last byte 0x80
+      expect(ctx.num2bin(-128, 3)).to eq('800080')
+    end
+
+    it 'num2bin(255, 2) encodes 0xFF with a zero sign byte' do
+      # 0xFF needs sign-bit space: 0xFF 0x00
+      expect(ctx.num2bin(255, 2)).to eq('ff00')
+    end
+
+    it 'num2bin(-255, 2) encodes 0xFF with sign bit in last byte' do
+      # 0xFF magnitude, sign bit set in last byte: 0xFF 0x80
+      expect(ctx.num2bin(-255, 2)).to eq('ff80')
+    end
+
+    it 'num2bin(0, 4) pads zero to requested length' do
+      expect(ctx.num2bin(0, 4)).to eq('00000000')
+    end
+
+    it 'num2bin(127, 3) pads positive 1-byte value with zero bytes' do
+      expect(ctx.num2bin(127, 3)).to eq('7f0000')
+    end
   end
 
   describe 'byte operations' do
