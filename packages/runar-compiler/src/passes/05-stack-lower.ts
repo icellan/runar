@@ -1257,8 +1257,26 @@ class LoweringContext {
     // Phase 3: single depth-balance check after ALL drops.
     // Push placeholder only if one branch is still deeper than the other.
     if (thenCtx.stackMap.depth > elseCtx.stackMap.depth) {
-      elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
-      elseCtx.stackMap.push(null);
+      // When the then-branch reassigned a local variable (if-without-else),
+      // push a COPY of that variable in the else-branch instead of a generic
+      // placeholder. This ensures the else-branch preserves the correct value
+      // when post-ENDIF stale removal (NIP) removes the old entry.
+      const thenTop = thenCtx.stackMap.peekAtDepth(0);
+      if (elseBindings.length === 0 && thenTop && elseCtx.stackMap.has(thenTop)) {
+        const varDepth = elseCtx.stackMap.findDepth(thenTop);
+        if (varDepth === 0) {
+          elseCtx.emitOp({ op: 'dup' });
+        } else {
+          elseCtx.emitOp({ op: 'push', value: BigInt(varDepth) });
+          elseCtx.stackMap.push(null);
+          elseCtx.emitOp({ op: 'pick', depth: varDepth });
+          elseCtx.stackMap.pop();
+        }
+        elseCtx.stackMap.push(thenTop);
+      } else {
+        elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
+        elseCtx.stackMap.push(null);
+      }
     } else if (elseCtx.stackMap.depth > thenCtx.stackMap.depth) {
       thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
       thenCtx.stackMap.push(null);
@@ -1293,6 +1311,32 @@ class LoweringContext {
         // Both branches did update_prop for the same property (e.g., turn flip).
         // The new value is on top of the actual stack. The old entry is stale.
         // Push the property name and physically remove the old entry.
+        this.stackMap.push(thenTop);
+        for (let d = 1; d < this.stackMap.depth; d++) {
+          if (this.stackMap.peekAtDepth(d) === thenTop) {
+            if (d === 1) {
+              this.emitOp({ op: 'nip' });
+              this.stackMap.removeAtDepth(1);
+            } else {
+              this.emitOp({ op: 'push', value: BigInt(d) });
+              this.stackMap.push(null);
+              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.stackMap.pop();
+              const rolled = this.stackMap.removeAtDepth(d);
+              this.stackMap.push(rolled);
+              this.emitOp({ op: 'drop' });
+              this.stackMap.pop();
+            }
+            break;
+          }
+        }
+      } else if (thenTop && !isProperty && elseBindings.length === 0 &&
+                 thenTop !== bindingName && this.stackMap.has(thenTop)) {
+        // If-without-else: the then-branch reassigned a local variable that
+        // was PICKed (outer-protected), leaving a stale copy on the stack.
+        // The new value is at TOS; the old copy is deeper. Push the local
+        // name and remove the stale entry so subsequent references find the
+        // correct (new) value.
         this.stackMap.push(thenTop);
         for (let d = 1; d < this.stackMap.depth; d++) {
           if (this.stackMap.peekAtDepth(d) === thenTop) {

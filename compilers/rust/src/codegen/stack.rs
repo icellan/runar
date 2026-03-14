@@ -1278,8 +1278,25 @@ impl LoweringContext {
         // Phase 3: single depth-balance check after ALL drops.
         // Push placeholder only if one branch is still deeper than the other.
         if then_ctx.sm.depth() > else_ctx.sm.depth() {
-            else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
-            else_ctx.sm.push("");
+            // When the then-branch reassigned a local variable (if-without-else),
+            // push a COPY of that variable in the else-branch instead of a generic
+            // placeholder.
+            let then_top_p3 = then_ctx.sm.peek_at_depth(0).to_string();
+            if else_bindings.is_empty() && !then_top_p3.is_empty() && else_ctx.sm.has(&then_top_p3) {
+                let var_depth = else_ctx.sm.find_depth(&then_top_p3).unwrap();
+                if var_depth == 0 {
+                    else_ctx.emit_op(StackOp::Dup);
+                } else {
+                    else_ctx.emit_op(StackOp::Push(PushValue::Int(var_depth as i128)));
+                    else_ctx.sm.push("");
+                    else_ctx.emit_op(StackOp::Pick { depth: var_depth });
+                    else_ctx.sm.pop();
+                }
+                else_ctx.sm.push(&then_top_p3);
+            } else {
+                else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
+                else_ctx.sm.push("");
+            }
         } else if else_ctx.sm.depth() > then_ctx.sm.depth() {
             then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
             then_ctx.sm.push("");
@@ -1320,6 +1337,31 @@ impl LoweringContext {
                 && then_top != binding_name && self.sm.has(&then_top)
             {
                 // Both branches did update_prop for the same property
+                self.sm.push(&then_top);
+                for d in 1..self.sm.depth() {
+                    if self.sm.peek_at_depth(d) == then_top {
+                        if d == 1 {
+                            self.emit_op(StackOp::Nip);
+                            self.sm.remove_at_depth(1);
+                        } else {
+                            self.emit_op(StackOp::Push(PushValue::Int(d as i128)));
+                            self.sm.push("");
+                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.sm.pop();
+                            let rolled = self.sm.remove_at_depth(d);
+                            self.sm.push(&rolled);
+                            self.emit_op(StackOp::Drop);
+                            self.sm.pop();
+                        }
+                        break;
+                    }
+                }
+            } else if !then_top.is_empty() && !is_property && else_bindings.is_empty()
+                && then_top != binding_name && self.sm.has(&then_top)
+            {
+                // If-without-else: then-branch reassigned a local variable that
+                // was PICKed (outer-protected), leaving a stale copy on the stack.
+                // Push the local name and remove the stale entry.
                 self.sm.push(&then_top);
                 for d in 1..self.sm.depth() {
                     if self.sm.peek_at_depth(d) == then_top {

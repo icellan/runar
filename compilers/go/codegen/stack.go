@@ -1158,8 +1158,26 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	// Phase 3: single depth-balance check after ALL drops.
 	// Push placeholder only if one branch is still deeper than the other.
 	if thenCtx.sm.depth() > elseCtx.sm.depth() {
-		elseCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
-		elseCtx.sm.push("")
+		// When the then-branch reassigned a local variable (if-without-else),
+		// push a COPY of that variable in the else-branch instead of a generic
+		// placeholder. This ensures the else-branch preserves the correct value
+		// when post-ENDIF stale removal (NIP) removes the old entry.
+		thenTopP3 := thenCtx.sm.peekAtDepth(0)
+		if len(elseBindings) == 0 && thenTopP3 != "" && elseCtx.sm.has(thenTopP3) {
+			varDepth := elseCtx.sm.findDepth(thenTopP3)
+			if varDepth == 0 {
+				elseCtx.emitOp(StackOp{Op: "dup"})
+			} else {
+				elseCtx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(varDepth))})
+				elseCtx.sm.push("")
+				elseCtx.emitOp(StackOp{Op: "pick", Depth: varDepth})
+				elseCtx.sm.pop()
+			}
+			elseCtx.sm.push(thenTopP3)
+		} else {
+			elseCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
+			elseCtx.sm.push("")
+		}
 	} else if elseCtx.sm.depth() > thenCtx.sm.depth() {
 		thenCtx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{}}})
 		thenCtx.sm.push("")
@@ -1203,6 +1221,29 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 		}
 		if isProperty && thenTop != "" && thenTop == elseTop && thenTop != bindingName && ctx.sm.has(thenTop) {
 			// Both branches did update_prop for the same property (e.g., turn flip).
+			ctx.sm.push(thenTop)
+			for d := 1; d < ctx.sm.depth(); d++ {
+				if ctx.sm.peekAtDepth(d) == thenTop {
+					if d == 1 {
+						ctx.emitOp(StackOp{Op: "nip"})
+						ctx.sm.removeAtDepth(1)
+					} else {
+						ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(d))})
+						ctx.sm.push("")
+						ctx.emitOp(StackOp{Op: "roll", Depth: d + 1})
+						ctx.sm.pop()
+						rolled := ctx.sm.removeAtDepth(d)
+						ctx.sm.push(rolled)
+						ctx.emitOp(StackOp{Op: "drop"})
+						ctx.sm.pop()
+					}
+					break
+				}
+			}
+		} else if thenTop != "" && !isProperty && len(elseBindings) == 0 && thenTop != bindingName && ctx.sm.has(thenTop) {
+			// If-without-else: the then-branch reassigned a local variable that
+			// was PICKed (outer-protected), leaving a stale copy on the stack.
+			// Push the local name and remove the stale entry.
 			ctx.sm.push(thenTop)
 			for d := 1; d < ctx.sm.depth(); d++ {
 				if ctx.sm.peekAtDepth(d) == thenTop {

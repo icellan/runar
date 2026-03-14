@@ -1018,8 +1018,24 @@ class _LoweringContext:
         # Phase 3: single depth-balance check after ALL drops.
         # Push placeholder only if one branch is still deeper than the other.
         if then_ctx.sm.depth() > else_ctx.sm.depth():
-            else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
-            else_ctx.sm.push("")
+            # When the then-branch reassigned a local variable (if-without-else),
+            # push a COPY of that variable in the else-branch instead of a generic
+            # placeholder.
+            then_top_p3 = then_ctx.sm.peek_at_depth(0)
+            if (not else_bindings and then_top_p3
+                    and else_ctx.sm.has(then_top_p3)):
+                var_depth = else_ctx.sm.find_depth(then_top_p3)
+                if var_depth == 0:
+                    else_ctx.emit_op(StackOp(op="dup"))
+                else:
+                    else_ctx.emit_op(StackOp(op="push", value=big_int_push(var_depth)))
+                    else_ctx.sm.push("")
+                    else_ctx.emit_op(StackOp(op="pick", depth=var_depth))
+                    else_ctx.sm.pop()
+                else_ctx.sm.push(then_top_p3)
+            else:
+                else_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
+                else_ctx.sm.push("")
         elif else_ctx.sm.depth() > then_ctx.sm.depth():
             then_ctx.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=b"")))
             then_ctx.sm.push("")
@@ -1047,6 +1063,27 @@ class _LoweringContext:
             if (is_property and then_top and then_top == else_top
                     and then_top != binding_name and self.sm.has(then_top)):
                 # Both branches did update_prop for the same property
+                self.sm.push(then_top)
+                for d in range(1, self.sm.depth()):
+                    if self.sm.peek_at_depth(d) == then_top:
+                        if d == 1:
+                            self.emit_op(StackOp(op="nip"))
+                            self.sm.remove_at_depth(1)
+                        else:
+                            self.emit_op(StackOp(op="push", value=big_int_push(d)))
+                            self.sm.push("")
+                            self.emit_op(StackOp(op="roll", depth=d + 1))
+                            self.sm.pop()
+                            rolled = self.sm.remove_at_depth(d)
+                            self.sm.push(rolled)
+                            self.emit_op(StackOp(op="drop"))
+                            self.sm.pop()
+                        break
+            elif (then_top and not is_property and len(else_bindings) == 0
+                    and then_top != binding_name and self.sm.has(then_top)):
+                # If-without-else: then-branch reassigned a local variable that
+                # was PICKed (outer-protected), leaving a stale copy on the stack.
+                # Push the local name and remove the stale entry.
                 self.sm.push(then_top)
                 for d in range(1, self.sm.depth()):
                     if self.sm.peek_at_depth(d) == then_top:

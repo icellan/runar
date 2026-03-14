@@ -1,0 +1,221 @@
+{
+  "contractName": "IfWithoutElse",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "threshold",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "threshold",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "count",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": ">",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "cond": "t3",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t4",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t5",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "count",
+                  "op": "+",
+                  "right": "t4"
+                }
+              },
+              {
+                "name": "count",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t5"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "threshold"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "bin_op",
+            "left": "t7",
+            "op": ">",
+            "right": "t8"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "cond": "t9",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t10",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t11",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "count",
+                  "op": "+",
+                  "right": "t10"
+                }
+              },
+              {
+                "name": "count",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t11"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "bin_op",
+            "left": "count",
+            "op": ">",
+            "right": "t13"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "assert",
+            "value": "t14"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "check",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "threshold",
+      "readonly": true,
+      "type": "bigint"
+    }
+  ]
+}
