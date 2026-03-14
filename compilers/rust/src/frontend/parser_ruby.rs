@@ -125,8 +125,29 @@ fn map_builtin_name(name: &str) -> String {
         "ec_point_y" => return "ecPointY".to_string(),
         "mul_div" => return "mulDiv".to_string(),
         "percent_of" => return "percentOf".to_string(),
+        "safe_div" => return "safediv".to_string(),
+        "safe_mod" => return "safemod".to_string(),
+        "div_mod" => return "divmod".to_string(),
+        "bin2num" => return "bin2num".to_string(),
         "add_output" => return "addOutput".to_string(),
+        "add_raw_output" => return "addRawOutput".to_string(),
         "get_state_script" => return "getStateScript".to_string(),
+        // SHA-256 partial verification
+        "sha256_compress" => return "sha256Compress".to_string(),
+        "sha256_finalize" => return "sha256Finalize".to_string(),
+        // Transaction intrinsics
+        "extract_nsequence" => return "extractNSequence".to_string(),
+        "extract_hash_prevouts" => return "extractHashPrevouts".to_string(),
+        "extract_hash_sequence" => return "extractHashSequence".to_string(),
+        "extract_outpoint" => return "extractOutpoint".to_string(),
+        "extract_script_code" => return "extractScriptCode".to_string(),
+        "extract_input_index" => return "extractInputIndex".to_string(),
+        "extract_sig_hash_type" => return "extractSigHashType".to_string(),
+        "extract_outputs" => return "extractOutputs".to_string(),
+        // EC constants
+        "EC_P" => return "EC_P".to_string(),
+        "EC_N" => return "EC_N".to_string(),
+        "EC_G" => return "EC_G".to_string(),
         _ => {}
     }
 
@@ -982,15 +1003,15 @@ impl<'a> RbParser<'a> {
         // Parse type
         let type_node = self.parse_type();
 
-        // Check for optional readonly: true
+        // Check for optional trailing options: readonly: true/false, default: <literal>
+        // Multiple options are comma-separated and may appear in any order.
         let mut is_readonly = false;
-        if *self.peek() == Token::Comma {
+        let mut initializer: Option<Expression> = None;
+        while *self.peek() == Token::Comma {
             self.advance(); // ','
-            // Expect 'readonly' ident
             if self.check_ident("readonly") {
                 self.advance(); // 'readonly'
                 self.expect(&Token::Colon);
-                // Expect 'true'
                 if *self.peek() == Token::TrueLit {
                     self.advance();
                     is_readonly = true;
@@ -998,6 +1019,13 @@ impl<'a> RbParser<'a> {
                     self.advance();
                     is_readonly = false;
                 }
+            } else if self.check_ident("default") {
+                self.advance(); // 'default'
+                self.expect(&Token::Colon);
+                initializer = Some(self.parse_unary());
+            } else {
+                // Unknown trailing option -- stop parsing options
+                break;
             }
         }
 
@@ -1018,6 +1046,7 @@ impl<'a> RbParser<'a> {
             name: snake_to_camel(&raw_name),
             prop_type: type_node,
             readonly: is_readonly,
+            initializer,
             source_location: self.loc(),
         })
     }
@@ -2045,7 +2074,11 @@ impl<'a> RbParser<'a> {
 // ---------------------------------------------------------------------------
 
 fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
-    let params: Vec<ParamNode> = properties
+    // Properties with initializers do not need constructor parameters.
+    let required_props: Vec<&PropertyNode> =
+        properties.iter().filter(|p| p.initializer.is_none()).collect();
+
+    let params: Vec<ParamNode> = required_props
         .iter()
         .map(|p| ParamNode {
             name: p.name.clone(),
@@ -2056,7 +2089,7 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
     let mut body: Vec<Statement> = Vec::new();
 
     // super(...) call
-    let super_args: Vec<Expression> = properties
+    let super_args: Vec<Expression> = required_props
         .iter()
         .map(|p| Expression::Identifier {
             name: p.name.clone(),
@@ -2076,8 +2109,8 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
         },
     });
 
-    // this.x = x for each property
-    for p in properties {
+    // this.x = x for each required property
+    for p in &required_props {
         body.push(Statement::Assignment {
             target: Expression::PropertyAccess {
                 property: p.name.clone(),

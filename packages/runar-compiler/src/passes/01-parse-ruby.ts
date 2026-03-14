@@ -382,8 +382,30 @@ function mapBuiltinName(name: string): string {
     'ec_point_y': 'ecPointY',
     'mul_div': 'mulDiv',
     'percent_of': 'percentOf',
+    'safe_div': 'safediv',
+    'safe_mod': 'safemod',
+    'div_mod': 'divmod',
     'add_output': 'addOutput',
+    'add_raw_output': 'addRawOutput',
     'get_state_script': 'getStateScript',
+    // SHA-256 partial verification
+    'sha256_compress': 'sha256Compress',
+    'sha256_finalize': 'sha256Finalize',
+    // Transaction intrinsics
+    'extract_nsequence': 'extractNSequence',
+    'extract_hash_prevouts': 'extractHashPrevouts',
+    'extract_hash_sequence': 'extractHashSequence',
+    'extract_outpoint': 'extractOutpoint',
+    'extract_script_code': 'extractScriptCode',
+    'extract_input_index': 'extractInputIndex',
+    'extract_sig_hash_type': 'extractSigHashType',
+    'extract_outputs': 'extractOutputs',
+    // EC constants
+    'EC_P': 'EC_P',
+    'EC_N': 'EC_N',
+    'EC_G': 'EC_G',
+    // Additional hash builtins
+    'bin2num': 'bin2num',
   };
   const special = SPECIAL[name];
   if (special) return special;
@@ -784,15 +806,15 @@ class RbParser {
     // Parse type
     const typeNode = this.parseType();
 
-    // Check for optional readonly: true
+    // Check for optional trailing options: readonly: true/false, default: <literal>
+    // Multiple options are comma-separated and may appear in any order.
     let isReadonly = false;
-    if (this.peek().type === ',') {
+    let initializer: Expression | undefined;
+    while (this.peek().type === ',') {
       this.advance(); // ','
-      // Expect 'readonly' ident
       if (this.checkIdent('readonly')) {
         this.advance(); // 'readonly'
         this.expect(':');
-        // Expect 'true'
         if (this.peek().type === 'true') {
           this.advance();
           isReadonly = true;
@@ -800,6 +822,13 @@ class RbParser {
           this.advance();
           isReadonly = false;
         }
+      } else if (this.checkIdent('default')) {
+        this.advance(); // 'default'
+        this.expect(':');
+        initializer = this.parseUnary();
+      } else {
+        // Unknown trailing option -- stop parsing options
+        break;
       }
     }
 
@@ -818,6 +847,7 @@ class RbParser {
       name: snakeToCamel(rawName),
       type: typeNode,
       readonly: isReadonly,
+      initializer,
       sourceLocation: loc,
     };
   }
@@ -923,7 +953,10 @@ class RbParser {
   }
 
   private autoGenerateConstructor(properties: PropertyNode[]): MethodNode {
-    const params: ParamNode[] = properties.map(p => ({
+    // Properties with initializers do not need constructor parameters.
+    const requiredProps = properties.filter(p => p.initializer === undefined);
+
+    const params: ParamNode[] = requiredProps.map(p => ({
       kind: 'param' as const,
       name: p.name,
       type: p.type,
@@ -944,7 +977,7 @@ class RbParser {
       sourceLocation: { file: this.file, line: 1, column: 0 },
     };
 
-    const assignments: Statement[] = properties.map(p => ({
+    const assignments: Statement[] = requiredProps.map(p => ({
       kind: 'assignment' as const,
       target: { kind: 'property_access' as const, property: p.name },
       value: { kind: 'identifier' as const, name: p.name },

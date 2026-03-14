@@ -498,8 +498,13 @@ var rbSpecialNames = map[string]string{
 	"ec_point_y":           "ecPointY",
 
 	// Intrinsics
-	"add_output":       "addOutput",
+	"add_output":     "addOutput",
+	"add_raw_output": "addRawOutput",
 	"get_state_script": "getStateScript",
+
+	// SHA-256 partial verification
+	"sha256_compress": "sha256Compress",
+	"sha256_finalize": "sha256Finalize",
 
 	// Transaction intrinsics
 	"extract_locktime":    "extractLocktime",
@@ -507,10 +512,21 @@ var rbSpecialNames = map[string]string{
 	"extract_sequence":    "extractSequence",
 	"extract_version":     "extractVersion",
 	"extract_amount":      "extractAmount",
+	"extract_nsequence":   "extractNSequence",
+	"extract_hash_prevouts": "extractHashPrevouts",
+	"extract_hash_sequence": "extractHashSequence",
+	"extract_outpoint":    "extractOutpoint",
+	"extract_script_code": "extractScriptCode",
+	"extract_input_index": "extractInputIndex",
+	"extract_sig_hash_type": "extractSigHashType",
+	"extract_outputs":     "extractOutputs",
 
 	// Math builtins
 	"mul_div":       "mulDiv",
 	"percent_of":    "percentOf",
+	"safe_div":      "safediv",
+	"safe_mod":      "safemod",
+	"div_mod":       "divmod",
 	"reverse_bytes": "reverseBytes",
 
 	// Hash builtins (pass through unchanged)
@@ -889,15 +905,15 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 	// Parse type
 	typeNode := p.parseRbType()
 
-	// Check for optional readonly: true
+	// Check for optional trailing options: readonly: true/false, default: <literal>
+	// Multiple options are comma-separated and may appear in any order.
 	isReadonly := false
-	if p.check(rbTokComma) {
+	var initializer Expression
+	for p.check(rbTokComma) {
 		p.advance() // ','
-		// Expect 'readonly' ident
 		if p.checkIdent("readonly") {
 			p.advance() // 'readonly'
 			p.expect(rbTokColon)
-			// Expect 'true'
 			if p.check(rbTokTrue) {
 				p.advance()
 				isReadonly = true
@@ -905,6 +921,13 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 				p.advance()
 				isReadonly = false
 			}
+		} else if p.checkIdent("default") {
+			p.advance() // 'default'
+			p.expect(rbTokColon)
+			initializer = p.parseUnary()
+		} else {
+			// Unknown trailing option -- stop parsing options
+			break
 		}
 	}
 
@@ -922,6 +945,7 @@ func (p *rbParser) parseProp(parentClass string) *PropertyNode {
 		Name:           rbConvertName(rawName),
 		Type:           typeNode,
 		Readonly:       isReadonly,
+		Initializer:    initializer,
 		SourceLocation: loc,
 	}
 }
@@ -1014,8 +1038,16 @@ func (p *rbParser) parseParams(paramTypes map[string]TypeNode) []ParamNode {
 }
 
 func (p *rbParser) autoGenerateConstructor(properties []PropertyNode) MethodNode {
-	params := make([]ParamNode, len(properties))
-	for i, prop := range properties {
+	// Properties with initializers do not need constructor parameters.
+	var requiredProps []PropertyNode
+	for _, prop := range properties {
+		if prop.Initializer == nil {
+			requiredProps = append(requiredProps, prop)
+		}
+	}
+
+	params := make([]ParamNode, len(requiredProps))
+	for i, prop := range requiredProps {
 		params[i] = ParamNode{
 			Name: prop.Name,
 			Type: prop.Type,
@@ -1038,7 +1070,7 @@ func (p *rbParser) autoGenerateConstructor(properties []PropertyNode) MethodNode
 	var body []Statement
 	body = append(body, superCall)
 
-	for _, prop := range properties {
+	for _, prop := range requiredProps {
 		body = append(body, AssignmentStmt{
 			Target: PropertyAccessExpr{Property: prop.Name},
 			Value:  Identifier{Name: prop.Name},
