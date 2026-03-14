@@ -2127,7 +2127,7 @@ impl LoweringContext {
                     if p.name == "_genesisOutpoint" {
                         36
                     } else if p.name == "_proof" {
-                        192
+                        256
                     } else {
                         panic!(
                             "deserialize_state: ByteString property '{}' has unknown serialized size",

@@ -134,6 +134,8 @@ export interface AssembleOptions {
   codeSeparatorIndex?: number;
   /** Per-method OP_CODESEPARATOR byte offsets. */
   codeSeparatorIndices?: number[];
+  /** JSON-serialized Groth16 verification key for inductive contracts. */
+  verificationKey?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +342,11 @@ export function assembleArtifact(
   }
   if (options?.codeSeparatorIndices && options.codeSeparatorIndices.length > 0) {
     artifact.codeSeparatorIndices = options.codeSeparatorIndices;
+  }
+
+  // Verification key (for inductive contracts with SNARK verification)
+  if (options?.verificationKey) {
+    artifact.verificationKey = options.verificationKey;
   }
 
   return artifact;

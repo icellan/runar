@@ -8,10 +8,10 @@
  * approach for BN curves.
  */
 
-import { P, BN_X } from './constants.js';
+import { BN_X } from './constants.js';
 import { fpMod, fpNeg } from './field.js';
 import {
-  fp2, fp2Add, fp2Sub, fp2Mul, fp2Sqr, fp2Neg, fp2Inv, fp2Eq,
+  fp2, fp2Add, fp2Sub, fp2Mul, fp2Sqr, fp2Neg, fp2Inv, fp2Eq, fp2Conj,
   FP2_ZERO, FP2_ONE, fp2MulScalar,
 } from './fp2.js';
 import { g1IsInfinity } from './g1.js';
@@ -120,19 +120,6 @@ function fp12Conj(a: Fp12): Fp12 {
   return { c0: a.c0, c1: fp6Neg(a.c1) };
 }
 
-function fp12Pow(base: Fp12, exp: bigint): Fp12 {
-  if (exp === 0n) return FP12_ONE;
-  let result = FP12_ONE;
-  let b = base;
-  let e = exp;
-  while (e > 0n) {
-    if (e & 1n) result = fp12Mul(result, b);
-    b = fp12Sqr(b);
-    e >>= 1n;
-  }
-  return result;
-}
-
 // ---------------------------------------------------------------------------
 // Miller loop (optimal Ate)
 // ---------------------------------------------------------------------------
@@ -141,29 +128,32 @@ function lineDouble(r: { x: Fp2; y: Fp2 }, p: G1Point): { coeff: Fp12; newR: { x
   const rx = r.x, ry = r.y;
   const px = fpMod(p.x), py = fpMod(p.y);
 
-  // λ = 3*rx^2 / (2*ry)
+  // λ = 3*rx^2 / (2*ry) on the twist curve E'
   const rx2 = fp2Sqr(rx);
   const threeRx2 = fp2Add(fp2Add(rx2, rx2), rx2);
   const twoRy = fp2Add(ry, ry);
   const lambda = fp2Mul(threeRx2, fp2Inv(twoRy));
 
-  // new R
+  // new R on twist curve
   const newX = fp2Sub(fp2Sqr(lambda), fp2Add(rx, rx));
   const newY = fp2Sub(fp2Mul(lambda, fp2Sub(rx, newX)), ry);
 
-  // Line evaluation at P: l = lambda * (px - rx) - (py - ry)
-  // Embedded in Fp12 sparse element
+  // Line evaluation at P through the D-type sextic twist.
+  // Twist: ψ(x',y') = (x'·v, y'·v·w) where v = w², v³ = ξ.
+  // The line L(P) = py + (-λ·px)·w + (λ·rx - ry)·v·w
+  // In Fp12 = Fp6[w]/(w²-v):
+  //   c0 (Fp6 constant part): (py, 0, 0)
+  //   c1 (Fp6 ·w part):       (-λ·px, λ·rx - ry, 0)
   const c0: Fp6 = {
-    c0: fp2Sub(fp2MulScalar(lambda, fpNeg(px)), fp2Neg(ry)),
+    c0: fp2(py, 0n),
     c1: FP2_ZERO,
     c2: FP2_ZERO,
   };
   const c1: Fp6 = {
-    c0: fp2MulScalar(FP2_ONE, py),
-    c1: FP2_ZERO,
+    c0: fp2MulScalar(lambda, fpNeg(px)),
+    c1: fp2Sub(fp2Mul(lambda, rx), ry),
     c2: FP2_ZERO,
   };
-  // Simplified: sparse multiplication would be more efficient
   const coeff: Fp12 = { c0, c1 };
 
   return { coeff, newR: { x: newX, y: newY } };
@@ -179,18 +169,104 @@ function lineAdd(r: { x: Fp2; y: Fp2 }, q: { x: Fp2; y: Fp2 }, p: G1Point): { co
   const newY = fp2Sub(fp2Mul(lambda, fp2Sub(rx, newX)), ry);
 
   const c0: Fp6 = {
-    c0: fp2Sub(fp2MulScalar(lambda, fpNeg(px)), fp2Neg(ry)),
+    c0: fp2(py, 0n),
     c1: FP2_ZERO,
     c2: FP2_ZERO,
   };
   const c1: Fp6 = {
-    c0: fp2MulScalar(FP2_ONE, py),
-    c1: FP2_ZERO,
+    c0: fp2MulScalar(lambda, fpNeg(px)),
+    c1: fp2Sub(fp2Mul(lambda, rx), ry),
     c2: FP2_ZERO,
   };
   const coeff: Fp12 = { c0, c1 };
 
   return { coeff, newR: { x: newX, y: newY } };
+}
+
+// ---------------------------------------------------------------------------
+// Frobenius constants (needed by twist Frobenius and final exponentiation)
+// ---------------------------------------------------------------------------
+
+/**
+ * Frobenius p coefficients in component order: [1, v, v², w, vw, v²w].
+ * For basis element v^a · w^b, the multiplier is ξ^{(2a+b)(p-1)/6}.
+ * Computed as: ξ = 9+u, exponent = (2a+b)·(p-1)/6.
+ */
+const FROB_P_COEFFS: Fp2[] = [
+  fp2(1n, 0n), // 1: ξ^0
+  fp2(  // v: ξ^{2(p-1)/6}
+    21575463638280843010398324269430826099269044274347216827212613867836435027261n,
+    10307601595873709700152284273816112264069230130616436755625194854815875713954n,
+  ),
+  fp2(  // v²: ξ^{4(p-1)/6}
+    2581911344467009335267311115468803099551665605076196740867805258568234346338n,
+    19937756971775647987995932169929341994314640652964949448313374472400716661030n,
+  ),
+  fp2(  // w: ξ^{(p-1)/6}
+    8376118865763821496583973867626364092589906065868298776909617916018768340080n,
+    16469823323077808223889137241176536799009286646108169935659301613961712198316n,
+  ),
+  fp2(  // vw: ξ^{3(p-1)/6}
+    2821565182194536844548159561693502659359617185244120367078079554186484126554n,
+    3505843767911556378687030309984248845540243509899259641013678093033130930403n,
+  ),
+  fp2(  // v²w: ξ^{5(p-1)/6}
+    685108087231508774477564247770172212460312782337200605669322048753928464687n,
+    8447204650696766136447902020341177575205426561248465145919723016860428151883n,
+  ),
+];
+
+/** Frobenius p² coefficients in component order (same basis permutation). */
+const FROB_P2_COEFFS: Fp2[] = [
+  fp2(1n, 0n), // 1
+  fp2(21888242871839275220042445260109153167277707414472061641714758635765020556616n, 0n), // v
+  fp2(2203960485148121921418603742825762020974279258880205651966n, 0n), // v²
+  fp2(21888242871839275220042445260109153167277707414472061641714758635765020556617n, 0n), // w
+  fp2(21888242871839275222246405745257275088696311157297823662689037894645226208582n, 0n), // vw
+  fp2(2203960485148121921418603742825762020974279258880205651967n, 0n), // v²w
+];
+
+/** ξ^{(p-1)/3} for twist Frobenius x-coordinate. */
+const TWIST_FROB_X: Fp2 = fp2(
+  21575463638280843010398324269430826099269044274347216827212613867836435027261n,
+  10307601595873709700152284273816112264069230130616436755625194854815875713954n,
+);
+/** ξ^{(p-1)/2} for twist Frobenius y-coordinate. */
+const TWIST_FROB_Y: Fp2 = fp2(
+  2821565182194536844548159561693502659359617185244120367078079554186484126554n,
+  3505843767911556378687030309984248845540243509899259641013678093033130930403n,
+);
+/** ξ^{(p²-1)/3} for twist Frobenius p² x-coordinate. */
+const TWIST_FROB2_X: Fp2 = fp2(
+  21888242871839275220042445260109153167277707414472061641714758635765020556616n, 0n,
+);
+/** ξ^{(p²-1)/2} for twist Frobenius p² y-coordinate. */
+const TWIST_FROB2_Y: Fp2 = fp2(
+  21888242871839275222246405745257275088696311157297823662689037894645226208582n, 0n,
+);
+
+/**
+ * Frobenius endomorphism on G2 twist points.
+ * π_p(x', y') = (conj(x') · ξ^{(p-1)/3}, conj(y') · ξ^{(p-1)/2})
+ * where the constants come from the Frobenius coefficients.
+ */
+function twistFrobeniusP(q: { x: Fp2; y: Fp2 }): { x: Fp2; y: Fp2 } {
+  return {
+    x: fp2Mul(fp2Conj(q.x), TWIST_FROB_X),
+    y: fp2Mul(fp2Conj(q.y), TWIST_FROB_Y),
+  };
+}
+
+/**
+ * Frobenius p^2 on G2 twist points.
+ * π_{p²}(x', y') = (x' · ξ^{(p²-1)/3}, y' · ξ^{(p²-1)/2})
+ * No conjugation needed since applying Frobenius twice returns to Fp2.
+ */
+function twistFrobeniusP2(q: { x: Fp2; y: Fp2 }): { x: Fp2; y: Fp2 } {
+  return {
+    x: fp2Mul(q.x, TWIST_FROB2_X),
+    y: fp2Mul(q.y, TWIST_FROB2_Y),
+  };
 }
 
 function millerLoop(p: G1Point, q: G2Point): Fp12 {
@@ -199,8 +275,7 @@ function millerLoop(p: G1Point, q: G2Point): Fp12 {
   let f = FP12_ONE;
   let r = { x: q.x, y: q.y };
 
-  // BN_X in binary (6x + 2 loop, using NAF of BN_X)
-  // For simplicity, use basic binary representation of 6*BN_X + 2
+  // Binary representation of 6*BN_X + 2
   const sixXPlus2 = 6n * BN_X + 2n;
   const bits: number[] = [];
   let v = sixXPlus2;
@@ -224,6 +299,49 @@ function millerLoop(p: G1Point, q: G2Point): Fp12 {
     }
   }
 
+  // Frobenius correction for BN254 optimal Ate pairing:
+  // Q1 = π_p(Q), Q2 = π_{p²}(Q)
+  const q1 = twistFrobeniusP({ x: q.x, y: q.y });
+  const q2 = twistFrobeniusP2({ x: q.x, y: q.y });
+
+  // Line evaluation with Q1
+  const add1 = lineAdd(r, q1, p);
+  f = fp12Mul(f, add1.coeff);
+  r = add1.newR;
+
+  // Line evaluation with -Q2 (negate y-coordinate)
+  const add2 = lineAdd(r, { x: q2.x, y: fp2Neg(q2.y) }, p);
+  f = fp12Mul(f, add2.coeff);
+
+  return f;
+}
+
+/** Miller loop without Frobenius correction (for testing). */
+function millerLoopRaw(p: G1Point, q: G2Point): Fp12 {
+  if (g1IsInfinity(p) || g2IsInfinity(q)) return FP12_ONE;
+
+  let f = FP12_ONE;
+  let r = { x: q.x, y: q.y };
+
+  const sixXPlus2 = 6n * BN_X + 2n;
+  const bits: number[] = [];
+  let v = sixXPlus2;
+  while (v > 0n) {
+    bits.push(Number(v & 1n));
+    v >>= 1n;
+  }
+
+  for (let i = bits.length - 2; i >= 0; i--) {
+    const dbl = lineDouble(r, p);
+    f = fp12Mul(fp12Sqr(f), dbl.coeff);
+    r = dbl.newR;
+
+    if (bits[i] === 1) {
+      const add = lineAdd(r, { x: q.x, y: q.y }, p);
+      f = fp12Mul(f, add.coeff);
+      r = add.newR;
+    }
+  }
   return f;
 }
 
@@ -231,28 +349,175 @@ function millerLoop(p: G1Point, q: G2Point): Fp12 {
 // Final exponentiation
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Frobenius endomorphisms (off-chain)
+// ---------------------------------------------------------------------------
+
+/**
+ * Frobenius p-th power: f^p.
+ * Each Fp2 component gets conjugated then multiplied by a precomputed constant.
+ */
+function fp12FrobP(f: Fp12): Fp12 {
+  const comps = [f.c0.c0, f.c0.c1, f.c0.c2, f.c1.c0, f.c1.c1, f.c1.c2];
+  const mapped = comps.map((c, i) => {
+    const conj = fp2Conj(c);
+    const g = FROB_P_COEFFS[i]!;
+    return g.c0 === 1n && g.c1 === 0n ? conj : fp2Mul(conj, g);
+  });
+  return {
+    c0: { c0: mapped[0]!, c1: mapped[1]!, c2: mapped[2]! },
+    c1: { c0: mapped[3]!, c1: mapped[4]!, c2: mapped[5]! },
+  };
+}
+
+/** Frobenius p^2: f^{p^2}. All constants are real; no conjugation needed. */
+function fp12FrobP2(f: Fp12): Fp12 {
+  const comps = [f.c0.c0, f.c0.c1, f.c0.c2, f.c1.c0, f.c1.c1, f.c1.c2];
+  const mapped = comps.map((c, i) => {
+    const g = FROB_P2_COEFFS[i]!;
+    return g.c0 === 1n && g.c1 === 0n ? c : fp2MulScalar(c, g.c0);
+  });
+  return {
+    c0: { c0: mapped[0]!, c1: mapped[1]!, c2: mapped[2]! },
+    c1: { c0: mapped[3]!, c1: mapped[4]!, c2: mapped[5]! },
+  };
+}
+
+/** Frobenius p^3: f^{p^3} = frobP(frobP2(f)). */
+function fp12FrobP3(f: Fp12): Fp12 {
+  return fp12FrobP(fp12FrobP2(f));
+}
+
+// ---------------------------------------------------------------------------
+// Cyclotomic squaring (for unitary elements after easy part)
+// ---------------------------------------------------------------------------
+
+/** Exponentiate by BN_X using binary method (x = BN_X). */
+function fp12ExpByX(f: Fp12): Fp12 {
+  let result = FP12_ONE;
+  let base = f;
+  let x = BN_X;
+  while (x > 0n) {
+    if (x & 1n) result = fp12Mul(result, base);
+    base = fp12Sqr(base);
+    x >>= 1n;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Final exponentiation
+// ---------------------------------------------------------------------------
+
+/**
+ * Hard part of final exponentiation using x-chain decomposition.
+ *
+ * The hard exponent d = (p^4 - p^2 + 1) / r decomposes as:
+ *   d = a0 + a1·p + a2·p^2 + a3·p^3
+ * where (derived via polynomial division of d(u) by p(u)):
+ *   a3 = 1
+ *   a2 = 6u^2 + 1
+ *   a1 = -36u^3 - 18u^2 - 12u + 1
+ *   a0 = -36u^3 - 30u^2 - 18u - 2
+ *
+ * So: f^d = f^{a0} · frobP(f)^{a1} · frobP2(f)^{a2} · frobP3(f)^{a3}
+ *
+ * For negative exponents, use conjugation: f^{-n} = conj(f)^n (cyclotomic subgroup).
+ *
+ * x-chain to compute the sub-exponents from f^u, f^{u^2}, f^{u^3}:
+ *   fu = f^u,  fu2 = fu^u = f^{u^2},  fu3 = fu2^u = f^{u^3}
+ *
+ *   a0 = -36u^3 - 30u^2 - 18u - 2 = -(2 + 18u + 30u^2 + 36u^3)
+ *      = -(2·(1 + 3u) + 6u^2·(5 + 6u))
+ *   a1 = 1 - 12u - 18u^2 - 36u^3 = 1 - 6u·(2 + 3u + 6u^2)
+ *   a2 = 1 + 6u^2
+ *   a3 = 1
+ *
+ * To minimize Fp12 exponentiations, we build the exponents from fu, fu2, fu3
+ * using multiplications and squarings only.
+ */
+function finalExpHardXChain(f: Fp12): Fp12 {
+  const fu = fp12ExpByX(f);          // f^u
+  const fu2 = fp12ExpByX(fu);        // f^{u^2}
+  const fu3 = fp12ExpByX(fu2);       // f^{u^3}
+
+  // a3-component: frobP3(f)^1 = frobP3(f)
+  const t3 = fp12FrobP3(f);
+
+  // a2-component: frobP2(f)^{6u^2 + 1}
+  // 6u^2 = 6 * fu2 in exponent. But we need f^{6u^2} not fu2^6...
+  // Actually: frobP2(f)^{6u^2+1} = frobP2(f) · frobP2(f^{u^2})^6
+  // = frobP2(f) · frobP2(fu2)^6
+  // where ^6 = squaring + mul: x^6 = (x^2)^2 · x^2 = x^2 · (x^2)^2
+  const fp2_fu2 = fp12FrobP2(fu2);
+  const fp2_fu2_sq = fp12Sqr(fp2_fu2);               // frobP2(fu2)^2
+  const fp2_fu2_4 = fp12Sqr(fp2_fu2_sq);              // frobP2(fu2)^4
+  const fp2_fu2_6 = fp12Mul(fp2_fu2_4, fp2_fu2_sq);   // frobP2(fu2)^6
+  const t2 = fp12Mul(fp12FrobP2(f), fp2_fu2_6);       // frobP2(f)^{6u^2+1}
+
+  // a1-component: frobP(f)^{-36u^3 - 18u^2 - 12u + 1}
+  // Since a1 = 1 - 12u - 18u^2 - 36u^3, and the negative part is large:
+  // |a1| part: 12u + 18u^2 + 36u^3 = 6u(2 + 3u + 6u^2)
+  // = 6u · (2 + 3u(1 + 2u))
+  //
+  // Build in exponent-of-f land:
+  // f^{6u} = fu^6
+  const fu_sq = fp12Sqr(fu);                          // fu^2
+  const fu_4 = fp12Sqr(fu_sq);                        // fu^4
+  const fu_6 = fp12Mul(fu_4, fu_sq);                  // fu^6 = f^{6u}
+
+  // f^{6u^2} = fu2^6
+  const fu2_sq = fp12Sqr(fu2);
+  const fu2_4 = fp12Sqr(fu2_sq);
+  const fu2_6 = fp12Mul(fu2_4, fu2_sq);               // f^{6u^2}
+
+  // f^{6u^3} = fu3^6
+  const fu3_sq = fp12Sqr(fu3);
+  const fu3_4 = fp12Sqr(fu3_sq);
+  const fu3_6 = fp12Mul(fu3_4, fu3_sq);               // f^{6u^3}
+
+  // 12u = 2·6u, 18u^2 = 3·6u^2, 36u^3 = 6·6u^3
+  const f_12u = fp12Sqr(fu_6);                        // f^{12u}
+  const f_18u2 = fp12Mul(fu2_6, fp12Sqr(fu2_6));      // f^{6u^2} · f^{12u^2} = f^{18u^2}
+  // Wait, fp12Sqr(fu2_6) = f^{12u^2}. fu2_6 * fp12Sqr(fu2_6) = f^{6u^2 + 12u^2} = f^{18u^2}. Yes.
+  const f_36u3 = fp12Sqr(fp12Mul(fu3_6, fp12Sqr(fu3_6)));
+  // fu3_6 = f^{6u^3}, fp12Sqr(fu3_6) = f^{12u^3}, fu3_6 * that = f^{18u^3}
+  // sqr of that = f^{36u^3}. Yes.
+
+  // negPart = f^{12u + 18u^2 + 36u^3}
+  const negPart = fp12Mul(fp12Mul(f_12u, f_18u2), f_36u3);
+
+  // a1 = 1 - negPart (in exponent), so frobP(f)^{a1} = frobP(f) · frobP(conj(negPart))
+  // = frobP(f) · conj(frobP(negPart))... no.
+  // Actually: frobP(f)^{a1} = frobP(f^{a1}) = frobP(f · conj(negPart))
+  // because f^{a1} = f^{1-neg} = f · f^{-neg} = f · conj(f^{neg}) = f · conj(negPart)
+  const f_a1 = fp12Mul(f, fp12Conj(negPart));
+  const t1 = fp12FrobP(f_a1);
+
+  // a0-component: f^{a0} where a0 = -(2 + 18u + 30u^2 + 36u^3)
+  // = -(2 + 18u + 30u^2 + 36u^3)
+  // Build:
+  // f^2 just square f
+  // f^{18u} = f_12u * fu_6 = f^{12u+6u} = f^{18u}
+  const f_18u = fp12Mul(f_12u, fu_6);
+  // f^{30u^2} = f^{18u^2} · f^{12u^2} = f_18u2 · fp12Sqr(fu2_6)
+  const f_30u2 = fp12Mul(f_18u2, fp12Sqr(fu2_6));     // f^{18u^2 + 12u^2} = f^{30u^2}
+
+  const posPart0 = fp12Mul(fp12Mul(fp12Sqr(f), f_18u), fp12Mul(f_30u2, f_36u3));
+  // f^{2 + 18u + 30u^2 + 36u^3}
+  const t0 = fp12Conj(posPart0);                       // f^{a0} = conjugate since a0 is negative
+
+  // Final result: t0 · t1 · t2 · t3
+  return fp12Mul(fp12Mul(t0, t1), fp12Mul(t2, t3));
+}
+
 function finalExponentiation(f: Fp12): Fp12 {
-  // Easy part: f^{(p^6 - 1)(p^2 + 1)}
-  const fConj = fp12Conj(f);
-  const fInv = fp12Inv(f);
-  let result = fp12Mul(fConj, fInv); // f^{p^6 - 1}
+  // ---- Easy part: f^{(p^6 - 1)(p^2 + 1)} ----
+  const f1 = fp12Mul(fp12Conj(f), fp12Inv(f));
+  const f2 = fp12Mul(fp12FrobP2(f1), f1);
 
-  // f^{p^2}: Frobenius map (simplified — apply p^2 Frobenius)
-  // For correctness we use exponentiation
-  result = fp12Mul(fp12Pow(result, P * P), fp12Inv(fp12Pow(result, P * P - 1n)));
-  // Simplified: just use result directly for now (the easy part is result itself)
-  // A proper implementation would use Frobenius endomorphism
-
-  // Hard part: f^{(p^4 - p^2 + 1) / r}
-  // This is the most complex part. For a correct implementation, we'd use
-  // the BN-specific formula involving BN_X. For now, we use direct exponentiation.
-  const _hardExp = (P * P * P * P - P * P + 1n) / (6n * BN_X + 2n);
-  void _hardExp;
-  // Note: this is astronomically expensive for a reference implementation.
-  // A production version would use the optimized formula with Frobenius maps.
-  // For testing with small inputs, we'll use the simplified path.
-
-  return result; // TODO: complete hard part with optimized formula
+  // ---- Hard part: f2^{(p^4 - p^2 + 1) / r} via x-chain ----
+  return finalExpHardXChain(f2);
 }
 
 // ---------------------------------------------------------------------------
@@ -304,3 +569,14 @@ function fp12IsOne(a: Fp12): boolean {
     fp2Eq(a.c1.c1, FP2_ZERO) &&
     fp2Eq(a.c1.c2, FP2_ZERO);
 }
+
+// Exports for isolated testing
+export {
+  fp6Mul, fp6Sqr, fp6Add, fp6Sub, fp6Neg, fp6MulByV,
+  fp12Mul, fp12Sqr, fp12Conj, fp12Inv,
+  fp12FrobP, fp12FrobP2, fp12FrobP3,
+  fp12ExpByX, finalExponentiation, millerLoop,
+  fp12IsOne, FP12_ONE,
+  twistFrobeniusP, twistFrobeniusP2,
+  millerLoopRaw,
+};

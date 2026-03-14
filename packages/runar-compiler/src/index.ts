@@ -64,6 +64,13 @@ export interface CompileOptions {
 
   /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
   disableConstantFolding?: boolean;
+
+  /**
+   * JSON-serialized Groth16 verification key for InductiveSmartContract.
+   * When provided, the artifact's `verificationKey` field is populated.
+   * The SDK can use this to generate the on-chain verifier at deployment time.
+   */
+  verificationKey?: string;
 }
 
 export interface CompileResult {
@@ -277,6 +284,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
         constructorSlots: emitResult.constructorSlots,
         codeSeparatorIndex: emitResult.codeSeparatorIndex,
         codeSeparatorIndices: emitResult.codeSeparatorIndices,
+        verificationKey: opts.verificationKey,
       },
     );
 

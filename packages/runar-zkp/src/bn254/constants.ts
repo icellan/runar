@@ -42,5 +42,6 @@ export const P_MINUS_1_OVER_2 = (P - 1n) / 2n;
 /** Number of bits in p. */
 export const P_BITS = 254;
 
-/** BN254 parameter x (used in Miller loop and final exponentiation). */
-export const BN_X = 4965661367071055936n;
+/** BN254 parameter x (used in Miller loop and final exponentiation).
+ * x = 0x44e992b44a6909f1, satisfying p = 36x^4 + 36x^3 + 24x^2 + 6x + 1. */
+export const BN_X = 4965661367192848881n;

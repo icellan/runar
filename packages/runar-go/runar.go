@@ -86,14 +86,13 @@ type StatefulSmartContract struct {
 }
 
 // InductiveSmartContract is the base struct for inductive Rúnar contracts.
-// Inductive contracts extend stateful contracts with chain-of-custody
-// tracking via parent transaction introspection. The compiler auto-injects
-// parentTx verification at method entry.
+// Inductive contracts extend stateful contracts with genesis tracking and
+// a ZKP proof slot. The compiler auto-injects genesis detection and
+// snark_verify at method entry.
 type InductiveSmartContract struct {
 	StatefulSmartContract
-	GenesisOutpoint     ByteString
-	ParentOutpoint      ByteString
-	GrandparentOutpoint ByteString
+	GenesisOutpoint ByteString
+	Proof           ByteString
 }
 
 // AddOutput records a new output with the given satoshis and state values.

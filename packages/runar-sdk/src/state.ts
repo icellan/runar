@@ -260,7 +260,7 @@ function decodeStateValue(
       if (name === '_genesisOutpoint') {
         return { value: hex.slice(offset, offset + 72), bytesRead: 72 }; // 36 bytes
       } else if (name === '_proof') {
-        return { value: hex.slice(offset, offset + 384), bytesRead: 384 }; // 192 bytes
+        return { value: hex.slice(offset, offset + 512), bytesRead: 512 }; // 256 bytes
       } else {
         // Unknown ByteString — try push-data decoding
         const { data, bytesRead } = decodePushData(hex, offset);

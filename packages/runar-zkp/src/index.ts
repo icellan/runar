@@ -51,7 +51,7 @@ export { pairing, checkPairingProduct } from './bn254/pairing.js';
 export { verifyGroth16 } from './groth16/verify.js';
 
 // Groth16 Bitcoin Script codegen
-export { estimateVerifierSize, generateVerifierStub } from './groth16/verify-script.js';
+export { estimateVerifierSize, generateVerifier, generateRuntimeVerifier, generateVerifierStub } from './groth16/verify-script.js';
 
 // Field arithmetic Bitcoin Script codegen
 export {
@@ -60,10 +60,35 @@ export {
   estimateOpSizes, estimateOptimizedVerifierSize,
 } from './bn254/field-script.js';
 
+// Fp2 extension field Bitcoin Script codegen
+export {
+  emitFp2Add, emitFp2Sub, emitFp2Mul, emitFp2Sqr, emitFp2Neg,
+  emitFp2Conj, emitFp2Inv, emitFp2MulByXi, emitFp2MulScalar,
+  emitPushFp2,
+} from './bn254/fp2-script.js';
+
+// Fp6 extension field Bitcoin Script codegen
+export {
+  emitFp6Add, emitFp6Sub, emitFp6Mul, emitFp6Sqr, emitFp6Neg,
+  emitFp6MulByV, emitFp6Inv,
+} from './bn254/fp6-script.js';
+
+// Fp12 extension field Bitcoin Script codegen
+export {
+  emitFp12Mul, emitFp12Sqr, emitFp12Inv, emitFp12Conj,
+  emitFp12SparseMul, emitFp12FrobeniusP, emitFp12FrobeniusP2,
+} from './bn254/fp12-script.js';
+
 // Circuit definitions
 export { defineIVCStepCircuit } from './circuit/ivc-step.js';
 export { defineGenesisCircuit } from './circuit/genesis-base.js';
 
+// Proof serialization (for on-chain state storage)
+export {
+  serializeGroth16Proof, deserializeGroth16Proof,
+  SERIALIZED_PROOF_SIZE,
+} from './proof-serialize.js';
+
 // Mock prover/setup (for testing)
 export { mockSetup } from './prover/setup.js';
-export { mockProve } from './prover/prove.js';
+export { mockProve, mockProveWithVK } from './prover/prove.js';

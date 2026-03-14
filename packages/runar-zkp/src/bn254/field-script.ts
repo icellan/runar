@@ -49,35 +49,31 @@ import type { StackOp } from 'runar-ir-schema';
 import { P, P_MINUS_2 } from './constants.js';
 
 // ---------------------------------------------------------------------------
-// Altstack prime management
+// Prime P management
 // ---------------------------------------------------------------------------
 
 /**
- * Push P onto the altstack. Call once at the start of a codegen block.
- * Stack: [...] → [...]; Alt: [..., P]
+ * Initialize P for a codegen block. Now a no-op — P is pushed inline
+ * by emitGetP each time it's needed, freeing the altstack for Fp6/Fp12
+ * intermediate storage.
  */
-export function emitInitP(ops: StackOp[]): void {
-  ops.push({ op: 'push', value: P } as StackOp);
-  ops.push({ op: 'opcode', code: 'OP_TOALTSTACK' } as StackOp);
+export function emitInitP(_ops: StackOp[]): void {
+  // no-op: P is pushed inline by emitGetP
 }
 
 /**
- * Get a copy of P from the altstack.
- * Stack: [...] → [..., P]; Alt: [..., P] (unchanged)
+ * Push P onto the main stack.
+ * Stack: [...] → [..., P]
  */
 function emitGetP(ops: StackOp[]): void {
-  ops.push({ op: 'opcode', code: 'OP_FROMALTSTACK' } as StackOp);
-  ops.push({ op: 'opcode', code: 'OP_DUP' } as StackOp);
-  ops.push({ op: 'opcode', code: 'OP_TOALTSTACK' } as StackOp);
+  ops.push({ op: 'push', value: P } as StackOp);
 }
 
 /**
- * Remove P from the altstack. Call at the end of a codegen block.
- * Alt: [..., P] → [...]
+ * Cleanup P after a codegen block. Now a no-op — P is not cached.
  */
-export function emitCleanupP(ops: StackOp[]): void {
-  ops.push({ op: 'opcode', code: 'OP_FROMALTSTACK' } as StackOp);
-  ops.push({ op: 'drop' } as StackOp);
+export function emitCleanupP(_ops: StackOp[]): void {
+  // no-op: P is pushed inline by emitGetP
 }
 
 // ---------------------------------------------------------------------------
@@ -115,11 +111,11 @@ export function emitFpAdd(ops: StackOp[]): void {
 export function emitFpSub(ops: StackOp[]): void {
   // Stack: [a, b]
   // We want (a - b + p) mod p
-  emitGetP(ops);                                           // [a, b, P]
-  ops.push({ op: 'opcode', code: 'OP_ROT' } as StackOp); // [a, P, b]
+  emitGetP(ops);                                            // [a, b, P]
+  ops.push({ op: 'swap' } as StackOp);                     // [a, P, b]
   ops.push({ op: 'opcode', code: 'OP_SUB' } as StackOp);  // [a, P-b]
   ops.push({ op: 'opcode', code: 'OP_ADD' } as StackOp);  // [a+P-b]
-  emitFpMod(ops);                                          // [(a+P-b) mod p]
+  emitFpMod(ops);                                           // [(a+P-b) mod p]
 }
 
 /**

@@ -76,15 +76,13 @@ pub struct OutputSnapshot {
 ///
 /// Fields:
 /// - `genesis_outpoint`: The outpoint of the original deployment transaction.
-/// - `parent_outpoint`: The outpoint of the immediate parent transaction.
-/// - `grandparent_outpoint`: The outpoint of the parent's parent transaction.
+/// - `proof`: ZKP proof slot (256 bytes, zero for genesis).
 /// - `outputs`: Recorded outputs from `add_output` calls.
 /// - `tx_preimage`: The sighash preimage for transaction validation.
 #[derive(Debug, Clone)]
 pub struct InductiveSmartContract {
     pub genesis_outpoint: ByteString,
-    pub parent_outpoint: ByteString,
-    pub grandparent_outpoint: ByteString,
+    pub proof: ByteString,
     pub outputs: Vec<OutputSnapshot>,
     pub tx_preimage: SigHashPreimage,
 }
@@ -93,13 +91,11 @@ impl InductiveSmartContract {
     /// Create a new InductiveSmartContract with the given outpoints.
     pub fn new(
         genesis_outpoint: ByteString,
-        parent_outpoint: ByteString,
-        grandparent_outpoint: ByteString,
+        proof: ByteString,
     ) -> Self {
         Self {
             genesis_outpoint,
-            parent_outpoint,
-            grandparent_outpoint,
+            proof,
             outputs: Vec::new(),
             tx_preimage: Vec::new(),
         }

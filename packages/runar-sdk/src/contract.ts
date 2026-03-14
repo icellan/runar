@@ -13,6 +13,7 @@ import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
 // computePartialSha256ForInductive remains available as a utility but is no longer used automatically
 import { computeNewState } from './anf-interpreter.js';
+import { InductiveProofManager, ZERO_PROOF } from './inductive-proof.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 
 /**
@@ -56,6 +57,7 @@ export class RunarContract {
   getUtxo(): UTXO | null { return this.currentUtxo; }
   private _provider: Provider | null = null;
   private _signer: Signer | null = null;
+  private _proofManager: InductiveProofManager | null = null;
 
   constructor(artifact: RunarArtifact, constructorArgs: unknown[]) {
     this.artifact = artifact;
@@ -104,6 +106,19 @@ export class RunarContract {
   connect(provider: Provider, signer: Signer): void {
     this._provider = provider;
     this._signer = signer;
+  }
+
+  /**
+   * Attach an InductiveProofManager for automatic proof lifecycle management.
+   * When set, the manager's proof is written to `_proof` state before each spend.
+   */
+  setProofManager(manager: InductiveProofManager): void {
+    this._proofManager = manager;
+  }
+
+  /** Get the attached proof manager, if any. */
+  get proofManager(): InductiveProofManager | null {
+    return this._proofManager;
   }
 
   /**
@@ -584,6 +599,7 @@ export class RunarContract {
 
       // For InductiveSmartContract, compute the updated _genesisOutpoint that the
       // on-chain script will set: extractOutpoint(preimage) at genesis, unchanged after.
+      // Also update _proof from the proof manager if attached.
       let inductiveUpdatedState: Record<string, unknown> = {};
       if (isInductive && this.currentUtxo) {
         const txidLE = this.currentUtxo.txid.match(/.{2}/g)!.reverse().join('');
@@ -597,6 +613,11 @@ export class RunarContract {
         inductiveUpdatedState = {
           _genesisOutpoint: isGenesis ? currentOutpoint : oldGenesis,
         };
+
+        // If a proof manager is attached, use its current proof
+        if (this._proofManager) {
+          inductiveUpdatedState._proof = this._proofManager.proof;
+        }
       }
 
       contractOutputs = options!.outputs!.map((out) => {
@@ -612,7 +633,7 @@ export class RunarContract {
       }
     } else if (isStateful) {
       newSatoshis = options?.satoshis ?? this.currentUtxo.satoshis;
-      // For inductive contracts, update _genesisOutpoint before building locking script
+      // For inductive contracts, update _genesisOutpoint and _proof before building locking script
       if (isInductive && this.currentUtxo) {
         const txidLE = this.currentUtxo.txid.match(/.{2}/g)!.reverse().join('');
         const voutLE = this.currentUtxo.outputIndex.toString(16).padStart(8, '0')
@@ -622,6 +643,11 @@ export class RunarContract {
         const oldGenesis = (this._state._genesisOutpoint as string) ?? ZERO_SENTINEL;
         const isGenesis = oldGenesis === ZERO_SENTINEL;
         this._state._genesisOutpoint = isGenesis ? currentOutpoint : oldGenesis;
+
+        // If a proof manager is attached, use its current proof
+        if (this._proofManager) {
+          this._state._proof = this._proofManager.proof;
+        }
       }
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)

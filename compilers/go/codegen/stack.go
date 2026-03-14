@@ -1749,7 +1749,7 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 			if p.Name == "_genesisOutpoint" {
 				sz = 36
 			} else if p.Name == "_proof" {
-				sz = 192
+				sz = 256
 			} else {
 				panic("deserialize_state: ByteString property '" + p.Name + "' has unknown serialized size")
 			}

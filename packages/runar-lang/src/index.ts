@@ -325,7 +325,7 @@ export abstract class StatefulSmartContract extends SmartContract {
  *
  * The compiler auto-injects two internal state fields:
  * - `_genesisOutpoint` — immutable identity of the token lineage (36 bytes)
- * - `_proof` — ZKP proof placeholder (192 bytes, stub for future SNARK verifier)
+ * - `_proof` — ZKP proof placeholder (256 bytes, stub for future SNARK verifier)
  *
  * Developers write code identical to StatefulSmartContract — all inductive
  * machinery is compiler-injected:

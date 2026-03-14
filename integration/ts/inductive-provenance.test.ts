@@ -25,7 +25,7 @@ import { createProvider } from './helpers/node.js';
 // The ABI requires 5 constructor args: 3 user + 2 internal fields.
 // ---------------------------------------------------------------------------
 const ZERO_SENTINEL = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 
 /** Helper: create an InductiveToken RunarContract with proper constructor args. */
 function createInductiveToken(

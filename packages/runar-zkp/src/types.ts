@@ -90,8 +90,8 @@ export interface SerializedProof {
   readonly c: Uint8Array;
 }
 
-/** Total proof size: 64 + 128 + 64 = 256 bytes when serialized, but we use 192 for the _proof field. */
-export const PROOF_BYTE_SIZE = 192; // compressed representation
+/** Total proof size: A(64) + B(128) + C(64) = 256 bytes, stored as 8 × 32-byte LE field elements. */
+export const PROOF_BYTE_SIZE = 256;
 
 // ---------------------------------------------------------------------------
 // Script codegen output

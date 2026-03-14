@@ -1546,7 +1546,7 @@ class _LoweringContext:
                 if p.name == "_genesisOutpoint":
                     sz = 36
                 elif p.name == "_proof":
-                    sz = 192
+                    sz = 256
                 else:
                     raise ValueError(f"deserialize_state: ByteString property '{p.name}' has unknown serialized size")
             else:

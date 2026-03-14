@@ -14,7 +14,7 @@ import { Transaction, LockingScript, UnlockingScript, Spend, Hash } from '@bsv/s
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const ZERO_SENTINEL = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 const PRIV_KEY = '0000000000000000000000000000000000000000000000000000000000000001';
 
 function compileContract(sourcePath: string): RunarArtifact {

@@ -14,27 +14,12 @@
  * 2. Multi-Miller loop (4 pairings computed simultaneously)
  * 3. Final exponentiation
  * 4. Check result == 1 in Fp12
- *
- * ## BSV-optimized size estimate
- *
- * With native OP_MUL/OP_MOD on arbitrary bigints, altstack P caching,
- * sparse Fp12 multiplication, and multi-Miller loop:
- *
- * | Component          | Size (KB) |
- * |--------------------|-----------|
- * | IC computation     | ~15-50    |
- * | Miller loop (4x)   | ~300-500  |
- * | Final exponentiation | ~50-80  |
- * | VK + setup         | ~1        |
- * | **Total**          | **~400-600** |
- *
- * This is comparable to existing BSV scripts (SLH-DSA verification is ~200 KB,
- * SHA-256 compression is ~23 KB × 3 = ~70 KB).
  */
 
 import type { StackOp } from 'runar-ir-schema';
-import type { VerificationKey, VerifierScript } from '../types.js';
+import type { VerificationKey, Groth16Proof, VerifierScript } from '../types.js';
 import { estimateOptimizedVerifierSize } from '../bn254/field-script.js';
+import { generateGroth16VerifierForKnownProof, generateRuntimeGroth16Verifier } from '../bn254/pairing-script.js';
 
 /**
  * Estimate the script size for a full Groth16 verifier.
@@ -55,10 +40,55 @@ export function estimateVerifierSize(vk: VerificationKey): {
 }
 
 /**
+ * Generate a Groth16 verifier script for a known proof and public inputs.
+ *
+ * All values (VK, proof, inputs) are baked in as constants. This produces
+ * a self-contained script that verifies the specific proof.
+ *
+ * Returns StackOp[] that, when executed, leave OP_TRUE on the stack
+ * if the proof is valid, or cause the script to fail otherwise.
+ */
+export function generateVerifier(
+  vk: VerificationKey,
+  proof: Groth16Proof,
+  publicInputs: bigint[],
+): VerifierScript {
+  const { ops, sizeBytes } = generateGroth16VerifierForKnownProof(vk, proof, publicInputs);
+  return {
+    ops,
+    scriptSizeBytes: sizeBytes,
+    opcodeCount: ops.length,
+  };
+}
+
+/**
+ * Generate a runtime Groth16 verifier script.
+ *
+ * The VK is embedded as constants. Proof points A (G1), B (G2), C (G1)
+ * are runtime values pushed in the unlock script.
+ *
+ * Stack input (unlock script, bottom to top):
+ *   [B.x.c0, B.x.c1, B.y.c0, B.y.c1, A.x, A.y, C.x, C.y, input_0, ..., input_{n-1}]
+ *
+ * Returns StackOp[] that leave 1 on the stack if the proof is valid, 0 otherwise.
+ */
+export function generateRuntimeVerifier(
+  vk: VerificationKey,
+  numPublicInputs: number,
+): VerifierScript {
+  const { ops, sizeBytes } = generateRuntimeGroth16Verifier(vk, numPublicInputs);
+  return {
+    ops,
+    scriptSizeBytes: sizeBytes,
+    opcodeCount: ops.length,
+  };
+}
+
+/**
  * Generate a STUB Groth16 verifier script.
  *
  * This version drops all proof/input data and pushes OP_TRUE.
- * Will be replaced with real Groth16 verifier codegen.
+ * Used for testing when the real verifier is not needed.
  */
 export function generateVerifierStub(
   _vk: VerificationKey,

@@ -9,7 +9,7 @@ import { createProvider } from './helpers/node.js';
 import { Transaction as BsvTransaction, Interpreter, Script as BsvScript } from '@aspect-run/bsv';
 
 const ZERO_SENTINEL = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 
 async function main() {
   const artifact = compileContract('examples/ts/inductive-token/InductiveToken.runar.ts');

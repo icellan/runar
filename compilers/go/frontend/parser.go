@@ -242,7 +242,7 @@ func (p *parseContext) tryParseContractClass(node *sitter.Node) *ContractNode {
 // injectInductiveInternalFields adds the internal tracking fields
 // (_genesisOutpoint, _proof) to an InductiveSmartContract.
 // _genesisOutpoint (36 bytes) tracks the chain lineage.
-// _proof (192 bytes) holds the ZKP proof data.
+// _proof (256 bytes) holds the ZKP proof data.
 // They are appended to properties, constructor params,
 // super() args, and constructor body assignments.
 func injectInductiveInternalFields(contract *ContractNode) {

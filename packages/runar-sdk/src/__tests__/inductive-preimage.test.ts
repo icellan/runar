@@ -22,7 +22,7 @@ import {
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..', '..', '..');
 const ZERO_SENTINEL = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 
 function compileContract(sourcePath: string): RunarArtifact {
   const absPath = resolve(PROJECT_ROOT, sourcePath);

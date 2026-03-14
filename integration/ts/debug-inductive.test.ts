@@ -6,7 +6,7 @@ import { createProvider } from './helpers/node.js';
 import { Transaction, Spend, LockingScript, UnlockingScript } from '@bsv/sdk';
 
 const ZERO_SENTINEL = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 
 describe('Debug InductiveSmartContract', () => {
   it('traces first spend through BSV SDK Spend to find failures', async () => {

@@ -117,7 +117,6 @@ type PreparedCall struct {
 	changeAmount      int64
 	methodNeedsNewAmount bool
 	newAmount            int64
-	inductiveParamsHex   string
 	preimageIndex        int
 	contractUtxo      UTXO
 	newLockingScript  string

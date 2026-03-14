@@ -14,7 +14,7 @@ Rúnar provides three base classes, each building on the last:
 | **Preimage** | None | Auto-injected `checkPreimage` at entry | Same |
 | **State continuation** | None | Auto-verified at exit (hashOutputs) | Same |
 | **Genesis tracking** | None | None | Auto-injected genesis outpoint detection |
-| **Additional state** | None | None | `_genesisOutpoint` (36 bytes), `_proof` (192 bytes) |
+| **Additional state** | None | None | `_genesisOutpoint` (36 bytes), `_proof` (256 bytes) |
 | **Additional unlock data** | None | `txPreimage` | Same as Stateful |
 | **Use case** | One-shot scripts (P2PKH, escrow) | Counters, vaults, any persistent state | Tokens, assets — anything requiring lineage identity |
 
@@ -73,7 +73,7 @@ Two mutable `ByteString` properties are appended to the contract's property list
 | Field | Type | Size | Purpose |
 |-------|------|------|---------|
 | `_genesisOutpoint` | ByteString | 36 bytes | Immutable identity of the token lineage (txid + vout of the first UTXO) |
-| `_proof` | ByteString | 192 bytes | ZKP proof placeholder (stub — future SNARK verifier) |
+| `_proof` | ByteString | 256 bytes | ZKP proof placeholder (stub — future SNARK verifier) |
 
 These fields are invisible to the developer. They participate in state serialization automatically, appearing as the last entries in the OP_RETURN state data.
 
@@ -129,7 +129,7 @@ const contract = new RunarContract(artifact, [
   1000n,
   tokenIdHex,
   '00'.repeat(36),    // _genesisOutpoint (zero sentinel)
-  '00'.repeat(192),   // _proof (zero placeholder)
+  '00'.repeat(256),   // _proof (zero placeholder)
 ]);
 
 await contract.deploy(provider, signer, { satoshis: 500_000 });
@@ -153,7 +153,7 @@ The SDK automatically updates `_genesisOutpoint` in the state when building cont
 
 ## Future: ZKP-Based Chain Verification
 
-The `_proof` field is a 192-byte placeholder for a future recursive SNARK proof. When implemented, the SNARK verifier will be injected into the locking script, replacing the genesis-only detection with full backward chain verification:
+The `_proof` field is a 256-byte placeholder for a future recursive SNARK proof. When implemented, the SNARK verifier will be injected into the locking script, replacing the genesis-only detection with full backward chain verification:
 
 - The proof attests to the validity of the entire chain from genesis to the current transaction
 - Supports both linear chains and DAG topologies (enabling token merges)

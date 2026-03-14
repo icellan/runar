@@ -44,7 +44,7 @@ func DeserializeState(fields []StateField, scriptHex string) map[string]interfac
 	offset := 0
 
 	for _, field := range sorted {
-		value, bytesRead := decodeStateValue(scriptHex, offset, field.Type)
+		value, bytesRead := decodeStateValue(scriptHex, offset, field.Type, field.Name)
 		result[field.Name] = value
 		offset += bytesRead
 	}
@@ -151,12 +151,15 @@ func encodeStateValue(value interface{}, fieldType string) string {
 			return "01"
 		}
 		return "00"
-	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point":
+	case "PubKey", "Addr", "Ripemd160", "Sha256", "Point", "ByteString":
 		// Fixed-size byte types: raw hex, no framing needed.
+		// ByteString state fields (e.g., inductive internal _genesisOutpoint, _proof)
+		// must use raw bytes to match the compiler's OP_CAT-based continuation output
+		// serialization.
 		return fmt.Sprintf("%v", value)
 	default:
-		// Variable-length types (bytes, ByteString, etc.): use push-data
-		// encoding so the decoder can determine the length.
+		// Variable-length types: use push-data encoding so the decoder can
+		// determine the length.
 		hex := fmt.Sprintf("%v", value)
 		if len(hex) == 0 {
 			return "00" // OP_0
@@ -249,7 +252,12 @@ func EncodePushData(dataHex string) string {
 // Decoding helpers
 // ---------------------------------------------------------------------------
 
-func decodeStateValue(hex string, offset int, fieldType string) (interface{}, int) {
+func decodeStateValue(hex string, offset int, fieldType string, fieldNames ...string) (interface{}, int) {
+	fieldName := ""
+	if len(fieldNames) > 0 {
+		fieldName = fieldNames[0]
+	}
+	_ = fieldName
 	switch fieldType {
 	case "bool":
 		// 1 raw byte: 0x00 = false, 0x01 = true
@@ -273,6 +281,17 @@ func decodeStateValue(hex string, offset int, fieldType string) (interface{}, in
 		return hex[offset : offset+64], 64 // 32 bytes
 	case "Point":
 		return hex[offset : offset+128], 128 // 64 bytes
+	case "ByteString":
+		// Inductive internal fields: raw hex without push-data encoding.
+		// Size determined by field name.
+		if fieldName == "_genesisOutpoint" {
+			return hex[offset : offset+72], 72 // 36 bytes
+		} else if fieldName == "_proof" {
+			return hex[offset : offset+512], 512 // 256 bytes
+		}
+		// Unknown ByteString — try push-data decoding
+		data, bytesRead := DecodePushData(hex, offset)
+		return data, bytesRead
 	default:
 		// For unknown types, fall back to push-data decoding
 		data, bytesRead := DecodePushData(hex, offset)

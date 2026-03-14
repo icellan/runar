@@ -257,15 +257,18 @@ func (c *RunarContract) PrepareCall(
 	methodNeedsChange := false
 	methodNeedsNewAmount := false
 	isInductive := false
+	for _, sf := range c.Artifact.StateFields {
+		if sf.Name == "_genesisOutpoint" {
+			isInductive = true
+			break
+		}
+	}
 	for _, p := range method.Params {
 		if p.Name == "_changePKH" {
 			methodNeedsChange = true
 		}
 		if p.Name == "_newAmount" {
 			methodNeedsNewAmount = true
-		}
-		if p.Name == "_parentHashState" {
-			isInductive = true
 		}
 	}
 	var userParams []ABIParam
@@ -274,11 +277,7 @@ func (c *RunarContract) PrepareCall(
 			if p.Type == "SigHashPreimage" ||
 				p.Name == "_changePKH" ||
 				p.Name == "_changeAmount" ||
-				p.Name == "_newAmount" ||
-				p.Name == "_parentHashState" ||
-				p.Name == "_parentTailBlock1" ||
-				p.Name == "_parentTailBlock2" ||
-				p.Name == "_parentRawTailLen" {
+				p.Name == "_newAmount" {
 				continue
 			}
 			userParams = append(userParams, p)
@@ -314,26 +313,29 @@ func (c *RunarContract) PrepareCall(
 		changeAddress = address
 	}
 
-	// For InductiveSmartContract methods, auto-compute the 4 partial SHA-256
-	// params from the parent transaction (the tx that created the current UTXO).
-	// These are pushed in the unlock script between user args and txPreimage.
-	inductiveParamsHex := ""
-	if isInductive {
-		parentTx, inductiveErr := provider.GetTransaction(c.currentUtxo.Txid)
-		if inductiveErr != nil {
-			return nil, fmt.Errorf("RunarContract.PrepareCall: fetching parent tx for InductiveSmartContract: %w", inductiveErr)
+	// For InductiveSmartContract, update _genesisOutpoint state before building
+	// continuation outputs. On genesis (sentinel = 36 zero bytes), set to current
+	// outpoint. On non-genesis, preserve existing value.
+	if isInductive && c.currentUtxo != nil {
+		zeroSentinel := strings.Repeat("00", 36)
+		// Current outpoint = txidLE + voutLE(4 bytes)
+		txidLE := reverseHex(c.currentUtxo.Txid)
+		voutLE := fmt.Sprintf("%02x%02x%02x%02x",
+			c.currentUtxo.OutputIndex&0xff,
+			(c.currentUtxo.OutputIndex>>8)&0xff,
+			(c.currentUtxo.OutputIndex>>16)&0xff,
+			(c.currentUtxo.OutputIndex>>24)&0xff,
+		)
+		currentOutpoint := txidLE + voutLE
+		oldGenesis, _ := c.state["_genesisOutpoint"].(string)
+		if oldGenesis == "" {
+			oldGenesis = zeroSentinel
 		}
-		if parentTx.Raw == "" {
-			return nil, fmt.Errorf("RunarContract.PrepareCall: provider returned transaction without raw hex, needed for inductive parent tx verification")
+		isGenesis := oldGenesis == zeroSentinel
+		if isGenesis {
+			c.state["_genesisOutpoint"] = currentOutpoint
 		}
-		partial, partialErr := ComputePartialSha256ForInductive(parentTx.Raw)
-		if partialErr != nil {
-			return nil, fmt.Errorf("RunarContract.PrepareCall: computing partial SHA-256 for inductive: %w", partialErr)
-		}
-		inductiveParamsHex = EncodePushData(partial.ParentHashState) +
-			EncodePushData(partial.ParentTailBlock1) +
-			EncodePushData(partial.ParentTailBlock2) +
-			encodeScriptNumber(int64(partial.ParentRawTailLen))
+		// Non-genesis: _genesisOutpoint stays the same
 	}
 
 	// Detect auto-compute params (user passed nil)
@@ -418,7 +420,7 @@ func (c *RunarContract) PrepareCall(
 			methodName, resolvedArgs, signer, options,
 			isStateful, needsOpPushTx, methodNeedsChange,
 			sigIndices, prevoutsIndices, preimageIndex,
-			methodSelectorHex, changePKHHex, inductiveParamsHex, contractUtxo,
+			methodSelectorHex, changePKHHex, contractUtxo,
 		)
 	}
 
@@ -445,11 +447,29 @@ func (c *RunarContract) PrepareCall(
 			codeScript = c.buildCodeScript()
 		}
 		for _, out := range options.Outputs {
-			stateHex := SerializeState(c.Artifact.StateFields, out.State)
+			// Merge auto-managed internal fields with user-provided state
+			mergedState := make(map[string]interface{})
+			for k, v := range c.state {
+				mergedState[k] = v
+			}
+			for k, v := range out.State {
+				mergedState[k] = v
+			}
+			stateHex := SerializeState(c.Artifact.StateFields, mergedState)
 			contractOutputs = append(contractOutputs, ContractOutput{
 				Script:   codeScript + "6a" + stateHex,
 				Satoshis: out.Satoshis,
 			})
+		}
+		// Track state from continuation output
+		contIdx := len(options.Outputs) - 1
+		if options.ContinuationOutputIndex >= 0 {
+			contIdx = options.ContinuationOutputIndex
+		}
+		if contIdx < len(options.Outputs) {
+			for k, v := range options.Outputs[contIdx].State {
+				c.state[k] = v
+			}
 		}
 	} else if isStateful {
 		newSatoshis = c.currentUtxo.Satoshis
@@ -643,7 +663,6 @@ func (c *RunarContract) PrepareCall(
 				argsHex +
 				changeHex +
 				newAmountHex +
-				inductiveParamsHex +
 				EncodePushData(preimageHexStr) +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
@@ -796,7 +815,6 @@ func (c *RunarContract) PrepareCall(
 		changeAmount:      changeAmount,
 		methodNeedsNewAmount: methodNeedsNewAmount,
 		newAmount:            newSatoshis,
-		inductiveParamsHex:   inductiveParamsHex,
 		preimageIndex:        preimageIndex,
 		contractUtxo:         contractUtxo,
 		newLockingScript:     newLockingScript,
@@ -849,7 +867,6 @@ func (c *RunarContract) FinalizeCall(
 			argsHex +
 			changeHex +
 			newAmountHex +
-			prepared.inductiveParamsHex +
 			EncodePushData(prepared.Preimage) +
 			prepared.methodSelectorHex
 	} else if prepared.needsOpPushTx {
@@ -1218,7 +1235,6 @@ func (c *RunarContract) prepareCallTerminal(
 	preimageIndex int,
 	methodSelectorHex string,
 	changePKHHex string,
-	inductiveParamsHex string,
 	contractUtxo UTXO,
 ) (*PreparedCall, error) {
 	termOutputs := options.TerminalOutputs
@@ -1278,7 +1294,6 @@ func (c *RunarContract) prepareCallTerminal(
 			unlockStr := c.buildStatefulPrefix(opSigHexStr, false) +
 				argsHex +
 				changeHex +
-				inductiveParamsHex +
 				EncodePushData(preimageHexStr) +
 				methodSelectorHex
 			return unlockStr, opSigHexStr, preimageHexStr, nil
@@ -1361,7 +1376,6 @@ func (c *RunarContract) prepareCallTerminal(
 		changeAmount:      0,
 		methodNeedsNewAmount: false,
 		newAmount:            0,
-		inductiveParamsHex:   inductiveParamsHex,
 		preimageIndex:        preimageIndex,
 		contractUtxo:         contractUtxo,
 		newLockingScript:     "",

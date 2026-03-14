@@ -15,7 +15,7 @@ const SATS = 1000n;
 
 // Zero outpoint sentinel used for genesis detection
 const ZERO_OUTPOINT = '00'.repeat(36);
-const ZERO_PROOF = '00'.repeat(192);
+const ZERO_PROOF = '00'.repeat(256);
 
 describe('InductiveToken', () => {
   function makeToken(owner = ALICE, balance = 100n) {

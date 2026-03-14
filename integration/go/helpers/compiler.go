@@ -198,7 +198,7 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 
 	// Build state fields for stateful contracts
 	var stateFields []runar.StateField
-	if contract.ParentClass == "StatefulSmartContract" {
+	if contract.ParentClass == "StatefulSmartContract" || contract.ParentClass == "InductiveSmartContract" {
 		for i, p := range contract.Properties {
 			if p.Readonly {
 				continue

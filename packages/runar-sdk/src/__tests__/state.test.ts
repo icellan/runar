@@ -202,12 +202,12 @@ describe('ByteString state serialization', () => {
   });
 
   it('does NOT add push-data length prefix to ByteString', () => {
-    const proof = 'cc'.repeat(192); // 192 bytes = 384 hex chars
+    const proof = 'cc'.repeat(256); // 256 bytes = 512 hex chars
     const fields = makeFields({ name: '_proof', type: 'ByteString', index: 0 });
     const hex = serializeState(fields, { _proof: proof });
-    // Raw encoding should be exactly 384 hex chars
+    // Raw encoding should be exactly 512 hex chars
     expect(hex).toBe(proof);
-    expect(hex.length).toBe(384);
+    expect(hex.length).toBe(512);
   });
 
   it('roundtrips ByteString through serialize/deserialize', () => {
@@ -222,7 +222,7 @@ describe('ByteString state serialization', () => {
     const owner = '02' + 'aa'.repeat(32); // 33 bytes
     const balance = 100n;
     const genesisOutpoint = 'dd'.repeat(36);  // 36 bytes
-    const proof = 'ee'.repeat(192);            // 192 bytes
+    const proof = 'ee'.repeat(256);            // 256 bytes
 
     const fields = makeFields(
       { name: 'owner', type: 'PubKey', index: 0 },
@@ -239,8 +239,8 @@ describe('ByteString state serialization', () => {
     };
 
     const hex = serializeState(fields, values);
-    // Total: 33 (PubKey) + 8 (bigint) + 36 (_genesisOutpoint) + 192 (_proof) = 269 bytes = 538 hex chars
-    expect(hex.length).toBe(538);
+    // Total: 33 (PubKey) + 8 (bigint) + 36 (_genesisOutpoint) + 256 (_proof) = 333 bytes = 666 hex chars
+    expect(hex.length).toBe(666);
 
     const result = deserializeState(fields, hex);
     expect(result.owner).toBe(owner);
