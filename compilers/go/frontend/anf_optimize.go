@@ -371,11 +371,14 @@ func isGRef(name string, lookup map[string]*ir.ANFValue) bool {
 	return *v.ConstString == gHex
 }
 
-// makeAlias rewrites a binding to be a load_param referencing another binding via @ref:.
+// makeAlias rewrites a binding to be a load_const referencing another binding via @ref:.
 func makeAlias(b *ir.ANFBinding, target string) {
+	refStr := "@ref:" + target
+	raw, _ := json.Marshal(refStr)
 	b.Value = ir.ANFValue{
-		Kind: "load_param",
-		Name: "@ref:" + target,
+		Kind:        "load_const",
+		RawValue:    raw,
+		ConstString: &refStr,
 	}
 }
 

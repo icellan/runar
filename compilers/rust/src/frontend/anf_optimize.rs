@@ -141,8 +141,8 @@ fn make_load_const_int(n: i128) -> ANFValue {
 }
 
 fn make_alias(target: &str) -> ANFValue {
-    ANFValue::LoadParam {
-        name: format!("@ref:{}", target),
+    ANFValue::LoadConst {
+        value: serde_json::Value::String(format!("@ref:{}", target)),
     }
 }
 
@@ -712,10 +712,11 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
                 assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst, got {other:?}"),
         }
     }
 
@@ -737,10 +738,11 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
                 assert_eq!(name, "@ref:t1", "expected @ref:t1, got {name}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst, got {other:?}"),
         }
     }
 
@@ -762,10 +764,11 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
                 assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst, got {other:?}"),
         }
     }
 
@@ -872,10 +875,11 @@ mod tests {
 
         let t2 = find_binding(body, "t2").expect("expected binding t2");
         match &t2.value {
-            ANFValue::LoadParam { name } => {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
                 assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
             }
-            other => panic!("expected LoadParam, got {other:?}"),
+            other => panic!("expected LoadConst, got {other:?}"),
         }
     }
 

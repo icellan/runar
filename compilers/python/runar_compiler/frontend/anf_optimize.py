@@ -260,8 +260,8 @@ def _canonical(name: str, vm: dict[str, ANFValue]) -> str:
 # ---------------------------------------------------------------------------
 
 def _make_ref(name: str) -> ANFValue:
-    """Create a load_param that aliases another binding via @ref:."""
-    return ANFValue(kind="load_param", name=f"@ref:{name}")
+    """Create a load_const that aliases another binding via @ref:."""
+    return ANFValue(kind="load_const", const_string=f"@ref:{name}", raw_value=f"@ref:{name}")
 
 
 def _make_const_hex(hex_str: str) -> ANFValue:

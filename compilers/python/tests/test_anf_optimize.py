@@ -146,8 +146,8 @@ class TestRule1EcAddInfinity:
         # t2 should become a @ref: to t0
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +168,8 @@ class TestRule2EcAddInfinityLeft:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t1"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t1"
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +190,8 @@ class TestRule3EcMulByOne:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +276,8 @@ class TestRule7DoubleNegate:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
