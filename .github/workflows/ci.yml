@@ -23,6 +23,9 @@ jobs:
         with:
           go-version: '1.24'
           cache-dependency-path: compilers/go/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust compiler (for cross-compiler tests)
+        run: cd compilers/rust && cargo build --release
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test
