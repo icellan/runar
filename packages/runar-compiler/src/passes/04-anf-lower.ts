@@ -246,6 +246,8 @@ class LoweringContext {
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
+  /** Debug: source location to attach to emitted ANF bindings. */
+  currentSourceLoc: { file: string; line: number; column: number } | undefined;
 
   constructor(contract: ContractNode) {
     this.contract = contract;
@@ -259,13 +261,17 @@ class LoweringContext {
   /** Emit a binding and return the bound name. */
   emit(value: ANFValue): string {
     const name = this.freshTemp();
-    this.bindings.push({ name, value });
+    const binding: ANFBinding = { name, value };
+    if (this.currentSourceLoc) binding.sourceLoc = this.currentSourceLoc;
+    this.bindings.push(binding);
     return name;
   }
 
   /** Emit a binding with a specific name (for named variables). */
   emitNamed(name: string, value: ANFValue): void {
-    this.bindings.push({ name, value });
+    const binding: ANFBinding = { name, value };
+    if (this.currentSourceLoc) binding.sourceLoc = this.currentSourceLoc;
+    this.bindings.push(binding);
   }
 
   /** Record a parameter name so we know to use load_param for it. */
@@ -408,6 +414,9 @@ function branchEndsWithReturn(stmts: Statement[]): boolean {
 }
 
 function lowerStatement(stmt: Statement, ctx: LoweringContext): void {
+  // Propagate source location to emitted ANF bindings
+  ctx.currentSourceLoc = stmt.sourceLocation;
+
   switch (stmt.kind) {
     case 'variable_decl':
       lowerVariableDecl(stmt, ctx);
@@ -433,6 +442,8 @@ function lowerStatement(stmt: Statement, ctx: LoweringContext): void {
       lowerReturnStatement(stmt, ctx);
       break;
   }
+
+  ctx.currentSourceLoc = undefined;
 }
 
 function lowerVariableDecl(

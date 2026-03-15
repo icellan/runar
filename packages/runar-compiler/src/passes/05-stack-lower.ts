@@ -319,6 +319,8 @@ class LoweringContext {
   /** True when executing inside an if-branch. update_prop skips old-value
    *  removal so that the same-property detection in lowerIf can handle it. */
   private _insideBranch = false;
+  /** Debug: source location to attach to next emitted StackOps. */
+  private currentSourceLoc: { file: string; line: number; column: number } | undefined;
 
   constructor(
     params: string[],
@@ -358,6 +360,9 @@ class LoweringContext {
   }
 
   private emitOp(stackOp: StackOp): void {
+    if (this.currentSourceLoc && !stackOp.sourceLoc) {
+      stackOp.sourceLoc = this.currentSourceLoc;
+    }
     this.ops.push(stackOp);
     this.trackDepth();
   }
@@ -544,6 +549,8 @@ class LoweringContext {
 
     for (let i = 0; i < bindings.length; i++) {
       const binding = bindings[i]!;
+      // Propagate source location from ANF binding to StackOps
+      this.currentSourceLoc = binding.sourceLoc;
       if (binding.value.kind === 'assert' && i === lastAssertIdx) {
         // Terminal assert: leave value on stack instead of OP_VERIFY
         this.lowerAssert(binding.value.value, i, lastUses, true);
@@ -553,6 +560,7 @@ class LoweringContext {
       } else {
         this.lowerBinding(binding, i, lastUses);
       }
+      this.currentSourceLoc = undefined;
     }
 
   }

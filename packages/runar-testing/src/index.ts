@@ -15,7 +15,7 @@ export {
   bytesToHex,
   disassemble,
 } from './vm/index.js';
-export type { VMResult, VMOptions, VMFlags } from './vm/index.js';
+export type { VMResult, VMOptions, VMFlags, StepResult } from './vm/index.js';
 
 // Interpreter
 export { RunarInterpreter } from './interpreter/index.js';
@@ -45,6 +45,17 @@ export type { TestCallResult, OutputSnapshot, MockPreimage } from './test-contra
 // Script execution (BSV SDK)
 export { ScriptExecutionContract } from './script-execution.js';
 export type { ScriptExecResult } from './script-execution.js';
+
+// Source map resolver (for debugger)
+export { SourceMapResolver } from './source-map.js';
+export type { SourceLocation } from './source-map.js';
+
+// Test keys (deterministic, pre-generated with @bsv/sdk)
+export {
+  TEST_KEYS, ALICE, BOB, CHARLIE, DAVE, EVE,
+  FRANK, GRACE, HEIDI, IVAN, JUDY,
+} from './test-keys.js';
+export type { TestKey } from './test-keys.js';
 
 // Post-quantum crypto primitives
 export { wotsKeygen, wotsSign, wotsVerify, WOTS_PARAMS } from './crypto/wots.js';

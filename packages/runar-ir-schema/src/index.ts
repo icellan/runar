@@ -70,6 +70,7 @@ export type {
 export type {
   StackProgram,
   StackMethod,
+  StackSourceLoc,
   PushOp,
   DupOp,
   SwapOp,

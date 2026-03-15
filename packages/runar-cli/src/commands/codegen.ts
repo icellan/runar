@@ -10,6 +10,33 @@ interface CodegenOptions {
   lang: string;
 }
 
+/**
+ * Simple glob expansion for artifact file patterns.
+ * Uses a basic directory scan + pattern match to avoid dependency on
+ * fs.globSync (which vitest's SSR transform doesn't handle correctly).
+ */
+function expandGlob(pattern: string): string[] {
+  const dir = path.dirname(pattern);
+  const base = path.basename(pattern);
+
+  // Convert glob pattern to regex: * → [^/]*, ? → [^/]
+  const regexStr = '^' + base
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\?/g, '[^/]') + '$';
+  const regex = new RegExp(regexStr);
+
+  try {
+    const resolvedDir = path.resolve(dir);
+    const entries = fs.readdirSync(resolvedDir);
+    return entries
+      .filter((entry) => regex.test(entry))
+      .map((entry) => path.join(resolvedDir, entry));
+  } catch {
+    return [];
+  }
+}
+
 export async function codegenCommand(patterns: string[], options: CodegenOptions): Promise<void> {
   if (options.lang !== 'ts') {
     console.error(`Error: language '${options.lang}' is not yet supported. Only 'ts' is available.`);
@@ -20,7 +47,8 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
   const files: string[] = [];
   for (const pattern of patterns) {
     if (pattern.includes('*') || pattern.includes('?')) {
-      const matches = fs.globSync(pattern);
+      // fs.globSync is Node 22+; use dynamic import to avoid SSR transform issues
+      const matches = expandGlob(pattern);
       files.push(...matches);
     } else {
       files.push(pattern);

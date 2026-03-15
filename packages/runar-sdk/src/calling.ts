@@ -128,6 +128,31 @@ export function buildCallTransaction(
 }
 
 // ---------------------------------------------------------------------------
+// Fee estimation
+// ---------------------------------------------------------------------------
+
+const P2PKH_INPUT_SIZE = 148;
+const P2PKH_OUTPUT_SIZE = 34;
+const TX_OVERHEAD = 10;
+
+/**
+ * Estimate the fee for a method call transaction.
+ */
+export function estimateCallFee(
+  lockingScriptByteLen: number,
+  unlockingScriptByteLen: number,
+  numFundingInputs: number,
+  feeRate: number = 1,
+): number {
+  const contractInputSize = 32 + 4 + varIntByteSize(unlockingScriptByteLen) + unlockingScriptByteLen + 4;
+  const fundingInputsSize = numFundingInputs * P2PKH_INPUT_SIZE;
+  const contractOutputSize = 8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen;
+  const changeOutputSize = P2PKH_OUTPUT_SIZE;
+  const txSize = TX_OVERHEAD + contractInputSize + fundingInputsSize + contractOutputSize + changeOutputSize;
+  return Math.ceil(txSize * feeRate);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

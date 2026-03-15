@@ -47,6 +47,8 @@ export interface ANFParam {
 export interface ANFBinding {
   name: string;
   value: ANFValue;
+  /** Debug-only: source location of the originating AST node. Not part of conformance. */
+  sourceLoc?: { file: string; line: number; column: number };
 }
 
 // ---------------------------------------------------------------------------

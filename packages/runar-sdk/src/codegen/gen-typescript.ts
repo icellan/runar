@@ -39,11 +39,11 @@ export function generateTypescript(artifact: RunarArtifact): string {
 
   // Imports
   emit("import { RunarContract, buildP2PKHScript } from 'runar-sdk';");
-  emit("import type { Provider, Signer, Transaction, DeployOptions, RunarArtifact, PreparedCall } from 'runar-sdk';");
+  emit("import type { Provider, Signer, TransactionData, DeployOptions, RunarArtifact, PreparedCall } from 'runar-sdk';");
   blank();
 
   // Result type alias
-  emit('type CallResult = { txid: string; tx: Transaction };');
+  emit('type CallResult = { txid: string; tx: TransactionData };');
   blank();
 
   // Terminal output type — accepts address (converted to P2PKH) or raw scriptHex
@@ -92,6 +92,30 @@ export function generateTypescript(artifact: RunarArtifact): string {
     emit('  constructor(artifact: RunarArtifact) {');
     emit('    this.inner = new RunarContract(artifact, []);');
   }
+  emit('  }');
+  blank();
+
+  // fromUtxo
+  emit('  static fromUtxo(');
+  emit('    artifact: RunarArtifact,');
+  emit('    utxo: { txid: string; outputIndex: number; satoshis: number; script: string },');
+  emit(`  ): ${name}Contract {`);
+  emit(`    const instance = Object.create(${name}Contract.prototype) as ${name}Contract;`);
+  emit('    (instance as any).inner = RunarContract.fromUtxo(artifact, utxo);');
+  emit('    return instance;');
+  emit('  }');
+  blank();
+
+  // fromTxId
+  emit('  static async fromTxId(');
+  emit('    artifact: RunarArtifact,');
+  emit('    txid: string,');
+  emit('    outputIndex: number,');
+  emit('    provider: Provider,');
+  emit(`  ): Promise<${name}Contract> {`);
+  emit(`    const instance = Object.create(${name}Contract.prototype) as ${name}Contract;`);
+  emit('    (instance as any).inner = await RunarContract.fromTxId(artifact, txid, outputIndex, provider);');
+  emit('    return instance;');
   emit('  }');
   blank();
 

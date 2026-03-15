@@ -8,7 +8,8 @@
  */
 
 import type { RunarArtifact, ABIMethod, ABIParam } from 'runar-ir-schema';
-import type { CompileResult, CompileOptions } from 'runar-compiler';
+import { compile } from 'runar-compiler';
+import type { CompileOptions } from 'runar-compiler';
 import { encodeScriptNumber, hexToBytes, bytesToHex } from './vm/utils.js';
 
 // BSV SDK imports (peer dependency)
@@ -53,11 +54,6 @@ export class ScriptExecutionContract {
     fileName?: string,
     compileOptions?: Partial<CompileOptions>,
   ): ScriptExecutionContract {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { compile } = require('runar-compiler') as {
-      compile: (source: string, options?: CompileOptions) => CompileResult;
-    };
-
     const result = compile(source, { fileName, constructorArgs, ...compileOptions });
     if (!result.success || !result.artifact || !result.scriptHex) {
       const errors = result.diagnostics
