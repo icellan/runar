@@ -5,6 +5,7 @@
     ".runar.move": "../../../examples/move/token-ft/FungibleTokenExample.runar.move",
     ".runar.go": "../../../examples/go/token-ft/FungibleTokenExample.runar.go",
     ".runar.rs": "../../../examples/rust/token-ft/FungibleTokenExample.runar.rs",
-    ".runar.py": "../../../examples/python/token-ft/FungibleTokenExample.runar.py"
+    ".runar.py": "../../../examples/python/token-ft/FungibleTokenExample.runar.py",
+    ".runar.rb": "../../../examples/ruby/token-ft/FungibleTokenExample.runar.rb"
   }
 }
