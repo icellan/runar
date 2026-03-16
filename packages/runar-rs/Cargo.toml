@@ -11,7 +11,7 @@ categories = ["cryptography"]
 
 [dependencies]
 runar-lang-macros = { version = "0.3.0", path = "../runar-rs-macros" }
-runar-compiler-rust = { version = "0.2.0", path = "../../compilers/rust" }
+runar-compiler-rust = { version = "0.3.0", path = "../../compilers/rust" }
 sha2 = "0.10"
 ripemd = "0.1"
 serde = { version = "1", features = ["derive"] }
