@@ -143,6 +143,11 @@ fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
             // artifacts loaded without a BigInt reviver.
             let n = match value {
                 SdkValue::Int(i) => *i,
+                SdkValue::BigInt(bi) => {
+                    // Convert BigInt to i64 for NUM2BIN encoding (state fields
+                    // are always 8 bytes, so values must fit in i64 range).
+                    bi.to_string().parse::<i64>().unwrap_or(0)
+                }
                 SdkValue::Bytes(s) => {
                     let num_str = if s.ends_with('n') { &s[..s.len() - 1] } else { s.as_str() };
                     num_str.parse::<i64>().unwrap_or(0)

@@ -17,7 +17,6 @@ import {
   PrivateKey,
   Hash,
   BigNumber,
-  TransactionSignature,
 } from '@bsv/sdk';
 
 // ---------------------------------------------------------------------------

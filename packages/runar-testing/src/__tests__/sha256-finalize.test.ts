@@ -148,22 +148,6 @@ function referenceSha256Compress(stateHex: string, blockHex: string): string {
   ].map(w => w.toString(16).padStart(8, '0')).join('');
 }
 
-/** Pad a message (hex) to SHA-256 blocks per FIPS 180-4 Section 5.1.1. */
-function sha256Pad(msgHex: string): string {
-  const msgBytes = msgHex.length / 2;
-  const bitLen = msgBytes * 8;
-
-  let padded = msgHex + '80';
-
-  while ((padded.length / 2) % 64 !== 56) {
-    padded += '00';
-  }
-
-  padded += bitLen.toString(16).padStart(16, '0');
-
-  return padded;
-}
-
 // ---- Tests ----
 
 describe('sha256Finalize — script execution', () => {

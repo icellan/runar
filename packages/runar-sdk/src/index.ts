@@ -50,7 +50,7 @@ export { TokenWallet } from './tokens.js';
 export { computeNewState } from './anf-interpreter.js';
 
 // Code generation
-export { generateTypescript } from './codegen/index.js';
+export { generateTypescript, generateGo, generateRust, generatePython } from './codegen/index.js';
 
 // Re-export artifact types from runar-ir-schema for convenience
 export type {

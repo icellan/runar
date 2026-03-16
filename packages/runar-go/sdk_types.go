@@ -150,9 +150,10 @@ type ABIConstructor struct {
 
 // ABIMethod describes a contract method.
 type ABIMethod struct {
-	Name     string     `json:"name"`
-	Params   []ABIParam `json:"params"`
-	IsPublic bool       `json:"isPublic"`
+	Name       string     `json:"name"`
+	Params     []ABIParam `json:"params"`
+	IsPublic   bool       `json:"isPublic"`
+	IsTerminal *bool      `json:"isTerminal,omitempty"`
 }
 
 // ABIParam describes a single parameter.

@@ -852,6 +852,7 @@ dependencies = [
  "bs58",
  "bsv-sdk",
  "k256",
+ "num-bigint",
  "ripemd",
  "runar-compiler-rust",
  "runar-lang-macros",
