@@ -108,14 +108,11 @@ class TestFungibleToken:
         contract.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
 
         # send: sig=None (auto), to=recipient, outputSatoshis=5000
-        # send uses addOutput, so we need Outputs (not new_state)
+        # State auto-computed from ANF IR (owner changes to recipient)
         call_txid, _ = contract.call(
             "send",
             [None, recipient["pubKeyHex"], 5000],
             provider, owner_wallet["signer"],
-            options=CallOptions(outputs=[
-                {"satoshis": 5000, "state": {"owner": recipient["pubKeyHex"], "balance": 1000, "mergeBalance": 0}},
-            ]),
         )
         assert call_txid
         assert len(call_txid) == 64

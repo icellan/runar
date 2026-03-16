@@ -7,23 +7,37 @@ import (
 
 func newPriceBet() *PriceBet {
 	return &PriceBet{
-		AlicePubKey:  runar.MockPubKey(),
-		BobPubKey:    runar.MockPubKey(),
-		OraclePubKey: runar.RabinPubKey("oracle_rabin_pk"),
+		AlicePubKey:  runar.Alice.PubKey,
+		BobPubKey:    runar.Bob.PubKey,
+		OraclePubKey: runar.RabinTestKeyN,
 		StrikePrice:  50000,
 	}
 }
 
+func signPrice(price int64) (runar.RabinSig, runar.ByteString) {
+	msg := runar.Num2Bin(price, 8)
+	return runar.RabinSignToBytes([]byte(msg), runar.RabinTestP(), runar.RabinTestQ())
+}
+
 func TestPriceBet_Settle_AliceWins(t *testing.T) {
-	newPriceBet().Settle(60000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig(), runar.MockSig())
+	rabinSig, pad := signPrice(60000)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newPriceBet().Settle(60000, rabinSig, pad, aliceSig, bobSig)
 }
 
 func TestPriceBet_Settle_BobWins(t *testing.T) {
-	newPriceBet().Settle(30000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig(), runar.MockSig())
+	rabinSig, pad := signPrice(30000)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newPriceBet().Settle(30000, rabinSig, pad, aliceSig, bobSig)
 }
 
 func TestPriceBet_Settle_BobWinsAtStrike(t *testing.T) {
-	newPriceBet().Settle(50000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig(), runar.MockSig())
+	rabinSig, pad := signPrice(50000)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newPriceBet().Settle(50000, rabinSig, pad, aliceSig, bobSig)
 }
 
 func TestPriceBet_Settle_ZeroPriceRejected(t *testing.T) {
@@ -32,11 +46,16 @@ func TestPriceBet_Settle_ZeroPriceRejected(t *testing.T) {
 			t.Fatal("expected assertion failure for zero price")
 		}
 	}()
-	newPriceBet().Settle(0, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig(), runar.MockSig())
+	rabinSig, pad := signPrice(0)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newPriceBet().Settle(0, rabinSig, pad, aliceSig, bobSig)
 }
 
 func TestPriceBet_Cancel(t *testing.T) {
-	newPriceBet().Cancel(runar.MockSig(), runar.MockSig())
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newPriceBet().Cancel(aliceSig, bobSig)
 }
 
 func TestPriceBet_Compile(t *testing.T) {

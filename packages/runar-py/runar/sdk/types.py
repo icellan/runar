@@ -97,6 +97,7 @@ class RunarArtifact:
     build_timestamp: str = ''
     code_separator_index: int | None = None
     code_separator_indices: list[int] | None = None
+    anf: dict | None = None
 
     @staticmethod
     def from_dict(d: dict) -> RunarArtifact:
@@ -137,6 +138,7 @@ class RunarArtifact:
             build_timestamp=d.get('buildTimestamp', ''),
             code_separator_index=d.get('codeSeparatorIndex'),
             code_separator_indices=d.get('codeSeparatorIndices'),
+            anf=d.get('anf'),
         )
 
 

@@ -156,6 +156,11 @@ pub enum ANFValue {
         #[serde(rename = "scriptBytes")]
         script_bytes: String,
     },
+
+    #[serde(rename = "array_literal")]
+    ArrayLiteral {
+        elements: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------

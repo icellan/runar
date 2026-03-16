@@ -47,6 +47,8 @@ export interface ANFParam {
 export interface ANFBinding {
   name: string;
   value: ANFValue;
+  /** Debug-only: source location of the originating AST node. Not part of conformance. */
+  sourceLoc?: { file: string; line: number; column: number };
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +150,11 @@ export interface AddRawOutput {
   scriptBytes: string;   // reference to a temp holding ByteString script
 }
 
+export interface ArrayLiteral {
+  kind: 'array_literal';
+  elements: string[];    // references to temp names
+}
+
 export type ANFValue =
   | LoadParam
   | LoadProp
@@ -164,4 +171,5 @@ export type ANFValue =
   | CheckPreimage
   | DeserializeState
   | AddOutput
-  | AddRawOutput;
+  | AddRawOutput
+  | ArrayLiteral;

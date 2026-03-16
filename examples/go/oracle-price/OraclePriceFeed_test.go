@@ -7,13 +7,17 @@ import (
 
 func newOracleFeed() *OraclePriceFeed {
 	return &OraclePriceFeed{
-		OraclePubKey: runar.RabinPubKey("oracle_rabin_pk"),
-		Receiver:     runar.MockPubKey(),
+		OraclePubKey: runar.RabinTestKeyN,
+		Receiver:     runar.Alice.PubKey,
 	}
 }
 
 func TestOraclePriceFeed_Settle(t *testing.T) {
-	newOracleFeed().Settle(60000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig())
+	price := int64(60000)
+	msg := runar.Num2Bin(price, 8)
+	rabinSig, padding := runar.RabinSignToBytes([]byte(msg), runar.RabinTestP(), runar.RabinTestQ())
+	receiverSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	newOracleFeed().Settle(price, rabinSig, padding, receiverSig)
 }
 
 func TestOraclePriceFeed_Settle_PriceTooLow_Fails(t *testing.T) {
@@ -22,7 +26,11 @@ func TestOraclePriceFeed_Settle_PriceTooLow_Fails(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newOracleFeed().Settle(50000, runar.RabinSig("sig"), runar.ByteString("pad"), runar.MockSig())
+	price := int64(50000)
+	msg := runar.Num2Bin(price, 8)
+	rabinSig, padding := runar.RabinSignToBytes([]byte(msg), runar.RabinTestP(), runar.RabinTestQ())
+	receiverSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	newOracleFeed().Settle(price, rabinSig, padding, receiverSig)
 }
 
 func TestOraclePriceFeed_Compile(t *testing.T) {

@@ -982,6 +982,20 @@
     {
       "body": [
         {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "pt"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
           "name": "result",
           "value": {
             "kind": "load_const",

@@ -43,6 +43,13 @@ export function lowerToANF(contract: ContractNode): ANFProgram {
   const properties = lowerProperties(contract);
   const methods = lowerMethods(contract);
 
+  // Post-pass: lift update_prop from if-else branches into flat conditionals.
+  // This prevents phantom stack entries in stack lowering for patterns like
+  // position dispatch (different properties updated in different branches).
+  for (const method of methods) {
+    method.body = liftBranchUpdateProps(method.body);
+  }
+
   return {
     contractName: contract.name,
     properties,
@@ -239,6 +246,8 @@ class LoweringContext {
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
+  /** Debug: source location to attach to emitted ANF bindings. */
+  currentSourceLoc: { file: string; line: number; column: number } | undefined;
 
   constructor(contract: ContractNode) {
     this.contract = contract;
@@ -252,13 +261,17 @@ class LoweringContext {
   /** Emit a binding and return the bound name. */
   emit(value: ANFValue): string {
     const name = this.freshTemp();
-    this.bindings.push({ name, value });
+    const binding: ANFBinding = { name, value };
+    if (this.currentSourceLoc) binding.sourceLoc = this.currentSourceLoc;
+    this.bindings.push(binding);
     return name;
   }
 
   /** Emit a binding with a specific name (for named variables). */
   emitNamed(name: string, value: ANFValue): void {
-    this.bindings.push({ name, value });
+    const binding: ANFBinding = { name, value };
+    if (this.currentSourceLoc) binding.sourceLoc = this.currentSourceLoc;
+    this.bindings.push(binding);
   }
 
   /** Record a parameter name so we know to use load_param for it. */
@@ -359,12 +372,51 @@ class LoweringContext {
 // ---------------------------------------------------------------------------
 
 function lowerStatements(stmts: Statement[], ctx: LoweringContext): void {
-  for (const stmt of stmts) {
+  for (let i = 0; i < stmts.length; i++) {
+    const stmt = stmts[i]!;
+
+    // Early-return nesting: when an if-statement's then-block ends with a
+    // return and there is no else-branch, the remaining statements after the
+    // if are unreachable from the then-branch.  Nest them into the else-branch
+    // so that only one value ends up on the stack (the return value from
+    // whichever branch executes).  Without this, both branches produce values
+    // and the stack becomes misaligned.
+    if (
+      stmt.kind === 'if_statement' &&
+      !stmt.else &&
+      i + 1 < stmts.length &&
+      branchEndsWithReturn(stmt.then)
+    ) {
+      const remaining = stmts.slice(i + 1);
+      const modifiedIf: typeof stmt = {
+        ...stmt,
+        else: remaining,
+      };
+      lowerStatement(modifiedIf, ctx);
+      return; // remaining stmts are now inside the else branch
+    }
+
     lowerStatement(stmt, ctx);
   }
 }
 
+/** Check whether a statement list always terminates with a return_statement. */
+function branchEndsWithReturn(stmts: Statement[]): boolean {
+  if (stmts.length === 0) return false;
+  const last = stmts[stmts.length - 1]!;
+  if (last.kind === 'return_statement') return true;
+  // Also handle if-else where both branches return:
+  // if (A) { return X; } else { return Y; }
+  if (last.kind === 'if_statement' && last.else) {
+    return branchEndsWithReturn(last.then) && branchEndsWithReturn(last.else);
+  }
+  return false;
+}
+
 function lowerStatement(stmt: Statement, ctx: LoweringContext): void {
+  // Propagate source location to emitted ANF bindings
+  ctx.currentSourceLoc = stmt.sourceLocation;
+
   switch (stmt.kind) {
     case 'variable_decl':
       lowerVariableDecl(stmt, ctx);
@@ -390,6 +442,8 @@ function lowerStatement(stmt: Statement, ctx: LoweringContext): void {
       lowerReturnStatement(stmt, ctx);
       break;
   }
+
+  ctx.currentSourceLoc = undefined;
 }
 
 function lowerVariableDecl(
@@ -560,7 +614,17 @@ function lowerReturnStatement(
   ctx: LoweringContext,
 ): void {
   if (stmt.value) {
-    lowerExprToRef(stmt.value, ctx);
+    const ref = lowerExprToRef(stmt.value, ctx);
+    // If the returned ref is not the name of the last emitted binding, emit
+    // an explicit load so the return value is the last (top-of-stack) binding.
+    // This matters when a local variable is returned after control flow (e.g.,
+    // `let count = 0n; if (...) { count += 1n; } return count;`).  Without
+    // this, the last binding is the if, not `count`, so inlineMethodCall in
+    // stack lowering can't find the return value.
+    const lastBinding = ctx.bindings[ctx.bindings.length - 1];
+    if (lastBinding && lastBinding.name !== ref) {
+      ctx.emit({ kind: 'load_const', value: `@ref:${ref}` });
+    }
   }
 }
 
@@ -617,6 +681,11 @@ function lowerExprToRef(expr: Expression, ctx: LoweringContext): string {
 
     case 'decrement_expr':
       return lowerDecrementExpr(expr, ctx);
+
+    case 'array_literal': {
+      const elementRefs = expr.elements.map(elem => lowerExprToRef(elem, ctx));
+      return ctx.emit({ kind: 'array_literal', elements: elementRefs });
+    }
   }
 }
 
@@ -911,6 +980,7 @@ const BYTE_RETURNING_FUNCTIONS = new Set([
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
   'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
   'extractVersion', 'extractLocktime', 'extractSigHashType',
+  'blake3Compress', 'blake3Hash',
 ]);
 
 /**
@@ -1062,4 +1132,347 @@ function exprHasAddOutput(expr: Expression): boolean {
     return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------
+// Post-ANF pass: lift update_prop from if-else branches
+// ---------------------------------------------------------------------------
+//
+// Transforms if-else chains where each branch ends with update_prop into
+// flat conditional assignments. This prevents phantom stack entries in
+// stack lowering.
+//
+// Before:
+//   if (pos === 0) { this.c0 = turn; }
+//   else if (pos === 1) { this.c1 = turn; }
+//   else { this.c4 = turn; }
+//
+// After:
+//   this.c0 = (pos === 0) ? turn : this.c0;
+//   this.c1 = (!cond0 && pos === 1) ? turn : this.c1;
+//   this.c4 = (!cond0 && !cond1) ? turn : this.c4;
+
+interface UpdateBranch {
+  /** Bindings that compute this branch's condition (hoisted from nested else). */
+  condSetupBindings: ANFBinding[];
+  /** Temp holding this branch's local condition (null for final else). */
+  condRef: string | null;
+  /** Property being updated. */
+  propName: string;
+  /** Bindings that compute the new value (everything before update_prop in the branch). */
+  valueBindings: ANFBinding[];
+  /** Temp holding the new value (from the update_prop). */
+  valueRef: string;
+}
+
+/**
+ * Recursively collect branches from a nested if-else chain where every
+ * branch ends with exactly one update_prop.
+ */
+function collectUpdateBranches(
+  ifCond: string,
+  thenBindings: ANFBinding[],
+  elseBindings: ANFBinding[],
+): UpdateBranch[] | null {
+  const thenUpdate = extractBranchUpdate(thenBindings);
+  if (!thenUpdate) return null;
+
+  const branches: UpdateBranch[] = [{
+    condSetupBindings: [],
+    condRef: ifCond,
+    ...thenUpdate,
+  }];
+
+  if (elseBindings.length === 0) return null;
+
+  // Check if else is another if (else-if chain)
+  const lastElse = elseBindings[elseBindings.length - 1]!;
+  if (lastElse.value.kind === 'if') {
+    const innerIf = lastElse.value;
+    const condSetup = elseBindings.slice(0, -1);
+    if (!allBindingsSideEffectFree(condSetup)) return null;
+
+    const innerBranches = collectUpdateBranches(
+      innerIf.cond, innerIf.then, innerIf.else,
+    );
+    if (!innerBranches) return null;
+
+    // Prepend condition setup to first inner branch
+    innerBranches[0]!.condSetupBindings = [
+      ...condSetup,
+      ...innerBranches[0]!.condSetupBindings,
+    ];
+    branches.push(...innerBranches);
+    return branches;
+  }
+
+  // Otherwise, else branch should end with update_prop (final else)
+  const elseUpdate = extractBranchUpdate(elseBindings);
+  if (elseUpdate) {
+    branches.push({
+      condSetupBindings: [],
+      condRef: null,
+      ...elseUpdate,
+    });
+    return branches;
+  }
+
+  // Handle unreachable else: assert(false) as the final else is dead code.
+  // We can still transform the preceding branches — each branch's condition
+  // fully guards its update, and the else path never executes.
+  if (isAssertFalseElse(elseBindings)) {
+    return branches;
+  }
+
+  return null;
+}
+
+function extractBranchUpdate(
+  bindings: ANFBinding[],
+): { propName: string; valueBindings: ANFBinding[]; valueRef: string } | null {
+  if (bindings.length === 0) return null;
+  const last = bindings[bindings.length - 1]!;
+  if (last.value.kind !== 'update_prop') return null;
+  const valueBindings = bindings.slice(0, -1);
+  if (!allBindingsSideEffectFree(valueBindings)) return null;
+  return {
+    propName: last.value.name,
+    valueRef: last.value.value,
+    valueBindings,
+  };
+}
+
+/**
+ * Check if an else branch is just `assert(false)` — unreachable dead code
+ * that acts as a safety net in position dispatch chains.
+ */
+function isAssertFalseElse(bindings: ANFBinding[]): boolean {
+  if (bindings.length === 0) return false;
+  const last = bindings[bindings.length - 1]!;
+  if (last.value.kind !== 'assert') return false;
+
+  // The assert's value should reference a binding that is load_const false
+  const assertRef = last.value.value;
+  const refBinding = bindings.find(b => b.name === assertRef);
+  if (refBinding && refBinding.value.kind === 'load_const' && refBinding.value.value === false) {
+    return true;
+  }
+
+  return false;
+}
+
+function allBindingsSideEffectFree(bindings: ANFBinding[]): boolean {
+  return bindings.every(b => {
+    const k = b.value.kind;
+    return k === 'load_prop' || k === 'load_param' || k === 'load_const' ||
+           k === 'bin_op' || k === 'unary_op';
+  });
+}
+
+/**
+ * Find the max temp index in a binding tree (e.g. t47 → 47).
+ */
+function maxTempIndex(bindings: ANFBinding[]): number {
+  let max = -1;
+  for (const b of bindings) {
+    const m = b.name.match(/^t(\d+)$/);
+    if (m) max = Math.max(max, parseInt(m[1]!));
+    if (b.value.kind === 'if') {
+      max = Math.max(max, maxTempIndex(b.value.then), maxTempIndex(b.value.else));
+    } else if (b.value.kind === 'loop') {
+      max = Math.max(max, maxTempIndex(b.value.body));
+    }
+  }
+  return max;
+}
+
+/**
+ * Remap temp references in an ANF value according to a name mapping.
+ */
+function remapValueRefs(value: ANFValue, map: Record<string, string>): ANFValue {
+  const r = (ref: string) => map[ref] || ref;
+  switch (value.kind) {
+    case 'load_param':
+    case 'load_prop':
+    case 'get_state_script':
+      return value;
+    case 'load_const': {
+      if (typeof value.value === 'string' && value.value.startsWith('@ref:')) {
+        const target = value.value.slice(5);
+        const remapped = map[target];
+        if (remapped) return { ...value, value: `@ref:${remapped}` };
+      }
+      return value;
+    }
+    case 'bin_op':
+      return { ...value, left: r(value.left), right: r(value.right) };
+    case 'unary_op':
+      return { ...value, operand: r(value.operand) };
+    case 'call':
+      return { ...value, args: value.args.map(r) };
+    case 'method_call':
+      return { ...value, object: r(value.object), args: value.args.map(r) };
+    case 'assert':
+      return { ...value, value: r(value.value) };
+    case 'update_prop':
+      return { ...value, value: r(value.value) };
+    case 'check_preimage':
+      return { ...value, preimage: r(value.preimage) };
+    case 'deserialize_state':
+      return { ...value, preimage: r(value.preimage) };
+    case 'add_output':
+      return { ...value, satoshis: r(value.satoshis), stateValues: value.stateValues.map(r), preimage: r(value.preimage) };
+    case 'add_raw_output':
+      return { ...value, satoshis: r(value.satoshis), scriptBytes: r(value.scriptBytes) };
+    case 'if':
+      return { ...value, cond: r(value.cond) };
+    case 'loop':
+      return value;
+    default:
+      return value;
+  }
+}
+
+/**
+ * Walk a method body and transform if-bindings whose branches all end
+ * with update_prop into flat conditional assignments.
+ */
+function liftBranchUpdateProps(bindings: ANFBinding[]): ANFBinding[] {
+  let nextIdx = maxTempIndex(bindings) + 1;
+  const fresh = () => `t${nextIdx++}`;
+
+  const result: ANFBinding[] = [];
+
+  for (const binding of bindings) {
+    if (binding.value.kind !== 'if') {
+      result.push(binding);
+      continue;
+    }
+
+    const ifVal = binding.value;
+    const branches = collectUpdateBranches(ifVal.cond, ifVal.then, ifVal.else);
+
+    if (!branches || branches.length < 2) {
+      result.push(binding);
+      continue;
+    }
+
+    // --- Transform: flatten into conditional assignments ---
+
+    // 1. Hoist condition setup bindings with fresh names
+    const nameMap: Record<string, string> = {};
+    const condRefs: (string | null)[] = [];
+
+    for (const branch of branches) {
+      for (const csb of branch.condSetupBindings) {
+        const newName = fresh();
+        nameMap[csb.name] = newName;
+        result.push({ name: newName, value: remapValueRefs(csb.value, nameMap) });
+      }
+      condRefs.push(
+        branch.condRef
+          ? (nameMap[branch.condRef] || branch.condRef)
+          : null,
+      );
+    }
+
+    // 2. Compute effective condition for each branch
+    //    Branch 0: cond0
+    //    Branch k>0: !cond0 && !cond1 && ... && !cond(k-1) && cond_k
+    //    Final else: !cond0 && !cond1 && ... && !cond(N-2)
+    const effectiveConds: string[] = [];
+    const negatedConds: string[] = [];
+
+    for (let i = 0; i < branches.length; i++) {
+      if (i === 0) {
+        effectiveConds.push(condRefs[0]!);
+        continue;
+      }
+
+      // Negate any prior conditions not yet negated
+      for (let j = negatedConds.length; j < i; j++) {
+        if (condRefs[j] === null) continue;
+        const negName = fresh();
+        result.push({
+          name: negName,
+          value: { kind: 'unary_op', op: '!', operand: condRefs[j]! },
+        });
+        negatedConds.push(negName);
+      }
+
+      // AND all negated conditions together
+      let andRef = negatedConds[0]!;
+      for (let j = 1; j < Math.min(i, negatedConds.length); j++) {
+        const andName = fresh();
+        result.push({
+          name: andName,
+          value: { kind: 'bin_op', op: '&&', left: andRef, right: negatedConds[j]! },
+        });
+        andRef = andName;
+      }
+
+      if (condRefs[i] !== null) {
+        // Middle branch: AND with own condition
+        const finalName = fresh();
+        result.push({
+          name: finalName,
+          value: { kind: 'bin_op', op: '&&', left: andRef, right: condRefs[i]! },
+        });
+        effectiveConds.push(finalName);
+      } else {
+        // Final else: just the AND of negations
+        effectiveConds.push(andRef);
+      }
+    }
+
+    // 3. For each branch, emit: load_old, conditional if-expression, update_prop
+    for (let i = 0; i < branches.length; i++) {
+      const branch = branches[i]!;
+
+      // Load old property value
+      const oldPropRef = fresh();
+      result.push({
+        name: oldPropRef,
+        value: { kind: 'load_prop', name: branch.propName },
+      });
+
+      // Remap value bindings for the then-branch
+      const branchMap: Record<string, string> = { ...nameMap };
+      const thenBindings: ANFBinding[] = [];
+      for (const vb of branch.valueBindings) {
+        const newName = fresh();
+        branchMap[vb.name] = newName;
+        thenBindings.push({
+          name: newName,
+          value: remapValueRefs(vb.value, branchMap),
+        });
+      }
+
+      // Else branch: keep old property value
+      const keepName = fresh();
+      const elseBindings: ANFBinding[] = [
+        { name: keepName, value: { kind: 'load_const', value: `@ref:${oldPropRef}` } },
+      ];
+
+      // Emit conditional if-expression
+      const condIfRef = fresh();
+      result.push({
+        name: condIfRef,
+        value: {
+          kind: 'if',
+          cond: effectiveConds[i]!,
+          then: thenBindings,
+          else: elseBindings,
+        },
+      });
+
+      // Emit update_prop
+      result.push({
+        name: fresh(),
+        value: { kind: 'update_prop', name: branch.propName, value: condIfRef },
+      });
+    }
+  }
+
+  return result;
 }

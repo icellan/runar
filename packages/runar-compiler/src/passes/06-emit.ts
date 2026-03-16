@@ -353,6 +353,24 @@ class EmitContext {
     return this.opcodeIndex++;
   }
 
+  private pendingSourceLoc: { file: string; line: number; column: number } | undefined;
+
+  /** Set source location to attach to the next emitted opcode(s). */
+  setSourceLoc(loc: { file: string; line: number; column: number } | undefined): void {
+    this.pendingSourceLoc = loc;
+  }
+
+  private recordSourceMapping(): void {
+    if (this.pendingSourceLoc) {
+      this.sourceMap.push({
+        opcodeIndex: this.opcodeIndex,
+        sourceFile: this.pendingSourceLoc.file,
+        line: this.pendingSourceLoc.line,
+        column: this.pendingSourceLoc.column,
+      });
+    }
+  }
+
   emitOpcode(name: string): void {
     const byte = OPCODES[name];
     if (byte === undefined) {
@@ -362,6 +380,7 @@ class EmitContext {
       this.codeSeparatorIndex = this.byteLength;
       this.codeSeparatorIndices.push(this.byteLength);
     }
+    this.recordSourceMapping();
     this.appendHex(byteToHex(byte));
     this.appendAsm(name);
     this.nextOpcodeIndex();
@@ -369,6 +388,7 @@ class EmitContext {
 
   emitPush(value: Uint8Array | bigint | boolean): void {
     const { hex, asm } = encodePushValue(value);
+    this.recordSourceMapping();
     this.appendHex(hex);
     this.appendAsm(asm);
     this.nextOpcodeIndex();
@@ -376,6 +396,7 @@ class EmitContext {
 
   emitPlaceholder(paramIndex: number, _paramName: string): void {
     const byteOffset = this.byteLength;
+    this.recordSourceMapping();
     this.appendHex('00'); // OP_0 placeholder byte
     this.appendAsm('OP_0');
     this.nextOpcodeIndex();
@@ -396,6 +417,12 @@ class EmitContext {
 // ---------------------------------------------------------------------------
 
 function emitStackOp(op: StackOp, ctx: EmitContext): void {
+  // Propagate source location from StackOp to the emit context
+  const loc = (op as { sourceLoc?: { file: string; line: number; column: number } }).sourceLoc;
+  if (loc) {
+    ctx.setSourceLoc(loc);
+  }
+
   switch (op.op) {
     case 'push':
       ctx.emitPush(op.value);
@@ -410,13 +437,10 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
       break;
 
     case 'roll':
-      // The depth value should already be pushed before this op by the
-      // stack lowering pass. We just emit OP_ROLL.
       ctx.emitOpcode('OP_ROLL');
       break;
 
     case 'pick':
-      // Same as roll — depth is already on stack.
       ctx.emitOpcode('OP_PICK');
       break;
 
@@ -452,6 +476,9 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
       ctx.emitPlaceholder(op.paramIndex, op.paramName);
       break;
   }
+
+  // Clear after emitting so the location doesn't leak to the next op
+  ctx.setSourceLoc(undefined);
 }
 
 /**

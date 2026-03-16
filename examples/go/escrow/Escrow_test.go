@@ -7,18 +7,22 @@ import (
 
 func newEscrow() *Escrow {
 	return &Escrow{
-		Buyer:   runar.MockPubKey(),
-		Seller:  runar.MockPubKey(),
-		Arbiter: runar.MockPubKey(),
+		Buyer:   runar.Alice.PubKey,
+		Seller:  runar.Bob.PubKey,
+		Arbiter: runar.Charlie.PubKey,
 	}
 }
 
 func TestEscrow_Release(t *testing.T) {
-	newEscrow().Release(runar.MockSig(), runar.MockSig())
+	sellerSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	arbiterSig := runar.SignTestMessage(runar.Charlie.PrivKey)
+	newEscrow().Release(sellerSig, arbiterSig)
 }
 
 func TestEscrow_Refund(t *testing.T) {
-	newEscrow().Refund(runar.MockSig(), runar.MockSig())
+	buyerSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	arbiterSig := runar.SignTestMessage(runar.Charlie.PrivKey)
+	newEscrow().Refund(buyerSig, arbiterSig)
 }
 
 func TestEscrow_Compile(t *testing.T) {

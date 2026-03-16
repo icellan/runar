@@ -17,6 +17,8 @@ import {
   SLH_SHA2_192s, SLH_SHA2_192f,
   SLH_SHA2_256s, SLH_SHA2_256f,
 } from '../crypto/slh-dsa.js';
+import { verifyTestMessageSig } from '../crypto/ecdsa.js';
+import { rabinVerify as rabinVerifyImpl } from '../crypto/rabin.js';
 import type {
   ContractNode,
   MethodNode,
@@ -245,20 +247,24 @@ export class RunarInterpreter {
 
       case 'if_statement': {
         const cond = this.evalExpr(stmt.condition, env, methods);
+        let ifReturnVal: RunarValue | undefined;
         if (this.toBool(cond)) {
           env.pushScope();
           try {
-            this.executeStatements(stmt.then, env, methods);
+            ifReturnVal = this.executeStatements(stmt.then, env, methods);
           } finally {
             env.popScope();
           }
         } else if (stmt.else) {
           env.pushScope();
           try {
-            this.executeStatements(stmt.else, env, methods);
+            ifReturnVal = this.executeStatements(stmt.else, env, methods);
           } finally {
             env.popScope();
           }
+        }
+        if (ifReturnVal !== undefined) {
+          throw new ReturnException(ifReturnVal);
         }
         break;
       }
@@ -276,10 +282,14 @@ export class RunarInterpreter {
               throw new Error('Loop iteration limit exceeded');
             }
             env.pushScope();
+            let forReturnVal: RunarValue | undefined;
             try {
-              this.executeStatements(stmt.body, env, methods);
+              forReturnVal = this.executeStatements(stmt.body, env, methods);
             } finally {
               env.popScope();
+            }
+            if (forReturnVal !== undefined) {
+              throw new ReturnException(forReturnVal);
             }
             this.executeStatement(stmt.update, env, methods);
           }
@@ -657,13 +667,17 @@ export class RunarInterpreter {
       }
 
       case 'checkSig': {
-        // In interpreter mode, checkSig always returns true (mock).
-        return { kind: 'boolean', value: true };
+        // Real ECDSA verification over the fixed TEST_MESSAGE.
+        const sig = this.toBytes(args[0]!);
+        const pubKey = this.toBytes(args[1]!);
+        return { kind: 'boolean', value: verifyTestMessageSig(sig, pubKey) };
       }
 
       case 'checkMultiSig': {
-        // Mock: always returns true.
-        return { kind: 'boolean', value: true };
+        // checkMultiSig is not currently used in any contracts.
+        // When array types are added to the interpreter, this should
+        // verify each sig against the pubkeys using verifyTestMessageSig.
+        return { kind: 'boolean', value: false };
       }
 
       case 'len': {
@@ -888,8 +902,14 @@ export class RunarInterpreter {
       case 'checkPreimage':
         return { kind: 'boolean', value: true };
 
-      case 'verifyRabinSig':
-        return { kind: 'boolean', value: true };
+      case 'verifyRabinSig': {
+        // Real Rabin verification: (sig² + padding) mod n === SHA256(msg) mod n
+        const rabinMsg = this.toBytes(args[0]!);
+        const rabinSig = this.toBigInt(args[1]!);
+        const rabinPad = this.toBytes(args[2]!);
+        const rabinPk = this.toBigInt(args[3]!);
+        return { kind: 'boolean', value: rabinVerifyImpl(rabinMsg, rabinSig, rabinPad, rabinPk) };
+      }
 
       case 'verifyWOTS': {
         const wotsMsg = this.toBytes(args[0]!);
@@ -998,6 +1018,20 @@ export class RunarInterpreter {
       case 'ecPointY': {
         const pt = this.toBytes(args[0]!);
         return { kind: 'bigint', value: ecPointYImpl(pt) };
+      }
+
+      case 'blake3Compress': {
+        const cv = this.toBytes(args[0]!);
+        const block = this.toBytes(args[1]!);
+        return { kind: 'bytes', value: blake3CompressImpl(cv, block) };
+      }
+
+      case 'blake3Hash': {
+        const msg = this.toBytes(args[0]!);
+        // Zero-pad to 64 bytes, use IV as chaining value
+        const padded = new Uint8Array(64);
+        padded.set(msg.subarray(0, 64));
+        return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded) };
       }
 
       default: {
@@ -1315,4 +1349,105 @@ function ecPointXImpl(pt: Uint8Array): bigint {
 function ecPointYImpl(pt: Uint8Array): bigint {
   const [, y] = ecDecodePoint(pt);
   return y;
+}
+
+// ---------------------------------------------------------------------------
+// BLAKE3 interpreter helpers
+// ---------------------------------------------------------------------------
+
+const BLAKE3_IV_WORDS = [
+  0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+  0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+const BLAKE3_IV_BYTES = new Uint8Array(32);
+for (let i = 0; i < 8; i++) {
+  BLAKE3_IV_BYTES[i * 4] = (BLAKE3_IV_WORDS[i]! >>> 24) & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 1] = (BLAKE3_IV_WORDS[i]! >>> 16) & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 2] = (BLAKE3_IV_WORDS[i]! >>> 8) & 0xff;
+  BLAKE3_IV_BYTES[i * 4 + 3] = BLAKE3_IV_WORDS[i]! & 0xff;
+}
+
+const BLAKE3_MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+function blake3Rotr32(x: number, n: number): number {
+  return ((x >>> n) | (x << (32 - n))) >>> 0;
+}
+
+function blake3G(
+  s: number[], a: number, b: number, c: number, d: number,
+  mx: number, my: number,
+): void {
+  s[a] = (s[a]! + s[b]! + mx) >>> 0;
+  s[d] = blake3Rotr32(s[d]! ^ s[a]!, 16);
+  s[c] = (s[c]! + s[d]!) >>> 0;
+  s[b] = blake3Rotr32(s[b]! ^ s[c]!, 12);
+  s[a] = (s[a]! + s[b]! + my) >>> 0;
+  s[d] = blake3Rotr32(s[d]! ^ s[a]!, 8);
+  s[c] = (s[c]! + s[d]!) >>> 0;
+  s[b] = blake3Rotr32(s[b]! ^ s[c]!, 7);
+}
+
+function blake3Round(s: number[], m: number[]): void {
+  blake3G(s, 0, 4, 8, 12, m[0]!, m[1]!);
+  blake3G(s, 1, 5, 9, 13, m[2]!, m[3]!);
+  blake3G(s, 2, 6, 10, 14, m[4]!, m[5]!);
+  blake3G(s, 3, 7, 11, 15, m[6]!, m[7]!);
+  blake3G(s, 0, 5, 10, 15, m[8]!, m[9]!);
+  blake3G(s, 1, 6, 11, 12, m[10]!, m[11]!);
+  blake3G(s, 2, 7, 8, 13, m[12]!, m[13]!);
+  blake3G(s, 3, 4, 9, 14, m[14]!, m[15]!);
+}
+
+/**
+ * BLAKE3 single-block compression. Matches the on-chain codegen which
+ * hardcodes blockLen=64, counter=0, flags=11 (CHUNK_START|CHUNK_END|ROOT).
+ */
+function blake3CompressImpl(cv: Uint8Array, block: Uint8Array): Uint8Array {
+  // Parse chaining value as 8 big-endian u32 words
+  const h: number[] = [];
+  for (let i = 0; i < 8; i++) {
+    h.push(
+      ((cv[i * 4]! << 24) | (cv[i * 4 + 1]! << 16) |
+       (cv[i * 4 + 2]! << 8) | cv[i * 4 + 3]!) >>> 0,
+    );
+  }
+
+  // Parse block as 16 big-endian u32 words
+  const m: number[] = [];
+  for (let i = 0; i < 16; i++) {
+    m.push(
+      ((block[i * 4]! << 24) | (block[i * 4 + 1]! << 16) |
+       (block[i * 4 + 2]! << 8) | block[i * 4 + 3]!) >>> 0,
+    );
+  }
+
+  // Initialize 16-word state
+  const state: number[] = [
+    h[0]!, h[1]!, h[2]!, h[3]!,
+    h[4]!, h[5]!, h[6]!, h[7]!,
+    BLAKE3_IV_WORDS[0]!, BLAKE3_IV_WORDS[1]!, BLAKE3_IV_WORDS[2]!, BLAKE3_IV_WORDS[3]!,
+    0,  // counter low
+    0,  // counter high
+    64, // blockLen
+    11, // flags = CHUNK_START | CHUNK_END | ROOT
+  ];
+
+  // 7 rounds with message permutation between rounds
+  let msg = [...m];
+  for (let r = 0; r < 7; r++) {
+    blake3Round(state, msg);
+    if (r < 6) msg = BLAKE3_MSG_PERM.map(i => msg[i]!);
+  }
+
+  // Output: XOR first 8 with last 8, encode as big-endian bytes
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 8; i++) {
+    const w = (state[i]! ^ state[i + 8]!) >>> 0;
+    out[i * 4] = (w >>> 24) & 0xff;
+    out[i * 4 + 1] = (w >>> 16) & 0xff;
+    out[i * 4 + 2] = (w >>> 8) & 0xff;
+    out[i * 4 + 3] = w & 0xff;
+  }
+  return out;
 }

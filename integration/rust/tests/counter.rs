@@ -23,19 +23,13 @@ fn test_counter_increment() {
     assert!(!deploy_txid.is_empty());
     assert_eq!(deploy_txid.len(), 64);
 
-    let mut new_state = HashMap::new();
-    new_state.insert("count".to_string(), SdkValue::Int(1));
-
     let (call_txid, _tx) = contract
         .call(
             "increment",
             &[],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(new_state),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("call increment failed");
     assert!(!call_txid.is_empty());
@@ -59,34 +53,24 @@ fn test_counter_chain() {
         .expect("deploy failed");
 
     // 0 -> 1
-    let mut state1 = HashMap::new();
-    state1.insert("count".to_string(), SdkValue::Int(1));
     contract
         .call(
             "increment",
             &[],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state1),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("call increment 0->1 failed");
 
     // 1 -> 2
-    let mut state2 = HashMap::new();
-    state2.insert("count".to_string(), SdkValue::Int(2));
     contract
         .call(
             "increment",
             &[],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state2),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("call increment 1->2 failed");
 }
@@ -109,34 +93,24 @@ fn test_counter_decrement() {
         .expect("deploy failed");
 
     // 0 -> 1
-    let mut state1 = HashMap::new();
-    state1.insert("count".to_string(), SdkValue::Int(1));
     contract
         .call(
             "increment",
             &[],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state1),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("call increment failed");
 
     // 1 -> 0
-    let mut state0 = HashMap::new();
-    state0.insert("count".to_string(), SdkValue::Int(0));
     contract
         .call(
             "decrement",
             &[],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state0),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("call decrement failed");
 }

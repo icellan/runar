@@ -20,7 +20,12 @@ func main() {
 	hexOnly := flag.Bool("hex", false, "output only the script hex (no artifact JSON)")
 	asmOnly := flag.Bool("asm", false, "output only the script ASM (no artifact JSON)")
 	emitIR := flag.Bool("emit-ir", false, "output only the ANF IR JSON (requires --source)")
+	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	flag.Parse()
+
+	opts := compiler.CompileOptions{
+		DisableConstantFolding: *disableConstFold,
+	}
 
 	if *irFile == "" && *sourceFile == "" {
 		fmt.Fprintln(os.Stderr, "Usage: runar-compiler-go [--ir <path> | --source <path>] [--output <path>] [--hex] [--asm] [--emit-ir]")
@@ -36,7 +41,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "--emit-ir requires --source")
 			os.Exit(1)
 		}
-		program, err := compiler.CompileSourceToIR(*sourceFile)
+		program, err := compiler.CompileSourceToIR(*sourceFile, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)
 			os.Exit(1)
@@ -68,9 +73,9 @@ func main() {
 	var err error
 
 	if *sourceFile != "" {
-		artifact, err = compiler.CompileFromSource(*sourceFile)
+		artifact, err = compiler.CompileFromSource(*sourceFile, opts)
 	} else {
-		artifact, err = compiler.CompileFromIR(*irFile)
+		artifact, err = compiler.CompileFromIR(*irFile, opts)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Compilation error: %v\n", err)

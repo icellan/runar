@@ -1,5 +1,9 @@
 /**
  * Wallet helper — creates funded wallets for integration tests.
+ *
+ * Uses deterministic sequential keys for reproducibility. Each call to
+ * createWallet() returns a unique key derived from an incrementing
+ * private key number, avoiding RNG dependency and UTXO conflicts.
  */
 
 import { PrivateKey, Hash } from '@bsv/sdk';
@@ -17,10 +21,20 @@ export interface TestWallet {
 }
 
 /**
- * Create a random wallet with regtest address and a signer that uses that address.
+ * Counter for generating unique deterministic keys.
+ * Seeded from process.pid to avoid collisions between parallel vitest
+ * workers. Each worker has a unique PID, so keys don't overlap.
+ */
+let walletIndex = (process.pid ?? 1) * 1000;
+
+/**
+ * Create a deterministic wallet from a sequential private key number.
+ * Each call returns a unique key (counter never wraps within a test run).
  */
 export function createWallet(): { privKeyHex: string; pubKeyHex: string; pubKeyHash: string } {
-  const privKey = PrivateKey.fromRandom();
+  walletIndex++;
+  const privHex = walletIndex.toString(16).padStart(64, '0');
+  const privKey = new PrivateKey(privHex, 16);
   const pubKey = privKey.toPublicKey();
   const pubKeyDer = pubKey.toDER('hex') as string;
 

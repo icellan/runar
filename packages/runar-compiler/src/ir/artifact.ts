@@ -98,6 +98,9 @@ export interface RunarArtifact {
     stack?: StackProgram;
   };
 
+  /** ANF IR for SDK state computation (always included for stateful contracts) */
+  anf?: ANFProgram;
+
   /** State field descriptors (present only for stateful contracts) */
   stateFields?: StateField[];
 

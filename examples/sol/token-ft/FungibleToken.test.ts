@@ -3,16 +3,14 @@ import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
-import { TestContract } from 'runar-testing';
+import { TestContract, ALICE, BOB, signTestMessage } from 'runar-testing';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const source = readFileSync(join(__dirname, 'FungibleTokenExample.runar.sol'), 'utf8');
 const FILE_NAME = 'FungibleTokenExample.runar.sol';
 
-const ALICE = '02' + 'aa'.repeat(32);
-const BOB = '02' + 'bb'.repeat(32);
 const TOKEN_ID = 'deadbeef';
-const MOCK_SIG = '30' + 'ff'.repeat(35);
+const ALICE_SIG = signTestMessage(ALICE.privKey);
 const SATS = 1000n;
 const MOCK_PREVOUTS = '00'.repeat(72);
 
@@ -25,7 +23,7 @@ function hash256(hexData: string): Uint8Array {
 const MOCK_HASH_PREVOUTS = hash256(MOCK_PREVOUTS);
 
 describe('FungibleToken (Solidity)', () => {
-  function makeToken(owner = ALICE, balance = 100n) {
+  function makeToken(owner = ALICE.pubKey, balance = 100n) {
     return TestContract.fromSource(source, {
       owner,
       balance,
@@ -38,8 +36,8 @@ describe('FungibleToken (Solidity)', () => {
     it('creates two outputs with correct balances', () => {
       const token = makeToken();
       const result = token.call('transfer', {
-        sig: MOCK_SIG,
-        to: BOB,
+        sig: ALICE_SIG,
+        to: BOB.pubKey,
         amount: 30n,
         outputSatoshis: SATS,
       });
@@ -53,29 +51,29 @@ describe('FungibleToken (Solidity)', () => {
 
     it('assigns correct owners to outputs', () => {
       const token = makeToken();
-      const result = token.call('transfer', { sig: MOCK_SIG, to: BOB, amount: 30n, outputSatoshis: SATS });
-      expect(result.outputs[0]!.owner).toBe(BOB);
-      expect(result.outputs[1]!.owner).toBe(ALICE);
+      const result = token.call('transfer', { sig: ALICE_SIG, to: BOB.pubKey, amount: 30n, outputSatoshis: SATS });
+      expect(result.outputs[0]!.owner).toBe(BOB.pubKey);
+      expect(result.outputs[1]!.owner).toBe(ALICE.pubKey);
     });
 
     it('rejects transfer of zero amount', () => {
-      const result = makeToken().call('transfer', { sig: MOCK_SIG, to: BOB, amount: 0n, outputSatoshis: SATS });
+      const result = makeToken().call('transfer', { sig: ALICE_SIG, to: BOB.pubKey, amount: 0n, outputSatoshis: SATS });
       expect(result.success).toBe(false);
     });
 
     it('rejects transfer exceeding balance', () => {
-      const result = makeToken(ALICE, 100n).call('transfer', { sig: MOCK_SIG, to: BOB, amount: 200n, outputSatoshis: SATS });
+      const result = makeToken(ALICE.pubKey, 100n).call('transfer', { sig: ALICE_SIG, to: BOB.pubKey, amount: 200n, outputSatoshis: SATS });
       expect(result.success).toBe(false);
     });
   });
 
   describe('send', () => {
     it('creates one output with full balance', () => {
-      const token = makeToken(ALICE, 100n);
-      const result = token.call('send', { sig: MOCK_SIG, to: BOB, outputSatoshis: SATS });
+      const token = makeToken(ALICE.pubKey, 100n);
+      const result = token.call('send', { sig: ALICE_SIG, to: BOB.pubKey, outputSatoshis: SATS });
       expect(result.success).toBe(true);
       expect(result.outputs).toHaveLength(1);
-      expect(result.outputs[0]!.owner).toBe(BOB);
+      expect(result.outputs[0]!.owner).toBe(BOB.pubKey);
       expect(result.outputs[0]!.balance).toBe(100n);
       expect(result.outputs[0]!.mergeBalance).toBe(0n);
     });
@@ -83,10 +81,10 @@ describe('FungibleToken (Solidity)', () => {
 
   describe('merge', () => {
     it('creates one output with position-dependent balances', () => {
-      const token = makeToken(ALICE, 30n);
+      const token = makeToken(ALICE.pubKey, 30n);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
-        sig: MOCK_SIG,
+        sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: MOCK_PREVOUTS,
         outputSatoshis: SATS,
@@ -95,14 +93,14 @@ describe('FungibleToken (Solidity)', () => {
       expect(result.outputs).toHaveLength(1);
       expect(result.outputs[0]!.balance).toBe(30n);
       expect(result.outputs[0]!.mergeBalance).toBe(70n);
-      expect(result.outputs[0]!.owner).toBe(ALICE);
+      expect(result.outputs[0]!.owner).toBe(ALICE.pubKey);
     });
 
     it('rejects merge with negative otherBalance', () => {
-      const token = makeToken(ALICE, 100n);
+      const token = makeToken(ALICE.pubKey, 100n);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
-        sig: MOCK_SIG,
+        sig: ALICE_SIG,
         otherBalance: -1n,
         allPrevouts: MOCK_PREVOUTS,
         outputSatoshis: SATS,
@@ -111,11 +109,11 @@ describe('FungibleToken (Solidity)', () => {
     });
 
     it('rejects merge with tampered allPrevouts (hash mismatch)', () => {
-      const token = makeToken(ALICE, 30n);
+      const token = makeToken(ALICE.pubKey, 30n);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const tamperedPrevouts = 'ff'.repeat(72);
       const result = token.call('merge', {
-        sig: MOCK_SIG,
+        sig: ALICE_SIG,
         otherBalance: 70n,
         allPrevouts: tamperedPrevouts,
         outputSatoshis: SATS,
@@ -125,14 +123,14 @@ describe('FungibleToken (Solidity)', () => {
 
     it('merge with pre-existing mergeBalance uses total', () => {
       const token = TestContract.fromSource(source, {
-        owner: ALICE,
+        owner: ALICE.pubKey,
         balance: 20n,
         mergeBalance: 10n,
         tokenId: TOKEN_ID,
       }, FILE_NAME);
       token.setMockPreimageBytes({ hashPrevouts: MOCK_HASH_PREVOUTS });
       const result = token.call('merge', {
-        sig: MOCK_SIG,
+        sig: ALICE_SIG,
         otherBalance: 50n,
         allPrevouts: MOCK_PREVOUTS,
         outputSatoshis: SATS,
@@ -146,10 +144,10 @@ describe('FungibleToken (Solidity)', () => {
 
   describe('edge cases', () => {
     it('transfer of exact balance succeeds with no change output', () => {
-      const token = makeToken(ALICE, 100n);
+      const token = makeToken(ALICE.pubKey, 100n);
       const result = token.call('transfer', {
-        sig: MOCK_SIG,
-        to: BOB,
+        sig: ALICE_SIG,
+        to: BOB.pubKey,
         amount: 100n,
         outputSatoshis: SATS,
       });
@@ -160,14 +158,14 @@ describe('FungibleToken (Solidity)', () => {
 
     it('transfer uses mergeBalance in total', () => {
       const token = TestContract.fromSource(source, {
-        owner: ALICE,
+        owner: ALICE.pubKey,
         balance: 60n,
         mergeBalance: 40n,
         tokenId: TOKEN_ID,
       }, FILE_NAME);
       const result = token.call('transfer', {
-        sig: MOCK_SIG,
-        to: BOB,
+        sig: ALICE_SIG,
+        to: BOB.pubKey,
         amount: 80n,
         outputSatoshis: SATS,
       });
@@ -180,14 +178,14 @@ describe('FungibleToken (Solidity)', () => {
 
     it('send uses mergeBalance in total', () => {
       const token = TestContract.fromSource(source, {
-        owner: ALICE,
+        owner: ALICE.pubKey,
         balance: 60n,
         mergeBalance: 40n,
         tokenId: TOKEN_ID,
       }, FILE_NAME);
       const result = token.call('send', {
-        sig: MOCK_SIG,
-        to: BOB,
+        sig: ALICE_SIG,
+        to: BOB.pubKey,
         outputSatoshis: SATS,
       });
       expect(result.success).toBe(true);

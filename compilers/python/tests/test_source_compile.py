@@ -79,7 +79,8 @@ class TestCompilerParity:
         source_path = _source_path(test_name)
         expected_hex = load_conformance_script(test_name)
 
-        artifact = must_compile_source(source_path)
+        # Disable constant folding to match golden files
+        artifact = must_compile_source(source_path, disable_constant_folding=True)
         assert artifact.script == expected_hex, (
             f"Parity mismatch for {test_name}:\n"
             f"  expected: {expected_hex}\n"

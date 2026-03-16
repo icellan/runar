@@ -83,9 +83,7 @@ func TestMathDemo_DivideBy(t *testing.T) {
 	// Deploy result=100, divideBy(5) -> result=20
 	contract, provider, signer := setupMathDemo(t, 100)
 
-	txid, _, err := contract.Call("divideBy", []interface{}{int64(5)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(20)},
-	})
+	txid, _, err := contract.Call("divideBy", []interface{}{int64(5)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call divideBy: %v", err)
 	}
@@ -96,9 +94,7 @@ func TestMathDemo_ClampValue(t *testing.T) {
 	// Deploy result=500, clampValue(10, 100) -> result=100
 	contract, provider, signer := setupMathDemo(t, 500)
 
-	txid, _, err := contract.Call("clampValue", []interface{}{int64(10), int64(100)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(100)},
-	})
+	txid, _, err := contract.Call("clampValue", []interface{}{int64(10), int64(100)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call clampValue: %v", err)
 	}
@@ -109,9 +105,7 @@ func TestMathDemo_Normalize(t *testing.T) {
 	// Deploy result=-42, normalize() -> result=-1
 	contract, provider, signer := setupMathDemo(t, -42)
 
-	txid, _, err := contract.Call("normalize", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(-1)},
-	})
+	txid, _, err := contract.Call("normalize", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call normalize: %v", err)
 	}
@@ -122,9 +116,7 @@ func TestMathDemo_SquareRoot(t *testing.T) {
 	// Deploy result=144, squareRoot() -> result=12
 	contract, provider, signer := setupMathDemo(t, 144)
 
-	txid, _, err := contract.Call("squareRoot", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(12)},
-	})
+	txid, _, err := contract.Call("squareRoot", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call squareRoot: %v", err)
 	}
@@ -135,9 +127,7 @@ func TestMathDemo_Exponentiate(t *testing.T) {
 	// Deploy result=2, exponentiate(3) -> result=8
 	contract, provider, signer := setupMathDemo(t, 2)
 
-	txid, _, err := contract.Call("exponentiate", []interface{}{int64(3)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(8)},
-	})
+	txid, _, err := contract.Call("exponentiate", []interface{}{int64(3)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call exponentiate: %v", err)
 	}
@@ -148,9 +138,7 @@ func TestMathDemo_ReduceGcd(t *testing.T) {
 	// Deploy result=48, reduceGcd(18) -> result=6
 	contract, provider, signer := setupMathDemo(t, 48)
 
-	txid, _, err := contract.Call("reduceGcd", []interface{}{int64(18)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(6)},
-	})
+	txid, _, err := contract.Call("reduceGcd", []interface{}{int64(18)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call reduceGcd: %v", err)
 	}
@@ -161,9 +149,7 @@ func TestMathDemo_ComputeLog2(t *testing.T) {
 	// Deploy result=256, computeLog2() -> result=8
 	contract, provider, signer := setupMathDemo(t, 256)
 
-	txid, _, err := contract.Call("computeLog2", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(8)},
-	})
+	txid, _, err := contract.Call("computeLog2", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call computeLog2: %v", err)
 	}
@@ -174,9 +160,7 @@ func TestMathDemo_ScaleByRatio(t *testing.T) {
 	// Deploy result=100, scaleByRatio(3, 4) -> result=75
 	contract, provider, signer := setupMathDemo(t, 100)
 
-	txid, _, err := contract.Call("scaleByRatio", []interface{}{int64(3), int64(4)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(75)},
-	})
+	txid, _, err := contract.Call("scaleByRatio", []interface{}{int64(3), int64(4)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call scaleByRatio: %v", err)
 	}
@@ -190,25 +174,19 @@ func TestMathDemo_ChainOperations(t *testing.T) {
 	// scaleByRatio(5, 1) -> 50
 	contract, provider, signer := setupMathDemo(t, 1000)
 
-	txid1, _, err := contract.Call("divideBy", []interface{}{int64(10)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(100)},
-	})
+	txid1, _, err := contract.Call("divideBy", []interface{}{int64(10)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call divideBy (1000->100): %v", err)
 	}
 	t.Logf("result->100 TX: %s", txid1)
 
-	txid2, _, err := contract.Call("squareRoot", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(10)},
-	})
+	txid2, _, err := contract.Call("squareRoot", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call squareRoot (100->10): %v", err)
 	}
 	t.Logf("result->10 TX: %s", txid2)
 
-	txid3, _, err := contract.Call("scaleByRatio", []interface{}{int64(5), int64(1)}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"value": int64(50)},
-	})
+	txid3, _, err := contract.Call("scaleByRatio", []interface{}{int64(5), int64(1)}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call scaleByRatio (10->50): %v", err)
 	}

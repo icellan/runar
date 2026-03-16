@@ -311,6 +311,31 @@ func TestIfElse_ScriptExecution(t *testing.T) {
 	}
 }
 
+func TestIfWithoutElse_ScriptExecution(t *testing.T) {
+	lockingHex, err := compileRúnar("if-without-else", `{"threshold":"5"}`)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	// check(10, 8) → both > 5, count=2 > 0
+	unlockingHex := buildUnlockingScript(10, 8)
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed (both above threshold): %v", err)
+	}
+
+	// check(10, 3) → only a>5, count=1 > 0
+	unlockingHex = buildUnlockingScript(10, 3)
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed (one above threshold): %v", err)
+	}
+
+	// check(3, 2) → neither > 5, count=0, assert fails
+	unlockingHex = buildUnlockingScript(3, 2)
+	if err := executeScript(lockingHex, unlockingHex); err == nil {
+		t.Fatal("expected script failure (neither above threshold) but execution succeeded")
+	}
+}
+
 func TestBoundedLoop_ScriptExecution(t *testing.T) {
 	// sum = (3+0)+(3+1)+(3+2)+(3+3)+(3+4) = 25
 	lockingHex, err := compileRúnar("bounded-loop", `{"expectedSum":"25"}`)

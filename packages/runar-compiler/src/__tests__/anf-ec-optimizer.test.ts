@@ -110,8 +110,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -128,8 +128,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -146,7 +146,7 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      expect(t2!.value.kind).toBe('load_param');
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -163,8 +163,8 @@ describe('ANF EC Optimizer', () => {
       const result = optimizeEC(program);
       const t2 = findBinding(result, 't2');
       expect(t2).toBeDefined();
-      // Should alias to t0
-      expect(t2!.value.kind).toBe('load_param');
+      // Should alias to t0 via load_const @ref:
+      expect(t2!.value.kind).toBe('load_const');
     });
   });
 
@@ -218,6 +218,28 @@ describe('ANF EC Optimizer', () => {
     });
   });
 
+  describe('Rule 12: ecMul(G, k) → ecMulGen(k)', () => {
+    it('replaces ecMul with G point with ecMulGen', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('g', { kind: 'load_const', value: G_HEX }),
+          b('t0', { kind: 'load_param', name: 'k' }),
+          b('t1', { kind: 'call', func: 'ecMul', args: ['g', 't0'] }),
+          b('t2', { kind: 'assert', value: 't1' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      const t1 = findBinding(result, 't1');
+      expect(t1).toBeDefined();
+      expect(t1!.value.kind).toBe('call');
+      if (t1!.value.kind === 'call') {
+        expect(t1!.value.func).toBe('ecMulGen');
+        // The scalar argument should reference the original k parameter
+        expect(t1!.value.args[0]).toBe('t0');
+      }
+    });
+  });
+
   describe('does not optimize non-EC calls', () => {
     it('leaves sha256 calls unchanged', () => {
       const program = makeProgram([
@@ -234,6 +256,174 @@ describe('ANF EC Optimizer', () => {
       if (t1!.value.kind === 'call') {
         expect(t1!.value.func).toBe('sha256');
       }
+    });
+
+    it('passes through a program with no EC operations unchanged', () => {
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_param', name: 'x' }),
+          b('t1', { kind: 'load_const', value: 5n }),
+          b('t2', { kind: 'bin_op', op: '+', left: 't0', right: 't1' }),
+          b('t3', { kind: 'assert', value: 't2' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      // The program reference should be identical (no change)
+      expect(result).toBe(program);
+    });
+  });
+
+  describe('contract metadata and structural preservation', () => {
+    it('preserves contract metadata (name, properties) after optimization', () => {
+      // P2PKH-like program with no EC ops
+      const program: ANFProgram = {
+        contractName: 'P2PKH',
+        properties: [
+          { name: 'pubKeyHash', type: 'Sha256', readonly: true },
+        ],
+        methods: [
+          makeMethod('unlock', [
+            b('t0', { kind: 'load_param', name: 'sig' }),
+            b('t1', { kind: 'load_param', name: 'pubKey' }),
+            b('t2', { kind: 'call', func: 'hash160', args: ['t1'] }),
+            b('t3', { kind: 'load_prop', name: 'pubKeyHash' }),
+            b('t4', { kind: 'bin_op', op: '===', left: 't2', right: 't3' }),
+            b('t5', { kind: 'assert', value: 't4' }),
+            b('t6', { kind: 'call', func: 'checkSig', args: ['t0', 't1'] }),
+            b('t7', { kind: 'assert', value: 't6' }),
+          ]),
+        ],
+      };
+      const result = optimizeEC(program);
+      expect(result.contractName).toBe('P2PKH');
+      expect(result.properties).toHaveLength(1);
+      expect(result.properties[0]!.name).toBe('pubKeyHash');
+    });
+
+    it('optimizes each method in a multi-method program independently', () => {
+      // Both methods contain ecAdd(x, INFINITY) — each should be simplified independently
+      const program = makeProgram([
+        makeMethod('method1', [
+          b('t0', { kind: 'load_param', name: 'pt' }),
+          b('t1', { kind: 'load_const', value: INFINITY_HEX }),
+          b('t2', { kind: 'call', func: 'ecAdd', args: ['t0', 't1'] }),
+          b('t3', { kind: 'assert', value: 't2' }),
+        ]),
+        makeMethod('method2', [
+          b('s0', { kind: 'load_param', name: 'pt2' }),
+          b('s1', { kind: 'load_const', value: INFINITY_HEX }),
+          b('s2', { kind: 'call', func: 'ecAdd', args: ['s0', 's1'] }),
+          b('s3', { kind: 'assert', value: 's2' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      // Rule 1: ecAdd(x, INFINITY) → alias to x via load_const @ref:
+      const t2 = findBinding(result, 't2');
+      expect(t2).toBeDefined();
+      expect(t2!.value.kind).toBe('load_const');
+      if (t2!.value.kind === 'load_const') {
+        expect(t2!.value.value).toMatch(/^@ref:/);
+      }
+      // Check method2: s2 should also be aliased
+      const s2 = findBinding(result, 's2');
+      expect(s2).toBeDefined();
+      expect(s2!.value.kind).toBe('load_const');
+      if (s2!.value.kind === 'load_const') {
+        expect(s2!.value.value).toMatch(/^@ref:/);
+      }
+    });
+
+    it('preserves empty method body unchanged', () => {
+      const program = makeProgram([
+        makeMethod('empty', []),
+      ]);
+      const result = optimizeEC(program);
+      expect(result.methods[0]!.body).toHaveLength(0);
+    });
+
+    it('preserves unreferenced call binding (side-effect call)', () => {
+      // checkSig is a call — it has side effects (used as assert input), but even
+      // a standalone call binding that nothing else references must survive because
+      // call bindings are treated as having side effects.
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_param', name: 'sig' }),
+          b('t1', { kind: 'load_param', name: 'pubKey' }),
+          b('t2', { kind: 'call', func: 'checkSig', args: ['t0', 't1'] }),
+          b('t3', { kind: 'assert', value: 't2' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      // The checkSig call binding must still be present
+      const t2 = findBinding(result, 't2');
+      expect(t2).toBeDefined();
+      expect(t2!.value.kind).toBe('call');
+      if (t2!.value.kind === 'call') {
+        expect(t2!.value.func).toBe('checkSig');
+      }
+    });
+
+    it('chains Rule 12 then Rule 5: ecMul(G, 0) becomes INFINITY', () => {
+      // Rule 12: ecMul(G, k) → ecMulGen(k)
+      // Rule 5:  ecMulGen(0) → INFINITY
+      // Combined: ecMul(G, 0) → INFINITY
+      const program = makeProgram([
+        makeMethod('m', [
+          b('g', { kind: 'load_const', value: G_HEX }),
+          b('t0', { kind: 'load_const', value: 0n }),
+          b('t1', { kind: 'call', func: 'ecMul', args: ['g', 't0'] }),
+          b('t2', { kind: 'assert', value: 't1' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      const t1 = findBinding(result, 't1');
+      expect(t1).toBeDefined();
+      expect(t1!.value.kind).toBe('load_const');
+      if (t1!.value.kind === 'load_const') {
+        expect(t1!.value.value).toBe(INFINITY_HEX);
+      }
+    });
+  });
+
+  describe('dead binding elimination after EC optimization', () => {
+    it('removes bindings that become dead after EC optimization', () => {
+      // ecMulGen(0) → INFINITY, so the scalar 0n binding becomes dead
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_const', value: 0n }),
+          b('t1', { kind: 'call', func: 'ecMulGen', args: ['t0'] }),
+          b('t2', { kind: 'assert', value: 't1' }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      // t1 should be replaced with INFINITY constant
+      const t1 = findBinding(result, 't1');
+      expect(t1!.value.kind).toBe('load_const');
+      // t0 (0n) is no longer referenced — dead binding elimination should remove it
+      const t0 = findBinding(result, 't0');
+      expect(t0).toBeUndefined();
+    });
+
+    it('preserves side-effect bindings (assert) even when unreferenced by further EC ops', () => {
+      // An assert is a side-effect and must not be eliminated
+      const program = makeProgram([
+        makeMethod('m', [
+          b('t0', { kind: 'load_param', name: 'pt' }),
+          b('t1', { kind: 'load_const', value: 0n }),
+          b('t2', { kind: 'call', func: 'ecMul', args: ['t0', 't1'] }),
+          // Assert the result (side effect)
+          b('t3', { kind: 'assert', value: 't2' }),
+          // Unreferenced constant — should be removed
+          b('t4', { kind: 'load_const', value: 99n }),
+        ]),
+      ]);
+      const result = optimizeEC(program);
+      // t3 (assert) must be preserved
+      const t3 = findBinding(result, 't3');
+      expect(t3).toBeDefined();
+      // t4 (unused constant) should be removed by dead binding elimination
+      const t4 = findBinding(result, 't4');
+      expect(t4).toBeUndefined();
     });
   });
 });

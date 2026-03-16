@@ -105,17 +105,23 @@ describe('runtime builtins', () => {
     });
   });
 
-  // ---- Signature verification (mocked) ----
+  // ---- Signature verification (real ECDSA) ----
 
-  describe('signature verification (mocked)', () => {
-    it('checkSig returns true', () => {
-      expect(checkSig(
-        Sig('3044022079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f817980220483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8'),
-        PubKey('0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798'),
-      )).toBe(true);
+  describe('signature verification (real ECDSA)', () => {
+    // ALICE's test key: real signature over the fixed test message
+    const ALICE_PUB = '03a34b99f22c790c4e36b2b3c2c35a36db06226e41c692fc82b8b56ac1c540c5bd';
+    const ALICE_SIG = '3045022100e2aa1265ce57f54b981ffc6a5f3d229e908d7772fceb75a50c8c2d6076313df00220607dbca2f9f695438b49eefea4e445664c740163af8b62b1373f87d50eb64417';
+
+    it('checkSig returns true for valid signature', () => {
+      expect(checkSig(Sig(ALICE_SIG), PubKey(ALICE_PUB))).toBe(true);
     });
 
-    it('checkMultiSig returns true', () => {
+    it('checkSig returns false for wrong key', () => {
+      const WRONG_PUB = '03d6bfe100d1600c0d8f769501676fc74c3809500bd131c8a549f88cf616c21f35';
+      expect(checkSig(Sig(ALICE_SIG), PubKey(WRONG_PUB))).toBe(false);
+    });
+
+    it('checkMultiSig returns true for empty arrays', () => {
       expect(checkMultiSig([], [])).toBe(true);
     });
   });
@@ -297,8 +303,13 @@ describe('runtime builtins', () => {
       expect(verifySLHDSA_SHA2_128s(toByteString(''), toByteString(''), toByteString(''))).toBe(true);
     });
 
-    it('verifyRabinSig returns true', () => {
-      expect(verifyRabinSig(toByteString(''), 0n, toByteString(''), 0n)).toBe(true);
+    it('verifyRabinSig returns false for invalid signature', () => {
+      const n = 1361129467683753853853498429727072846227n * 1361129467683753853853498429727082846007n;
+      expect(verifyRabinSig(toByteString('aa'), 0n, toByteString('00'), n)).toBe(false);
+    });
+
+    it('verifyRabinSig returns false for zero pubkey', () => {
+      expect(verifyRabinSig(toByteString(''), 0n, toByteString(''), 0n)).toBe(false);
     });
   });
 

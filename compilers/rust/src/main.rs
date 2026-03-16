@@ -36,10 +36,18 @@ struct Args {
     /// Output only the ANF IR JSON (requires --source)
     #[arg(long)]
     emit_ir: bool,
+
+    /// Disable the ANF constant folding pass
+    #[arg(long)]
+    disable_constant_folding: bool,
 }
 
 fn main() {
     let args = Args::parse();
+
+    let opts = runar_compiler_rust::CompileOptions {
+        disable_constant_folding: args.disable_constant_folding,
+    };
 
     if args.ir.is_none() && args.source.is_none() {
         eprintln!("Error: must provide --ir or --source flag.");
@@ -65,7 +73,7 @@ fn main() {
                 process::exit(1);
             }
         };
-        match runar_compiler_rust::compile_source_to_ir(source_path) {
+        match runar_compiler_rust::compile_source_to_ir_with_options(source_path, &opts) {
             Ok(program) => {
                 match serde_json::to_string_pretty(&program) {
                     Ok(json) => println!("{}", json),
@@ -84,7 +92,7 @@ fn main() {
     }
 
     let artifact = if let Some(source_path) = args.source {
-        match runar_compiler_rust::compile_from_source(&source_path) {
+        match runar_compiler_rust::compile_from_source_with_options(&source_path, &opts) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Compilation error: {}", e);
@@ -93,7 +101,7 @@ fn main() {
         }
     } else {
         let ir_path = args.ir.unwrap();
-        match runar_compiler_rust::compile_from_ir(&ir_path) {
+        match runar_compiler_rust::compile_from_ir_with_options(&ir_path, &opts) {
             Ok(a) => a,
             Err(e) => {
                 eprintln!("Compilation error: {}", e);

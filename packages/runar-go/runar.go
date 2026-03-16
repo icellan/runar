@@ -1,10 +1,14 @@
-// Package runar provides types and mock functions for Rúnar smart contract
+// Package runar provides types and crypto functions for Rúnar smart contract
 // development in Go. Contracts import this package to get IDE support,
 // type checking, and the ability to run native Go tests.
 //
-// Crypto functions like CheckSig are mocked (always return true) to enable
-// testing business logic without real signatures. Hash functions (Hash160,
-// Hash256, etc.) compute real hashes.
+// Crypto functions (CheckSig, VerifyRabinSig, VerifyWOTS, etc.) perform real
+// verification using the go-sdk ECDSA library and modular arithmetic.
+// CheckPreimage remains mocked (always returns true) since it requires a full
+// transaction context. Hash functions (Hash160, Hash256, etc.) compute real hashes.
+//
+// Test key pairs (Alice, Bob, Charlie) and SignTestMessage() provide deterministic
+// ECDSA keys and signatures for contract testing.
 //
 // Byte types use string as the underlying type so == comparison works
 // naturally in contract code, matching Rúnar's === semantics.
@@ -121,27 +125,51 @@ func Assert(cond bool) {
 }
 
 // ---------------------------------------------------------------------------
-// Mock crypto — always succeed for testing business logic
+// Crypto functions — real ECDSA and Rabin verification, mocked preimage
 // ---------------------------------------------------------------------------
 
-// CheckSig always returns true in test mode.
+// CheckSig performs real ECDSA signature verification against TestMessageDigest.
+// The signature must be DER-encoded and the public key must be a valid
+// compressed or uncompressed secp256k1 key.
 func CheckSig(sig Sig, pk PubKey) bool {
-	return true
+	return ecdsaVerify([]byte(sig), []byte(pk), TestMessageDigest[:])
 }
 
-// CheckMultiSig always returns true in test mode.
+// CheckMultiSig performs real ordered multi-signature verification.
+// Each signature is verified against the corresponding public key in order,
+// matching Bitcoin's OP_CHECKMULTISIG semantics (ordered, 1:1 pairing).
 func CheckMultiSig(sigs []Sig, pks []PubKey) bool {
+	if len(sigs) > len(pks) {
+		return false
+	}
+	pkIdx := 0
+	for _, sig := range sigs {
+		matched := false
+		for pkIdx < len(pks) {
+			if ecdsaVerify([]byte(sig), []byte(pks[pkIdx]), TestMessageDigest[:]) {
+				pkIdx++
+				matched = true
+				break
+			}
+			pkIdx++
+		}
+		if !matched {
+			return false
+		}
+	}
 	return true
 }
 
 // CheckPreimage always returns true in test mode.
+// Real preimage verification requires a full transaction context.
 func CheckPreimage(preimage SigHashPreimage) bool {
 	return true
 }
 
-// VerifyRabinSig always returns true in test mode.
+// VerifyRabinSig performs real Rabin signature verification using modular arithmetic.
+// Checks that (sig^2 + padding) mod pubkey == SHA256(msg).
 func VerifyRabinSig(msg ByteString, sig RabinSig, padding ByteString, pk RabinPubKey) bool {
-	return true
+	return rabinVerifyImpl([]byte(msg), []byte(sig), []byte(padding), []byte(pk))
 }
 
 // VerifyWOTS performs real WOTS+ signature verification using SHA-256 hash chains.
@@ -210,14 +238,43 @@ func Ripemd160Func(data ByteString) Ripemd160Hash {
 }
 
 // ---------------------------------------------------------------------------
+// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// ---------------------------------------------------------------------------
+
+// Blake3Compress is a mock BLAKE3 single-block compression.
+// In compiled Bitcoin Script this expands to ~10,000 opcodes.
+// The mock returns 32 zero bytes for business-logic testing.
+func Blake3Compress(chainingValue, block ByteString) ByteString {
+	return ByteString(make([]byte, 32))
+}
+
+// Blake3Hash is a mock BLAKE3 hash for messages up to 64 bytes.
+// In compiled Bitcoin Script this uses the IV as the chaining value and
+// applies zero-padding before calling the compression function.
+// The mock returns 32 zero bytes for business-logic testing.
+func Blake3Hash(message ByteString) ByteString {
+	return ByteString(make([]byte, 32))
+}
+
+// ---------------------------------------------------------------------------
 // Mock preimage extraction functions
 // ---------------------------------------------------------------------------
 
 // ExtractLocktime returns 0 in test mode.
 func ExtractLocktime(p SigHashPreimage) int64 { return 0 }
 
-// ExtractOutputHash returns 32 zero bytes in test mode.
-func ExtractOutputHash(p SigHashPreimage) Sha256 { return Sha256(make([]byte, 32)) }
+// ExtractOutputHash returns the first 32 bytes of the preimage in test mode.
+// Tests set TxPreimage = Hash256(expectedOutputBytes) so the assertion
+// Hash256(outputs) == ExtractOutputHash(TxPreimage) passes.
+// Falls back to 32 zero bytes when the preimage is unset (nil/empty).
+func ExtractOutputHash(p SigHashPreimage) Sha256 {
+	if len(p) >= 32 {
+		result := make([]byte, 32)
+		copy(result, p[:32])
+		return Sha256(result)
+	}
+	return Sha256(make([]byte, 32))
+}
 
 // ExtractAmount returns 10000 in test mode.
 func ExtractAmount(p SigHashPreimage) int64 { return 10000 }
@@ -471,18 +528,6 @@ func ToBool(n int64) bool {
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-// MockSig returns a dummy signature for testing.
-func MockSig() Sig {
-	return Sig(make([]byte, 72))
-}
-
-// MockPubKey returns a dummy compressed public key for testing.
-func MockPubKey() PubKey {
-	pk := make([]byte, 33)
-	pk[0] = 0x02
-	return PubKey(pk)
-}
 
 // MockPreimage returns a dummy sighash preimage for testing.
 func MockPreimage() SigHashPreimage {

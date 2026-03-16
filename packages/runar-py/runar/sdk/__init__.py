@@ -4,7 +4,7 @@ from runar.sdk.types import (
     Utxo, TransactionData, Transaction, TxInput, TxOutput,
     RunarArtifact, Abi, AbiMethod, AbiParam,
     StateField, ConstructorSlot, DeployOptions, CallOptions, OutputSpec,
-    PreparedCall, SdkValue,
+    PreparedCall, SdkValue, TerminalOutput,
 )
 from runar.sdk.provider import Provider, MockProvider
 from runar.sdk.rpc_provider import RPCProvider
@@ -15,12 +15,13 @@ from runar.sdk.deployment import build_deploy_transaction, select_utxos, estimat
 from runar.sdk.calling import build_call_transaction, insert_unlocking_script
 from runar.sdk.state import serialize_state, deserialize_state, find_last_op_return
 from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.anf_interpreter import compute_new_state
 
 __all__ = [
     'Utxo', 'TransactionData', 'Transaction', 'TxInput', 'TxOutput',
     'RunarArtifact', 'Abi', 'AbiMethod', 'AbiParam',
     'StateField', 'ConstructorSlot', 'DeployOptions', 'CallOptions', 'OutputSpec',
-    'PreparedCall', 'SdkValue',
+    'PreparedCall', 'SdkValue', 'TerminalOutput',
     'Provider', 'MockProvider', 'RPCProvider',
     'Signer', 'MockSigner', 'ExternalSigner', 'LocalSigner',
     'RunarContract',
@@ -28,4 +29,5 @@ __all__ = [
     'build_call_transaction', 'insert_unlocking_script',
     'serialize_state', 'deserialize_state', 'find_last_op_return',
     'compute_op_push_tx',
+    'compute_new_state',
 ]

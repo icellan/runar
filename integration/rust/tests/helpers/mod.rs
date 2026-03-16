@@ -7,7 +7,7 @@ use runar_lang::sdk::{
 use sha2::{Digest, Sha256};
 use ripemd::Ripemd160;
 use k256::ecdsa::SigningKey;
-use k256::elliptic_curve::rand_core::OsRng;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Compile helpers
@@ -209,10 +209,29 @@ pub struct TestWallet {
     pub address: String,
 }
 
-/// Generate a random key, compute pubkey and pubKeyHash.
+/// Counter for deterministic sequential keys, seeded from process ID to
+/// avoid collisions between parallel test processes.
+static WALLET_INDEX: AtomicU64 = AtomicU64::new(0);
+
+fn next_wallet_index() -> u64 {
+    let idx = WALLET_INDEX.fetch_add(1, Ordering::Relaxed);
+    if idx == 0 {
+        // First call: seed from process ID
+        let seed = std::process::id() as u64 * 1000;
+        WALLET_INDEX.store(seed + 1, Ordering::Relaxed);
+        return seed;
+    }
+    idx
+}
+
+/// Generate a deterministic key from a sequential counter.
 /// Does NOT fund the address.
 pub fn create_wallet() -> TestWallet {
-    let signing_key = SigningKey::random(&mut OsRng);
+    let idx = next_wallet_index();
+    let mut key_bytes = [0u8; 32];
+    key_bytes[24..32].copy_from_slice(&idx.to_be_bytes());
+    let signing_key = SigningKey::from_bytes((&key_bytes).into())
+        .expect("valid private key");
     let verifying_key = signing_key.verifying_key();
     let point = verifying_key.to_encoded_point(true);
     let pubkey_bytes = point.as_bytes();

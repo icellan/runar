@@ -120,12 +120,9 @@ describe('FunctionPatterns', () => {
     expect(deployTxid.length).toBe(64);
 
     // Call deposit(sig, amount) — null Sig is auto-computed by the SDK
+    // No manual newState — SDK auto-computes from ANF IR
     const { txid: callTxid } = await contract.call('deposit', [null, 50n], provider, signer, {
       satoshis: 10000,
-      newState: {
-        owner: signerPubKeyHex,
-        balance: 150n,
-      },
     });
     expect(callTxid).toBeTruthy();
     expect(typeof callTxid).toBe('string');
@@ -143,17 +140,17 @@ describe('FunctionPatterns', () => {
 
     await contract.deploy(provider, signer, { satoshis: 10000 });
 
-    // deposit(sig, 500) -> balance = 1500
+    // deposit(sig, 500) -> balance = 1500 (auto-computed)
     await contract.call('deposit', [null, 500n], provider, signer, {
       satoshis: 10000,
-      newState: { owner: signerPubKeyHex, balance: 1500n },
     });
+    expect(contract.state.balance).toBe(1500n);
 
-    // withdraw(sig, 200, 100) -> fee=2, balance = 1500-202 = 1298
+    // withdraw(sig, 200, 100) -> fee=2, balance = 1500-202 = 1298 (auto-computed)
     await contract.call('withdraw', [null, 200n, 100n], provider, signer, {
       satoshis: 10000,
-      newState: { owner: signerPubKeyHex, balance: 1298n },
     });
+    expect(contract.state.balance).toBe(1298n);
   });
 
   it('should reject deposit with wrong signer', async () => {
@@ -171,16 +168,12 @@ describe('FunctionPatterns', () => {
 
     await contract.deploy(provider, ownerSigner, { satoshis: 10000 });
 
-    // Call deposit with walletB — checkSig will fail on-chain
+    // Call deposit with walletB — auto-compute state, but checkSig fails on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
     await expect(
       contract.call('deposit', [null, 50n], provider, wrongSigner, {
         satoshis: 10000,
-        newState: {
-          owner: ownerPubKeyHex,
-          balance: 150n,
-        },
       }),
     ).rejects.toThrow();
   });

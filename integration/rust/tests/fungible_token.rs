@@ -145,20 +145,13 @@ fn test_fungible_token_send() {
         })
         .expect("deploy failed");
 
-    let recipient_pub = recipient.pub_key_hex.clone();
-    let mut new_state = HashMap::new();
-    new_state.insert("owner".to_string(), SdkValue::Bytes(recipient.pub_key_hex));
-    let call_opts = CallOptions {
-        new_state: Some(new_state),
-        ..Default::default()
-    };
     let (call_txid, _tx) = contract
         .call(
             "send",
-            &[SdkValue::Auto, SdkValue::Bytes(recipient_pub), SdkValue::Int(5000)],
+            &[SdkValue::Auto, SdkValue::Bytes(recipient.pub_key_hex), SdkValue::Int(5000)],
             &mut provider,
             &*signer,
-            Some(&call_opts),
+            None,
         )
         .expect("send failed");
     assert!(!call_txid.is_empty());
@@ -661,4 +654,282 @@ fn test_fungible_token_transfer_wrong_signer() {
         Some(&call_opts),
     );
     assert!(result.is_err(), "transfer with wrong signer should be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — exact balance (1 output only, no change)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_fungible_token_transfer_exact_balance() {
+    skip_if_no_node();
+
+    let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
+    let mut provider = create_provider();
+    let (signer, owner_wallet) = create_funded_wallet(&mut provider);
+    let recipient = create_wallet();
+    let token_id_hex = hex_encode_str("XFER-EXACT-TK");
+
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
+    contract
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+        })
+        .expect("deploy failed");
+
+    // Transfer entire balance — produces only 1 output (no change)
+    let call_opts = CallOptions {
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&recipient.pub_key_hex, 1000, 0),
+            },
+        ]),
+        ..Default::default()
+    };
+    let (txid, _) = contract
+        .call(
+            "transfer",
+            &[
+                SdkValue::Auto,
+                SdkValue::Bytes(recipient.pub_key_hex),
+                SdkValue::Int(1000),
+                SdkValue::Int(5000),
+            ],
+            &mut provider,
+            &*signer,
+            Some(&call_opts),
+        )
+        .expect("transfer exact balance failed");
+    assert!(!txid.is_empty());
+    assert_eq!(txid.len(), 64);
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — zero amount (assert fails: amount > 0)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_fungible_token_transfer_zero_amount_rejected() {
+    skip_if_no_node();
+
+    let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
+    let mut provider = create_provider();
+    let (signer, owner_wallet) = create_funded_wallet(&mut provider);
+    let recipient = create_wallet();
+    let token_id_hex = hex_encode_str("XFER-ZERO-TK");
+
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
+    contract
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+        })
+        .expect("deploy failed");
+
+    let call_opts = CallOptions {
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&owner_wallet.pub_key_hex, 1000, 0),
+            },
+        ]),
+        ..Default::default()
+    };
+    let result = contract.call(
+        "transfer",
+        &[
+            SdkValue::Auto,
+            SdkValue::Bytes(recipient.pub_key_hex),
+            SdkValue::Int(0),
+            SdkValue::Int(5000),
+        ],
+        &mut provider,
+        &*signer,
+        Some(&call_opts),
+    );
+    assert!(result.is_err(), "transfer of zero amount should be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — exceeds balance (assert fails: amount <= totalBalance)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_fungible_token_transfer_exceeds_balance_rejected() {
+    skip_if_no_node();
+
+    let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
+    let mut provider = create_provider();
+    let (signer, owner_wallet) = create_funded_wallet(&mut provider);
+    let recipient = create_wallet();
+    let token_id_hex = hex_encode_str("XFER-EXCEED-TK");
+
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
+    contract
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+        })
+        .expect("deploy failed");
+
+    let call_opts = CallOptions {
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 5000,
+                state: ft_state(&recipient.pub_key_hex, 1001, 0),
+            },
+        ]),
+        ..Default::default()
+    };
+    let result = contract.call(
+        "transfer",
+        &[
+            SdkValue::Auto,
+            SdkValue::Bytes(recipient.pub_key_hex),
+            SdkValue::Int(1001),
+            SdkValue::Int(5000),
+        ],
+        &mut provider,
+        &*signer,
+        Some(&call_opts),
+    );
+    assert!(result.is_err(), "transfer exceeding balance should be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — attacker inflates output totals (hashOutputs mismatch)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_fungible_token_transfer_inflated_balance() {
+    skip_if_no_node();
+
+    let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
+    let mut provider = create_provider();
+    let (signer, owner_wallet) = create_funded_wallet(&mut provider);
+    let recipient = create_wallet();
+    let token_id_hex = hex_encode_str("XFER-INFLATE-TK");
+
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
+    contract
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+        })
+        .expect("deploy failed");
+
+    // Attacker claims outputs totaling 1300 from a 1000-balance UTXO.
+    // The contract script does assert(amount <= totalBalance), but the
+    // outputs claim inflated balances. hashOutputs mismatch rejects it.
+    let call_opts = CallOptions {
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 2000,
+                state: ft_state(&recipient.pub_key_hex, 800, 0),
+            },
+            OutputSpec {
+                satoshis: 2000,
+                state: ft_state(&owner_wallet.pub_key_hex, 500, 0),
+            },
+        ]),
+        ..Default::default()
+    };
+    let result = contract.call(
+        "transfer",
+        &[
+            SdkValue::Auto,
+            SdkValue::Bytes(recipient.pub_key_hex),
+            SdkValue::Int(300),
+            SdkValue::Int(2000),
+        ],
+        &mut provider,
+        &*signer,
+        Some(&call_opts),
+    );
+    assert!(result.is_err(), "transfer with inflated output totals should be rejected");
+}
+
+// ---------------------------------------------------------------------------
+// Transfer — attacker deflates output totals (hashOutputs mismatch)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore]
+fn test_fungible_token_transfer_deflated_balance() {
+    skip_if_no_node();
+
+    let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
+    let mut provider = create_provider();
+    let (signer, owner_wallet) = create_funded_wallet(&mut provider);
+    let recipient = create_wallet();
+    let token_id_hex = hex_encode_str("XFER-DEFLATE-TK");
+
+    let mut contract = RunarContract::new(artifact, vec![
+        SdkValue::Bytes(owner_wallet.pub_key_hex.clone()),
+        SdkValue::Int(1000),
+        SdkValue::Int(0),
+        SdkValue::Bytes(token_id_hex),
+    ]);
+    contract
+        .deploy(&mut provider, &*signer, &DeployOptions {
+            satoshis: 5000,
+            change_address: None,
+        })
+        .expect("deploy failed");
+
+    // Attacker claims outputs totaling only 500 from a 1000-balance UTXO.
+    // The contract creates correct outputs internally, but the declared
+    // state doesn't match — hashOutputs mismatch rejects it.
+    let call_opts = CallOptions {
+        outputs: Some(vec![
+            OutputSpec {
+                satoshis: 2000,
+                state: ft_state(&recipient.pub_key_hex, 200, 0),
+            },
+            OutputSpec {
+                satoshis: 2000,
+                state: ft_state(&owner_wallet.pub_key_hex, 300, 0),
+            },
+        ]),
+        ..Default::default()
+    };
+    let result = contract.call(
+        "transfer",
+        &[
+            SdkValue::Auto,
+            SdkValue::Bytes(recipient.pub_key_hex),
+            SdkValue::Int(300),
+            SdkValue::Int(2000),
+        ],
+        &mut provider,
+        &*signer,
+        Some(&call_opts),
+    );
+    assert!(result.is_err(), "transfer with deflated output totals should be rejected");
 }

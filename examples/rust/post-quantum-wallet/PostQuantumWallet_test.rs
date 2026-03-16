@@ -2,10 +2,10 @@
 mod contract;
 
 use contract::*;
-use runar::prelude::{hash160, mock_pub_key, mock_sig, wots_keygen, wots_sign};
+use runar::prelude::{hash160, wots_keygen, wots_sign, ALICE};
 
 fn setup_keys() -> (Vec<u8>, Vec<u8>, runar::prelude::WotsKeyPair, Vec<u8>) {
-    let ecdsa_pub_key = mock_pub_key();
+    let ecdsa_pub_key = ALICE.pub_key.to_vec();
     let ecdsa_pub_key_hash = hash160(&ecdsa_pub_key);
 
     let seed = [0x42u8; 32];
@@ -25,8 +25,8 @@ fn test_spend() {
         wots_pub_key_hash,
     };
 
-    // Mock ECDSA signature (check_sig is mocked to true)
-    let ecdsa_sig = mock_sig();
+    // Real ECDSA signature
+    let ecdsa_sig = ALICE.sign_test_message();
 
     // WOTS-sign the ECDSA signature bytes
     let wots_sig = wots_sign(&ecdsa_sig, &kp.sk, &kp.pub_seed);
@@ -43,7 +43,7 @@ fn test_spend_tampered_wots() {
         wots_pub_key_hash,
     };
 
-    let ecdsa_sig = mock_sig();
+    let ecdsa_sig = ALICE.sign_test_message();
     let mut wots_sig = wots_sign(&ecdsa_sig, &kp.sk, &kp.pub_seed);
     wots_sig[100] ^= 0xff; // tamper
 
@@ -61,7 +61,7 @@ fn test_spend_wrong_ecdsa_sig() {
     };
 
     // Sign one ECDSA sig with WOTS, but provide different ECDSA sig to contract
-    let ecdsa_sig1 = mock_sig();
+    let ecdsa_sig1 = ALICE.sign_test_message();
     let wots_sig = wots_sign(&ecdsa_sig1, &kp.sk, &kp.pub_seed);
 
     let ecdsa_sig2 = vec![0x30, 0xFF]; // different sig bytes
@@ -86,7 +86,7 @@ fn test_spend_wrong_ecdsa_pub_key_hash() {
         k
     };
 
-    let ecdsa_sig = mock_sig();
+    let ecdsa_sig = ALICE.sign_test_message();
     let wots_sig = wots_sign(&ecdsa_sig, &kp.sk, &kp.pub_seed);
 
     let result = std::panic::catch_unwind(|| c.spend(&wots_sig, &kp.pk, &ecdsa_sig, &wrong_ecdsa_pub_key));
@@ -105,7 +105,7 @@ fn test_spend_wrong_wots_pub_key_hash() {
     // Different WOTS keypair whose hash160 won't match
     let wrong_kp = wots_keygen(Some(&[0x99u8; 32]), Some(&[0x77u8; 32]));
 
-    let ecdsa_sig = mock_sig();
+    let ecdsa_sig = ALICE.sign_test_message();
     let wots_sig = wots_sign(&ecdsa_sig, &wrong_kp.sk, &wrong_kp.pub_seed);
 
     let result = std::panic::catch_unwind(|| c.spend(&wots_sig, &wrong_kp.pk, &ecdsa_sig, &ecdsa_pub_key));

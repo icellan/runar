@@ -36,7 +36,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "divideBy", [10], provider, wallet["signer"],
-            CallOptions(new_state={"value": 100}),
         )
         assert txid
 
@@ -52,12 +51,10 @@ class TestMathDemo:
 
         contract.call(
             "divideBy", [10], provider, wallet["signer"],
-            CallOptions(new_state={"value": 100}),
         )
 
         contract.call(
             "clampValue", [0, 50], provider, wallet["signer"],
-            CallOptions(new_state={"value": 50}),
         )
 
     def test_square_root(self):
@@ -72,7 +69,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "squareRoot", [], provider, wallet["signer"],
-            CallOptions(new_state={"value": 7}),
         )
         assert txid
 
@@ -88,7 +84,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "exponentiate", [10], provider, wallet["signer"],
-            CallOptions(new_state={"value": 1024}),
         )
         assert txid
 
@@ -104,7 +99,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "reduceGcd", [75], provider, wallet["signer"],
-            CallOptions(new_state={"value": 25}),
         )
         assert txid
 
@@ -120,7 +114,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "computeLog2", [], provider, wallet["signer"],
-            CallOptions(new_state={"value": 10}),
         )
         assert txid
 
@@ -136,7 +129,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "scaleByRatio", [3, 4], provider, wallet["signer"],
-            CallOptions(new_state={"value": 75}),
         )
         assert txid
 
@@ -184,7 +176,6 @@ class TestMathDemo:
 
         txid, _ = contract.call(
             "normalize", [], provider, wallet["signer"],
-            CallOptions(new_state={"value": -1}),
         )
         assert txid
 
@@ -200,15 +191,12 @@ class TestMathDemo:
 
         contract.call(
             "divideBy", [10], provider, wallet["signer"],
-            CallOptions(new_state={"value": 100}),
         )
 
         contract.call(
             "squareRoot", [], provider, wallet["signer"],
-            CallOptions(new_state={"value": 10}),
         )
 
         contract.call(
             "scaleByRatio", [5, 1], provider, wallet["signer"],
-            CallOptions(new_state={"value": 50}),
         )

@@ -9,9 +9,12 @@
 //! ```
 
 pub mod ec;
+pub mod ecdsa;
 pub mod prelude;
+pub mod rabin;
 pub mod sdk;
 pub mod slh_dsa;
+pub mod test_keys;
 pub mod wots;
 
 // Re-export proc-macro attributes so `#[runar::contract]` works.

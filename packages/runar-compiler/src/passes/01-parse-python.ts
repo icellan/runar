@@ -1480,6 +1480,18 @@ class PyParser {
       return { kind: 'bytestring_literal', value: tok.value };
     }
 
+    // Array literal: [expr, expr, ...]
+    if (tok.type === '[') {
+      this.advance();
+      const elements: Expression[] = [];
+      while (this.peek().type !== ']' && this.peek().type !== 'eof') {
+        elements.push(this.parseExpression());
+        if (this.peek().type === ',') this.advance();
+      }
+      this.expect(']');
+      return { kind: 'array_literal', elements };
+    }
+
     // bytes.fromhex("...")
     if (tok.type === 'ident' && tok.value === 'bytes') {
       // Check for bytes.fromhex("...")

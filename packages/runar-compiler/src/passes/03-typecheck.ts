@@ -87,6 +87,8 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['verifySLHDSA_SHA2_256f', { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
   ['sha256Compress',  { params: ['ByteString', 'ByteString'], returnType: 'ByteString' }],
   ['sha256Finalize',  { params: ['ByteString', 'ByteString', 'bigint'], returnType: 'ByteString' }],
+  ['blake3Compress',  { params: ['ByteString', 'ByteString'], returnType: 'ByteString' }],
+  ['blake3Hash',      { params: ['ByteString'], returnType: 'ByteString' }],
   ['abs',          { params: ['bigint'], returnType: 'bigint' }],
   ['min',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],
   ['max',          { params: ['bigint', 'bigint'], returnType: 'bigint' }],
@@ -138,6 +140,17 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractOutputs',       { params: ['SigHashPreimage'], returnType: 'Sha256' }],
   ['extractLocktime',      { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractSigHashType',   { params: ['SigHashPreimage'], returnType: 'bigint' }],
+]);
+
+// ---------------------------------------------------------------------------
+// Known global constants (e.g., EC constants, SigHash namespace)
+// ---------------------------------------------------------------------------
+
+const KNOWN_GLOBALS: Map<string, TType> = new Map([
+  ['SigHash', '<namespace>'], // SigHash.ALL, SigHash.FORKID, etc.
+  ['EC_P', 'bigint'],         // secp256k1 field prime
+  ['EC_N', 'bigint'],         // secp256k1 group order
+  ['EC_G', 'Point'],          // secp256k1 generator point
 ]);
 
 // ---------------------------------------------------------------------------
@@ -437,9 +450,20 @@ class TypeChecker {
         // Check if it's a builtin function name (used as a reference)
         if (BUILTIN_FUNCTIONS.has(expr.name)) return '<builtin>';
 
-        // Not found -- could be an undeclared variable
-        // We don't error here because it could be a forward reference
-        // or a global builtin. The call checker will catch it.
+        // Check if it's a known global constant
+        const globalType = KNOWN_GLOBALS.get(expr.name);
+        if (globalType !== undefined) return globalType;
+
+        // Check if it's a contract property used as a bare identifier
+        // (some frontends like Solidity emit `pubKeyHash` instead of `this.pubKeyHash`)
+        const propType = this.propTypes.get(expr.name);
+        if (propType !== undefined) return propType;
+
+        // Undeclared variable -- emit error
+        this.errors.push(makeDiagnostic(
+          `Undefined variable '${expr.name}'`,
+          'error',
+        ));
         return '<unknown>';
       }
 
@@ -547,6 +571,23 @@ class TypeChecker {
           ));
         }
         return BIGINT;
+      }
+
+      case 'array_literal': {
+        if (expr.elements.length === 0) {
+          return '<unknown>[]';
+        }
+        const elemType = this.inferExprType(expr.elements[0]!, env);
+        for (let i = 1; i < expr.elements.length; i++) {
+          const et = this.inferExprType(expr.elements[i]!, env);
+          if (!isSubtype(et, elemType) && et !== '<unknown>') {
+            this.errors.push(makeDiagnostic(
+              `Array element type mismatch: expected '${elemType}', got '${et}'`,
+              'error',
+            ));
+          }
+        }
+        return `${elemType}[]`;
       }
     }
   }
@@ -1118,5 +1159,7 @@ function inferExprTypeStatic(expr: Expression): TType {
     case 'increment_expr':
     case 'decrement_expr':
       return BIGINT;
+    case 'array_literal':
+      return '<unknown>[]';
   }
 }

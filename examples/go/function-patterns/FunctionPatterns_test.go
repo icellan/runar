@@ -5,9 +5,11 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+func ownerSig() runar.Sig { return runar.SignTestMessage(runar.Alice.PrivKey) }
+
 func newContract() *FunctionPatterns {
 	return &FunctionPatterns{
-		Owner:   runar.MockPubKey(),
+		Owner:   runar.Alice.PubKey,
 		Balance: 10000,
 	}
 }
@@ -18,7 +20,7 @@ func newContract() *FunctionPatterns {
 
 func TestDeposit(t *testing.T) {
 	c := newContract()
-	c.Deposit(runar.MockSig(), 500)
+	c.Deposit(ownerSig(), 500)
 	if c.Balance != 10500 {
 		t.Errorf("expected 10500, got %d", c.Balance)
 	}
@@ -26,9 +28,9 @@ func TestDeposit(t *testing.T) {
 
 func TestDeposit_Multiple(t *testing.T) {
 	c := newContract()
-	c.Deposit(runar.MockSig(), 100)
-	c.Deposit(runar.MockSig(), 200)
-	c.Deposit(runar.MockSig(), 300)
+	c.Deposit(ownerSig(), 100)
+	c.Deposit(ownerSig(), 200)
+	c.Deposit(ownerSig(), 300)
 	if c.Balance != 10600 {
 		t.Errorf("expected 10600, got %d", c.Balance)
 	}
@@ -40,7 +42,7 @@ func TestDeposit_RejectsZero(t *testing.T) {
 			t.Fatal("expected panic for zero deposit")
 		}
 	}()
-	newContract().Deposit(runar.MockSig(), 0)
+	newContract().Deposit(ownerSig(), 0)
 }
 
 func TestDeposit_RejectsNegative(t *testing.T) {
@@ -49,7 +51,7 @@ func TestDeposit_RejectsNegative(t *testing.T) {
 			t.Fatal("expected panic for negative deposit")
 		}
 	}()
-	newContract().Deposit(runar.MockSig(), -100)
+	newContract().Deposit(ownerSig(), -100)
 }
 
 // ---------------------------------------------------------------------------
@@ -58,7 +60,7 @@ func TestDeposit_RejectsNegative(t *testing.T) {
 
 func TestWithdraw_NoFee(t *testing.T) {
 	c := newContract()
-	c.Withdraw(runar.MockSig(), 3000, 0) // 0 bps = no fee
+	c.Withdraw(ownerSig(), 3000, 0) // 0 bps = no fee
 	if c.Balance != 7000 {
 		t.Errorf("expected 7000, got %d", c.Balance)
 	}
@@ -67,7 +69,7 @@ func TestWithdraw_NoFee(t *testing.T) {
 func TestWithdraw_WithFee(t *testing.T) {
 	c := newContract()
 	// Withdraw 1000 with 500 bps (5%) fee = 50, total deducted = 1050
-	c.Withdraw(runar.MockSig(), 1000, 500)
+	c.Withdraw(ownerSig(), 1000, 500)
 	if c.Balance != 8950 {
 		t.Errorf("expected 8950, got %d", c.Balance)
 	}
@@ -75,7 +77,7 @@ func TestWithdraw_WithFee(t *testing.T) {
 
 func TestWithdraw_FullBalance(t *testing.T) {
 	c := newContract()
-	c.Withdraw(runar.MockSig(), 10000, 0)
+	c.Withdraw(ownerSig(), 10000, 0)
 	if c.Balance != 0 {
 		t.Errorf("expected 0, got %d", c.Balance)
 	}
@@ -87,7 +89,7 @@ func TestWithdraw_InsufficientBalance(t *testing.T) {
 			t.Fatal("expected panic for insufficient balance")
 		}
 	}()
-	newContract().Withdraw(runar.MockSig(), 20000, 0)
+	newContract().Withdraw(ownerSig(), 20000, 0)
 }
 
 func TestWithdraw_FeeExceedsBalance(t *testing.T) {
@@ -97,7 +99,7 @@ func TestWithdraw_FeeExceedsBalance(t *testing.T) {
 		}
 	}()
 	// 10000 balance, withdraw 10000 with 100 bps fee = 100 -> total 10100 > 10000
-	newContract().Withdraw(runar.MockSig(), 10000, 100)
+	newContract().Withdraw(ownerSig(), 10000, 100)
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +108,7 @@ func TestWithdraw_FeeExceedsBalance(t *testing.T) {
 
 func TestScale_Double(t *testing.T) {
 	c := newContract()
-	c.Scale(runar.MockSig(), 2, 1) // * 2/1 = double
+	c.Scale(ownerSig(), 2, 1) // * 2/1 = double
 	if c.Balance != 20000 {
 		t.Errorf("expected 20000, got %d", c.Balance)
 	}
@@ -114,7 +116,7 @@ func TestScale_Double(t *testing.T) {
 
 func TestScale_Half(t *testing.T) {
 	c := newContract()
-	c.Scale(runar.MockSig(), 1, 2) // * 1/2 = half
+	c.Scale(ownerSig(), 1, 2) // * 1/2 = half
 	if c.Balance != 5000 {
 		t.Errorf("expected 5000, got %d", c.Balance)
 	}
@@ -122,7 +124,7 @@ func TestScale_Half(t *testing.T) {
 
 func TestScale_ThreeQuarters(t *testing.T) {
 	c := newContract()
-	c.Scale(runar.MockSig(), 3, 4) // * 3/4 = 7500
+	c.Scale(ownerSig(), 3, 4) // * 3/4 = 7500
 	if c.Balance != 7500 {
 		t.Errorf("expected 7500, got %d", c.Balance)
 	}
@@ -135,25 +137,25 @@ func TestScale_ThreeQuarters(t *testing.T) {
 func TestNormalize_ClampsAndRounds(t *testing.T) {
 	c := newContract()
 	// Balance=10000, clamp to [0, 8000], round down to step=1000 -> 8000
-	c.Normalize(runar.MockSig(), 0, 8000, 1000)
+	c.Normalize(ownerSig(), 0, 8000, 1000)
 	if c.Balance != 8000 {
 		t.Errorf("expected 8000, got %d", c.Balance)
 	}
 }
 
 func TestNormalize_RoundsDown(t *testing.T) {
-	c := &FunctionPatterns{Owner: runar.MockPubKey(), Balance: 7777}
+	c := &FunctionPatterns{Owner: runar.Alice.PubKey, Balance: 7777}
 	// Clamp to [0, 10000] (no effect), round down to step=1000 -> 7000
-	c.Normalize(runar.MockSig(), 0, 10000, 1000)
+	c.Normalize(ownerSig(), 0, 10000, 1000)
 	if c.Balance != 7000 {
 		t.Errorf("expected 7000, got %d", c.Balance)
 	}
 }
 
 func TestNormalize_ClampsUp(t *testing.T) {
-	c := &FunctionPatterns{Owner: runar.MockPubKey(), Balance: 50}
+	c := &FunctionPatterns{Owner: runar.Alice.PubKey, Balance: 50}
 	// Clamp to [1000, 10000] -> 1000, round down to step=500 -> 1000
-	c.Normalize(runar.MockSig(), 1000, 10000, 500)
+	c.Normalize(ownerSig(), 1000, 10000, 500)
 	if c.Balance != 1000 {
 		t.Errorf("expected 1000, got %d", c.Balance)
 	}
@@ -217,8 +219,8 @@ func TestRoundDown(t *testing.T) {
 
 func TestDepositThenWithdrawWithFee(t *testing.T) {
 	c := newContract()
-	c.Deposit(runar.MockSig(), 5000)    // 10000 + 5000 = 15000
-	c.Withdraw(runar.MockSig(), 5000, 200) // 2% fee = 100, total = 5100 -> 9900
+	c.Deposit(ownerSig(), 5000)    // 10000 + 5000 = 15000
+	c.Withdraw(ownerSig(), 5000, 200) // 2% fee = 100, total = 5100 -> 9900
 	if c.Balance != 9900 {
 		t.Errorf("expected 9900, got %d", c.Balance)
 	}
@@ -226,8 +228,8 @@ func TestDepositThenWithdrawWithFee(t *testing.T) {
 
 func TestScaleThenNormalize(t *testing.T) {
 	c := newContract()
-	c.Scale(runar.MockSig(), 3, 4)                   // 10000 * 3/4 = 7500
-	c.Normalize(runar.MockSig(), 0, 10000, 1000) // clamp [0,10000] (no effect), round to 1000 -> 7000
+	c.Scale(ownerSig(), 3, 4)                   // 10000 * 3/4 = 7500
+	c.Normalize(ownerSig(), 0, 10000, 1000) // clamp [0,10000] (no effect), round to 1000 -> 7000
 	if c.Balance != 7000 {
 		t.Errorf("expected 7000, got %d", c.Balance)
 	}

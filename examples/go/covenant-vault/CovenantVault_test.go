@@ -7,8 +7,8 @@ import (
 
 func newVault() *CovenantVault {
 	return &CovenantVault{
-		Owner:     runar.MockPubKey(),
-		Recipient: runar.Hash160(runar.MockPubKey()),
+		Owner:     runar.Alice.PubKey,
+		Recipient: runar.Hash160(runar.Bob.PubKey),
 		MinAmount: 1000,
 	}
 }

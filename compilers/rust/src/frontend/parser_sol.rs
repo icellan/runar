@@ -1495,4 +1495,100 @@ contract Loop is SmartContract {
         let contract = result.contract.unwrap();
         assert_eq!(contract.methods[0].body.len(), 3); // let sum, for, require
     }
+
+    // -----------------------------------------------------------------------
+    // Test: method name, visibility, and parameter names/types are parsed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_methods_and_params() {
+        let source = r#"
+contract Adder is SmartContract {
+    immutable bigint target;
+
+    constructor(bigint target) {
+        super(target);
+        this.target = target;
+    }
+
+    function verify(bigint a, bigint b) public {
+        require(a + b == this.target);
+    }
+}
+"#;
+
+        let result = parse_solidity(source, Some("Adder.runar.sol"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+
+        assert_eq!(contract.methods.len(), 1, "expected 1 method");
+        let method = &contract.methods[0];
+        assert_eq!(method.name, "verify");
+        assert_eq!(
+            method.visibility,
+            Visibility::Public,
+            "expected public visibility"
+        );
+        assert_eq!(method.params.len(), 2, "expected 2 params");
+        assert_eq!(method.params[0].name, "a");
+        assert_eq!(method.params[1].name, "b");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: malformed Solidity produces an error
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_invalid_syntax_error() {
+        // Missing contract name and parent
+        let source = r#"
+contract {
+    // missing name and parent
+}
+"#;
+
+        let result = parse_solidity(source, Some("bad.runar.sol"));
+        // Should either produce errors or fail to produce a valid contract
+        let is_bad = !result.errors.is_empty() || result.contract.is_none();
+        assert!(
+            is_bad,
+            "expected errors or no contract for invalid Solidity syntax"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: contract with multiple properties all parsed correctly
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multiple_properties() {
+        let source = r#"
+contract TwoProps is SmartContract {
+    immutable Addr addr;
+    immutable PubKey key;
+
+    constructor(Addr addr, PubKey key) {
+        super(addr, key);
+        this.addr = addr;
+        this.key = key;
+    }
+
+    function check(bigint x) public {
+        require(x == 1);
+    }
+}
+"#;
+
+        let result = parse_solidity(source, Some("TwoProps.runar.sol"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        assert_eq!(
+            contract.properties.len(),
+            2,
+            "expected 2 properties, got {}",
+            contract.properties.len()
+        );
+        assert_eq!(contract.properties[0].name, "addr");
+        assert_eq!(contract.properties[1].name, "key");
+    }
 }

@@ -95,6 +95,9 @@ export interface RunarArtifact {
     stack?: StackProgram;
   };
 
+  /** ANF IR for SDK state computation (always included for stateful contracts) */
+  anf?: ANFProgram;
+
   /** State field descriptors (present only for stateful contracts) */
   stateFields?: StateField[];
 
@@ -319,6 +322,9 @@ export function assembleArtifact(
   // State fields (only if the contract has mutable state)
   if (stateFields.length > 0) {
     artifact.stateFields = stateFields;
+    // Always include ANF IR for stateful contracts — the SDK uses it
+    // to auto-compute state transitions without requiring manual newState.
+    artifact.anf = anfProgram;
   }
 
   // Constructor slots (only if there are placeholder byte offsets)

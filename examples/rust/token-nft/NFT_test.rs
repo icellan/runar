@@ -1,7 +1,7 @@
 // Contract logic tests for SimpleNFT.
 //
 // The contract struct is defined inline because add_output output-tracking
-// requires test infrastructure not part of the Rúnar contract.
+// requires test infrastructure not part of the Runar contract.
 
 use runar::prelude::*;
 
@@ -30,9 +30,9 @@ impl SimpleNFT {
     }
 }
 
-fn alice() -> PubKey { b"alice_pubkey_33bytes_placeholder!".to_vec() }
-fn bob() -> PubKey { b"bob___pubkey_33bytes_placeholder!".to_vec() }
-fn charlie() -> PubKey { b"charlie_pk_33bytes_placeholder__".to_vec() }
+fn alice() -> PubKey { ALICE.pub_key.to_vec() }
+fn bob() -> PubKey { BOB.pub_key.to_vec() }
+fn charlie() -> PubKey { CHARLIE.pub_key.to_vec() }
 
 fn new_nft(owner: PubKey) -> SimpleNFT {
     SimpleNFT {
@@ -46,7 +46,7 @@ fn new_nft(owner: PubKey) -> SimpleNFT {
 #[test]
 fn test_transfer() {
     let mut c = new_nft(alice());
-    c.transfer(&mock_sig(), bob(), 1000);
+    c.transfer(&ALICE.sign_test_message(), bob(), 1000);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.outputs[0].owner, bob());
 }
@@ -54,17 +54,17 @@ fn test_transfer() {
 #[test]
 fn test_transfer_chain() {
     let mut c = new_nft(alice());
-    c.transfer(&mock_sig(), bob(), 1000);
+    c.transfer(&ALICE.sign_test_message(), bob(), 1000);
     c.owner = bob();
     c.outputs.clear();
-    c.transfer(&mock_sig(), charlie(), 1000);
+    c.transfer(&BOB.sign_test_message(), charlie(), 1000);
     assert_eq!(c.outputs[0].owner, charlie());
 }
 
 #[test]
 fn test_burn() {
     let c = new_nft(alice());
-    c.burn(&mock_sig());
+    c.burn(&ALICE.sign_test_message());
     assert_eq!(c.outputs.len(), 0);
 }
 

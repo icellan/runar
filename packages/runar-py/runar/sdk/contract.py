@@ -18,6 +18,7 @@ from runar.sdk.state import (
     encode_push_data,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
+from runar.sdk.anf_interpreter import compute_new_state
 
 
 class RunarContract:
@@ -360,6 +361,12 @@ class RunarContract:
             if opts.new_state:
                 for k, v in opts.new_state.items():
                     self._state[k] = v
+            elif method_needs_change and self.artifact.anf:
+                named_args = _build_named_args(user_params, resolved_args)
+                computed = compute_new_state(
+                    self.artifact.anf, method_name, self._state, named_args,
+                )
+                self._state.update(computed)
             new_locking_script = self.get_locking_script()
 
         # Fetch fee rate and funding UTXOs for all contract types.
@@ -1035,6 +1042,15 @@ def _read_varint(data: bytes, offset: int) -> tuple[int, int]:
         return int.from_bytes(data[offset + 1:offset + 5], 'little'), 5
     else:
         return int.from_bytes(data[offset + 1:offset + 9], 'little'), 9
+
+
+def _build_named_args(user_params: list, resolved_args: list) -> dict:
+    """Map positional resolved_args to a dict keyed by parameter name."""
+    result: dict = {}
+    for i, param in enumerate(user_params):
+        if i < len(resolved_args):
+            result[param.name] = resolved_args[i]
+    return result
 
 
 def _encode_script_number(n: int) -> str:

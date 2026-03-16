@@ -99,11 +99,15 @@ function anfToJson(anf: ANFProgram): string {
   }, 2);
 }
 
+interface CompilerOutput {
+  hex: string | null;
+  stderr: string;
+}
+
 /**
- * Run the Go compiler on an ANF IR JSON file, returning the hex output.
- * Returns null if the Go compiler fails.
+ * Run the Go compiler on an ANF IR JSON file, returning the hex output and stderr.
  */
-function runGoCompiler(irFilePath: string): string | null {
+function runGoCompiler(irFilePath: string): CompilerOutput {
   try {
     const result = execSync(
       `go run . --ir "${irFilePath}" --hex`,
@@ -114,18 +118,19 @@ function runGoCompiler(irFilePath: string): string | null {
         maxBuffer: 16 * 1024 * 1024,
       },
     );
-    return result.toString().trim();
-  } catch {
-    return null;
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
   }
 }
 
 /**
- * Run the Rust compiler on an ANF IR JSON file, returning the hex output.
- * Uses the pre-built release binary for speed. Returns null if the compiler fails.
+ * Run the Rust compiler on an ANF IR JSON file, returning the hex output and stderr.
+ * Uses the pre-built release binary for speed.
  */
-function runRustCompiler(irFilePath: string): string | null {
-  if (!rustBinaryPath) return null;
+function runRustCompiler(irFilePath: string): CompilerOutput {
+  if (!rustBinaryPath) return { hex: null, stderr: 'Rust binary not available' };
   try {
     const result = execSync(
       `"${rustBinaryPath}" --ir "${irFilePath}" --hex`,
@@ -136,10 +141,26 @@ function runRustCompiler(irFilePath: string): string | null {
         maxBuffer: 16 * 1024 * 1024,
       },
     );
-    return result.toString().trim();
-  } catch {
-    return null;
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
   }
+}
+
+/**
+ * Assert that a cross-compiler produced output, throwing with context on failure.
+ */
+function requireHex(output: CompilerOutput, compiler: string, contractName: string): string {
+  if (output.hex === null) {
+    throw new Error(
+      `${compiler} compiler produced no output for ${contractName}${output.stderr ? `:\n${output.stderr}` : ''}`,
+    );
+  }
+  if (output.hex.length === 0) {
+    throw new Error(`${compiler} compiler produced empty hex for ${contractName}`);
+  }
+  return output.hex;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,20 +271,18 @@ describe.skipIf(!hasGo)('Cross-compiler: TS IR -> Go Script', () => {
       }
 
       expect(tsResult.anf).not.toBeNull();
-      expect(tsResult.scriptHex).toBeTruthy();
+      expect(typeof tsResult.scriptHex).toBe('string');
       const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
 
       const irJson = anfToJson(tsAnf);
       const irPath = join(tempDir, `${name}.anf.json`);
       writeFileSync(irPath, irJson);
 
-      const hexOutput = runGoCompiler(irPath);
+      const goHex = requireHex(runGoCompiler(irPath), 'Go', name);
 
       // The Go compiler must produce output matching the TS reference byte-for-byte
-      expect(hexOutput).not.toBeNull();
-      expect(hexOutput!.length).toBeGreaterThan(0);
-      const tsHex = tsResult.scriptHex as string;
-      expect(hexOutput!.toLowerCase()).toBe(tsHex.toLowerCase());
+      expect(goHex.toLowerCase()).toBe(tsHex.toLowerCase());
     });
   }
 
@@ -277,17 +296,17 @@ describe.skipIf(!hasGo)('Cross-compiler: TS IR -> Go Script', () => {
     expect(tsAnf.contractName).toBe('P2PKH');
 
     // Write ANF IR for Go
+    expect(typeof result.scriptHex).toBe('string');
+    const tsHex = result.scriptHex as string;
+
     const irJson = anfToJson(tsAnf);
     const irPath = join(tempDir, 'p2pkh-both.anf.json');
     writeFileSync(irPath, irJson);
 
-    const goHex = runGoCompiler(irPath);
+    const goHex = requireHex(runGoCompiler(irPath), 'Go', 'P2PKH');
 
     // Go must produce hex output matching the TS reference byte-for-byte
-    expect(goHex).not.toBeNull();
-    expect(goHex!.length).toBeGreaterThan(0);
-    const tsHex = result.scriptHex as string;
-    expect(goHex!.toLowerCase()).toBe(tsHex.toLowerCase());
+    expect(goHex.toLowerCase()).toBe(tsHex.toLowerCase());
   });
 });
 
@@ -318,20 +337,18 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler: TS IR -> Rust Scri
       }
 
       expect(tsResult.anf).not.toBeNull();
-      expect(tsResult.scriptHex).toBeTruthy();
+      expect(typeof tsResult.scriptHex).toBe('string');
       const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
 
       const irJson = anfToJson(tsAnf);
       const irPath = join(tempDir, `${name}.anf.json`);
       writeFileSync(irPath, irJson);
 
-      const hexOutput = runRustCompiler(irPath);
+      const rustHex = requireHex(runRustCompiler(irPath), 'Rust', name);
 
       // The Rust compiler must produce output matching the TS reference byte-for-byte
-      expect(hexOutput).not.toBeNull();
-      expect(hexOutput!.length).toBeGreaterThan(0);
-      const tsHex = tsResult.scriptHex as string;
-      expect(hexOutput!.toLowerCase()).toBe(tsHex.toLowerCase());
+      expect(rustHex.toLowerCase()).toBe(tsHex.toLowerCase());
     });
   }
 
@@ -343,16 +360,15 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler: TS IR -> Rust Scri
     const tsAnf = result.anf!;
     expect(tsAnf.contractName).toBe('P2PKH');
 
+    expect(typeof result.scriptHex).toBe('string');
+    const tsHex = result.scriptHex as string;
+
     const irJson = anfToJson(tsAnf);
     const irPath = join(tempDir, 'p2pkh-both-rust.anf.json');
     writeFileSync(irPath, irJson);
 
-    const rustHex = runRustCompiler(irPath);
-
-    expect(rustHex).not.toBeNull();
-    expect(rustHex!.length).toBeGreaterThan(0);
-    const tsHex = result.scriptHex as string;
-    expect(rustHex!.toLowerCase()).toBe(tsHex.toLowerCase());
+    const rustHex = requireHex(runRustCompiler(irPath), 'Rust', 'P2PKH');
+    expect(rustHex.toLowerCase()).toBe(tsHex.toLowerCase());
   });
 });
 
@@ -411,8 +427,9 @@ describe.skipIf(!hasGo)('Cross-compiler: all examples TS IR -> Go', () => {
       }
 
       expect(result.anf).not.toBeNull();
-      expect(result.scriptHex).toBeTruthy();
+      expect(typeof result.scriptHex).toBe('string');
       const exampleAnf = result.anf!;
+      const tsHex = result.scriptHex as string;
 
       // Write ANF IR to temp file
       const irJson = anfToJson(exampleAnf);
@@ -420,11 +437,8 @@ describe.skipIf(!hasGo)('Cross-compiler: all examples TS IR -> Go', () => {
       writeFileSync(irPath, irJson);
 
       // Run Go compiler
-      const goHex = runGoCompiler(irPath);
-
-      expect(goHex).not.toBeNull();
-      expect(goHex!.length).toBeGreaterThan(0);
-      expect(goHex!.toLowerCase()).toBe(result.scriptHex!.toLowerCase());
+      const goHex = requireHex(runGoCompiler(irPath), 'Go', example.name);
+      expect(goHex.toLowerCase()).toBe(tsHex.toLowerCase());
     });
   }
 });
@@ -500,8 +514,8 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
       const source = readFileSync(test.sourceFile, 'utf-8');
       const expectedHex = readFileSync(test.hexFile, 'utf-8').trim();
 
-      // Compile through TS compiler
-      const result = compile(source);
+      // Compile through TS compiler (disable constant folding to match golden files)
+      const result = compile(source, { disableConstantFolding: true });
       if (!result.success) {
         throw new Error(tsCompileErrors(test.name, result.diagnostics));
       }
@@ -515,14 +529,10 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
       writeFileSync(irPath, irJson);
 
       // Run Go compiler
-      const goHex = runGoCompiler(irPath);
-
-      // Go must produce output
-      expect(goHex).not.toBeNull();
-      expect(goHex!.length).toBeGreaterThan(0);
+      const goHex = requireHex(runGoCompiler(irPath), 'Go', test.name);
 
       // Byte-for-byte comparison against the golden hex file
-      expect(goHex!.toLowerCase()).toBe(expectedHex.toLowerCase());
+      expect(goHex.toLowerCase()).toBe(expectedHex.toLowerCase());
     });
   }
 });
@@ -557,18 +567,16 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler: all examples TS IR
       }
 
       expect(result.anf).not.toBeNull();
-      expect(result.scriptHex).toBeTruthy();
+      expect(typeof result.scriptHex).toBe('string');
       const exampleAnf = result.anf!;
+      const tsHex = result.scriptHex as string;
 
       const irJson = anfToJson(exampleAnf);
       const irPath = join(tempDir, `${example.name}.anf.json`);
       writeFileSync(irPath, irJson);
 
-      const rustHex = runRustCompiler(irPath);
-
-      expect(rustHex).not.toBeNull();
-      expect(rustHex!.length).toBeGreaterThan(0);
-      expect(rustHex!.toLowerCase()).toBe(result.scriptHex!.toLowerCase());
+      const rustHex = requireHex(runRustCompiler(irPath), 'Rust', example.name);
+      expect(rustHex.toLowerCase()).toBe(tsHex.toLowerCase());
     });
   }
 });
@@ -599,7 +607,8 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler conformance: Rust o
       const source = readFileSync(test.sourceFile, 'utf-8');
       const expectedHex = readFileSync(test.hexFile, 'utf-8').trim();
 
-      const result = compile(source);
+      // Disable constant folding to match golden files
+      const result = compile(source, { disableConstantFolding: true });
       if (!result.success) {
         throw new Error(tsCompileErrors(test.name, result.diagnostics));
       }
@@ -611,11 +620,8 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler conformance: Rust o
       const irPath = join(tempDir, `${test.name}.anf.json`);
       writeFileSync(irPath, irJson);
 
-      const rustHex = runRustCompiler(irPath);
-
-      expect(rustHex).not.toBeNull();
-      expect(rustHex!.length).toBeGreaterThan(0);
-      expect(rustHex!.toLowerCase()).toBe(expectedHex.toLowerCase());
+      const rustHex = requireHex(runRustCompiler(irPath), 'Rust', test.name);
+      expect(rustHex.toLowerCase()).toBe(expectedHex.toLowerCase());
     });
   }
 });
@@ -643,7 +649,7 @@ describe.skipIf(!hasGo || !hasRust || !rustBinaryPath)('Cross-compiler: all thre
     const result = compile(P2PKH_SOURCE);
     expect(result.success).toBe(true);
     expect(result.anf).not.toBeNull();
-    expect(result.scriptHex).toBeTruthy();
+    expect(typeof result.scriptHex).toBe('string');
 
     const tsAnf = result.anf!;
     const tsHex = (result.scriptHex as string).toLowerCase();
@@ -653,18 +659,14 @@ describe.skipIf(!hasGo || !hasRust || !rustBinaryPath)('Cross-compiler: all thre
     writeFileSync(irPath, irJson);
 
     // Run Go compiler
-    const goHex = runGoCompiler(irPath);
-    expect(goHex).not.toBeNull();
-    expect(goHex!.length).toBeGreaterThan(0);
+    const goHex = requireHex(runGoCompiler(irPath), 'Go', 'P2PKH');
 
     // Run Rust compiler
-    const rustHex = runRustCompiler(irPath);
-    expect(rustHex).not.toBeNull();
-    expect(rustHex!.length).toBeGreaterThan(0);
+    const rustHex = requireHex(runRustCompiler(irPath), 'Rust', 'P2PKH');
 
     // All three must match
-    expect(goHex!.toLowerCase()).toBe(tsHex);
-    expect(rustHex!.toLowerCase()).toBe(tsHex);
-    expect(goHex!.toLowerCase()).toBe(rustHex!.toLowerCase());
+    expect(goHex.toLowerCase()).toBe(tsHex);
+    expect(rustHex.toLowerCase()).toBe(tsHex);
+    expect(goHex.toLowerCase()).toBe(rustHex.toLowerCase());
   });
 });

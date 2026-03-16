@@ -64,6 +64,48 @@ describe('Multi-format: parse() dispatch', () => {
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
+
+  it('dispatches .runar.py to Python parser (row 64)', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.py');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.py');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+  });
+
+  it('parses .runar.go files using the Go parser (row 318)', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.go');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.go');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+  });
+
+  it('dispatches .runar.rs to Rust parser (row 321)', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.rs');
+    if (!source) return;
+    const result = parse(source, 'basic-p2pkh.runar.rs');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+  });
+
+  it('unknown extension produces errors or falls back to TS parser (row 323)', () => {
+    // When an unknown extension is passed with invalid source, it produces errors.
+    const result = parse('this is not valid typescript', 'contract.runar.xyz');
+    // Either no contract or errors
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
+
+  it('empty source produces error (row 72)', () => {
+    // An empty string has no class declaration → error or null contract
+    const result = parse('', 'contract.runar.ts');
+    const hasErrorsOrNoContract = result.contract === null || result.errors.some(e => e.severity === 'error');
+    expect(hasErrorsOrNoContract).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

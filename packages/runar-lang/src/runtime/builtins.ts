@@ -6,7 +6,7 @@
 // math uses native bigint; byte ops use hex string manipulation.
 // ---------------------------------------------------------------------------
 
-import { Hash, Point as BsvPoint, BigNumber } from '@bsv/sdk';
+import { Hash, Point as BsvPoint, BigNumber, Signature, PublicKey } from '@bsv/sdk';
 import type {
   ByteString,
   PubKey,
@@ -17,6 +17,11 @@ import type {
   RabinSig,
   Point,
 } from '../types.js';
+
+/** Fixed test message for real ECDSA verification in tests. */
+const TEST_MESSAGE = Array.from(
+  new TextEncoder().encode('runar-test-message-v1'),
+);
 
 // ---------------------------------------------------------------------------
 // Hex ↔ Uint8Array helpers
@@ -67,14 +72,58 @@ export function hash256(data: ByteString): Sha256 {
 }
 
 // ---------------------------------------------------------------------------
-// Signature verification (mocked — always returns true)
+// Signature verification (real ECDSA over fixed test message)
 // ---------------------------------------------------------------------------
 
-export function checkSig(_sig: Sig, _pubkey: PubKey): boolean {
-  return true;
+/**
+ * Parse a DER signature, stripping a trailing sighash byte if present.
+ */
+function parseDERSig(sigHex: string): InstanceType<typeof Signature> | null {
+  try {
+    const bytes = hexToBytes(sigHex);
+    if (bytes.length < 8) return null;
+    const declaredLen = bytes[1]!;
+    const expectedPureDER = declaredLen + 2;
+    let derBytes: number[];
+    if (bytes.length === expectedPureDER) {
+      derBytes = bytes;
+    } else if (bytes.length === expectedPureDER + 1) {
+      derBytes = bytes.slice(0, expectedPureDER);
+    } else {
+      derBytes = bytes;
+    }
+    return Signature.fromDER(derBytes);
+  } catch {
+    return null;
+  }
 }
 
-export function checkMultiSig(_sigs: Sig[], _pubkeys: PubKey[]): boolean {
+export function checkSig(sig: Sig, pubkey: PubKey): boolean {
+  try {
+    const pk = PublicKey.fromDER(hexToBytes(pubkey as string));
+    const parsedSig = parseDERSig(sig as string);
+    if (!parsedSig) return false;
+    return pk.verify(TEST_MESSAGE, parsedSig);
+  } catch {
+    return false;
+  }
+}
+
+export function checkMultiSig(sigs: Sig[], pubkeys: PubKey[]): boolean {
+  // Bitcoin's checkMultiSig: m sigs verified against n pubkeys in order
+  let pkIdx = 0;
+  for (const sig of sigs) {
+    let found = false;
+    while (pkIdx < pubkeys.length) {
+      if (checkSig(sig, pubkeys[pkIdx]!)) {
+        pkIdx++;
+        found = true;
+        break;
+      }
+      pkIdx++;
+    }
+    if (!found) return false;
+  }
   return true;
 }
 
@@ -287,16 +336,32 @@ export function bool(value: bigint): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Rabin signature verification (mocked)
+// Rabin signature verification (real)
 // ---------------------------------------------------------------------------
 
+function rabinBytesToUnsignedLE(bytes: number[]): bigint {
+  let result = 0n;
+  for (let i = 0; i < bytes.length; i++) {
+    result += BigInt(bytes[i]!) << BigInt(i * 8);
+  }
+  return result;
+}
+
 export function verifyRabinSig(
-  _msg: ByteString,
-  _sig: RabinSig,
-  _padding: ByteString,
-  _pubkey: RabinPubKey,
+  msg: ByteString,
+  sig: RabinSig,
+  padding: ByteString,
+  pubkey: RabinPubKey,
 ): boolean {
-  return true;
+  if (pubkey <= 0n) return false;
+  const msgBytes = hexToBytes(msg as string);
+  const hashArr = Hash.sha256(msgBytes);
+  const hashBN = rabinBytesToUnsignedLE(hashArr);
+  const padBytes = hexToBytes(padding as string);
+  const padBN = rabinBytesToUnsignedLE(padBytes);
+  const lhs = ((sig * sig + padBN) % pubkey + pubkey) % pubkey;
+  const rhs = (hashBN % pubkey + pubkey) % pubkey;
+  return lhs === rhs;
 }
 
 // ---------------------------------------------------------------------------

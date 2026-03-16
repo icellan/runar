@@ -154,19 +154,13 @@ fn test_function_patterns_deposit() {
         })
         .expect("deploy failed");
 
-    let mut new_state = HashMap::new();
-    new_state.insert("balance".to_string(), SdkValue::Int(150));
-
     let (call_txid, _tx) = contract
         .call(
             "deposit",
             &[SdkValue::Auto, SdkValue::Int(50)],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(new_state),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("deposit failed");
     assert!(!call_txid.is_empty());
@@ -194,34 +188,24 @@ fn test_function_patterns_deposit_then_withdraw() {
         .expect("deploy failed");
 
     // deposit(sig, 500) -> balance = 1500
-    let mut state1 = HashMap::new();
-    state1.insert("balance".to_string(), SdkValue::Int(1500));
     contract
         .call(
             "deposit",
             &[SdkValue::Auto, SdkValue::Int(500)],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state1),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("deposit failed");
 
     // withdraw(sig, 200, 100) -> fee = 200*100/10000 = 2, deduction = 202, balance = 1298
-    let mut state2 = HashMap::new();
-    state2.insert("balance".to_string(), SdkValue::Int(1298));
     contract
         .call(
             "withdraw",
             &[SdkValue::Auto, SdkValue::Int(200), SdkValue::Int(100)],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(state2),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("withdraw failed");
 }

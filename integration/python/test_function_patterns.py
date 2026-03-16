@@ -14,7 +14,7 @@ import pytest
 from conftest import (
     compile_contract, create_provider, create_funded_wallet, create_wallet,
 )
-from runar.sdk import RunarContract, CallOptions, DeployOptions
+from runar.sdk import RunarContract, DeployOptions
 
 
 class TestFunctionPatterns:
@@ -114,7 +114,6 @@ class TestFunctionPatterns:
             "deposit",
             [None, 50],
             provider, owner_wallet["signer"],
-            CallOptions(new_state={"balance": 150}),
         )
         assert call_txid
         assert len(call_txid) == 64
@@ -138,7 +137,6 @@ class TestFunctionPatterns:
             "deposit",
             [None, 500],
             provider, owner_wallet["signer"],
-            CallOptions(new_state={"balance": 1500}),
         )
 
         # withdraw(sig=None, amount=200, feeBps=100) -> fee=2, balance=1298
@@ -146,7 +144,6 @@ class TestFunctionPatterns:
             "withdraw",
             [None, 200, 100],
             provider, owner_wallet["signer"],
-            CallOptions(new_state={"balance": 1298}),
         )
 
     def test_wrong_owner_rejected(self):
@@ -169,5 +166,4 @@ class TestFunctionPatterns:
                 "deposit",
                 [None, 50],
                 provider, wrong_wallet["signer"],
-                CallOptions(new_state={"balance": 150}),
             )

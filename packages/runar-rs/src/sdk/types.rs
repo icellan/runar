@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use super::anf_interpreter::ANFProgram;
 
 // ---------------------------------------------------------------------------
 // Transaction types
@@ -121,6 +122,8 @@ pub struct RunarArtifact {
     pub code_separator_index: Option<usize>,
     #[serde(default, rename = "codeSeparatorIndices")]
     pub code_separator_indices: Option<Vec<usize>>,
+    #[serde(default)]
+    pub anf: Option<ANFProgram>,
 }
 
 /// The ABI (Application Binary Interface) of a contract.

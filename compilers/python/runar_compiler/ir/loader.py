@@ -44,6 +44,8 @@ KNOWN_KINDS: frozenset[str] = frozenset({
     "check_preimage",
     "deserialize_state",
     "add_output",
+    "add_raw_output",
+    "array_literal",
 })
 
 

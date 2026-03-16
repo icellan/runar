@@ -15,6 +15,8 @@ export type { ParseResult } from './passes/01-parse.js';
 export { parseSolSource } from './passes/01-parse-sol.js';
 export { parseMoveSource } from './passes/01-parse-move.js';
 export { parsePythonSource } from './passes/01-parse-python.js';
+export { parseGoSource } from './passes/01-parse-go.js';
+export { parseRustSource } from './passes/01-parse-rust.js';
 export { parseRubySource } from './passes/01-parse-ruby.js';
 
 export { validate } from './passes/02-validate.js';
@@ -38,6 +40,7 @@ import { lowerToStack } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
 import { optimizeStackIR } from './optimizer/peephole.js';
 import { optimizeEC } from './optimizer/anf-ec.js';
+import { foldConstants } from './optimizer/constant-fold.js';
 import { assembleArtifact } from './artifact/assembler.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
@@ -61,6 +64,9 @@ export interface CompileOptions {
 
   /** Bake property values into the locking script (replaces placeholders). */
   constructorArgs?: Record<string, bigint | boolean | string>;
+
+  /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
+  disableConstantFolding?: boolean;
 }
 
 export interface CompileResult {
@@ -244,6 +250,11 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     }
   }
 
+  // Pass 4.25: Constant folding (on by default)
+  if (!opts.disableConstantFolding) {
+    anf = foldConstants(anf);
+  }
+
   // Pass 4.5: ANF EC Optimizer (always-on)
   const optimizedAnf = optimizeEC(anf);
 
@@ -269,6 +280,8 @@ export function compile(source: string, options?: CompileOptions): CompileResult
         constructorSlots: emitResult.constructorSlots,
         codeSeparatorIndex: emitResult.codeSeparatorIndex,
         codeSeparatorIndices: emitResult.codeSeparatorIndices,
+        includeSourceMap: emitResult.sourceMap.length > 0,
+        sourceMappings: emitResult.sourceMap,
       },
     );
 

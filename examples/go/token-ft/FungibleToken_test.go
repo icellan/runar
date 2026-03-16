@@ -6,10 +6,12 @@ import (
 )
 
 var (
-	alice   = runar.PubKey("alice_pubkey_33bytes_placeholder!")
-	bob     = runar.PubKey("bob___pubkey_33bytes_placeholder!")
+	alice   = runar.Alice.PubKey
+	bob     = runar.Bob.PubKey
 	tokenId = runar.ByteString("test-token-001")
 )
+
+func aliceSig() runar.Sig { return runar.SignTestMessage(runar.Alice.PrivKey) }
 
 func newToken(owner runar.PubKey, balance runar.Bigint) *FungibleToken {
 	return &FungibleToken{Owner: owner, Balance: balance, MergeBalance: 0, TokenId: tokenId}
@@ -17,7 +19,7 @@ func newToken(owner runar.PubKey, balance runar.Bigint) *FungibleToken {
 
 func TestFungibleToken_Transfer(t *testing.T) {
 	c := newToken(alice, 100)
-	c.Transfer(runar.MockSig(), bob, 30, 1000)
+	c.Transfer(aliceSig(), bob, 30, 1000)
 	out := c.Outputs()
 	if len(out) != 2 {
 		t.Fatalf("expected 2 outputs, got %d", len(out))
@@ -39,12 +41,12 @@ func TestFungibleToken_Transfer_ZeroAmount_Fails(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newToken(alice, 100).Transfer(runar.MockSig(), bob, 0, 1000)
+	newToken(alice, 100).Transfer(aliceSig(), bob, 0, 1000)
 }
 
 func TestFungibleToken_Send(t *testing.T) {
 	c := newToken(alice, 100)
-	c.Send(runar.MockSig(), bob, 1000)
+	c.Send(aliceSig(), bob, 1000)
 	if len(c.Outputs()) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(c.Outputs()))
 	}
@@ -55,7 +57,7 @@ func TestFungibleToken_Merge(t *testing.T) {
 	// allPrevouts = 72 zero bytes (two 36-byte zero outpoints),
 	// consistent with mock ExtractHashPrevouts and ExtractOutpoint.
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	c.Merge(runar.MockSig(), 150, allPrevouts, 1000)
+	c.Merge(aliceSig(), 150, allPrevouts, 1000)
 	out := c.Outputs()
 	if len(out) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(out))
@@ -77,7 +79,7 @@ func TestFungibleToken_Merge_NegativeOtherBalance_Fails(t *testing.T) {
 		}
 	}()
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	newToken(alice, 100).Merge(runar.MockSig(), -1, allPrevouts, 1000)
+	newToken(alice, 100).Merge(aliceSig(), -1, allPrevouts, 1000)
 }
 
 func TestFungibleToken_Merge_TamperedPrevouts_Fails(t *testing.T) {
@@ -90,13 +92,13 @@ func TestFungibleToken_Merge_TamperedPrevouts_Fails(t *testing.T) {
 	for i := range tampered {
 		tampered[i] = 0xff
 	}
-	newToken(alice, 30).Merge(runar.MockSig(), 70, runar.ByteString(tampered), 1000)
+	newToken(alice, 30).Merge(aliceSig(), 70, runar.ByteString(tampered), 1000)
 }
 
 func TestFungibleToken_Merge_PreExistingMergeBalance(t *testing.T) {
 	c := &FungibleToken{Owner: alice, Balance: 20, MergeBalance: 10, TokenId: tokenId}
 	allPrevouts := runar.ByteString(make([]byte, 72))
-	c.Merge(runar.MockSig(), 50, allPrevouts, 1000)
+	c.Merge(aliceSig(), 50, allPrevouts, 1000)
 	out := c.Outputs()
 	if len(out) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(out))
@@ -112,7 +114,7 @@ func TestFungibleToken_Merge_PreExistingMergeBalance(t *testing.T) {
 
 func TestFungibleToken_Transfer_ExactBalance(t *testing.T) {
 	c := newToken(alice, 100)
-	c.Transfer(runar.MockSig(), bob, 100, 1000)
+	c.Transfer(aliceSig(), bob, 100, 1000)
 	out := c.Outputs()
 	if len(out) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(out))
@@ -124,7 +126,7 @@ func TestFungibleToken_Transfer_ExactBalance(t *testing.T) {
 
 func TestFungibleToken_Transfer_UsesMergeBalance(t *testing.T) {
 	c := &FungibleToken{Owner: alice, Balance: 60, MergeBalance: 40, TokenId: tokenId}
-	c.Transfer(runar.MockSig(), bob, 80, 1000)
+	c.Transfer(aliceSig(), bob, 80, 1000)
 	out := c.Outputs()
 	if len(out) != 2 {
 		t.Fatalf("expected 2 outputs, got %d", len(out))
@@ -139,7 +141,7 @@ func TestFungibleToken_Transfer_UsesMergeBalance(t *testing.T) {
 
 func TestFungibleToken_Send_UsesMergeBalance(t *testing.T) {
 	c := &FungibleToken{Owner: alice, Balance: 60, MergeBalance: 40, TokenId: tokenId}
-	c.Send(runar.MockSig(), bob, 1000)
+	c.Send(aliceSig(), bob, 1000)
 	out := c.Outputs()
 	if len(out) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(out))

@@ -45,6 +45,9 @@ importers:
       runar-sdk:
         specifier: workspace:*
         version: link:../../packages/runar-sdk
+      runar-testing:
+        specifier: workspace:*
+        version: link:../../packages/runar-testing
     devDependencies:
       vitest:
         specifier: ^2.1.0

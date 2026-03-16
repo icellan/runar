@@ -28,11 +28,14 @@ def load_conformance_script(test_name: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
-def must_compile_ir(json_str: str) -> Artifact:
+def must_compile_ir(json_str: str, disable_constant_folding: bool = False) -> Artifact:
     """Compile IR JSON to an Artifact, raising on failure."""
-    return compile_from_ir_bytes(json_str.encode("utf-8"))
+    return compile_from_ir_bytes(
+        json_str.encode("utf-8"),
+        disable_constant_folding=disable_constant_folding,
+    )
 
 
-def must_compile_source(path: str) -> Artifact:
+def must_compile_source(path: str, disable_constant_folding: bool = False) -> Artifact:
     """Compile a source file to an Artifact, raising on failure."""
-    return compile_from_source(path)
+    return compile_from_source(path, disable_constant_folding=disable_constant_folding)

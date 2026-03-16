@@ -26,6 +26,7 @@ import {
   emitEcMakePoint, emitEcPointX, emitEcPointY,
 } from './ec-codegen.js';
 import { emitSha256Compress, emitSha256Finalize } from './sha256-codegen.js';
+import { emitBlake3Compress, emitBlake3Hash } from './blake3-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -146,7 +147,7 @@ class StackMap {
         return this.slots.length - 1 - i;
       }
     }
-    throw new Error(`Value '${name}' not found on stack`);
+    throw new Error(`Value '${name}' not found on stack (stack has ${this.slots.length} items: [${this.slots.join(', ')}])`);
   }
 
   /** Check if a named value exists on the stack. */
@@ -202,6 +203,15 @@ class StackMap {
       if (s !== null) names.add(s);
     }
     return names;
+  }
+
+  /** Rename a slot at a given depth from top. */
+  renameAtDepth(depthFromTop: number, newName: string | null): void {
+    const index = this.slots.length - 1 - depthFromTop;
+    if (index < 0 || index >= this.slots.length) {
+      throw new Error(`Invalid stack depth for rename: ${depthFromTop}`);
+    }
+    this.slots[index] = newName;
   }
 
 }
@@ -286,6 +296,9 @@ function collectRefs(value: ANFValue): string[] {
     case 'deserialize_state':
       refs.push(value.preimage);
       break;
+    case 'array_literal':
+      refs.push(...value.elements);
+      break;
   }
 
   return refs;
@@ -306,6 +319,13 @@ class LoweringContext {
   private localBindings: Set<string> = new Set();
   /** Parent-scope refs that must not be consumed (used after the current if-branch). */
   private outerProtectedRefs: Set<string> | null = null;
+  /** True when executing inside an if-branch. update_prop skips old-value
+   *  removal so that the same-property detection in lowerIf can handle it. */
+  private _insideBranch = false;
+  /** Debug: source location to attach to next emitted StackOps. */
+  private currentSourceLoc: { file: string; line: number; column: number } | undefined;
+  /** Tracks the number of elements in array literal bindings for checkMultiSig. */
+  private arrayLengths: Map<string, number> = new Map();
 
   constructor(
     params: string[],
@@ -345,6 +365,9 @@ class LoweringContext {
   }
 
   private emitOp(stackOp: StackOp): void {
+    if (this.currentSourceLoc && !stackOp.sourceLoc) {
+      stackOp.sourceLoc = this.currentSourceLoc;
+    }
     this.ops.push(stackOp);
     this.trackDepth();
   }
@@ -531,6 +554,8 @@ class LoweringContext {
 
     for (let i = 0; i < bindings.length; i++) {
       const binding = bindings[i]!;
+      // Propagate source location from ANF binding to StackOps
+      this.currentSourceLoc = binding.sourceLoc;
       if (binding.value.kind === 'assert' && i === lastAssertIdx) {
         // Terminal assert: leave value on stack instead of OP_VERIFY
         this.lowerAssert(binding.value.value, i, lastUses, true);
@@ -540,6 +565,7 @@ class LoweringContext {
       } else {
         this.lowerBinding(binding, i, lastUses);
       }
+      this.currentSourceLoc = undefined;
     }
 
   }
@@ -599,6 +625,9 @@ class LoweringContext {
         break;
       case 'add_raw_output':
         this.lowerAddRawOutput(name, value.satoshis, value.scriptBytes, bindingIndex, lastUses);
+        break;
+      case 'array_literal':
+        this.lowerArrayLiteral(name, value.elements, bindingIndex, lastUses);
         break;
     }
   }
@@ -865,6 +894,16 @@ class LoweringContext {
       return;
     }
 
+    if (func === 'blake3Compress') {
+      this.lowerBlake3Compress(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
+    if (func === 'blake3Hash') {
+      this.lowerBlake3Hash(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
     // EC builtins
     if (func === 'ecAdd' || func === 'ecMul' || func === 'ecMulGen' ||
         func === 'ecNegate' || func === 'ecOnCurve' || func === 'ecModReduce' ||
@@ -939,6 +978,11 @@ class LoweringContext {
       return;
     }
 
+    if (func === 'checkMultiSig') {
+      this.lowerCheckMultiSig(bindingName, args, bindingIndex, lastUses);
+      return;
+    }
+
     // computeStateOutputHash(preimage, stateBytes) — builds the full BIP-143
     // output serialization for a single-output stateful continuation, then hashes it.
     // Extracts codePart and amount from the preimage's scriptCode field, builds:
@@ -1010,9 +1054,95 @@ class LoweringContext {
     this.trackDepth();
   }
 
+  /**
+   * Lower an array literal to stack. Each element is brought to the top
+   * in order. The binding name represents the array as a whole on the stack.
+   * The element count is recorded in `arrayLengths` so that consumers
+   * (like checkMultiSig) can emit the count push.
+   */
+  private lowerArrayLiteral(
+    bindingName: string,
+    elements: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring each element to the top in order
+    for (const elem of elements) {
+      const isLast = this.isLastUse(elem, bindingIndex, lastUses);
+      this.bringToTop(elem, isLast);
+    }
+
+    // Pop all elements from the stack map (they're consumed into the array)
+    for (let i = 0; i < elements.length; i++) {
+      this.stackMap.pop();
+    }
+
+    // Push the array binding name — represents the N elements now on stack
+    this.stackMap.push(bindingName);
+    // Record the array length for checkMultiSig
+    this.arrayLengths.set(bindingName, elements.length);
+    this.trackDepth();
+  }
+
+  /**
+   * Lower checkMultiSig([sig1, sig2, ...], [pk1, pk2, ...]) to Bitcoin Script.
+   *
+   * OP_CHECKMULTISIG expects the stack layout:
+   *   OP_0 <sig1> <sig2> ... <nSigs> <pk1> <pk2> ... <nPKs> OP_CHECKMULTISIG
+   *
+   * The args[0] is the sigs array binding, args[1] is the pubkeys array binding.
+   * Each was lowered as an array_literal, so the individual elements are already
+   * on the stack. We need to insert the OP_0 dummy, counts, and the opcode.
+   */
+  private lowerCheckMultiSig(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length !== 2) {
+      throw new Error(`checkMultiSig expects 2 arguments, got ${args.length}`);
+    }
+
+    const sigsRef = args[0]!;
+    const pksRef = args[1]!;
+    const nSigs = this.arrayLengths.get(sigsRef) ?? 1;
+    const nPKs = this.arrayLengths.get(pksRef) ?? 1;
+
+    // Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
+    this.emitOp({ op: 'push', value: 0n });
+    this.stackMap.push(null);
+
+    // Bring sigs array to top (the individual elements are treated as one item)
+    const sigsLast = this.isLastUse(sigsRef, bindingIndex, lastUses);
+    this.bringToTop(sigsRef, sigsLast);
+
+    // Push nSigs count
+    this.emitOp({ op: 'push', value: BigInt(nSigs) });
+    this.stackMap.push(null);
+
+    // Bring pubkeys array to top
+    const pksLast = this.isLastUse(pksRef, bindingIndex, lastUses);
+    this.bringToTop(pksRef, pksLast);
+
+    // Push nPKs count
+    this.emitOp({ op: 'push', value: BigInt(nPKs) });
+    this.stackMap.push(null);
+
+    // Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 2 + nSigs + nPKs + 2 items
+    // But on our stack map they're: null(OP_0), sigsRef, null(nSigs), pksRef, null(nPKs)
+    for (let i = 0; i < 5; i++) {
+      this.stackMap.pop();
+    }
+
+    this.emitOp({ op: 'opcode', code: 'OP_CHECKMULTISIG' });
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
   private lowerMethodCall(
     bindingName: string,
-    _object: string,
+    object: string,
     method: string,
     args: string[],
     bindingIndex: number,
@@ -1021,12 +1151,25 @@ class LoweringContext {
     // Method calls on `this` are treated as builtin calls
     // e.g. this.getStateScript(), this.buildP2PKH(addr)
     if (method === 'getStateScript') {
+      // Consume the @this object before dispatching
+      if (this.stackMap.has(object)) {
+        this.bringToTop(object, true);
+        this.emitOp({ op: 'drop' });
+        this.stackMap.pop();
+      }
       this.lowerGetStateScript(bindingName);
       return;
     }
 
     const privateMethod = this.privateMethods.get(method);
     if (privateMethod) {
+      // Consume the @this object reference — it's a compile-time concept,
+      // not a runtime value. Without this, 0n stays on the stack.
+      if (this.stackMap.has(object)) {
+        this.bringToTop(object, true);
+        this.emitOp({ op: 'drop' });
+        this.stackMap.pop();
+      }
       this.inlineMethodCall(bindingName, privateMethod, args, bindingIndex, lastUses);
       return;
     }
@@ -1042,18 +1185,43 @@ class LoweringContext {
     bindingIndex: number,
     lastUses: Map<string, number>,
   ): void {
+    // Track shadowed names so we can restore them after the body runs.
+    // When a param name already exists on the stack, temporarily rename
+    // the existing entry to avoid duplicate names which break Set-based
+    // branch reconciliation in lowerIf.
+    const shadowed: { paramName: string; shadowedName: string; depth: number }[] = [];
+
     // Bind call arguments to private method params.
     for (let i = 0; i < args.length; i++) {
       if (i < method.params.length) {
         const arg = args[i]!;
+        const paramName = method.params[i]!.name;
         const isLast = this.isLastUse(arg, bindingIndex, lastUses);
         this.bringToTop(arg, isLast);
         this.stackMap.pop();
-        this.stackMap.push(method.params[i]!.name);
+
+        // If paramName already exists on the stack, temporarily rename
+        // the existing entry to prevent duplicate-name issues.
+        if (this.stackMap.has(paramName)) {
+          const existingDepth = this.stackMap.findDepth(paramName);
+          const shadowedName = `__shadowed_${bindingIndex}_${paramName}`;
+          this.stackMap.renameAtDepth(existingDepth, shadowedName);
+          shadowed.push({ paramName, shadowedName, depth: existingDepth });
+        }
+
+        this.stackMap.push(paramName);
       }
     }
 
     this.lowerBindings(method.body);
+
+    // Restore shadowed names so the caller's scope sees its original entries.
+    for (const { paramName, shadowedName } of shadowed) {
+      if (this.stackMap.has(shadowedName)) {
+        const depth = this.stackMap.findDepth(shadowedName);
+        this.stackMap.renameAtDepth(depth, paramName);
+      }
+    }
 
     // Method return value is the last binding result.
     if (method.body.length > 0) {
@@ -1095,6 +1263,7 @@ class LoweringContext {
     const thenCtx = new LoweringContext([], this._properties, this.privateMethods);
     thenCtx.stackMap = this.stackMap.clone();
     thenCtx.outerProtectedRefs = protectedRefs;
+    thenCtx._insideBranch = true;
     thenCtx.lowerBindings(thenBindings, terminalAssert);
 
     if (terminalAssert && thenCtx.stackMap.depth > 1) {
@@ -1109,6 +1278,7 @@ class LoweringContext {
     const elseCtx = new LoweringContext([], this._properties, this.privateMethods);
     elseCtx.stackMap = this.stackMap.clone();
     elseCtx.outerProtectedRefs = protectedRefs;
+    elseCtx._insideBranch = true;
     elseCtx.lowerBindings(elseBindings, terminalAssert);
 
     if (terminalAssert && elseCtx.stackMap.depth > 1) {
@@ -1129,6 +1299,8 @@ class LoweringContext {
     // but gone after then). Emit targeted ROLL+DROP in the else-branch
     // to remove those same items, then push empty bytes as placeholder.
     // OP_CAT with empty bytes is identity (no-op for output hashing).
+    // Identify items consumed asymmetrically between branches.
+    // Phase 1: collect consumed names from both directions.
     const postThenNames = thenCtx.stackMap.namedSlots();
     const consumedNames: string[] = [];
     for (const name of preIfNames) {
@@ -1136,8 +1308,17 @@ class LoweringContext {
         consumedNames.push(name);
       }
     }
+    const postElseNames = elseCtx.stackMap.namedSlots();
+    const elseConsumedNames: string[] = [];
+    for (const name of preIfNames) {
+      if (!postElseNames.has(name) && thenCtx.stackMap.has(name)) {
+        elseConsumedNames.push(name);
+      }
+    }
+
+    // Phase 2: perform ALL drops before any placeholder pushes.
+    // This prevents double-placeholder when bilateral drops balance each other.
     if (consumedNames.length > 0) {
-      // Remove consumed items from else-branch, deepest first to keep depths stable
       const depths = consumedNames.map(n => elseCtx.stackMap.findDepth(n)).sort((a, b) => b - a);
       for (const depth of depths) {
         if (depth === 0) {
@@ -1147,27 +1328,15 @@ class LoweringContext {
           elseCtx.emitOp({ op: 'nip' });
           elseCtx.stackMap.removeAtDepth(1);
         } else {
-          // Push depth, ROLL to bring item to top, then DROP
           elseCtx.emitOp({ op: 'push', value: BigInt(depth) });
           elseCtx.stackMap.push(null);
           elseCtx.emitOp({ op: 'roll', depth });
-          elseCtx.stackMap.pop(); // remove depth literal
+          elseCtx.stackMap.pop();
           const rolled = elseCtx.stackMap.removeAtDepth(depth);
           elseCtx.stackMap.push(rolled);
           elseCtx.emitOp({ op: 'drop' });
           elseCtx.stackMap.pop();
         }
-      }
-      // Push empty bytes as placeholder result
-      elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
-      elseCtx.stackMap.push(null);
-    }
-    // Handle the reverse case symmetrically (unlikely but safe)
-    const postElseNames = elseCtx.stackMap.namedSlots();
-    const elseConsumedNames: string[] = [];
-    for (const name of preIfNames) {
-      if (!postElseNames.has(name) && thenCtx.stackMap.has(name)) {
-        elseConsumedNames.push(name);
       }
     }
     if (elseConsumedNames.length > 0) {
@@ -1190,6 +1359,32 @@ class LoweringContext {
           thenCtx.stackMap.pop();
         }
       }
+    }
+
+    // Phase 3: single depth-balance check after ALL drops.
+    // Push placeholder only if one branch is still deeper than the other.
+    if (thenCtx.stackMap.depth > elseCtx.stackMap.depth) {
+      // When the then-branch reassigned a local variable (if-without-else),
+      // push a COPY of that variable in the else-branch instead of a generic
+      // placeholder. This ensures the else-branch preserves the correct value
+      // when post-ENDIF stale removal (NIP) removes the old entry.
+      const thenTop = thenCtx.stackMap.peekAtDepth(0);
+      if (elseBindings.length === 0 && thenTop && elseCtx.stackMap.has(thenTop)) {
+        const varDepth = elseCtx.stackMap.findDepth(thenTop);
+        if (varDepth === 0) {
+          elseCtx.emitOp({ op: 'dup' });
+        } else {
+          elseCtx.emitOp({ op: 'push', value: BigInt(varDepth) });
+          elseCtx.stackMap.push(null);
+          elseCtx.emitOp({ op: 'pick', depth: varDepth });
+          elseCtx.stackMap.pop();
+        }
+        elseCtx.stackMap.push(thenTop);
+      } else {
+        elseCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
+        elseCtx.stackMap.push(null);
+      }
+    } else if (elseCtx.stackMap.depth > thenCtx.stackMap.depth) {
       thenCtx.emitOp({ op: 'push', value: new Uint8Array(0) });
       thenCtx.stackMap.push(null);
     }
@@ -1213,8 +1408,73 @@ class LoweringContext {
       }
     }
 
-    // The if expression produces one result value on top
-    this.stackMap.push(bindingName);
+    // The if expression may produce a result value on top.
+    if (thenCtx.stackMap.depth > this.stackMap.depth) {
+      // Branches increased depth — check if both updated the same property.
+      const thenTop = thenCtx.stackMap.peekAtDepth(0);
+      const elseTop = elseCtx.stackMap.depth > 0 ? elseCtx.stackMap.peekAtDepth(0) : null;
+      const isProperty = thenTop ? this._properties.some(p => p.name === thenTop) : false;
+      if (isProperty && thenTop && thenTop === elseTop && thenTop !== bindingName && this.stackMap.has(thenTop)) {
+        // Both branches did update_prop for the same property (e.g., turn flip).
+        // The new value is on top of the actual stack. The old entry is stale.
+        // Push the property name and physically remove the old entry.
+        this.stackMap.push(thenTop);
+        for (let d = 1; d < this.stackMap.depth; d++) {
+          if (this.stackMap.peekAtDepth(d) === thenTop) {
+            if (d === 1) {
+              this.emitOp({ op: 'nip' });
+              this.stackMap.removeAtDepth(1);
+            } else {
+              this.emitOp({ op: 'push', value: BigInt(d) });
+              this.stackMap.push(null);
+              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.stackMap.pop();
+              const rolled = this.stackMap.removeAtDepth(d);
+              this.stackMap.push(rolled);
+              this.emitOp({ op: 'drop' });
+              this.stackMap.pop();
+            }
+            break;
+          }
+        }
+      } else if (thenTop && !isProperty && elseBindings.length === 0 &&
+                 thenTop !== bindingName && this.stackMap.has(thenTop)) {
+        // If-without-else: the then-branch reassigned a local variable that
+        // was PICKed (outer-protected), leaving a stale copy on the stack.
+        // The new value is at TOS; the old copy is deeper. Push the local
+        // name and remove the stale entry so subsequent references find the
+        // correct (new) value.
+        this.stackMap.push(thenTop);
+        for (let d = 1; d < this.stackMap.depth; d++) {
+          if (this.stackMap.peekAtDepth(d) === thenTop) {
+            if (d === 1) {
+              this.emitOp({ op: 'nip' });
+              this.stackMap.removeAtDepth(1);
+            } else {
+              this.emitOp({ op: 'push', value: BigInt(d) });
+              this.stackMap.push(null);
+              this.emitOp({ op: 'roll', depth: d + 1 });
+              this.stackMap.pop();
+              const rolled = this.stackMap.removeAtDepth(d);
+              this.stackMap.push(rolled);
+              this.emitOp({ op: 'drop' });
+              this.stackMap.pop();
+            }
+            break;
+          }
+        }
+      } else {
+        this.stackMap.push(bindingName);
+      }
+    } else if (elseCtx.stackMap.depth > this.stackMap.depth) {
+      // The else-branch produced a value even though the then-branch didn't.
+      this.stackMap.push(bindingName);
+    } else {
+      // Neither branch increased depth beyond the (post-reconciliation) parent
+      // depth. This is a void if (e.g., both branches end with assert or both
+      // are empty). Don't push a phantom — there is no extra value on the
+      // actual stack.
+    }
     this.trackDepth();
 
     // Track max depth from sub-contexts
@@ -1325,6 +1585,34 @@ class LoweringContext {
     // subsequent load_prop can find the updated value.
     this.stackMap.pop();
     this.stackMap.push(propName);
+
+    // When NOT inside an if-branch, remove the old property entry from
+    // the stack. After liftBranchUpdateProps transforms conditional
+    // property updates into flat if-expressions + top-level update_prop,
+    // the old value is dead and must be removed to keep stack depth correct.
+    // Inside branches, the old value is kept for lowerIf's same-property
+    // detection to handle correctly.
+    if (!this._insideBranch) {
+      for (let d = 1; d < this.stackMap.depth; d++) {
+        if (this.stackMap.peekAtDepth(d) === propName) {
+          if (d === 1) {
+            this.emitOp({ op: 'nip' });
+            this.stackMap.removeAtDepth(1);
+          } else {
+            this.emitOp({ op: 'push', value: BigInt(d) });
+            this.stackMap.push(null);
+            this.emitOp({ op: 'roll', depth: d + 1 });
+            this.stackMap.pop();
+            const rolled = this.stackMap.removeAtDepth(d);
+            this.stackMap.push(rolled);
+            this.emitOp({ op: 'drop' });
+            this.stackMap.pop();
+          }
+          break;
+        }
+      }
+    }
+
     this.trackDepth();
   }
 
@@ -3288,6 +3576,50 @@ class LoweringContext {
     for (let i = 0; i < 3; i++) this.stackMap.pop();
 
     emitSha256Finalize((op) => this.emitOp(op));
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // BLAKE3 compression — delegates to blake3-codegen.ts
+  // =========================================================================
+
+  private lowerBlake3Compress(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 2) {
+      throw new Error('blake3Compress requires 2 arguments: chainingValue, block');
+    }
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < 2; i++) this.stackMap.pop();
+
+    emitBlake3Compress((op) => this.emitOp(op));
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  private lowerBlake3Hash(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 1) {
+      throw new Error('blake3Hash requires 1 argument: message');
+    }
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    this.stackMap.pop();
+
+    emitBlake3Hash((op) => this.emitOp(op));
 
     this.stackMap.push(bindingName);
     this.trackDepth();

@@ -966,11 +966,11 @@ fn parse_binary_expression(
         swc::BinaryOp::BitOr => BinaryOp::BitOr,
         swc::BinaryOp::BitXor => BinaryOp::BitXor,
         swc::BinaryOp::EqEq => {
-            errors.push("Use === instead of == for equality comparison".to_string());
+            // Accept == and map to === (same as TS and Go parsers)
             BinaryOp::StrictEq
         }
         swc::BinaryOp::NotEq => {
-            errors.push("Use !== instead of != for inequality comparison".to_string());
+            // Accept != and map to !== (same as TS and Go parsers)
             BinaryOp::StrictNe
         }
         _ => {
@@ -1134,6 +1134,9 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     }
     if name.ends_with(".runar.py") {
         return super::parser_python::parse_python(source, file_name);
+    }
+    if name.ends_with(".runar.go") {
+        return super::parser_gocontract::parse_go_contract(source, file_name);
     }
     if name.ends_with(".runar.rb") {
         return super::parser_ruby::parse_ruby(source, file_name);

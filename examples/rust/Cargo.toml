@@ -70,3 +70,15 @@ path = "ec-demo/ECDemo_test.rs"
 [[test]]
 name = "bounded_counter"
 path = "property-initializers/BoundedCounter_test.rs"
+
+[[test]]
+name = "tic_tac_toe"
+path = "tic-tac-toe/TicTacToe_test.rs"
+
+[[test]]
+name = "blake3_test"
+path = "blake3/Blake3Test_test.rs"
+
+[[test]]
+name = "p2blake3pkh"
+path = "p2blake3pkh/P2Blake3PKH_test.rs"

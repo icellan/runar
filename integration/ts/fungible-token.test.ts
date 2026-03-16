@@ -127,9 +127,9 @@ describe('FungibleToken', () => {
     await contract.deploy(provider, signer, {});
 
     // send(sig, to, outputSatoshis) — null Sig is auto-computed from the signer
+    // No manual newState — SDK auto-computes from ANF IR
     const { txid: callTxid } = await contract.call(
       'send', [null, recipient.pubKeyHex, 1n], provider, signer,
-      { newState: { owner: recipient.pubKeyHex } },
     );
     expect(callTxid).toBeTruthy();
     expect(callTxid.length).toBe(64);
@@ -155,10 +155,10 @@ describe('FungibleToken', () => {
 
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
+    // Auto-compute state, but wrong signer → checkSig fails on-chain
     await expect(
       contract.call(
         'send', [null, recipient.pubKeyHex, 1n], provider, wrongSigner,
-        { newState: { owner: recipient.pubKeyHex } },
       ),
     ).rejects.toThrow();
   });
@@ -327,6 +327,124 @@ describe('FungibleToken', () => {
           additionalContractInputArgs: [[null, 400n, null, 1n]],
           outputs: [
             { satoshis: 1, state: { owner: ownerPubKey, balance: 400n, mergeBalance: 600n } },
+          ],
+        },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('should transfer exact balance (single output, no change)', async () => {
+    const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
+    const provider = createProvider();
+    const { signer, pubKeyHex } = await createFundedWallet(provider);
+    const recipient = createWallet();
+    const tokenIdHex = Buffer.from('EXACT-TRANSFER').toString('hex');
+
+    const contract = new RunarContract(artifact, [pubKeyHex, 1000n, 0n, tokenIdHex]);
+    await contract.deploy(provider, signer, {});
+
+    // Transfer the entire balance — only 1 output (recipient gets everything)
+    const { txid } = await contract.call(
+      'transfer', [null, recipient.pubKeyHex, 1000n, 1n], provider, signer,
+      {
+        outputs: [
+          { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 1000n, mergeBalance: 0n } },
+        ],
+      },
+    );
+    expect(txid).toBeTruthy();
+    expect(txid.length).toBe(64);
+  });
+
+  it('should reject transfer with inflated balance', async () => {
+    const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
+    const provider = createProvider();
+    const { signer, pubKeyHex } = await createFundedWallet(provider);
+    const recipient = createWallet();
+    const tokenIdHex = Buffer.from('INFLATE-TRANSFER').toString('hex');
+
+    const contract = new RunarContract(artifact, [pubKeyHex, 1000n, 0n, tokenIdHex]);
+    await contract.deploy(provider, signer, {});
+
+    // Attacker claims bob gets 800 and alice keeps 500 = 1300 total (inflated from 1000)
+    await expect(
+      contract.call(
+        'transfer', [null, recipient.pubKeyHex, 800n, 1n], provider, signer,
+        {
+          outputs: [
+            { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 800n, mergeBalance: 0n } },
+            { satoshis: 1, state: { owner: pubKeyHex, balance: 500n, mergeBalance: 0n } },
+          ],
+        },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('should reject transfer with deflated balance', async () => {
+    const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
+    const provider = createProvider();
+    const { signer, pubKeyHex } = await createFundedWallet(provider);
+    const recipient = createWallet();
+    const tokenIdHex = Buffer.from('DEFLATE-TRANSFER').toString('hex');
+
+    const contract = new RunarContract(artifact, [pubKeyHex, 1000n, 0n, tokenIdHex]);
+    await contract.deploy(provider, signer, {});
+
+    // Attacker claims bob gets 300 and alice keeps 200 = 500 total (deflated from 1000)
+    await expect(
+      contract.call(
+        'transfer', [null, recipient.pubKeyHex, 300n, 1n], provider, signer,
+        {
+          outputs: [
+            { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 300n, mergeBalance: 0n } },
+            { satoshis: 1, state: { owner: pubKeyHex, balance: 200n, mergeBalance: 0n } },
+          ],
+        },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('should reject transfer of zero amount', async () => {
+    const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
+    const provider = createProvider();
+    const { signer, pubKeyHex } = await createFundedWallet(provider);
+    const recipient = createWallet();
+    const tokenIdHex = Buffer.from('ZERO-TRANSFER').toString('hex');
+
+    const contract = new RunarContract(artifact, [pubKeyHex, 1000n, 0n, tokenIdHex]);
+    await contract.deploy(provider, signer, {});
+
+    // Zero amount should fail assert(amount > 0)
+    await expect(
+      contract.call(
+        'transfer', [null, recipient.pubKeyHex, 0n, 1n], provider, signer,
+        {
+          outputs: [
+            { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 0n, mergeBalance: 0n } },
+            { satoshis: 1, state: { owner: pubKeyHex, balance: 1000n, mergeBalance: 0n } },
+          ],
+        },
+      ),
+    ).rejects.toThrow();
+  });
+
+  it('should reject transfer exceeding balance', async () => {
+    const artifact = compileContract('examples/ts/token-ft/FungibleTokenExample.runar.ts');
+    const provider = createProvider();
+    const { signer, pubKeyHex } = await createFundedWallet(provider);
+    const recipient = createWallet();
+    const tokenIdHex = Buffer.from('EXCEED-TRANSFER').toString('hex');
+
+    const contract = new RunarContract(artifact, [pubKeyHex, 1000n, 0n, tokenIdHex]);
+    await contract.deploy(provider, signer, {});
+
+    // Amount exceeds balance — should fail assert(amount <= totalBalance)
+    await expect(
+      contract.call(
+        'transfer', [null, recipient.pubKeyHex, 2000n, 1n], provider, signer,
+        {
+          outputs: [
+            { satoshis: 1, state: { owner: recipient.pubKeyHex, balance: 2000n, mergeBalance: 0n } },
           ],
         },
       ),

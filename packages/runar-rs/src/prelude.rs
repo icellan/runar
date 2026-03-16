@@ -65,27 +65,45 @@ pub struct OutputSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// Mock crypto — always succeed for testing business logic
+// Real crypto verification (ECDSA, Rabin) + mocked checkPreimage
 // ---------------------------------------------------------------------------
 
-/// Always returns `true` in test mode.
-pub fn check_sig(_sig: &[u8], _pk: &[u8]) -> bool {
+/// Real ECDSA verification over the fixed TEST_MESSAGE.
+///
+/// Verifies the given DER-encoded signature against the compressed public
+/// key using secp256k1 over the canonical test message
+/// `"runar-test-message-v1"`. Handles optional trailing sighash byte.
+pub fn check_sig(sig: &[u8], pk: &[u8]) -> bool {
+    crate::ecdsa::ecdsa_verify(sig, pk)
+}
+
+/// Real ordered multi-sig ECDSA verification over the fixed TEST_MESSAGE.
+///
+/// Each signature in `sigs` must correspond to a public key in `pks`
+/// (in order). All signatures must be valid.
+pub fn check_multi_sig(sigs: &[&[u8]], pks: &[&[u8]]) -> bool {
+    if sigs.len() != pks.len() {
+        return false;
+    }
+    for (sig, pk) in sigs.iter().zip(pks.iter()) {
+        if !crate::ecdsa::ecdsa_verify(sig, pk) {
+            return false;
+        }
+    }
     true
 }
 
-/// Always returns `true` in test mode.
-pub fn check_multi_sig(_sigs: &[&[u8]], _pks: &[&[u8]]) -> bool {
-    true
-}
-
-/// Always returns `true` in test mode.
+/// Always returns `true` in test mode (preimage verification is mocked).
 pub fn check_preimage(_preimage: &[u8]) -> bool {
     true
 }
 
-/// Always returns `true` in test mode.
-pub fn verify_rabin_sig(_msg: &[u8], _sig: &[u8], _padding: &[u8], _pk: &[u8]) -> bool {
-    true
+/// Real Rabin signature verification.
+///
+/// Equation: `(sig^2 + padding) mod n == SHA256(msg) mod n`
+/// where all byte slices are interpreted as unsigned little-endian big integers.
+pub fn verify_rabin_sig(msg: &[u8], sig: &[u8], padding: &[u8], pk: &[u8]) -> bool {
+    crate::rabin::rabin_verify(msg, sig, padding, pk)
 }
 
 /// Real WOTS+ signature verification using SHA-256 hash chains.
@@ -143,6 +161,15 @@ pub use crate::slh_dsa::{
     SLH_SHA2_256S, SLH_SHA2_256F,
 };
 
+pub use crate::ecdsa::{
+    sign_test_message, pub_key_from_priv_key, ecdsa_verify,
+    TEST_MESSAGE, TEST_MESSAGE_DIGEST,
+};
+
+pub use crate::test_keys::{TestKeyPair, ALICE, BOB, CHARLIE};
+
+pub use crate::rabin::rabin_sign_trivial;
+
 // ---------------------------------------------------------------------------
 // Real hash functions
 // ---------------------------------------------------------------------------
@@ -175,6 +202,25 @@ pub fn ripemd160(data: &[u8]) -> Ripemd160 {
 }
 
 // ---------------------------------------------------------------------------
+// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// ---------------------------------------------------------------------------
+
+/// Mock BLAKE3 single-block compression.
+/// In compiled Bitcoin Script this expands to ~10,000 opcodes.
+/// The mock returns 32 zero bytes for business-logic testing.
+pub fn blake3_compress(_chaining_value: &[u8], _block: &[u8]) -> ByteString {
+    vec![0u8; 32]
+}
+
+/// Mock BLAKE3 hash for messages up to 64 bytes.
+/// In compiled Bitcoin Script this uses the IV as the chaining value and
+/// applies zero-padding before calling the compression function.
+/// The mock returns 32 zero bytes for business-logic testing.
+pub fn blake3_hash(_message: &[u8]) -> ByteString {
+    vec![0u8; 32]
+}
+
+// ---------------------------------------------------------------------------
 // Mock preimage extraction functions
 // ---------------------------------------------------------------------------
 
@@ -183,9 +229,16 @@ pub fn extract_locktime(_p: &[u8]) -> Int {
     0
 }
 
-/// Returns 32 zero bytes in test mode.
-pub fn extract_output_hash(_p: &[u8]) -> ByteString {
-    vec![0u8; 32]
+/// Returns the first 32 bytes of the preimage in test mode.
+/// Tests set `tx_preimage = hash256(expected_output_bytes)` so the assertion
+/// `hash256(outputs) == extract_output_hash(tx_preimage)` passes.
+/// Falls back to 32 zero bytes when the preimage is unset or shorter than 32 bytes.
+pub fn extract_output_hash(p: &[u8]) -> ByteString {
+    if p.len() >= 32 {
+        p[..32].to_vec()
+    } else {
+        vec![0u8; 32]
+    }
 }
 
 /// Returns `hash256([0u8; 72])` in test mode.
@@ -395,8 +448,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_check_sig_always_true() {
-        assert!(check_sig(&mock_sig(), &mock_pub_key()));
+    fn test_check_sig_real_ecdsa() {
+        let sig = ALICE.sign_test_message();
+        assert!(check_sig(&sig, ALICE.pub_key));
+    }
+
+    #[test]
+    fn test_check_sig_rejects_wrong_key() {
+        let sig = ALICE.sign_test_message();
+        assert!(!check_sig(&sig, BOB.pub_key));
+    }
+
+    #[test]
+    fn test_check_multi_sig_real() {
+        let alice_sig = ALICE.sign_test_message();
+        let bob_sig = BOB.sign_test_message();
+        assert!(check_multi_sig(
+            &[alice_sig.as_slice(), bob_sig.as_slice()],
+            &[ALICE.pub_key, BOB.pub_key],
+        ));
+    }
+
+    #[test]
+    fn test_check_multi_sig_rejects_wrong_order() {
+        let alice_sig = ALICE.sign_test_message();
+        let bob_sig = BOB.sign_test_message();
+        // Wrong order: alice sig checked against bob key
+        assert!(!check_multi_sig(
+            &[alice_sig.as_slice(), bob_sig.as_slice()],
+            &[BOB.pub_key, ALICE.pub_key],
+        ));
     }
 
     #[test]
@@ -510,5 +591,110 @@ mod tests {
     #[should_panic(expected = "i64 overflow")]
     fn test_gcd_min_panics() {
         gcd(i64::MIN, 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // safediv
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_safediv_positive() {
+        // 10 / 3 truncates toward zero in Rust
+        assert_eq!(safediv(10, 3), 3);
+    }
+
+    #[test]
+    fn test_safediv_truncates_toward_zero() {
+        // Rust integer division truncates toward zero: -7 / 2 == -3 (not -4)
+        assert_eq!(safediv(-7, 2), -3);
+    }
+
+    #[test]
+    #[should_panic(expected = "safediv: division by zero")]
+    fn test_safediv_by_zero_panics() {
+        safediv(42, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // safemod
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_safemod_positive() {
+        assert_eq!(safemod(10, 3), 1);
+    }
+
+    #[test]
+    fn test_safemod_negative() {
+        // Rust % follows the sign of the dividend: -7 % 2 == -1
+        assert_eq!(safemod(-7, 2), -1);
+    }
+
+    // -----------------------------------------------------------------------
+    // clamp
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_clamp_within_range() {
+        assert_eq!(clamp(5, 0, 10), 5);
+    }
+
+    #[test]
+    fn test_clamp_below() {
+        assert_eq!(clamp(-1, 0, 10), 0);
+    }
+
+    #[test]
+    fn test_clamp_above() {
+        assert_eq!(clamp(15, 0, 10), 10);
+    }
+
+    // -----------------------------------------------------------------------
+    // sign
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sign_positive() {
+        assert_eq!(sign(42), 1);
+    }
+
+    #[test]
+    fn test_sign_negative() {
+        assert_eq!(sign(-42), -1);
+    }
+
+    #[test]
+    fn test_sign_zero() {
+        assert_eq!(sign(0), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // sqrt
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_sqrt_perfect_square() {
+        assert_eq!(sqrt(9), 3);
+    }
+
+    #[test]
+    fn test_sqrt_non_perfect() {
+        // floor(sqrt(10)) == 3
+        assert_eq!(sqrt(10), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // log2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_log2_power_of_two() {
+        assert_eq!(log2(8), 3);
+    }
+
+    #[test]
+    fn test_log2_non_power() {
+        // floor(log2(9)) == 3
+        assert_eq!(log2(9), 3);
     }
 }

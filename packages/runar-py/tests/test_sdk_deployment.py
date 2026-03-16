@@ -136,6 +136,100 @@ class TestEstimateDeployFee:
 # build_p2pkh_script
 # ---------------------------------------------------------------------------
 
+class TestDeployTransactionStructure:
+    """Structural tests for deploy transaction wire format (rows 334, 335)."""
+
+    def _parse_deploy_tx(self, tx_hex: str) -> dict:
+        """Minimal parser: returns version, inputs, outputs, locktime."""
+        import struct
+        pos = 0
+
+        def read_bytes(n):
+            nonlocal pos
+            r = tx_hex[pos:pos + n * 2]
+            pos += n * 2
+            return r
+
+        def read_uint32_le():
+            h = read_bytes(4)
+            return struct.unpack('<I', bytes.fromhex(h))[0]
+
+        def read_uint64_le():
+            h = read_bytes(8)
+            return struct.unpack('<Q', bytes.fromhex(h))[0]
+
+        def read_varint():
+            nonlocal pos
+            first = int(tx_hex[pos:pos + 2], 16)
+            pos += 2
+            if first < 0xFD:
+                return first
+            raise ValueError('unsupported varint')
+
+        version = read_uint32_le()
+        input_count = read_varint()
+        inputs = []
+        for _ in range(input_count):
+            prev_txid = read_bytes(32)
+            prev_index = read_uint32_le()
+            script_len = read_varint()
+            script = read_bytes(script_len)
+            sequence = read_uint32_le()
+            inputs.append({'prev_txid': prev_txid, 'prev_index': prev_index, 'script': script, 'sequence': sequence})
+
+        output_count = read_varint()
+        outputs = []
+        for _ in range(output_count):
+            satoshis = read_uint64_le()
+            script_len = read_varint()
+            script = read_bytes(script_len)
+            outputs.append({'satoshis': satoshis, 'script': script})
+
+        locktime = read_uint32_le()
+        return {'version': version, 'inputs': inputs, 'outputs': outputs, 'locktime': locktime}
+
+    def test_deploy_locktime_is_zero(self):
+        """Deploy transaction locktime is 0 (row 334)."""
+        utxo = _make_utxo(100_000)
+        tx_hex, _ = build_deploy_transaction(
+            locking_script='51',
+            utxos=[utxo],
+            satoshis=10_000,
+            change_address='00' * 20,
+        )
+        parsed = self._parse_deploy_tx(tx_hex)
+        assert parsed['locktime'] == 0, f"expected locktime=0, got {parsed['locktime']}"
+
+    def test_deploy_input_script_is_empty(self):
+        """Unsigned deploy transaction has empty scriptSig for all inputs (row 335)."""
+        utxo = _make_utxo(100_000)
+        tx_hex, _ = build_deploy_transaction(
+            locking_script='51',
+            utxos=[utxo],
+            satoshis=10_000,
+            change_address='00' * 20,
+        )
+        parsed = self._parse_deploy_tx(tx_hex)
+        assert len(parsed['inputs']) == 1
+        assert parsed['inputs'][0]['script'] == '', (
+            f"expected empty scriptSig for unsigned input, got '{parsed['inputs'][0]['script']}'"
+        )
+
+    def test_select_utxos_largest_first(self):
+        """select_utxos picks the largest UTXO first (row 336)."""
+        utxos = [
+            _make_utxo(1_000, 0),
+            _make_utxo(50_000, 1),
+            _make_utxo(200_000, 2),
+        ]
+        selected = select_utxos(utxos, target_satoshis=10_000, locking_script_byte_len=1)
+        # 200_000 alone is sufficient; only 1 UTXO should be selected
+        assert len(selected) == 1
+        assert selected[0].satoshis == 200_000, (
+            f"expected largest UTXO (200000) selected first, got {selected[0].satoshis}"
+        )
+
+
 class TestBuildP2pkhScript:
     def test_hex_pubkey_hash(self):
         """40-char hex pubkey hash produces OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG."""

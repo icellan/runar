@@ -34,6 +34,12 @@ export function validate(contract: ContractNode): ValidationResult {
   const warnings: CompilerDiagnostic[] = [];
   const ctx: ValidationContext = { errors, warnings, contract };
 
+  // Structural guard: contract name must be non-empty.
+  if (!contract.name) {
+    errors.push(makeDiagnostic('Contract name must not be empty', 'error'));
+    return { errors, warnings };
+  }
+
   validateProperties(ctx);
   validateConstructor(ctx);
   validateMethods(ctx);

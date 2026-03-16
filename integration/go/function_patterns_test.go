@@ -102,13 +102,7 @@ func sdkCallFunctionPatterns(t *testing.T, contract *runar.RunarContract, provid
 	args := []interface{}{nil} // Sig = auto
 	args = append(args, extraArgs...)
 
-	callOpts := &runar.CallOptions{
-		NewState: map[string]interface{}{
-			"balance": newBalance,
-		},
-	}
-
-	txid, _, err := contract.Call(methodName, args, provider, signer, callOpts)
+	txid, _, err := contract.Call(methodName, args, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("%s (balance->%d): %v", methodName, newBalance, err)
 	}

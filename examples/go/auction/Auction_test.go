@@ -7,8 +7,8 @@ import (
 
 func newAuction() *Auction {
 	return &Auction{
-		Auctioneer:    runar.MockPubKey(),
-		HighestBidder: runar.PubKey("initial_bidder_placeholder_33b!"),
+		Auctioneer:    runar.Alice.PubKey,
+		HighestBidder: runar.Bob.PubKey,
 		HighestBid:    100,
 		Deadline:      1000,
 	}
@@ -16,8 +16,9 @@ func newAuction() *Auction {
 
 func TestAuction_Bid(t *testing.T) {
 	c := newAuction()
-	bidder := runar.PubKey("new_bidder_placeholder_33bytes!")
-	c.Bid(runar.MockSig(), bidder, 200)
+	bidder := runar.Bob.PubKey
+	bidderSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	c.Bid(bidderSig, bidder, 200)
 	if c.HighestBid != 200 {
 		t.Errorf("expected HighestBid=200, got %d", c.HighestBid)
 	}
@@ -29,13 +30,16 @@ func TestAuction_Bid_MustBeHigher(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newAuction().Bid(runar.MockSig(), runar.MockPubKey(), 50)
+	bidderSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	newAuction().Bid(bidderSig, runar.Bob.PubKey, 50)
 }
 
 func TestAuction_MultipleBids(t *testing.T) {
 	c := newAuction()
-	c.Bid(runar.MockSig(), runar.PubKey("bidder1_33bytes_placeholder_____"), 200)
-	c.Bid(runar.MockSig(), runar.PubKey("bidder2_33bytes_placeholder_____"), 300)
+	bobSig := runar.SignTestMessage(runar.Bob.PrivKey)
+	charlieSig := runar.SignTestMessage(runar.Charlie.PrivKey)
+	c.Bid(bobSig, runar.Bob.PubKey, 200)
+	c.Bid(charlieSig, runar.Charlie.PubKey, 300)
 	if c.HighestBid != 300 {
 		t.Errorf("expected HighestBid=300, got %d", c.HighestBid)
 	}
@@ -44,7 +48,8 @@ func TestAuction_MultipleBids(t *testing.T) {
 func TestAuction_Close(t *testing.T) {
 	c := newAuction()
 	c.Deadline = 0
-	c.Close(runar.MockSig())
+	auctioneerSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	c.Close(auctioneerSig)
 }
 
 func TestAuction_Close_BeforeDeadline_Fails(t *testing.T) {
@@ -53,7 +58,8 @@ func TestAuction_Close_BeforeDeadline_Fails(t *testing.T) {
 			t.Fatal("expected assertion failure")
 		}
 	}()
-	newAuction().Close(runar.MockSig())
+	auctioneerSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	newAuction().Close(auctioneerSig)
 }
 
 func TestAuction_Compile(t *testing.T) {

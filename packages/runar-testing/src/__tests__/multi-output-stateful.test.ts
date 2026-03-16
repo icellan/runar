@@ -13,7 +13,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { compile } from 'runar-compiler';
 import { TestContract } from '../test-contract.js';
+import { ALICE, BOB } from '../test-keys.js';
+import { signTestMessage } from '../crypto/ecdsa.js';
 
 // ---------------------------------------------------------------------------
 // Contract source: minimal stateful contract with 2 addOutput calls
@@ -105,10 +108,7 @@ class ConditionalOutput extends StatefulSmartContract {
 describe('Multi-output stateful contracts', () => {
   describe('Compilation', () => {
     it('compiles a two-output stateful contract', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; diagnostics: { severity: string; message: string }[] };
-      };
+
       const result = compile(twoOutputSource, { fileName: 'TwoOutput.runar.ts' });
       const errors = result.diagnostics.filter(d => d.severity === 'error');
       expect(errors).toHaveLength(0);
@@ -116,10 +116,7 @@ describe('Multi-output stateful contracts', () => {
     });
 
     it('compiles a conditional-output stateful contract', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; diagnostics: { severity: string; message: string }[] };
-      };
+
       const result = compile(conditionalOutputSource, { fileName: 'ConditionalOutput.runar.ts' });
       const errors = result.diagnostics.filter(d => d.severity === 'error');
       expect(errors).toHaveLength(0);
@@ -132,13 +129,9 @@ describe('Multi-output stateful contracts', () => {
       // Regression check: the old buggy pattern was:
       //   OP_SIZE OP_DUP <fd00> OP_LESSTHAN OP_IF OP_1 OP_NUM2BIN
       // The fix uses OP_2 OP_NUM2BIN followed by OP_1 OP_SPLIT OP_DROP
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; artifact: { asm: string }; scriptHex: string };
-      };
       const result = compile(twoOutputSource, { fileName: 'TwoOutput.runar.ts' });
       expect(result.success).toBe(true);
-      const asm = result.artifact.asm;
+      const asm = result.artifact!.asm;
 
       // The old buggy pattern: OP_LESSTHAN OP_IF OP_1 OP_NUM2BIN
       // Should NOT appear. Instead we should see: OP_LESSTHAN OP_IF OP_2 OP_NUM2BIN OP_1 OP_SPLIT OP_DROP
@@ -148,16 +141,17 @@ describe('Multi-output stateful contracts', () => {
   });
 
   describe('Interpreter execution (TestContract)', () => {
+    const aliceSig = signTestMessage(ALICE.privKey);
+
     it('two-output split: interpreter succeeds with correct state', () => {
-      const pk = '02' + 'ab'.repeat(32);
       const contract = TestContract.fromSource(
         twoOutputSource,
-        { owner: pk, balance: 1000n },
+        { owner: ALICE.pubKey, balance: 1000n },
         'TwoOutput.runar.ts',
       );
       // split(sig, amount, outputSatoshis)
       const result = contract.call('split', {
-        sig: '00'.repeat(72),
+        sig: aliceSig,
         amount: 300n,
         outputSatoshis: 1n,
       });
@@ -165,33 +159,29 @@ describe('Multi-output stateful contracts', () => {
     });
 
     it('single-output send: interpreter succeeds', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
       const contract = TestContract.fromSource(
         singleOutputSource,
-        { owner: pk, balance: 500n },
+        { owner: ALICE.pubKey, balance: 500n },
         'SingleOutput.runar.ts',
       );
       const result = contract.call('send', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         outputSatoshis: 1n,
       });
       expect(result.success).toBe(true);
     });
 
     it('conditional-output transfer (full amount): interpreter succeeds', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
       const contract = TestContract.fromSource(
         conditionalOutputSource,
-        { owner: pk, balance: 1000n },
+        { owner: ALICE.pubKey, balance: 1000n },
         'ConditionalOutput.runar.ts',
       );
       // Transfer full amount (no second output)
       const result = contract.call('transfer', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         amount: 1000n,
         outputSatoshis: 1n,
       });
@@ -199,17 +189,15 @@ describe('Multi-output stateful contracts', () => {
     });
 
     it('conditional-output transfer (partial amount): interpreter succeeds', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
       const contract = TestContract.fromSource(
         conditionalOutputSource,
-        { owner: pk, balance: 1000n },
+        { owner: ALICE.pubKey, balance: 1000n },
         'ConditionalOutput.runar.ts',
       );
       // Transfer partial amount (generates second output)
       const result = contract.call('transfer', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         amount: 300n,
         outputSatoshis: 1n,
       });
@@ -279,10 +267,7 @@ class FungibleToken extends StatefulSmartContract {
 `;
 
     it('compiles FungibleToken without errors', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; diagnostics: { severity: string; message: string }[] };
-      };
+
       const result = compile(fungibleTokenSource, { fileName: 'FungibleToken.runar.ts' });
       const errors = result.diagnostics.filter(d => d.severity === 'error');
       expect(errors).toHaveLength(0);
@@ -290,13 +275,9 @@ class FungibleToken extends StatefulSmartContract {
     });
 
     it('ANF does not emit load_param txPreimage for addOutput', () => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; anf: { methods: { name: string; body: { name: string; value: { kind: string; name?: string; preimage?: string } }[] }[] } };
-      };
-      const result = compile(fungibleTokenSource, { fileName: 'FungibleToken.runar.ts', debug: true });
+      const result = compile(fungibleTokenSource, { fileName: 'FungibleToken.runar.ts' });
       expect(result.success).toBe(true);
-      for (const method of result.anf.methods) {
+      for (const method of (result.anf as any).methods) {
         for (const binding of method.body) {
           if (binding.value.kind === 'add_output') {
             // preimage should be empty (not referencing a load_param binding)
@@ -307,17 +288,16 @@ class FungibleToken extends StatefulSmartContract {
     });
 
     it('transfer (partial): interpreter succeeds with two outputs', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
+      const aliceSig = signTestMessage(ALICE.privKey);
       const tokenId = 'deadbeef';
       const contract = TestContract.fromSource(
         fungibleTokenSource,
-        { owner: pk, balance: 1000n, mergeBalance: 0n, tokenId },
+        { owner: ALICE.pubKey, balance: 1000n, mergeBalance: 0n, tokenId },
         'FungibleToken.runar.ts',
       );
       const result = contract.call('transfer', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         amount: 300n,
         outputSatoshis: 1n,
       });
@@ -325,17 +305,16 @@ class FungibleToken extends StatefulSmartContract {
     });
 
     it('transfer (full balance): interpreter succeeds with one output', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
+      const aliceSig = signTestMessage(ALICE.privKey);
       const tokenId = 'deadbeef';
       const contract = TestContract.fromSource(
         fungibleTokenSource,
-        { owner: pk, balance: 1000n, mergeBalance: 0n, tokenId },
+        { owner: ALICE.pubKey, balance: 1000n, mergeBalance: 0n, tokenId },
         'FungibleToken.runar.ts',
       );
       const result = contract.call('transfer', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         amount: 1000n,
         outputSatoshis: 1n,
       });
@@ -343,17 +322,16 @@ class FungibleToken extends StatefulSmartContract {
     });
 
     it('send: interpreter succeeds', () => {
-      const pk = '02' + 'ab'.repeat(32);
-      const recipientPk = '03' + 'cd'.repeat(32);
+      const aliceSig = signTestMessage(ALICE.privKey);
       const tokenId = 'deadbeef';
       const contract = TestContract.fromSource(
         fungibleTokenSource,
-        { owner: pk, balance: 500n, mergeBalance: 200n, tokenId },
+        { owner: ALICE.pubKey, balance: 500n, mergeBalance: 200n, tokenId },
         'FungibleToken.runar.ts',
       );
       const result = contract.call('send', {
-        sig: '00'.repeat(72),
-        to: recipientPk,
+        sig: aliceSig,
+        to: BOB.pubKey,
         outputSatoshis: 1n,
       });
       expect(result.success).toBe(true);
@@ -364,10 +342,7 @@ class FungibleToken extends StatefulSmartContract {
       // a real BIP-143 preimage. The interpreter mocks can't produce valid
       // preimage fields for these extractors, so we only verify compilation.
       // On-chain verification is covered by the integration test.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => { success: boolean; diagnostics: { severity: string; message: string }[] };
-      };
+
       const result = compile(fungibleTokenSource, { fileName: 'FungibleToken.runar.ts' });
       const errors = result.diagnostics.filter(d => d.severity === 'error');
       expect(errors).toHaveLength(0);
@@ -381,14 +356,6 @@ class FungibleToken extends StatefulSmartContract {
       // Compile the contract with baked constructor args. The output script
       // (codePart + OP_RETURN + state) for this minimal contract falls in the
       // 128-252 byte range, which was the problematic window.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const { compile } = require('runar-compiler') as {
-        compile: (source: string, options?: Record<string, unknown>) => {
-          success: boolean;
-          artifact: { asm: string };
-          scriptHex: string;
-        };
-      };
       const pk = '02' + 'ab'.repeat(32);
       const result = compile(twoOutputSource, {
         fileName: 'TwoOutput.runar.ts',
@@ -398,7 +365,7 @@ class FungibleToken extends StatefulSmartContract {
 
       // Verify the full script (with state) is in the 128-252 byte range
       // that triggers the bug
-      const scriptBytes = result.scriptHex.length / 2;
+      const scriptBytes = result.scriptHex!.length / 2;
       // The code part (without state) is what gets used in output construction.
       // For this contract: codePart + OP_RETURN(1) + owner(33) + balance(8) = codePart + 42
       // The codePart should be small enough that total falls in the problem range.
@@ -406,7 +373,7 @@ class FungibleToken extends StatefulSmartContract {
       expect(scriptBytes).toBeGreaterThan(0);
 
       // Verify the ASM uses the fixed varint encoding pattern
-      const asm = result.artifact.asm;
+      const asm = result.artifact!.asm;
       expect(asm).toContain('OP_NUM2BIN OP_1 OP_SPLIT OP_DROP');
     });
   });

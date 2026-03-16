@@ -1,5 +1,6 @@
 /**
  * MathDemo integration test — stateful contract exercising built-in math functions.
+ * All state transitions are auto-computed from ANF IR (no manual newState).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -29,10 +30,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('divideBy', [10n], provider, signer, {
-      newState: { value: 100n },
-    });
+    const { txid: callTxid } = await contract.call('divideBy', [10n], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(100n);
   });
 
   it('should chain divideBy then clampValue: 1000 -> 100 -> clamp(0,50) = 50', async () => {
@@ -44,13 +44,11 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    await contract.call('divideBy', [10n], provider, signer, {
-      newState: { value: 100n },
-    });
+    await contract.call('divideBy', [10n], provider, signer);
+    expect(contract.state.value).toBe(100n);
 
-    await contract.call('clampValue', [0n, 50n], provider, signer, {
-      newState: { value: 50n },
-    });
+    await contract.call('clampValue', [0n, 50n], provider, signer);
+    expect(contract.state.value).toBe(50n);
   });
 
   it('should squareRoot: sqrt(49) = 7', async () => {
@@ -62,10 +60,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('squareRoot', [], provider, signer, {
-      newState: { value: 7n },
-    });
+    const { txid: callTxid } = await contract.call('squareRoot', [], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(7n);
   });
 
   it('should exponentiate: 2^10 = 1024', async () => {
@@ -77,10 +74,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('exponentiate', [10n], provider, signer, {
-      newState: { value: 1024n },
-    });
+    const { txid: callTxid } = await contract.call('exponentiate', [10n], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(1024n);
   });
 
   it('should reduceGcd: gcd(100, 75) = 25', async () => {
@@ -92,10 +88,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('reduceGcd', [75n], provider, signer, {
-      newState: { value: 25n },
-    });
+    const { txid: callTxid } = await contract.call('reduceGcd', [75n], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(25n);
   });
 
   it('should computeLog2: log2(1024) = 10', async () => {
@@ -107,10 +102,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('computeLog2', [], provider, signer, {
-      newState: { value: 10n },
-    });
+    const { txid: callTxid } = await contract.call('computeLog2', [], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(10n);
   });
 
   it('should scaleByRatio: 100 * 3 / 4 = 75', async () => {
@@ -122,10 +116,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('scaleByRatio', [3n, 4n], provider, signer, {
-      newState: { value: 75n },
-    });
+    const { txid: callTxid } = await contract.call('scaleByRatio', [3n, 4n], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(75n);
   });
 
   it('should normalize: sign(-42) = -1', async () => {
@@ -137,10 +130,9 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    const { txid: callTxid } = await contract.call('normalize', [], provider, signer, {
-      newState: { value: -1n },
-    });
+    const { txid: callTxid } = await contract.call('normalize', [], provider, signer);
     expect(callTxid).toBeTruthy();
+    expect(contract.state.value).toBe(-1n);
   });
 
   it('should chain operations: 1000 -> 100 -> 10 -> scaleByRatio(5,1) = 50', async () => {
@@ -152,17 +144,14 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
-    await contract.call('divideBy', [10n], provider, signer, {
-      newState: { value: 100n },
-    });
+    await contract.call('divideBy', [10n], provider, signer);
+    expect(contract.state.value).toBe(100n);
 
-    await contract.call('squareRoot', [], provider, signer, {
-      newState: { value: 10n },
-    });
+    await contract.call('squareRoot', [], provider, signer);
+    expect(contract.state.value).toBe(10n);
 
-    await contract.call('scaleByRatio', [5n, 1n], provider, signer, {
-      newState: { value: 50n },
-    });
+    await contract.call('scaleByRatio', [5n, 1n], provider, signer);
+    expect(contract.state.value).toBe(50n);
   });
 
   it('should reject divideBy zero', async () => {
@@ -174,14 +163,13 @@ describe('MathDemo', () => {
 
     await contract.deploy(provider, signer, { satoshis: 5000 });
 
+    // divideBy(0) → safediv returns 0 on-chain, but assert(value > 0) may fail
     await expect(
-      contract.call('divideBy', [0n], provider, signer, {
-        newState: { value: 0n },
-      }),
+      contract.call('divideBy', [0n], provider, signer),
     ).rejects.toThrow();
   });
 
-  it('should reject wrong state after divideBy', async () => {
+  it('should reject wrong state after divideBy (manual override)', async () => {
     const artifact = compileContract('examples/ts/math-demo/MathDemo.runar.ts');
     const contract = new RunarContract(artifact, [1000n]);
 

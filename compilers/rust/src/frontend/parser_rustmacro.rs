@@ -319,13 +319,17 @@ impl RustDslParser {
                                 // Check later if any field is mutable
                             }
 
-                            properties.push(PropertyNode {
-                                name: snake_to_camel(&field_name),
-                                prop_type: field_type,
-                                readonly,
-                                initializer: None,
-                                source_location: loc,
-                            });
+                            // Skip txPreimage — it's an implicit stateful param, not a contract property
+                            let camel_name = snake_to_camel(&field_name);
+                            if camel_name != "txPreimage" {
+                                properties.push(PropertyNode {
+                                    name: camel_name,
+                                    prop_type: field_type,
+                                    readonly,
+                                    initializer: None,
+                                    source_location: loc,
+                                });
+                            }
                         } else {
                             self.advance_clone();
                         }
@@ -699,7 +703,11 @@ impl RustDslParser {
             });
         }
 
-        self.match_tok(&TokenType::Semi);
+        let had_semi = self.match_tok(&TokenType::Semi);
+        // Implicit return: expression without semicolon followed immediately by `}`
+        if !had_semi && matches!(self.current().typ, TokenType::RBrace) {
+            return Some(Statement::ReturnStatement { value: Some(expr), source_location: loc });
+        }
         Some(Statement::ExpressionStatement { expression: expr, source_location: loc })
     }
 
@@ -1319,5 +1327,35 @@ impl Test {
         assert_eq!(map_rust_builtin("int_2_str"), "int2str");
         assert_eq!(map_rust_builtin("to_byte_string"), "toByteString");
         assert_eq!(map_rust_builtin("add_output"), "addOutput");
+    }
+
+    #[test]
+    fn test_implicit_return_in_method() {
+        let source = r#"
+use runar::prelude::*;
+#[runar::contract]
+pub struct Foo { #[readonly] pub x: Bigint }
+#[runar::methods(Foo)]
+impl Foo {
+    fn compute(&self, a: Bigint, b: Bigint) -> Bigint {
+        let sum = a + b;
+        sum
+    }
+    #[public]
+    pub fn check(&self) {
+        assert!(self.x > 0);
+    }
+}
+"#;
+        let result = parse_rust_dsl(source, Some("Foo.runar.rs"));
+        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        let contract = result.contract.unwrap();
+        let compute = contract.methods.iter().find(|m| m.name == "compute").unwrap();
+        assert_eq!(compute.body.len(), 2, "expected 2 statements (let + return)");
+        // Last statement should be a ReturnStatement
+        match &compute.body[1] {
+            Statement::ReturnStatement { value: Some(_), .. } => {}
+            other => panic!("expected ReturnStatement, got {:?}", other),
+        }
     }
 }

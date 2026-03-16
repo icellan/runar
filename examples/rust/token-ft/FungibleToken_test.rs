@@ -2,7 +2,7 @@
 //
 // The contract struct is defined inline (not via #[path]) because the
 // add_output output-tracking requires fields and methods that are test
-// infrastructure, not part of the Rúnar contract.
+// infrastructure, not part of the Runar contract.
 
 use runar::prelude::*;
 
@@ -57,8 +57,9 @@ impl FungibleToken {
     }
 }
 
-fn alice() -> PubKey { b"alice_pubkey_33bytes_placeholder!".to_vec() }
-fn bob() -> PubKey { b"bob___pubkey_33bytes_placeholder!".to_vec() }
+fn alice() -> PubKey { ALICE.pub_key.to_vec() }
+fn bob() -> PubKey { BOB.pub_key.to_vec() }
+fn alice_sig() -> Sig { ALICE.sign_test_message() }
 
 fn new_token(owner: PubKey, balance: Bigint) -> FungibleToken {
     FungibleToken { owner, balance, merge_balance: 0, token_id: b"test-token-001".to_vec(), tx_preimage: vec![], outputs: vec![] }
@@ -67,7 +68,7 @@ fn new_token(owner: PubKey, balance: Bigint) -> FungibleToken {
 #[test]
 fn test_transfer() {
     let mut c = new_token(alice(), 100);
-    c.transfer(&mock_sig(), bob(), 30, 1000);
+    c.transfer(&alice_sig(), bob(), 30, 1000);
     assert_eq!(c.outputs.len(), 2);
     assert_eq!(c.outputs[0].owner, bob());
     assert_eq!(c.outputs[0].balance, 30);
@@ -80,19 +81,19 @@ fn test_transfer() {
 #[test]
 #[should_panic]
 fn test_transfer_zero_amount_fails() {
-    new_token(alice(), 100).transfer(&mock_sig(), bob(), 0, 1000);
+    new_token(alice(), 100).transfer(&alice_sig(), bob(), 0, 1000);
 }
 
 #[test]
 #[should_panic]
 fn test_transfer_exceeds_balance_fails() {
-    new_token(alice(), 100).transfer(&mock_sig(), bob(), 101, 1000);
+    new_token(alice(), 100).transfer(&alice_sig(), bob(), 101, 1000);
 }
 
 #[test]
 fn test_send() {
     let mut c = new_token(alice(), 100);
-    c.send(&mock_sig(), bob(), 1000);
+    c.send(&alice_sig(), bob(), 1000);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.outputs[0].owner, bob());
     assert_eq!(c.outputs[0].balance, 100);
@@ -105,7 +106,7 @@ fn test_merge() {
     // allPrevouts = 72 zero bytes (two 36-byte zero outpoints),
     // consistent with mock extract_hash_prevouts and extract_outpoint.
     let all_prevouts = vec![0u8; 72];
-    c.merge(&mock_sig(), 150, all_prevouts, 1000);
+    c.merge(&alice_sig(), 150, all_prevouts, 1000);
     assert_eq!(c.outputs.len(), 1);
     // extract_outpoint returns 36 zero bytes == first outpoint, so we're input 0:
     // balance slot gets my_balance (50), merge_balance slot gets other_balance (150).
@@ -117,14 +118,14 @@ fn test_merge() {
 #[should_panic]
 fn test_merge_negative_other_balance_fails() {
     let all_prevouts = vec![0u8; 72];
-    new_token(alice(), 100).merge(&mock_sig(), -1, all_prevouts, 1000);
+    new_token(alice(), 100).merge(&alice_sig(), -1, all_prevouts, 1000);
 }
 
 #[test]
 #[should_panic]
 fn test_merge_tampered_prevouts_fails() {
     let tampered_prevouts = vec![0xffu8; 72];
-    new_token(alice(), 30).merge(&mock_sig(), 70, tampered_prevouts, 1000);
+    new_token(alice(), 30).merge(&alice_sig(), 70, tampered_prevouts, 1000);
 }
 
 #[test]
@@ -134,7 +135,7 @@ fn test_merge_pre_existing_merge_balance() {
         token_id: b"test-token-001".to_vec(), tx_preimage: vec![], outputs: vec![],
     };
     let all_prevouts = vec![0u8; 72];
-    c.merge(&mock_sig(), 50, all_prevouts, 1000);
+    c.merge(&alice_sig(), 50, all_prevouts, 1000);
     assert_eq!(c.outputs.len(), 1);
     // myBalance = 20 + 10 = 30
     assert_eq!(c.outputs[0].balance, 30);
@@ -144,7 +145,7 @@ fn test_merge_pre_existing_merge_balance() {
 #[test]
 fn test_transfer_exact_balance() {
     let mut c = new_token(alice(), 100);
-    c.transfer(&mock_sig(), bob(), 100, 1000);
+    c.transfer(&alice_sig(), bob(), 100, 1000);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.outputs[0].balance, 100);
 }
@@ -155,7 +156,7 @@ fn test_transfer_uses_merge_balance() {
         owner: alice(), balance: 60, merge_balance: 40,
         token_id: b"test-token-001".to_vec(), tx_preimage: vec![], outputs: vec![],
     };
-    c.transfer(&mock_sig(), bob(), 80, 1000);
+    c.transfer(&alice_sig(), bob(), 80, 1000);
     assert_eq!(c.outputs.len(), 2);
     assert_eq!(c.outputs[0].balance, 80);
     assert_eq!(c.outputs[1].balance, 20);
@@ -169,7 +170,7 @@ fn test_send_uses_merge_balance() {
         owner: alice(), balance: 60, merge_balance: 40,
         token_id: b"test-token-001".to_vec(), tx_preimage: vec![], outputs: vec![],
     };
-    c.send(&mock_sig(), bob(), 1000);
+    c.send(&alice_sig(), bob(), 1000);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.outputs[0].balance, 100);
     assert_eq!(c.outputs[0].merge_balance, 0);

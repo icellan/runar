@@ -9,7 +9,6 @@
 //! focus on parse-level correctness and dispatch routing.
 
 use runar_compiler_rust::compile_from_source_str;
-use runar_compiler_rust::frontend::ast::Visibility;
 use runar_compiler_rust::frontend::parser::parse_source;
 
 fn conformance_dir() -> std::path::PathBuf {
@@ -345,4 +344,97 @@ fn test_cross_format_method_param_consistency() {
                        "{}: expected 2 params", ext);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test: parse_source dispatch for Python and Go formats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_parse_dispatch_py() {
+    // parse_source with a .runar.py filename should route to the Python parser.
+    // We use the conformance test's .runar.py file if available; otherwise a
+    // minimal inline snippet.
+    let py_source = read_conformance_format("arithmetic", ".runar.py")
+        .unwrap_or_else(|| {
+            // Minimal Python-format Rúnar contract
+            r#"from runar import SmartContract, Readonly
+
+class Arithmetic(SmartContract):
+    target: Readonly[int]
+
+    def __init__(self, target: int):
+        super().__init__(target)
+        self.target = target
+
+    @public
+    def verify(self, a: int, b: int):
+        assert_(a + b == self.target)
+"#.to_string()
+        });
+
+    // Must not panic; may succeed or produce parse errors
+    let result = parse_source(&py_source, Some("Arithmetic.runar.py"));
+    // If the Python parser produces a contract, verify the name is plausible
+    if let Some(contract) = result.contract {
+        assert!(
+            !contract.name.is_empty(),
+            "Python parser should produce a non-empty contract name"
+        );
+    } else {
+        // No contract + errors is also acceptable (parser may be partial)
+        // The key invariant is no panic.
+    }
+}
+
+#[test]
+fn test_parse_dispatch_go() {
+    // parse_source with a .runar.go filename should route to the Go/runar-go parser.
+    let go_source = read_conformance_format("arithmetic", ".runar.go")
+        .unwrap_or_else(|| {
+            // Minimal Go-format Rúnar contract
+            r#"package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Arithmetic struct {
+    Target runar.BigInt `runar:"readonly"`
+}
+
+func (c *Arithmetic) init() {
+    c.Target = 0
+}
+
+func (c *Arithmetic) Verify(a runar.BigInt, b runar.BigInt) {
+    runar.Assert(a+b == c.Target)
+}
+"#.to_string()
+        });
+
+    // Must not panic; may succeed or produce parse errors
+    let result = parse_source(&go_source, Some("Arithmetic.runar.go"));
+    if let Some(contract) = result.contract {
+        assert!(
+            !contract.name.is_empty(),
+            "Go parser should produce a non-empty contract name"
+        );
+    }
+    // No contract is also acceptable (errors or partial parse is fine)
+}
+
+#[test]
+fn test_parse_dispatch_unknown_extension() {
+    // parse_source with an unrecognized extension should produce errors
+    // or an empty result — it must NOT panic.
+    let source = "class Foo { }";
+    let result = parse_source(source, Some("Contract.runar.xyz"));
+
+    // An unrecognized extension should either produce errors or an empty result.
+    let has_contract = result.contract.is_some();
+    let has_errors = !result.errors.is_empty();
+
+    assert!(
+        !has_contract || has_errors,
+        "unrecognized extension should produce errors or no contract; got contract with no errors"
+    );
 }

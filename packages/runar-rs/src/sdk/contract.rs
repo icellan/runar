@@ -15,6 +15,7 @@ use super::deployment::{
 use super::calling::{build_call_transaction_ext, CallTxOptions, ContractOutput, AdditionalContractInput};
 use super::provider::Provider;
 use super::signer::Signer;
+use super::anf_interpreter;
 use crate::prelude::hash160 as compute_hash160;
 
 /// Convert a raw transaction hex string to a BSV SDK Transaction object for broadcasting.
@@ -531,10 +532,23 @@ impl RunarContract {
                     .and_then(|o| o.satoshis)
                     .unwrap_or(current_utxo.satoshis),
             );
-            // Apply new state values before building the continuation output
+            // Apply new state values before building the continuation output.
+            // Explicit newState takes priority (backward compat); otherwise
+            // auto-compute from ANF IR if available.
             if let Some(new_state) = options.and_then(|o| o.new_state.as_ref()) {
                 for (k, v) in new_state {
                     self.state.insert(k.clone(), v.clone());
+                }
+            } else if method_needs_change {
+                if let Some(ref anf) = self.artifact.anf {
+                    let named_args = build_named_args(&user_params, &resolved_args);
+                    if let Ok(computed) = anf_interpreter::compute_new_state(
+                        anf, method_name, &self.state, &named_args,
+                    ) {
+                        for (k, v) in computed {
+                            self.state.insert(k, v);
+                        }
+                    }
                 }
             }
             new_locking_script = Some(self.get_locking_script());
@@ -1643,6 +1657,20 @@ fn revive_json_value(value: &serde_json::Value, field_type: &str) -> SdkValue {
     }
 }
 
+/// Build a named-args map from user ABI params and resolved arg values.
+fn build_named_args(
+    user_params: &[&AbiParam],
+    resolved_args: &[SdkValue],
+) -> HashMap<String, SdkValue> {
+    let mut named = HashMap::new();
+    for (i, param) in user_params.iter().enumerate() {
+        if let Some(val) = resolved_args.get(i) {
+            named.insert(param.name.clone(), val.clone());
+        }
+    }
+    named
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1664,6 +1692,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         }
     }
 
@@ -1721,6 +1750,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
         RunarContract::new(artifact, vec![]);
     }
@@ -1756,6 +1786,7 @@ mod tests {
             }]),
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(
@@ -1792,6 +1823,7 @@ mod tests {
             ]),
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(
@@ -1824,6 +1856,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let pub_key_hash = "ab".repeat(20);
@@ -1857,6 +1890,7 @@ mod tests {
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 0 }]),
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(1000)]);
@@ -1882,6 +1916,7 @@ mod tests {
             constructor_slots: Some(vec![ConstructorSlot { param_index: 0, byte_offset: 2 }]),
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![SdkValue::Int(42)]);
@@ -2149,6 +2184,33 @@ mod tests {
         assert!(result.unwrap_err().contains("no UTXOs"));
     }
 
+    // Row 332: Error on insufficient funds — a UTXO that is too small to
+    // cover both the requested satoshis and the fee causes a panic from
+    // build_deploy_transaction.
+    #[test]
+    #[should_panic(expected = "insufficient funds")]
+    fn deploy_fails_insufficient_funds() {
+        let artifact = make_artifact("51", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+
+        let signer = MockSigner::new();
+        let mut provider = MockProvider::testnet();
+        let address = signer.get_address().unwrap();
+        // Add a UTXO that is far too small (1 satoshi) to fund a 50_000-sat deployment.
+        provider.add_utxo(&address, Utxo {
+            txid: "cc".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: format!("76a914{}88ac", "00".repeat(20)),
+        });
+
+        // This will panic inside build_deploy_transaction with "insufficient funds".
+        let _ = contract.deploy(&mut provider, &signer, &DeployOptions {
+            satoshis: 50_000,
+            change_address: None,
+        });
+    }
+
     #[test]
     fn call_fails_not_deployed() {
         let artifact = make_artifact(
@@ -2287,6 +2349,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
@@ -2361,6 +2424,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
@@ -2401,6 +2465,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(
@@ -2620,6 +2685,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2645,6 +2711,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2670,6 +2737,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);
@@ -2695,6 +2763,7 @@ mod tests {
             constructor_slots: None,
             code_separator_index: None,
             code_separator_indices: None,
+            anf: None,
         };
 
         let contract = RunarContract::new(artifact, vec![]);

@@ -260,12 +260,18 @@ function foldBinding(binding: ANFBinding, env: ConstEnv): ANFBinding {
   const { name, value } = binding;
   const foldedValue = foldValue(value, env);
 
-  // If the folded value is a load_const, register in the environment
+  // If the folded value is a load_const, register in the environment.
+  // Skip @ref: prefixed strings — they are binding aliases, not real constants.
   if (foldedValue.kind === 'load_const') {
-    env.set(name, foldedValue.value);
+    const v = foldedValue.value;
+    if (!(typeof v === 'string' && v.startsWith('@ref:'))) {
+      env.set(name, v);
+    }
   }
 
-  return { name, value: foldedValue };
+  const result: ANFBinding = { name, value: foldedValue };
+  if (binding.sourceLoc) result.sourceLoc = binding.sourceLoc;
+  return result;
 }
 
 function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
@@ -399,6 +405,9 @@ function foldValue(value: ANFValue, env: ConstEnv): ANFValue {
 
     case 'add_raw_output':
       return value;
+
+    case 'array_literal':
+      return value;
   }
 }
 
@@ -474,8 +483,13 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
   switch (value.kind) {
     case 'load_param':
     case 'load_prop':
-    case 'load_const':
     case 'get_state_script':
+      break;
+    case 'load_const':
+      // Track @ref: aliases as references to prevent DCE
+      if (typeof value.value === 'string' && value.value.startsWith('@ref:')) {
+        refs.add(value.value.slice(5));
+      }
       break;
     case 'bin_op':
       refs.add(value.left);
@@ -519,6 +533,9 @@ function collectRefsFromValue(value: ANFValue, refs: Set<string>): void {
     case 'add_raw_output':
       refs.add(value.satoshis);
       refs.add(value.scriptBytes);
+      break;
+    case 'array_literal':
+      for (const elem of value.elements) refs.add(elem);
       break;
   }
 }

@@ -16,7 +16,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 .venv/
-runar*-go
+compilers/go/runar*-go
 
 # runar-rb
 /packages/runar-rb/tmp/

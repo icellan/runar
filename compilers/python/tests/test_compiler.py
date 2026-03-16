@@ -357,7 +357,8 @@ class TestConformanceGolden:
         ir_json = load_conformance_ir(test_name)
         expected_hex = load_conformance_script(test_name)
 
-        artifact = must_compile_ir(ir_json)
+        # Disable constant folding to match golden files
+        artifact = must_compile_ir(ir_json, disable_constant_folding=True)
         assert artifact.script == expected_hex, (
             f"Script mismatch for {test_name}:\n"
             f"  expected: {expected_hex}\n"

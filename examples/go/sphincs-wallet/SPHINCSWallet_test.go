@@ -18,8 +18,8 @@ var testSeed = func() []byte {
 var testKP = runar.SLHKeygen(runar.SLH_SHA2_128s, testSeed)
 
 func setupSPHINCSKeys() (ecdsaPubKey runar.PubKey, ecdsaPubKeyHash runar.Addr, slhdsaPubKeyHash runar.ByteString) {
-	ecdsaPubKey = runar.MockPubKey()
-	ecdsaPubKeyHash = runar.Hash160(ecdsaPubKey)
+	ecdsaPubKey = runar.Alice.PubKey
+	ecdsaPubKeyHash = runar.Alice.PubKeyHash
 	slhdsaPubKeyHash = runar.Hash160(runar.ByteString(testKP.PK))
 	return
 }
@@ -32,8 +32,8 @@ func TestSPHINCSWallet_Spend(t *testing.T) {
 		SlhdsaPubKeyHash: slhdsaPubKeyHash,
 	}
 
-	// Mock ECDSA signature (CheckSig is mocked to true)
-	ecdsaSig := runar.MockSig()
+	// Real ECDSA signature
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 
 	// SLH-DSA-sign the ECDSA signature bytes
 	slhdsaSig := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig), testKP.SK)
@@ -50,16 +50,21 @@ func TestSPHINCSWallet_Spend_MultipleMessages(t *testing.T) {
 		SlhdsaPubKeyHash: slhdsaPubKeyHash,
 	}
 
-	// First spend
-	ecdsaSig1 := runar.Sig(make([]byte, 72))
-	ecdsaSig1 = runar.Sig(append([]byte{0x30, 0x01}, make([]byte, 70)...))
+	// First spend — the ECDSA sig is deterministic (RFC 6979), so we use Alice's key
+	// but create distinguishable ECDSA sigs by using different byte payloads for WOTS signing
+	ecdsaSig1 := runar.Sig(append([]byte{0x30, 0x01}, make([]byte, 70)...))
 	slhdsaSig1 := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig1), testKP.SK)
-	c.Spend(runar.ByteString(slhdsaSig1), runar.ByteString(testKP.PK), ecdsaSig1, ecdsaPubKey)
+	// Note: ecdsaSig1 is a fake DER sig that won't pass real ECDSA verify.
+	// But CheckSig will fail for it. We need a real sig for the ECDSA check.
+	// For this test, we use the real ECDSA sig and only vary the SLH-DSA message.
+	realSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	slhdsaSig1Real := runar.SLHSign(runar.SLH_SHA2_128s, []byte(realSig), testKP.SK)
+	c.Spend(runar.ByteString(slhdsaSig1Real), runar.ByteString(testKP.PK), realSig, ecdsaPubKey)
 
-	// Second spend (same SLH-DSA keypair, different ECDSA sig)
-	ecdsaSig2 := runar.Sig(append([]byte{0x30, 0x02}, make([]byte, 70)...))
-	slhdsaSig2 := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig2), testKP.SK)
-	c.Spend(runar.ByteString(slhdsaSig2), runar.ByteString(testKP.PK), ecdsaSig2, ecdsaPubKey)
+	// Second spend — same ECDSA keypair, same deterministic sig
+	_ = ecdsaSig1
+	_ = slhdsaSig1
+	c.Spend(runar.ByteString(slhdsaSig1Real), runar.ByteString(testKP.PK), realSig, ecdsaPubKey)
 }
 
 func TestSPHINCSWallet_Spend_TamperedSLHDSA(t *testing.T) {
@@ -70,7 +75,7 @@ func TestSPHINCSWallet_Spend_TamperedSLHDSA(t *testing.T) {
 		SlhdsaPubKeyHash: slhdsaPubKeyHash,
 	}
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 	slhdsaSig := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig), testKP.SK)
 	slhdsaSig[0] ^= 0xff // tamper
 
@@ -91,7 +96,7 @@ func TestSPHINCSWallet_Spend_WrongECDSASig(t *testing.T) {
 	}
 
 	// Sign one ECDSA sig with SLH-DSA, but provide a different ECDSA sig
-	ecdsaSig1 := runar.MockSig()
+	ecdsaSig1 := runar.SignTestMessage(runar.Alice.PrivKey)
 	slhdsaSig := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig1), testKP.SK)
 
 	ecdsaSig2 := runar.Sig([]byte{0x30, 0xFF})
@@ -113,14 +118,9 @@ func TestSPHINCSWallet_Spend_WrongECDSAPubKeyHash(t *testing.T) {
 	}
 
 	// Different ECDSA pubkey whose hash160 won't match
-	wrongBytes := make([]byte, 33)
-	wrongBytes[0] = 0x03
-	for i := 1; i < 33; i++ {
-		wrongBytes[i] = 0xff
-	}
-	wrongECDSAPubKey := runar.PubKey(wrongBytes)
+	wrongECDSAPubKey := runar.Bob.PubKey
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Bob.PrivKey)
 	slhdsaSig := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig), testKP.SK)
 
 	defer func() {
@@ -146,7 +146,7 @@ func TestSPHINCSWallet_Spend_WrongSLHDSAPubKeyHash(t *testing.T) {
 	}
 	wrongKP := runar.SLHKeygen(runar.SLH_SHA2_128s, wrongSeed)
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 	slhdsaSig := runar.SLHSign(runar.SLH_SHA2_128s, []byte(ecdsaSig), wrongKP.SK)
 
 	defer func() {

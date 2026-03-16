@@ -49,6 +49,8 @@ pub struct StateField {
     #[serde(rename = "type")]
     pub field_type: String,
     pub index: usize,
+    #[serde(rename = "initialValue", skip_serializing_if = "Option::is_none")]
+    pub initial_value: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -75,6 +77,8 @@ pub struct RunarArtifact {
     pub code_separator_indices: Option<Vec<usize>>,
     #[serde(rename = "buildTimestamp")]
     pub build_timestamp: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anf: Option<ANFProgram>,
 }
 
 // ---------------------------------------------------------------------------
@@ -92,11 +96,14 @@ pub fn assemble_artifact(
     constructor_slots: Vec<ConstructorSlot>,
     code_separator_index: i64,
     code_separator_indices: Vec<usize>,
+    include_anf: bool,
 ) -> RunarArtifact {
-    // Build constructor params from properties
+    // Build constructor params from properties, excluding those with initializers
+    // (properties with default values are not constructor parameters).
     let constructor_params: Vec<ABIParam> = program
         .properties
         .iter()
+        .filter(|p| p.initial_value.is_none())
         .map(|p| ABIParam {
             name: p.name.clone(),
             param_type: p.prop_type.clone(),
@@ -112,15 +119,17 @@ pub fn assemble_artifact(
                 name: prop.name.clone(),
                 field_type: prop.prop_type.clone(),
                 index: i,
+                initial_value: prop.initial_value.clone(),
             });
         }
     }
     let is_stateful = !state_fields.is_empty();
 
-    // Build method ABIs
+    // Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
     let methods: Vec<ABIMethod> = program
         .methods
         .iter()
+        .filter(|m| m.name != "constructor")
         .map(|m| {
             // For stateful contracts, mark public methods without _changePKH as terminal
             let is_terminal = if is_stateful && m.is_public {
@@ -159,6 +168,12 @@ pub fn assemble_artifact(
         Some(code_separator_indices)
     };
 
+    let anf = if include_anf {
+        Some(program.clone())
+    } else {
+        None
+    };
+
     RunarArtifact {
         version: SCHEMA_VERSION.to_string(),
         compiler_version: COMPILER_VERSION.to_string(),
@@ -176,6 +191,7 @@ pub fn assemble_artifact(
         code_separator_index: cs_index,
         code_separator_indices: cs_indices,
         build_timestamp: now,
+        anf,
     }
 }
 

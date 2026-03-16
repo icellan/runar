@@ -380,14 +380,23 @@ class SolParser {
       sourceLocation: location,
     };
 
+    // Build a rename map for _-prefixed param names (e.g., _count → count)
+    const renameMap = new Map<string, string>();
+    for (const p of params) {
+      const original = '_' + p.name;
+      if (original !== p.name) renameMap.set(original, p.name);
+    }
+
     // Convert bare identifier assignments (e.g., `pubKeyHash = _pk`) to
-    // property access (this.pubKeyHash = pk) to match validator expectations
+    // property access (this.pubKeyHash = pk) to match validator expectations,
+    // and rename _-prefixed identifiers to their stripped versions
     const propNames = new Set(_properties.map(p => p.name));
     const fixedBody = body.map(stmt => {
-      if (stmt.kind === 'assignment' && stmt.target.kind === 'identifier' && propNames.has(stmt.target.name)) {
-        return { ...stmt, target: { kind: 'property_access' as const, property: stmt.target.name } };
+      const renamed = renameMap.size > 0 ? renameIdentifiers(stmt, renameMap) : stmt;
+      if (renamed.kind === 'assignment' && renamed.target.kind === 'identifier' && propNames.has(renamed.target.name)) {
+        return { ...renamed, target: { kind: 'property_access' as const, property: renamed.target.name } };
       }
-      return stmt;
+      return renamed;
     });
 
     return {
@@ -828,6 +837,16 @@ class SolParser {
       this.expect(')');
       return expr;
     }
+    if (t.type === '[') {
+      this.advance();
+      const elements: Expression[] = [];
+      while (this.current().type !== ']' && this.current().type !== 'eof') {
+        elements.push(this.parseExpression());
+        if (this.current().type === ',') this.advance();
+      }
+      this.expect(']');
+      return { kind: 'array_literal', elements };
+    }
     if (t.type === 'ident') {
       this.advance();
       return { kind: 'identifier', name: t.value };
@@ -835,6 +854,70 @@ class SolParser {
 
     this.advance();
     return { kind: 'identifier', name: t.value };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Recursively rename identifiers in a statement tree.
+ * Used to fix _-prefixed constructor params in the body.
+ */
+function renameIdentifiers(stmt: Statement, map: Map<string, string>): Statement {
+  function renameExpr(expr: Expression): Expression {
+    switch (expr.kind) {
+      case 'identifier': {
+        const renamed = map.get(expr.name);
+        return renamed ? { ...expr, name: renamed } : expr;
+      }
+      case 'binary_expr':
+        return { ...expr, left: renameExpr(expr.left), right: renameExpr(expr.right) };
+      case 'unary_expr':
+        return { ...expr, operand: renameExpr(expr.operand) };
+      case 'call_expr':
+        return { ...expr, callee: renameExpr(expr.callee), args: expr.args.map(renameExpr) };
+      case 'member_expr':
+        return { ...expr, object: renameExpr(expr.object) };
+      case 'ternary_expr':
+        return { ...expr, condition: renameExpr(expr.condition), consequent: renameExpr(expr.consequent), alternate: renameExpr(expr.alternate) };
+      case 'index_access':
+        return { ...expr, object: renameExpr(expr.object), index: renameExpr(expr.index) };
+      case 'increment_expr':
+      case 'decrement_expr':
+        return { ...expr, operand: renameExpr(expr.operand) };
+      default:
+        return expr;
+    }
+  }
+
+  switch (stmt.kind) {
+    case 'variable_decl':
+      return { ...stmt, init: renameExpr(stmt.init) };
+    case 'assignment':
+      return { ...stmt, target: renameExpr(stmt.target), value: renameExpr(stmt.value) };
+    case 'expression_statement':
+      return { ...stmt, expression: renameExpr(stmt.expression) };
+    case 'if_statement':
+      return {
+        ...stmt,
+        condition: renameExpr(stmt.condition),
+        then: stmt.then.map(s => renameIdentifiers(s, map)),
+        else: stmt.else?.map(s => renameIdentifiers(s, map)),
+      };
+    case 'for_statement':
+      return {
+        ...stmt,
+        init: renameIdentifiers(stmt.init, map) as typeof stmt.init,
+        condition: renameExpr(stmt.condition),
+        update: renameIdentifiers(stmt.update, map),
+        body: stmt.body.map(s => renameIdentifiers(s, map)),
+      };
+    case 'return_statement':
+      return stmt.value ? { ...stmt, value: renameExpr(stmt.value) } : stmt;
+    default:
+      return stmt;
   }
 }
 

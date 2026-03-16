@@ -14,7 +14,7 @@ import pytest
 from conftest import (
     compile_contract, create_provider, create_funded_wallet, create_wallet,
 )
-from runar.sdk import RunarContract, CallOptions, DeployOptions
+from runar.sdk import RunarContract, DeployOptions
 
 
 class TestSimpleNFT:
@@ -109,21 +109,17 @@ class TestSimpleNFT:
             metadata_hex,
         ])
 
-        contract.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=5000))
+        contract.deploy(provider, owner_wallet["signer"], DeployOptions(satoshis=1))
 
         # transfer: sig=None (auto), newOwner, outputSatoshis
-        # transfer uses addOutput, so we need Outputs (not new_state)
+        # State auto-computed from ANF IR (owner changes to newOwner)
+        # outputSatoshis must match the deploy satoshis since the SDK constructs
+        # a continuation output with currentUtxo.satoshis. The on-chain script's
+        # addOutput uses outputSatoshis for the output amount.
         call_txid, _ = contract.call(
             "transfer",
-            [None, new_owner["pubKeyHex"], 4500],
+            [None, new_owner["pubKeyHex"], 1],
             provider, owner_wallet["signer"],
-            CallOptions(outputs=[
-                {"satoshis": 4500, "state": {
-                    "owner": new_owner["pubKeyHex"],
-                    "tokenId": token_id_hex,
-                    "metadata": metadata_hex,
-                }},
-            ]),
         )
         assert call_txid
 
@@ -176,5 +172,4 @@ class TestSimpleNFT:
                 "transfer",
                 [None, new_owner["pubKeyHex"], 5000],
                 provider, wrong_wallet["signer"],
-                CallOptions(new_state={"owner": new_owner["pubKeyHex"]}),
             )

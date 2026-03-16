@@ -423,8 +423,18 @@ func (c *RunarContract) PrepareCall(
 			newSatoshis = options.Satoshis
 		}
 		if options != nil && options.NewState != nil {
+			// Explicit newState takes priority (backward compat)
 			for k, v := range options.NewState {
 				c.state[k] = v
+			}
+		} else if methodNeedsChange && c.Artifact.ANF != nil {
+			// Auto-compute new state from ANF IR
+			namedArgs := buildNamedArgs(userParams, resolvedArgs)
+			computed, err := ComputeNewState(c.Artifact.ANF, methodName, c.state, namedArgs)
+			if err == nil {
+				for k, v := range computed {
+					c.state[k] = v
+				}
 			}
 		}
 		newLockingScript = c.GetLockingScript()

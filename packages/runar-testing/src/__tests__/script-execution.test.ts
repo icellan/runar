@@ -12,6 +12,11 @@ import { resolve } from 'node:path';
 import { PrivateKey } from '@bsv/sdk';
 import { ScriptExecutionContract } from '../script-execution.js';
 import { TestContract } from '../test-contract.js';
+import { ALICE, BOB, CHARLIE, DAVE, EVE, FRANK, GRACE, HEIDI } from '../test-keys.js';
+
+function privKey(hex: string): PrivateKey {
+  return new PrivateKey(hex, 16);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -122,28 +127,22 @@ describe('Script execution: signatures', () => {
     const src = readContract('basic-p2pkh');
 
     it('succeeds with correct key', () => {
-      const privKey = PrivateKey.fromRandom();
-      const pubKeyHex = ScriptExecutionContract.pubKeyHex(privKey);
-      const pubKeyHashHex = ScriptExecutionContract.pubKeyHashHex(privKey);
+      const pk = privKey(ALICE.privKey);
 
       const c = ScriptExecutionContract.fromSource(
-        src, { pubKeyHash: pubKeyHashHex }, 'basic-p2pkh.runar.ts',
+        src, { pubKeyHash: ALICE.pubKeyHash }, 'basic-p2pkh.runar.ts',
       );
-      const result = c.executeSigned('unlock', ['placeholder', pubKeyHex], 0, privKey);
+      const result = c.executeSigned('unlock', ['placeholder', ALICE.pubKey], 0, pk);
       expect(result.success).toBe(true);
     });
 
     it('fails with wrong key (hash mismatch)', () => {
-      const correctKey = PrivateKey.fromRandom();
-      const pubKeyHashHex = ScriptExecutionContract.pubKeyHashHex(correctKey);
-
-      const wrongKey = PrivateKey.fromRandom();
-      const wrongPubHex = ScriptExecutionContract.pubKeyHex(wrongKey);
+      const wrongPk = privKey(BOB.privKey);
 
       const c = ScriptExecutionContract.fromSource(
-        src, { pubKeyHash: pubKeyHashHex }, 'basic-p2pkh.runar.ts',
+        src, { pubKeyHash: ALICE.pubKeyHash }, 'basic-p2pkh.runar.ts',
       );
-      const result = c.executeSigned('unlock', ['placeholder', wrongPubHex], 0, wrongKey);
+      const result = c.executeSigned('unlock', ['placeholder', BOB.pubKey], 0, wrongPk);
       expect(result.success).toBe(false);
     });
   });
@@ -152,43 +151,34 @@ describe('Script execution: signatures', () => {
     const src = readContract('multi-method');
 
     it('spendWithOwner succeeds with correct key and amount > 5', () => {
-      const owner = PrivateKey.fromRandom();
-      const backup = PrivateKey.fromRandom();
-      const ownerPub = ScriptExecutionContract.pubKeyHex(owner);
-      const backupPub = ScriptExecutionContract.pubKeyHex(backup);
+      const ownerPk = privKey(CHARLIE.privKey);
 
       const c = ScriptExecutionContract.fromSource(
-        src, { owner: ownerPub, backup: backupPub }, 'multi-method.runar.ts',
+        src, { owner: CHARLIE.pubKey, backup: DAVE.pubKey }, 'multi-method.runar.ts',
       );
       // threshold = amount * 2 + 1 = 6*2+1 = 13 > 10
-      const result = c.executeSigned('spendWithOwner', ['placeholder', 6n], 0, owner);
+      const result = c.executeSigned('spendWithOwner', ['placeholder', 6n], 0, ownerPk);
       expect(result.success).toBe(true);
     });
 
     it('spendWithOwner fails when threshold ≤ 10', () => {
-      const owner = PrivateKey.fromRandom();
-      const backup = PrivateKey.fromRandom();
-      const ownerPub = ScriptExecutionContract.pubKeyHex(owner);
-      const backupPub = ScriptExecutionContract.pubKeyHex(backup);
+      const ownerPk = privKey(EVE.privKey);
 
       const c = ScriptExecutionContract.fromSource(
-        src, { owner: ownerPub, backup: backupPub }, 'multi-method.runar.ts',
+        src, { owner: EVE.pubKey, backup: FRANK.pubKey }, 'multi-method.runar.ts',
       );
       // threshold = 3*2+1 = 7, not > 10
-      const result = c.executeSigned('spendWithOwner', ['placeholder', 3n], 0, owner);
+      const result = c.executeSigned('spendWithOwner', ['placeholder', 3n], 0, ownerPk);
       expect(result.success).toBe(false);
     });
 
     it('spendWithBackup succeeds with correct key', () => {
-      const owner = PrivateKey.fromRandom();
-      const backup = PrivateKey.fromRandom();
-      const ownerPub = ScriptExecutionContract.pubKeyHex(owner);
-      const backupPub = ScriptExecutionContract.pubKeyHex(backup);
+      const backupPk = privKey(HEIDI.privKey);
 
       const c = ScriptExecutionContract.fromSource(
-        src, { owner: ownerPub, backup: backupPub }, 'multi-method.runar.ts',
+        src, { owner: GRACE.pubKey, backup: HEIDI.pubKey }, 'multi-method.runar.ts',
       );
-      const result = c.executeSigned('spendWithBackup', ['placeholder'], 0, backup);
+      const result = c.executeSigned('spendWithBackup', ['placeholder'], 0, backupPk);
       expect(result.success).toBe(true);
     });
   });

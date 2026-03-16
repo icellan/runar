@@ -108,6 +108,8 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "ecPointY":           FuncSig(params=["Point"], return_type="bigint"),
     "sha256Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
     "sha256Finalize":    FuncSig(params=["ByteString", "ByteString", "bigint"], return_type="ByteString"),
+    "blake3Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
+    "blake3Hash":        FuncSig(params=["ByteString"], return_type="ByteString"),
     "abs":               FuncSig(params=["bigint"], return_type="bigint"),
     "min":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),
     "max":               FuncSig(params=["bigint", "bigint"], return_type="bigint"),
@@ -446,6 +448,10 @@ class _TypeChecker:
     def _check_binary_expr(self, e: BinaryExpr, env: _TypeEnv) -> str:
         left_type = self._infer_expr_type(e.left, env)
         right_type = self._infer_expr_type(e.right, env)
+
+        # ByteString concatenation: ByteString + ByteString -> ByteString (via OP_CAT)
+        if e.op == "+" and _is_byte_family(left_type) and _is_byte_family(right_type):
+            return "ByteString"
 
         # Arithmetic: bigint x bigint -> bigint
         if e.op in ("+", "-", "*", "/", "%"):

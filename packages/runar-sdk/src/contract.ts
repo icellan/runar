@@ -11,7 +11,9 @@ import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
+import { computeNewState } from './anf-interpreter.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
+import { WalletProvider } from './providers/wallet-provider.js';
 
 /**
  * Invalidate the @bsv/sdk Transaction's serialization caches after
@@ -226,6 +228,78 @@ export class RunarContract {
     });
 
     return { txid, tx: txData };
+  }
+
+  /**
+   * Deploy the contract using a BRC-100 wallet. The wallet owns the coins
+   * and creates the transaction itself via `createAction()`.
+   *
+   * Requires the contract to be connected to a `WalletProvider` (via `connect()`).
+   *
+   * @param options.satoshis     - Satoshis to lock in the contract output (default: 1).
+   * @param options.description  - Description for the wallet action.
+   */
+  async deployWithWallet(options: {
+    satoshis?: number;
+    description?: string;
+  } = {}): Promise<{ txid: string; outputIndex: number }> {
+    if (!(this._provider instanceof WalletProvider)) {
+      throw new Error(
+        'deployWithWallet requires a connected WalletProvider. Call connect(walletProvider, signer) first.',
+      );
+    }
+    const walletProvider = this._provider as WalletProvider;
+    const wallet = (walletProvider as any).wallet;
+    const basket = (walletProvider as any).basket;
+
+    const lockingScript = this.getLockingScript();
+    const satoshis = options.satoshis ?? 1;
+
+    const result = await wallet.createAction({
+      description: options.description ?? 'Runar contract deployment',
+      outputs: [{
+        lockingScript,
+        satoshis,
+        outputDescription: `Deploy ${this.artifact.contractName}`,
+        basket,
+      }],
+    });
+
+    // Parse BEEF to find the correct vout for our locking script
+    let outputIndex = 0;
+    let actualSatoshis = satoshis;
+    if (result.tx) {
+      try {
+        const tx = BsvTransaction.fromAtomicBEEF(result.tx);
+        for (let i = 0; i < tx.outputs.length; i++) {
+          const out = tx.outputs[i]!;
+          if (out.lockingScript?.toHex() === lockingScript) {
+            outputIndex = i;
+            actualSatoshis = out.satoshis != null ? out.satoshis : satoshis;
+            break;
+          }
+        }
+        // Cache raw hex for EF child tx builds
+        const txid = result.txid || '';
+        if (txid) {
+          walletProvider.cacheTx(txid, tx.toHex());
+        }
+        // Broadcast to ARC (may already be known — non-fatal)
+        await walletProvider.broadcast(tx).catch(() => {});
+      } catch { /* BEEF parse failure is non-fatal */ }
+    }
+
+    const txid = result.txid || '';
+
+    // Track the deployed UTXO
+    this.currentUtxo = {
+      txid,
+      outputIndex,
+      satoshis: actualSatoshis,
+      script: lockingScript,
+    };
+
+    return { txid, outputIndex };
   }
 
   // -------------------------------------------------------------------------
@@ -584,7 +658,15 @@ export class RunarContract {
     } else if (isStateful) {
       newSatoshis = options?.satoshis ?? this.currentUtxo.satoshis;
       if (options?.newState) {
+        // Explicit newState takes priority (backward compat)
         this._state = { ...this._state, ...options.newState };
+      } else if (methodNeedsChange && this.artifact.anf) {
+        // Auto-compute new state from ANF IR
+        const namedArgs = buildNamedArgs(userParams, resolvedArgs);
+        const computed = computeNewState(
+          this.artifact.anf, methodName, this._state, namedArgs,
+        );
+        this._state = { ...this._state, ...computed };
       }
       newLockingScript = this.getLockingScript();
     }
@@ -1139,6 +1221,52 @@ export class RunarContract {
   // -------------------------------------------------------------------------
 
   /**
+   * Reconnect to an existing deployed contract from a known UTXO.
+   *
+   * This is the synchronous equivalent of `fromTxId()` — use it when the
+   * UTXO data is already available (e.g. from an overlay service or cache)
+   * without needing a Provider to fetch the transaction.
+   *
+   * @param artifact - The compiled artifact describing the contract.
+   * @param utxo     - The UTXO containing the contract output.
+   * @returns A RunarContract instance connected to the existing UTXO.
+   */
+  static fromUtxo(
+    artifact: RunarArtifact,
+    utxo: { txid: string; outputIndex: number; satoshis: number; script: string },
+  ): RunarContract {
+    const contract = new RunarContract(
+      artifact,
+      new Array(artifact.abi.constructor.params.length).fill(0n) as unknown[],
+    );
+
+    if (artifact.stateFields && artifact.stateFields.length > 0) {
+      const lastOpReturn = findLastOpReturn(utxo.script);
+      contract._codeScript = lastOpReturn !== -1
+        ? utxo.script.slice(0, lastOpReturn)
+        : utxo.script;
+    } else {
+      contract._codeScript = utxo.script;
+    }
+
+    contract.currentUtxo = {
+      txid: utxo.txid,
+      outputIndex: utxo.outputIndex,
+      satoshis: utxo.satoshis,
+      script: utxo.script,
+    };
+
+    if (artifact.stateFields && artifact.stateFields.length > 0) {
+      const state = extractStateFromScript(artifact, utxo.script);
+      if (state) {
+        contract._state = state;
+      }
+    }
+
+    return contract;
+  }
+
+  /**
    * Reconnect to an existing deployed contract from its deployment transaction.
    *
    * @param artifact     - The compiled artifact describing the contract.
@@ -1162,45 +1290,12 @@ export class RunarContract {
     }
 
     const output = tx.outputs[outputIndex]!;
-    const contract = new RunarContract(
-      artifact,
-      // Dummy constructor args -- we store the on-chain code script directly
-      // so these won't be used in getLockingScript().
-      new Array(artifact.abi.constructor.params.length).fill(0n) as unknown[],
-    );
-
-    // Store the code portion of the on-chain script so getLockingScript()
-    // produces correct output without needing the original constructor args.
-    if (artifact.stateFields && artifact.stateFields.length > 0) {
-      // Stateful: code is everything before the last OP_RETURN.
-      // Use opcode-aware walking to find the real OP_RETURN (not a 0x6a
-      // byte inside push data).
-      const lastOpReturn = findLastOpReturn(output.script);
-      contract._codeScript = lastOpReturn !== -1
-        ? output.script.slice(0, lastOpReturn)
-        : output.script;
-    } else {
-      // Stateless: the full on-chain script IS the code
-      contract._codeScript = output.script;
-    }
-
-    // Set the current UTXO
-    contract.currentUtxo = {
+    return RunarContract.fromUtxo(artifact, {
       txid,
       outputIndex,
       satoshis: output.satoshis,
       script: output.script,
-    };
-
-    // Extract state if this is a stateful contract
-    if (artifact.stateFields && artifact.stateFields.length > 0) {
-      const state = extractStateFromScript(artifact, output.script);
-      if (state) {
-        contract._state = state;
-      }
-    }
-
-    return contract;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -1229,6 +1324,21 @@ function reviveJsonValue(value: unknown, type: string): unknown {
     return BigInt(value);
   }
   return value;
+}
+
+/**
+ * Build a named argument map from positional args and user-visible params.
+ * Used to feed the ANF interpreter for auto-state computation.
+ */
+function buildNamedArgs(
+  userParams: Array<{ name: string; type: string }>,
+  resolvedArgs: unknown[],
+): Record<string, unknown> {
+  const named: Record<string, unknown> = {};
+  for (let i = 0; i < userParams.length; i++) {
+    named[userParams[i]!.name] = resolvedArgs[i];
+  }
+  return named;
 }
 
 // ---------------------------------------------------------------------------

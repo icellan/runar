@@ -31,7 +31,14 @@ use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFVal
 /// Lower a type-checked Rúnar AST to ANF IR.
 pub fn lower_to_anf(contract: &ContractNode) -> ANFProgram {
     let properties = lower_properties(contract);
-    let methods = lower_methods(contract);
+    let mut methods = lower_methods(contract);
+
+    // Post-process: lift nested if-else chains with update_prop into flat
+    // conditional assignments. This matches the TS reference compiler's
+    // liftBranchUpdateProps transformation (04-anf-lower.ts line 50).
+    for method in &mut methods {
+        method.body = lift_branch_update_props(method.body.clone());
+    }
 
     ANFProgram {
         contract_name: contract.name.clone(),
@@ -413,8 +420,49 @@ impl<'a> LoweringContext<'a> {
 // ---------------------------------------------------------------------------
 
 fn lower_statements(stmts: &[Statement], ctx: &mut LoweringContext) {
-    for stmt in stmts {
+    for i in 0..stmts.len() {
+        let stmt = &stmts[i];
+        // When an if-statement has no else, the then-block ends with return,
+        // and there are remaining statements: nest the remaining statements
+        // into the else branch. This handles early-return patterns in private methods.
+        if let Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch: None,
+            source_location,
+        } = stmt
+        {
+            if i + 1 < stmts.len() && branch_ends_with_return(then_branch) {
+                let remaining = stmts[i + 1..].to_vec();
+                let modified_if = Statement::IfStatement {
+                    condition: condition.clone(),
+                    then_branch: then_branch.clone(),
+                    else_branch: Some(remaining),
+                    source_location: source_location.clone(),
+                };
+                lower_statement(&modified_if, ctx);
+                return;
+            }
+        }
         lower_statement(stmt, ctx);
+    }
+}
+
+/// Check if a branch (slice of statements) ends with a return statement,
+/// or with an if-statement where both branches end with a return.
+fn branch_ends_with_return(stmts: &[Statement]) -> bool {
+    if stmts.is_empty() {
+        return false;
+    }
+    let last = &stmts[stmts.len() - 1];
+    match last {
+        Statement::ReturnStatement { .. } => true,
+        Statement::IfStatement {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => branch_ends_with_return(then_branch) && branch_ends_with_return(else_branch),
+        _ => false,
     }
 }
 
@@ -449,7 +497,21 @@ fn lower_statement(stmt: &Statement, ctx: &mut LoweringContext) {
         }
         Statement::ReturnStatement { value, .. } => {
             if let Some(v) = value {
-                lower_expr_to_ref(v, ctx);
+                let ref_name = lower_expr_to_ref(v, ctx);
+                // If the returned ref is not the name of the last emitted binding,
+                // emit an explicit @ref: alias so the return value is the last
+                // (top-of-stack) binding. This matters when a local variable is
+                // returned after control flow (e.g., `let count = 0n; if (...) {
+                // count += 1n; } return count;`). Without this, the last binding
+                // is the if, not `count`, so inline_method_call in stack lowering
+                // can't find the return value.
+                if let Some(last) = ctx.bindings.last() {
+                    if last.name != ref_name {
+                        ctx.emit(ANFValue::LoadConst {
+                            value: serde_json::Value::String(format!("@ref:{}", ref_name)),
+                        });
+                    }
+                }
             }
         }
     }
@@ -1125,6 +1187,7 @@ const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
     "sha256", "ripemd160", "hash160", "hash256", "cat", "num2bin", "int2str",
     "reverseBytes", "substr", "left", "right",
     "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
+    "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
 ];
 
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).
@@ -1351,4 +1414,879 @@ fn expr_has_add_output(expr: &Expression) -> bool {
         }
     }
     false
+}
+
+// ---------------------------------------------------------------------------
+// liftBranchUpdateProps — flatten nested if-else chains with update_prop
+// ---------------------------------------------------------------------------
+//
+// Mirrors the TypeScript reference compiler's `liftBranchUpdateProps` function
+// in 04-anf-lower.ts. When an if-else chain has update_prop as the last binding
+// in each branch (e.g., placeMove dispatching by position), this transform
+// flattens the nesting into a flat series of conditional if-expressions +
+// top-level update_prop calls. This is critical for the stack lowering pass,
+// which cannot handle deeply nested if-else with update_prop correctly.
+
+struct UpdateBranch {
+    cond_setup_bindings: Vec<ANFBinding>,
+    cond_ref: Option<String>,
+    prop_name: String,
+    value_bindings: Vec<ANFBinding>,
+    #[allow(dead_code)]
+    value_ref: String,
+}
+
+/// Find the max temp index (e.g. t47 → 47) in a binding tree.
+fn max_temp_index(bindings: &[ANFBinding]) -> i64 {
+    let mut max = -1i64;
+    for b in bindings {
+        if b.name.starts_with('t') {
+            if let Ok(n) = b.name[1..].parse::<i64>() {
+                if n > max {
+                    max = n;
+                }
+            }
+        }
+        match &b.value {
+            ANFValue::If { then, else_branch, .. } => {
+                let t = max_temp_index(then);
+                if t > max { max = t; }
+                let e = max_temp_index(else_branch);
+                if e > max { max = e; }
+            }
+            ANFValue::Loop { body, .. } => {
+                let l = max_temp_index(body);
+                if l > max { max = l; }
+            }
+            _ => {}
+        }
+    }
+    max
+}
+
+/// Check if a binding's value is side-effect-free.
+fn is_side_effect_free(value: &ANFValue) -> bool {
+    matches!(
+        value,
+        ANFValue::LoadProp { .. }
+            | ANFValue::LoadParam { .. }
+            | ANFValue::LoadConst { .. }
+            | ANFValue::BinOp { .. }
+            | ANFValue::UnaryOp { .. }
+    )
+}
+
+fn all_bindings_side_effect_free(bindings: &[ANFBinding]) -> bool {
+    bindings.iter().all(|b| is_side_effect_free(&b.value))
+}
+
+/// Extract the update_prop target from a branch's bindings.
+/// Returns (prop_name, value_bindings_before_update, value_ref) if the last
+/// binding is update_prop and all preceding bindings are side-effect-free.
+fn extract_branch_update(bindings: &[ANFBinding]) -> Option<(String, Vec<ANFBinding>, String)> {
+    if bindings.is_empty() {
+        return None;
+    }
+    let last = &bindings[bindings.len() - 1];
+    if let ANFValue::UpdateProp { name: prop_name, value: val_ref } = &last.value {
+        let value_bindings = bindings[..bindings.len() - 1].to_vec();
+        if !all_bindings_side_effect_free(&value_bindings) {
+            return None;
+        }
+        Some((prop_name.clone(), value_bindings, val_ref.clone()))
+    } else {
+        None
+    }
+}
+
+/// Check if an else branch is just `assert(false)` — unreachable dead code.
+fn is_assert_false_else(bindings: &[ANFBinding]) -> bool {
+    if bindings.is_empty() {
+        return false;
+    }
+    let last = &bindings[bindings.len() - 1];
+    if let ANFValue::Assert { value: assert_ref } = &last.value {
+        // Find the binding that assert_ref references
+        for b in bindings {
+            if b.name == *assert_ref {
+                if let ANFValue::LoadConst { value: v } = &b.value {
+                    return v == &serde_json::Value::Bool(false);
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Recursively collect update branches from a nested if-else chain.
+fn collect_update_branches(
+    if_cond: &str,
+    then_bindings: &[ANFBinding],
+    else_bindings: &[ANFBinding],
+) -> Option<Vec<UpdateBranch>> {
+    let then_update = extract_branch_update(then_bindings)?;
+
+    let mut branches = vec![UpdateBranch {
+        cond_setup_bindings: Vec::new(),
+        cond_ref: Some(if_cond.to_string()),
+        prop_name: then_update.0,
+        value_bindings: then_update.1,
+        value_ref: then_update.2,
+    }];
+
+    if else_bindings.is_empty() {
+        return None;
+    }
+
+    // Check if else is another if (else-if chain)
+    let last_else = &else_bindings[else_bindings.len() - 1];
+    if let ANFValue::If { cond, then, else_branch } = &last_else.value {
+        let cond_setup = &else_bindings[..else_bindings.len() - 1];
+        if !all_bindings_side_effect_free(cond_setup) {
+            return None;
+        }
+
+        let mut inner_branches = collect_update_branches(cond, then, else_branch)?;
+
+        // Prepend condition setup to first inner branch
+        let mut new_setup = cond_setup.to_vec();
+        new_setup.extend(inner_branches[0].cond_setup_bindings.drain(..));
+        inner_branches[0].cond_setup_bindings = new_setup;
+
+        branches.extend(inner_branches);
+        return Some(branches);
+    }
+
+    // Otherwise, else branch should end with update_prop (final else)
+    if let Some(else_update) = extract_branch_update(else_bindings) {
+        branches.push(UpdateBranch {
+            cond_setup_bindings: Vec::new(),
+            cond_ref: None,
+            prop_name: else_update.0,
+            value_bindings: else_update.1,
+            value_ref: else_update.2,
+        });
+        return Some(branches);
+    }
+
+    // Handle unreachable else: assert(false)
+    if is_assert_false_else(else_bindings) {
+        return Some(branches);
+    }
+
+    None
+}
+
+/// Remap temp references in an ANF value according to a name mapping.
+fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue {
+    let r = |s: &str| -> String { map.get(s).cloned().unwrap_or_else(|| s.to_string()) };
+    match value {
+        ANFValue::LoadParam { .. } | ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {
+            value.clone()
+        }
+        ANFValue::LoadConst { value: v } => {
+            if let Some(s) = v.as_str() {
+                if s.starts_with("@ref:") {
+                    let target = &s[5..];
+                    if let Some(remapped) = map.get(target) {
+                        return ANFValue::LoadConst {
+                            value: serde_json::Value::String(format!("@ref:{}", remapped)),
+                        };
+                    }
+                }
+            }
+            value.clone()
+        }
+        ANFValue::BinOp { op, left, right, result_type } => ANFValue::BinOp {
+            op: op.clone(),
+            left: r(left),
+            right: r(right),
+            result_type: result_type.clone(),
+        },
+        ANFValue::UnaryOp { op, operand, result_type } => ANFValue::UnaryOp {
+            op: op.clone(),
+            operand: r(operand),
+            result_type: result_type.clone(),
+        },
+        ANFValue::Call { func, args } => ANFValue::Call {
+            func: func.clone(),
+            args: args.iter().map(|a| r(a)).collect(),
+        },
+        ANFValue::MethodCall { object, method, args } => ANFValue::MethodCall {
+            object: r(object),
+            method: method.clone(),
+            args: args.iter().map(|a| r(a)).collect(),
+        },
+        ANFValue::Assert { value: v } => ANFValue::Assert { value: r(v) },
+        ANFValue::UpdateProp { name, value: v } => ANFValue::UpdateProp {
+            name: name.clone(),
+            value: r(v),
+        },
+        ANFValue::CheckPreimage { preimage } => ANFValue::CheckPreimage {
+            preimage: r(preimage),
+        },
+        ANFValue::DeserializeState { preimage } => ANFValue::DeserializeState {
+            preimage: r(preimage),
+        },
+        ANFValue::AddOutput { satoshis, state_values, preimage } => ANFValue::AddOutput {
+            satoshis: r(satoshis),
+            state_values: state_values.iter().map(|a| r(a)).collect(),
+            preimage: r(preimage),
+        },
+        ANFValue::AddRawOutput { satoshis, script_bytes } => ANFValue::AddRawOutput {
+            satoshis: r(satoshis),
+            script_bytes: r(script_bytes),
+        },
+        ANFValue::ArrayLiteral { elements } => ANFValue::ArrayLiteral {
+            elements: elements.iter().map(|e| r(e)).collect(),
+        },
+        ANFValue::If { cond, then, else_branch } => ANFValue::If {
+            cond: r(cond),
+            then: then.clone(),
+            else_branch: else_branch.clone(),
+        },
+        ANFValue::Loop { count, body, iter_var } => ANFValue::Loop {
+            count: *count,
+            body: body.clone(),
+            iter_var: iter_var.clone(),
+        },
+    }
+}
+
+/// Transform if-bindings whose branches all end with update_prop into
+/// flat conditional assignments. Mirrors TS liftBranchUpdateProps.
+fn lift_branch_update_props(bindings: Vec<ANFBinding>) -> Vec<ANFBinding> {
+    let mut next_idx = (max_temp_index(&bindings) + 1) as usize;
+    let mut fresh = || -> String {
+        let name = format!("t{}", next_idx);
+        next_idx += 1;
+        name
+    };
+
+    let mut result: Vec<ANFBinding> = Vec::new();
+
+    for binding in &bindings {
+        let if_val = match &binding.value {
+            ANFValue::If { cond, then, else_branch } => Some((cond, then, else_branch)),
+            _ => None,
+        };
+
+        if if_val.is_none() {
+            result.push(binding.clone());
+            continue;
+        }
+
+        let (cond, then_bindings, else_bindings) = if_val.unwrap();
+
+        let branches = collect_update_branches(cond, then_bindings, else_bindings);
+
+        if branches.is_none() || branches.as_ref().map_or(true, |b| b.len() < 2) {
+            result.push(binding.clone());
+            continue;
+        }
+
+        let branches = branches.unwrap();
+
+        // --- Transform: flatten into conditional assignments ---
+
+        // 1. Hoist condition setup bindings with fresh names
+        let mut name_map: HashMap<String, String> = HashMap::new();
+        let mut cond_refs: Vec<Option<String>> = Vec::new();
+
+        for branch in &branches {
+            for csb in &branch.cond_setup_bindings {
+                let new_name = fresh();
+                name_map.insert(csb.name.clone(), new_name.clone());
+                result.push(ANFBinding {
+                    name: new_name,
+                    value: remap_value_refs(&csb.value, &name_map),
+                });
+            }
+            cond_refs.push(
+                branch.cond_ref.as_ref().map(|cr| {
+                    name_map.get(cr).cloned().unwrap_or_else(|| cr.clone())
+                }),
+            );
+        }
+
+        // 2. Compute effective condition for each branch
+        let mut effective_conds: Vec<String> = Vec::new();
+        let mut negated_conds: Vec<String> = Vec::new();
+
+        for i in 0..branches.len() {
+            if i == 0 {
+                effective_conds.push(cond_refs[0].clone().unwrap());
+                continue;
+            }
+
+            // Negate any prior conditions not yet negated
+            for j in negated_conds.len()..i {
+                if cond_refs[j].is_none() {
+                    continue;
+                }
+                let neg_name = fresh();
+                result.push(ANFBinding {
+                    name: neg_name.clone(),
+                    value: ANFValue::UnaryOp {
+                        op: "!".to_string(),
+                        operand: cond_refs[j].clone().unwrap(),
+                        result_type: None,
+                    },
+                });
+                negated_conds.push(neg_name);
+            }
+
+            // AND all negated conditions together
+            let mut and_ref = negated_conds[0].clone();
+            for j in 1..std::cmp::min(i, negated_conds.len()) {
+                let and_name = fresh();
+                result.push(ANFBinding {
+                    name: and_name.clone(),
+                    value: ANFValue::BinOp {
+                        op: "&&".to_string(),
+                        left: and_ref,
+                        right: negated_conds[j].clone(),
+                        result_type: None,
+                    },
+                });
+                and_ref = and_name;
+            }
+
+            if cond_refs[i].is_some() {
+                // Middle branch: AND with own condition
+                let final_name = fresh();
+                result.push(ANFBinding {
+                    name: final_name.clone(),
+                    value: ANFValue::BinOp {
+                        op: "&&".to_string(),
+                        left: and_ref,
+                        right: cond_refs[i].clone().unwrap(),
+                        result_type: None,
+                    },
+                });
+                effective_conds.push(final_name);
+            } else {
+                // Final else: just the AND of negations
+                effective_conds.push(and_ref);
+            }
+        }
+
+        // 3. For each branch, emit: load_old, conditional if-expression, update_prop
+        for (i, branch) in branches.iter().enumerate() {
+            // Load old property value
+            let old_prop_ref = fresh();
+            result.push(ANFBinding {
+                name: old_prop_ref.clone(),
+                value: ANFValue::LoadProp {
+                    name: branch.prop_name.clone(),
+                },
+            });
+
+            // Remap value bindings for the then-branch
+            let mut branch_map = name_map.clone();
+            let mut then_bindings: Vec<ANFBinding> = Vec::new();
+            for vb in &branch.value_bindings {
+                let new_name = fresh();
+                branch_map.insert(vb.name.clone(), new_name.clone());
+                then_bindings.push(ANFBinding {
+                    name: new_name,
+                    value: remap_value_refs(&vb.value, &branch_map),
+                });
+            }
+
+            // Else branch: keep old property value
+            let keep_name = fresh();
+            let else_bindings = vec![ANFBinding {
+                name: keep_name,
+                value: ANFValue::LoadConst {
+                    value: serde_json::Value::String(format!("@ref:{}", old_prop_ref)),
+                },
+            }];
+
+            // Emit conditional if-expression
+            let cond_if_ref = fresh();
+            result.push(ANFBinding {
+                name: cond_if_ref.clone(),
+                value: ANFValue::If {
+                    cond: effective_conds[i].clone(),
+                    then: then_bindings,
+                    else_branch: else_bindings,
+                },
+            });
+
+            // Emit update_prop
+            result.push(ANFBinding {
+                name: fresh(),
+                value: ANFValue::UpdateProp {
+                    name: branch.prop_name.clone(),
+                    value: cond_if_ref,
+                },
+            });
+        }
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::parser::parse_source;
+    use crate::frontend::typecheck::typecheck;
+    use crate::frontend::validator::validate;
+
+    /// Helper: parse → validate → typecheck → return ContractNode.
+    fn must_lower_to_anf(source: &str) -> ContractNode {
+        let result = parse_source(source, Some("test.runar.ts"));
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+        let contract = result.contract.expect("expected a contract from parse");
+
+        let val_result = validate(&contract);
+        assert!(
+            val_result.errors.is_empty(),
+            "validation errors: {:?}",
+            val_result.errors
+        );
+
+        let tc_result = typecheck(&contract);
+        assert!(
+            tc_result.errors.is_empty(),
+            "type check errors: {:?}",
+            tc_result.errors
+        );
+
+        contract
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_has_properties
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_has_properties() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        assert_eq!(program.contract_name, "P2PKH");
+
+        assert_eq!(
+            program.properties.len(),
+            1,
+            "expected 1 property, got {}",
+            program.properties.len()
+        );
+        let prop = &program.properties[0];
+        assert_eq!(
+            prop.name, "pubKeyHash",
+            "expected property name 'pubKeyHash', got '{}'",
+            prop.name
+        );
+        assert_eq!(
+            prop.prop_type, "Addr",
+            "expected property type 'Addr', got '{}'",
+            prop.prop_type
+        );
+        assert!(prop.readonly, "expected property to be readonly");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_unlock_has_bindings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_unlock_has_bindings() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let unlock = program
+            .methods
+            .iter()
+            .find(|m| m.name == "unlock")
+            .expect("could not find 'unlock' method in ANF output");
+
+        assert!(unlock.is_public, "expected unlock method to be public");
+
+        assert_eq!(
+            unlock.params.len(),
+            2,
+            "expected 2 params (sig, pubKey), got {}",
+            unlock.params.len()
+        );
+        assert_eq!(unlock.params[0].name, "sig");
+        assert_eq!(unlock.params[0].param_type, "Sig");
+        assert_eq!(unlock.params[1].name, "pubKey");
+        assert_eq!(unlock.params[1].param_type, "PubKey");
+
+        // Count binding kinds — must have at least: 2 load_param, 2 call, 1
+        // load_prop, 1 bin_op, 2 assert.
+        let mut load_param_count = 0usize;
+        let mut call_count = 0usize;
+        let mut load_prop_count = 0usize;
+        let mut bin_op_count = 0usize;
+        let mut assert_count = 0usize;
+
+        for b in &unlock.body {
+            match &b.value {
+                ANFValue::LoadParam { .. } => load_param_count += 1,
+                ANFValue::LoadProp { .. } => load_prop_count += 1,
+                ANFValue::Call { .. } => call_count += 1,
+                ANFValue::BinOp { .. } => bin_op_count += 1,
+                ANFValue::Assert { .. } => assert_count += 1,
+                _ => {}
+            }
+        }
+
+        assert!(
+            load_param_count >= 2,
+            "expected at least 2 load_param bindings, got {}",
+            load_param_count
+        );
+        assert!(
+            call_count >= 2,
+            "expected at least 2 call bindings (hash160, checkSig), got {}",
+            call_count
+        );
+        assert!(
+            load_prop_count >= 1,
+            "expected at least 1 load_prop binding (pubKeyHash), got {}",
+            load_prop_count
+        );
+        assert!(
+            bin_op_count >= 1,
+            "expected at least 1 bin_op binding (===), got {}",
+            bin_op_count
+        );
+        assert!(
+            assert_count >= 2,
+            "expected at least 2 assert bindings, got {}",
+            assert_count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_p2pkh_binding_details
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_p2pkh_binding_details() {
+        let source = r#"
+import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+  readonly pubKeyHash: Addr;
+
+  constructor(pubKeyHash: Addr) {
+    super(pubKeyHash);
+    this.pubKeyHash = pubKeyHash;
+  }
+
+  public unlock(sig: Sig, pubKey: PubKey): void {
+    assert(hash160(pubKey) === this.pubKeyHash);
+    assert(checkSig(sig, pubKey));
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let unlock = program
+            .methods
+            .iter()
+            .find(|m| m.name == "unlock")
+            .expect("could not find 'unlock' method");
+
+        // Verify call to hash160 with 1 argument
+        let hash160_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::Call { func, .. } if func == "hash160")
+        });
+        assert!(
+            hash160_binding.is_some(),
+            "expected a call to hash160 in unlock method bindings"
+        );
+        if let Some(b) = hash160_binding {
+            if let ANFValue::Call { args, .. } = &b.value {
+                assert_eq!(
+                    args.len(),
+                    1,
+                    "hash160 should have 1 arg, got {}",
+                    args.len()
+                );
+            }
+        }
+
+        // Verify call to checkSig with 2 arguments
+        let checksig_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::Call { func, .. } if func == "checkSig")
+        });
+        assert!(
+            checksig_binding.is_some(),
+            "expected a call to checkSig in unlock method bindings"
+        );
+        if let Some(b) = checksig_binding {
+            if let ANFValue::Call { args, .. } = &b.value {
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "checkSig should have 2 args, got {}",
+                    args.len()
+                );
+            }
+        }
+
+        // Verify bin_op === has result_type "bytes" (byte-typed equality)
+        let eq_binding = unlock.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "===")
+        });
+        assert!(
+            eq_binding.is_some(),
+            "expected a bin_op === in unlock method bindings"
+        );
+        if let Some(b) = eq_binding {
+            if let ANFValue::BinOp { result_type, .. } = &b.value {
+                assert_eq!(
+                    result_type.as_deref(),
+                    Some("bytes"),
+                    "expected bin_op === to have result_type 'bytes' (byte-typed equality), got {:?}",
+                    result_type
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // test_constructor_included
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_constructor_included() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class Simple extends SmartContract {
+  readonly x: bigint;
+
+  constructor(x: bigint) {
+    super(x);
+    this.x = x;
+  }
+
+  public check(val: bigint): void {
+    assert(val === this.x);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        assert!(
+            program.methods.len() >= 2,
+            "expected at least 2 methods (constructor + check), got {}",
+            program.methods.len()
+        );
+
+        let ctor = &program.methods[0];
+        assert_eq!(
+            ctor.name, "constructor",
+            "expected first method to be 'constructor', got '{}'",
+            ctor.name
+        );
+        assert!(!ctor.is_public, "constructor should not be public");
+    }
+
+    // -----------------------------------------------------------------------
+    // test_arithmetic_bindings
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_arithmetic_bindings() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class ArithTest extends SmartContract {
+  readonly target: bigint;
+
+  constructor(target: bigint) {
+    super(target);
+    this.target = target;
+  }
+
+  public verify(a: bigint, b: bigint): void {
+    assert(a + b === this.target);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let verify = program
+            .methods
+            .iter()
+            .find(|m| m.name == "verify")
+            .expect("could not find 'verify' method");
+
+        // Should have a bin_op + for a + b
+        let add_binding = verify.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "+")
+        });
+        assert!(
+            add_binding.is_some(),
+            "expected bin_op + in verify method for 'a + b'"
+        );
+
+        // Should have a bin_op === for equality check
+        let eq_binding = verify.body.iter().find(|b| {
+            matches!(&b.value, ANFValue::BinOp { op, .. } if op == "===")
+        });
+        assert!(
+            eq_binding.is_some(),
+            "expected bin_op === in verify method"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_if_else_lowering
+    // Mirrors Python test_anf_lower_if_else
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_if_else_lowering() {
+        let source = r#"
+import { SmartContract, assert } from 'runar-lang';
+
+class IfElse extends SmartContract {
+  readonly limit: bigint;
+
+  constructor(limit: bigint) {
+    super(limit);
+    this.limit = limit;
+  }
+
+  public check(value: bigint, mode: boolean): void {
+    let result: bigint = 0n;
+    if (mode) {
+      result = value + this.limit;
+    } else {
+      result = value - this.limit;
+    }
+    assert(result > 0n);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let check = program
+            .methods
+            .iter()
+            .find(|m| m.name == "check")
+            .expect("could not find 'check' method");
+
+        // The if/else construct should produce an ANFValue::If binding
+        let has_if_binding = check
+            .body
+            .iter()
+            .any(|b| matches!(b.value, ANFValue::If { .. }));
+
+        assert!(
+            has_if_binding,
+            "expected an 'if' binding in the ANF output for the if/else construct, got: {:?}",
+            check.body.iter().map(|b| format!("{:?}", b.value)).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // test_stateful_has_implicit_params
+    // Mirrors Python test_typecheck_valid_stateful (checks implicit params in ANF)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_stateful_has_implicit_params() {
+        let source = r#"
+import { StatefulSmartContract, assert } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public increment(amount: bigint): void {
+    this.count = this.count + amount;
+    assert(this.count > 0n);
+  }
+}
+"#;
+        let contract = must_lower_to_anf(source);
+        let program = lower_to_anf(&contract);
+
+        let increment = program
+            .methods
+            .iter()
+            .find(|m| m.name == "increment")
+            .expect("could not find 'increment' method");
+
+        // A StatefulSmartContract public method should have implicit params injected:
+        // txPreimage, _changePKH, _changeAmount
+        let param_names: Vec<&str> = increment.params.iter().map(|p| p.name.as_str()).collect();
+
+        assert!(
+            param_names.contains(&"txPreimage"),
+            "stateful method should have 'txPreimage' as an implicit param, got: {:?}",
+            param_names
+        );
+        assert!(
+            param_names.contains(&"_changePKH"),
+            "stateful method should have '_changePKH' as an implicit param, got: {:?}",
+            param_names
+        );
+        assert!(
+            param_names.contains(&"_changeAmount"),
+            "stateful method should have '_changeAmount' as an implicit param, got: {:?}",
+            param_names
+        );
+    }
 }

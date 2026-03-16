@@ -197,6 +197,11 @@ impl StackMap {
         &self.slots[index]
     }
 
+    fn rename_at_depth(&mut self, depth_from_top: usize, new_name: &str) {
+        let idx = self.slots.len() - 1 - depth_from_top;
+        self.slots[idx] = new_name.to_string();
+    }
+
     fn swap(&mut self) {
         let n = self.slots.len();
         assert!(n >= 2, "stack underflow on swap");
@@ -304,6 +309,9 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
             refs.push(satoshis.clone());
             refs.push(script_bytes.clone());
         }
+        ANFValue::ArrayLiteral { elements } => {
+            refs.extend(elements.iter().cloned());
+        }
     }
     refs
 }
@@ -323,6 +331,9 @@ struct LoweringContext {
     local_bindings: HashSet<String>,
     /// Parent-scope refs that must not be consumed (used after current if-branch).
     outer_protected_refs: Option<HashSet<String>>,
+    /// True when executing inside an if-branch. update_prop skips old-value
+    /// removal so that the same-property detection in lower_if can handle it.
+    inside_branch: bool,
 }
 
 impl LoweringContext {
@@ -335,6 +346,7 @@ impl LoweringContext {
             private_methods: HashMap::new(),
             local_bindings: HashSet::new(),
             outer_protected_refs: None,
+            inside_branch: false,
         };
         ctx.track_depth();
         ctx
@@ -617,6 +629,9 @@ impl LoweringContext {
             ANFValue::AddRawOutput { satoshis, script_bytes } => {
                 self.lower_add_raw_output(name, satoshis, script_bytes, binding_index, last_uses);
             }
+            ANFValue::ArrayLiteral { elements } => {
+                self.lower_array_literal(name, elements, binding_index, last_uses);
+            }
         }
     }
 
@@ -772,7 +787,10 @@ impl LoweringContext {
         self.sm.pop();
 
         // For equality operators, choose OP_EQUAL vs OP_NUMEQUAL based on operand type.
-        if result_type == Some("bytes") && (op == "===" || op == "!==") {
+        // For addition, choose OP_CAT vs OP_ADD based on operand type.
+        if result_type == Some("bytes") && op == "+" {
+            self.emit_op(StackOp::Opcode("OP_CAT".to_string()));
+        } else if result_type == Some("bytes") && (op == "===" || op == "!==") {
             self.emit_op(StackOp::Opcode("OP_EQUAL".to_string()));
             if op == "!==" {
                 self.emit_op(StackOp::Opcode("OP_NOT".to_string()));
@@ -839,6 +857,12 @@ impl LoweringContext {
             return;
         }
 
+        // checkMultiSig(sigs, pks) — special handling for OP_CHECKMULTISIG.
+        if func_name == "checkMultiSig" && args.len() == 2 {
+            self.lower_check_multi_sig(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
         if func_name == "__array_access" {
             self.lower_array_access(binding_name, args, binding_index, last_uses);
             return;
@@ -877,6 +901,16 @@ impl LoweringContext {
 
         if func_name == "sha256Finalize" {
             self.lower_sha256_finalize(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "blake3Compress" {
+            self.lower_blake3_compress(binding_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "blake3Hash" {
+            self.lower_blake3_hash(binding_name, args, binding_index, last_uses);
             return;
         }
 
@@ -1025,12 +1059,20 @@ impl LoweringContext {
     fn lower_method_call(
         &mut self,
         binding_name: &str,
-        _object: &str,
+        object: &str,
         method: &str,
         args: &[String],
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
+        // Consume the @this object reference — it's a compile-time concept,
+        // not a runtime value. Without this, 0n stays on the stack.
+        if self.sm.has(object) {
+            self.bring_to_top(object, true);
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
         if method == "getStateScript" {
             self.lower_get_state_script(binding_name);
             return;
@@ -1056,19 +1098,45 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        // First, bring all args to the top of the stack and rename them to the method param names
+        // Track shadowed names so we can restore them after the body runs.
+        // When a param name already exists on the stack, temporarily rename
+        // the existing entry to avoid duplicate names which break Set-based
+        // branch reconciliation in lower_if.
+        let mut shadowed: Vec<(String, String)> = Vec::new();
+
+        // Bind call arguments to private method params.
         for (i, arg) in args.iter().enumerate() {
             if i < method.params.len() {
                 let is_last = self.is_last_use(arg, binding_index, last_uses);
                 self.bring_to_top(arg, is_last);
-                // Rename to param name
                 self.sm.pop();
-                self.sm.push(&method.params[i].name);
+
+                let param_name = &method.params[i].name;
+
+                // If param_name already exists on the stack, shadow it by renaming
+                // the existing entry to prevent duplicate-name issues.
+                if self.sm.has(param_name) {
+                    let existing_depth = self.sm.find_depth(param_name).unwrap();
+                    let shadowed_name = format!("__shadowed_{}_{}", binding_index, param_name);
+                    self.sm.rename_at_depth(existing_depth, &shadowed_name);
+                    shadowed.push((param_name.clone(), shadowed_name));
+                }
+
+                // Rename to param name
+                self.sm.push(param_name);
             }
         }
 
         // Lower the method body
         self.lower_bindings(&method.body, false);
+
+        // Restore shadowed names so the caller's scope sees its original entries.
+        for (param_name, shadowed_name) in &shadowed {
+            if self.sm.has(shadowed_name) {
+                let depth = self.sm.find_depth(shadowed_name).unwrap();
+                self.sm.rename_at_depth(depth, param_name);
+            }
+        }
 
         // The last binding's result should be on top of the stack.
         // Rename it to the calling binding name.
@@ -1113,6 +1181,7 @@ impl LoweringContext {
         let mut then_ctx = LoweringContext::new(&[], &self.properties);
         then_ctx.sm = self.sm.clone();
         then_ctx.outer_protected_refs = Some(protected_refs.clone());
+        then_ctx.inside_branch = true;
         then_ctx.lower_bindings(then_bindings, terminal_assert);
 
         if terminal_assert && then_ctx.sm.depth() > 1 {
@@ -1127,6 +1196,7 @@ impl LoweringContext {
         let mut else_ctx = LoweringContext::new(&[], &self.properties);
         else_ctx.sm = self.sm.clone();
         else_ctx.outer_protected_refs = Some(protected_refs);
+        else_ctx.inside_branch = true;
         else_ctx.lower_bindings(else_bindings, terminal_assert);
 
         if terminal_assert && else_ctx.sm.depth() > 1 {
@@ -1147,6 +1217,8 @@ impl LoweringContext {
         // but gone after then). Emit targeted ROLL+DROP in the else-branch
         // to remove those same items, then push empty bytes as placeholder.
         // OP_CAT with empty bytes is identity (no-op for output hashing).
+        // Identify items consumed asymmetrically between branches.
+        // Phase 1: collect consumed names from both directions.
         let post_then_names = then_ctx.sm.named_slots();
         let mut consumed_names: Vec<String> = Vec::new();
         for name in &pre_if_names {
@@ -1154,8 +1226,17 @@ impl LoweringContext {
                 consumed_names.push(name.clone());
             }
         }
+        let post_else_names = else_ctx.sm.named_slots();
+        let mut else_consumed_names: Vec<String> = Vec::new();
+        for name in &pre_if_names {
+            if !post_else_names.contains(name) && then_ctx.sm.has(name) {
+                else_consumed_names.push(name.clone());
+            }
+        }
+
+        // Phase 2: perform ALL drops before any placeholder pushes.
+        // This prevents double-placeholder when bilateral drops balance each other.
         if !consumed_names.is_empty() {
-            // Remove consumed items from else-branch, deepest first to keep depths stable
             let mut depths: Vec<usize> = consumed_names
                 .iter()
                 .map(|n| else_ctx.sm.find_depth(n).unwrap())
@@ -1169,27 +1250,15 @@ impl LoweringContext {
                     else_ctx.emit_op(StackOp::Nip);
                     else_ctx.sm.remove_at_depth(1);
                 } else {
-                    // Push depth, ROLL to bring item to top, then DROP
                     else_ctx.emit_op(StackOp::Push(PushValue::Int(depth as i128)));
                     else_ctx.sm.push("");
                     else_ctx.emit_op(StackOp::Roll { depth });
-                    else_ctx.sm.pop(); // remove depth literal
+                    else_ctx.sm.pop();
                     let rolled = else_ctx.sm.remove_at_depth(depth);
                     else_ctx.sm.push(&rolled);
                     else_ctx.emit_op(StackOp::Drop);
                     else_ctx.sm.pop();
                 }
-            }
-            // Push empty bytes as placeholder result
-            else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
-            else_ctx.sm.push("");
-        }
-        // Handle the reverse case symmetrically (unlikely but safe)
-        let post_else_names = else_ctx.sm.named_slots();
-        let mut else_consumed_names: Vec<String> = Vec::new();
-        for name in &pre_if_names {
-            if !post_else_names.contains(name) && then_ctx.sm.has(name) {
-                else_consumed_names.push(name.clone());
             }
         }
         if !else_consumed_names.is_empty() {
@@ -1216,6 +1285,31 @@ impl LoweringContext {
                     then_ctx.sm.pop();
                 }
             }
+        }
+
+        // Phase 3: single depth-balance check after ALL drops.
+        // Push placeholder only if one branch is still deeper than the other.
+        if then_ctx.sm.depth() > else_ctx.sm.depth() {
+            // When the then-branch reassigned a local variable (if-without-else),
+            // push a COPY of that variable in the else-branch instead of a generic
+            // placeholder.
+            let then_top_p3 = then_ctx.sm.peek_at_depth(0).to_string();
+            if else_bindings.is_empty() && !then_top_p3.is_empty() && else_ctx.sm.has(&then_top_p3) {
+                let var_depth = else_ctx.sm.find_depth(&then_top_p3).unwrap();
+                if var_depth == 0 {
+                    else_ctx.emit_op(StackOp::Dup);
+                } else {
+                    else_ctx.emit_op(StackOp::Push(PushValue::Int(var_depth as i128)));
+                    else_ctx.sm.push("");
+                    else_ctx.emit_op(StackOp::Pick { depth: var_depth });
+                    else_ctx.sm.pop();
+                }
+                else_ctx.sm.push(&then_top_p3);
+            } else {
+                else_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
+                else_ctx.sm.push("");
+            }
+        } else if else_ctx.sm.depth() > then_ctx.sm.depth() {
             then_ctx.emit_op(StackOp::Push(PushValue::Bytes(Vec::new())));
             then_ctx.sm.push("");
         }
@@ -1242,7 +1336,71 @@ impl LoweringContext {
             }
         }
 
-        self.sm.push(binding_name);
+        // The if expression may produce a result value on top.
+        if then_ctx.sm.depth() > self.sm.depth() {
+            let then_top = then_ctx.sm.peek_at_depth(0).to_string();
+            let else_top = if else_ctx.sm.depth() > 0 {
+                else_ctx.sm.peek_at_depth(0).to_string()
+            } else {
+                String::new()
+            };
+            let is_property = self.properties.iter().any(|p| p.name == then_top);
+            if is_property && !then_top.is_empty() && then_top == else_top
+                && then_top != binding_name && self.sm.has(&then_top)
+            {
+                // Both branches did update_prop for the same property
+                self.sm.push(&then_top);
+                for d in 1..self.sm.depth() {
+                    if self.sm.peek_at_depth(d) == then_top {
+                        if d == 1 {
+                            self.emit_op(StackOp::Nip);
+                            self.sm.remove_at_depth(1);
+                        } else {
+                            self.emit_op(StackOp::Push(PushValue::Int(d as i128)));
+                            self.sm.push("");
+                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.sm.pop();
+                            let rolled = self.sm.remove_at_depth(d);
+                            self.sm.push(&rolled);
+                            self.emit_op(StackOp::Drop);
+                            self.sm.pop();
+                        }
+                        break;
+                    }
+                }
+            } else if !then_top.is_empty() && !is_property && else_bindings.is_empty()
+                && then_top != binding_name && self.sm.has(&then_top)
+            {
+                // If-without-else: then-branch reassigned a local variable that
+                // was PICKed (outer-protected), leaving a stale copy on the stack.
+                // Push the local name and remove the stale entry.
+                self.sm.push(&then_top);
+                for d in 1..self.sm.depth() {
+                    if self.sm.peek_at_depth(d) == then_top {
+                        if d == 1 {
+                            self.emit_op(StackOp::Nip);
+                            self.sm.remove_at_depth(1);
+                        } else {
+                            self.emit_op(StackOp::Push(PushValue::Int(d as i128)));
+                            self.sm.push("");
+                            self.emit_op(StackOp::Roll { depth: d + 1 });
+                            self.sm.pop();
+                            let rolled = self.sm.remove_at_depth(d);
+                            self.sm.push(&rolled);
+                            self.emit_op(StackOp::Drop);
+                            self.sm.pop();
+                        }
+                        break;
+                    }
+                }
+            } else {
+                self.sm.push(binding_name);
+            }
+        } else if else_ctx.sm.depth() > self.sm.depth() {
+            self.sm.push(binding_name);
+        } else {
+            // Void if — don't push phantom
+        }
         self.track_depth();
 
         if then_ctx.max_depth > self.max_depth {
@@ -1353,6 +1511,34 @@ impl LoweringContext {
         self.bring_to_top(value_ref, is_last);
         self.sm.pop();
         self.sm.push(prop_name);
+
+        // When NOT inside an if-branch, remove the old property entry from
+        // the stack. After liftBranchUpdateProps transforms conditional
+        // property updates into flat if-expressions + top-level update_prop,
+        // the old value is dead and must be removed to keep stack depth correct.
+        // Inside branches, the old value is kept for lower_if's same-property
+        // detection to handle correctly.
+        if !self.inside_branch {
+            for d in 1..self.sm.depth() {
+                if self.sm.peek_at_depth(d) == prop_name {
+                    if d == 1 {
+                        self.emit_op(StackOp::Nip);
+                        self.sm.remove_at_depth(1);
+                    } else {
+                        self.emit_op(StackOp::Push(PushValue::Int(d as i128)));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Roll { depth: d + 1 });
+                        self.sm.pop();
+                        let rolled = self.sm.remove_at_depth(d);
+                        self.sm.push(&rolled);
+                        self.emit_op(StackOp::Drop);
+                        self.sm.pop();
+                    }
+                    break;
+                }
+            }
+        }
+
         self.track_depth();
     }
 
@@ -1807,6 +1993,66 @@ impl LoweringContext {
 
         // Rename top to binding name
         self.sm.pop();
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_array_literal(
+        &mut self,
+        binding_name: &str,
+        elements: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // An array_literal brings each element to the top of the stack.
+        // The elements remain as individual stack entries; the binding name tracks
+        // the last element so that callers (e.g. checkMultiSig) can find them.
+        for elem in elements {
+            let is_last = self.is_last_use(elem, binding_index, last_uses);
+            self.bring_to_top(elem, is_last);
+            self.sm.pop();
+            self.sm.push(""); // anonymous stack entry for intermediate elements
+        }
+        // Rename the topmost entry to the binding name
+        if !elements.is_empty() {
+            self.sm.pop();
+        }
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_check_multi_sig(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // checkMultiSig(sigs, pks) — emits the OP_CHECKMULTISIG sequence.
+        // Bitcoin Script stack layout:
+        //   OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
+        //
+        // The two args reference array_literal bindings whose individual elements
+        // are already on the stack.
+
+        // Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
+        self.emit_op(StackOp::Push(PushValue::Int(0)));
+        self.sm.push("");
+
+        // Bring sigs array ref to top
+        let sigs_is_last = self.is_last_use(&args[0], binding_index, last_uses);
+        self.bring_to_top(&args[0], sigs_is_last);
+
+        // Bring pks array ref to top
+        let pks_is_last = self.is_last_use(&args[1], binding_index, last_uses);
+        self.bring_to_top(&args[1], pks_is_last);
+
+        // Pop all args + dummy
+        self.sm.pop(); // pks
+        self.sm.pop(); // sigs
+        self.sm.pop(); // OP_0 dummy
+
+        self.emit_op(StackOp::Opcode("OP_CHECKMULTISIG".to_string()));
         self.sm.push(binding_name);
         self.track_depth();
     }
@@ -2941,6 +3187,56 @@ impl LoweringContext {
         }
 
         super::sha256::emit_sha256_finalize(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_blake3_compress(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 2,
+            "blake3Compress requires 2 arguments: chainingValue, block"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..2 {
+            self.sm.pop();
+        }
+
+        super::blake3::emit_blake3_compress(&mut |op| self.ops.push(op));
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    fn lower_blake3_hash(
+        &mut self,
+        binding_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() >= 1,
+            "blake3Hash requires 1 argument: message"
+        );
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in 0..1 {
+            self.sm.pop();
+        }
+
+        super::blake3::emit_blake3_hash(&mut |op| self.ops.push(op));
 
         self.sm.push(binding_name);
         self.track_depth();
@@ -4401,6 +4697,448 @@ mod tests {
             opcodes.contains(&"OP_SIZE".to_string()),
             "reverseBytes should emit OP_SIZE for length check, got: {:?}",
             opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: only public methods appear in stack output (method count)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_method_count_matches_public_methods() {
+        // P2PKH program has 1 public method (unlock) and 1 constructor (non-public)
+        let program = p2pkh_program();
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        // Should have exactly 1 method (unlock) — constructor is skipped
+        assert_eq!(
+            methods.len(),
+            1,
+            "expected 1 stack method (unlock), got {}: {:?}",
+            methods.len(),
+            methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+        assert_eq!(methods[0].name, "unlock");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: multi-method contract has correct number of StackMethods
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_multi_method_dispatch() {
+        let program = ANFProgram {
+            contract_name: "Multi".to_string(),
+            properties: vec![],
+            methods: vec![
+                ANFMethod {
+                    name: "constructor".to_string(),
+                    params: vec![],
+                    body: vec![],
+                    is_public: false,
+                },
+                ANFMethod {
+                    name: "method1".to_string(),
+                    params: vec![ANFParam {
+                        name: "x".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "x".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(42)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+                ANFMethod {
+                    name: "method2".to_string(),
+                    params: vec![ANFParam {
+                        name: "y".to_string(),
+                        param_type: "bigint".to_string(),
+                    }],
+                    body: vec![
+                        ANFBinding {
+                            name: "t0".to_string(),
+                            value: ANFValue::LoadParam { name: "y".to_string() },
+                        },
+                        ANFBinding {
+                            name: "t1".to_string(),
+                            value: ANFValue::LoadConst {
+                                value: serde_json::Value::Number(serde_json::Number::from(100)),
+                            },
+                        },
+                        ANFBinding {
+                            name: "t2".to_string(),
+                            value: ANFValue::BinOp {
+                                op: "===".to_string(),
+                                left: "t0".to_string(),
+                                right: "t1".to_string(),
+                                result_type: None,
+                            },
+                        },
+                        ANFBinding {
+                            name: "t3".to_string(),
+                            value: ANFValue::Assert { value: "t2".to_string() },
+                        },
+                    ],
+                    is_public: true,
+                },
+            ],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        assert_eq!(
+            methods.len(),
+            2,
+            "expected 2 stack methods, got {}: {:?}",
+            methods.len(),
+            methods.iter().map(|m| &m.name).collect::<Vec<_>>()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: extractOutputs uses offset 40, not 44
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_extract_outputs_uses_offset_40() {
+        let program = ANFProgram {
+            contract_name: "OutputsCheck".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "check".to_string(),
+                params: vec![ANFParam {
+                    name: "preimage".to_string(),
+                    param_type: "SigHashPreimage".to_string(),
+                }],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "preimage".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "extractOutputs".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::Assert { value: "t1".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        // The offset for extractOutputs should be 40 (hashOutputs(32) + nLocktime(4) + sighashType(4))
+        // Encoded as PUSH(40)
+        assert!(
+            opcodes.contains(&"PUSH(40)".to_string()),
+            "expected PUSH(40) for extractOutputs offset, got: {:?}",
+            opcodes
+        );
+        // Must NOT use the old incorrect offset 44
+        assert!(
+            !opcodes.contains(&"PUSH(44)".to_string()),
+            "extractOutputs should NOT use offset 44, got: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: arithmetic binary op (a + b) produces OP_ADD in stack output
+    // Mirrors Go TestLowerToStack_ArithmeticOps
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_arithmetic_ops_contains_add() {
+        // Contract: verify(a, b) { assert(a + b === target) }
+        let program = ANFProgram {
+            contract_name: "ArithCheck".to_string(),
+            properties: vec![ANFProperty {
+                name: "target".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: true,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "verify".to_string(),
+                params: vec![
+                    ANFParam { name: "a".to_string(), param_type: "bigint".to_string() },
+                    ANFParam { name: "b".to_string(), param_type: "bigint".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "a".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::LoadParam { name: "b".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "+".to_string(),
+                            left: "t0".to_string(),
+                            right: "t1".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::LoadProp { name: "target".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "===".to_string(),
+                            left: "t2".to_string(),
+                            right: "t3".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t5".to_string(),
+                        value: ANFValue::Assert { value: "t4".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        // The a + b operation should emit OP_ADD
+        assert!(
+            opcodes.contains(&"OP_ADD".to_string()),
+            "expected OP_ADD in stack ops for 'a + b', got: {:?}",
+            opcodes
+        );
+
+        // The === comparison should emit OP_NUMEQUAL
+        assert!(
+            opcodes.contains(&"OP_NUMEQUAL".to_string()),
+            "expected OP_NUMEQUAL in stack ops for '===', got: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // S18: PICK/ROLL depth ≤ max_stack_depth (stack invariant)
+    // After lowering P2PKH, verify no Pick or Roll references a depth ≥ max_stack_depth
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_s18_pick_roll_depth_within_max_stack_depth() {
+        let program = p2pkh_program();
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        let max_depth = methods[0].max_stack_depth;
+
+        fn check_ops(ops: &[StackOp], max_depth: usize) {
+            for op in ops {
+                match op {
+                    StackOp::Pick { depth } => {
+                        assert!(
+                            *depth < max_depth,
+                            "Pick depth {} must be < max_stack_depth {}",
+                            depth,
+                            max_depth
+                        );
+                    }
+                    StackOp::Roll { depth } => {
+                        assert!(
+                            *depth < max_depth,
+                            "Roll depth {} must be < max_stack_depth {}",
+                            depth,
+                            max_depth
+                        );
+                    }
+                    StackOp::If { then_ops, else_ops } => {
+                        check_ops(then_ops, max_depth);
+                        check_ops(else_ops, max_depth);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        check_ops(&methods[0].ops, max_depth);
+    }
+
+    // -----------------------------------------------------------------------
+    // Row 190: ByteString concatenation (bin_op "+", result_type="bytes") → OP_CAT
+    // Row 189 (bigint add) → OP_ADD is already tested above.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bytestring_concat_emits_op_cat() {
+        let program = ANFProgram {
+            contract_name: "CatCheck".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "verify".to_string(),
+                params: vec![
+                    ANFParam { name: "a".to_string(), param_type: "ByteString".to_string() },
+                    ANFParam { name: "b".to_string(), param_type: "ByteString".to_string() },
+                    ANFParam { name: "expected".to_string(), param_type: "ByteString".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "a".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::LoadParam { name: "b".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "+".to_string(),
+                            left: "t0".to_string(),
+                            right: "t1".to_string(),
+                            result_type: Some("bytes".to_string()), // ByteString concat
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::LoadParam { name: "expected".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::BinOp {
+                            op: "===".to_string(),
+                            left: "t2".to_string(),
+                            right: "t3".to_string(),
+                            result_type: Some("bytes".to_string()),
+                        },
+                    },
+                    ANFBinding {
+                        name: "t5".to_string(),
+                        value: ANFValue::Assert { value: "t4".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+        let opcodes = collect_all_opcodes(&methods[0].ops);
+
+        assert!(
+            opcodes.contains(&"OP_CAT".to_string()),
+            "ByteString '+' (result_type='bytes') should emit OP_CAT; got opcodes: {:?}",
+            opcodes
+        );
+        assert!(
+            !opcodes.contains(&"OP_ADD".to_string()),
+            "ByteString '+' should NOT emit OP_ADD (that's for bigint); got opcodes: {:?}",
+            opcodes
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Row 201: log2 emits exactly 64 if-ops with OP_DIV+OP_1ADD
+    // (bit-scanning: 64 iterations, one per bit of a 64-bit integer)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_log2_emits_64_if_ops() {
+        let program = ANFProgram {
+            contract_name: "TestLog2Count".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "check".to_string(),
+                params: vec![
+                    ANFParam { name: "n".to_string(), param_type: "bigint".to_string() },
+                ],
+                body: vec![
+                    ANFBinding {
+                        name: "t0".to_string(),
+                        value: ANFValue::LoadParam { name: "n".to_string() },
+                    },
+                    ANFBinding {
+                        name: "t1".to_string(),
+                        value: ANFValue::Call {
+                            func: "log2".to_string(),
+                            args: vec!["t0".to_string()],
+                        },
+                    },
+                    ANFBinding {
+                        name: "t2".to_string(),
+                        value: ANFValue::LoadConst {
+                            value: serde_json::Value::Number(serde_json::Number::from(0)),
+                        },
+                    },
+                    ANFBinding {
+                        name: "t3".to_string(),
+                        value: ANFValue::BinOp {
+                            op: ">=".to_string(),
+                            left: "t1".to_string(),
+                            right: "t2".to_string(),
+                            result_type: None,
+                        },
+                    },
+                    ANFBinding {
+                        name: "t4".to_string(),
+                        value: ANFValue::Assert { value: "t3".to_string() },
+                    },
+                ],
+                is_public: true,
+            }],
+        };
+
+        let methods = lower_to_stack(&program).expect("stack lowering should succeed");
+
+        // Count OP_IF occurrences — there should be exactly 64 (one per bit)
+        fn count_if_ops(ops: &[StackOp]) -> usize {
+            let mut count = 0;
+            for op in ops {
+                match op {
+                    StackOp::If { then_ops, else_ops } => {
+                        count += 1;
+                        count += count_if_ops(then_ops);
+                        count += count_if_ops(else_ops);
+                    }
+                    _ => {}
+                }
+            }
+            count
+        }
+
+        let if_count = count_if_ops(&methods[0].ops);
+        assert_eq!(
+            if_count, 64,
+            "log2 should emit exactly 64 if-ops (one per bit); got {} if-ops",
+            if_count
         );
     }
 }

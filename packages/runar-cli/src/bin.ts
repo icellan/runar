@@ -10,6 +10,7 @@ import { testCommand } from './commands/test.js';
 import { deployCommand } from './commands/deploy.js';
 import { verifyCommand } from './commands/verify.js';
 import { codegenCommand } from './commands/codegen.js';
+import { debugCommand } from './commands/debug.js';
 
 program
   .name('runar')
@@ -29,6 +30,7 @@ program
   .option('-o, --output <dir>', 'output directory', './artifacts')
   .option('--ir', 'include IR in artifact')
   .option('--asm', 'print ASM to stdout')
+  .option('--disable-constant-folding', 'disable ANF constant folding pass')
   .action(compileCommand);
 
 program
@@ -61,5 +63,15 @@ program
   .option('-o, --output <dir>', 'output directory (default: same as artifact)')
   .option('-l, --lang <lang>', 'target language (ts)', 'ts')
   .action(codegenCommand);
+
+program
+  .command('debug')
+  .description('Interactive step-through Bitcoin Script debugger')
+  .argument('<artifact>', 'path to compiled artifact JSON (with sourceMap)')
+  .option('-m, --method <name>', 'public method to invoke')
+  .option('-a, --args <json>', 'method arguments as JSON object')
+  .option('-u, --unlock <hex>', 'raw unlocking script hex (alternative to --method)')
+  .option('-b, --break <loc>', 'initial breakpoint (opcode# or file:line)')
+  .action(debugCommand);
 
 program.parse();

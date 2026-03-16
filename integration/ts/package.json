@@ -9,6 +9,7 @@
   "dependencies": {
     "runar-compiler": "workspace:*",
     "runar-sdk": "workspace:*",
+    "runar-testing": "workspace:*",
     "runar-lang": "workspace:*",
     "runar-ir-schema": "workspace:*",
     "@bsv/sdk": "^2.0.7"

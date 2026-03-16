@@ -106,6 +106,30 @@ class _ValidationContext:
         for prop in self.contract.properties:
             self._validate_property_type(prop.type, prop.source_location)
 
+            # V27: txPreimage is an implicit property of StatefulSmartContract
+            if self.contract.parent_class == "StatefulSmartContract" and prop.name == "txPreimage":
+                self._add_error(
+                    "'txPreimage' is an implicit property of StatefulSmartContract "
+                    "and must not be declared"
+                )
+
+        # SmartContract requires all properties to be readonly
+        if self.contract.parent_class == "SmartContract":
+            for prop in self.contract.properties:
+                if not prop.readonly:
+                    self._add_error(
+                        f"Property '{prop.name}' in SmartContract must be declared readonly"
+                    )
+
+        # V26: Warn if StatefulSmartContract has no mutable properties
+        if self.contract.parent_class == "StatefulSmartContract":
+            has_mutable = any(not p.readonly for p in self.contract.properties)
+            if not has_mutable:
+                self.warnings.append(
+                    "StatefulSmartContract has no mutable properties; "
+                    "consider using SmartContract instead"
+                )
+
     def _validate_property_type(self, t: TypeNode | None, loc: SourceLocation) -> None:
         if t is None:
             return
@@ -183,6 +207,10 @@ class _ValidationContext:
                 self._add_error(
                     f"public method '{method.name}' must end with an assert() call"
                 )
+
+        # V24/V25: Warn on manual preimage/state-script boilerplate in StatefulSmartContract
+        if self.contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
+            _warn_manual_preimage_usage(method, self.warnings)
 
         # Validate statements
         for stmt in method.body:
@@ -334,6 +362,102 @@ def _is_compile_time_constant(expr: Expression | None) -> bool:
         if expr.op == "-":
             return _is_compile_time_constant(expr.operand)
     return False
+
+
+# ---------------------------------------------------------------------------
+# V24/V25: warn on manual preimage/state-script usage
+# ---------------------------------------------------------------------------
+
+def _warn_manual_preimage_usage(method, warnings: list[str]) -> None:
+    """Walk method body and warn on checkPreimage() or this.getStateScript() calls."""
+
+    def visitor(expr: Expression) -> None:
+        if isinstance(expr, CallExpr):
+            # V24: bare checkPreimage(...) call
+            if isinstance(expr.callee, Identifier) and expr.callee.name == "checkPreimage":
+                warnings.append(
+                    f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
+                    f"in '{method.name}' will cause a duplicate verification"
+                )
+            # V24: this.checkPreimage(...) call via PropertyAccessExpr or MemberExpr
+            callee_prop = _callee_property(expr.callee)
+            if callee_prop == "checkPreimage":
+                warnings.append(
+                    f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
+                    f"in '{method.name}' will cause a duplicate verification"
+                )
+            # V25: this.getStateScript() call
+            if callee_prop == "getStateScript":
+                warnings.append(
+                    f"StatefulSmartContract auto-injects state continuation; calling "
+                    f"getStateScript() manually in '{method.name}' is redundant"
+                )
+
+    _walk_expressions_in_body(method.body, visitor)
+
+
+def _callee_property(callee: Expression | None) -> str | None:
+    """Return the property name if callee is a property access (PropertyAccessExpr or MemberExpr)."""
+    if callee is None:
+        return None
+    if isinstance(callee, PropertyAccessExpr):
+        return callee.property
+    if isinstance(callee, MemberExpr):
+        return callee.property
+    return None
+
+
+def _walk_expressions_in_body(stmts: list[Statement], visitor) -> None:
+    for stmt in stmts:
+        _walk_expressions_in_stmt(stmt, visitor)
+
+
+def _walk_expressions_in_stmt(stmt: Statement, visitor) -> None:
+    if isinstance(stmt, ExpressionStmt):
+        _walk_expr(stmt.expr, visitor)
+    elif isinstance(stmt, VariableDeclStmt):
+        _walk_expr(stmt.init, visitor)
+    elif isinstance(stmt, AssignmentStmt):
+        _walk_expr(stmt.target, visitor)
+        _walk_expr(stmt.value, visitor)
+    elif isinstance(stmt, IfStmt):
+        _walk_expr(stmt.condition, visitor)
+        _walk_expressions_in_body(stmt.then, visitor)
+        _walk_expressions_in_body(stmt.else_, visitor)
+    elif isinstance(stmt, ForStmt):
+        _walk_expr(stmt.condition, visitor)
+        _walk_expressions_in_body(stmt.body, visitor)
+    elif isinstance(stmt, ReturnStmt):
+        if stmt.value is not None:
+            _walk_expr(stmt.value, visitor)
+
+
+def _walk_expr(expr: Expression | None, visitor) -> None:
+    if expr is None:
+        return
+    visitor(expr)
+    if isinstance(expr, BinaryExpr):
+        _walk_expr(expr.left, visitor)
+        _walk_expr(expr.right, visitor)
+    elif isinstance(expr, UnaryExpr):
+        _walk_expr(expr.operand, visitor)
+    elif isinstance(expr, CallExpr):
+        _walk_expr(expr.callee, visitor)
+        for arg in expr.args:
+            _walk_expr(arg, visitor)
+    elif isinstance(expr, MemberExpr):
+        _walk_expr(expr.object, visitor)
+    elif isinstance(expr, TernaryExpr):
+        _walk_expr(expr.condition, visitor)
+        _walk_expr(expr.consequent, visitor)
+        _walk_expr(expr.alternate, visitor)
+    elif isinstance(expr, IndexAccessExpr):
+        _walk_expr(expr.object, visitor)
+        _walk_expr(expr.index, visitor)
+    elif isinstance(expr, IncrementExpr):
+        _walk_expr(expr.operand, visitor)
+    elif isinstance(expr, DecrementExpr):
+        _walk_expr(expr.operand, visitor)
 
 
 # ---------------------------------------------------------------------------

@@ -148,24 +148,34 @@ def _match_window2(a: StackOp, b: StackOp) -> Optional[list[StackOp]]:
     if a.op == "drop" and b.op == "drop":
         return [StackOp(op="opcode", code="OP_2DROP")]
 
-    # PUSH(0) + Roll(0) → remove both
-    if _is_push_bigint(a, 0) and b.op == "roll" and b.depth == 0:
+    # PUSH(0) + Roll(0) → remove both (typed or string-form)
+    if _is_push_bigint(a, 0) and (
+        (b.op == "roll" and b.depth == 0) or _is_opcode_op(b, "OP_ROLL")
+    ):
         return []
 
-    # PUSH(1) + Roll(1) → Swap
-    if _is_push_bigint(a, 1) and b.op == "roll" and b.depth == 1:
+    # PUSH(1) + Roll(1) → Swap (typed or string-form)
+    if _is_push_bigint(a, 1) and (
+        (b.op == "roll" and b.depth == 1) or _is_opcode_op(b, "OP_ROLL")
+    ):
         return [StackOp(op="swap")]
 
-    # PUSH(2) + Roll(2) → Rot
-    if _is_push_bigint(a, 2) and b.op == "roll" and b.depth == 2:
+    # PUSH(2) + Roll(2) → Rot (typed or string-form)
+    if _is_push_bigint(a, 2) and (
+        (b.op == "roll" and b.depth == 2) or _is_opcode_op(b, "OP_ROLL")
+    ):
         return [StackOp(op="rot")]
 
-    # PUSH(0) + Pick(0) → Dup
-    if _is_push_bigint(a, 0) and b.op == "pick" and b.depth == 0:
+    # PUSH(0) + Pick(0) → Dup (typed or string-form)
+    if _is_push_bigint(a, 0) and (
+        (b.op == "pick" and b.depth == 0) or _is_opcode_op(b, "OP_PICK")
+    ):
         return [StackOp(op="dup")]
 
-    # PUSH(1) + Pick(1) → Over
-    if _is_push_bigint(a, 1) and b.op == "pick" and b.depth == 1:
+    # PUSH(1) + Pick(1) → Over (typed or string-form)
+    if _is_push_bigint(a, 1) and (
+        (b.op == "pick" and b.depth == 1) or _is_opcode_op(b, "OP_PICK")
+    ):
         return [StackOp(op="over")]
 
     # SHA256 + SHA256 → HASH256

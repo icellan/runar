@@ -6,18 +6,18 @@ use runar::prelude::*;
 
 #[test]
 fn test_unlock() {
-    let pk = mock_pub_key();
+    let pk = ALICE.pub_key.to_vec();
     let c = P2PKH { pub_key_hash: hash160(&pk) };
-    c.unlock(&mock_sig(), &pk);
+    c.unlock(&ALICE.sign_test_message(), &pk);
 }
 
 #[test]
 #[should_panic]
 fn test_unlock_wrong_key() {
-    let pk = mock_pub_key();
-    let wrong_pk = vec![0x03; 33];
+    let pk = ALICE.pub_key.to_vec();
+    let wrong_pk = BOB.pub_key.to_vec();
     let c = P2PKH { pub_key_hash: hash160(&pk) };
-    c.unlock(&mock_sig(), &wrong_pk);
+    c.unlock(&BOB.sign_test_message(), &wrong_pk);
 }
 
 #[test]

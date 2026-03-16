@@ -146,8 +146,8 @@ class TestRule1EcAddInfinity:
         # t2 should become a @ref: to t0
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +168,8 @@ class TestRule2EcAddInfinityLeft:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t1"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t1"
 
 
 # ---------------------------------------------------------------------------
@@ -190,8 +190,8 @@ class TestRule3EcMulByOne:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +276,8 @@ class TestRule7DoubleNegate:
 
         t2 = _find_binding(body, "t2")
         assert t2 is not None
-        assert t2.value.kind == "load_param"
-        assert t2.value.name == "@ref:t0"
+        assert t2.value.kind == "load_const"
+        assert t2.value.const_string == "@ref:t0"
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +435,113 @@ class TestStructurePreserved:
         assert t1_m2 is not None
         assert t1_m2.value.kind == "load_const"
         assert t1_m2.value.const_string == G_HEX
+
+
+# ---------------------------------------------------------------------------
+# Additional dead binding / side-effect tests
+# ---------------------------------------------------------------------------
+
+class TestSideEffectPreservation:
+    def test_side_effect_call_binding_preserved(self):
+        """A call binding (e.g. checkSig) that is not referenced by any other
+        binding should NOT be eliminated — calls have side effects."""
+        bindings = [
+            ANFBinding(
+                name="t0",
+                value=ANFValue(kind="load_param", name="sig"),
+            ),
+            ANFBinding(
+                name="t1",
+                value=ANFValue(kind="load_param", name="pubKey"),
+            ),
+            ANFBinding(
+                name="t2",
+                value=ANFValue(kind="call", func="checkSig", args=["t0", "t1"]),
+            ),
+            # t2 is never referenced by another binding — but it's a call
+            # and calls have side effects, so it must be preserved.
+        ]
+        program = _make_program(bindings)
+        result = optimize_ec(program)
+        body = _get_method_body(result)
+
+        names = [b.name for b in body]
+        assert "t2" in names, (
+            f"expected call binding 't2' to be preserved (side effect), got names: {names}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Chained rule application (Rule 12 then Rule 5)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N)
+# ---------------------------------------------------------------------------
+
+class TestRule10EcAddMulGen:
+    # E9: Rule 10 with concrete integer constants
+    def test_e9_ec_add_mulgen_k1_mulgen_k2(self):
+        """ecAdd(ecMulGen(2), ecMulGen(3)) → ecMulGen(k1+k2).
+
+        Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2 mod N).
+        The optimizer rewrites t4 from ecAdd to ecMulGen. The combined constant
+        is stored internally (in the optimizer's value map) as a fresh binding
+        name (e.g. '__ec_opt_N') rather than added to the binding list directly.
+        We verify t4 becomes ecMulGen with exactly 1 arg.
+        """
+        bindings = [
+            _load_const_int("t0", 2),
+            _call("t1", "ecMulGen", ["t0"]),
+            _load_const_int("t2", 3),
+            _call("t3", "ecMulGen", ["t2"]),
+            _call("t4", "ecAdd", ["t1", "t3"]),
+            _assert_ref("t5", "t4"),
+        ]
+        program = _make_program(bindings)
+        result = optimize_ec(program)
+        body = _get_method_body(result)
+
+        t4 = _find_binding(body, "t4")
+        assert t4 is not None, "expected t4 binding to be present"
+        assert t4.value.kind == "call", (
+            f"expected t4 to be a 'call' after Rule 10, got kind='{t4.value.kind}'"
+        )
+        assert t4.value.func == "ecMulGen", (
+            f"expected t4 func to be 'ecMulGen' after Rule 10, got '{t4.value.func}'"
+        )
+        # The single arg should be a constant reference (k1+k2)
+        assert len(t4.value.args) == 1, (
+            f"expected ecMulGen to have 1 arg, got {len(t4.value.args)}"
+        )
+        # The arg is a fresh binding name whose value is 5 = (2+3) % CURVE_N.
+        # The fresh binding is stored in the optimizer's internal value map, not in
+        # the body list, so we can only verify the structural transformation here.
+        combined_arg = t4.value.args[0]
+        assert isinstance(combined_arg, str) and len(combined_arg) > 0, (
+            f"expected ecMulGen arg to be a non-empty binding name, got: {combined_arg!r}"
+        )
+
+
+class TestChainedRules:
+    def test_chained_rules_12_then_5(self):
+        """ecMul(G, 0) should optimize via Rule 12 (ecMul(G,k) -> ecMulGen(k))
+        then Rule 5 (ecMulGen(0) -> INFINITY) to produce INFINITY."""
+        bindings = [
+            _load_const_hex("t0", G_HEX),
+            _load_const_int("t1", 0),
+            _call("t2", "ecMul", ["t0", "t1"]),
+            _assert_ref("t3", "t2"),
+        ]
+        program = _make_program(bindings)
+        result = optimize_ec(program)
+        body = _get_method_body(result)
+
+        t2 = _find_binding(body, "t2")
+        assert t2 is not None
+        assert t2.value.kind == "load_const", (
+            f"expected t2 to be load_const after chained Rule 12+5, got kind='{t2.value.kind}'"
+        )
+        assert t2.value.const_string == INFINITY_HEX, (
+            f"expected t2 to be INFINITY after chained rules, got '{t2.value.const_string}'"
+        )

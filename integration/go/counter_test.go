@@ -41,9 +41,7 @@ func TestCounter_Increment(t *testing.T) {
 	}
 	t.Logf("deployed: %s", deployTxid)
 
-	callTxid, _, err := contract.Call("increment", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"count": int64(1)},
-	})
+	callTxid, _, err := contract.Call("increment", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call increment: %v", err)
 	}
@@ -81,18 +79,14 @@ func TestCounter_IncrementChain(t *testing.T) {
 	t.Logf("deployed: %s", deployTxid)
 
 	// Increment 0 -> 1
-	txid1, _, err := contract.Call("increment", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"count": int64(1)},
-	})
+	txid1, _, err := contract.Call("increment", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call increment (0->1): %v", err)
 	}
 	t.Logf("count->1 TX: %s", txid1)
 
 	// Increment 1 -> 2
-	txid2, _, err := contract.Call("increment", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"count": int64(2)},
-	})
+	txid2, _, err := contract.Call("increment", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call increment (1->2): %v", err)
 	}
@@ -131,18 +125,14 @@ func TestCounter_IncrementThenDecrement(t *testing.T) {
 	t.Logf("deployed: %s", deployTxid)
 
 	// Increment 0 -> 1
-	txid1, _, err := contract.Call("increment", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"count": int64(1)},
-	})
+	txid1, _, err := contract.Call("increment", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call increment (0->1): %v", err)
 	}
 	t.Logf("count->1 TX: %s", txid1)
 
 	// Decrement 1 -> 0
-	txid2, _, err := contract.Call("decrement", []interface{}{}, provider, signer, &runar.CallOptions{
-		NewState: map[string]interface{}{"count": int64(0)},
-	})
+	txid2, _, err := contract.Call("decrement", []interface{}{}, provider, signer, nil)
 	if err != nil {
 		t.Fatalf("call decrement (1->0): %v", err)
 	}

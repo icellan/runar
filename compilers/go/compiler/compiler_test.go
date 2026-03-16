@@ -26,9 +26,9 @@ func mustLoadIR(t *testing.T, jsonStr string) *ir.ANFProgram {
 	return prog
 }
 
-func mustCompile(t *testing.T, jsonStr string) *Artifact {
+func mustCompile(t *testing.T, jsonStr string, opts ...CompileOptions) *Artifact {
 	t.Helper()
-	artifact, err := CompileFromIRBytes([]byte(jsonStr))
+	artifact, err := CompileFromIRBytes([]byte(jsonStr), opts...)
 	if err != nil {
 		t.Fatalf("compilation failed: %v", err)
 	}
@@ -592,7 +592,8 @@ func TestCompile_AllConformanceTests(t *testing.T) {
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
 			irData := mustLoadConformanceIR(t, dir)
-			artifact, err := CompileFromIRBytes(irData)
+			// Disable constant folding to match existing golden files
+			artifact, err := CompileFromIRBytes(irData, CompileOptions{DisableConstantFolding: true})
 			if err != nil {
 				t.Fatalf("compilation failed for %s: %v", dir, err)
 			}
@@ -1050,7 +1051,8 @@ func TestSourceCompile_AllConformanceFromSource(t *testing.T) {
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
 			source := filepath.Join(conformanceDir(), dir, dir+".runar.ts")
-			artifact, err := CompileFromSource(source)
+			// Disable constant folding to match existing golden files
+			artifact, err := CompileFromSource(source, CompileOptions{DisableConstantFolding: true})
 			if err != nil {
 				t.Fatalf("source compilation failed for %s: %v", dir, err)
 			}
@@ -1113,12 +1115,12 @@ func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
 	sourcePath := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.runar.ts")
 
-	irArtifact, err := CompileFromIR(irPath)
+	irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
 	if err != nil {
 		t.Fatalf("IR compilation failed: %v", err)
 	}
 
-	sourceArtifact, err := CompileFromSource(sourcePath)
+	sourceArtifact, err := CompileFromSource(sourcePath, CompileOptions{DisableConstantFolding: true})
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
 	}
@@ -1165,8 +1167,8 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 				t.Skipf("source file not found: %s", sourcePath)
 			}
 
-			// Compile from source
-			artifact, err := CompileFromSource(sourcePath)
+			// Compile from source (disable constant folding to match golden files)
+			artifact, err := CompileFromSource(sourcePath, CompileOptions{DisableConstantFolding: true})
 			if err != nil {
 				t.Fatalf("source compilation failed for %s: %v", dir, err)
 			}
@@ -1209,7 +1211,7 @@ func TestCompilerParity_AllConformance(t *testing.T) {
 			// Also compile from IR and verify both paths produce the same output
 			irPath := filepath.Join(conformanceDir(), dir, "expected-ir.json")
 			if _, err := os.Stat(irPath); err == nil {
-				irArtifact, err := CompileFromIR(irPath)
+				irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
 				if err != nil {
 					t.Logf("%s: IR compilation failed (may be expected for some tests): %v", dir, err)
 				} else {

@@ -2,6 +2,7 @@ package runar
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -392,6 +393,8 @@ func toInt64(value interface{}) int64 {
 		return int64(v)
 	case uint64:
 		return int64(v)
+	case *big.Int:
+		return v.Int64()
 	case string:
 		// Handle BigInt strings with "n" suffix from JSON (e.g. "0n", "1000n", "-42n")
 		s := v

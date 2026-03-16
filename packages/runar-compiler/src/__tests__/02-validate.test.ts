@@ -620,3 +620,32 @@ describe('Pass 2: Validate', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Contract name validation (row 98)
+// ---------------------------------------------------------------------------
+
+describe('Validator: contract name validation', () => {
+  it('errors when contractName is empty (row 98)', () => {
+    // Manually construct a ContractNode with an empty name (can't be produced by the parser,
+    // but the validator must guard against this for robustness).
+    const contract: import('../ir/index.js').ContractNode = {
+      kind: 'contract',
+      name: '',
+      parentClass: 'SmartContract',
+      properties: [],
+      methods: [],
+      sourceFile: 'test.runar.ts',
+      constructor: {
+        kind: 'method',
+        name: 'constructor',
+        visibility: 'public',
+        params: [],
+        body: [],
+        sourceLocation: { file: 'test.runar.ts', line: 1, column: 0 },
+      },
+    };
+    const result = validate(contract);
+    expect(result.errors.some(e => e.message.toLowerCase().includes('name'))).toBe(true);
+  });
+});

@@ -188,8 +188,12 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 	}
 
 	var ctorParams []runar.ABIParam
-	for _, p := range program.Properties {
-		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: p.Type})
+	for _, p := range contract.Constructor.Params {
+		typeName := "bigint"
+		if p.Type != nil {
+			typeName = astTypeName(p.Type)
+		}
+		ctorParams = append(ctorParams, runar.ABIParam{Name: p.Name, Type: typeName})
 	}
 
 	// Build state fields for stateful contracts
@@ -203,11 +207,19 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 			if p.Type != nil {
 				typeName = astTypeName(p.Type)
 			}
-			stateFields = append(stateFields, runar.StateField{
+			field := runar.StateField{
 				Name:  p.Name,
 				Type:  typeName,
-				Index: i, // matches constructor arg order
-			})
+				Index: i, // property position
+			}
+			// Include initialValue from ANF property if present
+			for _, anfProp := range program.Properties {
+				if anfProp.Name == p.Name && anfProp.InitialValue != nil {
+					field.InitialValue = anfProp.InitialValue
+					break
+				}
+			}
+			stateFields = append(stateFields, field)
 		}
 	}
 
@@ -220,6 +232,9 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 		})
 	}
 
+	// Convert compiler IR ANF to SDK ANF for auto-state computation
+	sdkANF := convertIRANFToSDK(program)
+
 	artifact := &runar.RunarArtifact{
 		Version:          "runar-v0.1.0",
 		CompilerVersion:  "integration-test",
@@ -228,6 +243,7 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 		ASM:              emitResult.ScriptAsm,
 		ConstructorSlots: cSlots,
 		StateFields:      stateFields,
+		ANF:              sdkANF,
 		ABI: runar.ABI{
 			Constructor: runar.ABIConstructor{Params: ctorParams},
 			Methods:     abiMethods,
@@ -378,4 +394,172 @@ func astTypeName(t frontend.TypeNode) string {
 	default:
 		return "bigint"
 	}
+}
+
+// ---------------------------------------------------------------------------
+// IR → SDK ANF conversion
+// ---------------------------------------------------------------------------
+
+// convertIRANFToSDK converts the compiler's ir.ANFProgram (typed structs) to
+// the SDK's runar.ANFProgram (map[string]interface{} values) so the SDK's
+// auto-state computation (ComputeNewState) can interpret the ANF.
+func convertIRANFToSDK(program *ir.ANFProgram) *runar.ANFProgram {
+	sdkProps := make([]runar.ANFProperty, len(program.Properties))
+	for i, p := range program.Properties {
+		sdkProps[i] = runar.ANFProperty{
+			Name:         p.Name,
+			Type:         p.Type,
+			Readonly:     p.Readonly,
+			InitialValue: p.InitialValue,
+		}
+	}
+
+	sdkMethods := make([]runar.ANFMethod, len(program.Methods))
+	for i, m := range program.Methods {
+		sdkParams := make([]runar.ANFParam, len(m.Params))
+		for j, p := range m.Params {
+			sdkParams[j] = runar.ANFParam{Name: p.Name, Type: p.Type}
+		}
+		sdkMethods[i] = runar.ANFMethod{
+			Name:     m.Name,
+			Params:   sdkParams,
+			Body:     convertIRBindings(m.Body),
+			IsPublic: m.IsPublic,
+		}
+	}
+
+	return &runar.ANFProgram{
+		ContractName: program.ContractName,
+		Properties:   sdkProps,
+		Methods:      sdkMethods,
+	}
+}
+
+func convertIRBindings(bindings []ir.ANFBinding) []runar.ANFBinding {
+	result := make([]runar.ANFBinding, len(bindings))
+	for i, b := range bindings {
+		result[i] = runar.ANFBinding{
+			Name:  b.Name,
+			Value: convertIRValue(b.Value),
+		}
+	}
+	return result
+}
+
+func convertIRValue(v ir.ANFValue) map[string]interface{} {
+	m := map[string]interface{}{
+		"kind": v.Kind,
+	}
+
+	switch v.Kind {
+	case "load_param", "load_prop":
+		m["name"] = v.Name
+
+	case "load_const":
+		// Reconstruct the value from the typed Const* fields (which are json:"-")
+		if v.ConstString != nil {
+			m["value"] = *v.ConstString
+		} else if v.ConstBool != nil {
+			m["value"] = *v.ConstBool
+		} else if v.ConstBigInt != nil {
+			// Use int64 if it fits, otherwise string representation
+			if v.ConstInt != nil {
+				m["value"] = float64(*v.ConstInt)
+			} else {
+				m["value"] = v.ConstBigInt.String()
+			}
+		} else if v.ConstInt != nil {
+			m["value"] = float64(*v.ConstInt)
+		}
+
+	case "bin_op":
+		m["op"] = v.Op
+		m["left"] = v.Left
+		m["right"] = v.Right
+		if v.ResultType != "" {
+			m["result_type"] = v.ResultType
+		}
+
+	case "unary_op":
+		m["op"] = v.Op
+		m["operand"] = v.Operand
+		if v.ResultType != "" {
+			m["result_type"] = v.ResultType
+		}
+
+	case "call":
+		m["func"] = v.Func
+		args := make([]interface{}, len(v.Args))
+		for i, a := range v.Args {
+			args[i] = a
+		}
+		m["args"] = args
+
+	case "method_call":
+		m["object"] = v.Object
+		m["method"] = v.Method
+		args := make([]interface{}, len(v.Args))
+		for i, a := range v.Args {
+			args[i] = a
+		}
+		m["args"] = args
+
+	case "if":
+		m["cond"] = v.Cond
+		m["then"] = convertBindingsToInterface(v.Then)
+		m["else"] = convertBindingsToInterface(v.Else)
+
+	case "loop":
+		m["count"] = v.Count
+		m["iterVar"] = v.IterVar
+		m["body"] = convertBindingsToInterface(v.Body)
+
+	case "assert":
+		m["value"] = v.ValueRef
+
+	case "update_prop":
+		m["name"] = v.Name
+		m["value"] = v.ValueRef
+
+	case "check_preimage":
+		m["preimage"] = v.Preimage
+
+	case "deserialize_state":
+		m["preimage"] = v.Preimage
+
+	case "add_output":
+		m["satoshis"] = v.Satoshis
+		if len(v.StateValues) > 0 {
+			sv := make([]interface{}, len(v.StateValues))
+			for i, s := range v.StateValues {
+				sv[i] = s
+			}
+			m["stateValues"] = sv
+		}
+		if v.Preimage != "" {
+			m["preimage"] = v.Preimage
+		}
+
+	case "add_raw_output":
+		m["satoshis"] = v.Satoshis
+		m["scriptBytes"] = v.ScriptBytes
+
+	case "get_state_script":
+		// no extra fields needed
+	}
+
+	return m
+}
+
+// convertBindingsToInterface converts IR bindings to []interface{} of maps,
+// matching the format that anfGetBindings expects in the SDK interpreter.
+func convertBindingsToInterface(bindings []ir.ANFBinding) []interface{} {
+	result := make([]interface{}, len(bindings))
+	for i, b := range bindings {
+		result[i] = map[string]interface{}{
+			"name":  b.Name,
+			"value": convertIRValue(b.Value),
+		}
+	}
+	return result
 }

@@ -28,7 +28,6 @@ class TestCounter:
 
         call_txid, _ = contract.call(
             "increment", [], provider, wallet["signer"],
-            CallOptions(new_state={"count": 1}),
         )
         assert call_txid
 
@@ -44,12 +43,10 @@ class TestCounter:
 
         contract.call(
             "increment", [], provider, wallet["signer"],
-            CallOptions(new_state={"count": 1}),
         )
 
         contract.call(
             "increment", [], provider, wallet["signer"],
-            CallOptions(new_state={"count": 2}),
         )
 
     def test_increment_then_decrement(self):
@@ -64,12 +61,10 @@ class TestCounter:
 
         contract.call(
             "increment", [], provider, wallet["signer"],
-            CallOptions(new_state={"count": 1}),
         )
 
         contract.call(
             "decrement", [], provider, wallet["signer"],
-            CallOptions(new_state={"count": 0}),
         )
 
     def test_reject_wrong_state(self):

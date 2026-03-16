@@ -107,4 +107,28 @@ export class WalletSigner implements Signer {
     const txSig = new TransactionSignature(rawSig.r, rawSig.s, sigHashType);
     return Utils.toHex(txSig.toChecksigFormat());
   }
+
+  /**
+   * Sign a raw sighash directly, without computing BIP-143 from a
+   * transaction context. Useful for multi-signer flows where the
+   * sighash has already been computed by `prepareCall()`.
+   *
+   * @param sighash - Pre-computed sighash as hex string or byte array.
+   * @returns DER-encoded signature hex (without sighash flag byte).
+   */
+  async signHash(sighash: string | number[]): Promise<string> {
+    const hashBytes: number[] = typeof sighash === 'string'
+      ? Utils.toArray(sighash, 'hex')
+      : sighash;
+
+    const { signature } = await this.wallet.createSignature({
+      hashToDirectlySign: hashBytes,
+      protocolID: this.protocolID,
+      keyID: this.keyID,
+      counterparty: 'self',
+    });
+
+    const rawSig = Signature.fromDER(signature);
+    return Utils.toHex(rawSig.toDER() as number[]);
+  }
 }

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { ContractNode } from 'runar-ir-schema';
+import { compile } from 'runar-compiler';
 import { RunarInterpreter } from './interpreter/index.js';
 import type { RunarValue, InterpreterResult } from './interpreter/index.js';
 import { bytesToHex } from './vm/utils.js';
@@ -91,9 +92,6 @@ export class TestContract {
    * - `.runar.move` — Move-style
    */
   static fromSource(source: string, initialState: Record<string, unknown> = {}, fileName?: string): TestContract {
-    // Dynamic import to avoid hard dependency at module level
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { compile } = require('runar-compiler') as { compile: (source: string, options?: { typecheckOnly?: boolean; fileName?: string }) => { success: boolean; contract: ContractNode | null; diagnostics: { severity: string; message: string }[] } };
 
     const result = compile(source, { typecheckOnly: true, fileName });
     if (!result.success || !result.contract) {
@@ -121,7 +119,9 @@ export class TestContract {
     }
 
     const interpreter = new RunarInterpreter(props);
-    return new TestContract(result.contract, interpreter);
+    // Cast through unknown: runar-compiler's ContractNode may have slightly
+    // wider type unions than runar-ir-schema's (e.g. "void" PrimitiveTypeName).
+    return new TestContract(result.contract as unknown as ContractNode, interpreter);
   }
 
   /**

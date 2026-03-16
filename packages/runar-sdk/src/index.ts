@@ -15,8 +15,8 @@ export type {
 } from './types.js';
 
 // Providers
-export { WhatsOnChainProvider, MockProvider, RPCProvider } from './providers/index.js';
-export type { Provider, RPCProviderOptions } from './providers/index.js';
+export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider } from './providers/index.js';
+export type { Provider, RPCProviderOptions, WalletProviderOptions } from './providers/index.js';
 
 // Signers
 export { LocalSigner, ExternalSigner, WalletSigner } from './signers/index.js';
@@ -27,7 +27,7 @@ export { RunarContract } from './contract.js';
 
 // Transaction building
 export { buildDeployTransaction, selectUtxos, estimateDeployFee } from './deployment.js';
-export { buildCallTransaction } from './calling.js';
+export { buildCallTransaction, estimateCallFee } from './calling.js';
 
 // State management
 export {
@@ -41,10 +41,13 @@ export {
 export { computeOpPushTx } from './oppushtx.js';
 
 // Script utilities
-export { buildP2PKHScript } from './script-utils.js';
+export { buildP2PKHScript, extractConstructorArgs, matchesArtifact } from './script-utils.js';
 
 // Token management
 export { TokenWallet } from './tokens.js';
+
+// ANF interpreter (auto-compute state transitions)
+export { computeNewState } from './anf-interpreter.js';
 
 // Code generation
 export { generateTypescript } from './codegen/index.js';

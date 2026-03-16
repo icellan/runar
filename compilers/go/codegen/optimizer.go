@@ -180,7 +180,7 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	}
 
 	// PUSH(2n) + Roll{depth:2} -> ROT
-	if isPushBigInt(a, 2) && b.Op == "roll" {
+	if isPushBigInt(a, 2) && b.Op == "roll" && b.Depth == 2 {
 		return []StackOp{{Op: "rot"}}, true
 	}
 

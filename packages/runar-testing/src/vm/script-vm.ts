@@ -8,7 +8,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { Opcode } from './opcodes.js';
+import { Opcode, opcodeName } from './opcodes.js';
 import {
   encodeScriptNumber,
   decodeScriptNumber,
@@ -69,6 +69,22 @@ class ScriptError extends Error {
 // VM implementation
 // ---------------------------------------------------------------------------
 
+/** Result of a single step in the VM. */
+export interface StepResult {
+  /** Byte offset of the opcode that was executed. */
+  offset: number;
+  /** Name of the opcode (e.g. 'OP_ADD', 'OP_DUP', 'PUSH_20'). */
+  opcode: string;
+  /** Main stack after this opcode. */
+  mainStack: Uint8Array[];
+  /** Alt stack after this opcode. */
+  altStack: Uint8Array[];
+  /** Set if the opcode caused an error (e.g. OP_VERIFY on false). */
+  error?: string;
+  /** Which script is executing. */
+  context: 'unlocking' | 'locking';
+}
+
 export class ScriptVM {
   private stack: Uint8Array[] = [];
   private altStack: Uint8Array[] = [];
@@ -85,6 +101,15 @@ export class ScriptVM {
   private readonly maxScriptSize: number;
   readonly flags: VMFlags;
   private readonly checkSigCallback: (sig: Uint8Array, pubkey: Uint8Array) => boolean;
+
+  // Step mode state
+  private _script: Uint8Array | null = null;
+  private _lockingScript: Uint8Array | null = null;
+  private _pc = 0;
+  private _context: 'unlocking' | 'locking' = 'locking';
+  private _isComplete = false;
+  private _isSuccess = false;
+  private _stepError: string | undefined;
 
   constructor(options: VMOptions = {}) {
     this.maxOps = options.maxOps ?? 500_000;
@@ -138,6 +163,244 @@ export class ScriptVM {
   }
 
   // -------------------------------------------------------------------------
+  // Step mode API
+  // -------------------------------------------------------------------------
+
+  /**
+   * Load scripts for step-by-step execution.
+   * Call `step()` repeatedly to advance one opcode at a time.
+   */
+  load(unlockingScript: Uint8Array, lockingScript: Uint8Array): void {
+    this.reset();
+    this._lockingScript = lockingScript;
+    this._script = unlockingScript.length > 0 ? unlockingScript : lockingScript;
+    this._context = unlockingScript.length > 0 ? 'unlocking' : 'locking';
+    this._pc = 0;
+    this._isComplete = false;
+    this._isSuccess = false;
+    this._stepError = undefined;
+  }
+
+  /**
+   * Load scripts from hex strings for step-by-step execution.
+   */
+  loadHex(unlockingScriptHex: string, lockingScriptHex: string): void {
+    this.load(
+      unlockingScriptHex ? hexToBytes(unlockingScriptHex) : new Uint8Array(0),
+      hexToBytes(lockingScriptHex),
+    );
+  }
+
+  /**
+   * Execute one opcode and return the step result.
+   * Returns null if execution is already complete.
+   */
+  step(): StepResult | null {
+    if (this._isComplete || !this._script) return null;
+
+    const script = this._script;
+    const offset = this._pc;
+
+    // Check if we've reached the end of the current script
+    if (this._pc >= script.length) {
+      if (this._context === 'unlocking' && this._lockingScript) {
+        // Switch from unlocking to locking script
+        this._script = this._lockingScript;
+        this._context = 'locking';
+        this._pc = 0;
+        return this.step(); // Recurse to step into locking script
+      }
+
+      // End of locking script — check if/else balance and determine success
+      if (this.ifStack.length !== 0) {
+        this._stepError = 'Unbalanced OP_IF/OP_ENDIF';
+        this._isComplete = true;
+        this._isSuccess = false;
+        return {
+          offset,
+          opcode: 'END',
+          mainStack: [...this.stack],
+          altStack: [...this.altStack],
+          error: this._stepError,
+          context: this._context,
+        };
+      }
+
+      this._isComplete = true;
+      this._isSuccess = this.stack.length > 0 && isTruthy(this.stack[this.stack.length - 1]!);
+      return null;
+    }
+
+    const byte = script[this._pc]!;
+    const opName = this.getOpcodeName(byte);
+
+    try {
+      this._pc = this.executeOneOpcode(script, this._pc);
+
+      return {
+        offset,
+        opcode: opName,
+        mainStack: [...this.stack],
+        altStack: [...this.altStack],
+        context: this._context,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this._stepError = msg;
+      this._isComplete = true;
+      this._isSuccess = false;
+      return {
+        offset,
+        opcode: opName,
+        mainStack: [...this.stack],
+        altStack: [...this.altStack],
+        error: msg,
+        context: this._context,
+      };
+    }
+  }
+
+  /** Current program counter (byte offset in the active script). */
+  get pc(): number { return this._pc; }
+
+  /** Which script is currently executing. */
+  get context(): 'unlocking' | 'locking' { return this._context; }
+
+  /** Current main stack (copy). */
+  get currentStack(): Uint8Array[] { return [...this.stack]; }
+
+  /** Current alt stack (copy). */
+  get currentAltStack(): Uint8Array[] { return [...this.altStack]; }
+
+  /** Whether execution has completed (success or error). */
+  get isComplete(): boolean { return this._isComplete; }
+
+  /** Whether execution completed successfully (top of stack is truthy). */
+  get isSuccess(): boolean { return this._isSuccess; }
+
+  /**
+   * Get a human-readable name for the opcode at the given position.
+   */
+  private getOpcodeName(byte: number): string {
+    if (byte >= 0x01 && byte <= 0x4b) return `PUSH_${byte}`;
+    if (byte === 0x4c) return 'OP_PUSHDATA1';
+    if (byte === 0x4d) return 'OP_PUSHDATA2';
+    if (byte === 0x4e) return 'OP_PUSHDATA4';
+    return opcodeName(byte) ?? `OP_UNKNOWN_0x${byte.toString(16)}`;
+  }
+
+  /**
+   * Execute a single opcode at the given position in the script.
+   * Returns the new position after the opcode (and any push data).
+   *
+   * This is the step-mode equivalent of one iteration of runScript's loop.
+   * It delegates to runScript with a single-byte-offset trick: we run
+   * from `pos` and stop after one opcode by using an internal flag.
+   */
+  private executeOneOpcode(script: Uint8Array, pos: number): number {
+    const byte = script[pos]!;
+    let i = pos + 1;
+
+    // Push data: 0x01..0x4b
+    if (byte >= 0x01 && byte <= 0x4b) {
+      if (this.isExecuting()) {
+        if (i + byte > script.length) throw new ScriptError('Push data extends past end of script');
+        this.push(script.slice(i, i + byte));
+      }
+      return i + byte;
+    }
+
+    // OP_0
+    if (byte === Opcode.OP_0) {
+      if (this.isExecuting()) this.push(new Uint8Array(0));
+      return i;
+    }
+
+    // OP_PUSHDATA1
+    if (byte === Opcode.OP_PUSHDATA1) {
+      if (i >= script.length) throw new ScriptError('OP_PUSHDATA1: missing length byte');
+      const len = script[i]!; i++;
+      if (this.isExecuting()) {
+        if (i + len > script.length) throw new ScriptError('OP_PUSHDATA1: data extends past end of script');
+        this.push(script.slice(i, i + len));
+      }
+      return i + len;
+    }
+
+    // OP_PUSHDATA2
+    if (byte === Opcode.OP_PUSHDATA2) {
+      if (i + 1 >= script.length) throw new ScriptError('OP_PUSHDATA2: missing length bytes');
+      const len = script[i]! | (script[i + 1]! << 8); i += 2;
+      if (this.isExecuting()) {
+        if (i + len > script.length) throw new ScriptError('OP_PUSHDATA2: data extends past end of script');
+        this.push(script.slice(i, i + len));
+      }
+      return i + len;
+    }
+
+    // OP_PUSHDATA4
+    if (byte === Opcode.OP_PUSHDATA4) {
+      if (i + 3 >= script.length) throw new ScriptError('OP_PUSHDATA4: missing length bytes');
+      const len = script[i]! | (script[i + 1]! << 8) | (script[i + 2]! << 16) | (script[i + 3]! << 24);
+      i += 4;
+      if (this.isExecuting()) {
+        if (i + len > script.length) throw new ScriptError('OP_PUSHDATA4: data extends past end of script');
+        this.push(script.slice(i, i + len));
+      }
+      return i + len;
+    }
+
+    // OP_1NEGATE through OP_16
+    if (byte >= Opcode.OP_1NEGATE && byte <= Opcode.OP_16) {
+      if (this.isExecuting()) {
+        if (byte === Opcode.OP_1NEGATE) this.pushNum(-1n);
+        else this.pushNum(BigInt(byte - Opcode.OP_1 + 1));
+      }
+      return i;
+    }
+
+    // Flow control: handle if/else/endif directly (can't delegate to
+    // runScript because of the ifStack balance check at end-of-script)
+    if (byte === Opcode.OP_IF || byte === Opcode.OP_NOTIF) {
+      if (this.isExecuting()) {
+        const val = this.pop();
+        this.ifStack.push(byte === Opcode.OP_IF ? isTruthy(val) : !isTruthy(val));
+      } else {
+        this.ifStack.push(false);
+      }
+      return i;
+    }
+    if (byte === Opcode.OP_ELSE) {
+      if (this.ifStack.length === 0) throw new ScriptError('OP_ELSE without OP_IF');
+      const last = this.ifStack.length - 1;
+      // Only flip if all parent branches are executing
+      const parentExec = this.ifStack.slice(0, last).every(v => v);
+      this.ifStack[last] = parentExec && !this.ifStack[last]!;
+      return i;
+    }
+    if (byte === Opcode.OP_ENDIF) {
+      if (this.ifStack.length === 0) throw new ScriptError('OP_ENDIF without OP_IF');
+      this.ifStack.pop();
+      return i;
+    }
+
+    // Skip non-executing opcodes
+    if (!this.isExecuting()) return i;
+
+    // All remaining opcodes: delegate to runScript on a single-byte script.
+    // Save and restore ifStack to bypass the end-of-script balance check.
+    const savedIfStack = [...this.ifStack];
+    this.ifStack = [];
+
+    const result = this.runScript(new Uint8Array([byte]));
+
+    this.ifStack = savedIfStack;
+
+    if (result.error) throw new ScriptError(result.error);
+    return i;
+  }
+
+  // -------------------------------------------------------------------------
   // Internal: reset state
   // -------------------------------------------------------------------------
 
@@ -147,6 +410,12 @@ export class ScriptVM {
     this.ifStack = [];
     this.opsExecuted = 0;
     this.maxStackDepth = 0;
+    this._script = null;
+    this._lockingScript = null;
+    this._pc = 0;
+    this._isComplete = false;
+    this._isSuccess = false;
+    this._stepError = undefined;
   }
 
   // -------------------------------------------------------------------------
@@ -868,22 +1137,53 @@ export class ScriptVM {
         if (byte === Opcode.OP_LSHIFT) {
           this.countOp();
           const shift = this.popNum();
-          const val = this.popNum();
+          const val = this.pop(); // raw byte array, not number
           if (shift < 0n) {
             throw new ScriptError('OP_LSHIFT: negative shift');
           }
-          this.pushNum(val << shift);
+          const n = Number(shift);
+          if (val.length === 0 || n === 0) { this.push(val); continue; }
+          // Treat byte array as big-endian unsigned integer
+          let num = 0n;
+          for (let j = 0; j < val.length; j++) {
+            num = (num << 8n) | BigInt(val[j]!);
+          }
+          // Shift left, mask to original byte count
+          const bitLen = BigInt(val.length * 8);
+          num = (num << BigInt(n)) & ((1n << bitLen) - 1n);
+          // Convert back to big-endian bytes (same length)
+          const result = new Uint8Array(val.length);
+          for (let j = val.length - 1; j >= 0; j--) {
+            result[j] = Number(num & 0xFFn);
+            num >>= 8n;
+          }
+          this.push(result);
           continue;
         }
 
         if (byte === Opcode.OP_RSHIFT) {
           this.countOp();
           const shift = this.popNum();
-          const val = this.popNum();
+          const val = this.pop(); // raw byte array, not number
           if (shift < 0n) {
             throw new ScriptError('OP_RSHIFT: negative shift');
           }
-          this.pushNum(val >> shift);
+          const n = Number(shift);
+          if (val.length === 0 || n === 0) { this.push(val); continue; }
+          // Treat byte array as big-endian unsigned integer
+          let num = 0n;
+          for (let j = 0; j < val.length; j++) {
+            num = (num << 8n) | BigInt(val[j]!);
+          }
+          // Shift right (zero-fill from MSB side)
+          num = num >> BigInt(n);
+          // Convert back to big-endian bytes (same length)
+          const result2 = new Uint8Array(val.length);
+          for (let j = val.length - 1; j >= 0; j--) {
+            result2[j] = Number(num & 0xFFn);
+            num >>= 8n;
+          }
+          this.push(result2);
           continue;
         }
 

@@ -106,6 +106,8 @@ _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
     "ecNegate",
     "ecMakePoint",
     "ecEncodeCompressed",
+    "blake3Compress",
+    "blake3Hash",
 })
 
 
@@ -414,7 +416,25 @@ class _LowerCtx:
     # -------------------------------------------------------------------
 
     def lower_statements(self, stmts: list[Statement]) -> None:
-        for stmt in stmts:
+        for i, stmt in enumerate(stmts):
+            # Early-return nesting: when an if-statement's then-block ends with a
+            # return and there is no else-branch, the remaining statements after the
+            # if logically belong in the else-branch (they only execute when the
+            # condition is false).
+            if (
+                isinstance(stmt, IfStmt)
+                and not stmt.else_
+                and i + 1 < len(stmts)
+                and _branch_ends_with_return(stmt.then)
+            ):
+                remaining = stmts[i + 1:]
+                modified_if = IfStmt(
+                    condition=stmt.condition,
+                    then=stmt.then,
+                    else_=remaining,
+                )
+                self.lower_statement(modified_if)
+                return
             self.lower_statement(stmt)
 
     def lower_statement(self, stmt: Statement) -> None:
@@ -430,7 +450,16 @@ class _LowerCtx:
             self.lower_expr_to_ref(stmt.expr)
         elif isinstance(stmt, ReturnStmt):
             if stmt.value is not None:
-                self.lower_expr_to_ref(stmt.value)
+                ref = self.lower_expr_to_ref(stmt.value)
+                # If the returned ref is not the name of the last emitted binding,
+                # emit an explicit load so the return value is the last (top-of-stack)
+                # binding.  This matters when a local variable is returned after
+                # control flow (e.g., `let count = 0n; if (...) { count += 1n; }
+                # return count;`).  Without this, the last binding is the if, not
+                # `count`, so _inline_method_call in stack lowering can't find the
+                # return value.
+                if self.bindings and self.bindings[-1].name != ref:
+                    self.emit(_make_load_const_string(f"@ref:{ref}"))
 
     def _lower_variable_decl(self, stmt: VariableDeclStmt) -> None:
         value_ref = self.lower_expr_to_ref(stmt.init)
@@ -1012,6 +1041,19 @@ def _extract_bigint_value(expr: Expression | None) -> int | None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _branch_ends_with_return(stmts: list[Statement]) -> bool:
+    """Check whether a statement list always terminates with a return_statement."""
+    if not stmts:
+        return False
+    last = stmts[-1]
+    if isinstance(last, ReturnStmt):
+        return True
+    # Also handle if-else where both branches return
+    if isinstance(last, IfStmt) and last.else_:
+        return _branch_ends_with_return(last.then) and _branch_ends_with_return(last.else_)
+    return False
+
 
 def _type_node_to_string(node: TypeNode | None) -> str:
     """Convert a type node to its string representation."""

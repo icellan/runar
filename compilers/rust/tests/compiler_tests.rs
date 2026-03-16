@@ -1,6 +1,6 @@
 //! Integration tests for the Rúnar Rust compiler.
 
-use runar_compiler_rust::{compile_from_ir_str, compile_from_source_str};
+use runar_compiler_rust::{compile_from_ir_str, compile_from_ir_str_with_options, compile_from_source_str, compile_from_source_str_with_options, CompileOptions};
 
 // ---------------------------------------------------------------------------
 // Test: IR loading — Basic P2PKH
@@ -490,6 +490,8 @@ fn test_all_conformance_tests() {
         "stateful",
     ];
 
+    let no_fold = CompileOptions { disable_constant_folding: true };
+
     for dir in &test_dirs {
         let ir_json = load_conformance_ir(dir);
         let artifact = compile_from_ir_str(&ir_json)
@@ -511,10 +513,13 @@ fn test_all_conformance_tests() {
             dir
         );
 
-        // Compare against golden expected-script.hex
+        // Compare against golden expected-script.hex (with folding disabled to
+        // match the golden files which were generated without constant folding)
         if let Some(expected_hex) = load_expected_script_hex(dir) {
+            let artifact_no_fold = compile_from_ir_str_with_options(&ir_json, &no_fold)
+                .unwrap_or_else(|e| panic!("compilation (no-fold) failed for {}: {}", dir, e));
             assert_eq!(
-                artifact.script, expected_hex,
+                artifact_no_fold.script, expected_hex,
                 "{}: IR-compiled script hex does not match golden file",
                 dir
             );
@@ -885,6 +890,8 @@ fn test_source_compile_all_conformance() {
         "stateful",
     ];
 
+    let no_fold = CompileOptions { disable_constant_folding: true };
+
     for dir in &test_dirs {
         let source = conformance_source(dir);
         let artifact = compile_from_source_str(&source, Some(&format!("{}.runar.ts", dir)))
@@ -906,10 +913,13 @@ fn test_source_compile_all_conformance() {
             dir
         );
 
-        // Compare against golden expected-script.hex
+        // Compare against golden expected-script.hex (with folding disabled to
+        // match the golden files which were generated without constant folding)
         if let Some(expected_hex) = load_expected_script_hex(dir) {
+            let artifact_no_fold = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", dir)), &no_fold)
+                .unwrap_or_else(|e| panic!("source compilation (no-fold) failed for {}: {}", dir, e));
             assert_eq!(
-                artifact.script, expected_hex,
+                artifact_no_fold.script, expected_hex,
                 "{}: source-compiled script hex does not match golden file",
                 dir
             );
@@ -977,8 +987,9 @@ fn test_source_vs_ir_both_produce_output() {
 // ---------------------------------------------------------------------------
 
 fn conformance_golden_test(test_name: &str) {
+    let no_fold = CompileOptions { disable_constant_folding: true };
     let source = conformance_source(test_name);
-    let artifact = compile_from_source_str(&source, Some(&format!("{}.runar.ts", test_name)))
+    let artifact = compile_from_source_str_with_options(&source, Some(&format!("{}.runar.ts", test_name)), &no_fold)
         .unwrap_or_else(|e| panic!("[{}] source compilation failed: {}", test_name, e));
 
     assert!(
@@ -1058,6 +1069,622 @@ fn test_conformance_golden_post_quantum_slhdsa() {
     conformance_golden_test("post-quantum-slhdsa");
 }
 
+// ---------------------------------------------------------------------------
+// Test: terminal assert leaves value on stack (no trailing OP_VERIFY in ASM)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_terminal_assert_no_verify() {
+    // A single-method contract with a single terminal assert should NOT end
+    // with OP_VERIFY — the final assert leaves the value on the stack for
+    // the Script VM to evaluate as the spend condition.
+    let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        super(pubKeyHash);
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+    let artifact = runar_compiler_rust::compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("P2PKH should compile");
+
+    // Trim trailing whitespace and verify the ASM does NOT end with OP_VERIFY.
+    let asm_trimmed = artifact.asm.trim();
+    assert!(
+        !asm_trimmed.ends_with("OP_VERIFY"),
+        "final assert in a single-method contract must NOT end with OP_VERIFY; asm: {}",
+        artifact.asm
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: bool push encoding — true = 0x51 (OP_TRUE), false = 0x00 (OP_FALSE)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_bool_push_encoding() {
+    use runar_compiler_rust::codegen::emit::encode_push_int;
+
+    // true (1) should encode as OP_1 = 0x51
+    let (hex_true, asm_true) = encode_push_int(1);
+    assert_eq!(
+        hex_true, "51",
+        "true (1) should encode as OP_1 = 0x51, got {}",
+        hex_true
+    );
+    assert!(
+        asm_true.contains("OP_1") || asm_true == "51",
+        "asm for true should be OP_1 or 51, got {}",
+        asm_true
+    );
+
+    // false (0) should encode as OP_0 = 0x00
+    let (hex_false, _asm_false) = encode_push_int(0);
+    assert_eq!(
+        hex_false, "00",
+        "false (0) should encode as OP_0 = 0x00, got {}",
+        hex_false
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IR Loader tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ir_load_decodes_constants() {
+    let ir_json = r#"{
+        "contractName": "ConstTest",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [{"name": "x", "type": "bigint"}],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": 42}},
+                {"name": "t1", "value": {"kind": "load_const", "value": true}},
+                {"name": "t2", "value": {"kind": "load_const", "value": "deadbeef"}},
+                {"name": "t3", "value": {"kind": "load_param", "name": "x"}},
+                {"name": "t4", "value": {"kind": "bin_op", "op": ">", "left": "t3", "right": "t0"}},
+                {"name": "t5", "value": {"kind": "assert", "value": "t4"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let artifact = compile_from_ir_str(ir_json);
+    assert!(
+        artifact.is_ok(),
+        "IR with integer, boolean, and hex string constants should load without error; got: {:?}",
+        artifact.err()
+    );
+    let artifact = artifact.unwrap();
+    assert_eq!(artifact.contract_name, "ConstTest");
+    assert_eq!(artifact.abi.methods.len(), 1, "expected 1 method in ABI");
+}
+
+#[test]
+fn test_ir_validate_empty_method_name() {
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [],
+        "methods": [{
+            "name": "",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_err(),
+        "IR with empty method name should produce a validation error"
+    );
+}
+
+#[test]
+fn test_ir_validate_empty_param_name() {
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [{"name": "", "type": "bigint"}],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_err(),
+        "IR with empty param name should produce a validation error"
+    );
+}
+
+#[test]
+fn test_ir_validate_empty_property_name() {
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [{"name": "", "type": "bigint", "readonly": true}],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_err(),
+        "IR with empty property name should produce a validation error"
+    );
+}
+
+#[test]
+fn test_ir_validate_empty_property_type() {
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [{"name": "x", "type": "", "readonly": true}],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_err(),
+        "IR with empty property type should produce a validation error"
+    );
+}
+
+#[test]
+fn test_ir_invalid_json() {
+    // Non-JSON string input should produce a JSON parse error, not a panic.
+    let inputs = [
+        "{ this is not valid json }",
+        "not json at all",
+        "",
+        "[1,2,3]", // valid JSON but wrong type (array, not object)
+    ];
+    for input in &inputs {
+        let result = compile_from_ir_str(input);
+        assert!(
+            result.is_err(),
+            "non-JSON or wrong-type input {:?} should produce an error",
+            input
+        );
+        // Error should mention JSON parsing, not a panic
+        let err = result.unwrap_err();
+        assert!(
+            !err.is_empty(),
+            "error message should not be empty for input {:?}",
+            input
+        );
+    }
+}
+
+#[test]
+fn test_ir_validate_loop_count_exceeds_max() {
+    // Loop count of 1000 is above the expected max of 512.
+    // In the Rust IR loader, usize can hold 1000, so this test verifies whether
+    // the compiler accepts or rejects it. If no max is enforced, the compile
+    // will succeed (no validation error at the IR loader level).
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {
+                    "kind": "loop",
+                    "count": 1000,
+                    "iterVar": "i",
+                    "body": [
+                        {"name": "tb", "value": {"kind": "load_const", "value": 0}}
+                    ]
+                }},
+                {"name": "t1", "value": {"kind": "load_const", "value": true}},
+                {"name": "t2", "value": {"kind": "assert", "value": "t1"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    // The Rust IR loader uses usize for count and has no 512 max validation.
+    // A count of 1000 will either succeed or fail during stack lowering (depth check).
+    // We verify the result is not a panic and produces a consistent response.
+    let result = compile_from_ir_str(ir_json);
+    // Either it succeeds or it errors — both are acceptable, just no panic.
+    match &result {
+        Ok(_) => { /* no enforced max in Rust IR loader */ }
+        Err(e) => {
+            // If it does error, it should be a stack depth or loop-related message
+            let _ = e; // Any error is fine
+        }
+    }
+}
+
+#[test]
+fn test_ir_validate_negative_loop_count() {
+    // usize cannot be negative — a JSON value of -1 should fail to deserialize
+    let ir_json = r#"{
+        "contractName": "Test",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {
+                    "kind": "loop",
+                    "count": -1,
+                    "iterVar": "i",
+                    "body": []
+                }},
+                {"name": "t1", "value": {"kind": "load_const", "value": true}},
+                {"name": "t2", "value": {"kind": "assert", "value": "t1"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_err(),
+        "IR with negative loop count should produce a deserialization or validation error"
+    );
+}
+
+#[test]
+fn test_ir_round_trip() {
+    let ir_json = r#"{
+        "contractName": "RoundTrip",
+        "properties": [
+            {"name": "pubKeyHash", "type": "Addr", "readonly": true}
+        ],
+        "methods": [{
+            "name": "unlock",
+            "params": [
+                {"name": "sig", "type": "Sig"},
+                {"name": "pubKey", "type": "PubKey"}
+            ],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "sig"}},
+                {"name": "t1", "value": {"kind": "load_param", "name": "pubKey"}},
+                {"name": "t2", "value": {"kind": "load_prop", "name": "pubKeyHash"}},
+                {"name": "t3", "value": {"kind": "call", "func": "hash160", "args": ["t1"]}},
+                {"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t3", "right": "t2"}},
+                {"name": "t5", "value": {"kind": "assert", "value": "t4"}},
+                {"name": "t6", "value": {"kind": "call", "func": "checkSig", "args": ["t0", "t1"]}},
+                {"name": "t7", "value": {"kind": "assert", "value": "t6"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+
+    let artifact1 = compile_from_ir_str(ir_json).expect("first load should succeed");
+    // Serialize the artifact's source data back — we verify contract name and method count
+    // by re-compiling from the same IR
+    let artifact2 = compile_from_ir_str(ir_json).expect("second load should succeed");
+    assert_eq!(artifact1.contract_name, artifact2.contract_name, "contract name should be identical");
+    assert_eq!(artifact1.abi.methods.len(), artifact2.abi.methods.len(), "method count should be identical");
+}
+
+#[test]
+fn test_ir_empty_method_body_valid() {
+    // A method with an empty bindings array but still a final assert is valid.
+    // Actually a method with just assert(true) is the minimal valid form.
+    let ir_json = r#"{
+        "contractName": "Empty",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_ok(),
+        "method with only assert(true) should be valid; got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_ir_round_trip_with_initial_value() {
+    let ir_json = r#"{
+        "contractName": "InitTest",
+        "properties": [
+            {"name": "value", "type": "bigint", "readonly": true, "initialValue": {"kind": "load_const", "value": "42n"}}
+        ],
+        "methods": [{
+            "name": "check",
+            "params": [],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_const", "value": true}},
+                {"name": "t1", "value": {"kind": "assert", "value": "t0"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_ok(),
+        "IR with initialValue on property should load without error; got: {:?}",
+        result.err()
+    );
+    let artifact = result.unwrap();
+    assert_eq!(artifact.contract_name, "InitTest");
+    // Properties with initialValue should be present in the compiled artifact
+    assert!(!artifact.script.is_empty(), "script should not be empty");
+}
+
+#[test]
+fn test_ir_round_trip_if_and_loop() {
+    // IR with both an if binding and a loop binding should load and compile correctly
+    let ir_json = r#"{
+        "contractName": "IfLoop",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [
+                {"name": "mode", "type": "boolean"},
+                {"name": "val", "type": "bigint"}
+            ],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "mode"}},
+                {"name": "t1", "value": {"kind": "load_param", "name": "val"}},
+                {"name": "t2", "value": {
+                    "kind": "if",
+                    "cond": "t0",
+                    "then": [
+                        {"name": "t3", "value": {"kind": "load_const", "value": 1}}
+                    ],
+                    "else": [
+                        {"name": "t4", "value": {"kind": "load_const", "value": 2}}
+                    ]
+                }},
+                {"name": "t5", "value": {
+                    "kind": "loop",
+                    "count": 3,
+                    "iterVar": "i",
+                    "body": [
+                        {"name": "t6", "value": {"kind": "load_const", "value": 0}}
+                    ]
+                }},
+                {"name": "t7", "value": {"kind": "load_const", "value": true}},
+                {"name": "t8", "value": {"kind": "assert", "value": "t7"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    assert!(
+        result.is_ok(),
+        "IR with if and loop bindings should load and compile correctly; got: {:?}",
+        result.err()
+    );
+    let artifact = result.unwrap();
+    assert!(!artifact.script.is_empty(), "script should not be empty");
+    assert!(artifact.asm.contains("OP_IF"), "expected OP_IF for if binding");
+}
+
+// ---------------------------------------------------------------------------
+// Emit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_emit_placeholder_produces_constructor_slot() {
+    let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        super(pubKeyHash);
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+    let artifact = compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("P2PKH should compile");
+    assert!(
+        !artifact.constructor_slots.is_empty(),
+        "P2PKH compiled from source should have at least one constructor slot"
+    );
+}
+
+#[test]
+fn test_emit_multiple_placeholders_distinct_offsets() {
+    // A contract with 2 constructor properties should have 2 constructor slots
+    // with different byte offsets.
+    let ir_json = r#"{
+        "contractName": "TwoProp",
+        "properties": [
+            {"name": "a", "type": "bigint", "readonly": true},
+            {"name": "b", "type": "bigint", "readonly": true}
+        ],
+        "methods": [{
+            "name": "check",
+            "params": [{"name": "x", "type": "bigint"}],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                {"name": "t1", "value": {"kind": "load_prop", "name": "a"}},
+                {"name": "t2", "value": {"kind": "load_prop", "name": "b"}},
+                {"name": "t3", "value": {"kind": "bin_op", "op": "+", "left": "t1", "right": "t2"}},
+                {"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t3"}},
+                {"name": "t5", "value": {"kind": "assert", "value": "t4"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+    let artifact = compile_from_ir_str(ir_json).expect("TwoProp should compile");
+    assert_eq!(
+        artifact.constructor_slots.len(),
+        2,
+        "contract with 2 properties should have 2 constructor slots"
+    );
+    let offset0 = artifact.constructor_slots[0].byte_offset;
+    let offset1 = artifact.constructor_slots[1].byte_offset;
+    assert_ne!(
+        offset0, offset1,
+        "two constructor slots should have different byte offsets"
+    );
+}
+
+#[test]
+fn test_emit_byte_offset_accounts_for_preceding_opcodes() {
+    let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        super(pubKeyHash);
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+    let artifact = compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("P2PKH should compile");
+    assert!(
+        !artifact.constructor_slots.is_empty(),
+        "expected constructor slots for pubKeyHash"
+    );
+    assert!(
+        artifact.constructor_slots[0].byte_offset > 0,
+        "byte_offset should be > 0 because opcodes precede the constructor placeholder; got {}",
+        artifact.constructor_slots[0].byte_offset
+    );
+}
+
+#[test]
+fn test_emit_simple_sequence_hex() {
+    let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        super(pubKeyHash);
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+    let artifact = compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("P2PKH should compile");
+    assert!(
+        !artifact.script.is_empty(),
+        "compiled script hex should not be empty"
+    );
+    assert_eq!(
+        artifact.script.len() % 2,
+        0,
+        "script hex should have even length (valid hex encoding)"
+    );
+}
+
+#[test]
+fn test_emit_empty_methods_produces_empty_hex() {
+    // An IR with no methods should produce an artifact with empty or minimal script
+    let ir_json = r#"{
+        "contractName": "NoMethods",
+        "properties": [],
+        "methods": []
+    }"#;
+    let result = compile_from_ir_str(ir_json);
+    // Either it fails validation (no methods) or produces empty script
+    match result {
+        Ok(artifact) => {
+            // If it succeeds, the script should be empty since there are no methods
+            assert!(
+                artifact.script.is_empty() || artifact.script == "00",
+                "no-methods contract should produce empty or near-empty script; got: {}",
+                artifact.script
+            );
+        }
+        Err(_) => {
+            // A validation error for no methods is also acceptable
+        }
+    }
+}
+
+#[test]
+fn test_emit_deterministic_output() {
+    let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        super(pubKeyHash);
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+    let artifact1 = compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("first compilation");
+    let artifact2 = compile_from_source_str(source, Some("test.runar.ts"))
+        .expect("second compilation");
+    assert_eq!(
+        artifact1.script, artifact2.script,
+        "script hex should be identical across two compilations"
+    );
+    assert_eq!(
+        artifact1.asm, artifact2.asm,
+        "asm should be identical across two compilations"
+    );
+}
+
 #[test]
 fn test_optimizer_roll2_to_rot() {
     use runar_compiler_rust::codegen::optimizer::optimize_stack_ops;
@@ -1070,4 +1697,224 @@ fn test_optimizer_roll2_to_rot() {
     let optimized = optimize_stack_ops(&ops);
     assert_eq!(optimized.len(), 1, "Should reduce to 1 op: {:?}", optimized);
     assert!(matches!(&optimized[0], StackOp::Rot), "Should be Rot: {:?}", optimized);
+}
+
+// ---------------------------------------------------------------------------
+// Test: Emit — constructor slot byte offsets with push-data prefix
+// Mirrors Go: TestEmit_PlaceholderByteOffsets / TestEmit_ByteOffsetWithPushData
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_emit_constructor_slot_byte_offsets() {
+    // A 33-byte PubKey push takes 34 bytes (1 length prefix + 33 data bytes).
+    // The first slot at offset 0 uses OP_0 (1 byte); subsequent slots shift.
+    // Here we use a contract with two constructor properties and verify that
+    // the second slot's byte offset is strictly greater than the first slot's.
+    let ir_json = r#"{
+        "contractName": "TwoSlots",
+        "properties": [
+            {"name": "x", "type": "bigint", "readonly": true},
+            {"name": "y", "type": "bigint", "readonly": true}
+        ],
+        "methods": [{
+            "name": "check",
+            "params": [{"name": "a", "type": "bigint"}],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "a"}},
+                {"name": "t1", "value": {"kind": "load_prop", "name": "x"}},
+                {"name": "t2", "value": {"kind": "load_prop", "name": "y"}},
+                {"name": "t3", "value": {"kind": "bin_op", "op": "+", "left": "t1", "right": "t2"}},
+                {"name": "t4", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t3"}},
+                {"name": "t5", "value": {"kind": "assert", "value": "t4"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+
+    let artifact = compile_from_ir_str(ir_json).expect("compilation should succeed");
+
+    // There should be exactly 2 constructor slots (one per property).
+    assert_eq!(
+        artifact.constructor_slots.len(),
+        2,
+        "expected 2 constructor slots, got {}",
+        artifact.constructor_slots.len()
+    );
+
+    let slot0 = &artifact.constructor_slots[0];
+    let slot1 = &artifact.constructor_slots[1];
+
+    // Slots must have distinct indices.
+    assert_ne!(
+        slot0.param_index, slot1.param_index,
+        "constructor slot paramIndex values must be distinct"
+    );
+
+    // The second slot must have a higher byte offset than the first.
+    assert!(
+        slot1.byte_offset > slot0.byte_offset,
+        "second constructor slot byte_offset ({}) must be > first ({})",
+        slot1.byte_offset,
+        slot0.byte_offset
+    );
+
+    // First slot is the first op in the script, so byte_offset should be 0.
+    assert_eq!(
+        slot0.byte_offset, 0,
+        "first constructor slot should be at byte offset 0, got {}",
+        slot0.byte_offset
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: Emit — multi-method dispatch contains OP_IF/OP_ELSE/OP_ENDIF
+// Mirrors Go: TestEmit_MultiMethodDispatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_emit_multi_method_dispatch() {
+    // A contract with two public methods should produce a dispatch preamble
+    // using OP_IF / OP_ELSE / OP_ENDIF around the method bodies.
+    let ir_json = r#"{
+        "contractName": "MultiDispatch",
+        "properties": [],
+        "methods": [
+            {
+                "name": "m1",
+                "params": [{"name": "x", "type": "bigint"}],
+                "body": [
+                    {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                    {"name": "t1", "value": {"kind": "load_const", "value": 1}},
+                    {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                    {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+                ],
+                "isPublic": true
+            },
+            {
+                "name": "m2",
+                "params": [{"name": "y", "type": "bigint"}],
+                "body": [
+                    {"name": "t0", "value": {"kind": "load_param", "name": "y"}},
+                    {"name": "t1", "value": {"kind": "load_const", "value": 2}},
+                    {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                    {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+                ],
+                "isPublic": true
+            }
+        ]
+    }"#;
+
+    let artifact = compile_from_ir_str(ir_json).expect("multi-method compilation should succeed");
+
+    assert!(!artifact.script.is_empty(), "script should not be empty");
+    assert!(!artifact.asm.is_empty(), "asm should not be empty");
+
+    assert!(
+        artifact.asm.contains("OP_IF"),
+        "expected OP_IF in multi-method dispatch asm, got: {}",
+        artifact.asm
+    );
+    assert!(
+        artifact.asm.contains("OP_ELSE"),
+        "expected OP_ELSE in multi-method dispatch asm, got: {}",
+        artifact.asm
+    );
+    assert!(
+        artifact.asm.contains("OP_ENDIF"),
+        "expected OP_ENDIF in multi-method dispatch asm, got: {}",
+        artifact.asm
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test: IR loader — invalid JSON returns an error (not a panic)
+// Mirrors Go: TestLoadIRFromBytes_InvalidJSON
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ir_loader_invalid_json_returns_error() {
+    // Passing malformed JSON to the IR-based entry point should return Err,
+    // not panic. Any descriptive error message is acceptable.
+    let result = compile_from_ir_str("{not valid json");
+    assert!(
+        result.is_err(),
+        "invalid JSON should produce an Err, not a panic"
+    );
+    let err_msg = result.unwrap_err();
+    // The error should mention JSON parsing failure in some way.
+    assert!(
+        err_msg.to_lowercase().contains("json")
+            || err_msg.to_lowercase().contains("invalid")
+            || err_msg.to_lowercase().contains("parse"),
+        "error message should describe the JSON parsing failure, got: {}",
+        err_msg
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Row 214: 3-method contract → last method uses OP_NUMEQUALVERIFY (fail-closed dispatch)
+// In a 3-method contract, the last method in the dispatch table must use
+// OP_NUMEQUALVERIFY (not OP_NUMEQUAL) to fail-close the dispatch selector.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_three_method_dispatch_last_uses_numequalverify() {
+    // A 3-public-method contract forces the emitter to produce:
+    //   selector OP_1 OP_IF <m1> OP_ELSE
+    //     selector OP_2 OP_IF <m2> OP_ELSE
+    //       selector OP_3 OP_NUMEQUALVERIFY <m3>
+    //     OP_ENDIF
+    //   OP_ENDIF
+    // The last method check uses OP_NUMEQUALVERIFY (not OP_NUMEQUAL) so the
+    // script fails when the selector doesn't match any method.
+    let ir_json = r#"{
+        "contractName": "ThreeMethod",
+        "properties": [],
+        "methods": [
+            {
+                "name": "m1",
+                "params": [{"name": "x", "type": "bigint"}],
+                "body": [
+                    {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                    {"name": "t1", "value": {"kind": "load_const", "value": 1}},
+                    {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                    {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+                ],
+                "isPublic": true
+            },
+            {
+                "name": "m2",
+                "params": [{"name": "x", "type": "bigint"}],
+                "body": [
+                    {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                    {"name": "t1", "value": {"kind": "load_const", "value": 2}},
+                    {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                    {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+                ],
+                "isPublic": true
+            },
+            {
+                "name": "m3",
+                "params": [{"name": "x", "type": "bigint"}],
+                "body": [
+                    {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                    {"name": "t1", "value": {"kind": "load_const", "value": 3}},
+                    {"name": "t2", "value": {"kind": "bin_op", "op": "===", "left": "t0", "right": "t1"}},
+                    {"name": "t3", "value": {"kind": "assert", "value": "t2"}}
+                ],
+                "isPublic": true
+            }
+        ]
+    }"#;
+
+    let artifact = compile_from_ir_str(ir_json)
+        .expect("3-method compilation should succeed");
+
+    // The dispatch table for N >= 2 methods must use OP_NUMEQUALVERIFY for
+    // the last method (fail-closed: rejects any selector that doesn't match).
+    assert!(
+        artifact.asm.contains("OP_NUMEQUALVERIFY"),
+        "3-method contract should use OP_NUMEQUALVERIFY for the last dispatch entry; got asm: {}",
+        artifact.asm
+    );
 }

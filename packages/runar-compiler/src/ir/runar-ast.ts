@@ -249,6 +249,11 @@ export interface DecrementExpr {
   prefix: boolean;
 }
 
+export interface ArrayLiteralExpr {
+  kind: 'array_literal';
+  elements: Expression[];
+}
+
 export type Expression =
   | BinaryExpr
   | UnaryExpr
@@ -262,4 +267,5 @@ export type Expression =
   | PropertyAccessExpr
   | IndexAccessExpr
   | IncrementExpr
-  | DecrementExpr;
+  | DecrementExpr
+  | ArrayLiteralExpr;

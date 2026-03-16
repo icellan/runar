@@ -141,8 +141,8 @@ fn make_load_const_int(n: i128) -> ANFValue {
 }
 
 fn make_alias(target: &str) -> ANFValue {
-    ANFValue::LoadParam {
-        name: format!("@ref:{}", target),
+    ANFValue::LoadConst {
+        value: serde_json::Value::String(format!("@ref:{}", target)),
     }
 }
 
@@ -367,15 +367,19 @@ fn try_rewrite(
 /// Collect all referenced binding names from a value.
 fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
     match value {
-        ANFValue::LoadParam { name } => {
-            // Handle @ref: aliases
-            if let Some(target) = name.strip_prefix("@ref:") {
-                refs.insert(target.to_string());
-            } else {
-                refs.insert(name.clone());
+        ANFValue::LoadParam { .. } => {
+            // Do NOT track @ref: targets here — matches TS collectRefsFromValue
+            // which breaks on load_param without collecting refs.
+        }
+        ANFValue::LoadProp { .. } | ANFValue::GetStateScript {} => {}
+        ANFValue::LoadConst { value } => {
+            // Track @ref: aliases as references to prevent DCE
+            if let serde_json::Value::String(s) = value {
+                if let Some(target) = s.strip_prefix("@ref:") {
+                    refs.insert(target.to_string());
+                }
             }
         }
-        ANFValue::LoadProp { .. } | ANFValue::LoadConst { .. } | ANFValue::GetStateScript {} => {}
         ANFValue::BinOp { left, right, .. } => {
             refs.insert(left.clone());
             refs.insert(right.clone());
@@ -440,6 +444,11 @@ fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
         ANFValue::AddRawOutput { satoshis, script_bytes } => {
             refs.insert(satoshis.clone());
             refs.insert(script_bytes.clone());
+        }
+        ANFValue::ArrayLiteral { elements } => {
+            for elem in elements {
+                refs.insert(elem.clone());
+            }
         }
     }
 }
@@ -566,5 +575,543 @@ pub fn optimize_ec(program: ANFProgram) -> ANFProgram {
         contract_name: program.contract_name,
         properties: program.properties,
         methods: cleaned_methods,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFValue};
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    fn make_program(bindings: Vec<ANFBinding>) -> ANFProgram {
+        ANFProgram {
+            contract_name: "Test".to_string(),
+            properties: vec![],
+            methods: vec![ANFMethod {
+                name: "test".to_string(),
+                params: vec![],
+                body: bindings,
+                is_public: true,
+            }],
+        }
+    }
+
+    fn load_const_hex(name: &str, hex: &str) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::LoadConst {
+                value: serde_json::Value::String(hex.to_string()),
+            },
+        }
+    }
+
+    fn load_const_int(name: &str, n: i64) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::LoadConst {
+                value: serde_json::json!(n),
+            },
+        }
+    }
+
+    fn call_binding(name: &str, func: &str, args: Vec<&str>) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::Call {
+                func: func.to_string(),
+                args: args.into_iter().map(|s| s.to_string()).collect(),
+            },
+        }
+    }
+
+    fn assert_binding(name: &str, value_ref: &str) -> ANFBinding {
+        ANFBinding {
+            name: name.to_string(),
+            value: ANFValue::Assert {
+                value: value_ref.to_string(),
+            },
+        }
+    }
+
+    fn find_binding<'a>(bindings: &'a [ANFBinding], name: &str) -> Option<&'a ANFBinding> {
+        bindings.iter().find(|b| b.name == name)
+    }
+
+    fn get_method_body(program: &ANFProgram) -> &[ANFBinding] {
+        &program.methods[0].body
+    }
+
+    fn infinity_hex() -> String {
+        INFINITY_HEX.to_string()
+    }
+
+    fn g_hex() -> String {
+        G_HEX.to_string()
+    }
+
+    fn some_point() -> String {
+        "ab".repeat(64)
+    }
+
+    // -----------------------------------------------------------------------
+    // Pass-through behavior (no EC ops)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pass_through_no_ec_ops() {
+        let bindings = vec![
+            load_const_int("t0", 42),
+            load_const_int("t1", 10),
+            ANFBinding {
+                name: "t2".to_string(),
+                value: ANFValue::BinOp {
+                    op: "+".to_string(),
+                    left: "t0".to_string(),
+                    right: "t1".to_string(),
+                    result_type: None,
+                },
+            },
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+
+        let body = get_method_body(&result);
+        assert_eq!(body.len(), 4, "expected 4 bindings, got {}", body.len());
+        assert_eq!(body[0].name, "t0");
+        assert_eq!(body[1].name, "t1");
+        assert_eq!(body[2].name, "t2");
+        assert_eq!(body[3].name, "t3");
+    }
+
+    #[test]
+    fn test_pass_through_empty_method() {
+        let program = make_program(vec![]);
+        let result = optimize_ec(program);
+        assert_eq!(get_method_body(&result).len(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 1: ecAdd(x, INFINITY) -> alias to x
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule1_ec_add_x_infinity() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            load_const_hex("t1", &infinity_hex()),
+            call_binding("t2", "ecAdd", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
+                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            }
+            other => panic!("expected LoadConst, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 2: ecAdd(INFINITY, x) -> alias to x
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule2_ec_add_infinity_x() {
+        let bindings = vec![
+            load_const_hex("t0", &infinity_hex()),
+            load_const_hex("t1", &"cd".repeat(64)),
+            call_binding("t2", "ecAdd", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
+                assert_eq!(name, "@ref:t1", "expected @ref:t1, got {name}");
+            }
+            other => panic!("expected LoadConst, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 3: ecMul(x, 1) -> alias to x
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule3_ec_mul_by_one() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            load_const_int("t1", 1),
+            call_binding("t2", "ecMul", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
+                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            }
+            other => panic!("expected LoadConst, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 4: ecMul(x, 0) -> INFINITY
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule4_ec_mul_by_zero() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            load_const_int("t1", 0),
+            call_binding("t2", "ecMul", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(INFINITY_HEX),
+                    "expected INFINITY, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 5: ecMulGen(0) -> INFINITY
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule5_ec_mulgen_zero() {
+        let bindings = vec![
+            load_const_int("t0", 0),
+            call_binding("t1", "ecMulGen", vec!["t0"]),
+            assert_binding("t2", "t1"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t1 = find_binding(body, "t1").expect("expected binding t1");
+        match &t1.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(INFINITY_HEX),
+                    "expected INFINITY, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 6: ecMulGen(1) -> G
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule6_ec_mulgen_one() {
+        let bindings = vec![
+            load_const_int("t0", 1),
+            call_binding("t1", "ecMulGen", vec!["t0"]),
+            assert_binding("t2", "t1"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t1 = find_binding(body, "t1").expect("expected binding t1");
+        match &t1.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(G_HEX),
+                    "expected G, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(G), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 7: ecNegate(ecNegate(x)) -> alias to x
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule7_double_negate() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            call_binding("t1", "ecNegate", vec!["t0"]),
+            call_binding("t2", "ecNegate", vec!["t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                let name = value.as_str().unwrap();
+                assert_eq!(name, "@ref:t0", "expected @ref:t0, got {name}");
+            }
+            other => panic!("expected LoadConst, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule8_add_negate() {
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            call_binding("t1", "ecNegate", vec!["t0"]),
+            call_binding("t2", "ecAdd", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(
+                    value.as_str(),
+                    Some(INFINITY_HEX),
+                    "expected INFINITY, got {value}"
+                );
+            }
+            other => panic!("expected LoadConst(INFINITY), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rule 12: ecMul(G, k) -> ecMulGen(k)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_rule12_mul_g_to_mulgen() {
+        let bindings = vec![
+            load_const_hex("t0", &g_hex()),
+            load_const_int("t1", 42),
+            call_binding("t2", "ecMul", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t2 = find_binding(body, "t2").expect("expected binding t2");
+        match &t2.value {
+            ANFValue::Call { func, args } => {
+                assert_eq!(func, "ecMulGen", "expected ecMulGen, got {func}");
+                assert_eq!(args, &["t1"], "expected args [t1], got {args:?}");
+            }
+            other => panic!("expected Call(ecMulGen), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Dead binding elimination
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dead_binding_removed() {
+        // ecAdd(t0, INFINITY) rewrites t2 to @ref:t0.
+        // t1 (INFINITY constant) is then unreferenced and should be removed.
+        let bindings = vec![
+            load_const_hex("t0", &some_point()),
+            load_const_hex("t1", &infinity_hex()),
+            call_binding("t2", "ecAdd", vec!["t0", "t1"]),
+            assert_binding("t3", "t2"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let names: Vec<&str> = body.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            !names.contains(&"t1"),
+            "expected dead binding t1 (INFINITY) to be eliminated, but it is still present"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Non-EC builtins pass through unchanged
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_non_ec_call_unchanged() {
+        // hash160 is not an EC intrinsic — it must survive the optimizer intact.
+        let bindings = vec![
+            load_const_hex("t0", &"ab".repeat(33)),
+            ANFBinding {
+                name: "t1".to_string(),
+                value: ANFValue::Call {
+                    func: "hash160".to_string(),
+                    args: vec!["t0".to_string()],
+                },
+            },
+            assert_binding("t2", "t1"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let t1 = find_binding(body, "t1").expect("expected hash160 binding t1 to be present");
+        match &t1.value {
+            ANFValue::Call { func, args } => {
+                assert_eq!(func, "hash160", "expected hash160 call preserved, got {func}");
+                assert_eq!(args, &["t0"], "expected args [t0], got {args:?}");
+            }
+            other => panic!("expected Call(hash160), got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Side-effect bindings survive dead-binding elimination
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_side_effect_bindings_preserved() {
+        // An assert binding whose result is never referenced must not be
+        // eliminated by dead-binding elimination, because it has a side effect.
+        let bindings = vec![
+            load_const_int("t0", 1),
+            // assert is a side effect — must not be eliminated even if unreferenced
+            assert_binding("t1", "t0"),
+        ];
+        let program = make_program(bindings);
+        let result = optimize_ec(program);
+        let body = get_method_body(&result);
+
+        let names: Vec<&str> = body.iter().map(|b| b.name.as_str()).collect();
+        assert!(
+            names.contains(&"t1"),
+            "expected assert binding t1 to be preserved as side effect, but it was eliminated. bindings: {names:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Program structure preserved
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_contract_name_preserved() {
+        let program = ANFProgram {
+            contract_name: "MyContract".to_string(),
+            properties: vec![ANFProperty {
+                name: "x".to_string(),
+                prop_type: "bigint".to_string(),
+                readonly: true,
+                initial_value: None,
+            }],
+            methods: vec![ANFMethod {
+                name: "doStuff".to_string(),
+                params: vec![ANFParam {
+                    name: "y".to_string(),
+                    param_type: "bigint".to_string(),
+                }],
+                body: vec![
+                    load_const_int("t0", 1),
+                    assert_binding("t1", "t0"),
+                ],
+                is_public: true,
+            }],
+        };
+
+        let result = optimize_ec(program);
+
+        assert_eq!(result.contract_name, "MyContract");
+        assert_eq!(result.properties.len(), 1);
+        assert_eq!(result.properties[0].name, "x");
+        assert_eq!(result.methods.len(), 1);
+        assert_eq!(result.methods[0].name, "doStuff");
+    }
+
+    #[test]
+    fn test_multiple_methods_all_optimized() {
+        let program = ANFProgram {
+            contract_name: "Test".to_string(),
+            properties: vec![],
+            methods: vec![
+                ANFMethod {
+                    name: "method1".to_string(),
+                    params: vec![],
+                    body: vec![
+                        load_const_int("t0", 0),
+                        call_binding("t1", "ecMulGen", vec!["t0"]),
+                        assert_binding("t2", "t1"),
+                    ],
+                    is_public: true,
+                },
+                ANFMethod {
+                    name: "method2".to_string(),
+                    params: vec![],
+                    body: vec![
+                        load_const_int("t0", 1),
+                        call_binding("t1", "ecMulGen", vec!["t0"]),
+                        assert_binding("t2", "t1"),
+                    ],
+                    is_public: true,
+                },
+            ],
+        };
+
+        let result = optimize_ec(program);
+
+        assert_eq!(result.methods.len(), 2);
+
+        // method1: ecMulGen(0) -> INFINITY
+        let body1 = &result.methods[0].body;
+        let t1m1 = find_binding(body1, "t1").expect("expected t1 in method1");
+        match &t1m1.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some(INFINITY_HEX), "method1 t1: expected INFINITY");
+            }
+            other => panic!("method1 t1: expected LoadConst(INFINITY), got {other:?}"),
+        }
+
+        // method2: ecMulGen(1) -> G
+        let body2 = &result.methods[1].body;
+        let t1m2 = find_binding(body2, "t1").expect("expected t1 in method2");
+        match &t1m2.value {
+            ANFValue::LoadConst { value } => {
+                assert_eq!(value.as_str(), Some(G_HEX), "method2 t1: expected G");
+            }
+            other => panic!("method2 t1: expected LoadConst(G), got {other:?}"),
+        }
     }
 }

@@ -757,3 +757,90 @@ describe('m10: fee rate parameter', () => {
     expect(fee3).toBe(fee1 * 3);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Auto-compute state from ANF IR
+// ---------------------------------------------------------------------------
+
+describe('auto-compute state from ANF IR', () => {
+  function makeStatefulArtifact(anf?: RunarArtifact['anf']): RunarArtifact {
+    return makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [{ name: 'count', type: 'bigint' }] },
+        methods: [{
+          name: 'increment',
+          params: [
+            { name: '_changePKH', type: 'Ripemd160' },
+            { name: '_changeAmount', type: 'bigint' },
+            { name: '_newAmount', type: 'bigint' },
+            { name: 'txPreimage', type: 'SigHashPreimage' },
+          ],
+          isPublic: true,
+        }],
+      },
+      stateFields: [{ name: 'count', type: 'bigint', index: 0 }],
+      anf: anf ?? {
+        contractName: 'Counter',
+        properties: [{ name: 'count', type: 'bigint', readonly: false }],
+        methods: [{
+          name: 'increment',
+          params: [
+            { name: '_changePKH', type: 'Ripemd160' },
+            { name: '_changeAmount', type: 'bigint' },
+            { name: '_newAmount', type: 'bigint' },
+            { name: 'txPreimage', type: 'SigHashPreimage' },
+          ],
+          body: [
+            { name: 't0', value: { kind: 'load_prop', name: 'count' } },
+            { name: 't1', value: { kind: 'load_const', value: 1n } },
+            { name: 't2', value: { kind: 'bin_op', op: '+', left: 't0', right: 't1' } },
+            { name: 't3', value: { kind: 'update_prop', name: 'count', value: 't2' } },
+          ],
+          isPublic: true,
+        }],
+      },
+    });
+  }
+
+  it('prepareCall auto-computes newState when ANF IR present', async () => {
+    const signer = new LocalSigner(PRIV_KEY);
+    const address = await signer.getAddress();
+    const provider = new MockProvider();
+    provider.addUtxo(address, makeUtxo(100_000));
+
+    const artifact = makeStatefulArtifact();
+    const contract = new RunarContract(artifact, [0n]);
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    expect(contract.state.count).toBe(0n);
+
+    // Add funding for call
+    provider.addUtxo(address, makeUtxo(100_000, 1));
+
+    // Call WITHOUT newState — should auto-compute
+    await contract.call('increment', [], provider, signer);
+
+    expect(contract.state.count).toBe(1n);
+  });
+
+  it('prepareCall uses explicit newState when provided (override)', async () => {
+    const signer = new LocalSigner(PRIV_KEY);
+    const address = await signer.getAddress();
+    const provider = new MockProvider();
+    provider.addUtxo(address, makeUtxo(100_000));
+
+    const artifact = makeStatefulArtifact();
+    const contract = new RunarContract(artifact, [0n]);
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    provider.addUtxo(address, makeUtxo(100_000, 1));
+
+    // Explicit newState overrides auto-compute
+    await contract.call('increment', [], provider, signer, {
+      newState: { count: 99n },
+    });
+
+    expect(contract.state.count).toBe(99n);
+  });
+});

@@ -152,20 +152,13 @@ fn test_nft_transfer() {
         .expect("deploy failed");
 
     // Transfer: sig=Auto, newOwner=explicit, outputSatoshis
-    // This is stateful with addOutput, so we need new_state with the new owner
-    let mut new_state = HashMap::new();
-    new_state.insert("owner".to_string(), SdkValue::Bytes(new_owner.pub_key_hex.clone()));
-
     let (call_txid, _tx) = contract
         .call(
             "transfer",
             &[SdkValue::Auto, SdkValue::Bytes(new_owner.pub_key_hex), SdkValue::Int(5000)],
             &mut provider,
             &*signer,
-            Some(&CallOptions {
-                new_state: Some(new_state),
-                ..Default::default()
-            }),
+            None,
         )
         .expect("transfer failed");
     assert!(!call_txid.is_empty());

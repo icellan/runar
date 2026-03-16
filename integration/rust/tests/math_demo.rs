@@ -4,7 +4,7 @@ use crate::helpers::*;
 use runar_lang::sdk::{CallOptions, DeployOptions, RunarContract, SdkValue};
 use std::collections::HashMap;
 
-fn new_state(value: i64) -> Option<CallOptions> {
+fn wrong_state(value: i64) -> Option<CallOptions> {
     let mut state = HashMap::new();
     state.insert("value".to_string(), SdkValue::Int(value));
     Some(CallOptions {
@@ -56,7 +56,7 @@ fn test_math_divide_by() {
             &[SdkValue::Int(10)],
             &mut provider,
             &*signer,
-            new_state(100).as_ref(),
+            None,
         )
         .expect("divideBy failed");
     assert!(!txid.is_empty());
@@ -86,7 +86,7 @@ fn test_math_divide_then_clamp() {
             &[SdkValue::Int(10)],
             &mut provider,
             &*signer,
-            new_state(100).as_ref(),
+            None,
         )
         .expect("divideBy failed");
 
@@ -97,7 +97,7 @@ fn test_math_divide_then_clamp() {
             &[SdkValue::Int(0), SdkValue::Int(50)],
             &mut provider,
             &*signer,
-            new_state(50).as_ref(),
+            None,
         )
         .expect("clampValue failed");
 }
@@ -126,7 +126,7 @@ fn test_math_square_root() {
             &[],
             &mut provider,
             &*signer,
-            new_state(7).as_ref(),
+            None,
         )
         .expect("squareRoot failed");
     assert!(!txid.is_empty());
@@ -156,7 +156,7 @@ fn test_math_exponentiate() {
             &[SdkValue::Int(10)],
             &mut provider,
             &*signer,
-            new_state(1024).as_ref(),
+            None,
         )
         .expect("exponentiate failed");
     assert!(!txid.is_empty());
@@ -186,7 +186,7 @@ fn test_math_reduce_gcd() {
             &[SdkValue::Int(75)],
             &mut provider,
             &*signer,
-            new_state(25).as_ref(),
+            None,
         )
         .expect("reduceGcd failed");
     assert!(!txid.is_empty());
@@ -216,7 +216,7 @@ fn test_math_compute_log2() {
             &[],
             &mut provider,
             &*signer,
-            new_state(10).as_ref(),
+            None,
         )
         .expect("computeLog2 failed");
     assert!(!txid.is_empty());
@@ -246,7 +246,7 @@ fn test_math_scale_by_ratio() {
             &[SdkValue::Int(3), SdkValue::Int(4)],
             &mut provider,
             &*signer,
-            new_state(75).as_ref(),
+            None,
         )
         .expect("scaleByRatio failed");
     assert!(!txid.is_empty());
@@ -274,7 +274,7 @@ fn test_math_divide_by_zero() {
         &[SdkValue::Int(0)],
         &mut provider,
         &*signer,
-        new_state(0).as_ref(),
+        wrong_state(0).as_ref(),
     );
     assert!(result.is_err(), "expected divide by zero to fail");
 }
@@ -302,7 +302,7 @@ fn test_math_wrong_state() {
         &[SdkValue::Int(10)],
         &mut provider,
         &*signer,
-        new_state(999).as_ref(),
+        wrong_state(999).as_ref(),
     );
     assert!(result.is_err(), "expected wrong state to fail");
 }
@@ -331,7 +331,7 @@ fn test_math_normalize() {
             &[],
             &mut provider,
             &*signer,
-            new_state(-1).as_ref(),
+            None,
         )
         .expect("normalize failed");
     assert!(!txid.is_empty());
@@ -361,7 +361,7 @@ fn test_math_chain_operations() {
             &[SdkValue::Int(10)],
             &mut provider,
             &*signer,
-            new_state(100).as_ref(),
+            None,
         )
         .expect("divideBy failed");
 
@@ -372,7 +372,7 @@ fn test_math_chain_operations() {
             &[],
             &mut provider,
             &*signer,
-            new_state(10).as_ref(),
+            None,
         )
         .expect("squareRoot failed");
 
@@ -383,7 +383,7 @@ fn test_math_chain_operations() {
             &[SdkValue::Int(5), SdkValue::Int(1)],
             &mut provider,
             &*signer,
-            new_state(50).as_ref(),
+            None,
         )
         .expect("scaleByRatio failed");
 }

@@ -20,11 +20,11 @@ pub struct ValidationResult {
 /// Validate a parsed Rúnar AST against the language subset constraints.
 pub fn validate(contract: &ContractNode) -> ValidationResult {
     let mut errors = Vec::new();
-    let warnings = Vec::new();
+    let mut warnings = Vec::new();
 
-    validate_properties(contract, &mut errors);
+    validate_properties(contract, &mut errors, &mut warnings);
     validate_constructor(contract, &mut errors);
-    validate_methods(contract, &mut errors);
+    validate_methods(contract, &mut errors, &mut warnings);
     check_no_recursion(contract, &mut errors);
 
     ValidationResult { errors, warnings }
@@ -56,9 +56,38 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
 // Property validation
 // ---------------------------------------------------------------------------
 
-fn validate_properties(contract: &ContractNode, errors: &mut Vec<String>) {
+fn validate_properties(contract: &ContractNode, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for prop in &contract.properties {
         validate_property_type(&prop.prop_type, errors);
+
+        // V27: Error when any property is named `txPreimage`
+        if prop.name == "txPreimage" {
+            errors.push(
+                "'txPreimage' is a reserved implicit parameter name and must not be used as a property name".to_string()
+            );
+        }
+    }
+
+    // SmartContract requires all properties to be readonly
+    if contract.parent_class == "SmartContract" {
+        for prop in &contract.properties {
+            if !prop.readonly {
+                errors.push(format!(
+                    "property '{}' in SmartContract must be readonly. Use StatefulSmartContract for mutable state.",
+                    prop.name
+                ));
+            }
+        }
+    }
+
+    // V26: Warn when a StatefulSmartContract has no mutable (non-readonly) properties
+    if contract.parent_class == "StatefulSmartContract" {
+        let has_mutable = contract.properties.iter().any(|p| !p.readonly);
+        if !has_mutable {
+            warnings.push(
+                "StatefulSmartContract has no mutable properties; consider using SmartContract instead".to_string()
+            );
+        }
     }
 }
 
@@ -162,9 +191,14 @@ fn is_super_call(stmt: &Statement) -> bool {
 // Method validation
 // ---------------------------------------------------------------------------
 
-fn validate_methods(contract: &ContractNode, errors: &mut Vec<String>) {
+fn validate_methods(contract: &ContractNode, errors: &mut Vec<String>, warnings: &mut Vec<String>) {
     for method in &contract.methods {
         validate_method(method, contract, errors);
+
+        // V24, V25: Warn when StatefulSmartContract public method calls checkPreimage or getStateScript explicitly
+        if contract.parent_class == "StatefulSmartContract" && method.visibility == Visibility::Public {
+            warn_manual_preimage_usage(method, warnings);
+        }
     }
 }
 
@@ -535,6 +569,119 @@ fn has_cycle(
 }
 
 // ---------------------------------------------------------------------------
+// V24, V25: Warn about manual use of checkPreimage / getStateScript in
+// StatefulSmartContract public methods.
+// ---------------------------------------------------------------------------
+
+fn warn_manual_preimage_usage(method: &MethodNode, warnings: &mut Vec<String>) {
+    walk_expressions_in_body(&method.body, &mut |expr| {
+        // V24: Detect manual checkPreimage(...)
+        if let Expression::CallExpr { callee, .. } = expr {
+            if let Expression::Identifier { name } = callee.as_ref() {
+                if name == "checkPreimage" {
+                    warnings.push(format!(
+                        "StatefulSmartContract auto-injects checkPreimage(); calling it manually in '{}' will cause a duplicate verification",
+                        method.name
+                    ));
+                }
+            }
+            // V25: Detect manual this.getStateScript()
+            if let Expression::PropertyAccess { property } = callee.as_ref() {
+                if property == "getStateScript" {
+                    warnings.push(format!(
+                        "StatefulSmartContract auto-injects state continuation; calling getStateScript() manually in '{}' is redundant",
+                        method.name
+                    ));
+                }
+            }
+        }
+    });
+}
+
+fn walk_expressions_in_body(stmts: &[Statement], visitor: &mut impl FnMut(&Expression)) {
+    for stmt in stmts {
+        walk_expressions_in_statement(stmt, visitor);
+    }
+}
+
+fn walk_expressions_in_statement(stmt: &Statement, visitor: &mut impl FnMut(&Expression)) {
+    match stmt {
+        Statement::ExpressionStatement { expression, .. } => {
+            walk_expression(expression, visitor);
+        }
+        Statement::VariableDecl { init, .. } => {
+            walk_expression(init, visitor);
+        }
+        Statement::Assignment { target, value, .. } => {
+            walk_expression(target, visitor);
+            walk_expression(value, visitor);
+        }
+        Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            walk_expression(condition, visitor);
+            walk_expressions_in_body(then_branch, visitor);
+            if let Some(else_stmts) = else_branch {
+                walk_expressions_in_body(else_stmts, visitor);
+            }
+        }
+        Statement::ForStatement {
+            condition, body, ..
+        } => {
+            walk_expression(condition, visitor);
+            walk_expressions_in_body(body, visitor);
+        }
+        Statement::ReturnStatement { value, .. } => {
+            if let Some(v) = value {
+                walk_expression(v, visitor);
+            }
+        }
+    }
+}
+
+fn walk_expression(expr: &Expression, visitor: &mut impl FnMut(&Expression)) {
+    visitor(expr);
+    match expr {
+        Expression::CallExpr { callee, args } => {
+            walk_expression(callee, visitor);
+            for arg in args {
+                walk_expression(arg, visitor);
+            }
+        }
+        Expression::BinaryExpr { left, right, .. } => {
+            walk_expression(left, visitor);
+            walk_expression(right, visitor);
+        }
+        Expression::UnaryExpr { operand, .. } => {
+            walk_expression(operand, visitor);
+        }
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            walk_expression(condition, visitor);
+            walk_expression(consequent, visitor);
+            walk_expression(alternate, visitor);
+        }
+        Expression::MemberExpr { object, .. } => {
+            walk_expression(object, visitor);
+        }
+        Expression::IndexAccess { object, index } => {
+            walk_expression(object, visitor);
+            walk_expression(index, visitor);
+        }
+        Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+            walk_expression(operand, visitor);
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -712,6 +859,104 @@ class Counter extends StatefulSmartContract {
         assert!(
             result.errors.is_empty(),
             "expected no validation errors for stateful contract, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Alias mirroring the name used in Go/Python test suites.
+    #[test]
+    fn test_constructor_missing_super_fails() {
+        let source = r#"
+import { SmartContract, Addr, PubKey, Sig } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly pubKeyHash: Addr;
+
+    constructor(pubKeyHash: Addr) {
+        this.pubKeyHash = pubKeyHash;
+    }
+
+    public unlock(sig: Sig, pubKey: PubKey) {
+        assert(hash160(pubKey) === this.pubKeyHash);
+        assert(checkSig(sig, pubKey));
+    }
+}
+"#;
+        let contract = parse_contract(source);
+        let result = validate(&contract);
+        assert!(
+            !result.errors.is_empty(),
+            "expected validation errors for missing super()"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.to_lowercase().contains("super")),
+            "expected error about super(), got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Alias mirroring the name used in Go/Python test suites.
+    #[test]
+    fn test_public_method_missing_final_assert_fails() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class P2PKH extends SmartContract {
+    readonly x: bigint;
+
+    constructor(x: bigint) {
+        super(x);
+        this.x = x;
+    }
+
+    public unlock(val: bigint): void { const y = val + 1n; }
+}
+"#;
+        let contract = parse_contract(source);
+        let result = validate(&contract);
+        assert!(
+            !result.errors.is_empty(),
+            "expected validation errors for missing assert at end of public method"
+        );
+        assert!(
+            result.errors.iter().any(|e| e.to_lowercase().contains("assert")),
+            "expected error about missing assert(), got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Alias mirroring the name used in Go/Python test suites.
+    #[test]
+    fn test_direct_recursion_fails() {
+        let source = r#"
+import { SmartContract } from 'runar-lang';
+
+class Rec extends SmartContract {
+    readonly x: bigint;
+
+    constructor(x: bigint) {
+        super(x);
+        this.x = x;
+    }
+
+    public recurse(v: bigint) {
+        this.recurse(v);
+        assert(v === this.x);
+    }
+}
+"#;
+        let contract = parse_contract(source);
+        let result = validate(&contract);
+        assert!(
+            !result.errors.is_empty(),
+            "expected validation errors for direct recursion"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.to_lowercase().contains("recursion") || e.to_lowercase().contains("recursive")),
+            "expected error about recursion, got: {:?}",
             result.errors
         );
     }

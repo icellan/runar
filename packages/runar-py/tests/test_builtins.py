@@ -47,11 +47,16 @@ class TestHashFunctions:
 # Mock crypto
 # ---------------------------------------------------------------------------
 
-class TestMockCrypto:
-    def test_check_sig_always_true(self):
-        assert check_sig(b'\x00' * 72, b'\x02' + b'\x00' * 32) is True
+class TestRealCrypto:
+    def test_check_sig_valid(self):
+        """Real ECDSA: mock_sig() + mock_pub_key() should verify."""
+        assert check_sig(mock_sig(), mock_pub_key()) is True
 
-    def test_check_multi_sig_always_true(self):
+    def test_check_sig_invalid(self):
+        """Real ECDSA: random bytes should not verify."""
+        assert check_sig(b'\x00' * 72, b'\x02' + b'\x00' * 32) is False
+
+    def test_check_multi_sig_empty(self):
         assert check_multi_sig([], []) is True
 
     def test_check_preimage_always_true(self):
@@ -204,8 +209,12 @@ class TestMathUtils:
 # ---------------------------------------------------------------------------
 
 class TestMockHelpers:
-    def test_mock_sig_length(self):
-        assert len(mock_sig()) == 72
+    def test_mock_sig_is_valid_der(self):
+        """mock_sig() returns a real DER-encoded ECDSA signature."""
+        sig = mock_sig()
+        assert sig[0] == 0x30  # DER SEQUENCE tag
+        # DER length: sig[1] + 2 == total length
+        assert sig[1] + 2 == len(sig)
 
     def test_mock_pub_key_length(self):
         assert len(mock_pub_key()) == 33
@@ -213,6 +222,10 @@ class TestMockHelpers:
     def test_mock_pub_key_prefix(self):
         """Compressed public key should start with 0x02 or 0x03."""
         assert mock_pub_key()[0] in (0x02, 0x03)
+
+    def test_mock_sig_verifies_with_mock_pub_key(self):
+        """mock_sig() should verify against mock_pub_key()."""
+        assert check_sig(mock_sig(), mock_pub_key()) is True
 
     def test_mock_preimage_length(self):
         assert len(mock_preimage()) == 181

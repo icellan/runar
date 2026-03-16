@@ -291,7 +291,7 @@ func TestOptimizer_Push1Roll_BecomesSwap(t *testing.T) {
 func TestOptimizer_Push2Roll_BecomesRot(t *testing.T) {
 	ops := []StackOp{
 		pushBigIntOp(2),
-		{Op: "roll"},
+		{Op: "roll", Depth: 2},
 	}
 	result := OptimizeStackOps(ops)
 	if len(result) != 1 {
@@ -567,6 +567,144 @@ func TestOptimizer_NestedIf_Optimized(t *testing.T) {
 		t.Errorf("else branch: expected 1 op (OP_CHECKSIGVERIFY), got %d", len(ifOp.Else))
 	} else if ifOp.Else[0].Code != "OP_CHECKSIGVERIFY" {
 		t.Errorf("else branch: expected OP_CHECKSIGVERIFY, got %s", ifOp.Else[0].Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2-op window: PUSH(0) OP_SUB -> removed (subtractive identity)
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push0Sub_Removed(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		opcodeOp("OP_SUB"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(0) OP_SUB should be removed (x - 0 = x), got %d ops", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2-op window: OP_CHECKMULTISIG OP_VERIFY -> OP_CHECKMULTISIGVERIFY
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_CheckMultiSigVerify_Merged(t *testing.T) {
+	ops := []StackOp{
+		opcodeOp("OP_CHECKMULTISIG"),
+		opcodeOp("OP_VERIFY"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 op, got %d", len(result))
+	}
+	if result[0].Code != "OP_CHECKMULTISIGVERIFY" {
+		t.Errorf("expected OP_CHECKMULTISIGVERIFY, got %s", result[0].Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2-op window: PUSH(bool) DROP -> removed (any push followed by drop is eliminated)
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_PushBoolDrop_Removed(t *testing.T) {
+	ops := []StackOp{
+		{Op: "push", Value: PushValue{Kind: "bool", Bool: true}},
+		{Op: "drop"},
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(bool) DROP should be removed entirely, got %d ops", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3-op window: PUSH(6) PUSH(2) OP_DIV — NOT constant-folded (division not in rules)
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_ConstFoldDivNotFolded(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(6),
+		pushBigIntOp(2),
+		opcodeOp("OP_DIV"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 3 {
+		t.Errorf("PUSH PUSH DIV should NOT be constant-folded (3 ops unchanged), got %d ops", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2-op window: PUSH(bytes) DROP -> removed
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_PushBytesDrop_Removed(t *testing.T) {
+	ops := []StackOp{
+		{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0xde, 0xad, 0xbe, 0xef}}},
+		{Op: "drop"},
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(bytes) DROP should be removed entirely, got %d ops", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 2-op window: PUSH(-1) DROP -> removed
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_PushNegativeOneDrop_Removed(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(-1),
+		{Op: "drop"},
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 0 {
+		t.Errorf("PUSH(-1) DROP should be removed entirely, got %d ops", len(result))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3-op window: PUSH(3) PUSH(10) OP_SUB -> PUSH(-7) (stack: top-1 - top = 3 - 10)
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_ConstFoldSub_Negative(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(3),
+		pushBigIntOp(10),
+		opcodeOp("OP_SUB"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 op after constant folding, got %d", len(result))
+	}
+	if result[0].Op != "push" || result[0].Value.BigInt == nil {
+		t.Fatalf("expected push bigint, got %s", result[0].Op)
+	}
+	if result[0].Value.BigInt.Cmp(big.NewInt(-7)) != 0 {
+		t.Errorf("expected -7 (3 - 10), got %s", result[0].Value.BigInt.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 3-op window: PUSH(1000) PUSH(999) OP_ADD -> PUSH(1999)
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_ConstFoldAdd_LargeValues(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1000),
+		pushBigIntOp(999),
+		opcodeOp("OP_ADD"),
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 1 {
+		t.Fatalf("expected 1 op after constant folding, got %d", len(result))
+	}
+	if result[0].Op != "push" || result[0].Value.BigInt == nil {
+		t.Fatalf("expected push bigint, got %s", result[0].Op)
+	}
+	if result[0].Value.BigInt.Cmp(big.NewInt(1999)) != 0 {
+		t.Errorf("expected 1999, got %s", result[0].Value.BigInt.String())
 	}
 }
 

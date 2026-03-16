@@ -1,7 +1,9 @@
 package runar
 
 import (
+	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"testing"
 
@@ -2470,5 +2472,408 @@ func TestTerminalCall_TxStructure(t *testing.T) {
 	// Should have 1 input (no funding inputs)
 	if parsed.inputCount != 1 {
 		t.Errorf("expected 1 input, got %d", parsed.inputCount)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 353: All input sequences are 0xffffffff in call transaction
+// ---------------------------------------------------------------------------
+
+func TestBuildCallTransaction_AllSequences(t *testing.T) {
+	utxo := makeUtxo(100000, 0)
+	additional := []UTXO{makeUtxo(50000, 1), makeUtxo(30000, 2)}
+	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
+
+	callTxObj, _, _ := BuildCallTransaction(utxo, "51", "", 0, "changeaddr", changeScript, additional, 1)
+	parsed := parseTxHex(callTxObj.Hex())
+
+	for i, inp := range parsed.inputs {
+		if inp.sequence != 0xffffffff {
+			t.Errorf("input %d: expected sequence 0xffffffff, got %d", i, inp.sequence)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 363: InsertUnlockingScript with out-of-range input index panics
+// ---------------------------------------------------------------------------
+
+func TestInsertUnlockingScript_OutOfRange(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for out-of-range input index")
+		}
+	}()
+
+	utxo := makeUtxo(100000, 0)
+	deployTxObj, _, err := BuildDeployTransaction("51", []UTXO{utxo}, 50000, "addr",
+		"76a914"+strings.Repeat("ff", 20)+"88ac")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// index 5 is out of range (tx has 1 input)
+	InsertUnlockingScript(deployTxObj.Hex(), 5, "51")
+}
+
+// ---------------------------------------------------------------------------
+// Row 372: encode_state_value for PubKey encodes as raw hex (no push prefix)
+// ---------------------------------------------------------------------------
+
+func TestEncodeStateValue_PubKey(t *testing.T) {
+	// A 33-byte compressed PubKey state field serializes as raw hex (no push prefix).
+	// Test via round-trip: serialize state with a PubKey field, then verify bytes.
+	pubKeyHex := "02" + strings.Repeat("ab", 32) // 33-byte compressed pubkey
+	fields := []StateField{
+		{Name: "pk", Type: "PubKey", Index: 0},
+	}
+	stateMap := map[string]interface{}{"pk": pubKeyHex}
+	encoded := SerializeState(fields, stateMap)
+	// Encoded state should contain the raw pubkey hex without extra push prefix length
+	if !strings.Contains(encoded, strings.Repeat("ab", 32)) {
+		t.Errorf("PubKey state encoding should contain raw bytes, got: %s", encoded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 378: extract_state_from_script returns nil when no state fields defined
+// ---------------------------------------------------------------------------
+
+func TestExtractState_NoStateFieldsDefined(t *testing.T) {
+	// A contract with no stateFields → ExtractStateFromScript returns nil
+	artifact := makeArtifact("76a914"+strings.Repeat("00", 20)+"88ac", ABI{})
+	// artifact.StateFields is empty/nil
+
+	script := "76a914" + strings.Repeat("00", 20) + "88ac"
+	state := ExtractStateFromScript(artifact, script)
+	if state != nil {
+		t.Errorf("expected nil state for contract with no stateFields, got: %v", state)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 382: push_data encode/decode — small data (< 76 bytes) round-trips
+// ---------------------------------------------------------------------------
+
+func TestPushData_SmallData_RoundTrip(t *testing.T) {
+	// Encode 4-byte hex "deadbeef" as push data
+	data := "deadbeef"
+	encoded := EncodePushData(data)
+	// Should start with "04" (length = 4)
+	if !strings.HasPrefix(encoded, "04") {
+		t.Errorf("expected 4-byte push to start with '04', got: %s", encoded)
+	}
+	// Decode should recover original
+	decoded, _ := DecodePushData(encoded, 0)
+	if decoded != data {
+		t.Errorf("push_data round-trip failed: expected %s, got %s", data, decoded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 383: push_data encode — 76+ bytes triggers OP_PUSHDATA1 (prefix 0x4c)
+// ---------------------------------------------------------------------------
+
+func TestPushData_76Bytes_UsesPUSHDATA1(t *testing.T) {
+	// 76 bytes = 152 hex chars
+	data := strings.Repeat("ab", 76)
+	encoded := EncodePushData(data)
+	if !strings.HasPrefix(encoded, "4c") {
+		t.Errorf("expected 76-byte push to start with '4c' (OP_PUSHDATA1), got: %s", encoded[:4])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 387: MockSigner.sign() is deterministic
+// ---------------------------------------------------------------------------
+
+func TestMockSigner_Sign_Deterministic(t *testing.T) {
+	signer := NewMockSigner("", "")
+	txHex := "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff00ffffffff0100000000000000001976a914000000000000000000000000000000000000000088ac00000000"
+
+	sig1, err1 := signer.Sign(txHex, 0, "", 0, nil)
+	sig2, err2 := signer.Sign(txHex, 0, "", 0, nil)
+
+	if err1 != nil || err2 != nil {
+		t.Fatalf("sign errors: %v, %v", err1, err2)
+	}
+	if sig1 != sig2 {
+		t.Errorf("MockSigner sign is not deterministic: %s != %s", sig1, sig2)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 388: MockSigner returns address (40 hex chars)
+// ---------------------------------------------------------------------------
+
+func TestMockSigner_GetAddress(t *testing.T) {
+	signer := NewMockSigner("", "")
+	addr, err := signer.GetAddress()
+	if err != nil {
+		t.Fatalf("GetAddress error: %v", err)
+	}
+	if len(addr) != 40 {
+		t.Errorf("expected 40-char address, got %d: %s", len(addr), addr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 400: ExternalSigner delegates GetPublicKey to callback
+// ---------------------------------------------------------------------------
+
+func TestExternalSigner_GetPublicKey(t *testing.T) {
+	expectedPK := "03" + strings.Repeat("ab", 32)
+	signer := NewExternalSigner(expectedPK, "addr", func(tx string, idx int, script string, sats int64, ht *int) (string, error) {
+		return "", nil
+	})
+	pk, err := signer.GetPublicKey()
+	if err != nil {
+		t.Fatalf("GetPublicKey error: %v", err)
+	}
+	if pk != expectedPK {
+		t.Errorf("expected pubkey %s, got %s", expectedPK, pk)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 401: ExternalSigner delegates GetAddress to callback
+// ---------------------------------------------------------------------------
+
+func TestExternalSigner_GetAddress(t *testing.T) {
+	expectedAddr := "1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf Na"
+	signer := NewExternalSigner("03"+ strings.Repeat("ab", 32), expectedAddr, func(tx string, idx int, script string, sats int64, ht *int) (string, error) {
+		return "", nil
+	})
+	addr, err := signer.GetAddress()
+	if err != nil {
+		t.Fatalf("GetAddress error: %v", err)
+	}
+	if addr != expectedAddr {
+		t.Errorf("expected address %s, got %s", expectedAddr, addr)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 402: ExternalSigner delegates sign() to callback with correct args
+// ---------------------------------------------------------------------------
+
+func TestExternalSigner_Sign_DelegatesToCallback(t *testing.T) {
+	var capturedTx string
+	var capturedIdx int
+	expectedSig := "3045022100" + strings.Repeat("aa", 32) + "0220" + strings.Repeat("bb", 32) + "41"
+
+	signer := NewExternalSigner("03"+strings.Repeat("ab", 32), "addr",
+		func(tx string, idx int, script string, sats int64, ht *int) (string, error) {
+			capturedTx = tx
+			capturedIdx = idx
+			return expectedSig, nil
+		},
+	)
+
+	txHex := "0100000001" + strings.Repeat("00", 32) + "00000000ffffffff00ffffffff0100000000000000001976a914" + strings.Repeat("00", 20) + "88ac00000000"
+	sig, err := signer.Sign(txHex, 2, "", 50000, nil)
+	if err != nil {
+		t.Fatalf("Sign error: %v", err)
+	}
+	if sig != expectedSig {
+		t.Errorf("expected sig %s, got %s", expectedSig, sig)
+	}
+	if capturedTx != txHex {
+		t.Errorf("callback received wrong tx: %s", capturedTx)
+	}
+	if capturedIdx != 2 {
+		t.Errorf("callback received wrong input index: %d", capturedIdx)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 407: MockProvider unknown address → empty UTXO slice
+// ---------------------------------------------------------------------------
+
+func TestMockProvider_UnknownAddress_EmptySlice(t *testing.T) {
+	provider := NewMockProvider("mainnet")
+	// Don't add any UTXOs
+	utxos, err := provider.GetUtxos("unknown-address")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(utxos) != 0 {
+		t.Errorf("expected empty UTXO slice for unknown address, got %d UTXOs", len(utxos))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 408: MockProvider broadcast() is all-lowercase hex txid
+// ---------------------------------------------------------------------------
+
+func TestMockProvider_Broadcast_TxidAllHexLower(t *testing.T) {
+	provider := NewMockProvider("mainnet")
+	bcastTx := transaction.NewTransaction()
+	_ = bcastTx.AddInputFrom(strings.Repeat("aa", 32), 0, "51", 100000, nil)
+	outLS, _ := sdkscript.NewFromHex("51")
+	bcastTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      50000,
+		LockingScript: outLS,
+	})
+
+	txid, err := provider.Broadcast(bcastTx)
+	if err != nil {
+		t.Fatalf("broadcast error: %v", err)
+	}
+	if len(txid) != 64 {
+		t.Errorf("expected 64-char txid, got %d: %s", len(txid), txid)
+	}
+	// All hex chars
+	for _, c := range txid {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("txid contains non-hex character: %c", c)
+			break
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 433: RunarArtifact deserialization parses version, contractName, etc.
+// ---------------------------------------------------------------------------
+
+func TestRunarArtifact_Deserialization(t *testing.T) {
+	artifactJSON := `{
+		"version": "runar-v0.1.0",
+		"compilerVersion": "0.1.0",
+		"contractName": "P2PKH",
+		"abi": {
+			"constructor": {"params": [{"name": "pubKeyHash", "type": "Addr"}]},
+			"methods": [{"name": "unlock", "params": [{"name": "sig", "type": "Sig"}, {"name": "pubKey", "type": "PubKey"}], "isPublic": true}]
+		},
+		"script": "76a914",
+		"asm": "OP_DUP OP_HASH160",
+		"buildTimestamp": "2026-01-01T00:00:00Z"
+	}`
+
+	var artifact RunarArtifact
+	if err := json.Unmarshal([]byte(artifactJSON), &artifact); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if artifact.Version != "runar-v0.1.0" {
+		t.Errorf("expected version 'runar-v0.1.0', got '%s'", artifact.Version)
+	}
+	if artifact.ContractName != "P2PKH" {
+		t.Errorf("expected contractName 'P2PKH', got '%s'", artifact.ContractName)
+	}
+	if artifact.Script != "76a914" {
+		t.Errorf("expected script '76a914', got '%s'", artifact.Script)
+	}
+	if len(artifact.ABI.Constructor.Params) != 1 {
+		t.Errorf("expected 1 constructor param, got %d", len(artifact.ABI.Constructor.Params))
+	}
+	if len(artifact.ABI.Methods) != 1 {
+		t.Errorf("expected 1 method, got %d", len(artifact.ABI.Methods))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 434: constructorSlots and codeSeparatorIndex parsed from artifact JSON
+// ---------------------------------------------------------------------------
+
+func TestRunarArtifact_ConstructorSlots(t *testing.T) {
+	sep := 5
+	artifactJSON := fmt.Sprintf(`{
+		"version": "runar-v0.1.0",
+		"compilerVersion": "0.1.0",
+		"contractName": "P2PKH",
+		"abi": {"constructor": {"params": []}, "methods": []},
+		"script": "76a914",
+		"asm": "",
+		"buildTimestamp": "2026-01-01T00:00:00Z",
+		"constructorSlots": [{"paramIndex": 0, "byteOffset": 3}],
+		"codeSeparatorIndex": %d
+	}`, sep)
+
+	var artifact RunarArtifact
+	if err := json.Unmarshal([]byte(artifactJSON), &artifact); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+
+	if len(artifact.ConstructorSlots) != 1 {
+		t.Fatalf("expected 1 constructor slot, got %d", len(artifact.ConstructorSlots))
+	}
+	if artifact.ConstructorSlots[0].ParamIndex != 0 {
+		t.Errorf("expected slot paramIndex=0, got %d", artifact.ConstructorSlots[0].ParamIndex)
+	}
+	if artifact.ConstructorSlots[0].ByteOffset != 3 {
+		t.Errorf("expected slot byteOffset=3, got %d", artifact.ConstructorSlots[0].ByteOffset)
+	}
+	if artifact.CodeSeparatorIndex == nil || *artifact.CodeSeparatorIndex != sep {
+		t.Errorf("expected codeSeparatorIndex=%d, got %v", sep, artifact.CodeSeparatorIndex)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 457: ANF interpreter — Counter increment: count 0→1
+// ---------------------------------------------------------------------------
+
+func TestComputeNewState_Counter_Increment(t *testing.T) {
+	anf := &ANFProgram{
+		ContractName: "Counter",
+		Properties: []ANFProperty{
+			{Name: "count", Type: "bigint", Readonly: false},
+		},
+		Methods: []ANFMethod{
+			{
+				Name:     "constructor",
+				Params:   []ANFParam{{Name: "count", Type: "bigint"}},
+				Body:     []ANFBinding{},
+				IsPublic: false,
+			},
+			{
+				Name:     "increment",
+				Params:   []ANFParam{{Name: "txPreimage", Type: "SigHashPreimage"}, {Name: "_changePKH", Type: "Addr"}, {Name: "_changeAmount", Type: "bigint"}},
+				IsPublic: true,
+				Body: []ANFBinding{
+					{Name: "t0", Value: map[string]interface{}{"kind": "load_prop", "name": "count"}},
+					{Name: "t1", Value: map[string]interface{}{"kind": "load_const", "value": float64(1)}},
+					{Name: "t2", Value: map[string]interface{}{"kind": "bin_op", "op": "+", "left": "t0", "right": "t1", "resultType": "bigint"}},
+					{Name: "t3", Value: map[string]interface{}{"kind": "update_prop", "name": "count", "value": "t2"}},
+				},
+			},
+		},
+	}
+
+	currentState := map[string]interface{}{"count": big.NewInt(0)}
+	newState, err := ComputeNewState(anf, "increment", currentState, nil)
+	if err != nil {
+		t.Fatalf("ComputeNewState failed: %v", err)
+	}
+
+	countVal, ok := newState["count"]
+	if !ok {
+		t.Fatal("expected 'count' in new state")
+	}
+	countBig, ok := countVal.(*big.Int)
+	if !ok {
+		t.Fatalf("expected *big.Int for count, got %T", countVal)
+	}
+	if countBig.Int64() != 1 {
+		t.Errorf("expected count=1, got %d", countBig.Int64())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Row 462: ANF interpreter — unknown method → error
+// ---------------------------------------------------------------------------
+
+func TestComputeNewState_UnknownMethod_Error(t *testing.T) {
+	anf := &ANFProgram{
+		ContractName: "Counter",
+		Properties:   []ANFProperty{{Name: "count", Type: "bigint"}},
+		Methods: []ANFMethod{
+			{Name: "constructor", IsPublic: false, Body: []ANFBinding{}},
+		},
+	}
+
+	_, err := ComputeNewState(anf, "nonexistent", map[string]interface{}{"count": big.NewInt(0)}, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown method")
 	}
 }

@@ -1050,4 +1050,115 @@ describe('Pass 3: Type-Check', () => {
       expect(result.errors).toEqual([]);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Undefined variable detection
+  // ---------------------------------------------------------------------------
+
+  describe('undefined variable detection', () => {
+    it('reports error for typo in constructor assignment', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly pubKeyHash: Ripemd160;
+          constructor(pubKeyHash: Ripemd160) {
+            super(pubKeyHash);
+            this.pubKeyHash = pubKeyHashhhhh;
+          }
+          public unlock(sig: Sig, pk: PubKey) {
+            assert(checkSig(sig, pk));
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, "Undefined variable 'pubKeyHashhhhh'")).toBe(true);
+    });
+
+    it('reports error for undefined variable in method body', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            const b: bigint = undeclaredVar + a;
+            assert(b > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, "Undefined variable 'undeclaredVar'")).toBe(true);
+    });
+
+    it('reports error for undefined variable used as function argument', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly pk: PubKey;
+          constructor(pk: PubKey) { super(pk); this.pk = pk; }
+          public m(sig: Sig) {
+            assert(checkSig(sig, nonExistentPubKey));
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(hasError(result, "Undefined variable 'nonExistentPubKey'")).toBe(true);
+    });
+
+    it('does not report error for defined local variables', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            const b: bigint = a + 1n;
+            assert(b > 0n);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('does not report error for for-loop variables', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m() {
+            for (let i: bigint = 0n; i < 10n; i++) {
+              assert(i >= 0n);
+            }
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('does not report error for known global constants (EC_P, EC_N, EC_G)', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            assert(a < EC_N);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+
+    it('does not report error for SigHash namespace', () => {
+      const source = `
+        class C extends SmartContract {
+          readonly x: bigint;
+          constructor(x: bigint) { super(x); this.x = x; }
+          public m(a: bigint) {
+            assert(a === SigHash.ALL);
+          }
+        }
+      `;
+      const result = typecheckSource(source);
+      expect(result.errors).toEqual([]);
+    });
+  });
 });

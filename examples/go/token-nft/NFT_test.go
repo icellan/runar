@@ -14,19 +14,18 @@ func newNFT(owner runar.PubKey) *SimpleNFT {
 }
 
 func TestSimpleNFT_Transfer(t *testing.T) {
-	alice := runar.PubKey("alice_pubkey_33bytes_placeholder!")
-	bob := runar.PubKey("bob___pubkey_33bytes_placeholder!")
-	c := newNFT(alice)
-	c.Transfer(runar.MockSig(), bob, 1000)
+	c := newNFT(runar.Alice.PubKey)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	c.Transfer(aliceSig, runar.Bob.PubKey, 1000)
 	if len(c.Outputs()) != 1 {
 		t.Fatalf("expected 1 output, got %d", len(c.Outputs()))
 	}
 }
 
 func TestSimpleNFT_Burn(t *testing.T) {
-	alice := runar.PubKey("alice_pubkey_33bytes_placeholder!")
-	c := newNFT(alice)
-	c.Burn(runar.MockSig())
+	c := newNFT(runar.Alice.PubKey)
+	aliceSig := runar.SignTestMessage(runar.Alice.PrivKey)
+	c.Burn(aliceSig)
 	if len(c.Outputs()) != 0 {
 		t.Errorf("expected 0 outputs after burn, got %d", len(c.Outputs()))
 	}

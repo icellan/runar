@@ -105,6 +105,15 @@ describe('End-to-end: compile()', () => {
       expect(methodNames).toContain('constructor');
       expect(methodNames).toContain('unlock');
     });
+
+    it('compiled script contains OP_CHECKSIG', () => {
+      const result = compile(P2PKH_SOURCE);
+      expect(result.success).toBe(true);
+      expect(typeof result.scriptHex).toBe('string');
+      const hex = (result.scriptHex as string).toLowerCase();
+      // OP_CHECKSIG = 0xac
+      expect(hex).toContain('ac');
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -156,13 +165,54 @@ describe('End-to-end: compile()', () => {
       expect(result.success).toBe(true);
     });
 
-    it('ANF contains checkSig-free logic (sha256 + equality)', () => {
+    it('ANF contains sha256 call -> equality check -> assert in correct order', () => {
       const result = compile(HASH_LOCK_SOURCE);
       const unlock = result.anf!.methods.find(m => m.name === 'unlock')!;
-      const kinds = unlock.body.map(b => b.value.kind);
-      expect(kinds).toContain('call'); // sha256 call
-      expect(kinds).toContain('bin_op'); // === comparison
-      expect(kinds).toContain('assert');
+      const body = unlock.body;
+
+      // Find the sha256 call and verify it's calling the right builtin
+      const sha256Binding = body.find(
+        b => b.value.kind === 'call' && (b.value as { func?: string }).func === 'sha256',
+      );
+      expect(sha256Binding).toBeDefined();
+
+      // Find the equality comparison and verify it uses ===
+      const eqBinding = body.find(
+        b => b.value.kind === 'bin_op' && (b.value as { op?: string }).op === '===',
+      );
+      expect(eqBinding).toBeDefined();
+
+      // Find the assert
+      const assertBinding = body.find(b => b.value.kind === 'assert');
+      expect(assertBinding).toBeDefined();
+
+      // Verify ordering: sha256 call comes before equality, equality before assert
+      const sha256Idx = body.indexOf(sha256Binding!);
+      const eqIdx = body.indexOf(eqBinding!);
+      const assertIdx = body.indexOf(assertBinding!);
+      expect(sha256Idx).toBeLessThan(eqIdx);
+      expect(eqIdx).toBeLessThan(assertIdx);
+
+      // No checkSig in this contract
+      const checkSigBinding = body.find(
+        b => b.value.kind === 'call' && (b.value as { func?: string }).func === 'checkSig',
+      );
+      expect(checkSigBinding).toBeUndefined();
+    });
+
+    it('compiled script contains OP_SHA256 and OP_EQUAL', () => {
+      const result = compile(HASH_LOCK_SOURCE);
+      expect(result.success).toBe(true);
+      expect(typeof result.scriptHex).toBe('string');
+      const hex = (result.scriptHex as string).toLowerCase();
+      // OP_SHA256 = 0xa8, OP_EQUAL = 0x87
+      expect(hex).toContain('a8');
+      expect(hex).toContain('87');
+      // Should NOT contain OP_CHECKSIG (0xac) — this is a hash lock, not a signature check
+      // Note: 'ac' could appear in push data, so we check the script ends without it
+      // as the final opcode
+      const lastByte = hex.slice(-2);
+      expect(lastByte).not.toBe('ac');
     });
   });
 

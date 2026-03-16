@@ -76,8 +76,9 @@ export class MockProvider implements Provider {
     this.broadcastedTxObjects.push(tx);
     this.broadcastCount++;
 
-    // Generate a deterministic fake txid from the broadcast count
-    const fakeTxid = sha256Hex(`mock-broadcast-${this.broadcastCount}-${rawTx.slice(0, 16)}`);
+    // Generate a deterministic fake txid purely from the raw tx hex.
+    // Same transaction → same txid (real Bitcoin semantics: txid = hash of tx bytes).
+    const fakeTxid = sha256Hex(`mock-broadcast-${rawTx}`);
 
     // Auto-store raw hex for subsequent getRawTransaction lookups
     this.rawTransactions.set(fakeTxid, rawTx);

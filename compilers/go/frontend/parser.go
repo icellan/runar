@@ -26,6 +26,7 @@ type ParseResult struct {
 //   - .runar.move -> ParseMove
 //   - .runar.go -> ParseGoContract
 //   - .runar.py -> ParsePython
+//   - .runar.rs -> ParseRustMacro
 //   - .runar.rb -> ParseRuby
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
@@ -39,6 +40,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		return ParseGoContract(source, fileName)
 	case strings.HasSuffix(lower, ".runar.py"):
 		return ParsePython(source, fileName)
+	case strings.HasSuffix(lower, ".runar.rs"):
+		return ParseRustMacro(source, fileName)
 	case strings.HasSuffix(lower, ".runar.rb"):
 		return ParseRuby(source, fileName)
 	default:

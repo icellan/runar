@@ -19,6 +19,10 @@ func Validate(contract *ContractNode) *ValidationResult {
 		contract: contract,
 	}
 
+	if contract.Name == "" {
+		ctx.addError("contract name must not be empty")
+	}
+
 	ctx.validateProperties()
 	ctx.validateConstructor()
 	ctx.validateMethods()
@@ -28,6 +32,10 @@ func Validate(contract *ContractNode) *ValidationResult {
 		Errors:   ctx.errors,
 		Warnings: ctx.warnings,
 	}
+}
+
+func (ctx *validationContext) addWarning(msg string) {
+	ctx.warnings = append(ctx.warnings, msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +74,34 @@ var validPropTypes = map[string]bool{
 func (ctx *validationContext) validateProperties() {
 	for _, prop := range ctx.contract.Properties {
 		ctx.validatePropertyType(prop.Type, prop.SourceLocation)
+
+		// txPreimage is an implicit property of StatefulSmartContract and must not be declared explicitly
+		if ctx.contract.ParentClass == "StatefulSmartContract" && prop.Name == "txPreimage" {
+			ctx.addError("'txPreimage' is an implicit property of StatefulSmartContract and must not be declared")
+		}
+	}
+
+	// SmartContract requires all properties to be readonly
+	if ctx.contract.ParentClass == "SmartContract" {
+		for _, prop := range ctx.contract.Properties {
+			if !prop.Readonly {
+				ctx.addError(fmt.Sprintf("property '%s' in SmartContract must be readonly. Use StatefulSmartContract for mutable state.", prop.Name))
+			}
+		}
+	}
+
+	// Warn if StatefulSmartContract has no mutable properties
+	if ctx.contract.ParentClass == "StatefulSmartContract" {
+		hasMutable := false
+		for _, prop := range ctx.contract.Properties {
+			if !prop.Readonly {
+				hasMutable = true
+				break
+			}
+		}
+		if !hasMutable {
+			ctx.addWarning("StatefulSmartContract has no mutable properties; consider using SmartContract instead")
+		}
 	}
 }
 
@@ -169,6 +205,11 @@ func (ctx *validationContext) validateMethod(method MethodNode) {
 		if !endsWithAssert(method.Body) {
 			ctx.addError(fmt.Sprintf("public method '%s' must end with an assert() call", method.Name))
 		}
+	}
+
+	// Warn on manual preimage boilerplate in StatefulSmartContract public methods
+	if ctx.contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
+		ctx.warnManualPreimageUsage(method)
 	}
 
 	// Validate statements
@@ -299,6 +340,83 @@ func (ctx *validationContext) validateExpression(expr Expression) {
 		ctx.validateExpression(e.Operand)
 	case DecrementExpr:
 		ctx.validateExpression(e.Operand)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// StatefulSmartContract: warn on manual preimage boilerplate
+// ---------------------------------------------------------------------------
+
+func (ctx *validationContext) warnManualPreimageUsage(method MethodNode) {
+	walkExpressionsInBody(method.Body, func(expr Expression) {
+		// Detect manual checkPreimage(...)
+		if call, ok := expr.(CallExpr); ok {
+			if id, ok := call.Callee.(Identifier); ok && id.Name == "checkPreimage" {
+				ctx.addWarning(fmt.Sprintf("StatefulSmartContract auto-injects checkPreimage(); calling it manually in '%s' will cause a duplicate verification", method.Name))
+			}
+			// Detect manual this.getStateScript()
+			if pa, ok := call.Callee.(PropertyAccessExpr); ok && pa.Property == "getStateScript" {
+				ctx.addWarning(fmt.Sprintf("StatefulSmartContract auto-injects state continuation; calling getStateScript() manually in '%s' is redundant", method.Name))
+			}
+		}
+	})
+}
+
+func walkExpressionsInBody(stmts []Statement, visitor func(Expression)) {
+	for _, stmt := range stmts {
+		walkExpressionsInStatement(stmt, visitor)
+	}
+}
+
+func walkExpressionsInStatement(stmt Statement, visitor func(Expression)) {
+	switch s := stmt.(type) {
+	case ExpressionStmt:
+		walkExpr(s.Expr, visitor)
+	case VariableDeclStmt:
+		walkExpr(s.Init, visitor)
+	case AssignmentStmt:
+		walkExpr(s.Target, visitor)
+		walkExpr(s.Value, visitor)
+	case IfStmt:
+		walkExpr(s.Condition, visitor)
+		walkExpressionsInBody(s.Then, visitor)
+		walkExpressionsInBody(s.Else, visitor)
+	case ForStmt:
+		walkExpr(s.Condition, visitor)
+		walkExpressionsInBody(s.Body, visitor)
+	case ReturnStmt:
+		if s.Value != nil {
+			walkExpr(s.Value, visitor)
+		}
+	}
+}
+
+func walkExpr(expr Expression, visitor func(Expression)) {
+	visitor(expr)
+	switch e := expr.(type) {
+	case BinaryExpr:
+		walkExpr(e.Left, visitor)
+		walkExpr(e.Right, visitor)
+	case UnaryExpr:
+		walkExpr(e.Operand, visitor)
+	case CallExpr:
+		walkExpr(e.Callee, visitor)
+		for _, arg := range e.Args {
+			walkExpr(arg, visitor)
+		}
+	case MemberExpr:
+		walkExpr(e.Object, visitor)
+	case TernaryExpr:
+		walkExpr(e.Condition, visitor)
+		walkExpr(e.Consequent, visitor)
+		walkExpr(e.Alternate, visitor)
+	case IndexAccessExpr:
+		walkExpr(e.Object, visitor)
+		walkExpr(e.Index, visitor)
+	case IncrementExpr:
+		walkExpr(e.Operand, visitor)
+	case DecrementExpr:
+		walkExpr(e.Operand, visitor)
 	}
 }
 

@@ -122,9 +122,8 @@ describe('SimpleNFT', () => {
     expect(deployTxid).toBeTruthy();
 
     // transfer(sig, newOwner, outputSatoshis) — null Sig is auto-computed by the SDK
-    const { txid: callTxid } = await contract.call('transfer', [null, newOwner.pubKeyHex, 1n], provider, signer, {
-      newState: { owner: newOwner.pubKeyHex, tokenId: tokenIdHex, metadata: metadataHex },
-    });
+    // No manual newState — SDK auto-computes from ANF IR
+    const { txid: callTxid } = await contract.call('transfer', [null, newOwner.pubKeyHex, 1n], provider, signer);
     expect(callTxid).toBeTruthy();
     expect(typeof callTxid).toBe('string');
     expect(callTxid.length).toBe(64);
@@ -179,10 +178,10 @@ describe('SimpleNFT', () => {
     // Call transfer with walletB — checkSig will fail on-chain
     const { signer: wrongSigner } = await createFundedWallet(provider);
 
+    // Auto-compute state, but wrong signer → checkSig fails on-chain
     await expect(
       contract.call(
         'transfer', [null, newOwner.pubKeyHex, 1n], provider, wrongSigner,
-        { newState: { owner: newOwner.pubKeyHex, tokenId: tokenIdHex, metadata: metadataHex } },
       ),
     ).rejects.toThrow();
   });

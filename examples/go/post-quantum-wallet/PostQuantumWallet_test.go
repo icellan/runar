@@ -7,8 +7,8 @@ import (
 )
 
 func setupKeys() (ecdsaPubKey runar.PubKey, ecdsaPubKeyHash runar.Addr, kp runar.WOTSKeyPair, wotsPubKeyHash runar.ByteString) {
-	ecdsaPubKey = runar.MockPubKey()
-	ecdsaPubKeyHash = runar.Hash160(ecdsaPubKey)
+	ecdsaPubKey = runar.Alice.PubKey
+	ecdsaPubKeyHash = runar.Alice.PubKeyHash
 
 	seed := [32]byte{}
 	for i := range seed {
@@ -31,8 +31,8 @@ func TestPostQuantumWallet_Spend(t *testing.T) {
 		WotsPubKeyHash:  wotsPubKeyHash,
 	}
 
-	// Mock ECDSA signature (CheckSig is mocked to true)
-	ecdsaSig := runar.MockSig()
+	// Real ECDSA signature
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 
 	// WOTS-sign the ECDSA signature bytes
 	wotsSig := runar.WotsSign([]byte(ecdsaSig), kp.SK, kp.PubSeed)
@@ -48,7 +48,7 @@ func TestPostQuantumWallet_Spend_TamperedWOTS(t *testing.T) {
 		WotsPubKeyHash:  wotsPubKeyHash,
 	}
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 	wotsSig := runar.WotsSign([]byte(ecdsaSig), kp.SK, kp.PubSeed)
 	wotsSig[100] ^= 0xff // tamper
 
@@ -69,11 +69,11 @@ func TestPostQuantumWallet_Spend_WrongECDSASig(t *testing.T) {
 	}
 
 	// Sign one ECDSA sig with WOTS, but provide a different ECDSA sig
-	ecdsaSig1 := runar.MockSig()
+	ecdsaSig1 := runar.SignTestMessage(runar.Alice.PrivKey)
 	wotsSig := runar.WotsSign([]byte(ecdsaSig1), kp.SK, kp.PubSeed)
 
-	ecdsaSig2 := runar.Sig(make([]byte, 72))
-	ecdsaSig2 = runar.Sig([]byte{0x30, 0xFF}) // different sig bytes
+	// Create a different message and sign it
+	ecdsaSig2 := runar.Sig([]byte{0x30, 0xFF})
 
 	defer func() {
 		if r := recover(); r == nil {
@@ -92,14 +92,9 @@ func TestPostQuantumWallet_Spend_WrongECDSAPubKeyHash(t *testing.T) {
 	}
 
 	// Different ECDSA pubkey whose hash160 won't match
-	wrongBytes := make([]byte, 33)
-	wrongBytes[0] = 0x03
-	for i := 1; i < 33; i++ {
-		wrongBytes[i] = 0xff
-	}
-	wrongECDSAPubKey := runar.PubKey(wrongBytes)
+	wrongECDSAPubKey := runar.Bob.PubKey
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Bob.PrivKey)
 	wotsSig := runar.WotsSign([]byte(ecdsaSig), kp.SK, kp.PubSeed)
 
 	defer func() {
@@ -125,7 +120,7 @@ func TestPostQuantumWallet_Spend_WrongWOTSPubKeyHash(t *testing.T) {
 	wrongPubSeed[0] = 0x77
 	wrongKP := runar.WotsKeygen(wrongSeed[:], wrongPubSeed[:])
 
-	ecdsaSig := runar.MockSig()
+	ecdsaSig := runar.SignTestMessage(runar.Alice.PrivKey)
 	wotsSig := runar.WotsSign([]byte(ecdsaSig), wrongKP.SK, wrongKP.PubSeed)
 
 	defer func() {

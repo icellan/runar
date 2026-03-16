@@ -60,6 +60,11 @@ def main() -> None:
         action="store_true",
         help="Output only the ANF IR JSON (requires --source)",
     )
+    parser.add_argument(
+        "--disable-constant-folding",
+        action="store_true",
+        help="Disable the ANF constant folding pass",
+    )
 
     args = parser.parse_args()
 
@@ -86,7 +91,10 @@ def main() -> None:
             print("--emit-ir requires --source", file=sys.stderr)
             sys.exit(1)
         try:
-            program = compile_source_to_ir(args.source)
+            program = compile_source_to_ir(
+                args.source,
+                disable_constant_folding=args.disable_constant_folding,
+            )
         except CompilationError as e:
             print(f"Compilation error: {e}", file=sys.stderr)
             sys.exit(1)
@@ -97,9 +105,15 @@ def main() -> None:
 
     try:
         if args.source:
-            artifact = compile_from_source(args.source)
+            artifact = compile_from_source(
+                args.source,
+                disable_constant_folding=args.disable_constant_folding,
+            )
         else:
-            artifact = compile_from_ir(args.ir)
+            artifact = compile_from_ir(
+                args.ir,
+                disable_constant_folding=args.disable_constant_folding,
+            )
     except CompilationError as e:
         print(f"Compilation error: {e}", file=sys.stderr)
         sys.exit(1)

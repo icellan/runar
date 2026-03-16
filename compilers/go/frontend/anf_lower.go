@@ -18,6 +18,14 @@ func LowerToANF(contract *ContractNode) *ir.ANFProgram {
 	properties := lowerProperties(contract)
 	methods := lowerMethods(contract)
 
+	// Post-pass: lift update_prop from if-else branches into flat conditionals.
+	// This prevents phantom stack entries in stack lowering for patterns like
+	// position dispatch (different properties updated in different branches).
+	// Mirrors the TS reference compiler's liftBranchUpdateProps (04-anf-lower.ts line 50).
+	for i := range methods {
+		methods[i].Body = liftBranchUpdateProps(methods[i].Body)
+	}
+
 	return &ir.ANFProgram{
 		ContractName: contract.Name,
 		Properties:   properties,
@@ -60,6 +68,8 @@ var byteReturningFunctions = map[string]bool{
 	"ecEncodeCompressed": true,
 	"sha256Compress":     true,
 	"sha256Finalize":     true,
+	"blake3Compress":     true,
+	"blake3Hash":         true,
 }
 
 func isByteTypedExpr(expr Expression, ctx *lowerCtx) bool {
@@ -459,9 +469,46 @@ func (ctx *lowerCtx) syncCounter(sub *lowerCtx) {
 // ---------------------------------------------------------------------------
 
 func (ctx *lowerCtx) lowerStatements(stmts []Statement) {
-	for _, stmt := range stmts {
+	for i, stmt := range stmts {
+		// Early-return nesting: when an if-statement's then-block ends with a
+		// return and there is no else-branch, the remaining statements after the
+		// if are unreachable from the then-branch. Nest them into the else-branch
+		// so that only one value ends up on the stack (the return value from
+		// whichever branch executes). Without this, both branches produce values
+		// and the stack becomes misaligned.
+		if ifStmt, ok := stmt.(IfStmt); ok &&
+			len(ifStmt.Else) == 0 &&
+			i+1 < len(stmts) &&
+			branchEndsWithReturn(ifStmt.Then) {
+			remaining := stmts[i+1:]
+			modifiedIf := IfStmt{
+				Condition:      ifStmt.Condition,
+				Then:           ifStmt.Then,
+				Else:           remaining,
+				SourceLocation: ifStmt.SourceLocation,
+			}
+			ctx.lowerStatement(modifiedIf)
+			return // remaining stmts are now inside the else branch
+		}
+
 		ctx.lowerStatement(stmt)
 	}
+}
+
+// branchEndsWithReturn checks whether a statement list always terminates with a return.
+func branchEndsWithReturn(stmts []Statement) bool {
+	if len(stmts) == 0 {
+		return false
+	}
+	last := stmts[len(stmts)-1]
+	if _, ok := last.(ReturnStmt); ok {
+		return true
+	}
+	// Also handle if-else where both branches return
+	if ifStmt, ok := last.(IfStmt); ok && len(ifStmt.Else) > 0 {
+		return branchEndsWithReturn(ifStmt.Then) && branchEndsWithReturn(ifStmt.Else)
+	}
+	return false
 }
 
 func (ctx *lowerCtx) lowerStatement(stmt Statement) {
@@ -478,7 +525,16 @@ func (ctx *lowerCtx) lowerStatement(stmt Statement) {
 		ctx.lowerExprToRef(s.Expr)
 	case ReturnStmt:
 		if s.Value != nil {
-			ctx.lowerExprToRef(s.Value)
+			ref := ctx.lowerExprToRef(s.Value)
+			// If the returned ref is not the name of the last emitted binding, emit
+			// an explicit load so the return value is the last (top-of-stack) binding.
+			// This matters when a local variable is returned after control flow (e.g.,
+			// `let count = 0n; if (...) { count += 1n; } return count;`). Without
+			// this, the last binding is the if, not `count`, so inlineMethodCall in
+			// stack lowering can't find the return value.
+			if len(ctx.bindings) > 0 && ctx.bindings[len(ctx.bindings)-1].Name != ref {
+				ctx.emit(makeLoadConstString("@ref:" + ref))
+			}
 		}
 	}
 }
@@ -1144,4 +1200,453 @@ func exprHasAddOutput(expr Expression) bool {
 		}
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Post-ANF pass: lift update_prop from if-else branches
+// ---------------------------------------------------------------------------
+//
+// Mirrors the TypeScript reference compiler's liftBranchUpdateProps function.
+// Transforms if-else chains where each branch ends with update_prop into
+// flat conditional assignments. This prevents phantom stack entries in
+// stack lowering.
+//
+// Before:
+//   if (pos === 0) { this.c0 = turn; }
+//   else if (pos === 1) { this.c1 = turn; }
+//   else { this.c4 = turn; }
+//
+// After:
+//   this.c0 = (pos === 0) ? turn : this.c0;
+//   this.c1 = (!cond0 && pos === 1) ? turn : this.c1;
+//   this.c4 = (!cond0 && !cond1) ? turn : this.c4;
+
+type updateBranch struct {
+	condSetupBindings []ir.ANFBinding
+	condRef           *string // nil for final else
+	propName          string
+	valueBindings     []ir.ANFBinding
+	valueRef          string
+}
+
+// maxTempIndex finds the max temp index (e.g. t47 → 47) in a binding tree.
+func maxTempIndex(bindings []ir.ANFBinding) int {
+	max := -1
+	for _, b := range bindings {
+		if len(b.Name) > 1 && b.Name[0] == 't' {
+			n := 0
+			valid := true
+			for _, ch := range b.Name[1:] {
+				if ch >= '0' && ch <= '9' {
+					n = n*10 + int(ch-'0')
+				} else {
+					valid = false
+					break
+				}
+			}
+			if valid && n > max {
+				max = n
+			}
+		}
+		if b.Value.Kind == "if" {
+			if t := maxTempIndex(b.Value.Then); t > max {
+				max = t
+			}
+			if e := maxTempIndex(b.Value.Else); e > max {
+				max = e
+			}
+		}
+		if b.Value.Kind == "loop" {
+			if l := maxTempIndex(b.Value.Body); l > max {
+				max = l
+			}
+		}
+	}
+	return max
+}
+
+// isSideEffectFree checks if an ANF value kind is side-effect-free.
+func isSideEffectFree(v *ir.ANFValue) bool {
+	switch v.Kind {
+	case "load_prop", "load_param", "load_const", "bin_op", "unary_op":
+		return true
+	}
+	return false
+}
+
+func allBindingsSideEffectFree(bindings []ir.ANFBinding) bool {
+	for i := range bindings {
+		if !isSideEffectFree(&bindings[i].Value) {
+			return false
+		}
+	}
+	return true
+}
+
+// extractBranchUpdate checks if a branch's bindings end with update_prop.
+// Returns (propName, valueBindings, valueRef, ok).
+func extractBranchUpdate(bindings []ir.ANFBinding) (string, []ir.ANFBinding, string, bool) {
+	if len(bindings) == 0 {
+		return "", nil, "", false
+	}
+	last := &bindings[len(bindings)-1]
+	if last.Value.Kind != "update_prop" {
+		return "", nil, "", false
+	}
+	valueBindings := make([]ir.ANFBinding, len(bindings)-1)
+	copy(valueBindings, bindings[:len(bindings)-1])
+	if !allBindingsSideEffectFree(valueBindings) {
+		return "", nil, "", false
+	}
+	return last.Value.Name, valueBindings, last.Value.ValueRef, true
+}
+
+// isAssertFalseElse checks if an else branch is just assert(false).
+func isAssertFalseElse(bindings []ir.ANFBinding) bool {
+	if len(bindings) == 0 {
+		return false
+	}
+	last := &bindings[len(bindings)-1]
+	if last.Value.Kind != "assert" {
+		return false
+	}
+	assertRef := last.Value.ValueRef
+	for _, b := range bindings {
+		if b.Name == assertRef && b.Value.Kind == "load_const" && b.Value.ConstBool != nil && !*b.Value.ConstBool {
+			return true
+		}
+	}
+	return false
+}
+
+// collectUpdateBranches recursively collects update branches from a nested if-else chain.
+func collectUpdateBranches(ifCond string, thenBindings, elseBindings []ir.ANFBinding) []updateBranch {
+	propName, valBindings, valRef, ok := extractBranchUpdate(thenBindings)
+	if !ok {
+		return nil
+	}
+
+	branches := []updateBranch{{
+		condRef:      &ifCond,
+		propName:     propName,
+		valueBindings: valBindings,
+		valueRef:     valRef,
+	}}
+
+	if len(elseBindings) == 0 {
+		return nil
+	}
+
+	// Check if else is another if (else-if chain)
+	lastElse := &elseBindings[len(elseBindings)-1]
+	if lastElse.Value.Kind == "if" {
+		condSetup := make([]ir.ANFBinding, len(elseBindings)-1)
+		copy(condSetup, elseBindings[:len(elseBindings)-1])
+		if !allBindingsSideEffectFree(condSetup) {
+			return nil
+		}
+
+		innerBranches := collectUpdateBranches(lastElse.Value.Cond, lastElse.Value.Then, lastElse.Value.Else)
+		if innerBranches == nil {
+			return nil
+		}
+
+		// Prepend condition setup to first inner branch
+		newSetup := make([]ir.ANFBinding, 0, len(condSetup)+len(innerBranches[0].condSetupBindings))
+		newSetup = append(newSetup, condSetup...)
+		newSetup = append(newSetup, innerBranches[0].condSetupBindings...)
+		innerBranches[0].condSetupBindings = newSetup
+
+		branches = append(branches, innerBranches...)
+		return branches
+	}
+
+	// Otherwise, else branch should end with update_prop (final else)
+	if ePropName, eValBindings, eValRef, eOk := extractBranchUpdate(elseBindings); eOk {
+		branches = append(branches, updateBranch{
+			condRef:       nil,
+			propName:      ePropName,
+			valueBindings: eValBindings,
+			valueRef:      eValRef,
+		})
+		return branches
+	}
+
+	// Handle unreachable else: assert(false)
+	if isAssertFalseElse(elseBindings) {
+		return branches
+	}
+
+	return nil
+}
+
+// remapValueRefs remaps temp references in an ANF value according to a name mapping.
+func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
+	r := func(s string) string {
+		if mapped, ok := nameMap[s]; ok {
+			return mapped
+		}
+		return s
+	}
+
+	switch v.Kind {
+	case "load_param", "load_prop", "get_state_script":
+		return v
+	case "load_const":
+		if v.ConstString != nil {
+			s := *v.ConstString
+			if len(s) > 5 && s[:5] == "@ref:" {
+				target := s[5:]
+				if mapped, ok := nameMap[target]; ok {
+					newRef := "@ref:" + mapped
+					raw, _ := json.Marshal(newRef)
+					return ir.ANFValue{
+						Kind:        "load_const",
+						RawValue:    raw,
+						ConstString: &newRef,
+					}
+				}
+			}
+		}
+		return v
+	case "bin_op":
+		v.Left = r(v.Left)
+		v.Right = r(v.Right)
+		return v
+	case "unary_op":
+		v.Operand = r(v.Operand)
+		return v
+	case "call":
+		args := make([]string, len(v.Args))
+		for i, a := range v.Args {
+			args[i] = r(a)
+		}
+		v.Args = args
+		return v
+	case "method_call":
+		v.Object = r(v.Object)
+		args := make([]string, len(v.Args))
+		for i, a := range v.Args {
+			args[i] = r(a)
+		}
+		v.Args = args
+		return v
+	case "assert":
+		v.ValueRef = r(v.ValueRef)
+		return v
+	case "update_prop":
+		v.ValueRef = r(v.ValueRef)
+		return v
+	case "check_preimage":
+		v.Preimage = r(v.Preimage)
+		return v
+	case "deserialize_state":
+		v.Preimage = r(v.Preimage)
+		return v
+	case "add_output":
+		v.Satoshis = r(v.Satoshis)
+		sv := make([]string, len(v.StateValues))
+		for i, s := range v.StateValues {
+			sv[i] = r(s)
+		}
+		v.StateValues = sv
+		return v
+	case "add_raw_output":
+		v.Satoshis = r(v.Satoshis)
+		v.ScriptBytes = r(v.ScriptBytes)
+		return v
+	case "if":
+		v.Cond = r(v.Cond)
+		return v
+	case "loop":
+		return v
+	}
+	return v
+}
+
+// liftBranchUpdateProps transforms if-bindings whose branches all end
+// with update_prop into flat conditional assignments.
+func liftBranchUpdateProps(bindings []ir.ANFBinding) []ir.ANFBinding {
+	nextIdx := maxTempIndex(bindings) + 1
+	fresh := func() string {
+		name := fmt.Sprintf("t%d", nextIdx)
+		nextIdx++
+		return name
+	}
+
+	result := make([]ir.ANFBinding, 0, len(bindings))
+
+	for _, binding := range bindings {
+		if binding.Value.Kind != "if" {
+			result = append(result, binding)
+			continue
+		}
+
+		branches := collectUpdateBranches(binding.Value.Cond, binding.Value.Then, binding.Value.Else)
+
+		if branches == nil || len(branches) < 2 {
+			result = append(result, binding)
+			continue
+		}
+
+		// --- Transform: flatten into conditional assignments ---
+
+		// 1. Hoist condition setup bindings with fresh names
+		nameMap := map[string]string{}
+		condRefs := make([]*string, len(branches))
+
+		for bi, branch := range branches {
+			for _, csb := range branch.condSetupBindings {
+				newName := fresh()
+				nameMap[csb.Name] = newName
+				result = append(result, ir.ANFBinding{
+					Name:  newName,
+					Value: remapValueRefs(csb.Value, nameMap),
+				})
+			}
+			if branch.condRef != nil {
+				cr := *branch.condRef
+				if mapped, ok := nameMap[cr]; ok {
+					cr = mapped
+				}
+				condRefs[bi] = &cr
+			}
+		}
+
+		// 2. Compute effective condition for each branch
+		effectiveConds := make([]string, 0, len(branches))
+		negatedConds := make([]string, 0)
+
+		for i := range branches {
+			if i == 0 {
+				effectiveConds = append(effectiveConds, *condRefs[0])
+				continue
+			}
+
+			// Negate any prior conditions not yet negated
+			for j := len(negatedConds); j < i; j++ {
+				if condRefs[j] == nil {
+					continue
+				}
+				negName := fresh()
+				result = append(result, ir.ANFBinding{
+					Name: negName,
+					Value: ir.ANFValue{
+						Kind:    "unary_op",
+						Op:      "!",
+						Operand: *condRefs[j],
+					},
+				})
+				negatedConds = append(negatedConds, negName)
+			}
+
+			// AND all negated conditions together
+			andRef := negatedConds[0]
+			limit := i
+			if len(negatedConds) < limit {
+				limit = len(negatedConds)
+			}
+			for j := 1; j < limit; j++ {
+				andName := fresh()
+				result = append(result, ir.ANFBinding{
+					Name: andName,
+					Value: ir.ANFValue{
+						Kind:  "bin_op",
+						Op:    "&&",
+						Left:  andRef,
+						Right: negatedConds[j],
+					},
+				})
+				andRef = andName
+			}
+
+			if condRefs[i] != nil {
+				// Middle branch: AND with own condition
+				finalName := fresh()
+				result = append(result, ir.ANFBinding{
+					Name: finalName,
+					Value: ir.ANFValue{
+						Kind:  "bin_op",
+						Op:    "&&",
+						Left:  andRef,
+						Right: *condRefs[i],
+					},
+				})
+				effectiveConds = append(effectiveConds, finalName)
+			} else {
+				// Final else: just the AND of negations
+				effectiveConds = append(effectiveConds, andRef)
+			}
+		}
+
+		// 3. For each branch, emit: load_old, conditional if-expression, update_prop
+		for i, branch := range branches {
+			// Load old property value
+			oldPropRef := fresh()
+			result = append(result, ir.ANFBinding{
+				Name: oldPropRef,
+				Value: ir.ANFValue{
+					Kind: "load_prop",
+					Name: branch.propName,
+				},
+			})
+
+			// Remap value bindings for the then-branch
+			branchMap := make(map[string]string)
+			for k, v := range nameMap {
+				branchMap[k] = v
+			}
+			thenBindings := make([]ir.ANFBinding, 0, len(branch.valueBindings))
+			for _, vb := range branch.valueBindings {
+				newName := fresh()
+				branchMap[vb.Name] = newName
+				thenBindings = append(thenBindings, ir.ANFBinding{
+					Name:  newName,
+					Value: remapValueRefs(vb.Value, branchMap),
+				})
+			}
+
+			// Else branch: keep old property value
+			keepName := fresh()
+			refStr := "@ref:" + oldPropRef
+			raw, _ := json.Marshal(refStr)
+			elseBindings := []ir.ANFBinding{
+				{
+					Name: keepName,
+					Value: ir.ANFValue{
+						Kind:        "load_const",
+						RawValue:    raw,
+						ConstString: &refStr,
+					},
+				},
+			}
+
+			// Emit conditional if-expression
+			condIfRef := fresh()
+			result = append(result, ir.ANFBinding{
+				Name: condIfRef,
+				Value: ir.ANFValue{
+					Kind: "if",
+					Cond: effectiveConds[i],
+					Then: thenBindings,
+					Else: elseBindings,
+				},
+			})
+
+			// Emit update_prop
+			updateName := fresh()
+			valRefJSON, _ := json.Marshal(condIfRef)
+			result = append(result, ir.ANFBinding{
+				Name: updateName,
+				Value: ir.ANFValue{
+					Kind:     "update_prop",
+					Name:     branch.propName,
+					RawValue: valRefJSON,
+					ValueRef: condIfRef,
+				},
+			})
+		}
+	}
+
+	return result
 }
