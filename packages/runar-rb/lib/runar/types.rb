@@ -20,5 +20,8 @@ module Runar
     RabinSig     = String
     RabinPubKey  = String
     Point        = String
+    # Boolean is the Runar boolean type. Ruby uses native true/false values;
+    # this constant exists so `prop :active, Boolean` resolves at load time.
+    Boolean      = :boolean
   end
 end

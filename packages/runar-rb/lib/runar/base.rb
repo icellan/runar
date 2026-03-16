@@ -11,7 +11,12 @@ module Runar
     include Runar::DSL
 
     def initialize(*args)
-      # Base constructor — contracts call super(...)
+      # Apply property defaults declared with `default:` before the
+      # developer-written initializer body runs. Because Ruby calls super
+      # at the top of each constructor, this executes first.
+      self.class.runar_defaults.each do |prop_name, default_value|
+        instance_variable_set(:"@#{prop_name}", default_value)
+      end
     end
   end
 

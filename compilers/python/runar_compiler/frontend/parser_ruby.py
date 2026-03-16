@@ -189,6 +189,9 @@ _SPECIAL_NAMES: dict[str, str] = {
     "safe_div": "safediv",
     "safe_mod": "safemod",
     "div_mod": "divmod",
+    # SHA-256 partial verification (explicit for documentation clarity)
+    "sha256_compress": "sha256Compress",
+    "sha256_finalize": "sha256Finalize",
     "sha256": "sha256",
     "ripemd160": "ripemd160",
     "hash160": "hash160",

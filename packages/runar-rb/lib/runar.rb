@@ -32,6 +32,7 @@ SigHashPreimage = Runar::Types::SigHashPreimage
 RabinSig     = Runar::Types::RabinSig
 RabinPubKey  = Runar::Types::RabinPubKey
 Point        = Runar::Types::Point
+Boolean      = Runar::Types::Boolean
 
 # -- Top-level EC constants --------------------------------------------------
 

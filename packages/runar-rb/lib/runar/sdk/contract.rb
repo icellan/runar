@@ -97,7 +97,7 @@ module Runar
       # @param provider [Provider, nil]      overrides connected provider
       # @param signer   [Signer, nil]        overrides connected signer
       # @param options  [DeployOptions, nil] deployment parameters
-      # @return [Array(String, Transaction)] [txid, transaction]
+      # @return [Array(String, TransactionData)] [txid, transaction]
       def deploy(provider = nil, signer = nil, options = nil)
         provider = resolve_provider(provider, 'deploy')
         signer   = resolve_signer(signer, 'deploy')
@@ -139,7 +139,7 @@ module Runar
         tx = begin
           provider.get_transaction(txid)
         rescue StandardError
-          Transaction.new(
+          TransactionData.new(
             txid: txid, version: 1,
             outputs: [TxOutput.new(satoshis: opts.satoshis, script: locking_script)],
             raw: signed_tx
@@ -161,23 +161,23 @@ module Runar
       # @param provider    [Provider, nil]   overrides connected provider
       # @param signer      [Signer, nil]     overrides connected signer
       # @param options     [CallOptions, nil]
-      # @return [Array(String, Transaction)] [txid, transaction]
+      # @return [Array(String, TransactionData)] [txid, transaction]
       def call(method_name, args = [], provider = nil, signer = nil, options = nil)
         provider = resolve_provider(provider, 'call')
         signer   = resolve_signer(signer, 'call')
 
         prepared   = prepare_call(method_name, args, provider, signer, options)
         signatures = {}
-        prepared[:sig_indices].each do |idx|
-          subscript = prepared[:contract_utxo].script
-          if prepared[:is_stateful] && prepared[:code_sep_idx] >= 0
-            trim_pos  = (prepared[:code_sep_idx] + 1) * 2
+        prepared.sig_indices.each do |idx|
+          subscript = prepared.contract_utxo.script
+          if prepared.is_stateful && prepared.code_sep_idx >= 0
+            trim_pos  = (prepared.code_sep_idx + 1) * 2
             subscript = subscript[trim_pos..] if trim_pos <= subscript.length
           end
           signatures[idx] = signer.sign(
-            prepared[:tx_hex], 0,
+            prepared.tx_hex, 0,
             subscript,
-            prepared[:contract_utxo].satoshis
+            prepared.contract_utxo.satoshis
           )
         end
 
@@ -185,7 +185,7 @@ module Runar
       end
 
       # Prepare a method call without signing the primary contract input's Sig
-      # params. Returns an opaque Hash for use with +finalize_call+.
+      # params. Returns a +PreparedCall+ struct for use with +finalize_call+.
       #
       # P2PKH funding inputs ARE signed. Only the primary contract input's Sig
       # params are left as 72-byte placeholders.
@@ -195,7 +195,7 @@ module Runar
       # @param provider    [Provider, nil]
       # @param signer      [Signer, nil]
       # @param options     [CallOptions, nil]
-      # @return [Hash] prepared call state
+      # @return [PreparedCall]
       # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
       def prepare_call(method_name, args = [], provider = nil, signer = nil, options = nil)
         provider = resolve_provider(provider, 'prepare_call')
@@ -250,6 +250,16 @@ module Runar
 
         change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
 
+        # Terminal call path: build a transaction with exact outputs, no funding inputs.
+        if opts.terminal_outputs && !opts.terminal_outputs.empty?
+          return prepare_terminal(
+            method_name, resolved_args, signer, opts,
+            is_stateful, needs_op_push_tx, method_needs_change,
+            sig_indices, preimage_index,
+            method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx
+          )
+        end
+
         new_locking_script, new_satoshis = build_continuation(is_stateful, opts)
 
         fee_rate          = provider.get_fee_rate
@@ -287,7 +297,7 @@ module Runar
 
         sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
 
-        build_prepared_call_hash(
+        build_prepared_call(
           sighash, final_preimage, final_op_push_tx_sig, signed_tx,
           sig_indices, method_name, resolved_args, method_selector_hex,
           is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
@@ -299,19 +309,19 @@ module Runar
 
       # Complete a prepared call by injecting external signatures and broadcasting.
       #
-      # @param prepared   [Hash]                    result of +prepare_call+
+      # @param prepared   [PreparedCall]            result of +prepare_call+
       # @param signatures [Hash<Integer, String>]   map from arg index to hex signature
       # @param provider   [Provider, nil]           overrides connected provider
-      # @return [Array(String, Transaction)] [txid, transaction]
+      # @return [Array(String, TransactionData)] [txid, transaction]
       # rubocop:disable Metrics/MethodLength
       def finalize_call(prepared, signatures, provider = nil)
         provider = resolve_provider(provider, 'finalize_call')
 
-        resolved_args = prepared[:resolved_args].dup
-        prepared[:sig_indices].each { |idx| resolved_args[idx] = signatures[idx] if signatures.key?(idx) }
+        resolved_args = prepared.resolved_args.dup
+        prepared.sig_indices.each { |idx| resolved_args[idx] = signatures[idx] if signatures.key?(idx) }
 
         primary_unlock = assemble_primary_unlock(prepared, resolved_args)
-        final_tx       = SDK.insert_unlocking_script(prepared[:tx_hex], 0, primary_unlock)
+        final_tx       = SDK.insert_unlocking_script(prepared.tx_hex, 0, primary_unlock)
         txid           = provider.broadcast(final_tx)
 
         update_tracked_utxo(txid, prepared)
@@ -319,7 +329,7 @@ module Runar
         tx = begin
           provider.get_transaction(txid)
         rescue StandardError
-          Transaction.new(txid: txid, version: 1, raw: final_tx)
+          TransactionData.new(txid: txid, version: 1, raw: final_tx)
         end
 
         [txid, tx]
@@ -477,6 +487,144 @@ module Runar
       # ---------------------------------------------------------------------------
       # prepare_call decomposition helpers
       # ---------------------------------------------------------------------------
+
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
+      def prepare_terminal(
+        method_name, resolved_args, _signer, opts,
+        is_stateful, needs_op_push_tx, method_needs_change,
+        sig_indices, preimage_index,
+        method_selector_hex, change_pkh_hex, contract_utxo, code_sep_idx
+      )
+        # Normalize terminal outputs — accept TerminalOutput structs or hashes.
+        term_outputs = Array(opts.terminal_outputs).map do |item|
+          case item
+          when TerminalOutput
+            item
+          when Hash
+            script = item['scriptHex'] || item[:script_hex] || item['script_hex'] || ''
+            sats = item['satoshis'] || item[:satoshis] || 0
+            TerminalOutput.new(script_hex: script, satoshis: sats)
+          else
+            item
+          end
+        end
+
+        # Build placeholder unlocking script (terminal has no change output).
+        term_unlock_script = if needs_op_push_tx
+                               build_stateful_prefix('00' * 72, false) +
+                                 build_unlocking_script(method_name, resolved_args)
+                             else
+                               build_unlocking_script(method_name, resolved_args)
+                             end
+
+        # Build raw terminal transaction: single input, exact outputs, no change.
+        build_terminal_tx = lambda do |unlock|
+          tx = +''
+          tx << SDK.to_le32(1)
+          tx << SDK.encode_varint(1)
+          tx << SDK.reverse_hex(contract_utxo.txid)
+          tx << SDK.to_le32(contract_utxo.output_index)
+          tx << SDK.encode_varint(unlock.length / 2)
+          tx << unlock
+          tx << 'ffffffff'
+          tx << SDK.encode_varint(term_outputs.length)
+          term_outputs.each do |out|
+            tx << SDK.to_le64(out.satoshis)
+            tx << SDK.encode_varint(out.script_hex.length / 2)
+            tx << out.script_hex
+          end
+          tx << SDK.to_le32(0)
+          tx
+        end
+
+        term_tx              = build_terminal_tx.call(term_unlock_script)
+        final_op_push_tx_sig = ''
+        final_preimage       = ''
+
+        if is_stateful
+          # Two-pass stateful terminal: compute preimage with placeholder, then stabilize.
+          build_stateful_terminal_unlock = lambda do |tx|
+            op_sig, preimage = SDK.compute_op_push_tx(
+              tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx
+            )
+            args_hex   = resolved_args.map { |a| encode_arg(a) }.join
+            change_hex = ''
+            if method_needs_change && !change_pkh_hex.empty?
+              change_hex = State.encode_push_data(change_pkh_hex) + State.encode_script_int(0)
+            end
+            unlock = build_stateful_prefix(op_sig, false) +
+                     args_hex +
+                     change_hex +
+                     State.encode_push_data(preimage) +
+                     method_selector_hex
+            [unlock, op_sig, preimage]
+          end
+
+          # First pass — size the unlocking script.
+          first_unlock, = build_stateful_terminal_unlock.call(term_tx)
+          term_tx = build_terminal_tx.call(first_unlock)
+
+          # Second pass — stable preimage with final TX layout.
+          final_unlock, op_sig, preimage = build_stateful_terminal_unlock.call(term_tx)
+          term_tx              = SDK.insert_unlocking_script(term_tx, 0, final_unlock)
+          final_op_push_tx_sig = op_sig
+          final_preimage       = preimage
+
+        elsif needs_op_push_tx || !sig_indices.empty?
+          if needs_op_push_tx
+            sig_hex, preimage_hex = SDK.compute_op_push_tx(
+              term_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx
+            )
+            final_op_push_tx_sig          = sig_hex
+            resolved_args[preimage_index] = preimage_hex
+          end
+
+          real_unlock = build_unlocking_script(method_name, resolved_args)
+          if needs_op_push_tx && !final_op_push_tx_sig.empty?
+            real_unlock = build_stateful_prefix(final_op_push_tx_sig, false) + real_unlock
+            tmp_tx      = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
+            final_sig, final_pre = SDK.compute_op_push_tx(
+              tmp_tx, 0, contract_utxo.script, contract_utxo.satoshis, code_sep_idx
+            )
+            resolved_args[preimage_index] = final_pre
+            final_op_push_tx_sig          = final_sig
+            final_preimage                = final_pre
+            real_unlock = build_stateful_prefix(final_sig, false) +
+                          build_unlocking_script(method_name, resolved_args)
+          end
+          term_tx = SDK.insert_unlocking_script(term_tx, 0, real_unlock)
+          final_preimage = resolved_args[preimage_index] if final_preimage.empty? && needs_op_push_tx
+        end
+
+        sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
+
+        PreparedCall.new(
+          sighash: sighash,
+          preimage: final_preimage,
+          op_push_tx_sig: final_op_push_tx_sig,
+          tx_hex: term_tx,
+          sig_indices: sig_indices,
+          method_name: method_name,
+          resolved_args: resolved_args,
+          method_selector_hex: method_selector_hex,
+          is_stateful: is_stateful,
+          is_terminal: true,
+          needs_op_push_tx: needs_op_push_tx,
+          method_needs_change: method_needs_change,
+          change_pkh_hex: change_pkh_hex,
+          change_amount: 0,
+          method_needs_new_amount: false,
+          new_amount: 0,
+          preimage_index: preimage_index,
+          contract_utxo: contract_utxo,
+          new_locking_script: '',
+          new_satoshis: 0,
+          has_multi_output: false,
+          contract_outputs: [],
+          code_sep_idx: code_sep_idx
+        )
+      end
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
 
       def resolve_method_args(args, user_params, signer)
         resolved_args  = args.dup
@@ -643,14 +791,14 @@ module Runar
       end
 
       # rubocop:disable Metrics/ParameterLists
-      def build_prepared_call_hash(
+      def build_prepared_call(
         sighash, final_preimage, final_op_push_tx_sig, signed_tx,
         sig_indices, method_name, resolved_args, method_selector_hex,
         is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
         change_amount, method_needs_new_amount, new_satoshis, preimage_index,
         contract_utxo, new_locking_script, code_sep_idx
       )
-        {
+        PreparedCall.new(
           sighash: sighash,
           preimage: final_preimage,
           op_push_tx_sig: final_op_push_tx_sig,
@@ -672,7 +820,7 @@ module Runar
           new_locking_script: new_locking_script,
           new_satoshis: new_satoshis,
           code_sep_idx: code_sep_idx
-        }
+        )
       end
       # rubocop:enable Metrics/ParameterLists
 
@@ -682,40 +830,43 @@ module Runar
 
       # rubocop:disable Metrics/AbcSize
       def assemble_primary_unlock(prepared, resolved_args)
-        if prepared[:is_stateful]
+        if prepared.is_stateful
           args_hex = resolved_args.map { |a| encode_arg(a) }.join
 
           change_hex = ''
-          if prepared[:method_needs_change] && !prepared[:change_pkh_hex].empty?
-            change_hex = State.encode_push_data(prepared[:change_pkh_hex]) +
-                         State.encode_script_int(prepared[:change_amount])
+          if prepared.method_needs_change && !prepared.change_pkh_hex.empty?
+            change_hex = State.encode_push_data(prepared.change_pkh_hex) +
+                         State.encode_script_int(prepared.change_amount)
           end
 
-          new_amount_hex = prepared[:method_needs_new_amount] ? State.encode_script_int(prepared[:new_amount]) : ''
+          new_amount_hex = prepared.method_needs_new_amount ? State.encode_script_int(prepared.new_amount) : ''
 
-          build_stateful_prefix(prepared[:op_push_tx_sig], prepared[:method_needs_change]) +
+          build_stateful_prefix(prepared.op_push_tx_sig, prepared.method_needs_change) +
             args_hex + change_hex + new_amount_hex +
-            State.encode_push_data(prepared[:preimage]) +
-            prepared[:method_selector_hex]
+            State.encode_push_data(prepared.preimage) +
+            prepared.method_selector_hex
 
-        elsif prepared[:needs_op_push_tx]
-          pi = prepared[:preimage_index]
-          resolved_args[pi] = prepared[:preimage] if pi >= 0
-          build_stateful_prefix(prepared[:op_push_tx_sig], false) +
-            build_unlocking_script(prepared[:method_name], resolved_args)
+        elsif prepared.needs_op_push_tx
+          pi = prepared.preimage_index
+          resolved_args[pi] = prepared.preimage if pi >= 0
+          build_stateful_prefix(prepared.op_push_tx_sig, false) +
+            build_unlocking_script(prepared.method_name, resolved_args)
 
         else
-          build_unlocking_script(prepared[:method_name], resolved_args)
+          build_unlocking_script(prepared.method_name, resolved_args)
         end
       end
       # rubocop:enable Metrics/AbcSize
 
       def update_tracked_utxo(txid, prepared)
-        if prepared[:is_stateful] && !prepared[:new_locking_script].empty?
+        if prepared.is_terminal
+          # Terminal call consumes the contract UTXO — no continuation to track.
+          @current_utxo = nil
+        elsif prepared.is_stateful && !prepared.new_locking_script.empty?
           @current_utxo = Utxo.new(
             txid: txid, output_index: 0,
-            satoshis: prepared[:new_satoshis].positive? ? prepared[:new_satoshis] : prepared[:contract_utxo].satoshis,
-            script: prepared[:new_locking_script]
+            satoshis: prepared.new_satoshis.positive? ? prepared.new_satoshis : prepared.contract_utxo.satoshis,
+            script: prepared.new_locking_script
           )
         else
           @current_utxo = nil

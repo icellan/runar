@@ -10,7 +10,7 @@ RSpec.describe Runar::DSL do
       end
 
       expect(klass.runar_properties).to contain_exactly(
-        { name: :balance, type: Integer, readonly: false }
+        { name: :balance, type: Integer, readonly: false, default: nil }
       )
       obj = klass.new
       obj.balance = 42
@@ -23,7 +23,7 @@ RSpec.describe Runar::DSL do
       end
 
       expect(klass.runar_properties).to contain_exactly(
-        { name: :pub_key_hash, type: String, readonly: true }
+        { name: :pub_key_hash, type: String, readonly: true, default: nil }
       )
       obj = klass.new
       expect(obj).to respond_to(:pub_key_hash)
@@ -37,8 +37,8 @@ RSpec.describe Runar::DSL do
       end
 
       props = klass.runar_properties
-      expect(props[0]).to eq({ name: :token_id, type: String, readonly: true })
-      expect(props[1]).to eq({ name: :balance, type: Integer, readonly: false })
+      expect(props[0]).to eq({ name: :token_id, type: String, readonly: true, default: nil })
+      expect(props[1]).to eq({ name: :balance, type: Integer, readonly: false, default: nil })
 
       obj = klass.new
       expect(obj).to respond_to(:token_id)

@@ -74,7 +74,7 @@ RSpec.describe 'Runar::SDK types' do
     end
   end
 
-  describe Runar::SDK::Transaction do
+  describe Runar::SDK::TransactionData do
     it 'defaults version to 1 and collections to empty' do
       tx = described_class.new(txid: 'deadbeef')
       expect(tx.version).to eq(1)
@@ -82,6 +82,44 @@ RSpec.describe 'Runar::SDK types' do
       expect(tx.outputs).to eq([])
       expect(tx.locktime).to eq(0)
       expect(tx.raw).to eq('')
+    end
+
+    it 'stores all fields when provided' do
+      tx = described_class.new(txid: 'cafe', version: 2, locktime: 1, raw: 'ff')
+      expect(tx.txid).to eq('cafe')
+      expect(tx.version).to eq(2)
+      expect(tx.locktime).to eq(1)
+      expect(tx.raw).to eq('ff')
+    end
+  end
+
+  describe 'Transaction alias' do
+    it 'is the same constant as TransactionData' do
+      expect(Runar::SDK::Transaction).to be(Runar::SDK::TransactionData)
+    end
+
+    it 'can be used to construct TransactionData instances' do
+      tx = Runar::SDK::Transaction.new(txid: 'deadbeef')
+      expect(tx).to be_a(Runar::SDK::TransactionData)
+      expect(tx.version).to eq(1)
+    end
+  end
+
+  describe Runar::SDK::ABIMethod do
+    it 'defaults is_terminal to nil' do
+      m = described_class.new(name: 'unlock')
+      expect(m.is_terminal).to be_nil
+    end
+
+    it 'accepts an explicit is_terminal value' do
+      m = described_class.new(name: 'close', is_terminal: true)
+      expect(m.is_terminal).to be true
+    end
+
+    it 'defaults is_public to true and params to empty' do
+      m = described_class.new(name: 'unlock')
+      expect(m.is_public).to be true
+      expect(m.params).to eq([])
     end
   end
 
@@ -111,6 +149,26 @@ RSpec.describe 'Runar::SDK types' do
         expect(method.name).to eq('unlock')
         expect(method.is_public).to be true
         expect(method.params.map(&:name)).to eq(%w[sig pubKey])
+      end
+
+      it 'sets is_terminal to nil when isTerminal is absent from the artifact' do
+        method = artifact.abi.methods.first
+        expect(method.is_terminal).to be_nil
+      end
+
+      it 'parses isTerminal when present' do
+        hash_with_terminal = MINIMAL_ARTIFACT_HASH.dup
+        hash_with_terminal['abi'] = MINIMAL_ARTIFACT_HASH['abi'].dup
+        hash_with_terminal['abi']['methods'] = [
+          {
+            'name' => 'close',
+            'params' => [],
+            'isPublic' => true,
+            'isTerminal' => true
+          }
+        ]
+        art = described_class.from_hash(hash_with_terminal)
+        expect(art.abi.methods.first.is_terminal).to be true
       end
 
       it 'parses constructor slots' do
@@ -183,6 +241,22 @@ RSpec.describe 'Runar::SDK types' do
     end
   end
 
+  describe Runar::SDK::OutputSpec do
+    it 'stores satoshis and state' do
+      spec = described_class.new(satoshis: 5000, state: { 'count' => 1 })
+      expect(spec.satoshis).to eq(5000)
+      expect(spec.state).to eq({ 'count' => 1 })
+    end
+  end
+
+  describe Runar::SDK::TerminalOutput do
+    it 'stores script_hex and satoshis' do
+      out = described_class.new(script_hex: 'deadbeef', satoshis: 1000)
+      expect(out.script_hex).to eq('deadbeef')
+      expect(out.satoshis).to eq(1000)
+    end
+  end
+
   describe Runar::SDK::CallOptions do
     it 'defaults to 0 satoshis, empty change address, and nil new_state' do
       opts = described_class.new
@@ -194,6 +268,103 @@ RSpec.describe 'Runar::SDK types' do
     it 'accepts a new_state hash' do
       opts = described_class.new(new_state: { 'count' => 5 })
       expect(opts.new_state).to eq({ 'count' => 5 })
+    end
+
+    it 'defaults change_pub_key to empty string' do
+      opts = described_class.new
+      expect(opts.change_pub_key).to eq('')
+    end
+
+    it 'defaults outputs to nil' do
+      opts = described_class.new
+      expect(opts.outputs).to be_nil
+    end
+
+    it 'defaults additional_contract_inputs to nil' do
+      opts = described_class.new
+      expect(opts.additional_contract_inputs).to be_nil
+    end
+
+    it 'defaults additional_contract_input_args to nil' do
+      opts = described_class.new
+      expect(opts.additional_contract_input_args).to be_nil
+    end
+
+    it 'defaults terminal_outputs to nil' do
+      opts = described_class.new
+      expect(opts.terminal_outputs).to be_nil
+    end
+
+    it 'accepts all new fields' do
+      utxo = Runar::SDK::Utxo.new(txid: 'aa' * 32, output_index: 0, satoshis: 1000, script: 'aabb')
+      term = Runar::SDK::TerminalOutput.new(script_hex: 'cafe', satoshis: 999)
+      out  = Runar::SDK::OutputSpec.new(satoshis: 500, state: {})
+
+      opts = described_class.new(
+        change_pub_key: 'aabbcc',
+        outputs: [out],
+        additional_contract_inputs: [utxo],
+        additional_contract_input_args: [[1, 2]],
+        terminal_outputs: [term]
+      )
+      expect(opts.change_pub_key).to eq('aabbcc')
+      expect(opts.outputs.length).to eq(1)
+      expect(opts.additional_contract_inputs.length).to eq(1)
+      expect(opts.additional_contract_input_args).to eq([[1, 2]])
+      expect(opts.terminal_outputs.length).to eq(1)
+    end
+  end
+
+  describe Runar::SDK::PreparedCall do
+    it 'defaults all fields to sensible zero values' do
+      pc = described_class.new
+      expect(pc.sighash).to eq('')
+      expect(pc.preimage).to eq('')
+      expect(pc.op_push_tx_sig).to eq('')
+      expect(pc.tx_hex).to eq('')
+      expect(pc.sig_indices).to eq([])
+      expect(pc.method_name).to eq('')
+      expect(pc.resolved_args).to eq([])
+      expect(pc.method_selector_hex).to eq('')
+      expect(pc.is_stateful).to be false
+      expect(pc.is_terminal).to be false
+      expect(pc.needs_op_push_tx).to be false
+      expect(pc.method_needs_change).to be false
+      expect(pc.change_pkh_hex).to eq('')
+      expect(pc.change_amount).to eq(0)
+      expect(pc.method_needs_new_amount).to be false
+      expect(pc.new_amount).to eq(0)
+      expect(pc.preimage_index).to eq(-1)
+      expect(pc.contract_utxo).to be_nil
+      expect(pc.new_locking_script).to eq('')
+      expect(pc.new_satoshis).to eq(0)
+      expect(pc.has_multi_output).to be false
+      expect(pc.contract_outputs).to eq([])
+      expect(pc.code_sep_idx).to eq(-1)
+    end
+
+    it 'accepts keyword arguments for all fields' do
+      utxo = Runar::SDK::Utxo.new(txid: 'aa' * 32, output_index: 0, satoshis: 1000, script: 'aabb')
+      pc = described_class.new(
+        sighash: 'abc',
+        preimage: 'def',
+        tx_hex: 'cafebabe',
+        sig_indices: [0],
+        method_name: 'increment',
+        is_stateful: true,
+        is_terminal: true,
+        contract_utxo: utxo,
+        code_sep_idx: 5
+      )
+      expect(pc.sighash).to eq('abc')
+      expect(pc.preimage).to eq('def')
+      expect(pc.tx_hex).to eq('cafebabe')
+      expect(pc.sig_indices).to eq([0])
+      expect(pc.method_name).to eq('increment')
+      expect(pc.is_stateful).to be true
+      expect(pc.is_terminal).to be true
+      expect(pc.contract_utxo).to be(utxo)
+      expect(pc.code_sep_idx).to eq(5)
     end
   end
 end

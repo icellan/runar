@@ -12,7 +12,16 @@ module Runar
     end
 
     module ClassMethods
-      def prop(name, type, readonly: false)
+      # Declare a typed property on a Runar contract.
+      #
+      # Options:
+      #   readonly: true   -- generates only a reader; the property cannot be
+      #                       mutated by contract methods.
+      #   default: value   -- provides an initial value so the property is
+      #                       excluded from the auto-generated constructor.
+      #                       The default is set before the developer-written
+      #                       initialize runs.
+      def prop(name, type, readonly: false, default: :__no_default__)
         @_runar_properties ||= []
         is_readonly = readonly || (self < Runar::SmartContract && !(self < Runar::StatefulSmartContract))
         if is_readonly
@@ -20,7 +29,20 @@ module Runar
         else
           attr_accessor name
         end
-        @_runar_properties << { name: name, type: type, readonly: is_readonly }
+
+        has_default = default != :__no_default__
+        if has_default
+          @_runar_defaults      ||= {}
+          @_runar_defaults[name]  = default
+        end
+
+        @_runar_properties << { name: name, type: type, readonly: is_readonly, default: has_default ? default : nil }
+      end
+
+      # Returns the hash of { property_name => default_value } for this class
+      # and all its superclasses (merged, with the most specific class winning).
+      def runar_defaults
+        @_runar_defaults || {}
       end
 
       def runar_public(**param_types)
