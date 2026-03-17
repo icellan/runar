@@ -586,6 +586,22 @@ const Parser = struct {
     };
 
     fn parseClassMember(self: *Parser, parent_class: ParentClass) ClassMember {
+        // Skip TypeScript decorators: @prop(), @method(), etc.
+        while (self.current.kind == .ident and self.current.text.len == 1 and self.current.text[0] == '@') {
+            _ = self.bump(); // consume '@'
+            if (self.current.kind == .ident) _ = self.bump(); // consume decorator name
+            // consume optional parenthesized arguments: (...)
+            if (self.current.kind == .lparen) {
+                _ = self.bump(); // consume '('
+                var paren_depth: u32 = 1;
+                while (paren_depth > 0 and self.current.kind != .eof) {
+                    if (self.current.kind == .lparen) paren_depth += 1;
+                    if (self.current.kind == .rparen) paren_depth -= 1;
+                    _ = self.bump();
+                }
+            }
+        }
+
         // Collect modifiers: public, private, protected, readonly
         var is_public = false;
         var is_readonly = false;

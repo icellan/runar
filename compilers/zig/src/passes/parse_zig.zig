@@ -1067,11 +1067,11 @@ test "method calls and property access" {
     try std.testing.expectEqual(@as(usize, 0), res.errors.len);
     const outer = res.contract.?.methods[0].body[0].expr_stmt;
     switch (outer) {
-        .method_call => |mc| {
-            try std.testing.expectEqualStrings("runar", mc.object);
-            try std.testing.expectEqualStrings("assert", mc.method);
-            switch (mc.args[0]) {
-                .method_call => |inner| { try std.testing.expectEqualStrings("runar", inner.object); try std.testing.expectEqualStrings("checkSig", inner.method); try std.testing.expectEqual(@as(usize, 2), inner.args.len); },
+        .call => |c| {
+            try std.testing.expectEqualStrings("assert", c.callee);
+            try std.testing.expectEqual(@as(usize, 1), c.args.len);
+            switch (c.args[0]) {
+                .call => |inner| { try std.testing.expectEqualStrings("checkSig", inner.callee); try std.testing.expectEqual(@as(usize, 2), inner.args.len); },
                 else => return error.UnexpectedVariant,
             }
         },
@@ -1183,7 +1183,7 @@ test "logical or operator" {
     const res = parseZig(arena2.allocator(), source, "L.runar.zig");
     try std.testing.expectEqual(@as(usize, 0), res.errors.len);
     switch (res.contract.?.methods[0].body[0].expr_stmt) {
-        .method_call => |mc| { switch (mc.args[0]) { .binary_op => |b| try std.testing.expectEqual(BinOperator.or_op, b.op), else => return error.UnexpectedVariant } },
+        .call => |c| { try std.testing.expectEqualStrings("assert", c.callee); switch (c.args[0]) { .binary_op => |b| try std.testing.expectEqual(BinOperator.or_op, b.op), else => return error.UnexpectedVariant } },
         else => return error.UnexpectedVariant,
     }
 }

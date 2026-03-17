@@ -651,6 +651,7 @@ const LowerCtx = struct {
         ecPairing,
         slhDsaVerify,
         schnorrVerify,
+        super_call,
     };
 
     const builtin_map = std.StaticStringMap(BuiltinId).initComptime(.{
@@ -695,6 +696,7 @@ const LowerCtx = struct {
         .{ "ecPairing", .ecPairing },
         .{ "slhDsaVerify", .slhDsaVerify },
         .{ "schnorrVerify", .schnorrVerify },
+        .{ "super", .super_call },
     });
 
     fn lowerBuiltinCall(self: *LowerCtx, bind_name: []const u8, call: types.ANFBuiltinCall) !void {
@@ -735,6 +737,11 @@ const LowerCtx = struct {
             .buildChangeOutput => try self.lowerBuildChangeOutput(bind_name, args),
             .getStateScript, .buildStateOutput, .computeStateOutput => {
                 // No-op or handled elsewhere
+                try self.stack.push(self.allocator, bind_name);
+                self.trackDepth();
+            },
+            // super() is the constructor superclass call — no-op in Bitcoin Script
+            .super_call => {
                 try self.stack.push(self.allocator, bind_name);
                 self.trackDepth();
             },
