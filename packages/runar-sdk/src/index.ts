@@ -49,9 +49,6 @@ export { TokenWallet } from './tokens.js';
 // ANF interpreter (auto-compute state transitions)
 export { computeNewState } from './anf-interpreter.js';
 
-// Code generation
-export { generateTypescript, generateGo, generateRust, generatePython } from './codegen/index.js';
-
 // Re-export artifact types from runar-ir-schema for convenience
 export type {
   RunarArtifact,

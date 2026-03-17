@@ -70,7 +70,7 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
   }
 
   // Dynamically import the codegen functions from runar-sdk
-  const { generateTypescript, generateGo, generateRust, generatePython } = await import('runar-sdk');
+  const { generateTypescript, generateGo, generateRust, generatePython } = await import('runar-sdk/codegen');
 
   const generators: Record<string, { fn: (a: any) => string; ext: string; nameStyle: 'pascal' | 'snake' }> = {
     ts:     { fn: generateTypescript, ext: '.ts', nameStyle: 'pascal' },
