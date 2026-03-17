@@ -13,7 +13,7 @@
  *   ee5e6c74a298854942a9eadd789f2812b38936691230134ad50b884cc1f119fa
  */
 
-import { PrivateKey, Signature } from '@bsv/sdk';
+import { PrivateKey, PublicKey, Signature } from '@bsv/sdk';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -111,9 +111,8 @@ function hexToBytes(hex: string): Uint8Array {
   return bytes;
 }
 
-function ecPublicKeyFromBytes(bytes: Uint8Array): ReturnType<typeof PrivateKey.prototype.toPublicKey> {
+function ecPublicKeyFromBytes(bytes: Uint8Array): InstanceType<typeof PublicKey> {
   // @bsv/sdk PublicKey.fromDER takes number[]
-  const { PublicKey } = require('@bsv/sdk');
   return PublicKey.fromDER(Array.from(bytes));
 }
 
