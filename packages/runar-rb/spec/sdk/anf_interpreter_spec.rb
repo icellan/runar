@@ -783,4 +783,53 @@ RSpec.describe 'Runar::SDK::ANFInterpreter' do
       expect(new_state['result']).to eq(6)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # Loop iteration cap (issue #52)
+  # ---------------------------------------------------------------------------
+
+  describe 'loop iteration cap' do
+    # Build a minimal loop ANF with a configurable count.
+    def loop_count_anf(count)
+      {
+        'contractName' => 'LoopCap',
+        'properties' => [
+          { 'name' => 'result', 'type' => 'bigint', 'readonly' => false },
+        ],
+        'methods' => [
+          { 'name' => 'constructor', 'params' => [], 'body' => [], 'isPublic' => false },
+          {
+            'name' => 'run',
+            'params' => [],
+            'body' => [
+              {
+                'name' => 'lresult',
+                'value' => {
+                  'kind' => 'loop',
+                  'count' => count,
+                  'iterVar' => 'i',
+                  'body' => [],
+                },
+              },
+            ],
+            'isPublic' => true,
+          },
+        ],
+      }
+    end
+
+    it 'raises a RuntimeError when loop count exceeds MAX_LOOP_ITERATIONS (65,536)' do
+      oversized_anf = loop_count_anf(65_537)
+      expect do
+        mod.compute_new_state(oversized_anf, 'run', { 'result' => 0 }, {})
+      end.to raise_error(RuntimeError, /loop count 65537 exceeds maximum of 65536/)
+    end
+
+    it 'completes normally when loop count is within the limit (100 iterations)' do
+      normal_anf = loop_count_anf(100)
+      expect do
+        mod.compute_new_state(normal_anf, 'run', { 'result' => 0 }, {})
+      end.not_to raise_error
+    end
+  end
 end

@@ -27,6 +27,15 @@ module Runar
       # Implicit params injected by the compiler — never required from the caller.
       IMPLICIT_PARAMS = %w[_changePKH _changeAmount _newAmount txPreimage].freeze
 
+      # Maximum number of iterations allowed for a single loop node.
+      #
+      # Bitcoin Script loops (unrolled at compile time) are bounded by script size
+      # limits. A count above this threshold in the ANF IR almost certainly
+      # indicates a malformed or adversarially crafted artifact rather than a
+      # legitimate contract. Capping here prevents the interpreter from hanging or
+      # consuming unbounded memory when simulating state transitions.
+      MAX_LOOP_ITERATIONS = 65_536
+
       # Compute the new state after executing a contract method.
       #
       # @param anf          [Hash]   the ANF IR from the compiled artifact (plain Hash from JSON)
@@ -131,6 +140,10 @@ module Runar
 
         when 'loop'
           count    = (value['count'] || 0).to_i
+          if count > MAX_LOOP_ITERATIONS
+            raise "ANF interpreter: loop count #{count} exceeds maximum of #{MAX_LOOP_ITERATIONS}"
+          end
+
           body     = Array(value['body'])
           iter_var = value['iterVar'].to_s
           last_val = nil
@@ -542,6 +555,21 @@ module Runar
       #
       # @param v [Object]
       # @return [Boolean]
+      #
+      # --- Divergence from on-chain Bitcoin Script semantics ---
+      #
+      # Bitcoin Script treats a ByteString as falsy if it is empty OR if it
+      # consists entirely of zero bytes (e.g. "00", "0000", "80" — the negative
+      # zero encoding). In this interpreter, ByteStrings are represented as
+      # hex-encoded Ruby Strings. The string "00" is non-empty and does not
+      # match the special-cased values ('', '0', 'false'), so it evaluates as
+      # TRUTHY here even though the single zero byte 0x00 is FALSY on-chain.
+      #
+      # Consequence: simulation may diverge from on-chain behavior for contracts
+      # whose control flow depends on zero-valued ByteString conditions (e.g. a
+      # branch on the result of num2bin(0, 1) == "00"). Numeric zero (Integer 0)
+      # is handled correctly. This divergence affects only hex-encoded zero-byte
+      # strings passed through the 'if' or boolean operator paths.
       def is_truthy(v) # rubocop:disable Naming/PredicateName
         case v
         when TrueClass  then true
