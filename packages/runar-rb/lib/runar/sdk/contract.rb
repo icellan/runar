@@ -8,6 +8,7 @@ require_relative 'state'
 require_relative 'deployment'
 require_relative 'calling'
 require_relative 'oppushtx'
+require_relative 'anf_interpreter'
 
 # RunarContract — runtime wrapper for a compiled Runar contract.
 #
@@ -249,6 +250,18 @@ module Runar
         code_sep_idx        = get_code_sep_index(find_method_index(method_name))
 
         change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
+
+        # Auto-compute new state via ANF interpreter when artifact has ANF IR and
+        # no explicit new_state was provided. This mirrors the Python SDK behavior:
+        # compute_new_state is called here (where method_name and args are available),
+        # not in build_continuation (which has neither).
+        if is_stateful && @artifact.anf && opts.new_state.nil?
+          named_args = build_named_args(user_params, resolved_args)
+          opts = opts.dup
+          opts.new_state = ANFInterpreter.compute_new_state(
+            @artifact.anf, method_name, @state, named_args
+          )
+        end
 
         # Terminal call path: build a transaction with exact outputs, no funding inputs.
         if opts.terminal_outputs && !opts.terminal_outputs.empty?
@@ -625,6 +638,22 @@ module Runar
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/ParameterLists
+
+      # Map positional resolved_args to a Hash keyed by parameter name.
+      #
+      # Mirrors the Python SDK's _build_named_args helper. Used to build the
+      # named-args dict passed to ANFInterpreter.compute_new_state.
+      #
+      # @param user_params  [Array<ABIParam>]
+      # @param resolved_args [Array]
+      # @return [Hash]
+      def build_named_args(user_params, resolved_args)
+        result = {}
+        user_params.each_with_index do |param, i|
+          result[param.name] = resolved_args[i] if i < resolved_args.length
+        end
+        result
+      end
 
       def resolve_method_args(args, user_params, signer)
         resolved_args  = args.dup

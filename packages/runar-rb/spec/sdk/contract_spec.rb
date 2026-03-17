@@ -67,12 +67,60 @@ RSpec.describe Runar::SDK::RunarContract do
     codeSeparatorIndex: 0
   ).freeze
 
+  # Stateful (counter) artifact with ANF IR — used to test auto-computed state.
+  #
+  # The ANF IR describes an increment() method that adds 1 to the 'count'
+  # property via an update_prop node.  It mirrors the minimal Counter contract:
+  #
+  #   class Counter extends StatefulSmartContract {
+  #     count: bigint;
+  #     public increment() { this.count += 1n; }
+  #   }
+  STATEFUL_ANF_ARTIFACT_JSON = JSON.generate(
+    version:            '1.0',
+    compilerVersion:    '0.1.0',
+    contractName:       'Counter',
+    abi:                {
+      constructor: { params: [{ name: 'count', type: 'bigint' }] },
+      methods:     [{ name: 'increment', params: [], isPublic: true }]
+    },
+    script:             'aabbcc',
+    asm:                '',
+    stateFields:        [{ name: 'count', type: 'bigint', index: 0 }],
+    constructorSlots:   [],
+    codeSeparatorIndex: 0,
+    anf:                {
+      'properties' => [{ 'name' => 'count', 'type' => 'bigint', 'readonly' => false }],
+      'methods'    => [
+        {
+          'name'     => 'increment',
+          'isPublic' => true,
+          'params'   => [],
+          'body'     => [
+            # t0 = count  (load current value)
+            { 'name' => 't0', 'value' => { 'kind' => 'load_prop', 'name' => 'count' } },
+            # t1 = 1
+            { 'name' => 't1', 'value' => { 'kind' => 'load_const', 'value' => 1 } },
+            # t2 = t0 + t1
+            { 'name' => 't2', 'value' => { 'kind' => 'bin_op', 'op' => '+', 'left' => 't0', 'right' => 't1' } },
+            # update_prop count = t2
+            { 'name' => 't3', 'value' => { 'kind' => 'update_prop', 'name' => 'count', 'value' => 't2' } }
+          ]
+        }
+      ]
+    }
+  ).freeze
+
   def stateless_artifact
     Runar::SDK::RunarArtifact.from_json(STATELESS_ARTIFACT_JSON)
   end
 
   def stateful_artifact
     Runar::SDK::RunarArtifact.from_json(STATEFUL_ARTIFACT_JSON)
+  end
+
+  def stateful_anf_artifact
+    Runar::SDK::RunarArtifact.from_json(STATEFUL_ANF_ARTIFACT_JSON)
   end
 
   def make_utxo(txid, satoshis, script: 'aabb', index: 0)
@@ -365,6 +413,54 @@ RSpec.describe Runar::SDK::RunarContract do
       locking_script = contract.get_locking_script
       decoded = Runar::SDK::State.extract_state_from_script(stateful_artifact, locking_script)
       expect(decoded).to eq('count' => 7)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # ANF interpreter auto-computation of new state
+  # ---------------------------------------------------------------------------
+
+  describe 'ANF auto-state in prepare_call' do
+    let(:provider) { mock_provider }
+    let(:signer)   { mock_signer }
+    let(:contract) { described_class.new(stateful_anf_artifact, [5]) }
+
+    before do
+      # Deploy the contract so prepare_call has a current UTXO to spend.
+      provider.add_utxo(
+        SAMPLE_ADDRESS,
+        make_utxo('cc' * 32, 1_000_000, script: '76a914' + SAMPLE_ADDRESS + '88ac')
+      )
+      contract.connect(provider, signer)
+      contract.deploy
+    end
+
+    it 'auto-computes new state from ANF IR when new_state is nil' do
+      # count starts at 5; increment() should produce count = 6
+      _prepared = contract.prepare_call('increment', [])
+      expect(contract.get_state['count']).to eq(6)
+    end
+
+    it 'explicit new_state overrides ANF auto-computation' do
+      opts = Runar::SDK::CallOptions.new(new_state: { 'count' => 99 })
+      _prepared = contract.prepare_call('increment', [], nil, nil, opts)
+      expect(contract.get_state['count']).to eq(99)
+    end
+
+    it 'prepare_call works normally when artifact has no ANF' do
+      # Use the stateful artifact without ANF data — no auto-computation,
+      # state should remain unchanged (build_continuation with nil new_state
+      # does not modify state).
+      no_anf_contract = described_class.new(stateful_artifact, [10])
+      provider.add_utxo(
+        SAMPLE_ADDRESS,
+        make_utxo('dd' * 32, 1_000_000, script: '76a914' + SAMPLE_ADDRESS + '88ac')
+      )
+      no_anf_contract.connect(provider, signer)
+      no_anf_contract.deploy
+      _prepared = no_anf_contract.prepare_call('increment', [])
+      # Without ANF, state is not mutated by the interpreter.
+      expect(no_anf_contract.get_state['count']).to eq(10)
     end
   end
 end
