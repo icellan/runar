@@ -10,6 +10,10 @@ require_relative 'runar/dsl'
 require_relative 'runar/base'
 require_relative 'runar/builtins'
 require_relative 'runar/ec'
+require_relative 'runar/ec_primitives'
+require_relative 'runar/ecdsa'
+require_relative 'runar/rabin_sig'
+require_relative 'runar/test_keys'
 require_relative 'runar/compile_check'
 
 module Runar
@@ -39,6 +43,20 @@ Boolean      = Runar::Types::Boolean
 EC_P = Runar::EC::EC_P
 EC_N = Runar::EC::EC_N
 EC_G = Runar::EC::EC_G
+
+# -- Top-level test key constants --------------------------------------------
+# These allow test files to reference ALICE, BOB, etc. without a namespace.
+
+ALICE   = Runar::TestKeys::ALICE
+BOB     = Runar::TestKeys::BOB
+CHARLIE = Runar::TestKeys::CHARLIE
+DAVE    = Runar::TestKeys::DAVE
+EVE     = Runar::TestKeys::EVE
+FRANK   = Runar::TestKeys::FRANK
+GRACE   = Runar::TestKeys::GRACE
+HEIDI   = Runar::TestKeys::HEIDI
+IVAN    = Runar::TestKeys::IVAN
+JUDY    = Runar::TestKeys::JUDY
 
 # -- Top-level builtin functions ---------------------------------------------
 # These are defined at the top level so contracts can call them without a
@@ -123,6 +141,14 @@ module Kernel
 
   def verify_slh_dsa_sha2_256f(msg, sig, pubkey)
     Runar.verify_slh_dsa_sha2_256f(msg, sig, pubkey)
+  end
+
+  def blake3_compress(chaining_value, block)
+    Runar.blake3_compress(chaining_value, block)
+  end
+
+  def blake3_hash(message)
+    Runar.blake3_hash(message)
   end
 
   # Binary utilities
@@ -239,6 +265,14 @@ module Kernel
 
   def extract_sequence(preimage)
     Runar.extract_sequence(preimage)
+  end
+
+  def extract_hash_prevouts(preimage)
+    Runar.extract_hash_prevouts(preimage)
+  end
+
+  def extract_outpoint(preimage)
+    Runar.extract_outpoint(preimage)
   end
 
   # EC operations
