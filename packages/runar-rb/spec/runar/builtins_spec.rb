@@ -6,21 +6,49 @@ RSpec.describe Runar::Builtins do
   # Create a test harness that includes the builtins
   let(:ctx) { Object.new.extend(Runar::Builtins) }
 
-  describe 'mock crypto' do
-    it 'check_sig returns true' do
-      expect(ctx.check_sig('aa', 'bb')).to be true
+  describe 'real ECDSA verification' do
+    it 'check_sig returns true for ALICE real sig and pub_key' do
+      sig = Runar::TestKeys::ALICE.test_sig
+      pk  = Runar::TestKeys::ALICE.pub_key
+      expect(ctx.check_sig(sig, pk)).to be true
     end
 
-    it 'check_multi_sig returns true' do
+    it 'check_sig returns false for fabricated sig and pub_key' do
+      expect(ctx.check_sig('aa', 'bb')).to be false
+    end
+
+    it 'check_multi_sig returns true for empty sig/pk lists' do
       expect(ctx.check_multi_sig([], [])).to be true
+    end
+
+    it 'check_multi_sig returns true when all sigs verify in order' do
+      alice_sig = Runar::TestKeys::ALICE.test_sig
+      alice_pk  = Runar::TestKeys::ALICE.pub_key
+      bob_sig   = Runar::TestKeys::BOB.test_sig
+      bob_pk    = Runar::TestKeys::BOB.pub_key
+      expect(ctx.check_multi_sig([alice_sig, bob_sig], [alice_pk, bob_pk])).to be true
+    end
+
+    it 'check_multi_sig returns false when more sigs than pks' do
+      alice_sig = Runar::TestKeys::ALICE.test_sig
+      alice_pk  = Runar::TestKeys::ALICE.pub_key
+      expect(ctx.check_multi_sig([alice_sig, alice_sig], [alice_pk])).to be false
+    end
+
+    it 'check_multi_sig allows a subset of pks to be unused' do
+      alice_sig = Runar::TestKeys::ALICE.test_sig
+      alice_pk  = Runar::TestKeys::ALICE.pub_key
+      bob_pk    = Runar::TestKeys::BOB.pub_key
+      # Alice's sig matches the first pk; bob_pk is unused — still valid
+      expect(ctx.check_multi_sig([alice_sig], [alice_pk, bob_pk])).to be true
     end
 
     it 'check_preimage returns true' do
       expect(ctx.check_preimage('00')).to be true
     end
 
-    it 'verify_rabin_sig returns true' do
-      expect(ctx.verify_rabin_sig('a', 'b', 'c', 'd')).to be true
+    it 'verify_rabin_sig returns false for arbitrary invalid inputs' do
+      expect(ctx.verify_rabin_sig('a', 'b', 'c', 'd')).to be false
     end
 
     it 'verify_wots returns true' do
@@ -35,6 +63,28 @@ RSpec.describe Runar::Builtins do
       ].each do |method|
         expect(ctx.send(method, 'a', 'b', 'c')).to be true
       end
+    end
+
+    it 'blake3_compress returns 64-char hex string of zeros' do
+      result = ctx.blake3_compress('00' * 32, '00' * 64)
+      expect(result).to eq('00' * 32)
+      expect(result.length).to eq(64)
+    end
+
+    it 'blake3_compress accepts arbitrary hex input' do
+      result = ctx.blake3_compress('ab' * 32, 'cd' * 64)
+      expect(result).to eq('00' * 32)
+    end
+
+    it 'blake3_hash returns 64-char hex string of zeros' do
+      result = ctx.blake3_hash('deadbeef')
+      expect(result).to eq('00' * 32)
+      expect(result.length).to eq(64)
+    end
+
+    it 'blake3_hash accepts arbitrary hex input' do
+      result = ctx.blake3_hash('ff' * 64)
+      expect(result).to eq('00' * 32)
     end
   end
 
@@ -176,7 +226,7 @@ RSpec.describe Runar::Builtins do
     end
 
     it 'num2bin(127, 1) encodes the largest positive 1-byte value' do
-      # 0x7F — MSB is 0, so no extra byte needed
+      # 0x7F -- MSB is 0, so no extra byte needed
       expect(ctx.num2bin(127, 1)).to eq('7f')
     end
 
@@ -241,6 +291,37 @@ RSpec.describe Runar::Builtins do
     end
   end
 
+  describe 'preimage extraction' do
+    it 'extract_output_hash returns first 32 bytes when preimage is long enough' do
+      # hash256 produces 32 bytes (64 hex chars) -- long enough to extract from
+      preimage = ctx.hash256('deadbeef')
+      result = ctx.extract_output_hash(preimage)
+      expect(result.length).to eq(64)
+      expect(result).to eq(preimage[0, 64])
+    end
+
+    it 'extract_output_hash returns 32 zero bytes when preimage is too short' do
+      expect(ctx.extract_output_hash('')).to eq('00' * 32)
+      expect(ctx.extract_output_hash('aabb')).to eq('00' * 32) # 2 bytes = too short
+    end
+
+    it 'extract_output_hash handles nil by treating it as empty string' do
+      expect(ctx.extract_output_hash(nil)).to eq('00' * 32)
+    end
+
+    it 'extract_hash_prevouts returns hash256 of 72 zero bytes' do
+      expected = ctx.hash256('00' * 72)
+      expect(ctx.extract_hash_prevouts('anything')).to eq(expected)
+      expect(ctx.extract_hash_prevouts('').length).to eq(64)
+    end
+
+    it 'extract_outpoint returns 36 zero bytes as hex' do
+      result = ctx.extract_outpoint('anything')
+      expect(result).to eq('00' * 36)
+      expect(result.length).to eq(72) # 36 bytes = 72 hex chars
+    end
+  end
+
   describe 'assert' do
     it 'passes on truthy values' do
       expect { ctx.assert(true) }.not_to raise_error
@@ -254,16 +335,21 @@ RSpec.describe Runar::Builtins do
   end
 
   describe 'test helpers' do
-    it 'mock_sig returns 72 zero bytes as hex' do
+    it 'mock_sig returns ALICE real DER signature as hex' do
       sig = ctx.mock_sig
-      expect(sig.length).to eq(144)
-      expect(sig).to eq('00' * 72)
+      expect(sig).to eq(Runar::TestKeys::ALICE.test_sig)
+      expect(sig[0, 2]).to eq('30') # DER sequence tag
     end
 
-    it 'mock_pub_key returns 33 bytes with 02 prefix as hex' do
+    it 'mock_pub_key returns ALICE real compressed pub key as hex' do
       pk = ctx.mock_pub_key
-      expect(pk.length).to eq(66)
-      expect(pk[0, 2]).to eq('02')
+      expect(pk).to eq(Runar::TestKeys::ALICE.pub_key)
+      expect(pk.length).to eq(66) # 33 bytes = 66 hex chars
+      expect(%w[02 03]).to include(pk[0, 2])
+    end
+
+    it 'check_sig(mock_sig, mock_pub_key) returns true' do
+      expect(ctx.check_sig(ctx.mock_sig, ctx.mock_pub_key)).to be true
     end
 
     it 'mock_preimage returns 181 zero bytes as hex' do

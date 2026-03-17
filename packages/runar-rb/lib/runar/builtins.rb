@@ -2,14 +2,20 @@
 
 # Runar built-in functions.
 #
-# Mock crypto functions always return true for business logic testing.
-# Real hash functions use Ruby's Digest stdlib (no external dependencies).
-# All byte data is represented as hex-encoded strings.
+# Real ECDSA and Rabin verification for check_sig, check_multi_sig, and
+# verify_rabin_sig. Real hash functions use Ruby's Digest stdlib (no external
+# dependencies). All byte data is represented as hex-encoded strings.
 
 require 'digest'
+require_relative 'ecdsa'
+require_relative 'rabin_sig'
 
 module Runar
   module Builtins
+    # The fixed test message digest shared across all Runar SDKs.
+    # SHA256("runar-test-message-v1") — matches Python TEST_MESSAGE_DIGEST.
+    TEST_MESSAGE_DIGEST = Digest::SHA256.hexdigest('runar-test-message-v1').freeze
+
     # -- Assertion -------------------------------------------------------------
 
     # Runar assertion. Raises RuntimeError if condition is falsey.
@@ -17,13 +23,33 @@ module Runar
       raise 'runar: assertion failed' unless condition
     end
 
-    # -- Mock Crypto (always true for business logic testing) ------------------
+    # -- Real ECDSA Verification -----------------------------------------------
 
-    def check_sig(_sig, _pk)
-      true
+    # Verify an ECDSA signature over the fixed TEST_MESSAGE_DIGEST.
+    # Both sig and pk are hex-encoded strings.
+    def check_sig(sig, pk)
+      Runar::ECDSA.verify(TEST_MESSAGE_DIGEST, sig, pk)
     end
 
-    def check_multi_sig(_sigs, _pks)
+    # Verify multiple ECDSA signatures (Bitcoin-style ordered multi-sig).
+    # Each signature must verify against the next unused public key in order.
+    # Both sigs and pks are arrays of hex-encoded strings.
+    def check_multi_sig(sigs, pks)
+      return false if sigs.length > pks.length
+
+      pk_idx = 0
+      sigs.each do |sig|
+        matched = false
+        while pk_idx < pks.length
+          if check_sig(sig, pks[pk_idx])
+            pk_idx += 1
+            matched = true
+            break
+          end
+          pk_idx += 1
+        end
+        return false unless matched
+      end
       true
     end
 
@@ -31,8 +57,11 @@ module Runar
       true
     end
 
-    def verify_rabin_sig(_msg, _sig, _padding, _pk)
-      true
+    # Verify a Rabin signature.
+    # All parameters are hex-encoded strings. sig, padding, and pk are
+    # interpreted as unsigned little-endian integers.
+    def verify_rabin_sig(msg, sig, padding, pk)
+      Runar::RabinSig.rabin_verify(msg, sig, padding, pk)
     end
 
     def verify_wots(_msg, _sig, _pubkey)
@@ -61,6 +90,21 @@ module Runar
 
     def verify_slh_dsa_sha2_256f(_msg, _sig, _pubkey)
       true
+    end
+
+    # Mock BLAKE3 single-block compression.
+    # In compiled Bitcoin Script this expands to ~10,000 opcodes.
+    # Returns 32 zero bytes as hex for business-logic testing.
+    def blake3_compress(_chaining_value, _block)
+      '00' * 32
+    end
+
+    # Mock BLAKE3 hash for messages up to 64 bytes.
+    # In compiled Bitcoin Script this uses the IV as the chaining value and
+    # applies zero-padding before calling the compression function.
+    # Returns 32 zero bytes as hex for business-logic testing.
+    def blake3_hash(_message)
+      '00' * 32
     end
 
     # -- Real Hash Functions ---------------------------------------------------
@@ -96,8 +140,17 @@ module Runar
       0
     end
 
-    def extract_output_hash(_preimage)
-      '00' * 32
+    # Returns the first 32 bytes of the preimage as a hex string.
+    # Tests set tx_preimage = hash256(expected_output_bytes) so the assertion
+    # hash256(outputs) == extract_output_hash(tx_preimage) passes.
+    # Falls back to 32 zero bytes when the preimage is shorter than 32 bytes.
+    def extract_output_hash(preimage)
+      preimage = preimage.to_s
+      if preimage.length >= 64 # 32 bytes = 64 hex chars
+        preimage[0, 64]
+      else
+        '00' * 32
+      end
     end
 
     def extract_amount(_preimage)
@@ -110,6 +163,18 @@ module Runar
 
     def extract_sequence(_preimage)
       0xFFFFFFFF
+    end
+
+    # Returns hash256(72 zero bytes) in test mode.
+    # Consistent with passing all_prevouts = 72 zero bytes in tests,
+    # since extract_outpoint also returns 36 zero bytes.
+    def extract_hash_prevouts(_preimage)
+      hash256('00' * 72)
+    end
+
+    # Returns 36 zero bytes (outpoint = txid[32] + vout[4]) in test mode.
+    def extract_outpoint(_preimage)
+      '00' * 36
     end
 
     # -- Math Utilities --------------------------------------------------------
@@ -283,12 +348,20 @@ module Runar
 
     # -- Test Helpers ----------------------------------------------------------
 
+    # Return ALICE's real ECDSA test signature (DER-encoded hex).
+    # This is a valid signature over TEST_MESSAGE_DIGEST that will pass
+    # check_sig verification when paired with mock_pub_key.
     def mock_sig
-      '00' * 72
+      require_relative 'test_keys'
+      Runar::TestKeys::ALICE.test_sig
     end
 
+    # Return ALICE's real compressed secp256k1 public key (33 bytes, hex).
+    # This is a valid key that will pass check_sig verification when paired
+    # with mock_sig.
     def mock_pub_key
-      '02' + ('00' * 32)
+      require_relative 'test_keys'
+      Runar::TestKeys::ALICE.pub_key
     end
 
     def mock_preimage
