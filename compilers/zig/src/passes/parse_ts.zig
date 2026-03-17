@@ -903,27 +903,8 @@ const Parser = struct {
         return .{ .custom_type = name };
     }
 
-    fn typeNodeToRunarType(tn: TypeNode) RunarType {
-        return switch (tn) {
-            .primitive_type => |ptn| switch (ptn) {
-                .bigint => .bigint,
-                .boolean => .boolean,
-                .byte_string => .byte_string,
-                .pub_key => .pub_key,
-                .sig => .sig,
-                .sha256 => .sha256,
-                .ripemd160 => .ripemd160,
-                .addr => .addr,
-                .sig_hash_preimage => .sig_hash_preimage,
-                .rabin_sig => .rabin_sig,
-                .rabin_pub_key => .rabin_pub_key,
-                .point => .point,
-                .void => .void,
-            },
-            .fixed_array_type => .unknown,
-            .custom_type => .unknown,
-        };
-    }
+    /// Delegates to the canonical implementation in types.zig.
+    const typeNodeToRunarType = types.typeNodeToRunarType;
 
     fn runarTypeToTypeName(t: RunarType) []const u8 {
         return types.runarTypeToString(t);

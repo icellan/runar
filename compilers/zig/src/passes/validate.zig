@@ -46,9 +46,9 @@ pub fn validate(allocator: Allocator, contract: ContractNode) !ValidationResult 
     var warnings: std.ArrayListUnmanaged(CompilerDiagnostic) = .empty;
     defer warnings.deinit(allocator);
 
-    validateProperties(allocator, contract, &errors, &warnings);
-    validateConstructor(allocator, contract, &errors);
-    validateMethods(allocator, contract, &errors, &warnings);
+    try validateProperties(allocator, contract, &errors, &warnings);
+    try validateConstructor(allocator, contract, &errors);
+    try validateMethods(allocator, contract, &errors, &warnings);
     try checkNoRecursion(allocator, contract, &errors);
 
     return .{

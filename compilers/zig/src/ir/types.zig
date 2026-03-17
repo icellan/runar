@@ -79,6 +79,29 @@ pub const TypeNode = union(enum) {
 
 pub const FixedArrayType = struct { element: *const TypeNode, length: u32 };
 
+/// Convert a TypeNode to a RunarType. Custom and fixed-array types become .unknown.
+pub fn typeNodeToRunarType(tn: TypeNode) RunarType {
+    return switch (tn) {
+        .primitive_type => |ptn| switch (ptn) {
+            .bigint => .bigint,
+            .boolean => .boolean,
+            .byte_string => .byte_string,
+            .pub_key => .pub_key,
+            .sig => .sig,
+            .sha256 => .sha256,
+            .ripemd160 => .ripemd160,
+            .addr => .addr,
+            .sig_hash_preimage => .sig_hash_preimage,
+            .rabin_sig => .rabin_sig,
+            .rabin_pub_key => .rabin_pub_key,
+            .point => .point,
+            .void => .void,
+        },
+        .fixed_array_type => .unknown,
+        .custom_type => .unknown,
+    };
+}
+
 pub const ParentClass = enum {
     smart_contract, stateful_smart_contract,
 

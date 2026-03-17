@@ -101,11 +101,14 @@ fn optimizeMethod(allocator: Allocator, method: types.ANFMethod) !types.ANFMetho
         }
 
         if (changed) {
+            allocator.free(body);
             body = try new_body.toOwnedSlice(allocator);
         }
     }
 
-    body = try eliminateDeadBindings(allocator, body);
+    const optimized_body = try eliminateDeadBindings(allocator, body);
+    allocator.free(body);
+    body = optimized_body;
 
     return .{
         .name = method.name,
@@ -437,8 +440,10 @@ fn toU256(v: i128) u256 {
 
 /// Remove bindings whose results are never referenced.
 /// Iterates until stable, handling transitive dead code.
+/// Caller must free the returned slice. The input `body` is NOT freed by this function.
 fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]types.ANFBinding {
     var current = body;
+    var owns_current = false;
     var changed = true;
 
     while (changed) {
@@ -459,7 +464,10 @@ fn eliminateDeadBindings(allocator: Allocator, body: []types.ANFBinding) ![]type
             }
         }
 
-        current = try filtered.toOwnedSlice(allocator);
+        const new_slice = try filtered.toOwnedSlice(allocator);
+        if (owns_current) allocator.free(current);
+        current = new_slice;
+        owns_current = true;
     }
 
     return current;
@@ -577,7 +585,9 @@ fn testProgram(methods: []const types.ANFMethod) types.ANFProgram {
     return .{ .contract_name = "Test", .properties = &.{}, .methods = @constCast(methods) };
 }
 
-/// Free all allocations from an optimize() result (methods array + per-method bodies + optimized values).
+/// Free allocations from an optimize() result (methods array + per-method bodies + @ref strings).
+/// Note: does not free call args since we cannot distinguish heap-allocated args from
+/// stack-allocated args passed in through the original input.
 fn freeOptimizeResult(alloc: Allocator, result: types.ANFProgram) void {
     for (result.methods) |method| {
         for (method.body) |binding| {
@@ -589,10 +599,6 @@ fn freeOptimizeResult(alloc: Allocator, result: types.ANFProgram) void {
                             alloc.free(s);
                     },
                     else => {},
-                },
-                .call => |c| {
-                    // Free owned args slices (allocated by makeCall)
-                    alloc.free(c.args);
                 },
                 else => {},
             }
@@ -763,6 +769,7 @@ test "rule 12: ecMul(G, k) -> ecMulGen(k)" {
     const t0 = result.methods[0].body[1].value;
     switch (t0) {
         .call => |c| {
+            defer alloc.free(c.args); // Allocated by makeCall
             try testing.expectEqualStrings("ecMulGen", c.func);
             try testing.expectEqual(@as(usize, 1), c.args.len);
             try testing.expectEqualStrings("k", c.args[0]);
