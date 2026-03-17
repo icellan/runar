@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'digest'
+require_relative '../ec_primitives'
 
 # OP_PUSH_TX helper for checkPreimage contracts.
 #
@@ -15,19 +16,12 @@ require 'digest'
 # from the sighash alone without needing a private key at all.  This is
 # deliberately insecure for normal signing; its only valid use is OP_PUSH_TX.
 #
+# EC arithmetic is delegated to Runar::ECPrimitives.
 # Zero external dependencies — uses only Ruby stdlib (Digest::SHA256).
 
 module Runar
   module SDK
-    # secp256k1 curve parameters.
-    SECP256K1_P  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-    SECP256K1_N  = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
-    SECP256K1_GX = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-    SECP256K1_GY = 0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8
-
     SIGHASH_ALL_FORKID = 0x41
-
-    private_constant :SECP256K1_P, :SECP256K1_N, :SECP256K1_GX, :SECP256K1_GY
 
     module_function
 
@@ -66,8 +60,8 @@ module Runar
       r, s = ecdsa_sign_k1(hash_bytes)
 
       # Enforce low-S normalisation.
-      half_n = SECP256K1_N >> 1
-      s = SECP256K1_N - s if s > half_n
+      half_n = ECPrimitives::SECP256K1_N >> 1
+      s = ECPrimitives::SECP256K1_N - s if s > half_n
 
       der_encode(r, s).unpack1('H*') + format('%02x', SIGHASH_ALL_FORKID)
     end
@@ -123,67 +117,12 @@ module Runar
     end
 
     # ---------------------------------------------------------------------------
-    # Private helpers — pure secp256k1 arithmetic
+    # Private helpers — OP_PUSH_TX specific signing
     #
-    # Single-letter parameter names (r, s, a, b, k) are conventional in
-    # cryptographic literature.  The cops below are disabled for this section.
-    # rubocop:disable Naming/MethodParameterName, Metrics/AbcSize, Metrics/MethodLength
+    # Single-letter parameter names (r, s, n) are conventional in cryptographic
+    # literature.  The cops below are disabled for this section.
+    # rubocop:disable Naming/MethodParameterName
     # ---------------------------------------------------------------------------
-
-    # Modular inverse using the extended Euclidean algorithm.
-    def mod_inv(a, m)
-      a %= m if a.negative?
-      g, x, = extended_gcd(a, m)
-      raise ArgumentError, 'no modular inverse' unless g == 1
-
-      x % m
-    end
-    private_class_method :mod_inv
-
-    def extended_gcd(a, b)
-      return [b, 0, 1] if a.zero?
-
-      g, x, y = extended_gcd(b % a, a)
-      [g, y - (b / a) * x, x]
-    end
-    private_class_method :extended_gcd
-
-    # secp256k1 point addition.  +nil+ represents the point at infinity.
-    def ec_add(p1, p2)
-      return p2 if p1.nil?
-      return p1 if p2.nil?
-
-      x1, y1 = p1
-      x2, y2 = p2
-
-      if x1 == x2
-        return nil if y1 != y2 # p1 == -p2 → point at infinity
-
-        lam = 3 * x1 * x1 * mod_inv(2 * y1, SECP256K1_P) % SECP256K1_P
-      else
-        lam = (y2 - y1) * mod_inv(x2 - x1, SECP256K1_P) % SECP256K1_P
-      end
-
-      x3 = (lam * lam - x1 - x2) % SECP256K1_P
-      y3 = (lam * (x1 - x3) - y1) % SECP256K1_P
-      [x3, y3]
-    end
-    private_class_method :ec_add
-
-    # secp256k1 scalar multiplication (double-and-add).
-    def ec_mul(k, point)
-      result  = nil
-      addend  = point
-
-      while k.positive?
-        result = ec_add(result, addend) if k.odd?
-        addend = ec_add(addend, addend)
-        k >>= 1
-      end
-
-      result
-    end
-    private_class_method :ec_mul
 
     # ECDSA sign with private key d=1 and nonce k=1.
     #
@@ -192,13 +131,15 @@ module Runar
     # the preimage algebraically rather than checking the signature against a
     # known public key.
     #
+    # EC arithmetic is delegated to Runar::ECPrimitives.
+    #
     # @param msg_hash [String] 32-byte binary message digest
     # @return [Array(Integer, Integer)] (r, s) signature components
     def ecdsa_sign_k1(msg_hash)
       z = msg_hash.unpack1('H*').to_i(16)
-      r = SECP256K1_GX % SECP256K1_N
+      r = ECPrimitives::SECP256K1_GX % ECPrimitives::SECP256K1_N
       # s = k⁻¹ × (z + r×d) mod N; d=1, k=1 → k⁻¹=1
-      s = (z + r) % SECP256K1_N
+      s = (z + r) % ECPrimitives::SECP256K1_N
       [r, s]
     end
     private_class_method :ecdsa_sign_k1
@@ -227,7 +168,7 @@ module Runar
     end
     private_class_method :int_to_der_bytes
 
-    # rubocop:enable Naming/MethodParameterName, Metrics/AbcSize, Metrics/MethodLength
+    # rubocop:enable Naming/MethodParameterName
 
     # ---------------------------------------------------------------------------
     # BIP-143 preimage assembly
