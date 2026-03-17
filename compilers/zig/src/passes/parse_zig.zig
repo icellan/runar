@@ -761,7 +761,12 @@ const Parser = struct {
                         .property_access => |pa| pa.property,
                         else => "unknown",
                     };
-                    expr = self.makeMethodCall(object_name, member, args) orelse return null;
+                    // Strip runar. namespace: runar.assert(x) → assert(x)
+                    if (std.mem.eql(u8, object_name, "runar")) {
+                        expr = self.makeCall(member, args) orelse return null;
+                    } else {
+                        expr = self.makeMethodCall(object_name, member, args) orelse return null;
+                    }
                 } else {
                     // Property access: obj.prop
                     const object_name = switch (expr) {
