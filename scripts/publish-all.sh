@@ -64,17 +64,40 @@ echo ""
 # --- Publish npm packages ---
 echo "=== Publishing npm packages ==="
 cd "$ROOT"
-pnpm -r publish --access public --no-git-checks $DRY_RUN
+# Tolerate "already exists" so re-runs continue to later stages.
+if output=$(pnpm -r publish --access public --no-git-checks $DRY_RUN 2>&1); then
+  echo "$output"
+elif echo "$output" | grep -q "previously published"; then
+  echo "$output"
+  echo "  (some packages already published, continuing)"
+else
+  echo "$output" >&2
+  exit 1
+fi
 echo "  ✓ npm packages published"
 echo ""
 
 # --- Publish Rust crates (order matters: deps first) ---
+# Tolerate "already exists" so re-runs don't abort before later stages.
+cargo_publish() {
+  local output
+  if output=$(cargo publish $DRY_RUN 2>&1); then
+    return 0
+  elif echo "$output" | grep -q "already exists"; then
+    echo "  (already published, skipping)"
+    return 0
+  else
+    echo "$output" >&2
+    return 1
+  fi
+}
+
 if [ "$SKIP_RUST" = "0" ]; then
   echo "=== Publishing Rust crates ==="
 
   echo "  1/3 runar-compiler-rust (compilers/rust)"
   cd "$ROOT/compilers/rust"
-  cargo publish $DRY_RUN
+  cargo_publish
   if [ -z "$DRY_RUN" ]; then
     echo "  Waiting for crates.io index..."
     sleep 30
@@ -82,7 +105,7 @@ if [ "$SKIP_RUST" = "0" ]; then
 
   echo "  2/3 runar-lang-macros (packages/runar-rs-macros)"
   cd "$ROOT/packages/runar-rs-macros"
-  cargo publish $DRY_RUN
+  cargo_publish
   if [ -z "$DRY_RUN" ]; then
     echo "  Waiting for crates.io index..."
     sleep 30
@@ -90,7 +113,7 @@ if [ "$SKIP_RUST" = "0" ]; then
 
   echo "  3/3 runar-lang (packages/runar-rs)"
   cd "$ROOT/packages/runar-rs"
-  cargo publish $DRY_RUN
+  cargo_publish
 
   echo "  ✓ Rust crates published"
   echo ""
@@ -116,7 +139,14 @@ if [ "$SKIP_PYTHON" = "0" ]; then
     if [ -n "$DRY_RUN" ]; then
       echo "  [dry-run] would upload: $(ls dist/*.tar.gz dist/*.whl 2>/dev/null)"
     else
-      $TWINE_CMD upload dist/*
+      if output=$($TWINE_CMD upload dist/* 2>&1); then
+        echo "$output"
+      elif echo "$output" | grep -q "already exists"; then
+        echo "  (already published, skipping)"
+      else
+        echo "$output" >&2
+        return 1
+      fi
     fi
   done
 
