@@ -112,7 +112,7 @@ fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
             return false;
         },
         .method_call => |mc| {
-            if (std.mem.eql(u8, mc.object, "this")) {
+            if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self")) {
                 for (ctx.contract.properties) |p| {
                     if (std.mem.eql(u8, p.name, mc.method) and isByteType(p.type_info)) return true;
                 }
@@ -773,8 +773,8 @@ fn lowerExprToRef(ctx: *LowerCtx, expr: Expression) LowerError![]const u8 {
 }
 
 fn lowerIdentifier(ctx: *LowerCtx, name: []const u8) LowerError![]const u8 {
-    // 'this' is not a value in ANF
-    if (std.mem.eql(u8, name, "this")) {
+    // 'this' and 'self' are not first-class runtime values in ANF.
+    if (std.mem.eql(u8, name, "this") or std.mem.eql(u8, name, "self")) {
         return try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
     }
 
@@ -837,8 +837,10 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
 }
 
 fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![]const u8 {
+    const is_self = std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self");
+
     // this.addOutput(satoshis, val1, val2, ...)
-    if (std.mem.eql(u8, mc.object, "this") and std.mem.eql(u8, mc.method, "addOutput")) {
+    if (is_self and std.mem.eql(u8, mc.method, "addOutput")) {
         const arg_refs = try lowerArgs(ctx, mc.args);
         if (arg_refs.len > 0) {
             const ref = try ctx.emit(.{ .add_output = .{
@@ -852,7 +854,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     }
 
     // this.addRawOutput(satoshis, scriptBytes)
-    if (std.mem.eql(u8, mc.object, "this") and std.mem.eql(u8, mc.method, "addRawOutput")) {
+    if (is_self and std.mem.eql(u8, mc.method, "addRawOutput")) {
         const arg_refs = try lowerArgs(ctx, mc.args);
         if (arg_refs.len >= 2) {
             const ref = try ctx.emit(.{ .add_raw_output = .{
@@ -865,7 +867,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     }
 
     // this.getStateScript()
-    if (std.mem.eql(u8, mc.object, "this") and std.mem.eql(u8, mc.method, "getStateScript")) {
+    if (is_self and std.mem.eql(u8, mc.method, "getStateScript")) {
         return try ctx.emit(.{ .get_state_script = {} });
     }
 
@@ -882,7 +884,7 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     }
 
     // this.method(...) -> method_call
-    if (std.mem.eql(u8, mc.object, "this")) {
+    if (is_self) {
         const arg_refs = try lowerArgs(ctx, mc.args);
         const this_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
         return try ctx.emit(.{ .method_call = .{

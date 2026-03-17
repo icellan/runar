@@ -17,6 +17,7 @@ const crypto_emitters = @import("helpers/crypto_emitters.zig");
 const blake3_emitters = @import("helpers/blake3_emitters.zig");
 const ec_emitters = @import("helpers/ec_emitters.zig");
 const pq_emitters = @import("helpers/pq_emitters.zig");
+const sha256_emitters = @import("helpers/sha256_emitters.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
 
@@ -1092,6 +1093,7 @@ const LowerCtx = struct {
         ecPointY,
         // Wave 3 placeholders
         sha256Compress,
+        sha256Finalize,
         blake3,
         ecAdd,
         ecMul,
@@ -1153,6 +1155,7 @@ const LowerCtx = struct {
         .{ "ecPointX", .ecPointX },
         .{ "ecPointY", .ecPointY },
         .{ "sha256Compress", .sha256Compress },
+        .{ "sha256Finalize", .sha256Finalize },
         .{ "blake3Compress", .blake3 },
         .{ "blake3Hash", .blake3 },
         .{ "blake3", .blake3 },
@@ -1221,6 +1224,8 @@ const LowerCtx = struct {
             .ecPointY => try self.lowerCryptoBuiltin(bind_name, args, .ec_point_y),
             .ecAdd => try self.lowerEcBuiltin(bind_name, args, .ec_add),
             .ecMul => try self.lowerEcBuiltin(bind_name, args, .ec_mul),
+            .sha256Compress => try self.lowerSha256Builtin(bind_name, args, .compress),
+            .sha256Finalize => try self.lowerSha256Builtin(bind_name, args, .finalize),
             .blake3 => {
                 const crypto_builtin = crypto_builtins.classify(call.name) orelse return LowerError.InvalidBuiltin;
                 try self.lowerBlake3Builtin(bind_name, args, crypto_builtin);
@@ -1235,7 +1240,7 @@ const LowerCtx = struct {
                 self.trackDepth();
             },
             // Wave 3 placeholders — consume args and push placeholder
-            .sha256Compress, .ecPairing, .schnorrVerify => {
+            .ecPairing, .schnorrVerify => {
                 for (args) |arg| {
                     try self.bringToTopAuto(arg);
                     _ = self.stack.pop();
@@ -1262,6 +1267,38 @@ const LowerCtx = struct {
         crypto_emitters.appendBuiltinInstructions(&emitted, self.allocator, builtin) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.NotImplemented => return error.InvalidBuiltin,
+        };
+
+        for (emitted.items) |inst| {
+            switch (inst) {
+                .op_name => |name| {
+                    const opcode = opcodes.byName(name) orelse return LowerError.InvalidBuiltin;
+                    try self.emitOp(opcode);
+                },
+                .push_int => |n| try self.emitPushInt(n),
+                .push_data => |data| try self.emitPushData(data),
+            }
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerSha256Builtin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, builtin: sha256_emitters.Sha256Builtin) LowerError!void {
+        if (args.len < sha256_emitters.requiredArgCount(builtin)) return LowerError.InvalidBuiltin;
+
+        for (args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var emitted: std.ArrayListUnmanaged(sha256_emitters.Sha256Instruction) = .empty;
+        defer emitted.deinit(self.allocator);
+        sha256_emitters.appendBuiltinInstructions(&emitted, self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.InvalidBuiltin,
         };
 
         for (emitted.items) |inst| {
@@ -3471,6 +3508,120 @@ test "lower hash builtin" {
         }
     }
     try std.testing.expect(found_sha256);
+}
+
+test "lower sha256Compress builtin" {
+    const allocator = std.testing.allocator;
+
+    const bindings = [_]types.ANFBinding{
+        .{
+            .name = "t0",
+            .value = .{ .builtin_call = .{
+                .name = "sha256Compress",
+                .args = &[_][]const u8{ "state", "block" },
+            } },
+        },
+    };
+
+    const method = types.ANFMethod{
+        .name = "compress",
+        .is_public = true,
+        .params = @constCast(&[_]types.ANFParam{
+            .{ .name = "state", .type_name = "ByteString" },
+            .{ .name = "block", .type_name = "ByteString" },
+        }),
+        .bindings = @constCast(&bindings),
+    };
+
+    const program = types.ANFProgram{
+        .contract_name = "Sha256CompressTest",
+        .properties = &.{},
+        .methods = @constCast(&[_]types.ANFMethod{method}),
+    };
+
+    const result = try lower(allocator, program);
+    defer {
+        for (result.methods) |m| {
+            allocator.free(m.instructions);
+        }
+        allocator.free(result.methods);
+    }
+
+    var found_lshift = false;
+    var found_rshift = false;
+    var found_bin2num = false;
+    for (result.methods[0].instructions) |inst| {
+        switch (inst) {
+            .op => |op| {
+                if (op == .op_lshift) found_lshift = true;
+                if (op == .op_rshift) found_rshift = true;
+                if (op == .op_bin2num) found_bin2num = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_lshift);
+    try std.testing.expect(found_rshift);
+    try std.testing.expect(found_bin2num);
+}
+
+test "lower sha256Finalize builtin" {
+    const allocator = std.testing.allocator;
+
+    const bindings = [_]types.ANFBinding{
+        .{
+            .name = "t0",
+            .value = .{ .builtin_call = .{
+                .name = "sha256Finalize",
+                .args = &[_][]const u8{ "state", "remaining", "bit_len" },
+            } },
+        },
+    };
+
+    const method = types.ANFMethod{
+        .name = "finalize",
+        .is_public = true,
+        .params = @constCast(&[_]types.ANFParam{
+            .{ .name = "state", .type_name = "ByteString" },
+            .{ .name = "remaining", .type_name = "ByteString" },
+            .{ .name = "bit_len", .type_name = "bigint" },
+        }),
+        .bindings = @constCast(&bindings),
+    };
+
+    const program = types.ANFProgram{
+        .contract_name = "Sha256FinalizeTest",
+        .properties = &.{},
+        .methods = @constCast(&[_]types.ANFMethod{method}),
+    };
+
+    const result = try lower(allocator, program);
+    defer {
+        for (result.methods) |m| {
+            allocator.free(m.instructions);
+        }
+        allocator.free(result.methods);
+    }
+
+    var found_if = false;
+    var found_else = false;
+    var found_endif = false;
+    var found_num2bin = false;
+    for (result.methods[0].instructions) |inst| {
+        switch (inst) {
+            .op => |op| {
+                if (op == .op_if) found_if = true;
+                if (op == .op_else) found_else = true;
+                if (op == .op_endif) found_endif = true;
+                if (op == .op_num2bin) found_num2bin = true;
+            },
+            else => {},
+        }
+    }
+    try std.testing.expect(found_if);
+    try std.testing.expect(found_else);
+    try std.testing.expect(found_endif);
+    try std.testing.expect(found_num2bin);
 }
 
 test "lower if expression" {

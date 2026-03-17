@@ -437,7 +437,7 @@ const TypeChecker = struct {
             .literal_bool => .boolean,
             .literal_bytes => .byte_string,
             .identifier => |name| {
-                if (std.mem.eql(u8, name, "this")) return .unknown; // sentinel
+                if (std.mem.eql(u8, name, "this") or std.mem.eql(u8, name, "self")) return .unknown; // sentinel
                 if (std.mem.eql(u8, name, "super")) return .unknown;
                 if (env.lookup(name)) |t| return t;
                 if (self.prop_types.get(name)) |t| return t;
@@ -445,7 +445,7 @@ const TypeChecker = struct {
                 return .unknown;
             },
             .property_access => |pa| {
-                if (std.mem.eql(u8, pa.object, "this")) {
+                if (std.mem.eql(u8, pa.object, "this") or std.mem.eql(u8, pa.object, "self")) {
                     if (self.prop_types.get(pa.property)) |t| return t;
                     if (self.method_sigs.get(pa.property) != null) return .unknown;
                     if (std.mem.eql(u8, pa.property, "getStateScript")) return .unknown;

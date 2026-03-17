@@ -21,18 +21,20 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ZIG_BIN = ROOT / "compilers" / "zig" / "zig-out" / "bin" / "runar-zig"
+DEFAULT_RUST_BIN = ROOT / "compilers" / "rust" / "target" / "release" / "runar-compiler-rust"
 DEFAULT_SOURCE_CONTRACTS = ROOT / "compilers" / "zig" / "benchmarks" / "contracts-source.txt"
 DEFAULT_IR_CONTRACTS = ROOT / "compilers" / "zig" / "benchmarks" / "contracts-ir.txt"
 TS_SOURCE_HELPER = ROOT / "compilers" / "zig" / "scripts" / "ts_compile_source_hex.mjs"
 TS_IR_HELPER = ROOT / "compilers" / "zig" / "scripts" / "ts_compile_ir_hex.mjs"
 TS_DIST = ROOT / "packages" / "runar-compiler" / "dist"
+IMPLEMENTATION_ORDER = ("zig", "rust", "ts")
 JS_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 IR_LOAD_CONST_INT_RE = re.compile(r'"kind"\s*:\s*"load_const"\s*,\s*"value"\s*:\s*(-?\d+)')
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Compare Zig compiler performance against the TypeScript reference."
+        description="Compare Zig compiler performance against the TypeScript reference, with optional Rust runs."
     )
     parser.add_argument("mode", choices=["source", "ir"], help="Benchmark mode.")
     parser.add_argument("--contracts-file", type=Path, help="File containing one contract name per line.")
@@ -57,6 +59,17 @@ def parse_args() -> argparse.Namespace:
         help="Per-process timeout in seconds.",
     )
     parser.add_argument("--zig-bin", type=Path, default=DEFAULT_ZIG_BIN, help="Path to runar-zig binary.")
+    parser.add_argument(
+        "--with-rust",
+        action="store_true",
+        help="Also benchmark the Rust compiler on the same contracts and only aggregate parity-clean rows across all three compilers.",
+    )
+    parser.add_argument(
+        "--rust-bin",
+        type=Path,
+        default=DEFAULT_RUST_BIN,
+        help="Path to the Rust compiler binary used when --with-rust is enabled.",
+    )
     parser.add_argument("--json-out", type=Path, help="Optional path for JSON results.")
     parser.add_argument("--label", help="Optional label embedded in JSON output for this run.")
     parser.add_argument(
@@ -119,6 +132,10 @@ def shell_join(cmd: list[str]) -> str:
     return shlex.join(cmd)
 
 
+def measurement_order_label(with_rust: bool) -> str:
+    return "round-robin-rotating" if with_rust else "paired-alternating"
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -169,7 +186,8 @@ def resolve_source_path(contract: str) -> Path:
     source_json = ROOT / "conformance" / "tests" / contract / "source.json"
     if source_json.exists():
         data = json.loads(source_json.read_text())
-        rel = data.get("sourceFiles", {}).get(".runar.ts")
+        source_map = data.get("sourceFiles") or data.get("sources") or {}
+        rel = source_map.get(".runar.ts")
         if rel:
             return (source_json.parent / rel).resolve()
 
@@ -219,30 +237,38 @@ def time_one(cmd: list[str], timeout_sec: float) -> tuple[float, str]:
     return elapsed_ms, output
 
 
-def time_commands_paired(
-    zig_cmd: list[str], ts_cmd: list[str], warmup: int, iterations: int, timeout_sec: float
-) -> tuple[list[float], list[float], str, str]:
-    last_output = {"zig": "", "ts": ""}
+def implementation_keys(commands: dict[str, list[str]]) -> list[str]:
+    return [name for name in IMPLEMENTATION_ORDER if name in commands]
+
+
+def rotate_implementations(commands: dict[str, list[str]], start_index: int) -> list[tuple[str, list[str]]]:
+    names = implementation_keys(commands)
+    rotated: list[tuple[str, list[str]]] = []
+    for offset in range(len(names)):
+        name = names[(start_index + offset) % len(names)]
+        rotated.append((name, commands[name]))
+    return rotated
+
+
+def time_commands_round_robin(
+    commands: dict[str, list[str]], warmup: int, iterations: int, timeout_sec: float
+) -> tuple[dict[str, list[float]], dict[str, str]]:
+    names = implementation_keys(commands)
+    last_output = {name: "" for name in names}
+    samples_ms = {name: [] for name in names}
 
     for index in range(warmup):
-        order = (("zig", zig_cmd), ("ts", ts_cmd)) if index % 2 == 0 else (("ts", ts_cmd), ("zig", zig_cmd))
-        for key, cmd in order:
+        for key, cmd in rotate_implementations(commands, index):
             _, output = time_one(cmd, timeout_sec)
             last_output[key] = output
 
-    zig_samples_ms: list[float] = []
-    ts_samples_ms: list[float] = []
     for index in range(iterations):
-        order = (("zig", zig_cmd), ("ts", ts_cmd)) if index % 2 == 0 else (("ts", ts_cmd), ("zig", zig_cmd))
-        for key, cmd in order:
+        for key, cmd in rotate_implementations(commands, index):
             elapsed_ms, output = time_one(cmd, timeout_sec)
             last_output[key] = output
-            if key == "zig":
-                zig_samples_ms.append(elapsed_ms)
-            else:
-                ts_samples_ms.append(elapsed_ms)
+            samples_ms[key].append(elapsed_ms)
 
-    return zig_samples_ms, ts_samples_ms, last_output["zig"], last_output["ts"]
+    return samples_ms, last_output
 
 
 def summarize(samples: list[float]) -> dict[str, float]:
@@ -276,21 +302,29 @@ def summarize(samples: list[float]) -> dict[str, float]:
 def summarize_overall(results: list[dict]) -> dict[str, float | int]:
     ok_rows = [row for row in results if row.get("status") == "ok"]
     matched_rows = [row for row in ok_rows if row.get("match")]
-    speedups = [
-        row["speedup_vs_ts"]
-        for row in matched_rows
-        if isinstance(row.get("speedup_vs_ts"), (int, float)) and row["speedup_vs_ts"] > 0
-    ]
-    geometric_mean = math.exp(statistics.fmean(math.log(value) for value in speedups)) if speedups else 0.0
-    return {
+
+    def geometric_mean_for(key: str) -> float:
+        speedups = [
+            row[key]
+            for row in matched_rows
+            if isinstance(row.get(key), (int, float)) and row[key] > 0
+        ]
+        if not speedups:
+            return 0.0
+        return math.exp(statistics.fmean(math.log(value) for value in speedups))
+
+    summary = {
         "contracts_total": len(results),
         "contracts_ok": len(ok_rows),
         "contracts_failed": len(results) - len(ok_rows),
         "matches": len(matched_rows),
         "mismatches": len(ok_rows) - len(matched_rows),
-        "comparable_speedup_contracts": len(speedups),
-        "geometric_mean_speedup_vs_ts": geometric_mean,
+        "comparable_speedup_contracts": len(matched_rows),
+        "geometric_mean_speedup_zig_vs_ts": geometric_mean_for("speedup_zig_vs_ts"),
     }
+    if any(row.get("speedup_rust_vs_ts") is not None for row in ok_rows):
+        summary["geometric_mean_speedup_rust_vs_ts"] = geometric_mean_for("speedup_rust_vs_ts")
+    return summary
 
 
 def diff_hex(zig_hex: str, ts_hex: str) -> dict[str, int | str | None]:
@@ -314,30 +348,77 @@ def diff_hex(zig_hex: str, ts_hex: str) -> dict[str, int | str | None]:
     }
 
 
+def resolve_commands(
+    mode: str, input_path: Path, zig_bin: Path, node_bin: str, rust_bin: Path | None
+) -> dict[str, list[str]]:
+    if mode == "source":
+        commands = {
+            "zig": [str(zig_bin), "--source", str(input_path), "--hex"],
+            "ts": [node_bin, str(TS_SOURCE_HELPER), "--file", str(input_path)],
+        }
+        if rust_bin is not None:
+            commands["rust"] = [str(rust_bin), "--source", str(input_path), "--hex"]
+        return commands
+
+    commands = {
+        "zig": [str(zig_bin), "compile-ir", str(input_path), "--hex"],
+        "ts": [node_bin, str(TS_IR_HELPER), "--file", str(input_path)],
+    }
+    if rust_bin is not None:
+        commands["rust"] = [str(rust_bin), "--ir", str(input_path), "--hex"]
+    return commands
+
+
+def impl_payload(cmd: list[str], raw_hex: str, samples: list[float]) -> dict[str, object]:
+    return {
+        "command": cmd,
+        "command_pretty": shell_join(cmd),
+        "hex_len": len(raw_hex),
+        "samples_ms": samples,
+        **summarize(samples),
+    }
+
+
 def benchmark_contract(
-    contract: str, mode: str, zig_bin: Path, node_bin: str, warmup: int, iterations: int, timeout_sec: float
+    contract: str,
+    mode: str,
+    zig_bin: Path,
+    node_bin: str,
+    rust_bin: Path | None,
+    warmup: int,
+    iterations: int,
+    timeout_sec: float,
 ) -> dict:
     if mode == "source":
         input_path = resolve_source_path(contract)
-        zig_cmd = [str(zig_bin), "--source", str(input_path), "--hex"]
-        ts_cmd = [node_bin, str(TS_SOURCE_HELPER), "--file", str(input_path)]
     else:
         input_path = resolve_ir_path(contract)
         ensure_ir_json_safe_for_ts_helper(input_path)
-        zig_cmd = [str(zig_bin), "compile-ir", str(input_path), "--hex"]
-        ts_cmd = [node_bin, str(TS_IR_HELPER), "--file", str(input_path)]
+    commands = resolve_commands(mode, input_path, zig_bin, node_bin, rust_bin)
+    samples_ms, raw_outputs = time_commands_round_robin(commands, warmup, iterations, timeout_sec)
+    hex_outputs = {name: extract_hex(raw_output) for name, raw_output in raw_outputs.items()}
 
-    zig_samples, ts_samples, zig_hex_raw, ts_hex_raw = time_commands_paired(
-        zig_cmd, ts_cmd, warmup, iterations, timeout_sec
-    )
-    zig_hex = extract_hex(zig_hex_raw)
-    ts_hex = extract_hex(ts_hex_raw)
+    zig_match_ts = hex_outputs["zig"] == hex_outputs["ts"]
+    rust_match_ts = hex_outputs["rust"] == hex_outputs["ts"] if "rust" in hex_outputs else None
+    zig_match_rust = hex_outputs["zig"] == hex_outputs["rust"] if "rust" in hex_outputs else None
+    match = zig_match_ts and (rust_match_ts if rust_match_ts is not None else True)
 
-    zig_stats = summarize(zig_samples)
-    ts_stats = summarize(ts_samples)
-    match = zig_hex == ts_hex
-    speedup = ts_stats["mean_ms"] / zig_stats["mean_ms"] if zig_stats["mean_ms"] > 0 else 0.0
+    zig = impl_payload(commands["zig"], hex_outputs["zig"], samples_ms["zig"])
+    ts = impl_payload(commands["ts"], hex_outputs["ts"], samples_ms["ts"])
+    rust = impl_payload(commands["rust"], hex_outputs["rust"], samples_ms["rust"]) if "rust" in commands else None
+
+    speedup_zig_vs_ts = ts["mean_ms"] / zig["mean_ms"] if match and zig["mean_ms"] > 0 else None
+    speedup_rust_vs_ts = ts["mean_ms"] / rust["mean_ms"] if match and rust is not None and rust["mean_ms"] > 0 else None
+    speedup_zig_vs_rust = rust["mean_ms"] / zig["mean_ms"] if match and rust is not None and zig["mean_ms"] > 0 else None
     input_bytes = input_path.stat().st_size
+
+    hex_diff: dict[str, dict[str, int | str | None]] = {}
+    if not zig_match_ts:
+        hex_diff["zig_vs_ts"] = diff_hex(hex_outputs["zig"], hex_outputs["ts"])
+    if rust is not None and not rust_match_ts:
+        hex_diff["rust_vs_ts"] = diff_hex(hex_outputs["rust"], hex_outputs["ts"])
+    if rust is not None and not zig_match_rust:
+        hex_diff["zig_vs_rust"] = diff_hex(hex_outputs["zig"], hex_outputs["rust"])
 
     return {
         "status": "ok",
@@ -348,31 +429,33 @@ def benchmark_contract(
         "mode": mode,
         "match": match,
         "comparable": match,
-        "zig": {
-            "command": zig_cmd,
-            "command_pretty": shell_join(zig_cmd),
-            "hex_len": len(zig_hex),
-            "samples_ms": zig_samples,
-            **zig_stats,
-        },
-        "ts": {
-            "command": ts_cmd,
-            "command_pretty": shell_join(ts_cmd),
-            "hex_len": len(ts_hex),
-            "samples_ms": ts_samples,
-            **ts_stats,
-        },
-        "hex_diff": diff_hex(zig_hex, ts_hex) if not match else None,
-        "speedup_vs_ts": speedup if match else None,
-        "delta_mean_ms_vs_ts": (ts_stats["mean_ms"] - zig_stats["mean_ms"]) if match else None,
+        "zig_match_ts": zig_match_ts,
+        "rust_match_ts": rust_match_ts,
+        "zig_match_rust": zig_match_rust,
+        "zig": zig,
+        "rust": rust,
+        "ts": ts,
+        "hex_diff": hex_diff or None,
+        "speedup_zig_vs_ts": speedup_zig_vs_ts,
+        "speedup_rust_vs_ts": speedup_rust_vs_ts,
+        "speedup_zig_vs_rust": speedup_zig_vs_rust,
+        "delta_mean_ms_zig_vs_ts": (ts["mean_ms"] - zig["mean_ms"]) if match else None,
+        "delta_mean_ms_rust_vs_ts": (ts["mean_ms"] - rust["mean_ms"]) if match and rust is not None else None,
     }
 
 
 def benchmark_contract_safe(
-    contract: str, mode: str, zig_bin: Path, node_bin: str, warmup: int, iterations: int, timeout_sec: float
+    contract: str,
+    mode: str,
+    zig_bin: Path,
+    node_bin: str,
+    rust_bin: Path | None,
+    warmup: int,
+    iterations: int,
+    timeout_sec: float,
 ) -> dict:
     try:
-        return benchmark_contract(contract, mode, zig_bin, node_bin, warmup, iterations, timeout_sec)
+        return benchmark_contract(contract, mode, zig_bin, node_bin, rust_bin, warmup, iterations, timeout_sec)
     except Exception as exc:
         return {
             "status": "error",
@@ -409,8 +492,10 @@ def print_run_header(
     print(f"iterations: {args.iterations}")
     print(f"warmup: {args.warmup}")
     print(f"timeout_sec: {args.timeout_sec:g}")
-    print(f"measurement_order: paired-alternating")
+    print(f"measurement_order: {measurement_order_label(args.with_rust)}")
     print(f"zig_bin: {args.zig_bin}")
+    if args.with_rust:
+        print(f"rust_bin: {args.rust_bin}")
     print(f"node_bin: {args.node_bin}")
     if args.label:
         print(f"label: {args.label}")
@@ -431,35 +516,53 @@ def print_report(
 ) -> None:
     print_run_header(args, contracts_file, contracts, environment)
     if not args.summary_only:
-        print("| contract | input bytes | zig mean ms | zig p95 ms | ts mean ms | ts p95 ms | zig vs ts | hex match | zig cv | ts cv |")
-        print("|---|---:|---:|---:|---:|---:|---|---|---:|---:|")
+        if args.with_rust:
+            print("| contract | input bytes | zig mean ms | rust mean ms | ts mean ms | zig vs ts | rust vs ts | parity |")
+            print("|---|---:|---:|---:|---:|---|---|---|")
+        else:
+            print("| contract | input bytes | zig mean ms | zig p95 ms | ts mean ms | ts p95 ms | zig vs ts | hex match | zig cv | ts cv |")
+            print("|---|---:|---:|---:|---:|---:|---|---|---:|---:|")
         for row in results:
             if row.get("status") != "ok":
-                print(f"| {row['contract']} | error | error | error | error | error | error | no | n/a | n/a |")
+                if args.with_rust:
+                    print(f"| {row['contract']} | error | error | error | error | error | error | no |")
+                else:
+                    print(f"| {row['contract']} | error | error | error | error | error | error | no | n/a | n/a |")
                 continue
-            print(
-                f"| {row['contract']} | "
-                f"{row['input_bytes']} | "
-                f"{row['zig']['mean_ms']:.2f} | "
-                f"{row['zig']['p95_ms']:.2f} | "
-                f"{row['ts']['mean_ms']:.2f} | "
-                f"{row['ts']['p95_ms']:.2f} | "
-                f"{format_speedup(row['speedup_vs_ts']) if row['match'] else 'n/a'} | "
-                f"{'yes' if row['match'] else 'no'} | "
-                f"{row['zig']['cv_pct']:.1f}% | "
-                f"{row['ts']['cv_pct']:.1f}% |"
-            )
+            if args.with_rust:
+                print(
+                    f"| {row['contract']} | "
+                    f"{row['input_bytes']} | "
+                    f"{row['zig']['mean_ms']:.2f} | "
+                    f"{row['rust']['mean_ms']:.2f} | "
+                    f"{row['ts']['mean_ms']:.2f} | "
+                    f"{format_speedup(row['speedup_zig_vs_ts']) if row['match'] else 'n/a'} | "
+                    f"{format_speedup(row['speedup_rust_vs_ts']) if row['match'] else 'n/a'} | "
+                    f"{'yes' if row['match'] else 'no'} |"
+                )
+            else:
+                print(
+                    f"| {row['contract']} | "
+                    f"{row['input_bytes']} | "
+                    f"{row['zig']['mean_ms']:.2f} | "
+                    f"{row['zig']['p95_ms']:.2f} | "
+                    f"{row['ts']['mean_ms']:.2f} | "
+                    f"{row['ts']['p95_ms']:.2f} | "
+                    f"{format_speedup(row['speedup_zig_vs_ts']) if row['match'] else 'n/a'} | "
+                    f"{'yes' if row['match'] else 'no'} | "
+                    f"{row['zig']['cv_pct']:.1f}% | "
+                    f"{row['ts']['cv_pct']:.1f}% |"
+                )
     summary = summarize_overall(results)
     print()
     print(f"contracts: {summary['contracts_total']} total, {summary['contracts_ok']} ok, {summary['contracts_failed']} failed")
     print(f"hex parity: {summary['matches']} match, {summary['mismatches']} mismatch")
     if summary["comparable_speedup_contracts"] > 0:
-        print(
-            f"geomean speedup vs ts (parity-matched rows only, n={summary['comparable_speedup_contracts']}): "
-            f"{summary['geometric_mean_speedup_vs_ts']:.2f}x"
-        )
+        print(f"geomean speedup zig vs ts (parity-matched rows only, n={summary['comparable_speedup_contracts']}): {summary['geometric_mean_speedup_zig_vs_ts']:.2f}x")
+        if args.with_rust:
+            print(f"geomean speedup rust vs ts (parity-matched rows only, n={summary['comparable_speedup_contracts']}): {summary['geometric_mean_speedup_rust_vs_ts']:.2f}x")
     elif summary["contracts_ok"] > 0:
-        print("geomean speedup vs ts: n/a (no parity-matched rows)")
+        print("geomean speedup: n/a (no parity-matched rows)")
 
     error_rows = [row for row in results if row.get("status") == "error"]
     if error_rows:
@@ -473,16 +576,20 @@ def print_report(
         print()
         print("hex mismatches:")
         for row in mismatch_rows:
-            diff = row.get("hex_diff") or {}
-            print(
-                f"- {row['contract']}: "
-                f"zig_len={row['zig']['hex_len']} "
-                f"ts_len={row['ts']['hex_len']} "
-                f"first_diff={diff.get('first_diff_index')}"
-            )
-            if diff.get("zig_excerpt") or diff.get("ts_excerpt"):
-                print(f"  zig_excerpt={diff.get('zig_excerpt')}")
-                print(f"  ts_excerpt={diff.get('ts_excerpt')}")
+            diffs = row.get("hex_diff") or {}
+            for pair, diff in diffs.items():
+                pair_left, pair_right = pair.split("_vs_")
+                left = row[pair_left]
+                right = row[pair_right]
+                print(
+                    f"- {row['contract']} ({pair_left} vs {pair_right}): "
+                    f"{pair_left}_len={left['hex_len']} "
+                    f"{pair_right}_len={right['hex_len']} "
+                    f"first_diff={diff.get('first_diff_index')}"
+                )
+                if diff.get("zig_excerpt") or diff.get("ts_excerpt"):
+                    print(f"  {pair_left}_excerpt={diff.get('zig_excerpt')}")
+                    print(f"  {pair_right}_excerpt={diff.get('ts_excerpt')}")
 
     if args.show_commands:
         print()
@@ -492,6 +599,8 @@ def print_report(
                 continue
             print(f"- {row['contract']}")
             print(f"  zig: {row['zig']['command_pretty']}")
+            if row.get("rust") is not None:
+                print(f"  rust: {row['rust']['command_pretty']}")
             print(f"  ts:  {row['ts']['command_pretty']}")
 
 
@@ -517,6 +626,12 @@ def preflight(args: argparse.Namespace) -> None:
         )
     if shutil.which(args.node_bin) is None:
         raise SystemExit(f"missing required executable: {args.node_bin}")
+    if args.with_rust and not args.rust_bin.exists():
+        raise SystemExit(
+            f"missing Rust binary: {args.rust_bin}\n"
+            "build it first with:\n"
+            "  cd /Users/satchmo/code/runar/compilers/rust && cargo build --release"
+        )
 
 
 def maybe_read_command_output(cmd: list[str], timeout_sec: float = 10.0) -> str | None:
@@ -546,7 +661,7 @@ def collect_environment(args: argparse.Namespace) -> dict[str, object]:
     git_status = maybe_read_command_output(["git", "status", "--short", "--untracked-files=no"])
     node_version = maybe_read_command_output([args.node_bin, "--version"])
     zig_version = maybe_read_command_output(["zig", "version"])
-    return {
+    environment = {
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "cwd": str(ROOT),
         "hostname": platform.node(),
@@ -558,13 +673,16 @@ def collect_environment(args: argparse.Namespace) -> dict[str, object]:
         "git_commit": git_commit,
         "git_dirty": bool(git_status),
     }
+    if args.with_rust:
+        environment["rustc_version"] = maybe_read_command_output(["rustc", "--version"])
+    return environment
 
 
 def build_payload(
     args: argparse.Namespace, contracts: list[str], contracts_file: Path | None, results: list[dict]
 ) -> dict:
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "config": {
             "mode": args.mode,
             "suite": infer_suite_name(args.mode, contracts_file, contracts),
@@ -576,8 +694,9 @@ def build_payload(
             "iterations": args.iterations,
             "warmup": args.warmup,
             "timeout_sec": args.timeout_sec,
-            "measurement_order": "paired-alternating",
+            "measurement_order": measurement_order_label(args.with_rust),
             "zig_bin": str(args.zig_bin),
+            "rust_bin": str(args.rust_bin) if args.with_rust else None,
             "node_bin": args.node_bin,
             "helpers": {
                 "ts_source_helper": str(TS_SOURCE_HELPER.relative_to(ROOT)),
@@ -585,19 +704,23 @@ def build_payload(
             },
             "artifacts": {
                 "zig_bin_sha256": file_sha256(args.zig_bin),
+                "rust_bin_sha256": file_sha256(args.rust_bin) if args.with_rust else None,
                 "ts_source_helper_sha256": file_sha256(TS_SOURCE_HELPER),
                 "ts_ir_helper_sha256": file_sha256(TS_IR_HELPER),
                 "ts_dist_sha256": path_sha256(TS_DIST),
             },
-            "recommended_invocation": shell_join([
-                sys.executable,
-                str((ROOT / "compilers" / "zig" / "scripts" / "benchmark_compare.py").relative_to(ROOT)),
-                args.mode,
-                "--iterations",
-                str(args.iterations),
-                "--warmup",
-                str(args.warmup),
-            ]),
+            "recommended_invocation": shell_join(
+                [
+                    sys.executable,
+                    str((ROOT / "compilers" / "zig" / "scripts" / "benchmark_compare.py").relative_to(ROOT)),
+                    args.mode,
+                    *(["--with-rust"] if args.with_rust else []),
+                    "--iterations",
+                    str(args.iterations),
+                    "--warmup",
+                    str(args.warmup),
+                ]
+            ),
         },
         "environment": collect_environment(args),
         "summary": summarize_overall(results),
@@ -629,7 +752,14 @@ def main() -> int:
     results: list[dict] = []
     for name in contracts:
         row = benchmark_contract_safe(
-            name, args.mode, args.zig_bin, args.node_bin, args.warmup, args.iterations, args.timeout_sec
+            name,
+            args.mode,
+            args.zig_bin,
+            args.node_bin,
+            args.rust_bin if args.with_rust else None,
+            args.warmup,
+            args.iterations,
+            args.timeout_sec,
         )
         results.append(row)
         if row.get("status") == "error" and not args.keep_going:

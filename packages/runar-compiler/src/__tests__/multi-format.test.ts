@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
+import { compile } from '../index.js';
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 
@@ -19,8 +20,8 @@ const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', '
 
 const FORMAT_EXTENSIONS = ['.runar.ts', '.runar.sol', '.runar.move'] as const;
 
-function readConformanceSource(testName: string, ext: string): string | null {
-  const path = join(CONFORMANCE_DIR, testName, `${testName}${ext}`);
+function readConformanceSource(testName: string, ext: string, baseName = testName): string | null {
+  const path = join(CONFORMANCE_DIR, testName, `${baseName}${ext}`);
   if (!existsSync(path)) return null;
   return readFileSync(path, 'utf-8');
 }
@@ -87,6 +88,15 @@ describe('Multi-format: parse() dispatch', () => {
     const source = readConformanceSource('basic-p2pkh', '.runar.rs');
     if (!source) return;
     const result = parse(source, 'basic-p2pkh.runar.rs');
+    expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+  });
+
+  it('dispatches .runar.zig to Zig parser', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
+    if (!source) return;
+    const result = parse(source, 'P2PKH.runar.zig');
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('P2PKH');
@@ -209,4 +219,44 @@ describe('Multi-format: stateful contract', () => {
       expect(hasMutable).toBe(true);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Zig conformance: parse and hex parity
+// ---------------------------------------------------------------------------
+
+describe('Multi-format: Zig conformance', () => {
+  it('parses basic-p2pkh from .runar.zig', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
+    if (!source) return;
+
+    const result = parse(source, 'P2PKH.runar.zig');
+    const errors = result.errors.filter(e => e.severity === 'error');
+
+    expect(errors).toEqual([]);
+    expect(result.contract).not.toBeNull();
+    expect(result.contract!.name).toBe('P2PKH');
+    expect(result.contract!.properties).toHaveLength(1);
+    expect(result.contract!.methods.map(method => method.name)).toContain('unlock');
+  });
+
+  it('compiles basic-p2pkh .runar.zig to the golden script hex', () => {
+    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
+    if (!source) return;
+
+    const expectedHex = readFileSync(
+      join(CONFORMANCE_DIR, 'basic-p2pkh', 'expected-script.hex'),
+      'utf-8',
+    ).trim().toLowerCase();
+
+    const result = compile(source, {
+      fileName: 'P2PKH.runar.zig',
+      disableConstantFolding: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.diagnostics.filter(diagnostic => diagnostic.severity === 'error')).toEqual([]);
+    expect(typeof result.scriptHex).toBe('string');
+    expect(result.scriptHex!.toLowerCase()).toBe(expectedHex);
+  });
 });

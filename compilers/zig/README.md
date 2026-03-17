@@ -1,6 +1,6 @@
 # Runar Zig Compiler
 
-The 5th implementation of the Runar Bitcoin Script compiler, written in Zig 0.15. Produces byte-identical Bitcoin Script to the TypeScript, Go, Rust, and Python compilers.
+A Zig 0.15 implementation of the Runar Bitcoin Script compiler. It produces byte-identical Bitcoin Script to the reference TypeScript compiler and the other maintained compiler implementations in this repository.
 
 ## Build
 
@@ -29,16 +29,17 @@ runar-zig --source <file> --disable-constant-folding
 
 ## Benchmarking
 
-The benchmark harness for Zig vs TypeScript comparison lives outside the compiler core so it can be iterated safely while correctness is still moving.
+Benchmark tooling for the Zig compiler lives outside the compiler core. The default harness compares Zig against the TypeScript implementation, and it can optionally run the Rust compiler on the same workloads for cross-implementation checks.
 
 Use the benchmark runner from repo root:
 
 ```bash
 python3 compilers/zig/scripts/benchmark_compare.py source
 python3 compilers/zig/scripts/benchmark_compare.py ir
+python3 compilers/zig/scripts/benchmark_compare.py source --with-rust
 ```
 
-For benchmark workflow details, prerequisites, JSON output, and reproducible command examples, see [benchmarks/README.md](/Users/satchmo/code/runar/compilers/zig/benchmarks/README.md).
+For workload definitions, prerequisites, JSON output, committed manifests, and reproducible command examples, see [benchmarks/README.md](/Users/satchmo/code/runar/compilers/zig/benchmarks/README.md).
 
 ## .runar.zig Syntax
 

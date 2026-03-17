@@ -1,20 +1,22 @@
-# Zig Benchmark Scaffolding
+# Zig Benchmark Harness
 
-This directory contains the isolated benchmark inputs for the Zig compiler work.
+This directory contains benchmark inputs and documentation for the Zig compiler benchmark harness.
 
-The harness is intentionally low-risk:
+The harness is isolated from the compiler implementation:
 
-- It does not touch `build.zig`, `src/**`, or `tests/**`.
-- It compares the Zig compiler against the TypeScript reference compiler using existing repo artifacts.
-- It keeps the default suites conservative so benchmark runs do not depend on still-failing conformance cases.
+- It does not modify `build.zig`, `src/**`, or `tests/**`.
+- It compares Zig against the TypeScript implementation using artifacts already present in the repository.
+- It can optionally include the Rust compiler on the same workloads.
+- Its default suites are limited to contracts that are suitable for parity-checked benchmarking.
 - It supports two modes:
-  - `source`: full source compile, `.runar.ts -> hex`
-  - `ir`: backend-only compile, `expected-ir.json -> hex`
+  - `source`: end-to-end source compilation, `.runar.ts -> hex`
+  - `ir`: backend-only compilation, `expected-ir.json -> hex`
 
 ## Files
 
 - `contracts-source.txt`: default contracts for full source benchmarks
-- `contracts-source-representative.txt`: larger parity-clean source suite for PR-ready representative numbers
+- `contracts-source-representative.txt`: larger parity-clean source suite for shareable benchmark summaries
+- `contracts-source-cross-impl.txt`: parity-clean source suite shared across Zig, Rust, and TypeScript
 - `contracts-ir.txt`: default contracts for backend-only benchmarks
 - [`../scripts/benchmark_compare.py`](/Users/satchmo/code/runar/compilers/zig/scripts/benchmark_compare.py): main benchmark runner
 - [`../scripts/ts_compile_source_hex.mjs`](/Users/satchmo/code/runar/compilers/zig/scripts/ts_compile_source_hex.mjs): TS full-source helper
@@ -22,15 +24,19 @@ The harness is intentionally low-risk:
 
 ## What It Benchmarks
 
-`source` mode compares:
+This harness uses the TypeScript implementation as the baseline. It reports `source` and `ir` separately, and it only computes aggregate speedups from parity-matched rows.
+
+`source` mode measures:
 
 - Zig: `runar-zig --source <file> --hex`
 - TypeScript: `runar-compiler` `compile(source, { fileName })`
+- Optional Rust: `runar-compiler-rust --source <file> --hex`
 
-`ir` mode compares:
+`ir` mode measures:
 
 - Zig: `runar-zig compile-ir <expected-ir.json> --hex`
 - TypeScript: `lowerToStack(anf)` + peephole + `emit(stack)`
+- Optional Rust: `runar-compiler-rust --ir <expected-ir.json> --hex`
 
 ## Prerequisites
 
@@ -54,6 +60,15 @@ Run the default full-source comparison suite:
 ```bash
 cd /Users/satchmo/code/runar
 python3 compilers/zig/scripts/benchmark_compare.py source
+```
+
+Run the shared Zig/Rust/TypeScript source suite:
+
+```bash
+cd /Users/satchmo/code/runar
+python3 compilers/zig/scripts/benchmark_compare.py source \
+  --with-rust \
+  --contracts-file compilers/zig/benchmarks/contracts-source-cross-impl.txt
 ```
 
 Run the default backend-only comparison suite:
@@ -105,6 +120,14 @@ Run the committed representative source suite:
 python3 compilers/zig/scripts/benchmark_compare.py source --contracts-file compilers/zig/benchmarks/contracts-source-representative.txt
 ```
 
+Run the committed cross-implementation source suite:
+
+```bash
+python3 compilers/zig/scripts/benchmark_compare.py source \
+  --with-rust \
+  --contracts-file compilers/zig/benchmarks/contracts-source-cross-impl.txt
+```
+
 Write machine-readable results:
 
 ```bash
@@ -117,7 +140,7 @@ Print only the suite summary:
 python3 compilers/zig/scripts/benchmark_compare.py source --summary-only
 ```
 
-Show the fully resolved Zig and TypeScript commands:
+Show the fully resolved benchmark commands:
 
 ```bash
 python3 compilers/zig/scripts/benchmark_compare.py source --show-commands
@@ -136,7 +159,7 @@ node compilers/zig/scripts/ts_compile_source_hex.mjs --help
 node compilers/zig/scripts/ts_compile_ir_hex.mjs --help
 ```
 
-The helper CLIs also accept a positional file path:
+The TypeScript helper CLIs also accept a positional file path:
 
 ```bash
 node compilers/zig/scripts/ts_compile_source_hex.mjs conformance/tests/basic-p2pkh/basic-p2pkh.runar.ts
@@ -157,7 +180,7 @@ python3 compilers/zig/scripts/benchmark_compare.py source \
   --json-out /tmp/runar-zig-source-basic-p2pkh.json
 ```
 
-For a broader sweep while correctness is still settling:
+For a broader exploratory sweep:
 
 ```bash
 cd /Users/satchmo/code/runar
@@ -172,7 +195,7 @@ python3 compilers/zig/scripts/benchmark_compare.py source \
 The Python runner now:
 
 - normalizes Zig and TypeScript hex before comparing
-- measures Zig and TypeScript in paired, alternating order to reduce run-order bias
+- measures participating compilers in alternating order to reduce run-order bias
 - prints a run header, a per-contract table, and an aggregate summary
 - reports `p90`/`p95` latency alongside mean timing so startup jitter is visible
 - reports per-contract errors without losing already collected results
@@ -181,15 +204,15 @@ The Python runner now:
 - supports `--summary-only` for CI logs or quick spot checks
 - supports `--show-commands` so the exact command pair for each contract is visible
 - stores per-sample timings, workload size (`input_bytes`), per-tool variability (`cv_pct`), and first-difference metadata for hex mismatches
-- records SHA-256 hashes for benchmark inputs, helper scripts, the Zig binary, and the TypeScript `dist` tree so runs can be compared against the same artifacts
+- records SHA-256 hashes for benchmark inputs, helper scripts, the benchmarked native binaries, and the TypeScript `dist` tree so runs can be compared against the same artifacts
 - rejects `ir` benchmark inputs whose numeric `load_const` values exceed JavaScript's safe integer range, rather than benchmarking them unsafely
 
 ## Notes
 
-- The runner verifies hex equality between Zig and TypeScript for each contract and reports mismatches.
-- The reported geomean speedup only includes parity-matched rows, and mismatched rows are shown as `n/a` in the speedup column. Do not make performance claims from mismatched contracts.
+- The runner verifies hex equality for each benchmarked implementation and reports mismatches.
+- Aggregate speedups only include parity-matched rows, and mismatched rows are shown as `n/a` in the speedup column. Do not make performance claims from mismatched contracts.
 - JSON output includes the git commit, dirty-state flag, host/platform details, Python version, Node version, Zig toolchain version, selected helper paths, contract-list hash, artifact hashes, and measurement order so runs can be compared later with less guesswork.
-- Use `--keep-going --allow-failures` while parity is still moving. Once correctness is green, the default strict exit behavior is the right CI-friendly mode.
+- Use `--keep-going --allow-failures` when collecting exploratory results from a suite that may still contain mismatches. For shareable or CI-facing results, use the default strict exit behavior.
 - Publish benchmark claims only from a committed contract manifest whose rows all parity-match.
 - Treat `source` and `ir` as separate workloads. Report them separately rather than blending them into one headline number.
 - Compare runs only on the same machine, same build mode, same Node/Zig toolchain versions, and the same hashed benchmark artifacts. These numbers are cold CLI subprocess timings, not in-process compiler microbenchmarks.
