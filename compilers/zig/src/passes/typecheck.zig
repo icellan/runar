@@ -657,10 +657,16 @@ const TypeChecker = struct {
         if (is_this) {
             if (std.mem.eql(u8, mc.method, "getStateScript")) return .byte_string;
             if (std.mem.eql(u8, mc.method, "addOutput")) {
+                if (self.contract.parent_class != .stateful_smart_contract) {
+                    self.addError("addOutput() is only available in StatefulSmartContract, not SmartContract", .{});
+                }
                 for (mc.args) |arg| _ = self.inferExprType(arg, env);
                 return .void;
             }
             if (std.mem.eql(u8, mc.method, "addRawOutput")) {
+                if (self.contract.parent_class != .stateful_smart_contract) {
+                    self.addError("addRawOutput() is only available in StatefulSmartContract, not SmartContract", .{});
+                }
                 for (mc.args) |arg| _ = self.inferExprType(arg, env);
                 return .void;
             }

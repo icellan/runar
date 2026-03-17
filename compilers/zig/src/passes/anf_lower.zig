@@ -924,6 +924,9 @@ fn lowerIncrementExpr(ctx: *LowerCtx, inc: *const types.IncrementExpr) LowerErro
             try ctx.emitNamed(name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
+            if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
+                return error.UnsupportedExpression; // cannot increment readonly property
+            }
             _ = try ctx.emit(.{ .update_prop = .{
                 .name = pa.property,
                 .value = result,
@@ -951,6 +954,9 @@ fn lowerDecrementExpr(ctx: *LowerCtx, dec: *const types.DecrementExpr) LowerErro
             try ctx.emitNamed(name, makeLoadConstString(ctx.allocator, try refString(ctx.allocator, result)));
         },
         .property_access => |pa| {
+            if (isReadonlyProperty(ctx.contract.properties, pa.property)) {
+                return error.UnsupportedExpression; // cannot decrement readonly property
+            }
             _ = try ctx.emit(.{ .update_prop = .{
                 .name = pa.property,
                 .value = result,
@@ -993,6 +999,17 @@ fn makeLoadConstString(allocator: Allocator, val: []const u8) ANFValue {
 /// Create an "@ref:NAME" string for local variable aliasing.
 fn refString(allocator: Allocator, name: []const u8) LowerError![]const u8 {
     return try std.fmt.allocPrint(allocator, "@ref:{s}", .{name});
+}
+
+// ============================================================================
+// Property helpers
+// ============================================================================
+
+fn isReadonlyProperty(properties: []const PropertyNode, name: []const u8) bool {
+    for (properties) |p| {
+        if (std.mem.eql(u8, p.name, name)) return p.readonly;
+    }
+    return false;
 }
 
 // ============================================================================

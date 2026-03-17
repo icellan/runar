@@ -224,11 +224,14 @@ const Parser = struct {
     current: Token,
     file_name: []const u8,
     errors: std.ArrayListUnmanaged([]const u8),
+    depth: u32,
+
+    const max_depth: u32 = 256;
 
     fn init(allocator: Allocator, source: []const u8, file_name: []const u8) Parser {
         var tokenizer = Tokenizer.init(source);
         const first = tokenizer.next();
-        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty };
+        return .{ .allocator = allocator, .tokenizer = tokenizer, .current = first, .file_name = file_name, .errors = .empty, .depth = 0 };
     }
 
     fn addError(self: *Parser, msg: []const u8) void {
@@ -634,7 +637,15 @@ const Parser = struct {
 
     // ---- Expressions ----
 
-    fn parseExpression(self: *Parser) ?Expression { return self.parseLogicalOr(); }
+    fn parseExpression(self: *Parser) ?Expression {
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_depth) {
+            self.addError("expression nesting depth exceeds maximum (256)");
+            return null;
+        }
+        return self.parseLogicalOr();
+    }
 
     fn parseLogicalOr(self: *Parser) ?Expression {
         var left = self.parseLogicalAnd() orelse return null;
