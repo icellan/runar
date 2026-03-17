@@ -187,6 +187,36 @@ RSpec.describe 'Runar::SDK types' do
         expect(artifact.code_separator_indices).to be_nil
       end
 
+      it 'defaults anf to nil when absent from the artifact' do
+        expect(artifact.anf).to be_nil
+      end
+
+      context 'with an anf field present' do
+        let(:anf_data) do
+          {
+            'contract' => 'Counter',
+            'methods' => [
+              {
+                'name' => 'increment',
+                'body' => [{ 'kind' => 'let', 'name' => 't0', 'value' => { 'kind' => 'add', 'left' => 'count', 'right' => 1 } }]
+              }
+            ]
+          }
+        end
+
+        subject(:artifact) { described_class.from_hash(MINIMAL_ARTIFACT_HASH.merge('anf' => anf_data)) }
+
+        it 'stores the anf hash' do
+          expect(artifact.anf).to eq(anf_data)
+        end
+
+        it 'preserves the anf structure without modification' do
+          expect(artifact.anf['contract']).to eq('Counter')
+          expect(artifact.anf['methods'].length).to eq(1)
+          expect(artifact.anf['methods'].first['name']).to eq('increment')
+        end
+      end
+
       context 'with a stateful contract hash' do
         let(:stateful_hash) do
           MINIMAL_ARTIFACT_HASH.merge(
@@ -223,6 +253,21 @@ RSpec.describe 'Runar::SDK types' do
         artifact = described_class.from_json(json)
         expect(artifact.contract_name).to eq('P2PKH')
         expect(artifact.abi.constructor_params.length).to eq(1)
+      end
+
+      it 'round-trips the anf field through JSON' do
+        require 'json'
+        anf_data = { 'contract' => 'P2PKH', 'methods' => [] }
+        json = JSON.generate(MINIMAL_ARTIFACT_HASH.merge('anf' => anf_data))
+        artifact = described_class.from_json(json)
+        expect(artifact.anf).to eq(anf_data)
+      end
+
+      it 'produces nil anf when the field is absent from JSON' do
+        require 'json'
+        json = JSON.generate(MINIMAL_ARTIFACT_HASH)
+        artifact = described_class.from_json(json)
+        expect(artifact.anf).to be_nil
       end
     end
   end

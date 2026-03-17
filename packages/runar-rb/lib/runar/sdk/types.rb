@@ -68,7 +68,8 @@ module Runar
     class RunarArtifact
       attr_reader :version, :compiler_version, :contract_name, :abi,
                   :script, :asm, :state_fields, :constructor_slots,
-                  :build_timestamp, :code_separator_index, :code_separator_indices
+                  :build_timestamp, :code_separator_index, :code_separator_indices,
+                  :anf
 
       def initialize(
         version: '',
@@ -81,19 +82,21 @@ module Runar
         constructor_slots: [],
         build_timestamp: '',
         code_separator_index: nil,
-        code_separator_indices: nil
+        code_separator_indices: nil,
+        anf: nil
       )
-        @version               = version
-        @compiler_version      = compiler_version
-        @contract_name         = contract_name
-        @abi                   = abi
-        @script                = script
-        @asm                   = asm
-        @state_fields          = state_fields
-        @constructor_slots     = constructor_slots
-        @build_timestamp       = build_timestamp
-        @code_separator_index  = code_separator_index
+        @version                = version
+        @compiler_version       = compiler_version
+        @contract_name          = contract_name
+        @abi                    = abi
+        @script                 = script
+        @asm                    = asm
+        @state_fields           = state_fields
+        @constructor_slots      = constructor_slots
+        @build_timestamp        = build_timestamp
+        @code_separator_index   = code_separator_index
         @code_separator_indices = code_separator_indices
+        @anf                    = anf
       end
 
       # Load an artifact from a JSON-parsed Hash (keys may be camelCase strings).
@@ -128,17 +131,18 @@ module Runar
         end
 
         new(
-          version:               hash.fetch('version', ''),
-          compiler_version:      hash.fetch('compilerVersion', ''),
-          contract_name:         hash.fetch('contractName', ''),
-          abi:                   ABI.new(constructor_params: ctor_params, methods: methods),
-          script:                hash.fetch('script', ''),
-          asm:                   hash.fetch('asm', ''),
-          state_fields:          state_fields,
-          constructor_slots:     constructor_slots,
-          build_timestamp:       hash.fetch('buildTimestamp', ''),
-          code_separator_index:  hash['codeSeparatorIndex'],
-          code_separator_indices: hash['codeSeparatorIndices']
+          version:                hash.fetch('version', ''),
+          compiler_version:       hash.fetch('compilerVersion', ''),
+          contract_name:          hash.fetch('contractName', ''),
+          abi:                    ABI.new(constructor_params: ctor_params, methods: methods),
+          script:                 hash.fetch('script', ''),
+          asm:                    hash.fetch('asm', ''),
+          state_fields:           state_fields,
+          constructor_slots:      constructor_slots,
+          build_timestamp:        hash.fetch('buildTimestamp', ''),
+          code_separator_index:   hash['codeSeparatorIndex'],
+          code_separator_indices: hash['codeSeparatorIndices'],
+          anf:                    hash['anf']
         )
       end
 
