@@ -14,19 +14,23 @@ pub const FunctionPatterns = struct {
         runar.assert(runar.checkSig(sig, self.owner));
     }
 
-    fn computeFee(amount: i64, feeBps: i64) i64 {
+    fn computeFee(self: *const FunctionPatterns, amount: i64, feeBps: i64) i64 {
+        _ = self;
         return runar.percentOf(amount, feeBps);
     }
 
-    fn scaleValue(value: i64, numerator: i64, denominator: i64) i64 {
+    fn scaleValue(self: *const FunctionPatterns, value: i64, numerator: i64, denominator: i64) i64 {
+        _ = self;
         return runar.mulDiv(value, numerator, denominator);
     }
 
-    fn clampValue(value: i64, lo: i64, hi: i64) i64 {
+    fn clampValue(self: *const FunctionPatterns, value: i64, lo: i64, hi: i64) i64 {
+        _ = self;
         return runar.clamp(value, lo, hi);
     }
 
-    fn roundDown(value: i64, step: i64) i64 {
+    fn roundDown(self: *const FunctionPatterns, value: i64, step: i64) i64 {
+        _ = self;
         const remainder = runar.safemod(value, step);
         return value - remainder;
     }
@@ -40,7 +44,7 @@ pub const FunctionPatterns = struct {
     pub fn withdraw(self: *FunctionPatterns, sig: runar.Sig, amount: i64, feeBps: i64) void {
         self.requireOwner(sig);
         runar.assert(amount > 0);
-        const fee = computeFee(amount, feeBps);
+        const fee = self.computeFee(amount, feeBps);
         const total = amount + fee;
         runar.assert(total <= self.balance);
         self.balance = self.balance - total;
@@ -48,12 +52,12 @@ pub const FunctionPatterns = struct {
 
     pub fn scale(self: *FunctionPatterns, sig: runar.Sig, numerator: i64, denominator: i64) void {
         self.requireOwner(sig);
-        self.balance = scaleValue(self.balance, numerator, denominator);
+        self.balance = self.scaleValue(self.balance, numerator, denominator);
     }
 
-    pub fn normalizeBalance(self: *FunctionPatterns, sig: runar.Sig, lo: i64, hi: i64, step: i64) void {
+    pub fn normalize(self: *FunctionPatterns, sig: runar.Sig, lo: i64, hi: i64, step: i64) void {
         self.requireOwner(sig);
-        const clamped = clampValue(self.balance, lo, hi);
-        self.balance = roundDown(clamped, step);
+        const clamped = self.clampValue(self.balance, lo, hi);
+        self.balance = self.roundDown(clamped, step);
     }
 };

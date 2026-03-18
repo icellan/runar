@@ -477,7 +477,7 @@ pub fn build(b: *std.Build) void {
 `);
 
   fs.writeFileSync(path.join(projectDir, 'build.zig.zon'), `.{
-    .name = .{"${projectName}"},
+    .name = "${projectName}",
     .version = .{ 0, 1, 0 },
     .fingerprint = 0x0000000000000000,
     .dependencies = .{

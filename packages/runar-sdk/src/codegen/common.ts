@@ -394,7 +394,7 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
     const sigParams: CodegenSigParam[] = sigParamsRaw.map((sp, i) => {
       const idx = sdkArgsRaw.findIndex((p) => p.name === sp.name);
       return {
-        name: lang === 'go' ? toPascalCase(sp.name) : (lang === 'rust' || lang === 'python') ? toSnakeCase(sp.name) : sp.name,
+        name: lang === 'go' ? toPascalCase(sp.name) : (lang === 'rust' || lang === 'python' || lang === 'zig') ? toSnakeCase(sp.name) : sp.name,
         argIndex: idx,
         isLast: i === sigParamsRaw.length - 1,
       };
