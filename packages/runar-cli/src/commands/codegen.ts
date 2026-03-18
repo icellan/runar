@@ -10,7 +10,7 @@ interface CodegenOptions {
   lang: string;
 }
 
-const SUPPORTED_LANGS = ['ts', 'go', 'rust', 'python'];
+const SUPPORTED_LANGS = ['ts', 'go', 'rust', 'python', 'zig'];
 
 /**
  * Simple glob expansion for artifact file patterns.
@@ -70,13 +70,14 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
   }
 
   // Dynamically import the codegen functions from runar-sdk
-  const { generateTypescript, generateGo, generateRust, generatePython } = await import('runar-sdk/codegen');
+  const { generateTypescript, generateGo, generateRust, generatePython, generateZig } = await import('runar-sdk/codegen');
 
   const generators: Record<string, { fn: (a: any) => string; ext: string; nameStyle: 'pascal' | 'snake' }> = {
     ts:     { fn: generateTypescript, ext: '.ts', nameStyle: 'pascal' },
     go:     { fn: generateGo,        ext: '.go', nameStyle: 'snake' },
     rust:   { fn: generateRust,      ext: '.rs', nameStyle: 'snake' },
     python: { fn: generatePython,    ext: '.py', nameStyle: 'snake' },
+    zig:    { fn: generateZig,       ext: '.zig', nameStyle: 'snake' },
   };
 
   const { fn: generate, ext, nameStyle } = generators[options.lang]!;
