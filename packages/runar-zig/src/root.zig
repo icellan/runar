@@ -4,6 +4,7 @@ pub const base = @import("base.zig");
 pub const builtins = @import("builtins.zig");
 pub const compile_check = @import("compile_check.zig");
 pub const test_keys = @import("test_keys.zig");
+pub const testing = @import("testing_helpers.zig");
 
 pub const Int = base.Int;
 pub const Bigint = builtins.SignedBigint;
@@ -93,4 +94,11 @@ pub const ecPointY = builtins.ecPointY;
 test "root exports compile helpers and fixtures" {
     try std.testing.expect(ALICE.pubKey.len != 0);
     try std.testing.expect(@TypeOf(compileCheckSource) == @TypeOf(compile_check.compileCheckSource));
+}
+
+test {
+    _ = @import("base.zig");
+    _ = @import("builtins.zig");
+    _ = @import("compile_check.zig");
+    _ = @import("testing_helpers.zig");
 }
