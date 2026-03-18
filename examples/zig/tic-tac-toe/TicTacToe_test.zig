@@ -45,13 +45,11 @@ test "tic tac toe cancelBeforeJoin validates the real payout output" {
     var runtime = runar.StatefulSmartContract.init(std.testing.allocator);
     defer runtime.deinit();
     const game = TicTacToe.init(runar.ALICE.pubKey, 100);
-    const payout = runar.cat(
-        runar.cat(runar.num2bin(100, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.ALICE.pubKey), "88ac"),
-    );
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
-        .outputHash = runar.hash256(payout),
-    }));
+    const payout = runar.testing.buildP2pkhOutput(runar.hash160(runar.ALICE.pubKey), 100);
+    defer std.heap.page_allocator.free(payout);
+    const preimage = runar.testing.mockPreimageForOutputs(&.{payout});
+    defer std.heap.page_allocator.free(preimage);
+    const ctx = try runar.StatefulContext.init(&runtime, preimage);
 
     game.cancelBeforeJoin(ctx, runar.signTestMessage(runar.ALICE), runar.hash160(runar.BOB.pubKey), 0);
 }
@@ -67,17 +65,13 @@ test "tic tac toe cancel validates the real dual-payout output" {
     var game = TicTacToe.init(runar.ALICE.pubKey, 100);
     game.join(runar.BOB.pubKey, runar.signTestMessage(runar.BOB));
 
-    const out1 = runar.cat(
-        runar.cat(runar.num2bin(100, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.ALICE.pubKey), "88ac"),
-    );
-    const out2 = runar.cat(
-        runar.cat(runar.num2bin(100, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.BOB.pubKey), "88ac"),
-    );
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
-        .outputHash = runar.hash256(runar.cat(out1, out2)),
-    }));
+    const out1 = runar.testing.buildP2pkhOutput(runar.hash160(runar.ALICE.pubKey), 100);
+    const out2 = runar.testing.buildP2pkhOutput(runar.hash160(runar.BOB.pubKey), 100);
+    defer std.heap.page_allocator.free(out1);
+    defer std.heap.page_allocator.free(out2);
+    const preimage = runar.testing.mockPreimageForOutputs(&.{ out1, out2 });
+    defer std.heap.page_allocator.free(preimage);
+    const ctx = try runar.StatefulContext.init(&runtime, preimage);
 
     game.cancel(
         ctx,
@@ -109,13 +103,11 @@ test "tic tac toe moveAndWin validates the real winner-take-all output" {
         .status = 1,
     };
 
-    const payout = runar.cat(
-        runar.cat(runar.num2bin(200, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.ALICE.pubKey), "88ac"),
-    );
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
-        .outputHash = runar.hash256(payout),
-    }));
+    const payout = runar.testing.buildP2pkhOutput(runar.hash160(runar.ALICE.pubKey), 200);
+    defer std.heap.page_allocator.free(payout);
+    const preimage = runar.testing.mockPreimageForOutputs(&.{payout});
+    defer std.heap.page_allocator.free(preimage);
+    const ctx = try runar.StatefulContext.init(&runtime, preimage);
 
     game.moveAndWin(
         ctx,
@@ -151,17 +143,13 @@ test "tic tac toe moveAndTie validates the real split payout output" {
         .status = 1,
     };
 
-    const out1 = runar.cat(
-        runar.cat(runar.num2bin(100, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.ALICE.pubKey), "88ac"),
-    );
-    const out2 = runar.cat(
-        runar.cat(runar.num2bin(100, 8), "1976a914"),
-        runar.cat(runar.hash160(runar.BOB.pubKey), "88ac"),
-    );
-    const ctx = try runar.StatefulContext.init(&runtime, runar.mockPreimage(.{
-        .outputHash = runar.hash256(runar.cat(out1, out2)),
-    }));
+    const out1 = runar.testing.buildP2pkhOutput(runar.hash160(runar.ALICE.pubKey), 100);
+    const out2 = runar.testing.buildP2pkhOutput(runar.hash160(runar.BOB.pubKey), 100);
+    defer std.heap.page_allocator.free(out1);
+    defer std.heap.page_allocator.free(out2);
+    const preimage = runar.testing.mockPreimageForOutputs(&.{ out1, out2 });
+    defer std.heap.page_allocator.free(preimage);
+    const ctx = try runar.StatefulContext.init(&runtime, preimage);
 
     game.moveAndTie(
         ctx,

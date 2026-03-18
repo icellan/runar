@@ -9,6 +9,16 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const bsvz_crypto_module = b.createModule(.{
+        .root_source_file = b.path("../../../bsvz/src/crypto/lib.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const bsvz_hex_module = b.createModule(.{
+        .root_source_file = b.path("../../../bsvz/src/primitives/hex.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     const runar_module = b.createModule(.{
         .root_source_file = b.path("../../packages/runar-zig/src/root.zig"),
@@ -16,6 +26,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     runar_module.addImport("runar_frontend", frontend_module);
+    runar_module.addImport("bsvz_crypto", bsvz_crypto_module);
+    runar_module.addImport("bsvz_hex", bsvz_hex_module);
 
     const assert_probe = b.addExecutable(.{
         .name = "assert_probe",

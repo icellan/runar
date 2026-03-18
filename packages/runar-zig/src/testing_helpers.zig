@@ -1,5 +1,6 @@
 const std = @import("std");
 const builtins = @import("builtins.zig");
+const hex = @import("hex.zig");
 
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
@@ -7,6 +8,10 @@ pub const RabinProof = struct {
     sig: []const u8,
     padding: []const u8,
 };
+
+pub fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    return hex.decodeAlloc(allocator, text);
+}
 
 pub const rabin_test_key_n = [_]u8{
     0x95, 0x0b, 0x36, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -53,6 +58,31 @@ pub const wots_w = 16;
 pub const wots_len1 = 64;
 pub const wots_len2 = 3;
 pub const wots_len = wots_len1 + wots_len2;
+
+pub fn buildP2pkhOutput(recipient_pkh: []const u8, satoshis: i64) []const u8 {
+    const amount_bytes = builtins.num2bin(satoshis, 8);
+    defer std.heap.page_allocator.free(@constCast(amount_bytes));
+
+    const script_prefix = builtins.cat("1976a914", recipient_pkh);
+    defer std.heap.page_allocator.free(@constCast(script_prefix));
+    const locking_script = builtins.cat(script_prefix, "88ac");
+    defer std.heap.page_allocator.free(@constCast(locking_script));
+
+    return builtins.cat(amount_bytes, locking_script);
+}
+
+pub fn mockPreimageForOutputs(outputs: []const []const u8) []const u8 {
+    var all_outputs = std.ArrayList(u8){};
+    defer all_outputs.deinit(std.heap.page_allocator);
+
+    for (outputs) |output| {
+        all_outputs.appendSlice(std.heap.page_allocator, output) catch @panic("OOM");
+    }
+
+    const output_hash = builtins.hash256(all_outputs.items);
+    defer std.heap.page_allocator.free(@constCast(output_hash));
+    return builtins.mockPreimage(.{ .outputHash = output_hash });
+}
 
 fn wotsF(pub_seed: []const u8, chain_idx: usize, step_idx: usize, msg: []const u8) [32]u8 {
     var input: [wots_n + 2 + wots_n]u8 = undefined;
@@ -159,4 +189,22 @@ test "oracle price Rabin fixtures verify against the shared test modulus" {
 
     try std.testing.expect(builtins.verifyRabinSig(message, proof.sig, proof.padding, &rabin_test_key_n));
     try std.testing.expect(!builtins.verifyRabinSig("wrong-message", proof.sig, proof.padding, &rabin_test_key_n));
+}
+
+test "P2PKH output and mock preimage helpers compose expected output hashes" {
+    const test_keys = @import("test_keys.zig");
+    const out1 = buildP2pkhOutput(test_keys.ALICE.pubKeyHash, 100);
+    const out2 = buildP2pkhOutput(test_keys.BOB.pubKeyHash, 200);
+    defer std.heap.page_allocator.free(out1);
+    defer std.heap.page_allocator.free(out2);
+
+    const combined = builtins.cat(out1, out2);
+    defer std.heap.page_allocator.free(@constCast(combined));
+    const expected_hash = builtins.hash256(combined);
+    defer std.heap.page_allocator.free(@constCast(expected_hash));
+
+    const preimage = mockPreimageForOutputs(&.{ out1, out2 });
+    defer std.heap.page_allocator.free(preimage);
+
+    try std.testing.expectEqualSlices(u8, expected_hash, builtins.extractOutputHash(preimage));
 }

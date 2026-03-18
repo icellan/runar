@@ -3,6 +3,7 @@ const std = @import("std");
 pub const base = @import("base.zig");
 pub const builtins = @import("builtins.zig");
 pub const compile_check = @import("compile_check.zig");
+pub const hex = @import("hex.zig");
 pub const test_keys = @import("test_keys.zig");
 pub const testing = @import("testing_helpers.zig");
 
@@ -102,6 +103,6 @@ test {
     _ = @import("base.zig");
     _ = @import("builtins.zig");
     _ = @import("compile_check.zig");
+    _ = @import("hex.zig");
     _ = @import("testing_helpers.zig");
-    _ = @import("script_integration_test.zig");
 }

@@ -3,12 +3,6 @@ const root = @import("../examples_test.zig");
 const runar = @import("runar");
 const SchnorrZKP = @import("SchnorrZKP.runar.zig").SchnorrZKP;
 
-fn decodeHexAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, hex.len / 2);
-    _ = try std.fmt.hexToBytes(out, hex);
-    return out;
-}
-
 fn contractPath(comptime basename: []const u8) []const u8 {
     return "schnorr-zkp/" ++ basename;
 }
@@ -43,13 +37,13 @@ test "SchnorrZKP verifies a valid Fiat-Shamir proof with wide bigint response" {
     const s_le_hex =
         "eddbfe2cedf6f857ae5530a2dc2ee18f3f9562076f6269e09da736fee207ec5f";
 
-    const pub_key = try decodeHexAlloc(std.testing.allocator, pub_key_hex);
+    const pub_key = try runar.testing.decodeHexAlloc(std.testing.allocator, pub_key_hex);
     defer std.testing.allocator.free(pub_key);
 
-    const r_point = try decodeHexAlloc(std.testing.allocator, r_point_hex);
+    const r_point = try runar.testing.decodeHexAlloc(std.testing.allocator, r_point_hex);
     defer std.testing.allocator.free(r_point);
 
-    const s_bytes = try decodeHexAlloc(std.testing.allocator, s_le_hex);
+    const s_bytes = try runar.testing.decodeHexAlloc(std.testing.allocator, s_le_hex);
     defer std.testing.allocator.free(s_bytes);
 
     const contract = SchnorrZKP.init(pub_key);

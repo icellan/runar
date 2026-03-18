@@ -14,12 +14,3 @@ fn decodeHexFixed(comptime N: usize, comptime hex: []const u8) [N]u8 {
 
 pub const slhdsa_pub_key = decodeHexFixed(32, slhdsa_pub_key_hex);
 pub const slhdsa_pub_key_hash = decodeHexFixed(20, slhdsa_pub_key_hash_hex);
-
-pub fn decodeHexAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
-    if ((hex.len & 1) != 0) return error.InvalidHexLength;
-
-    const out = try allocator.alloc(u8, hex.len / 2);
-    errdefer allocator.free(out);
-    _ = try std.fmt.hexToBytes(out, hex);
-    return out;
-}

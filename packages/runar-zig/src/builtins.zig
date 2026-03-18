@@ -1,9 +1,10 @@
 const std = @import("std");
+const bsvz_crypto = @import("bsvz_crypto");
 const base = @import("base.zig");
+const hex = @import("hex.zig");
 const test_keys = @import("test_keys.zig");
 
 const Sha256Hasher = std.crypto.hash.sha2.Sha256;
-const Secp256k1Ecdsa = std.crypto.sign.ecdsa.EcdsaSecp256k1Sha256;
 
 const mock_preimage_magic = "RNRP";
 const test_message = "runar-test-message-v1";
@@ -36,54 +37,6 @@ const sha256_k = [_]u32{
     0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
     0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-};
-
-const ripemd160_r = [_]u8{
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-    7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
-    3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12,
-    1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
-    4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13,
-};
-
-const ripemd160_rp = [_]u8{
-    5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12,
-    6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
-    15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13,
-    8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
-    12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11,
-};
-
-const ripemd160_s = [_]u5{
-    11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8,
-    7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
-    11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5,
-    11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
-    9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6,
-};
-
-const ripemd160_sp = [_]u5{
-    8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6,
-    9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
-    9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5,
-    15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
-    8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11,
-};
-
-const ripemd160_k = [_]u32{
-    0x00000000,
-    0x5a827999,
-    0x6ed9eba1,
-    0x8f1bbcdc,
-    0xa953fd4e,
-};
-
-const ripemd160_kp = [_]u32{
-    0x50a28be6,
-    0x5c4dd124,
-    0x6d703ef3,
-    0x7a6d76e9,
-    0x00000000,
 };
 
 const blake3_iv_words = [_]u32{
@@ -146,27 +99,23 @@ pub fn assert(condition: bool) void {
 }
 
 pub fn sha256(data: base.ByteString) base.Sha256 {
-    var out: [32]u8 = undefined;
-    Sha256Hasher.hash(data, &out, .{});
-    return dupeBytes(&out);
+    const digest = bsvz_crypto.hash.sha256(data);
+    return dupeBytes(&digest.bytes);
 }
 
 pub fn ripemd160(data: base.ByteString) base.Ripemd160 {
-    var out: [20]u8 = undefined;
-    ripemd160Hash(&out, data);
-    return dupeBytes(&out);
+    const digest = bsvz_crypto.hash.ripemd160(data);
+    return dupeBytes(&digest.bytes);
 }
 
 pub fn hash160(data: base.ByteString) base.Addr {
-    const first = sha256(data);
-    defer freeIfOwned(first);
-    return ripemd160(first);
+    const digest = bsvz_crypto.hash.hash160(data);
+    return dupeBytes(&digest.bytes);
 }
 
 pub fn hash256(data: base.ByteString) base.Sha256 {
-    const first = sha256(data);
-    defer freeIfOwned(first);
-    return sha256(first);
+    const digest = bsvz_crypto.hash.hash256(data);
+    return dupeBytes(&digest.bytes);
 }
 
 pub fn bytesEq(left: base.ByteString, right: base.ByteString) bool {
@@ -176,12 +125,11 @@ pub fn bytesEq(left: base.ByteString, right: base.ByteString) bool {
 pub fn checkSig(sig: base.Sig, pub_key: base.PubKey) bool {
     if (sig.len < 8 or pub_key.len == 0) return false;
 
-    const public_key = Secp256k1Ecdsa.PublicKey.fromSec1(pub_key) catch return false;
+    const public_key = bsvz_crypto.PublicKey.fromSec1(pub_key) catch return false;
     const der_sig = stripSigHashByte(sig);
-    const parsed_sig = Secp256k1Ecdsa.Signature.fromDer(der_sig) catch return false;
+    const parsed_sig = bsvz_crypto.DerSignature.fromDer(der_sig) catch return false;
 
-    parsed_sig.verify(test_message, public_key) catch return false;
-    return true;
+    return public_key.verifySha256(test_message, parsed_sig) catch false;
 }
 
 pub fn checkMultiSig(sigs: []const base.Sig, pub_keys: []const base.PubKey) bool {
@@ -208,10 +156,9 @@ pub fn checkPreimage(preimage: base.SigHashPreimage) bool {
 }
 
 pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
-    const secret_key = parseFixtureSecretKey(pair.privKey) catch @panic("invalid fixture private key");
-    const key_pair = Secp256k1Ecdsa.KeyPair.fromSecretKey(secret_key) catch @panic("invalid fixture private key");
-    const derived_pub_key = key_pair.public_key.toCompressedSec1();
-    if (!std.mem.eql(u8, &derived_pub_key, pair.pubKey)) {
+    const private_key = parseFixturePrivateKey(pair.privKey) catch @panic("invalid fixture private key");
+    const derived_pub_key = private_key.publicKey() catch @panic("invalid fixture private key");
+    if (!std.mem.eql(u8, &derived_pub_key.bytes, pair.pubKey)) {
         @panic("fixture private/public key mismatch");
     }
 
@@ -219,9 +166,8 @@ pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
         return dupeBytes(sig_bytes);
     }
 
-    const sig = key_pair.sign(test_message, null) catch @panic("unable to sign fixture test message");
-    var der_buf: [Secp256k1Ecdsa.Signature.der_encoded_length_max]u8 = undefined;
-    return dupeBytes(sig.toDer(&der_buf));
+    const sig = private_key.signSha256(test_message) catch @panic("unable to sign fixture test message");
+    return dupeBytes(sig.asSlice());
 }
 
 pub fn mockPreimage(parts: MockPreimageParts) base.SigHashPreimage {
@@ -946,10 +892,10 @@ pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
     return dupeBytes(&compressed);
 }
 
-fn parseFixtureSecretKey(priv_key_hex: []const u8) !Secp256k1Ecdsa.SecretKey {
-    var secret_key_bytes: [Secp256k1Ecdsa.SecretKey.encoded_length]u8 = undefined;
+fn parseFixturePrivateKey(priv_key_hex: []const u8) !bsvz_crypto.PrivateKey {
+    var secret_key_bytes: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&secret_key_bytes, priv_key_hex);
-    return Secp256k1Ecdsa.SecretKey.fromBytes(secret_key_bytes);
+    return bsvz_crypto.PrivateKey.fromBytes(secret_key_bytes);
 }
 
 fn lookupCanonicalFixtureSig(pair: test_keys.TestKeyPair) ?[]const u8 {
@@ -1127,91 +1073,6 @@ fn sha256CompressBlock(out: *[32]u8, state_bytes: []const u8, block_bytes: []con
     for (0..8) |index| {
         std.mem.writeInt(u32, out[index * 4 ..][0..4], h[index], .big);
     }
-}
-
-fn ripemd160Hash(out: *[20]u8, data: []const u8) void {
-    const total_len = ((data.len + 9 + 63) / 64) * 64;
-    var padded = std.heap.page_allocator.alloc(u8, total_len) catch @panic("OOM");
-    defer std.heap.page_allocator.free(padded);
-
-    @memset(padded, 0);
-    @memcpy(padded[0..data.len], data);
-    padded[data.len] = 0x80;
-    std.mem.writeInt(u64, padded[total_len - 8 .. total_len][0..8], @as(u64, @intCast(data.len)) * 8, .little);
-
-    var h0: u32 = 0x67452301;
-    var h1: u32 = 0xefcdab89;
-    var h2: u32 = 0x98badcfe;
-    var h3: u32 = 0x10325476;
-    var h4: u32 = 0xc3d2e1f0;
-
-    for (0..total_len / 64) |block_index| {
-        const block = padded[block_index * 64 ..][0..64];
-        var x: [16]u32 = undefined;
-        for (0..16) |word_index| {
-            x[word_index] = std.mem.readInt(u32, block[word_index * 4 ..][0..4], .little);
-        }
-
-        var al = h0;
-        var bl = h1;
-        var cl = h2;
-        var dl = h3;
-        var el = h4;
-        var ar = h0;
-        var br = h1;
-        var cr = h2;
-        var dr = h3;
-        var er = h4;
-
-        for (0..80) |step| {
-            const round = step / 16;
-
-            const tl = std.math.rotl(
-                u32,
-                al +% ripemd160F(step, bl, cl, dl) +% x[ripemd160_r[step]] +% ripemd160_k[round],
-                ripemd160_s[step],
-            ) +% el;
-            al = el;
-            el = dl;
-            dl = std.math.rotl(u32, cl, 10);
-            cl = bl;
-            bl = tl;
-
-            const tr = std.math.rotl(
-                u32,
-                ar +% ripemd160F(79 - step, br, cr, dr) +% x[ripemd160_rp[step]] +% ripemd160_kp[round],
-                ripemd160_sp[step],
-            ) +% er;
-            ar = er;
-            er = dr;
-            dr = std.math.rotl(u32, cr, 10);
-            cr = br;
-            br = tr;
-        }
-
-        const t = h1 +% cl +% dr;
-        h1 = h2 +% dl +% er;
-        h2 = h3 +% el +% ar;
-        h3 = h4 +% al +% br;
-        h4 = h0 +% bl +% cr;
-        h0 = t;
-    }
-
-    std.mem.writeInt(u32, out[0..4], h0, .little);
-    std.mem.writeInt(u32, out[4..8], h1, .little);
-    std.mem.writeInt(u32, out[8..12], h2, .little);
-    std.mem.writeInt(u32, out[12..16], h3, .little);
-    std.mem.writeInt(u32, out[16..20], h4, .little);
-}
-
-fn ripemd160F(step: usize, x: u32, y: u32, z: u32) u32 {
-    return switch (step / 16) {
-        0 => x ^ y ^ z,
-        1 => (x & y) | (~x & z),
-        2 => (x | ~y) ^ z,
-        3 => (x & z) | (y & ~z),
-        else => x ^ (y | ~z),
-    };
 }
 
 fn blake3Round(state: *[16]u32, msg: *const [16]u32) void {
@@ -1742,10 +1603,9 @@ test "fixture private keys derive the published compressed pubkeys" {
     };
 
     for (fixtures) |fixture| {
-        const secret_key = try parseFixtureSecretKey(fixture.privKey);
-        const key_pair = try Secp256k1Ecdsa.KeyPair.fromSecretKey(secret_key);
-        const derived_pub_key = key_pair.public_key.toCompressedSec1();
-        try std.testing.expectEqualSlices(u8, fixture.pubKey, &derived_pub_key);
+        const private_key = try parseFixturePrivateKey(fixture.privKey);
+        const derived_pub_key = try private_key.publicKey();
+        try std.testing.expectEqualSlices(u8, fixture.pubKey, &derived_pub_key.bytes);
     }
 }
 
@@ -1996,12 +1856,6 @@ test "verifyRabinSig accepts a trivial valid signature construction" {
     try std.testing.expect(!verifyRabinSig("wrong-message", &[_]u8{0x00}, padding, &modulus));
 }
 
-fn decodeHexAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
-    const out = try allocator.alloc(u8, hex.len / 2);
-    _ = try std.fmt.hexToBytes(out, hex);
-    return out;
-}
-
 test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects tampering" {
     const pk_hex =
         "00000000000000000000000000000000b618cb38f7f785488c9768f3a2972baf";
@@ -2172,10 +2026,10 @@ test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects 
         "0a42c4b6e328d78a1bc2a849cd9a4b91eee05c9b14d1867b1ce16086ea49917744029d9596be4f1a97ec2cf407c9851a" ++
         "177d08f2f21f0a6e63300c9611be8c2b52d4919a4325cddf0864b0046b976349";
 
-    const pk = try decodeHexAlloc(std.testing.allocator, pk_hex);
+    const pk = try hex.decodeAlloc(std.testing.allocator, pk_hex);
     defer std.testing.allocator.free(pk);
 
-    const sig = try decodeHexAlloc(std.testing.allocator, sig_hex);
+    const sig = try hex.decodeAlloc(std.testing.allocator, sig_hex);
     defer std.testing.allocator.free(sig);
 
     try std.testing.expect(verifySLHDSA_SHA2_128s("hello SLH-DSA", sig, pk));

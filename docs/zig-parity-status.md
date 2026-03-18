@@ -76,6 +76,10 @@ Legend:
 - Added a real positive direct-contract path for `post-quantum-wallet` using deterministic WOTS fixtures in the Zig test itself.
 - Added explicit test-only continuation serialization in `packages/runar-zig`, so recorded stateful outputs now carry deterministic `stateScript` and `continuationScript` bytes instead of only tuple snapshots.
 - Tightened the `token-ft` and `token-nft` Zig tests so they assert those serialized continuation bytes, not just the raw tuple values.
+- Switched the top-level `sha256` / `ripemd160` / `hash160` / `hash256` runtime wrappers in `packages/runar-zig` over to `bsvz` and now route `checkSig` / fixture signing through `bsvz`'s `PrivateKey` / `PublicKey` / `DerSignature` crypto surface too.
+- Narrowed the `bsvz` dependency boundary to its crypto module. The broader `bsvz` script/sighash surface looks promising, but it is not yet a live dependency for `runar-zig` because the sibling repo is still locally unstable there and its local acceptance lane is not fully green yet.
+- Added a tiny internal `runar-zig` hex helper backed by `bsvz` primitives and migrated the Zig probes/tests onto that shared path instead of keeping separate local alloc-decoding helpers in each file.
+- Added shared Zig testing helpers for canonical P2PKH outputs and output-hash preimages, then migrated `covenant-vault` and the payout/output-hash half of `tic-tac-toe` to use them instead of hand-assembling those bytes inline.
 - Restored `examples/zig/assert_probe.zig` as a real subprocess probe runner and got the full `examples/zig` lane green again on a fresh cache.
 - Prepared deterministic SPHINCS public-key and signature fixtures from the TypeScript reference implementation and wired them into a real positive Zig test.
 - The remaining direct-execution blockers are now clearer:
