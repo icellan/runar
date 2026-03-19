@@ -20,8 +20,7 @@ test "compile-check ECDemo.runar.zig" {
 test "ECDemo init stores the real point" {
     const point = runar.ecMulGen(3);
     const contract = ECDemo.init(point);
-    try std.testing.expectEqual(runar.ecPointX(point), runar.ecPointX(contract.pt));
-    try std.testing.expectEqual(runar.ecPointY(point), runar.ecPointY(contract.pt));
+    try std.testing.expectEqualSlices(u8, runar.ecEncodeCompressed(point), runar.ecEncodeCompressed(contract.pt));
 }
 
 test "ECDemo real contract covers the EC helper surface" {

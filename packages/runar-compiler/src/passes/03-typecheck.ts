@@ -141,6 +141,7 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractOutputs',       { params: ['SigHashPreimage'], returnType: 'Sha256' }],
   ['extractLocktime',      { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractSigHashType',   { params: ['SigHashPreimage'], returnType: 'bigint' }],
+  ['buildChangeOutput',    { params: ['ByteString', 'bigint'], returnType: 'ByteString' }],
 ]);
 
 // ---------------------------------------------------------------------------

@@ -1,17 +1,12 @@
 const std = @import("std");
+const bsvz = @import("bsvz");
 const builtins = @import("builtins.zig");
-const hex = @import("hex.zig");
-
-const Sha256 = std.crypto.hash.sha2.Sha256;
+const wots = @import("wots_helpers.zig");
 
 pub const RabinProof = struct {
     sig: []const u8,
     padding: []const u8,
 };
-
-pub fn decodeHexAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
-    return hex.decodeAlloc(allocator, text);
-}
 
 pub const rabin_test_key_n = [_]u8{
     0x95, 0x0b, 0x36, 0xf0, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -53,119 +48,65 @@ pub fn oraclePriceProof(price: i64) ?RabinProof {
     };
 }
 
-pub const wots_n = 32;
-pub const wots_w = 16;
-pub const wots_len1 = 64;
-pub const wots_len2 = 3;
-pub const wots_len = wots_len1 + wots_len2;
+pub const wots_n = wots.wots_n;
+pub const wots_w = wots.wots_w;
+pub const wots_len1 = wots.wots_len1;
+pub const wots_len2 = wots.wots_len2;
+pub const wots_len = wots.wots_len;
+pub const wotsPublicKeyFromSeed = wots.publicKeyFromSeed;
+pub const wotsSignDeterministic = wots.signDeterministic;
 
 pub fn buildP2pkhOutput(recipient_pkh: []const u8, satoshis: i64) []const u8 {
-    const amount_bytes = builtins.num2bin(satoshis, 8);
-    defer std.heap.page_allocator.free(@constCast(amount_bytes));
-
-    const script_prefix = builtins.cat("1976a914", recipient_pkh);
-    defer std.heap.page_allocator.free(@constCast(script_prefix));
-    const locking_script = builtins.cat(script_prefix, "88ac");
-    defer std.heap.page_allocator.free(@constCast(locking_script));
-
-    return builtins.cat(amount_bytes, locking_script);
+    return builtins.buildChangeOutput(recipient_pkh, satoshis);
 }
 
 pub fn mockPreimageForOutputs(outputs: []const []const u8) []const u8 {
-    var all_outputs = std.ArrayList(u8){};
-    defer all_outputs.deinit(std.heap.page_allocator);
-
-    for (outputs) |output| {
-        all_outputs.appendSlice(std.heap.page_allocator, output) catch @panic("OOM");
+    const output_views = parseSerializedOutputs(std.heap.page_allocator, outputs) catch @panic("invalid serialized output");
+    defer {
+        for (output_views) |output| std.heap.page_allocator.free(output.locking_script.bytes);
+        std.heap.page_allocator.free(output_views);
     }
 
-    const output_hash = builtins.hash256(all_outputs.items);
-    defer std.heap.page_allocator.free(@constCast(output_hash));
-    return builtins.mockPreimage(.{ .outputHash = output_hash });
+    const output_hash = bsvz.transaction.Output.hashAll(std.heap.page_allocator, output_views) catch @panic("failed to hash outputs");
+    return builtins.mockPreimage(.{ .outputHash = output_hash.bytes[0..] });
 }
 
-fn wotsF(pub_seed: []const u8, chain_idx: usize, step_idx: usize, msg: []const u8) [32]u8 {
-    var input: [wots_n + 2 + wots_n]u8 = undefined;
-    @memcpy(input[0..wots_n], pub_seed);
-    input[wots_n] = @truncate(chain_idx);
-    input[wots_n + 1] = @truncate(step_idx);
-    @memcpy(input[wots_n + 2 ..], msg);
-
-    var out: [32]u8 = undefined;
-    Sha256.hash(&input, &out, .{});
-    return out;
-}
-
-fn wotsChain(x: []const u8, start_step: usize, steps: usize, pub_seed: []const u8, chain_idx: usize) [32]u8 {
-    var current: [32]u8 = undefined;
-    @memcpy(&current, x[0..wots_n]);
-    var j = start_step;
-    while (j < start_step + steps) : (j += 1) {
-        current = wotsF(pub_seed, chain_idx, j, &current);
-    }
-    return current;
-}
-
-fn wotsAllDigits(msg_hash: *const [32]u8) [wots_len]usize {
-    var digits: [wots_len]usize = undefined;
-    var checksum: usize = 0;
-    for (msg_hash, 0..) |byte, index| {
-        const high = (byte >> 4) & 0x0f;
-        const low = byte & 0x0f;
-        digits[index * 2] = high;
-        digits[index * 2 + 1] = low;
-        checksum += (wots_w - 1) - high;
-        checksum += (wots_w - 1) - low;
-    }
-    var remaining = checksum;
-    var i: usize = wots_len;
-    while (i > wots_len1) {
-        i -= 1;
-        digits[i] = remaining % wots_w;
-        remaining /= wots_w;
-    }
-    return digits;
-}
-
-fn wotsSecretKeyElement(seed: []const u8, index: usize) [32]u8 {
-    var input: [wots_n + 4]u8 = undefined;
-    @memcpy(input[0..wots_n], seed);
-    std.mem.writeInt(u32, input[wots_n .. wots_n + 4], @intCast(index), .big);
-
-    var out: [32]u8 = undefined;
-    Sha256.hash(&input, &out, .{});
-    return out;
-}
-
-pub fn wotsPublicKeyFromSeed(seed: []const u8, pub_seed: []const u8) [64]u8 {
-    var endpoints: [wots_len * wots_n]u8 = undefined;
-    for (0..wots_len) |i| {
-        const sk_element = wotsSecretKeyElement(seed, i);
-        const endpoint = wotsChain(&sk_element, 0, wots_w - 1, pub_seed, i);
-        @memcpy(endpoints[i * wots_n ..][0..wots_n], &endpoint);
+fn parseSerializedOutputs(
+    allocator: std.mem.Allocator,
+    outputs: []const []const u8,
+) ![]bsvz.transaction.Output {
+    const parsed = try allocator.alloc(bsvz.transaction.Output, outputs.len);
+    errdefer {
+        for (parsed[0..outputs.len]) |output| {
+            if (output.locking_script.bytes.len != 0) allocator.free(output.locking_script.bytes);
+        }
+        allocator.free(parsed);
     }
 
-    var root_hash: [32]u8 = undefined;
-    Sha256.hash(&endpoints, &root_hash, .{});
+    @memset(parsed, .{
+        .satoshis = 0,
+        .locking_script = bsvz.script.Script.init(&.{}),
+    });
 
-    var out: [64]u8 = undefined;
-    @memcpy(out[0..32], pub_seed);
-    @memcpy(out[32..64], &root_hash);
-    return out;
+    for (outputs, 0..) |output_bytes, index| {
+        parsed[index] = try parseSerializedOutput(allocator, output_bytes);
+    }
+
+    return parsed;
 }
 
-pub fn wotsSignDeterministic(message: []const u8, seed: []const u8, pub_seed: []const u8) [wots_len * wots_n]u8 {
-    var msg_hash: [32]u8 = undefined;
-    Sha256.hash(message, &msg_hash, .{});
-    const digits = wotsAllDigits(&msg_hash);
+fn parseSerializedOutput(
+    allocator: std.mem.Allocator,
+    output_bytes: []const u8,
+) !bsvz.transaction.Output {
+    const parsed = bsvz.transaction.Output.parse(output_bytes) catch return error.InvalidSerializedOutput;
+    if (parsed.len != output_bytes.len) return error.InvalidSerializedOutput;
 
-    var sig: [wots_len * wots_n]u8 = undefined;
-    for (0..wots_len) |i| {
-        const sk_element = wotsSecretKeyElement(seed, i);
-        const element = wotsChain(&sk_element, 0, digits[i], pub_seed, i);
-        @memcpy(sig[i * wots_n ..][0..wots_n], &element);
-    }
-    return sig;
+    const locking_script = try allocator.dupe(u8, parsed.output.locking_script.bytes);
+    return .{
+        .satoshis = parsed.output.satoshis,
+        .locking_script = bsvz.script.Script.init(locking_script),
+    };
 }
 
 test "deterministic WOTS helpers round trip through the runtime verifier" {
@@ -198,13 +139,34 @@ test "P2PKH output and mock preimage helpers compose expected output hashes" {
     defer std.heap.page_allocator.free(out1);
     defer std.heap.page_allocator.free(out2);
 
-    const combined = builtins.cat(out1, out2);
-    defer std.heap.page_allocator.free(@constCast(combined));
-    const expected_hash = builtins.hash256(combined);
-    defer std.heap.page_allocator.free(@constCast(expected_hash));
+    const output_views = try parseSerializedOutputs(std.heap.page_allocator, &.{ out1, out2 });
+    defer {
+        for (output_views) |output| std.heap.page_allocator.free(output.locking_script.bytes);
+        std.heap.page_allocator.free(output_views);
+    }
+
+    const expected_hash = try bsvz.transaction.Output.hashAll(std.heap.page_allocator, output_views);
 
     const preimage = mockPreimageForOutputs(&.{ out1, out2 });
     defer std.heap.page_allocator.free(preimage);
 
-    try std.testing.expectEqualSlices(u8, expected_hash, builtins.extractOutputHash(preimage));
+    try std.testing.expectEqualSlices(u8, &expected_hash.bytes, builtins.extractOutputHash(preimage));
+}
+
+test "buildP2pkhOutput emits canonical serialized P2PKH output bytes" {
+    const test_keys = @import("test_keys.zig");
+    const out = buildP2pkhOutput(test_keys.ALICE.pubKeyHash, 100);
+    defer std.heap.page_allocator.free(out);
+
+    var pubkey_hash: bsvz.crypto.Hash160 = undefined;
+    @memcpy(&pubkey_hash.bytes, test_keys.ALICE.pubKeyHash[0..20]);
+    const locking_script = bsvz.script.templates.p2pkh.encode(pubkey_hash);
+    const expected_output = bsvz.transaction.Output{
+        .satoshis = 100,
+        .locking_script = bsvz.script.Script.init(&locking_script),
+    };
+    const expected = try expected_output.serialize(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(expected);
+
+    try std.testing.expectEqualSlices(u8, expected, out);
 }

@@ -23,6 +23,18 @@ const TicTacToe = @import("tic-tac-toe/TicTacToe.runar.zig").TicTacToe;
 const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleTokenExample;
 const NFTExample = @import("token-nft/NFTExample.runar.zig").NFTExample;
 
+pub const assert_panic_tag = "RUNAR_ASSERT_PANIC";
+
+pub fn panic(msg: []const u8, st: ?*std.builtin.StackTrace, addr: ?usize) noreturn {
+    _ = st;
+    if (std.mem.eql(u8, msg, runar.assertFailureMessage)) {
+        var buf: [256]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s}:{s}\n", .{ assert_panic_tag, msg }) catch assert_panic_tag ++ "\n";
+        std.fs.File.stderr().writeAll(line) catch {};
+    }
+    std.debug.defaultPanic(msg, addr);
+}
+
 pub fn main() !void {
     var args = try std.process.argsWithAllocator(std.heap.page_allocator);
     defer args.deinit();
@@ -90,17 +102,11 @@ fn runCase(probe_case: []const u8) !void {
 }
 
 fn payoutOutput(amount: i64, pub_key: []const u8) []const u8 {
-    return runar.cat(
-        runar.cat(runar.num2bin(amount, 8), "1976a914"),
-        runar.cat(runar.hash160(pub_key), "88ac"),
-    );
+    return runar.buildChangeOutput(runar.hash160(pub_key), amount);
 }
 
 fn buildVaultOutput(recipient: []const u8, min_amount: i64) []const u8 {
-    const script_prefix = runar.cat("1976a914", recipient);
-    const p2pkh_script = runar.cat(script_prefix, "88ac");
-    const amount_bytes = runar.num2bin(min_amount, 8);
-    return runar.cat(amount_bytes, p2pkh_script);
+    return runar.buildChangeOutput(recipient, min_amount);
 }
 
 fn findRabinPadding(message: []const u8, modulus: []const u8) ![]const u8 {
@@ -514,14 +520,14 @@ fn probePostQuantumWalletInvalidWOTSProof() !void {
 
 fn probeSPHINCSWalletWrongECDSAPubkey() !void {
     const ecdsa_sig = runar.signTestMessage(runar.ALICE);
-    const slhdsa_sig = try runar.testing.decodeHexAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
+    const slhdsa_sig = try runar.hex.decodeAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
     defer std.heap.page_allocator.free(slhdsa_sig);
     const contract = SPHINCSWallet.init(runar.hash160(runar.ALICE.pubKey), runar.hash160(&sphincs_fixtures.slhdsa_pub_key));
     contract.spend(slhdsa_sig, &sphincs_fixtures.slhdsa_pub_key, ecdsa_sig, runar.BOB.pubKey);
 }
 
 fn probeSPHINCSWalletWrongECDSASig() !void {
-    const slhdsa_sig = try runar.testing.decodeHexAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
+    const slhdsa_sig = try runar.hex.decodeAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
     defer std.heap.page_allocator.free(slhdsa_sig);
     const contract = SPHINCSWallet.init(runar.hash160(runar.ALICE.pubKey), runar.hash160(&sphincs_fixtures.slhdsa_pub_key));
     contract.spend(slhdsa_sig, &sphincs_fixtures.slhdsa_pub_key, runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
@@ -529,7 +535,7 @@ fn probeSPHINCSWalletWrongECDSASig() !void {
 
 fn probeSPHINCSWalletWrongSLHDSAKey() !void {
     const ecdsa_sig = runar.signTestMessage(runar.ALICE);
-    const slhdsa_sig = try runar.testing.decodeHexAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
+    const slhdsa_sig = try runar.hex.decodeAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
     defer std.heap.page_allocator.free(slhdsa_sig);
     var wrong_pub_key = sphincs_fixtures.slhdsa_pub_key;
     wrong_pub_key[0] ^= 0xff;
@@ -539,7 +545,7 @@ fn probeSPHINCSWalletWrongSLHDSAKey() !void {
 
 fn probeSPHINCSWalletInvalidSLHDSAProof() !void {
     const ecdsa_sig = runar.signTestMessage(runar.ALICE);
-    var slhdsa_sig = try runar.testing.decodeHexAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
+    var slhdsa_sig = try runar.hex.decodeAlloc(std.heap.page_allocator, sphincs_fixtures.slhdsa_sig_hex);
     defer std.heap.page_allocator.free(slhdsa_sig);
     slhdsa_sig[17] ^= 0xff;
     const contract = SPHINCSWallet.init(runar.hash160(runar.ALICE.pubKey), runar.hash160(&sphincs_fixtures.slhdsa_pub_key));
@@ -547,7 +553,7 @@ fn probeSPHINCSWalletInvalidSLHDSAProof() !void {
 }
 
 fn probeSchnorrZKPInvalidRPoint() !void {
-    const pub_key = try runar.testing.decodeHexAlloc(
+    const pub_key = try runar.hex.decodeAlloc(
         std.heap.page_allocator,
         "fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af" ++
             "07b158f244cd0de2134ac7c1d371cffbfae4db40801a2572e531c573cda9b5b4",

@@ -13,7 +13,7 @@ Legend:
 |---|---|---|---|---|---|---|
 | Compiler correctness | 🟩 | 🟩 | 🟩 | 🟩 | 🟩 | Zig is fully green on compiler tests and conformance |
 | Native frontend syntax | 🟩 | 🟨 | 🟨 | 🟨 | 🟨 | Zig parses and compiles well, but the surface is not yet fully plain-Zig natural |
-| Native helper/runtime package | 🟩 | 🟩 | 🟩 | 🟩 | 🟨 | `packages/runar-zig` exists, compile-check is now honest, stateful continuation serialization is explicit in test mode, hash/byte semantics are materially better, and `SLH-DSA-SHA2-128s` now has a real verifier slice; the remaining crypto depth gaps are the other SLH variants plus broader EC/PQ coverage |
+| Native helper/runtime package | 🟩 | 🟩 | 🟩 | 🟩 | 🟨 | `packages/runar-zig` exists, compile-check is now honest, stateful continuation serialization is explicit in test mode, raw outputs are now recordable directly, honest serialized P2PKH outputs are available through `buildChangeOutput`, and all six SHA2 SLH-DSA verifier paths are now real; the remaining crypto depth gaps are broader EC/PQ runtime depth rather than missing SLH variants |
 | Example inventory parity | 🟩 | 🟩 | 🟩 | 🟩 | 🟩 | Zig now has the same 21-example tree |
 | Adjacent native tests | 🟩 | 🟩 | 🟩 | 🟩 | 🟩 | Zig now has tests beside the contracts |
 | Real contract execution in tests | 🟩 | 🟩 | 🟩 | 🟩 | 🟨 | The direct-contract set is now materially larger, including `tic-tac-toe`, `sphincs-wallet`, and `schnorr-zkp`; the remaining gaps are runtime-depth issues rather than the old fixed-width bigint wall |
@@ -64,6 +64,7 @@ Legend:
   - `stateful-counter`
   - `property-initializers`
 - Added a dedicated Zig `assert_probe` executable so negative-path contract assertions can be tested honestly from the example suite without pretending panics are catchable in-process.
+- Centralized the Zig assertion-failure marker in `packages/runar-zig`, taught `assert_probe` to emit an explicit machine-readable assertion tag on panic, and taught the example probe helper to print stdout/stderr when a negative-path probe fails for the wrong reason, so assertion regressions are easier to diagnose.
 - Added an explicit `runar.bytesEq(...)` path in both Zig frontends and `packages/runar-zig`, then used it to migrate the first byte-comparison contracts away from misleading plain `==`.
 - Added an explicit `runar.StatefulContext` bridge in `packages/runar-zig` and both Zig compiler pipelines. The compiler now erases that source-level context from the ABI while native Zig tests can seed it with real preimages and inspect real outputs.
 - Migrated `auction` to the explicit context model and converted it to direct real-contract tests, including probe-backed negative assertions.
@@ -76,17 +77,32 @@ Legend:
 - Added a real positive direct-contract path for `post-quantum-wallet` using deterministic WOTS fixtures in the Zig test itself.
 - Added explicit test-only continuation serialization in `packages/runar-zig`, so recorded stateful outputs now carry deterministic `stateScript` and `continuationScript` bytes instead of only tuple snapshots.
 - Tightened the `token-ft` and `token-nft` Zig tests so they assert those serialized continuation bytes, not just the raw tuple values.
-- Switched the top-level `sha256` / `ripemd160` / `hash160` / `hash256` runtime wrappers in `packages/runar-zig` over to `bsvz` and now route `checkSig` / fixture signing through `bsvz`'s `PrivateKey` / `PublicKey` / `DerSignature` crypto surface too.
-- Narrowed the `bsvz` dependency boundary to its crypto module. The broader `bsvz` script/sighash surface looks promising, but it is not yet a live dependency for `runar-zig` because the sibling repo is still locally unstable there and its local acceptance lane is not fully green yet.
+- Switched the top-level `sha256` / `ripemd160` / `hash160` / `hash256` runtime wrappers in `packages/runar-zig` over to `bsvz`, route `checkSig` / fixture signing through `bsvz`'s `PrivateKey` / `PublicKey` / `DerSignature` crypto surface, and now use `bsvz.transaction.preimage` for preimage parsing/extraction too.
+- Switched `runar-zig`'s `num2bin` / `bin2num` over to `bsvz.script.ScriptNum`, keeping the external `runar.Bigint` surface but dropping another local script-number implementation seam.
+- Collapsed the `runar-zig` Zig dependency boundary to a single `bsvz` module import. `bsvz` itself is now green, and the package-level script lane now has an honest split: compiler smoke coverage stays local while representative execution vectors run through the shared `bsvz` Runar harness.
+- `bsvz` is currently green locally at `333/333` tests, now exposes a public secp256k1 point API, compact verification outcomes, prevout-spend helpers, and trace/debug helpers, and `runar-zig` has switched its local point math/parsing/serialization onto that seam.
+- `runar-zig`'s output/preimage test helpers now go through public `bsvz.transaction.Output` / `hashOutputs(...)` APIs instead of local byte concatenation, and the package-level script harness now asserts structured verification outcomes instead of reducing everything to a bare boolean too early.
+- The package-level script harness now uses traced verification as its primary path, so mismatches report the real outcome plus phase/opcode trace context instead of ad hoc branch-specific strings.
+- Replaced the last baked locking-script hex in the package-level script lane with constructor-aware compilation from the actual inline contract sources, so the harness now exercises real current compiler output instead of pinned stale hex.
 - Added a tiny internal `runar-zig` hex helper backed by `bsvz` primitives and migrated the Zig probes/tests onto that shared path instead of keeping separate local alloc-decoding helpers in each file.
+- Removed the redundant `runar.testing.decodeHexAlloc(...)` passthrough, switched the remaining tests/probes to `runar.hex.decodeAlloc(...)`, and moved the SPHINCS fixed-size fixture decoding onto the shared `runar.hex.decodeFixed(...)` path too.
+- Extracted the duplicated deterministic WOTS fixture/signing logic into a shared leaf helper so both `builtins` and `testing_helpers` now use one implementation instead of carrying drift-prone copies.
 - Added shared Zig testing helpers for canonical P2PKH outputs and output-hash preimages, then migrated `covenant-vault` and the payout/output-hash half of `tic-tac-toe` to use them instead of hand-assembling those bytes inline.
+- Added a real `hashOutputs()` bridge in `packages/runar-zig` that serializes recorded outputs with the same `8-byte LE satoshis + varint(script_len) + script` shape used by `bsvz`.
 - Restored `examples/zig/assert_probe.zig` as a real subprocess probe runner and got the full `examples/zig` lane green again on a fresh cache.
 - Prepared deterministic SPHINCS public-key and signature fixtures from the TypeScript reference implementation and wired them into a real positive Zig test.
+- Switched the EC-heavy Zig examples away from paired `ecPointX(...)` / `ecPointY(...)` equality checks and onto canonical compressed-point comparison, which keeps the contract surface honest without introducing a new compiler builtin.
+- Switched `runar-zig`'s `cat` / `substr` wrappers over to `bsvz.script`, promoted the compiler's internal `buildChangeOutput(...)` primitive into the Zig/native public surface, and migrated the remaining payout-heavy Zig examples/tests off the old ASCII-hex pseudo-output path.
+- Added real `addRawOutput(...)` recording support to the Zig runtime surface so `StatefulContext` now matches the raw-output capability already present in the compiler model.
+- Simplified `buildChangeOutput(...)` down to one direct output allocation while keeping its wire format locked to `bsvz`'s P2PKH script and varint encoding.
+- Simplified `buildChangeOutput(...)` again to delegate its wire-format serialization directly to public `bsvz.transaction.Output.writeInto(...)` instead of manually re-encoding the output locally.
+- Switched `runar-zig`'s stateful `hashOutputs()` bridge and the output-preimage test helper over to public `bsvz.transaction.Output.hashAll(...)`, and switched serialized-output parsing in the helper lane over to public `bsvz.transaction.Output.parse(...)` instead of manual local decoding.
 - The remaining direct-execution blockers are now clearer:
   - the remaining EC/PQ-heavy examples that still lack deeper runtime coverage
 - Advanced crypto helpers are still not honest enough:
-  - the public `SLH-DSA-SHA2-128s` verifier path is now real, but the other public SLH-DSA variants still fail closed
+  - all six public SHA2 SLH-DSA verifier paths are now real and fixture-backed in Zig
   - some higher-level post-quantum example semantics are still scaffolded
+  - `bsvz` now covers hashes, signatures, script numbers, preimage parsing, and secp256k1 point math well enough to be the real foundation seam; the remaining EC issue is the Runar-facing `i64`-shaped point access model rather than missing sibling support
 - The example negative-path harness integrity issue is closed:
   - the probe runner is restored in-tree and the fresh-cache example lane is green
 
@@ -134,7 +150,7 @@ Representative issues:
 - contract-style assertions/failure expectations
 - advanced crypto helpers that are still not fully honest for the remaining PQ-heavy cases outside the `SLH-DSA-SHA2-128s` verifier slice
 - widening beyond `i64` is now handled through explicit `runar.Bigint` where the contract path really needs it, but the broader ergonomic story is still young
-- the remaining example tree still has some old `==` byte comparisons in unmigrated contracts
+- the remaining example issues are runtime-depth and API-shape problems, not leftover dishonest byte-equality syntax in the shipped Zig examples
 
 ### Cross-Implementation Notes
 
@@ -163,7 +179,7 @@ The test tree shape is now correct, but the quality bar is not met until the imp
 
 Priority contracts to move next:
 
-- the remaining SLH-DSA variants after the `SHA2-128s` slice
+- the remaining EC/PQ-heavy example semantics that still need deeper native runtime honesty
 
 ## Priority Ladder
 

@@ -35,6 +35,7 @@ pub const BOB = test_keys.BOB;
 pub const CHARLIE = test_keys.CHARLIE;
 
 pub const MockPreimageParts = builtins.MockPreimageParts;
+pub const assertFailureMessage = builtins.assert_failure_message;
 
 pub const CompileCheckStage = compile_check.CompileCheckStage;
 pub const CompileCheckResult = compile_check.CompileCheckResult;
@@ -57,6 +58,7 @@ pub const extractHashPrevouts = builtins.extractHashPrevouts;
 pub const extractOutpoint = builtins.extractOutpoint;
 pub const extractOutputHash = builtins.extractOutputHash;
 pub const extractLocktime = builtins.extractLocktime;
+pub const buildChangeOutput = builtins.buildChangeOutput;
 pub const cat = builtins.cat;
 pub const substr = builtins.substr;
 pub const num2bin = builtins.num2bin;
@@ -104,5 +106,6 @@ test {
     _ = @import("builtins.zig");
     _ = @import("compile_check.zig");
     _ = @import("hex.zig");
+    _ = @import("script_integration_test.zig");
     _ = @import("testing_helpers.zig");
 }

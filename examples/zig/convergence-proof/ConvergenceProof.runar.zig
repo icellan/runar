@@ -20,7 +20,6 @@ pub const ConvergenceProof = struct {
         const diff = runar.ecAdd(self.rA, runar.ecNegate(self.rB));
         const expected = runar.ecMulGen(deltaO);
 
-        runar.assert(runar.ecPointX(diff) == runar.ecPointX(expected));
-        runar.assert(runar.ecPointY(diff) == runar.ecPointY(expected));
+        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(diff), runar.ecEncodeCompressed(expected)));
     }
 };

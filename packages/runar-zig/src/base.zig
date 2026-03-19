@@ -1,4 +1,5 @@
 const std = @import("std");
+const bsvz = @import("bsvz");
 
 pub const Int = i64;
 pub const Bigint = i64;
@@ -87,6 +88,14 @@ pub const StatefulSmartContract = struct {
         return self._outputs.items;
     }
 
+    pub fn hashOutputs(self: *const StatefulSmartContract) StatefulRuntimeError!Sha256 {
+        const output_views = try buildBsvzOutputViews(self.allocator, self._outputs.items);
+        defer self.allocator.free(output_views);
+
+        const digest = try bsvz.transaction.Output.hashAll(self.allocator, output_views);
+        return try self.allocator.dupe(u8, &digest.bytes);
+    }
+
     pub fn setTxPreimage(self: *StatefulSmartContract, tx_preimage: SigHashPreimage) !void {
         self.txPreimage = try self.allocator.dupe(u8, tx_preimage);
     }
@@ -165,6 +174,19 @@ pub const StatefulSmartContract = struct {
         });
     }
 
+    pub fn addRawOutput(self: *StatefulSmartContract, satoshis: Bigint, script_bytes: ByteString) StatefulRuntimeError!void {
+        const copied_values = try self.allocator.alloc(OutputValue, 0);
+        errdefer self.allocator.free(copied_values);
+        const continuation_script = try self.allocator.dupe(u8, script_bytes);
+        errdefer self.allocator.free(continuation_script);
+        try self._outputs.append(self.allocator, .{
+            .satoshis = satoshis,
+            .values = copied_values,
+            .stateScript = &.{},
+            .continuationScript = continuation_script,
+        });
+    }
+
     pub fn getStateScript(self: *const StatefulSmartContract) ByteString {
         return self._current_state_script;
     }
@@ -187,12 +209,20 @@ pub const StatefulContext = struct {
         self.runtime.addOutput(satoshis, values) catch @panic("failed to record output");
     }
 
+    pub fn addRawOutput(self: StatefulContext, satoshis: Bigint, script_bytes: ByteString) void {
+        self.runtime.addRawOutput(satoshis, script_bytes) catch @panic("failed to record raw output");
+    }
+
     pub fn getStateScript(self: StatefulContext) ByteString {
         return self.runtime.getStateScript();
     }
 
     pub fn outputs(self: StatefulContext) []const OutputSnapshot {
         return self.runtime.outputs();
+    }
+
+    pub fn hashOutputs(self: StatefulContext) StatefulRuntimeError!Sha256 {
+        return self.runtime.hashOutputs();
     }
 };
 
@@ -306,6 +336,42 @@ fn wrapContinuationScript(
     return out.toOwnedSlice(allocator);
 }
 
+fn serializeRecordedOutput(allocator: std.mem.Allocator, output: OutputSnapshot) StatefulRuntimeError![]u8 {
+    var out = std.ArrayList(u8){};
+    defer out.deinit(allocator);
+    try appendRecordedOutput(&out, allocator, output);
+    return out.toOwnedSlice(allocator);
+}
+
+fn buildBsvzOutputViews(
+    allocator: std.mem.Allocator,
+    outputs: []const OutputSnapshot,
+) StatefulRuntimeError![]bsvz.transaction.Output {
+    const views = try allocator.alloc(bsvz.transaction.Output, outputs.len);
+    for (outputs, 0..) |output, index| {
+        views[index] = .{
+            .satoshis = output.satoshis,
+            .locking_script = bsvz.script.Script.init(output.continuationScript),
+        };
+    }
+    return views;
+}
+
+fn appendRecordedOutput(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    output: OutputSnapshot,
+) StatefulRuntimeError!void {
+    var satoshis_bytes: [8]u8 = undefined;
+    std.mem.writeInt(i64, &satoshis_bytes, output.satoshis, .little);
+    try out.appendSlice(allocator, &satoshis_bytes);
+
+    var length_bytes: [9]u8 = undefined;
+    const length_len = bsvz.primitives.varint.VarInt.encodeInto(length_bytes[0..], output.continuationScript.len) catch unreachable;
+    try out.appendSlice(allocator, length_bytes[0..length_len]);
+    try out.appendSlice(allocator, output.continuationScript);
+}
+
 fn appendU32(out: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !void {
     var encoded: [4]u8 = undefined;
     std.mem.writeInt(u32, encoded[0..], value, .big);
@@ -317,7 +383,8 @@ test "stateful runtime records and resets outputs" {
     defer runtime.deinit();
 
     try runtime.addOutput(10, .{ "alice", @as(i64, 7), true });
-    try std.testing.expectEqual(@as(usize, 1), runtime.outputs().len);
+    try runtime.addRawOutput(5, "raw-script");
+    try std.testing.expectEqual(@as(usize, 2), runtime.outputs().len);
     try std.testing.expectEqual(@as(i64, 10), runtime.outputs()[0].satoshis);
     try std.testing.expect(runtime.outputs()[0].stateScript.len != 0);
     try std.testing.expectEqualSlices(u8, runtime.outputs()[0].stateScript, runtime.outputs()[0].continuationScript);
@@ -325,6 +392,9 @@ test "stateful runtime records and resets outputs" {
         .bytes => |bytes| bytes,
         else => return error.TestUnexpectedResult,
     });
+    try std.testing.expectEqual(@as(i64, 5), runtime.outputs()[1].satoshis);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outputs()[1].stateScript.len);
+    try std.testing.expectEqualSlices(u8, "raw-script", runtime.outputs()[1].continuationScript);
 
     runtime.resetOutputs();
     try std.testing.expectEqual(@as(usize, 0), runtime.outputs().len);
@@ -342,8 +412,13 @@ test "StatefulContext exposes txPreimage and mutating output helpers" {
     try std.testing.expectEqualStrings("preimage", ctx.txPreimage);
 
     ctx.addOutput(21, .{ "alice", @as(i64, 7) });
-    try std.testing.expectEqual(@as(usize, 1), ctx.outputs().len);
+    ctx.addRawOutput(22, "raw-script");
+    try std.testing.expectEqual(@as(usize, 2), ctx.outputs().len);
     try std.testing.expectEqual(@as(i64, 21), ctx.outputs()[0].satoshis);
+    try std.testing.expectEqualSlices(u8, "raw-script", ctx.outputs()[1].continuationScript);
+    const output_hash = try ctx.hashOutputs();
+    defer std.testing.allocator.free(output_hash);
+    try std.testing.expectEqual(@as(usize, 32), output_hash.len);
 }
 
 test "stateful runtime supports explicit current-state and continuation envelopes" {
@@ -361,6 +436,11 @@ test "stateful runtime supports explicit current-state and continuation envelope
     try std.testing.expect(std.mem.startsWith(u8, output.continuationScript, "code-prefix:"));
     try std.testing.expect(std.mem.endsWith(u8, output.continuationScript, ":code-suffix"));
     try std.testing.expect(std.mem.indexOf(u8, output.continuationScript, output.stateScript) != null);
+    const serialized = try serializeRecordedOutput(std.testing.allocator, output);
+    defer std.testing.allocator.free(serialized);
+    const hash = try runtime.hashOutputs();
+    defer std.testing.allocator.free(hash);
+    try std.testing.expectEqualSlices(u8, &bsvz.crypto.hash.hash256(serialized).bytes, hash);
 }
 
 test "serialize helpers produce explicit deterministic test state bytes" {

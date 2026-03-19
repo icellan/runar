@@ -111,7 +111,7 @@ Six SHA-256 parameter sets (pre-implementation projections):
 | SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | 306 KB | 192-bit |
 | SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | 905 KB | 192-bit |
 | SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | 417 KB | 256-bit |
-| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
+| SLH-DSA-SHA2-256f | 48,736 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
 
 > **Note:** The "Script est." column contains pre-implementation projections that significantly underestimated the actual script sizes. The "Measured script" column shows the real sizes after implementation. The 4-10x difference is due to the overhead of tweakable hashing (each SHA-256 call requires constructing a 22-byte ADRS for domain separation, adding ~7 opcodes per hash) and the stack management code needed to track named positions across thousands of operations. See the Implementation Status section below for exact byte counts.
 

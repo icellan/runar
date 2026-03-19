@@ -21,8 +21,8 @@ test "ConvergenceProof init stores both real points" {
     const r_a = runar.ecMulGen(5);
     const r_b = runar.ecMulGen(2);
     const contract = ConvergenceProof.init(r_a, r_b);
-    try std.testing.expectEqual(runar.ecPointX(r_a), runar.ecPointX(contract.rA));
-    try std.testing.expectEqual(runar.ecPointY(r_b), runar.ecPointY(contract.rB));
+    try std.testing.expectEqualSlices(u8, runar.ecEncodeCompressed(r_a), runar.ecEncodeCompressed(contract.rA));
+    try std.testing.expectEqualSlices(u8, runar.ecEncodeCompressed(r_b), runar.ecEncodeCompressed(contract.rB));
 }
 
 test "ConvergenceProof proveConvergence accepts a real point delta" {

@@ -19,10 +19,7 @@ pub const CovenantVault = struct {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(runar.checkPreimage(txPreimage));
 
-        const scriptPrefix = runar.cat("1976a914", self.recipient);
-        const p2pkhScript = runar.cat(scriptPrefix, "88ac");
-        const amountBytes = runar.num2bin(self.minAmount, 8);
-        const expectedOutput = runar.cat(amountBytes, p2pkhScript);
+        const expectedOutput = runar.buildChangeOutput(self.recipient, self.minAmount);
 
         runar.assert(runar.bytesEq(runar.hash256(expectedOutput), runar.extractOutputHash(txPreimage)));
     }

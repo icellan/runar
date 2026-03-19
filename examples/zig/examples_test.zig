@@ -2,6 +2,7 @@ const std = @import("std");
 const runtime = @import("runar");
 
 const assert_probe_path = "zig-out/bin/assert_probe";
+const assert_panic_tag = "RUNAR_ASSERT_PANIC";
 
 pub const runar = struct {
     pub fn compileCheckSource(
@@ -54,8 +55,16 @@ pub const runar = struct {
         }
 
         const saw_assert_panic =
-            std.mem.indexOf(u8, result.stdout, "runar assertion failed") != null or
-            std.mem.indexOf(u8, result.stderr, "runar assertion failed") != null;
+            std.mem.indexOf(u8, result.stdout, assert_panic_tag) != null or
+            std.mem.indexOf(u8, result.stderr, assert_panic_tag) != null or
+            std.mem.indexOf(u8, result.stdout, runtime.assertFailureMessage) != null or
+            std.mem.indexOf(u8, result.stderr, runtime.assertFailureMessage) != null;
+        if (!saw_assert_panic) {
+            std.debug.print(
+                "assert probe {s} exited without the Runar assertion marker\nstdout:\n{s}\nstderr:\n{s}\n",
+                .{ probe_case, result.stdout, result.stderr },
+            );
+        }
         try std.testing.expect(saw_assert_panic);
     }
 };

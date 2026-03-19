@@ -55,8 +55,7 @@ pub const ECDemo = struct {
     pub fn checkNegateRoundtrip(self: *const ECDemo) void {
         const neg1 = runar.ecNegate(self.pt);
         const neg2 = runar.ecNegate(neg1);
-        runar.assert(runar.ecPointX(neg2) == runar.ecPointX(self.pt));
-        runar.assert(runar.ecPointY(neg2) == runar.ecPointY(self.pt));
+        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(neg2), runar.ecEncodeCompressed(self.pt)));
     }
 
     pub fn checkModReduce(self: *const ECDemo, value: i64, modulus: i64, expected: i64) void {
@@ -70,8 +69,7 @@ pub const ECDemo = struct {
 
     pub fn checkMulIdentity(self: *const ECDemo) void {
         const result = runar.ecMul(self.pt, 1);
-        runar.assert(runar.ecPointX(result) == runar.ecPointX(self.pt));
-        runar.assert(runar.ecPointY(result) == runar.ecPointY(self.pt));
+        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(result), runar.ecEncodeCompressed(self.pt)));
     }
 
     pub fn checkAddOnCurve(self: *const ECDemo, other: runar.Point) void {

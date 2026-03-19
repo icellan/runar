@@ -150,6 +150,7 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "extractOutputs", sig(&.{.sig_hash_preimage}, .sha256) },
     .{ "extractLocktime", sig(&.{.sig_hash_preimage}, .bigint) },
     .{ "extractSigHashType", sig(&.{.sig_hash_preimage}, .bigint) },
+    .{ "buildChangeOutput", sig(&.{ .byte_string, .bigint }, .byte_string) },
 });
 
 // ============================================================================

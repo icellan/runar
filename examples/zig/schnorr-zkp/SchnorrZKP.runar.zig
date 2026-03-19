@@ -17,7 +17,6 @@ pub const SchnorrZKP = struct {
         const eP = runar.ecMul(self.pubKey, e);
         const rhs = runar.ecAdd(rPoint, eP);
 
-        runar.assert(runar.ecPointX(sG) == runar.ecPointX(rhs));
-        runar.assert(runar.ecPointY(sG) == runar.ecPointY(rhs));
+        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(sG), runar.ecEncodeCompressed(rhs)));
     }
 };

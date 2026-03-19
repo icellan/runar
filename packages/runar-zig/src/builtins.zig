@@ -1,12 +1,11 @@
 const std = @import("std");
-const bsvz_crypto = @import("bsvz_crypto");
+const bsvz = @import("bsvz");
 const base = @import("base.zig");
 const hex = @import("hex.zig");
 const test_keys = @import("test_keys.zig");
+const wots = @import("wots_helpers.zig");
 
 const Sha256Hasher = std.crypto.hash.sha2.Sha256;
-
-const mock_preimage_magic = "RNRP";
 const test_message = "runar-test-message-v1";
 const default_zero_20 = [_]u8{0} ** 20;
 const default_zero_32 = [_]u8{0} ** 32;
@@ -58,27 +57,11 @@ const secp256k1_order_be = [_]u8{
     0xba, 0xae, 0xdc, 0xe6, 0xaf, 0x48, 0xa0, 0x3b,
     0xbf, 0xd2, 0x5e, 0x8c, 0xd0, 0x36, 0x41, 0x41,
 };
-const wots_w = 16;
-const wots_n = 32;
-const wots_len1 = 64;
-const wots_len2 = 3;
-const wots_len = wots_len1 + wots_len2;
-const slh_sha2_128s_n = 16;
-const slh_sha2_128s_h = 63;
-const slh_sha2_128s_d = 7;
-const slh_sha2_128s_hp = 9;
-const slh_sha2_128s_a = 12;
-const slh_sha2_128s_k = 14;
-const slh_sha2_128s_len = 35;
-const slh_sha2_128s_md_len = 21;
-const slh_sha2_128s_tree_idx_len = 7;
-const slh_sha2_128s_leaf_idx_len = 2;
-const slh_sha2_128s_digest_len = slh_sha2_128s_md_len + slh_sha2_128s_tree_idx_len + slh_sha2_128s_leaf_idx_len;
-const slh_sha2_128s_fors_sig_len = slh_sha2_128s_k * (1 + slh_sha2_128s_a) * slh_sha2_128s_n;
-const slh_sha2_128s_xmss_sig_len = (slh_sha2_128s_len + slh_sha2_128s_hp) * slh_sha2_128s_n;
-const slh_sha2_128s_sig_len = slh_sha2_128s_n + slh_sha2_128s_fors_sig_len + (slh_sha2_128s_d * slh_sha2_128s_xmss_sig_len);
-const slh_sha2_128s_wots_parts_len = slh_sha2_128s_len * slh_sha2_128s_n;
-const slh_sha2_128s_fors_roots_len = slh_sha2_128s_k * slh_sha2_128s_n;
+const wots_w = wots.wots_w;
+const wots_n = wots.wots_n;
+const wots_len1 = wots.wots_len1;
+const wots_len2 = wots.wots_len2;
+const wots_len = wots.wots_len;
 const slh_adrs_size = 32;
 const slh_adrs_wots_hash: u32 = 0;
 const slh_adrs_wots_pk: u32 = 1;
@@ -86,6 +69,68 @@ const slh_adrs_tree: u32 = 2;
 const slh_adrs_fors_tree: u32 = 3;
 const slh_adrs_fors_roots: u32 = 4;
 const SlhAdrs = [slh_adrs_size]u8;
+
+const SlhParams = struct {
+    n: usize,
+    h: usize,
+    d: usize,
+    hp: usize,
+    a: usize,
+    k: usize,
+    len: usize,
+    md_len: usize,
+    tree_idx_len: usize,
+    leaf_idx_len: usize,
+    digest_len: usize,
+    fors_sig_len: usize,
+    xmss_sig_len: usize,
+    sig_len: usize,
+    wots_parts_len: usize,
+    fors_roots_len: usize,
+};
+
+fn slhParams(
+    comptime n: usize,
+    comptime h: usize,
+    comptime d: usize,
+    comptime hp: usize,
+    comptime a: usize,
+    comptime k: usize,
+    comptime len: usize,
+) SlhParams {
+    const md_len = (k * a + 7) / 8;
+    const tree_idx_len = (h - hp + 7) / 8;
+    const leaf_idx_len = (hp + 7) / 8;
+    const digest_len = md_len + tree_idx_len + leaf_idx_len;
+    const fors_sig_len = k * (1 + a) * n;
+    const xmss_sig_len = (len + hp) * n;
+    return .{
+        .n = n,
+        .h = h,
+        .d = d,
+        .hp = hp,
+        .a = a,
+        .k = k,
+        .len = len,
+        .md_len = md_len,
+        .tree_idx_len = tree_idx_len,
+        .leaf_idx_len = leaf_idx_len,
+        .digest_len = digest_len,
+        .fors_sig_len = fors_sig_len,
+        .xmss_sig_len = xmss_sig_len,
+        .sig_len = n + fors_sig_len + (d * xmss_sig_len),
+        .wots_parts_len = len * n,
+        .fors_roots_len = k * n,
+    };
+}
+
+const slh_sha2_128s = slhParams(16, 63, 7, 9, 12, 14, 35);
+const slh_sha2_128f = slhParams(16, 66, 22, 3, 6, 33, 35);
+const slh_sha2_192s = slhParams(24, 63, 7, 9, 14, 17, 51);
+const slh_sha2_192f = slhParams(24, 66, 22, 3, 8, 33, 51);
+const slh_sha2_256s = slhParams(32, 64, 8, 8, 14, 22, 67);
+const slh_sha2_256f = slhParams(32, 68, 17, 4, 8, 35, 67);
+pub const assert_failure_message = "runar assertion failed";
 
 pub const MockPreimageParts = struct {
     hashPrevouts: base.Sha256 = default_zero_32[0..],
@@ -95,26 +140,26 @@ pub const MockPreimageParts = struct {
 };
 
 pub fn assert(condition: bool) void {
-    if (!condition) @panic("runar assertion failed");
+    if (!condition) @panic(assert_failure_message);
 }
 
 pub fn sha256(data: base.ByteString) base.Sha256 {
-    const digest = bsvz_crypto.hash.sha256(data);
+    const digest = bsvz.crypto.hash.sha256(data);
     return dupeBytes(&digest.bytes);
 }
 
 pub fn ripemd160(data: base.ByteString) base.Ripemd160 {
-    const digest = bsvz_crypto.hash.ripemd160(data);
+    const digest = bsvz.crypto.hash.ripemd160(data);
     return dupeBytes(&digest.bytes);
 }
 
 pub fn hash160(data: base.ByteString) base.Addr {
-    const digest = bsvz_crypto.hash.hash160(data);
+    const digest = bsvz.crypto.hash.hash160(data);
     return dupeBytes(&digest.bytes);
 }
 
 pub fn hash256(data: base.ByteString) base.Sha256 {
-    const digest = bsvz_crypto.hash.hash256(data);
+    const digest = bsvz.crypto.hash.hash256(data);
     return dupeBytes(&digest.bytes);
 }
 
@@ -125,9 +170,8 @@ pub fn bytesEq(left: base.ByteString, right: base.ByteString) bool {
 pub fn checkSig(sig: base.Sig, pub_key: base.PubKey) bool {
     if (sig.len < 8 or pub_key.len == 0) return false;
 
-    const public_key = bsvz_crypto.PublicKey.fromSec1(pub_key) catch return false;
-    const der_sig = stripSigHashByte(sig);
-    const parsed_sig = bsvz_crypto.DerSignature.fromDer(der_sig) catch return false;
+    const public_key = bsvz.crypto.PublicKey.fromSec1(pub_key) catch return false;
+    const parsed_sig = parseChecksigDer(sig) orelse return false;
 
     return public_key.verifySha256(test_message, parsed_sig) catch false;
 }
@@ -152,7 +196,8 @@ pub fn checkMultiSig(sigs: []const base.Sig, pub_keys: []const base.PubKey) bool
 }
 
 pub fn checkPreimage(preimage: base.SigHashPreimage) bool {
-    return preimage.len >= 4 and std.mem.eql(u8, preimage[0..4], mock_preimage_magic);
+    _ = bsvz.transaction.Preimage.parse(preimage) catch return false;
+    return true;
 }
 
 pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
@@ -171,81 +216,86 @@ pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
 }
 
 pub fn mockPreimage(parts: MockPreimageParts) base.SigHashPreimage {
-    var encoded = std.heap.page_allocator.alloc(u8, 4 + 32 + 36 + 32 + 8) catch @panic("OOM");
-    @memcpy(encoded[0..4], mock_preimage_magic);
+    var encoded = std.heap.page_allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch @panic("OOM");
+    std.mem.writeInt(i32, encoded[0..4], 2, .little);
     copyFixed(encoded[4..36], parts.hashPrevouts);
-    copyFixed(encoded[36..72], parts.outpoint);
-    copyFixed(encoded[72..104], parts.outputHash);
-    encodeInt64Le(encoded[104..112], parts.locktime);
+    @memset(encoded[36..68], 0);
+    copyFixed(encoded[68..104], parts.outpoint);
+    encoded[104] = 0x00;
+    @memset(encoded[105..113], 0);
+    std.mem.writeInt(u32, encoded[113..117], 0xffff_ffff, .little);
+    copyFixed(encoded[117..149], parts.outputHash);
+    const locktime: u32 = std.math.cast(u32, parts.locktime) orelse @panic("mockPreimage: locktime out of range");
+    std.mem.writeInt(u32, encoded[149..153], locktime, .little);
+    std.mem.writeInt(u32, encoded[153..157], 0x41, .little);
     return encoded;
 }
 
 pub fn extractHashPrevouts(preimage: base.SigHashPreimage) base.Sha256 {
-    return sliceOrZero(preimage, 4, 32);
+    const extracted = bsvz.transaction.extractHashPrevouts(preimage) catch return default_zero_32[0..];
+    return dupeBytes(&extracted.bytes);
 }
 
 pub fn extractOutpoint(preimage: base.SigHashPreimage) base.ByteString {
-    return sliceOrZero(preimage, 36, 36);
+    const extracted = bsvz.transaction.extractOutpointBytes(preimage) catch return default_zero_36[0..];
+    return dupeBytes(&extracted);
 }
 
 pub fn extractOutputHash(preimage: base.SigHashPreimage) base.Sha256 {
-    return sliceOrZero(preimage, 72, 32);
+    const extracted = bsvz.transaction.extractOutputHash(preimage) catch return default_zero_32[0..];
+    return dupeBytes(&extracted.bytes);
 }
 
 pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
-    if (preimage.len < 112) return 0;
-    return decodeInt64Le(preimage[104..112]);
+    const extracted = bsvz.transaction.extractLocktime(preimage) catch return 0;
+    return extracted;
+}
+
+pub fn buildChangeOutput(pkh: base.ByteString, amount: base.Bigint) base.ByteString {
+    if (pkh.len != 20) @panic("buildChangeOutput: pubkey hash must be 20 bytes");
+
+    var pubkey_hash: bsvz.crypto.Hash160 = undefined;
+    @memcpy(&pubkey_hash.bytes, pkh[0..20]);
+
+    const locking_script = bsvz.script.templates.p2pkh.encode(pubkey_hash);
+    const output = bsvz.transaction.Output{
+        .satoshis = amount,
+        .locking_script = .{
+            .bytes = &locking_script,
+        },
+    };
+    const out = std.heap.page_allocator.alloc(u8, output.serializedLen()) catch @panic("OOM");
+    _ = output.writeInto(out);
+
+    return out;
 }
 
 pub fn cat(left: base.ByteString, right: base.ByteString) base.ByteString {
-    var out = std.heap.page_allocator.alloc(u8, left.len + right.len) catch @panic("OOM");
-    @memcpy(out[0..left.len], left);
-    @memcpy(out[left.len..], right);
-    return out;
+    return bsvz.script.cat(std.heap.page_allocator, left, right) catch @panic("OOM");
 }
 
 pub fn substr(bytes: base.ByteString, start: base.Bigint, len: base.Bigint) base.ByteString {
     if (start < 0 or len <= 0) return &.{};
     const start_usize = std.math.cast(usize, start) orelse return &.{};
     const len_usize = std.math.cast(usize, len) orelse return &.{};
-    if (start_usize >= bytes.len) return &.{};
-
-    const remaining = bytes.len - start_usize;
-    const end_usize = start_usize + @min(len_usize, remaining);
-    return dupeBytes(bytes[start_usize..end_usize]);
+    return bsvz.script.substr(std.heap.page_allocator, bytes, start_usize, len_usize) catch @panic("OOM");
 }
 
 pub fn num2bin(value: anytype, size: base.Bigint) base.ByteString {
     if (size < 0) return &.{};
     const size_usize = std.math.cast(usize, size) orelse return &.{};
-    if (size_usize == 0) {
-        if (signedBigintFrom(value).isZero()) return &.{};
-        @panic("num2bin: size too small");
-    }
-
-    const bigint = signedBigintFrom(value);
-    var out = std.heap.page_allocator.alloc(u8, size_usize) catch @panic("OOM");
-    @memset(out, 0);
-
-    if (bigint.isZero()) return out;
-
-    var magnitude_buffer: [32]u8 = undefined;
-    const magnitude_bytes = bigint.toLeMagnitudeBytes(&magnitude_buffer);
-    var encoded_len = magnitude_bytes.len;
-
-    if ((magnitude_bytes[encoded_len - 1] & 0x80) != 0) {
-        encoded_len += 1;
-    }
-
-    if (encoded_len > size_usize) @panic("num2bin: size too small");
-
-    @memcpy(out[0..magnitude_bytes.len], magnitude_bytes);
-    if (bigint.negative) out[size_usize - 1] |= 0x80;
-    return out;
+    var script_num = scriptNumFromValue(std.heap.page_allocator, value) catch @panic("OOM");
+    defer script_num.deinit();
+    return script_num.num2binOwned(std.heap.page_allocator, size_usize) catch |err| switch (err) {
+        error.InvalidEncoding => @panic("num2bin: size too small"),
+        error.OutOfMemory => @panic("OOM"),
+    };
 }
 
 pub fn bin2num(bytes: base.ByteString) SignedBigint {
-    return SignedBigint.fromLeSignedMagnitude(bytes);
+    var script_num = bsvz.script.ScriptNum.bin2num(std.heap.page_allocator, bytes) catch @panic("bin2num: invalid encoding");
+    defer script_num.deinit();
+    return signedBigintFromScriptNum(&script_num);
 }
 
 pub fn clamp(value: base.Bigint, lo: base.Bigint, hi: base.Bigint) base.Bigint {
@@ -434,14 +484,14 @@ pub fn verifyWOTS(message: base.ByteString, sig: base.ByteString, pub_key: base.
     var msg_hash: [32]u8 = undefined;
     Sha256Hasher.hash(message, &msg_hash, .{});
 
-    const digits = wotsAllDigits(&msg_hash);
+    const digits = wots.allDigits(&msg_hash);
     var endpoints = std.heap.page_allocator.alloc(u8, wots_len * wots_n) catch @panic("OOM");
     defer std.heap.page_allocator.free(endpoints);
 
     for (0..wots_len) |i| {
         const sig_element = sig[i * wots_n ..][0..wots_n];
         const remaining = (wots_w - 1) - digits[i];
-        const endpoint = wotsChain(sig_element, digits[i], remaining, pub_seed, i);
+        const endpoint = wots.chain(sig_element, digits[i], remaining, pub_seed, i);
         @memcpy(endpoints[i * wots_n ..][0..wots_n], &endpoint);
     }
 
@@ -451,94 +501,82 @@ pub fn verifyWOTS(message: base.ByteString, sig: base.ByteString, pub_key: base.
 }
 
 pub fn verifySLHDSA_SHA2_128s(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    return slhVerifySha2_128s(message, sig, pub_key);
+    return slhVerifySha2(slh_sha2_128s, message, sig, pub_key);
 }
 
 pub fn verifySLHDSA_SHA2_128f(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    _ = message;
-    _ = sig;
-    _ = pub_key;
-    return false;
+    return slhVerifySha2(slh_sha2_128f, message, sig, pub_key);
 }
 
 pub fn verifySLHDSA_SHA2_192s(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    _ = message;
-    _ = sig;
-    _ = pub_key;
-    return false;
+    return slhVerifySha2(slh_sha2_192s, message, sig, pub_key);
 }
 
 pub fn verifySLHDSA_SHA2_192f(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    _ = message;
-    _ = sig;
-    _ = pub_key;
-    return false;
+    return slhVerifySha2(slh_sha2_192f, message, sig, pub_key);
 }
 
 pub fn verifySLHDSA_SHA2_256s(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    _ = message;
-    _ = sig;
-    _ = pub_key;
-    return false;
+    return slhVerifySha2(slh_sha2_256s, message, sig, pub_key);
 }
 
 pub fn verifySLHDSA_SHA2_256f(message: base.ByteString, sig: base.ByteString, pub_key: base.ByteString) bool {
-    _ = message;
-    _ = sig;
-    _ = pub_key;
-    return false;
+    return slhVerifySha2(slh_sha2_256f, message, sig, pub_key);
 }
 
-fn slhVerifySha2_128s(message: []const u8, sig: []const u8, pub_key: []const u8) bool {
-    if (pub_key.len != 2 * slh_sha2_128s_n) return false;
-    if (sig.len < slh_sha2_128s_sig_len) return false;
+fn slhVerifySha2(comptime params: SlhParams, message: []const u8, sig: []const u8, pub_key: []const u8) bool {
+    if (pub_key.len != 2 * params.n) return false;
+    if (sig.len < params.sig_len) return false;
 
-    const pk_seed = pub_key[0..slh_sha2_128s_n];
-    const pk_root = pub_key[slh_sha2_128s_n .. 2 * slh_sha2_128s_n];
+    const pk_seed = pub_key[0..params.n];
+    const pk_root = pub_key[params.n .. 2 * params.n];
 
     var offset: usize = 0;
-    const r = sig[offset .. offset + slh_sha2_128s_n];
-    offset += slh_sha2_128s_n;
+    const r = sig[offset .. offset + params.n];
+    offset += params.n;
 
-    const fors_sig = sig[offset .. offset + slh_sha2_128s_fors_sig_len];
-    offset += slh_sha2_128s_fors_sig_len;
+    const fors_sig = sig[offset .. offset + params.fors_sig_len];
+    offset += params.fors_sig_len;
 
-    const digest = slhHmsg128s(r, pk_seed, pk_root, message);
-    const md = digest[0..slh_sha2_128s_md_len];
+    const digest = slhHmsg(params, r, pk_seed, pk_root, message);
+    const md = digest[0..params.md_len];
 
     var tree_idx: u64 = 0;
-    for (digest[slh_sha2_128s_md_len .. slh_sha2_128s_md_len + slh_sha2_128s_tree_idx_len]) |byte| {
+    for (digest[params.md_len .. params.md_len + params.tree_idx_len]) |byte| {
         tree_idx = (tree_idx << 8) | @as(u64, byte);
     }
-    tree_idx &= (@as(u64, 1) << (slh_sha2_128s_h - slh_sha2_128s_hp)) - 1;
+    const tree_bits = params.h - params.hp;
+    if (tree_bits < 64) {
+        tree_idx &= (@as(u64, 1) << @intCast(tree_bits)) - 1;
+    }
 
     var leaf_idx: u32 = 0;
-    for (digest[slh_sha2_128s_md_len + slh_sha2_128s_tree_idx_len ..]) |byte| {
+    for (digest[params.md_len + params.tree_idx_len ..]) |byte| {
         leaf_idx = (leaf_idx << 8) | @as(u32, byte);
     }
-    leaf_idx &= (@as(u32, 1) << slh_sha2_128s_hp) - 1;
+    leaf_idx &= (@as(u32, 1) << @intCast(params.hp)) - 1;
 
     var fors_adrs = slhNewAdrs();
     slhSetTreeAddress(&fors_adrs, tree_idx);
     slhSetType(&fors_adrs, slh_adrs_fors_tree);
     slhSetKeyPairAddress(&fors_adrs, leaf_idx);
-    var current_msg = slhForsPkFromSig128s(fors_sig, md, pk_seed, &fors_adrs);
+    var current_msg = slhForsPkFromSig(params, fors_sig, md, pk_seed, &fors_adrs);
 
     var current_tree_idx = tree_idx;
     var current_leaf_idx = leaf_idx;
 
-    for (0..slh_sha2_128s_d) |layer| {
-        if (sig.len < offset + slh_sha2_128s_xmss_sig_len) return false;
-        const xmss_sig = sig[offset .. offset + slh_sha2_128s_xmss_sig_len];
-        offset += slh_sha2_128s_xmss_sig_len;
+    for (0..params.d) |layer| {
+        if (sig.len < offset + params.xmss_sig_len) return false;
+        const xmss_sig = sig[offset .. offset + params.xmss_sig_len];
+        offset += params.xmss_sig_len;
 
         var layer_adrs = slhNewAdrs();
         slhSetLayerAddress(&layer_adrs, @intCast(layer));
         slhSetTreeAddress(&layer_adrs, current_tree_idx);
 
-        current_msg = slhXmssPkFromSig128s(current_leaf_idx, xmss_sig, &current_msg, pk_seed, &layer_adrs);
-        current_leaf_idx = @intCast(current_tree_idx & ((@as(u64, 1) << slh_sha2_128s_hp) - 1));
-        current_tree_idx >>= slh_sha2_128s_hp;
+        current_msg = slhXmssPkFromSig(params, current_leaf_idx, xmss_sig, &current_msg, pk_seed, &layer_adrs);
+        current_leaf_idx = @intCast(current_tree_idx & ((@as(u64, 1) << @intCast(params.hp)) - 1));
+        current_tree_idx >>= @intCast(params.hp);
     }
 
     return std.mem.eql(u8, &current_msg, pk_root);
@@ -621,23 +659,23 @@ fn slhSha256Hash(data: []const u8) [32]u8 {
     return out;
 }
 
-fn slhT128s(pk_seed: []const u8, adrs: *const SlhAdrs, msg: []const u8) [slh_sha2_128s_n]u8 {
+fn slhT(comptime params: SlhParams, pk_seed: []const u8, adrs: *const SlhAdrs, msg: []const u8) [params.n]u8 {
     const compressed_adrs = slhCompressAdrs(adrs);
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(std.heap.page_allocator);
 
     input.appendSlice(std.heap.page_allocator, pk_seed) catch @panic("OOM");
-    input.appendNTimes(std.heap.page_allocator, 0, 64 - slh_sha2_128s_n) catch @panic("OOM");
+    input.appendNTimes(std.heap.page_allocator, 0, 64 - params.n) catch @panic("OOM");
     input.appendSlice(std.heap.page_allocator, &compressed_adrs) catch @panic("OOM");
     input.appendSlice(std.heap.page_allocator, msg) catch @panic("OOM");
 
     const hash = slhSha256Hash(input.items);
-    var out: [slh_sha2_128s_n]u8 = undefined;
-    @memcpy(&out, hash[0..slh_sha2_128s_n]);
+    var out: [params.n]u8 = undefined;
+    @memcpy(&out, hash[0..params.n]);
     return out;
 }
 
-fn slhHmsg128s(r: []const u8, pk_seed: []const u8, pk_root: []const u8, msg: []const u8) [slh_sha2_128s_digest_len]u8 {
+fn slhHmsg(comptime params: SlhParams, r: []const u8, pk_seed: []const u8, pk_root: []const u8, msg: []const u8) [params.digest_len]u8 {
     var seed: std.ArrayList(u8) = .empty;
     defer seed.deinit(std.heap.page_allocator);
 
@@ -647,18 +685,23 @@ fn slhHmsg128s(r: []const u8, pk_seed: []const u8, pk_root: []const u8, msg: []c
     seed.appendSlice(std.heap.page_allocator, msg) catch @panic("OOM");
 
     const hash = slhSha256Hash(seed.items);
-    var block_input: [36]u8 = undefined;
-    @memcpy(block_input[0..32], &hash);
-    std.mem.writeInt(u32, block_input[32..36], 0, .big);
-
-    const block = slhSha256Hash(&block_input);
-    var out: [slh_sha2_128s_digest_len]u8 = undefined;
-    @memcpy(&out, block[0..slh_sha2_128s_digest_len]);
+    var out: [params.digest_len]u8 = undefined;
+    var offset: usize = 0;
+    var counter: u32 = 0;
+    while (offset < params.digest_len) : (counter += 1) {
+        var block_input: [36]u8 = undefined;
+        @memcpy(block_input[0..32], &hash);
+        std.mem.writeInt(u32, block_input[32..36], counter, .big);
+        const block = slhSha256Hash(&block_input);
+        const copy_len = @min(32, params.digest_len - offset);
+        @memcpy(out[offset..][0..copy_len], block[0..copy_len]);
+        offset += copy_len;
+    }
     return out;
 }
 
-fn slhBase16Digits32(msg: []const u8) [32]u32 {
-    var digits = [_]u32{0} ** 32;
+fn slhBase16MsgDigits(comptime params: SlhParams, msg: []const u8) [2 * params.n]u32 {
+    var digits = [_]u32{0} ** (2 * params.n);
     var index: usize = 0;
     for (msg) |byte| {
         if (index >= digits.len) break;
@@ -671,28 +714,28 @@ fn slhBase16Digits32(msg: []const u8) [32]u32 {
     return digits;
 }
 
-fn slhBase16Digits3(bytes: [2]u8) [3]u32 {
-    return .{
-        bytes[0] >> 4,
-        bytes[0] & 0x0f,
-        bytes[1] >> 4,
-    };
+fn slhBase16ChecksumDigits(comptime params: SlhParams, bytes: [2]u8) [params.len - (2 * params.n)]u32 {
+    var digits = [_]u32{0} ** (params.len - (2 * params.n));
+    if (digits.len > 0) digits[0] = bytes[0] >> 4;
+    if (digits.len > 1) digits[1] = bytes[0] & 0x0f;
+    if (digits.len > 2) digits[2] = bytes[1] >> 4;
+    return digits;
 }
 
-fn slhWotsChain128s(x: []const u8, start: u32, steps: u32, pk_seed: []const u8, adrs: *SlhAdrs) [slh_sha2_128s_n]u8 {
-    var tmp: [slh_sha2_128s_n]u8 = undefined;
-    @memcpy(&tmp, x[0..slh_sha2_128s_n]);
+fn slhWotsChain(comptime params: SlhParams, x: []const u8, start: u32, steps: u32, pk_seed: []const u8, adrs: *SlhAdrs) [params.n]u8 {
+    var tmp: [params.n]u8 = undefined;
+    @memcpy(&tmp, x[0..params.n]);
 
     var j = start;
     while (j < start + steps) : (j += 1) {
         slhSetHashAddress(adrs, j);
-        tmp = slhT128s(pk_seed, adrs, &tmp);
+        tmp = slhT(params, pk_seed, adrs, &tmp);
     }
     return tmp;
 }
 
-fn slhWotsPkFromSig128s(sig: []const u8, msg: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [slh_sha2_128s_n]u8 {
-    const msg_digits = slhBase16Digits32(msg);
+fn slhWotsPkFromSig(comptime params: SlhParams, sig: []const u8, msg: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [params.n]u8 {
+    const msg_digits = slhBase16MsgDigits(params, msg);
 
     var csum: u32 = 0;
     for (msg_digits) |digit| csum += 15 - digit;
@@ -701,55 +744,55 @@ fn slhWotsPkFromSig128s(sig: []const u8, msg: []const u8, pk_seed: []const u8, a
         @truncate(shifted_csum >> 8),
         @truncate(shifted_csum),
     };
-    const csum_digits = slhBase16Digits3(csum_bytes);
+    const csum_digits = slhBase16ChecksumDigits(params, csum_bytes);
 
-    var all_digits: [slh_sha2_128s_len]u32 = undefined;
-    @memcpy(all_digits[0..32], &msg_digits);
-    @memcpy(all_digits[32..35], &csum_digits);
+    var all_digits: [params.len]u32 = undefined;
+    @memcpy(all_digits[0 .. 2 * params.n], &msg_digits);
+    @memcpy(all_digits[2 * params.n .. params.len], &csum_digits);
 
     const kp_addr = slhGetKeyPairAddress(adrs);
     var tmp_adrs = adrs.*;
     slhSetType(&tmp_adrs, slh_adrs_wots_hash);
     slhSetKeyPairAddress(&tmp_adrs, kp_addr);
 
-    var parts: [slh_sha2_128s_wots_parts_len]u8 = undefined;
-    for (0..slh_sha2_128s_len) |i| {
+    var parts: [params.wots_parts_len]u8 = undefined;
+    for (0..params.len) |i| {
         slhSetChainAddress(&tmp_adrs, @intCast(i));
-        const sig_i = sig[i * slh_sha2_128s_n ..][0..slh_sha2_128s_n];
-        const endpoint = slhWotsChain128s(sig_i, all_digits[i], 15 - all_digits[i], pk_seed, &tmp_adrs);
-        @memcpy(parts[i * slh_sha2_128s_n ..][0..slh_sha2_128s_n], &endpoint);
+        const sig_i = sig[i * params.n ..][0..params.n];
+        const endpoint = slhWotsChain(params, sig_i, all_digits[i], 15 - all_digits[i], pk_seed, &tmp_adrs);
+        @memcpy(parts[i * params.n ..][0..params.n], &endpoint);
     }
 
     var pk_adrs = adrs.*;
     slhSetType(&pk_adrs, slh_adrs_wots_pk);
-    return slhT128s(pk_seed, &pk_adrs, &parts);
+    return slhT(params, pk_seed, &pk_adrs, &parts);
 }
 
-fn slhXmssPkFromSig128s(idx: u32, sig_xmss: []const u8, msg: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [slh_sha2_128s_n]u8 {
-    const wots_sig = sig_xmss[0..slh_sha2_128s_wots_parts_len];
-    const auth = sig_xmss[slh_sha2_128s_wots_parts_len..];
+fn slhXmssPkFromSig(comptime params: SlhParams, idx: u32, sig_xmss: []const u8, msg: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [params.n]u8 {
+    const wots_sig = sig_xmss[0..params.wots_parts_len];
+    const auth = sig_xmss[params.wots_parts_len..];
 
     var w_adrs = adrs.*;
     slhSetType(&w_adrs, slh_adrs_wots_hash);
     slhSetKeyPairAddress(&w_adrs, idx);
-    var node = slhWotsPkFromSig128s(wots_sig, msg, pk_seed, &w_adrs);
+    var node = slhWotsPkFromSig(params, wots_sig, msg, pk_seed, &w_adrs);
 
     var tree_adrs = adrs.*;
     slhSetType(&tree_adrs, slh_adrs_tree);
-    for (0..slh_sha2_128s_hp) |j| {
-        const auth_j = auth[j * slh_sha2_128s_n ..][0..slh_sha2_128s_n];
+    for (0..params.hp) |j| {
+        const auth_j = auth[j * params.n ..][0..params.n];
         slhSetTreeHeight(&tree_adrs, @intCast(j + 1));
         slhSetTreeIndex(&tree_adrs, idx >> @intCast(j + 1));
 
-        var combined: [2 * slh_sha2_128s_n]u8 = undefined;
+        var combined: [2 * params.n]u8 = undefined;
         if (((idx >> @intCast(j)) & 1) == 0) {
-            @memcpy(combined[0..slh_sha2_128s_n], &node);
-            @memcpy(combined[slh_sha2_128s_n .. 2 * slh_sha2_128s_n], auth_j);
+            @memcpy(combined[0..params.n], &node);
+            @memcpy(combined[params.n .. 2 * params.n], auth_j);
         } else {
-            @memcpy(combined[0..slh_sha2_128s_n], auth_j);
-            @memcpy(combined[slh_sha2_128s_n .. 2 * slh_sha2_128s_n], &node);
+            @memcpy(combined[0..params.n], auth_j);
+            @memcpy(combined[params.n .. 2 * params.n], &node);
         }
-        node = slhT128s(pk_seed, &tree_adrs, &combined);
+        node = slhT(params, pk_seed, &tree_adrs, &combined);
     }
 
     return node;
@@ -776,53 +819,53 @@ fn slhExtractForsIdx(md: []const u8, tree_idx: usize, a: usize) u32 {
     return value;
 }
 
-fn slhForsPkFromSig128s(fors_sig: []const u8, md: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [slh_sha2_128s_n]u8 {
-    var roots: [slh_sha2_128s_fors_roots_len]u8 = undefined;
+fn slhForsPkFromSig(comptime params: SlhParams, fors_sig: []const u8, md: []const u8, pk_seed: []const u8, adrs: *const SlhAdrs) [params.n]u8 {
+    var roots: [params.fors_roots_len]u8 = undefined;
     var offset: usize = 0;
 
-    for (0..slh_sha2_128s_k) |i| {
-        const idx = slhExtractForsIdx(md, i, slh_sha2_128s_a);
-        const sk = fors_sig[offset .. offset + slh_sha2_128s_n];
-        offset += slh_sha2_128s_n;
+    for (0..params.k) |i| {
+        const idx = slhExtractForsIdx(md, i, params.a);
+        const sk = fors_sig[offset .. offset + params.n];
+        offset += params.n;
 
         var leaf_adrs = adrs.*;
         slhSetType(&leaf_adrs, slh_adrs_fors_tree);
         slhSetKeyPairAddress(&leaf_adrs, slhGetKeyPairAddress(adrs));
         slhSetTreeHeight(&leaf_adrs, 0);
-        const tree_span = @as(u32, 1) << slh_sha2_128s_a;
+        const tree_span = @as(u32, 1) << @intCast(params.a);
         slhSetTreeIndex(&leaf_adrs, @intCast((@as(u32, @intCast(i)) * tree_span) + idx));
-        var node = slhT128s(pk_seed, &leaf_adrs, sk);
+        var node = slhT(params, pk_seed, &leaf_adrs, sk);
 
         var auth_adrs = adrs.*;
         slhSetType(&auth_adrs, slh_adrs_fors_tree);
         slhSetKeyPairAddress(&auth_adrs, slhGetKeyPairAddress(adrs));
 
-        for (0..slh_sha2_128s_a) |j| {
-            const auth_j = fors_sig[offset .. offset + slh_sha2_128s_n];
-            offset += slh_sha2_128s_n;
+        for (0..params.a) |j| {
+            const auth_j = fors_sig[offset .. offset + params.n];
+            offset += params.n;
 
             slhSetTreeHeight(&auth_adrs, @intCast(j + 1));
-            const level_span = @as(u32, 1) << @intCast(slh_sha2_128s_a - j - 1);
+            const level_span = @as(u32, 1) << @intCast(params.a - j - 1);
             slhSetTreeIndex(&auth_adrs, (@as(u32, @intCast(i)) * level_span) + (idx >> @intCast(j + 1)));
 
-            var combined: [2 * slh_sha2_128s_n]u8 = undefined;
+            var combined: [2 * params.n]u8 = undefined;
             if (((idx >> @intCast(j)) & 1) == 0) {
-                @memcpy(combined[0..slh_sha2_128s_n], &node);
-                @memcpy(combined[slh_sha2_128s_n .. 2 * slh_sha2_128s_n], auth_j);
+                @memcpy(combined[0..params.n], &node);
+                @memcpy(combined[params.n .. 2 * params.n], auth_j);
             } else {
-                @memcpy(combined[0..slh_sha2_128s_n], auth_j);
-                @memcpy(combined[slh_sha2_128s_n .. 2 * slh_sha2_128s_n], &node);
+                @memcpy(combined[0..params.n], auth_j);
+                @memcpy(combined[params.n .. 2 * params.n], &node);
             }
-            node = slhT128s(pk_seed, &auth_adrs, &combined);
+            node = slhT(params, pk_seed, &auth_adrs, &combined);
         }
 
-        @memcpy(roots[i * slh_sha2_128s_n ..][0..slh_sha2_128s_n], &node);
+        @memcpy(roots[i * params.n ..][0..params.n], &node);
     }
 
     var fors_pk_adrs = adrs.*;
     slhSetType(&fors_pk_adrs, slh_adrs_fors_roots);
     slhSetKeyPairAddress(&fors_pk_adrs, slhGetKeyPairAddress(adrs));
-    return slhT128s(pk_seed, &fors_pk_adrs, &roots);
+    return slhT(params, pk_seed, &fors_pk_adrs, &roots);
 }
 
 pub fn ecMakePoint(x: base.Bigint, y: base.Bigint) base.Point {
@@ -855,8 +898,8 @@ pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
     const reduced_scalar = reduceScalarForSecp256k1(scalar);
     if (reduced_scalar.is_zero) return dupeBytes(&([_]u8{0} ** 64));
 
-    var result = p.mul(reduced_scalar.bytes, .big) catch @panic("ecMul: invalid scalar");
-    if (reduced_scalar.negative) result = result.neg();
+    var result = p.mul(reduced_scalar.bytes) catch @panic("ecMul: invalid scalar");
+    if (reduced_scalar.negative) result = result.negate();
     return serializePoint(result);
 }
 
@@ -864,19 +907,19 @@ pub fn ecMulGen(scalar: anytype) base.Point {
     const reduced_scalar = reduceScalarForSecp256k1(scalar);
     if (reduced_scalar.is_zero) return dupeBytes(&([_]u8{0} ** 64));
 
-    var result = std.crypto.ecc.Secp256k1.basePoint.mul(reduced_scalar.bytes, .big) catch @panic("ecMulGen: invalid scalar");
-    if (reduced_scalar.negative) result = result.neg();
+    var result = bsvz.crypto.Point.basePointMul(reduced_scalar.bytes) catch @panic("ecMulGen: invalid scalar");
+    if (reduced_scalar.negative) result = result.negate();
     return serializePoint(result);
 }
 
 pub fn ecNegate(point: base.Point) base.Point {
     const p = parsePoint(point) catch @panic("ecNegate: invalid point");
-    return serializePoint(p.neg());
+    return serializePoint(p.negate());
 }
 
 pub fn ecOnCurve(point: base.Point) bool {
-    _ = parsePoint(point) catch return false;
-    return true;
+    const p = parsePoint(point) catch return false;
+    return p.isOnCurve();
 }
 
 pub fn ecModReduce(value: base.Bigint, modulus: base.Bigint) base.Bigint {
@@ -889,13 +932,7 @@ pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
     const p = parsePoint(point) catch @panic("ecEncodeCompressed: invalid point");
     if (isIdentityPoint(point)) return dupeBytes(&[_]u8{0x00});
     const compressed = p.toCompressedSec1();
-    return dupeBytes(&compressed);
-}
-
-fn parseFixturePrivateKey(priv_key_hex: []const u8) !bsvz_crypto.PrivateKey {
-    var secret_key_bytes: [32]u8 = undefined;
-    _ = try std.fmt.hexToBytes(&secret_key_bytes, priv_key_hex);
-    return bsvz_crypto.PrivateKey.fromBytes(secret_key_bytes);
+    return dupeBytes(compressed.slice());
 }
 
 fn lookupCanonicalFixtureSig(pair: test_keys.TestKeyPair) ?[]const u8 {
@@ -941,12 +978,26 @@ fn lookupCanonicalFixtureSig(pair: test_keys.TestKeyPair) ?[]const u8 {
     return null;
 }
 
-fn stripSigHashByte(sig: []const u8) []const u8 {
-    if (sig.len < 2 or sig[0] != 0x30) return sig;
+fn parseFixturePrivateKey(priv_key_hex: []const u8) !bsvz.crypto.PrivateKey {
+    var secret_key_bytes: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&secret_key_bytes, priv_key_hex);
+    return bsvz.crypto.PrivateKey.fromBytes(secret_key_bytes);
+}
+
+fn parseChecksigDer(sig: []const u8) ?bsvz.crypto.DerSignature {
+    if (sig.len < 2 or sig[0] != 0x30) {
+        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
+    }
 
     const pure_der_len = @as(usize, sig[1]) + 2;
-    if (sig.len == pure_der_len + 1) return sig[0..pure_der_len];
-    return sig;
+    if (sig.len == pure_der_len + 1) {
+        const tx_sig = bsvz.crypto.TxSignature.fromChecksigFormat(sig) catch return null;
+        return tx_sig.der;
+    }
+    if (sig.len == pure_der_len) {
+        return bsvz.crypto.DerSignature.fromDer(sig) catch null;
+    }
+    return null;
 }
 
 fn dupeBytes(bytes: []const u8) []const u8 {
@@ -961,7 +1012,6 @@ fn freeIfOwned(bytes: []const u8) void {
         @intFromPtr(default_zero_32[0..].ptr),
         @intFromPtr(default_zero_36[0..].ptr),
         @intFromPtr(default_zero_64[0..].ptr),
-        @intFromPtr(mock_preimage_magic.ptr),
         @intFromPtr(sha256_initial_state[0..].ptr),
         @intFromPtr(blake3_iv_bytes[0..].ptr),
     };
@@ -969,6 +1019,41 @@ fn freeIfOwned(bytes: []const u8) void {
         if (addr == static_addr) return;
     }
     std.heap.page_allocator.free(bytes);
+}
+
+fn decodeEmbeddedHexAlloc(allocator: std.mem.Allocator, embedded: []const u8) ![]u8 {
+    var normalized: std.ArrayList(u8) = .empty;
+    defer normalized.deinit(allocator);
+
+    for (embedded) |byte| {
+        if (!std.ascii.isWhitespace(byte)) {
+            try normalized.append(allocator, byte);
+        }
+    }
+
+    return hex.decodeAlloc(allocator, normalized.items);
+}
+
+fn expectRealSlhVariant(
+    comptime message: []const u8,
+    comptime pk_fixture_path: []const u8,
+    comptime sig_fixture_path: []const u8,
+    comptime tamper_index: usize,
+    comptime verify_fn: *const fn (base.ByteString, base.ByteString, base.ByteString) bool,
+) !void {
+    const pk = try decodeEmbeddedHexAlloc(std.testing.allocator, @embedFile(pk_fixture_path));
+    defer std.testing.allocator.free(pk);
+
+    const sig = try decodeEmbeddedHexAlloc(std.testing.allocator, @embedFile(sig_fixture_path));
+    defer std.testing.allocator.free(sig);
+
+    try std.testing.expect(verify_fn(message, sig, pk));
+    try std.testing.expect(!verify_fn("wrong " ++ message, sig, pk));
+
+    var bad_sig = try std.testing.allocator.dupe(u8, sig);
+    defer std.testing.allocator.free(bad_sig);
+    bad_sig[tamper_index] ^= 0xff;
+    try std.testing.expect(!verify_fn(message, bad_sig, pk));
 }
 
 fn copyFixed(dest: []u8, source: []const u8) void {
@@ -1415,96 +1500,6 @@ fn normalizeOwned(allocator: std.mem.Allocator, limbs: []u64) !BigUint {
     return .{ .allocator = allocator, .limbs = trimmed };
 }
 
-fn wotsF(pub_seed: []const u8, chain_idx: usize, step_idx: usize, msg: []const u8) [32]u8 {
-    var input: [wots_n + 2 + wots_n]u8 = undefined;
-    @memcpy(input[0..wots_n], pub_seed);
-    input[wots_n] = @truncate(chain_idx);
-    input[wots_n + 1] = @truncate(step_idx);
-    @memcpy(input[wots_n + 2 ..], msg);
-
-    var out: [32]u8 = undefined;
-    Sha256Hasher.hash(&input, &out, .{});
-    return out;
-}
-
-fn wotsChain(x: []const u8, start_step: usize, steps: usize, pub_seed: []const u8, chain_idx: usize) [32]u8 {
-    var current: [32]u8 = undefined;
-    @memcpy(&current, x[0..wots_n]);
-
-    var j = start_step;
-    while (j < start_step + steps) : (j += 1) {
-        current = wotsF(pub_seed, chain_idx, j, &current);
-    }
-    return current;
-}
-
-fn wotsAllDigits(msg_hash: *const [32]u8) [wots_len]usize {
-    var digits: [wots_len]usize = undefined;
-    var idx: usize = 0;
-    var checksum: usize = 0;
-
-    for (msg_hash) |byte| {
-        const high = (byte >> 4) & 0x0f;
-        const low = byte & 0x0f;
-        digits[idx] = high;
-        digits[idx + 1] = low;
-        checksum += (wots_w - 1) - high;
-        checksum += (wots_w - 1) - low;
-        idx += 2;
-    }
-
-    var remaining = checksum;
-    var i: usize = wots_len;
-    while (i > wots_len1) {
-        i -= 1;
-        digits[i] = remaining % wots_w;
-        remaining /= wots_w;
-    }
-
-    return digits;
-}
-
-fn wotsSecretKeyElement(seed: []const u8, index: usize) [32]u8 {
-    var input: [wots_n + 4]u8 = undefined;
-    @memcpy(input[0..wots_n], seed);
-    std.mem.writeInt(u32, input[wots_n .. wots_n + 4], @intCast(index), .big);
-
-    var out: [32]u8 = undefined;
-    Sha256Hasher.hash(&input, &out, .{});
-    return out;
-}
-
-fn wotsPublicKeyFromSeed(seed: []const u8, pub_seed: []const u8) [64]u8 {
-    var endpoints: [wots_len * wots_n]u8 = undefined;
-    for (0..wots_len) |i| {
-        const sk_element = wotsSecretKeyElement(seed, i);
-        const endpoint = wotsChain(&sk_element, 0, wots_w - 1, pub_seed, i);
-        @memcpy(endpoints[i * wots_n ..][0..wots_n], &endpoint);
-    }
-
-    var root: [32]u8 = undefined;
-    Sha256Hasher.hash(&endpoints, &root, .{});
-
-    var pk: [64]u8 = undefined;
-    @memcpy(pk[0..32], pub_seed);
-    @memcpy(pk[32..64], &root);
-    return pk;
-}
-
-fn wotsSignDeterministic(message: []const u8, seed: []const u8, pub_seed: []const u8) [wots_len * wots_n]u8 {
-    var msg_hash: [32]u8 = undefined;
-    Sha256Hasher.hash(message, &msg_hash, .{});
-    const digits = wotsAllDigits(&msg_hash);
-
-    var sig: [wots_len * wots_n]u8 = undefined;
-    for (0..wots_len) |i| {
-        const sk_element = wotsSecretKeyElement(seed, i);
-        const element = wotsChain(&sk_element, 0, digits[i], pub_seed, i);
-        @memcpy(sig[i * wots_n ..][0..wots_n], &element);
-    }
-    return sig;
-}
-
 fn isIdentityPoint(point: []const u8) bool {
     if (point.len != 64) return false;
     for (point) |byte| {
@@ -1513,26 +1508,52 @@ fn isIdentityPoint(point: []const u8) bool {
     return true;
 }
 
-fn parsePoint(point: []const u8) !std.crypto.ecc.Secp256k1 {
-    if (point.len != 64) return error.InvalidPointEncoding;
-    if (isIdentityPoint(point)) return std.crypto.ecc.Secp256k1.identityElement;
-
-    var sec1 = [_]u8{0} ** 65;
-    sec1[0] = 0x04;
-    @memcpy(sec1[1..65], point);
-    return std.crypto.ecc.Secp256k1.fromSec1(&sec1);
+fn parsePoint(point: []const u8) !bsvz.crypto.Point {
+    return bsvz.crypto.Point.fromRaw64(point);
 }
 
-fn serializePoint(point: std.crypto.ecc.Secp256k1) base.Point {
-    if (point.equivalent(std.crypto.ecc.Secp256k1.identityElement)) {
-        return dupeBytes(&([_]u8{0} ** 64));
-    }
-    const sec1 = point.toUncompressedSec1();
-    return dupeBytes(sec1[1..65]);
+fn serializePoint(point: bsvz.crypto.Point) base.Point {
+    return dupeBytes(&point.toRaw64());
 }
 
 fn signedBigintFrom(value: anytype) SignedBigint {
     return SignedBigint.from(value);
+}
+
+fn scriptNumFromValue(allocator: std.mem.Allocator, value: anytype) !bsvz.script.ScriptNum {
+    const Value = @TypeOf(value);
+    if (Value == SignedBigint) return scriptNumFromSignedBigint(allocator, value);
+    return bsvz.script.ScriptNum.fromValue(allocator, value);
+}
+
+fn scriptNumFromSignedBigint(allocator: std.mem.Allocator, value: SignedBigint) !bsvz.script.ScriptNum {
+    var magnitude_buffer: [32]u8 = undefined;
+    const magnitude = value.toLeMagnitudeBytes(&magnitude_buffer);
+
+    const needs_extra = magnitude.len != 0 and (magnitude[magnitude.len - 1] & 0x80) != 0;
+    const encoded_len = magnitude.len + @intFromBool(needs_extra);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+
+    if (magnitude.len != 0) @memcpy(encoded[0..magnitude.len], magnitude);
+    if (needs_extra) {
+        encoded[encoded_len - 1] = if (value.negative and !value.isZero()) 0x80 else 0x00;
+    } else if (value.negative and !value.isZero()) {
+        encoded[encoded_len - 1] |= 0x80;
+    }
+
+    return bsvz.script.ScriptNum.bin2num(allocator, encoded);
+}
+
+fn signedBigintFromScriptNum(script_num: *const bsvz.script.ScriptNum) SignedBigint {
+    return switch (script_num.*) {
+        .small => |value| SignedBigint.fromI64(value),
+        .big => {
+            const encoded = script_num.encodeOwned(std.heap.page_allocator) catch @panic("OOM");
+            defer std.heap.page_allocator.free(encoded);
+            return SignedBigint.fromLeSignedMagnitude(encoded);
+        },
+    };
 }
 
 fn reduceScalarForSecp256k1(value: anytype) ReducedScalar {
@@ -1658,6 +1679,24 @@ test "bytesEq compares byte content explicitly" {
     try std.testing.expect(bytesEq(&.{}, &.{}));
 }
 
+test "cat and substr preserve current Runar byte-string semantics" {
+    const joined = cat("hello", " world");
+    defer freeIfOwned(joined);
+
+    try std.testing.expectEqualSlices(u8, "hello world", joined);
+
+    const middle = substr("hello world", 6, 5);
+    defer freeIfOwned(middle);
+    try std.testing.expectEqualSlices(u8, "world", middle);
+
+    try std.testing.expectEqualSlices(u8, &.{}, substr("hello", -1, 2));
+    try std.testing.expectEqualSlices(u8, &.{}, substr("hello", 0, 0));
+
+    const past_end = substr("hello", 99, 3);
+    defer freeIfOwned(past_end);
+    try std.testing.expectEqualSlices(u8, &.{}, past_end);
+}
+
 test "mock preimage extractors round trip" {
     const expected_hash = hash256("prevouts");
     defer freeIfOwned(expected_hash);
@@ -1720,8 +1759,8 @@ test "wide signed-magnitude values flow through bin2num and secp256k1 scalar mul
     defer freeIfOwned(actual);
 
     const reduced = reduceScalarForSecp256k1(scalar);
-    var expected_point = std.crypto.ecc.Secp256k1.basePoint.mul(reduced.bytes, .big) catch @panic("invalid test scalar");
-    if (reduced.negative) expected_point = expected_point.neg();
+    var expected_point = bsvz.crypto.Point.basePointMul(reduced.bytes) catch @panic("invalid test scalar");
+    if (reduced.negative) expected_point = expected_point.negate();
     const expected = serializePoint(expected_point);
     defer freeIfOwned(expected);
 
@@ -1831,8 +1870,8 @@ test "ec small-value point helpers round trip" {
 test "verifyWOTS accepts a valid deterministic signature" {
     const seed = [_]u8{0x42} ** 32;
     const pub_seed = [_]u8{0x13} ** 32;
-    const pk = wotsPublicKeyFromSeed(&seed, &pub_seed);
-    const sig = wotsSignDeterministic("hello WOTS+", &seed, &pub_seed);
+    const pk = wots.publicKeyFromSeed(&seed, &pub_seed);
+    const sig = wots.signDeterministic("hello WOTS+", &seed, &pub_seed);
 
     try std.testing.expect(verifyWOTS("hello WOTS+", &sig, &pk));
     try std.testing.expect(!verifyWOTS("wrong message", &sig, &pk));
@@ -1854,6 +1893,15 @@ test "verifyRabinSig accepts a trivial valid signature construction" {
 
     try std.testing.expect(verifyRabinSig("oracle-message", &[_]u8{0x00}, padding, &modulus));
     try std.testing.expect(!verifyRabinSig("wrong-message", &[_]u8{0x00}, padding, &modulus));
+}
+
+test "SLH SHA2 parameter sizes stay aligned with the published script matrix" {
+    try std.testing.expectEqual(@as(usize, 7856), slh_sha2_128s.sig_len);
+    try std.testing.expectEqual(@as(usize, 17088), slh_sha2_128f.sig_len);
+    try std.testing.expectEqual(@as(usize, 16224), slh_sha2_192s.sig_len);
+    try std.testing.expectEqual(@as(usize, 35664), slh_sha2_192f.sig_len);
+    try std.testing.expectEqual(@as(usize, 29792), slh_sha2_256s.sig_len);
+    try std.testing.expectEqual(@as(usize, 48736), slh_sha2_256f.sig_len);
 }
 
 test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects tampering" {
@@ -2041,9 +2089,57 @@ test "verifySLHDSA_SHA2_128s accepts a real deterministic signature and rejects 
     try std.testing.expect(!verifySLHDSA_SHA2_128s("hello SLH-DSA", bad_sig, pk));
 }
 
-test "unsupported SLHDSA variants still fail closed" {
+test "verifySLHDSA_SHA2_128f accepts a real deterministic signature and rejects tampering" {
+    try expectRealSlhVariant(
+        "128f",
+        "fixtures/slh-sha2-128f-pk.hex",
+        "fixtures/slh-sha2-128f-sig.hex",
+        23,
+        &verifySLHDSA_SHA2_128f,
+    );
+}
+
+test "verifySLHDSA_SHA2_192s accepts a real deterministic signature and rejects tampering" {
+    try expectRealSlhVariant(
+        "192s",
+        "fixtures/slh-sha2-192s-pk.hex",
+        "fixtures/slh-sha2-192s-sig.hex",
+        31,
+        &verifySLHDSA_SHA2_192s,
+    );
+}
+
+test "verifySLHDSA_SHA2_192f accepts a real deterministic signature and rejects tampering" {
+    try expectRealSlhVariant(
+        "192f",
+        "fixtures/slh-sha2-192f-pk.hex",
+        "fixtures/slh-sha2-192f-sig.hex",
+        37,
+        &verifySLHDSA_SHA2_192f,
+    );
+}
+
+test "verifySLHDSA_SHA2_256s accepts a real deterministic signature and rejects tampering" {
+    try expectRealSlhVariant(
+        "256s",
+        "fixtures/slh-sha2-256s-pk.hex",
+        "fixtures/slh-sha2-256s-sig.hex",
+        41,
+        &verifySLHDSA_SHA2_256s,
+    );
+}
+
+test "verifySLHDSA_SHA2_256f accepts a real deterministic signature and rejects tampering" {
+    try expectRealSlhVariant(
+        "256f",
+        "fixtures/slh-sha2-256f-pk.hex",
+        "fixtures/slh-sha2-256f-sig.hex",
+        47,
+        &verifySLHDSA_SHA2_256f,
+    );
+}
+
+test "non-SLH PQ stubs still fail closed" {
     try std.testing.expect(!verifyRabinSig("msg", "sig", "pad", ""));
     try std.testing.expect(!verifyWOTS("msg", "sig", "pub"));
-    try std.testing.expect(!verifySLHDSA_SHA2_128f("msg", "sig", "pub"));
-    try std.testing.expect(!verifySLHDSA_SHA2_256f("msg", "sig", "pub"));
 }

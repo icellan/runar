@@ -19,8 +19,7 @@ test "compile-check SchnorrZKP.runar.zig" {
 test "SchnorrZKP init stores pubKey" {
     const pub_key = runar.ecMulGen(11);
     const contract = SchnorrZKP.init(pub_key);
-    try std.testing.expectEqual(runar.ecPointX(pub_key), runar.ecPointX(contract.pubKey));
-    try std.testing.expectEqual(runar.ecPointY(pub_key), runar.ecPointY(contract.pubKey));
+    try std.testing.expectEqualSlices(u8, runar.ecEncodeCompressed(pub_key), runar.ecEncodeCompressed(contract.pubKey));
 }
 
 test "SchnorrZKP rejects invalid points" {
@@ -37,13 +36,13 @@ test "SchnorrZKP verifies a valid Fiat-Shamir proof with wide bigint response" {
     const s_le_hex =
         "eddbfe2cedf6f857ae5530a2dc2ee18f3f9562076f6269e09da736fee207ec5f";
 
-    const pub_key = try runar.testing.decodeHexAlloc(std.testing.allocator, pub_key_hex);
+    const pub_key = try runar.hex.decodeAlloc(std.testing.allocator, pub_key_hex);
     defer std.testing.allocator.free(pub_key);
 
-    const r_point = try runar.testing.decodeHexAlloc(std.testing.allocator, r_point_hex);
+    const r_point = try runar.hex.decodeAlloc(std.testing.allocator, r_point_hex);
     defer std.testing.allocator.free(r_point);
 
-    const s_bytes = try runar.testing.decodeHexAlloc(std.testing.allocator, s_le_hex);
+    const s_bytes = try runar.hex.decodeAlloc(std.testing.allocator, s_le_hex);
     defer std.testing.allocator.free(s_bytes);
 
     const contract = SchnorrZKP.init(pub_key);

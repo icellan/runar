@@ -29,8 +29,8 @@ test "SPHINCSWallet init stores both authorization hashes" {
 
 test "SPHINCSWallet spend accepts real ECDSA and SLH-DSA authorization" {
     const ecdsa_sig = runar.signTestMessage(runar.ALICE);
-    const slhdsa_sig = try runar.testing.decodeHexAlloc(std.testing.allocator, fixtures.slhdsa_sig_hex);
-    const slhdsa_pub_key = try runar.testing.decodeHexAlloc(std.testing.allocator, fixtures.slhdsa_pub_key_hex);
+    const slhdsa_sig = try runar.hex.decodeAlloc(std.testing.allocator, fixtures.slhdsa_sig_hex);
+    const slhdsa_pub_key = try runar.hex.decodeAlloc(std.testing.allocator, fixtures.slhdsa_pub_key_hex);
     defer std.testing.allocator.free(slhdsa_sig);
     defer std.testing.allocator.free(slhdsa_pub_key);
 
