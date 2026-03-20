@@ -27,12 +27,12 @@ describe('codegenCommand', () => {
     });
 
     await expect(
-      codegenCommand(['some-file.json'], { lang: 'python' }),
+      codegenCommand(['some-file.json'], { lang: 'fortran' }),
     ).rejects.toThrow('process.exit called');
 
     const errCalls = consoleSpy.mock.calls.map(c => c[0]);
     expect(errCalls.some(
-      (msg: unknown) => typeof msg === 'string' && msg.includes("'python' is not yet supported"),
+      (msg: unknown) => typeof msg === 'string' && msg.includes("'fortran' is not supported"),
     )).toBe(true);
 
     consoleSpy.mockRestore();
@@ -62,34 +62,36 @@ describe('codegenCommand', () => {
     exitSpy.mockRestore();
   });
 
-  it('accepts "ts" as a valid language without immediately exiting', async () => {
+  it('accepts all supported languages without language error', async () => {
     const mod = await import('../commands/codegen.js');
     codegenCommand = mod.codegenCommand;
 
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
-      throw new Error('process.exit called');
-    });
+    for (const lang of ['ts', 'go', 'rust', 'python']) {
+      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
+        throw new Error('process.exit called');
+      });
 
-    // Pass a non-existent file (not a glob). It will pass the lang check
-    // but fail at the file-existence check. The key thing is that it does
-    // NOT fail with "language not supported".
-    try {
-      await codegenCommand(
-        ['/tmp/nonexistent-runar-artifact.json'],
-        { lang: 'ts' },
+      // Pass a non-existent file (not a glob). It will pass the lang check
+      // but fail at the file-existence check. The key thing is that it does
+      // NOT fail with "is not supported".
+      try {
+        await codegenCommand(
+          ['/tmp/nonexistent-runar-artifact.json'],
+          { lang },
+        );
+      } catch {
+        // Expected — will fail on file not found or missing runar-sdk import
+      }
+
+      const errCalls = consoleSpy.mock.calls.map(c => c[0]);
+      const hasLangError = errCalls.some(
+        (msg: unknown) => typeof msg === 'string' && msg.includes('is not supported'),
       );
-    } catch {
-      // Expected — will fail on file not found or missing runar-sdk import
+      expect(hasLangError).toBe(false);
+
+      consoleSpy.mockRestore();
+      exitSpy.mockRestore();
     }
-
-    const errCalls = consoleSpy.mock.calls.map(c => c[0]);
-    const hasLangError = errCalls.some(
-      (msg: unknown) => typeof msg === 'string' && msg.includes('is not yet supported'),
-    );
-    expect(hasLangError).toBe(false);
-
-    consoleSpy.mockRestore();
-    exitSpy.mockRestore();
   });
 });

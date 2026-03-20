@@ -37,7 +37,7 @@ export interface WalletProviderOptions {
   overlayTopics?: string[];
   /** Network (default: 'mainnet'). */
   network?: 'mainnet' | 'testnet';
-  /** Fee rate in sats/byte (default: 0.1). */
+  /** Fee rate in sats/KB (default: 100, i.e. 0.1 sat/byte). */
   feeRate?: number;
 }
 
@@ -66,7 +66,7 @@ export class WalletProvider implements Provider {
     this.overlayUrl = options.overlayUrl;
     this.overlayTopics = options.overlayTopics;
     this._network = options.network ?? 'mainnet';
-    this._feeRate = options.feeRate ?? 0.1;
+    this._feeRate = options.feeRate ?? 100;
   }
 
   // -------------------------------------------------------------------------

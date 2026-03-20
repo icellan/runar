@@ -25,6 +25,8 @@ export interface ABIMethod {
   name: string;
   params: ABIParam[];
   isPublic: boolean;
+  /** True for stateful contract methods that don't mutate state (no continuation output). */
+  isTerminal?: boolean;
 }
 
 export interface ABI {
@@ -55,6 +57,7 @@ export interface StateField {
   name: string;
   type: string;
   index: number;
+  initialValue?: string | bigint | boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +112,9 @@ export interface RunarArtifact {
 
   /** Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash) */
   codeSeparatorIndex?: number;
+
+  /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
+  codeSeparatorIndices?: number[];
 
   /** ISO-8601 build timestamp */
   buildTimestamp: string;

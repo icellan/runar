@@ -194,8 +194,8 @@ class TestBuildCallTransaction:
         # Only the change output, no contract output
         assert len(parsed['outputs']) == 1
         assert parsed['outputs'][0]['script'] == change_script
-        # Fee: input0(42) + changeOut(34) + overhead(10) = 86 → change = 100000 - 86 = 99914
-        assert parsed['outputs'][0]['satoshis'] == 99_914
+        # Fee: 86 bytes at 100 sat/KB → fee = ceil(86*100/1000) = 9 → change = 100000 - 9 = 99991
+        assert parsed['outputs'][0]['satoshis'] == 99_991
 
     def test_call_fee_paid_from_funding_utxos(self):
         """The transaction fee is deducted from the change output (change < total input)."""

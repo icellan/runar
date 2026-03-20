@@ -133,6 +133,6 @@ export class RPCProvider implements Provider {
   }
 
   async getFeeRate(): Promise<number> {
-    return 1;
+    return 100;
   }
 }

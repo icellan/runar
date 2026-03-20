@@ -82,3 +82,11 @@ path = "blake3/Blake3Test_test.rs"
 [[test]]
 name = "p2blake3pkh"
 path = "p2blake3pkh/P2Blake3PKH_test.rs"
+
+[[test]]
+name = "sha256_compress_test"
+path = "sha256-compress/Sha256CompressTest_test.rs"
+
+[[test]]
+name = "sha256_finalize_test"
+path = "sha256-finalize/Sha256FinalizeTest_test.rs"

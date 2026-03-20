@@ -145,12 +145,18 @@ export interface AddOutput {
   kind: 'add_output';
   satoshis: string;       // reference to a temp holding satoshis bigint
   stateValues: string[];  // references to temps, one per mutable property in declaration order
+  preimage: string;       // reference to a temp holding the verified preimage (for codePart extraction)
 }
 
 export interface AddRawOutput {
   kind: 'add_raw_output';
   satoshis: string;      // reference to a temp holding satoshis bigint
   scriptBytes: string;   // reference to a temp holding ByteString script
+}
+
+export interface ArrayLiteral {
+  kind: 'array_literal';
+  elements: string[];    // references to temp names
 }
 
 export type ANFValue =
@@ -169,4 +175,5 @@ export type ANFValue =
   | CheckPreimage
   | DeserializeState
   | AddOutput
-  | AddRawOutput;
+  | AddRawOutput
+  | ArrayLiteral;

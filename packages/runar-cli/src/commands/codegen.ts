@@ -10,6 +10,8 @@ interface CodegenOptions {
   lang: string;
 }
 
+const SUPPORTED_LANGS = ['ts', 'go', 'rust', 'python'];
+
 /**
  * Simple glob expansion for artifact file patterns.
  * Uses a basic directory scan + pattern match to avoid dependency on
@@ -37,9 +39,17 @@ function expandGlob(pattern: string): string[] {
   }
 }
 
+/** Convert camelCase/PascalCase to snake_case for file naming. */
+function toSnakeCase(name: string): string {
+  return name
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1_$2')
+    .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+    .toLowerCase();
+}
+
 export async function codegenCommand(patterns: string[], options: CodegenOptions): Promise<void> {
-  if (options.lang !== 'ts') {
-    console.error(`Error: language '${options.lang}' is not yet supported. Only 'ts' is available.`);
+  if (!SUPPORTED_LANGS.includes(options.lang)) {
+    console.error(`Error: language '${options.lang}' is not supported. Available: ${SUPPORTED_LANGS.join(', ')}`);
     process.exit(1);
   }
 
@@ -47,7 +57,6 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
   const files: string[] = [];
   for (const pattern of patterns) {
     if (pattern.includes('*') || pattern.includes('?')) {
-      // fs.globSync is Node 22+; use dynamic import to avoid SSR transform issues
       const matches = expandGlob(pattern);
       files.push(...matches);
     } else {
@@ -60,8 +69,17 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
     process.exit(1);
   }
 
-  // Dynamically import the codegen function from runar-sdk
-  const { generateTypescript } = await import('runar-sdk');
+  // Dynamically import the codegen functions from runar-sdk
+  const { generateTypescript, generateGo, generateRust, generatePython } = await import('runar-sdk/codegen');
+
+  const generators: Record<string, { fn: (a: any) => string; ext: string; nameStyle: 'pascal' | 'snake' }> = {
+    ts:     { fn: generateTypescript, ext: '.ts', nameStyle: 'pascal' },
+    go:     { fn: generateGo,        ext: '.go', nameStyle: 'snake' },
+    rust:   { fn: generateRust,      ext: '.rs', nameStyle: 'snake' },
+    python: { fn: generatePython,    ext: '.py', nameStyle: 'snake' },
+  };
+
+  const { fn: generate, ext, nameStyle } = generators[options.lang]!;
 
   let generated = 0;
   for (const file of files) {
@@ -80,7 +98,7 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
       process.exit(1);
     }
 
-    const code = generateTypescript(artifact as any);
+    const code = generate(artifact as any);
 
     const contractName = (artifact as any).contractName ?? 'Contract';
     const outputDir = options.output
@@ -91,7 +109,10 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
       fs.mkdirSync(outputDir, { recursive: true });
     }
 
-    const outputPath = path.join(outputDir, `${contractName}Contract.ts`);
+    const fileName = nameStyle === 'snake'
+      ? `${toSnakeCase(contractName)}_contract${ext}`
+      : `${contractName}Contract${ext}`;
+    const outputPath = path.join(outputDir, fileName);
     fs.writeFileSync(outputPath, code, 'utf8');
 
     console.log(`Generated: ${outputPath}`);

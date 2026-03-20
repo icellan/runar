@@ -85,6 +85,7 @@ impl Val {
     fn from_sdk(v: &SdkValue) -> Self {
         match v {
             SdkValue::Int(n) => Val::Int(*n),
+            SdkValue::BigInt(n) => Val::Int(n.to_string().parse::<i64>().unwrap_or(0)),
             SdkValue::Bool(b) => Val::Bool(*b),
             SdkValue::Bytes(s) => Val::Bytes(s.clone()),
             SdkValue::Auto => Val::Undefined,

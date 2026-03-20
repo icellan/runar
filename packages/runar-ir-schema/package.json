@@ -1,6 +1,6 @@
 {
   "name": "runar-ir-schema",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "type": "module",
   "description": "JSON Schema definitions and validators for Rúnar IR formats",
   "main": "dist/index.js",

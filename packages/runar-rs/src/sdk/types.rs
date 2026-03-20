@@ -146,6 +146,8 @@ pub struct AbiMethod {
     pub name: String,
     pub params: Vec<AbiParam>,
     pub is_public: bool,
+    #[serde(default)]
+    pub is_terminal: Option<bool>,
 }
 
 /// A parameter in the ABI.
@@ -189,6 +191,8 @@ pub struct ConstructorSlot {
 pub enum SdkValue {
     /// An integer (maps to Bitcoin Script numbers).
     Int(i64),
+    /// An arbitrary-precision integer for values that exceed i64 range.
+    BigInt(num_bigint::BigInt),
     /// A boolean value.
     Bool(bool),
     /// Hex-encoded byte data.
@@ -200,11 +204,23 @@ pub enum SdkValue {
 }
 
 impl SdkValue {
-    /// Convert to i64, panicking if not an Int variant.
+    /// Convert to i64. Works for Int and BigInt (if within range).
+    /// Panics if the value is not numeric or exceeds i64 range.
     pub fn as_int(&self) -> i64 {
         match self {
             SdkValue::Int(n) => *n,
-            _ => panic!("SdkValue::as_int called on non-Int variant"),
+            SdkValue::BigInt(n) => {
+                use num_bigint::ToBigInt;
+                let min = i64::MIN.to_bigint().unwrap();
+                let max = i64::MAX.to_bigint().unwrap();
+                if *n >= min && *n <= max {
+                    // Safe to convert: value fits in i64
+                    n.to_string().parse::<i64>().unwrap()
+                } else {
+                    panic!("SdkValue::as_int: BigInt value {} exceeds i64 range", n)
+                }
+            }
+            _ => panic!("SdkValue::as_int called on non-numeric variant"),
         }
     }
 
@@ -423,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "non-Int")]
+    #[should_panic(expected = "non-numeric")]
     fn sdk_value_as_int_panics_on_bool() {
         SdkValue::Bool(true).as_int();
     }

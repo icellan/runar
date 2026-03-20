@@ -6,6 +6,7 @@ Real hash functions use Python's hashlib (stdlib, no dependencies).
 
 import hashlib
 import math
+import struct
 
 from runar.ecdsa import ecdsa_verify, TEST_MESSAGE_DIGEST
 from runar.rabin_sig import rabin_verify as _rabin_verify_real
@@ -124,6 +125,126 @@ def blake3_hash(message) -> bytes:
     applies zero-padding before calling the compression function.
     Returns 32 zero bytes for business-logic testing."""
     return b'\x00' * 32
+
+
+# -- SHA-256 Compression (real implementation) --------------------------------
+
+_SHA256_K = (
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+)
+
+
+def _rotr(x: int, n: int) -> int:
+    """Right-rotate a 32-bit unsigned integer by n bits."""
+    return ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+
+
+def sha256_compress(state: bytes, block: bytes) -> bytes:
+    """SHA-256 single-block compression function (FIPS 180-4 Section 6.2.2).
+
+    Performs one round of SHA-256 block compression: message schedule
+    expansion (W[0..63]), then 64 compression rounds with Sigma/Ch/Maj
+    functions and the K constants, followed by addition back to the
+    initial state.
+
+    Args:
+        state: 32-byte intermediate hash state (8 big-endian uint32 words).
+            Use the SHA-256 IV for the first block.
+        block: 64-byte message block (512 bits).
+
+    Returns:
+        32-byte updated hash state (big-endian).
+    """
+    assert len(state) == 32, f"state must be 32 bytes, got {len(state)}"
+    assert len(block) == 64, f"block must be 64 bytes, got {len(block)}"
+
+    # Parse state as 8 big-endian uint32
+    H = list(struct.unpack('>8I', state))
+
+    # Parse block as 16 big-endian uint32 and expand to 64 words
+    W = list(struct.unpack('>16I', block))
+    for t in range(16, 64):
+        s0 = (_rotr(W[t - 15], 7) ^ _rotr(W[t - 15], 18) ^ (W[t - 15] >> 3)) & 0xFFFFFFFF
+        s1 = (_rotr(W[t - 2], 17) ^ _rotr(W[t - 2], 19) ^ (W[t - 2] >> 10)) & 0xFFFFFFFF
+        W.append((s1 + W[t - 7] + s0 + W[t - 16]) & 0xFFFFFFFF)
+
+    # Initialize working variables
+    a, b, c, d, e, f, g, h = H
+
+    # 64 compression rounds
+    for t in range(64):
+        S1 = (_rotr(e, 6) ^ _rotr(e, 11) ^ _rotr(e, 25)) & 0xFFFFFFFF
+        ch = ((e & f) ^ (~e & g)) & 0xFFFFFFFF
+        temp1 = (h + S1 + ch + _SHA256_K[t] + W[t]) & 0xFFFFFFFF
+        S0 = (_rotr(a, 2) ^ _rotr(a, 13) ^ _rotr(a, 22)) & 0xFFFFFFFF
+        maj = ((a & b) ^ (a & c) ^ (b & c)) & 0xFFFFFFFF
+        temp2 = (S0 + maj) & 0xFFFFFFFF
+
+        h = g
+        g = f
+        f = e
+        e = (d + temp1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (temp1 + temp2) & 0xFFFFFFFF
+
+    # Add compressed chunk to hash state
+    result = tuple((H[i] + v) & 0xFFFFFFFF for i, v in enumerate((a, b, c, d, e, f, g, h)))
+    return struct.pack('>8I', *result)
+
+
+def sha256_finalize(state: bytes, remaining: bytes, msg_bit_len: int) -> bytes:
+    """SHA-256 finalization with FIPS 180-4 padding.
+
+    Applies SHA-256 padding (append 0x80 byte, zero-pad, append 8-byte
+    big-endian bit length) and runs the final 1-2 compression rounds:
+
+    - Single-block path (remaining <= 55 bytes): pads to one 64-byte
+      block and compresses once.
+    - Two-block path (56-119 bytes): pads to two 64-byte blocks and
+      compresses twice.
+
+    Args:
+        state: 32-byte intermediate hash state. Use SHA-256 IV when
+            finalizing a message that fits in a single compress+finalize
+            call, or the output of a prior sha256_compress for multi-block.
+        remaining: Unprocessed trailing message bytes (0-119 bytes).
+        msg_bit_len: Total message length in bits across all blocks
+            (used in the 64-bit length suffix of SHA-256 padding).
+
+    Returns:
+        Final 32-byte SHA-256 digest.
+    """
+    # Append the 0x80 byte
+    padded = remaining + b'\x80'
+
+    if len(padded) + 8 <= 64:
+        # Fits in one block: pad to 56 bytes, then append 8-byte BE bit length
+        padded = padded.ljust(56, b'\x00')
+        padded += struct.pack('>Q', msg_bit_len)
+        return sha256_compress(state, padded)
+    else:
+        # Need two blocks: pad to 120 bytes, then append 8-byte BE bit length
+        padded = padded.ljust(120, b'\x00')
+        padded += struct.pack('>Q', msg_bit_len)
+        state = sha256_compress(state, padded[:64])
+        return sha256_compress(state, padded[64:])
 
 
 # -- Real Hash Functions -----------------------------------------------------

@@ -446,8 +446,9 @@ describe('fee estimation with actual script sizes', () => {
 
     // Large script fee should be significantly larger
     expect(largeFee).toBeGreaterThan(smallFee);
-    // The difference should be approximately 200 - 1 = 199 bytes
-    expect(largeFee - smallFee).toBe(199);
+    // The difference should reflect the 199-byte script size difference
+    // At 100 sat/KB: small(202 bytes)=21, large(401 bytes)=41, diff=20
+    expect(largeFee - smallFee).toBe(20);
   });
 
   it('call fee uses actual unlocking script size for input 0', () => {
@@ -739,21 +740,22 @@ describe('BigInt values from JSON without reviver', () => {
 // ---------------------------------------------------------------------------
 
 describe('m10: fee rate parameter', () => {
-  it('estimateDeployFee with feeRate=2 returns double the default', () => {
-    const fee1 = estimateDeployFee(1, 100);
-    const fee2 = estimateDeployFee(1, 100, 2);
+  it('estimateDeployFee with feeRate=2000 returns double of feeRate=1000', () => {
+    // Use multiples of 1000 for exact scaling (no ceiling rounding)
+    const fee1 = estimateDeployFee(1, 100, 1000);
+    const fee2 = estimateDeployFee(1, 100, 2000);
     expect(fee2).toBe(fee1 * 2);
   });
 
-  it('estimateDeployFee with explicit feeRate=1 matches default', () => {
+  it('estimateDeployFee with explicit feeRate=100 matches default', () => {
     const feeDefault = estimateDeployFee(1, 100);
-    const feeExplicit = estimateDeployFee(1, 100, 1);
+    const feeExplicit = estimateDeployFee(1, 100, 100);
     expect(feeExplicit).toBe(feeDefault);
   });
 
-  it('estimateDeployFee with feeRate=3 returns triple the default', () => {
-    const fee1 = estimateDeployFee(1, 100);
-    const fee3 = estimateDeployFee(1, 100, 3);
+  it('estimateDeployFee with feeRate=3000 returns triple of feeRate=1000', () => {
+    const fee1 = estimateDeployFee(1, 100, 1000);
+    const fee3 = estimateDeployFee(1, 100, 3000);
     expect(fee3).toBe(fee1 * 3);
   });
 });

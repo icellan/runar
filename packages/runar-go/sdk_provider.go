@@ -29,8 +29,8 @@ type Provider interface {
 	// GetNetwork returns the network this provider is connected to.
 	GetNetwork() string
 
-	// GetFeeRate returns the current fee rate in satoshis per byte.
-	// BSV standard is 1 sat/byte.
+	// GetFeeRate returns the current fee rate in satoshis per KB (1000 bytes).
+	// BSV standard is 100 sat/KB (0.1 sat/byte).
 	GetFeeRate() (int64, error)
 
 	// GetRawTransaction fetches the raw transaction hex by its txid.
@@ -66,7 +66,7 @@ func NewMockProvider(network string) *MockProvider {
 		utxos:           make(map[string][]UTXO),
 		contractUtxos:   make(map[string]*UTXO),
 		network:         network,
-		feeRate:         1,
+		feeRate:         100,
 	}
 }
 
@@ -156,7 +156,7 @@ func (m *MockProvider) GetRawTransaction(txid string) (string, error) {
 	return tx.Raw, nil
 }
 
-// GetFeeRate returns the configured fee rate (default 1 sat/byte).
+// GetFeeRate returns the configured fee rate (default 100 sat/KB).
 func (m *MockProvider) GetFeeRate() (int64, error) {
 	return m.feeRate, nil
 }

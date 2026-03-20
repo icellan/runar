@@ -31,13 +31,15 @@ func compileRúnar(contractName string, argsJSON string) (string, error) {
 	// Use node to invoke the compiler from the runar-testing package
 	// (where runar-compiler is a resolved dependency).
 	code := fmt.Sprintf(`
-const { compile } = require('./packages/runar-compiler/dist/index.js');
+(async () => {
+const { compile } = await import('./packages/runar-compiler/dist/index.js');
 const fs = require('fs');
 const src = fs.readFileSync('conformance/tests/%s/%s.runar.ts', 'utf-8');
 const args = JSON.parse('%s', (k,v) => typeof v === 'string' && /^-?\d+$/.test(v) ? BigInt(v) : v);
 const r = compile(src, { fileName: '%s.runar.ts', constructorArgs: args });
 if (!r.success || !r.scriptHex) { process.exit(1); }
 process.stdout.write(r.scriptHex);
+})();
 `, contractName, contractName, argsJSON, contractName)
 
 	cmd := exec.Command("node", "-e", code)
@@ -1339,7 +1341,8 @@ func compileRúnarInline(source, argsJSON, fileName string) (string, error) {
 	escaped := strings.ReplaceAll(source, "`", "\\`")
 	escaped = strings.ReplaceAll(escaped, "$", "\\$")
 	code := fmt.Sprintf(`
-const { compile } = require('./packages/runar-compiler/dist/index.js');
+(async () => {
+const { compile } = await import('./packages/runar-compiler/dist/index.js');
 const src = `+"`%s`"+`;
 const args = JSON.parse('%s', (k,v) => typeof v === 'string' && /^-?\d+$/.test(v) ? BigInt(v) : v);
 const r = compile(src, { fileName: '%s', constructorArgs: args });
@@ -1349,6 +1352,7 @@ if (!r.success || !r.scriptHex) {
   process.exit(1);
 }
 process.stdout.write(r.scriptHex);
+})();
 `, escaped, argsJSON, fileName)
 
 	cmd := exec.Command("node", "-e", code)
@@ -1644,6 +1648,455 @@ func referenceSha256Compress(stateHex, blockHex string) string {
 		binary.BigEndian.PutUint32(result[i*4:], v)
 	}
 	return hex.EncodeToString(result)
+}
+
+// ---------------------------------------------------------------------------
+// Part 10: SHA-256 Finalize Script Execution (go-sdk interpreter)
+// ---------------------------------------------------------------------------
+// These tests verify sha256Finalize codegen correctness. sha256Finalize
+// handles FIPS 180-4 padding internally and branches between 1-block
+// (remaining <= 55 bytes) and 2-block (56-119 bytes) paths.
+
+const sha256FinalizeSource = `
+class Sha256FinalizeTest extends SmartContract {
+  readonly expected: ByteString;
+
+  constructor(expected: ByteString) {
+    super(expected);
+    this.expected = expected;
+  }
+
+  public verify(state: ByteString, remaining: ByteString, msgBitLen: bigint) {
+    const result = sha256Finalize(state, remaining, msgBitLen);
+    assert(result === this.expected);
+  }
+}
+`
+
+const sha256FinalizeCrossVerifySource = `
+class Sha256FinalizeCrossVerify extends SmartContract {
+  readonly initState: ByteString;
+
+  constructor(initState: ByteString) {
+    super(initState);
+    this.initState = initState;
+  }
+
+  public verify(message: ByteString, msgBitLen: bigint) {
+    const finalized = sha256Finalize(this.initState, message, msgBitLen);
+    const native = sha256(message);
+    assert(finalized === native);
+  }
+}
+`
+
+const sha256FinalizeChainedSource = `
+class Sha256FinalizeChained extends SmartContract {
+  readonly initState: ByteString;
+
+  constructor(initState: ByteString) {
+    super(initState);
+    this.initState = initState;
+  }
+
+  public verify(fullMessage: ByteString, firstBlock: ByteString, remaining: ByteString, totalBitLen: bigint) {
+    const mid = sha256Compress(this.initState, firstBlock);
+    const final = sha256Finalize(mid, remaining, totalBitLen);
+    const native = sha256(fullMessage);
+    assert(final === native);
+  }
+}
+`
+
+func TestSha256Finalize_ABC(t *testing.T) {
+	expected := "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+	lockingHex, err := compileRúnarInline(sha256FinalizeSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256FinalizeTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	remaining, _ := hex.DecodeString("616263") // "abc" = 3 bytes
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(remaining) + encodePushInt(24)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestSha256Finalize_Empty(t *testing.T) {
+	expected := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+	lockingHex, err := compileRúnarInline(sha256FinalizeSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256FinalizeTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes([]byte{}) + encodePushInt(0)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestSha256Finalize_RejectsWrongHash(t *testing.T) {
+	expected := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	lockingHex, err := compileRúnarInline(sha256FinalizeSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Sha256FinalizeTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	stateBytes, _ := hex.DecodeString(sha256Init)
+	remaining, _ := hex.DecodeString("616263")
+	unlockingHex := encodePushBytes(stateBytes) + encodePushBytes(remaining) + encodePushInt(24)
+
+	if err := executeScript(lockingHex, unlockingHex); err == nil {
+		t.Fatal("expected script failure with wrong hash but execution succeeded")
+	}
+}
+
+func TestSha256Finalize_CrossVerify(t *testing.T) {
+	messages := []struct {
+		name string
+		hex  string
+		bits int64
+	}{
+		{"abc", "616263", 24},
+		{"empty", "", 0},
+		{"one byte 0x42", "42", 8},
+		{"55 bytes (max single-block)", strings.Repeat("aa", 55), 440},
+		{"Hello, SHA-256!", hex.EncodeToString([]byte("Hello, SHA-256!")), int64(len("Hello, SHA-256!") * 8)},
+	}
+
+	for _, msg := range messages {
+		t.Run(msg.name, func(t *testing.T) {
+			lockingHex, err := compileRúnarInline(sha256FinalizeCrossVerifySource,
+				fmt.Sprintf(`{"initState":"%s"}`, sha256Init), "Sha256FinalizeCrossVerify.runar.ts")
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			msgBytes, _ := hex.DecodeString(msg.hex)
+			unlockingHex := encodePushBytes(msgBytes) + encodePushInt(msg.bits)
+
+			if err := executeScript(lockingHex, unlockingHex); err != nil {
+				t.Fatalf("execution failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSha256Finalize_TwoBlock(t *testing.T) {
+	messages := []struct {
+		name string
+		hex  string
+		bits int64
+	}{
+		{"56 bytes (min two-block)", strings.Repeat("bb", 56), 448},
+		{"64 bytes", strings.Repeat("cc", 64), 512},
+		{"100 bytes", strings.Repeat("dd", 100), 800},
+	}
+
+	for _, msg := range messages {
+		t.Run(msg.name, func(t *testing.T) {
+			lockingHex, err := compileRúnarInline(sha256FinalizeCrossVerifySource,
+				fmt.Sprintf(`{"initState":"%s"}`, sha256Init), "Sha256FinalizeCrossVerify.runar.ts")
+			if err != nil {
+				t.Fatalf("compile: %v", err)
+			}
+
+			msgBytes, _ := hex.DecodeString(msg.hex)
+			unlockingHex := encodePushBytes(msgBytes) + encodePushInt(msg.bits)
+
+			if err := executeScript(lockingHex, unlockingHex); err != nil {
+				t.Fatalf("execution failed: %v", err)
+			}
+		})
+	}
+}
+
+func TestSha256Finalize_Chained(t *testing.T) {
+	// 120-byte message: compress first 64 bytes, finalize remaining 56
+	fullMsg := strings.Repeat("ee", 120)
+	firstBlock := fullMsg[:128]   // first 64 bytes (128 hex chars)
+	remaining := fullMsg[128:]    // remaining 56 bytes
+	totalBitLen := int64(960)     // 120 * 8
+
+	lockingHex, err := compileRúnarInline(sha256FinalizeChainedSource,
+		fmt.Sprintf(`{"initState":"%s"}`, sha256Init), "Sha256FinalizeChained.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	fullMsgBytes, _ := hex.DecodeString(fullMsg)
+	firstBlockBytes, _ := hex.DecodeString(firstBlock)
+	remainingBytes, _ := hex.DecodeString(remaining)
+	unlockingHex := encodePushBytes(fullMsgBytes) +
+		encodePushBytes(firstBlockBytes) +
+		encodePushBytes(remainingBytes) +
+		encodePushInt(totalBitLen)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Part 11: BLAKE3 Script Execution (go-sdk interpreter)
+// ---------------------------------------------------------------------------
+
+const blake3CompressSource = `
+class Blake3CompressTest extends SmartContract {
+  readonly expected: ByteString;
+
+  constructor(expected: ByteString) {
+    super(expected);
+    this.expected = expected;
+  }
+
+  public verify(chainingValue: ByteString, block: ByteString) {
+    const result = blake3Compress(chainingValue, block);
+    assert(result === this.expected);
+  }
+}
+`
+
+const blake3HashSource = `
+class Blake3HashTest extends SmartContract {
+  readonly expected: ByteString;
+
+  constructor(expected: ByteString) {
+    super(expected);
+    this.expected = expected;
+  }
+
+  public verify(message: ByteString) {
+    const result = blake3Hash(message);
+    assert(result === this.expected);
+  }
+}
+`
+
+// referenceBlake3Compress implements BLAKE3 single-block compression in pure Go.
+// Matches the on-chain codegen which hardcodes blockLen=64, counter=0, flags=11.
+func referenceBlake3Compress(cvHex, blockHex string) string {
+	blake3IV := [8]uint32{
+		0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+		0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+	}
+	msgPerm := [16]int{2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8}
+
+	rotr := func(x uint32, n uint) uint32 { return (x >> n) | (x << (32 - n)) }
+	add := func(a, b uint32) uint32 { return a + b }
+
+	gFunc := func(state *[16]uint32, a, b, c, d int, mx, my uint32) {
+		state[a] = add(add(state[a], state[b]), mx)
+		state[d] = rotr(state[d]^state[a], 16)
+		state[c] = add(state[c], state[d])
+		state[b] = rotr(state[b]^state[c], 12)
+		state[a] = add(add(state[a], state[b]), my)
+		state[d] = rotr(state[d]^state[a], 8)
+		state[c] = add(state[c], state[d])
+		state[b] = rotr(state[b]^state[c], 7)
+	}
+
+	roundFunc := func(state *[16]uint32, m [16]uint32) {
+		gFunc(state, 0, 4, 8, 12, m[0], m[1])
+		gFunc(state, 1, 5, 9, 13, m[2], m[3])
+		gFunc(state, 2, 6, 10, 14, m[4], m[5])
+		gFunc(state, 3, 7, 11, 15, m[6], m[7])
+		gFunc(state, 0, 5, 10, 15, m[8], m[9])
+		gFunc(state, 1, 6, 11, 12, m[10], m[11])
+		gFunc(state, 2, 7, 8, 13, m[12], m[13])
+		gFunc(state, 3, 4, 9, 14, m[14], m[15])
+	}
+
+	cvBytes, _ := hex.DecodeString(cvHex)
+	blockBytes, _ := hex.DecodeString(blockHex)
+
+	var cv [8]uint32
+	for i := 0; i < 8; i++ {
+		cv[i] = binary.BigEndian.Uint32(cvBytes[i*4:])
+	}
+
+	var m [16]uint32
+	for i := 0; i < 16; i++ {
+		m[i] = binary.BigEndian.Uint32(blockBytes[i*4:])
+	}
+
+	state := [16]uint32{
+		cv[0], cv[1], cv[2], cv[3],
+		cv[4], cv[5], cv[6], cv[7],
+		blake3IV[0], blake3IV[1], blake3IV[2], blake3IV[3],
+		0, 0, 64, 11, // counter=0, counter_hi=0, blockLen=64, flags=CHUNK_START|CHUNK_END|ROOT
+	}
+
+	msg := m
+	for r := 0; r < 7; r++ {
+		roundFunc(&state, msg)
+		if r < 6 {
+			var permuted [16]uint32
+			for i, pi := range msgPerm {
+				permuted[i] = msg[pi]
+			}
+			msg = permuted
+		}
+	}
+
+	result := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		w := state[i] ^ state[i+8]
+		binary.BigEndian.PutUint32(result[i*4:], w)
+	}
+	return hex.EncodeToString(result)
+}
+
+// referenceBlake3Hash computes BLAKE3 hash of a message <= 64 bytes.
+func referenceBlake3Hash(msgHex string) string {
+	// Zero-pad to 64 bytes (128 hex chars)
+	padded := msgHex
+	for len(padded) < 128 {
+		padded += "0"
+	}
+	blake3IVHex := "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+	return referenceBlake3Compress(blake3IVHex, padded)
+}
+
+func TestBlake3Compress_Empty(t *testing.T) {
+	block := strings.Repeat("00", 64)
+	blake3IVHex := "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+	expected := referenceBlake3Compress(blake3IVHex, block)
+
+	lockingHex, err := compileRúnarInline(blake3CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	cvBytes, _ := hex.DecodeString(blake3IVHex)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(cvBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestBlake3Compress_ABC(t *testing.T) {
+	block := "616263" + strings.Repeat("00", 61)
+	blake3IVHex := "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+	expected := referenceBlake3Compress(blake3IVHex, block)
+
+	lockingHex, err := compileRúnarInline(blake3CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	cvBytes, _ := hex.DecodeString(blake3IVHex)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(cvBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestBlake3Compress_RejectsWrongHash(t *testing.T) {
+	block := strings.Repeat("00", 64)
+	expected := strings.Repeat("00", 32)
+
+	lockingHex, err := compileRúnarInline(blake3CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	blake3IVHex := "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+	cvBytes, _ := hex.DecodeString(blake3IVHex)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(cvBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err == nil {
+		t.Fatal("expected script failure with wrong hash but execution succeeded")
+	}
+}
+
+func TestBlake3Compress_NonIVChaining(t *testing.T) {
+	customCV := strings.Repeat("deadbeef", 8)
+	block := strings.Repeat("ff", 64)
+	expected := referenceBlake3Compress(customCV, block)
+
+	lockingHex, err := compileRúnarInline(blake3CompressSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3CompressTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	cvBytes, _ := hex.DecodeString(customCV)
+	blockBytes, _ := hex.DecodeString(block)
+	unlockingHex := encodePushBytes(cvBytes) + encodePushBytes(blockBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestBlake3Hash_Empty(t *testing.T) {
+	expected := referenceBlake3Hash("")
+
+	lockingHex, err := compileRúnarInline(blake3HashSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3HashTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	unlockingHex := encodePushBytes([]byte{})
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestBlake3Hash_ABC(t *testing.T) {
+	expected := referenceBlake3Hash("616263")
+
+	lockingHex, err := compileRúnarInline(blake3HashSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3HashTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	msgBytes, _ := hex.DecodeString("616263")
+	unlockingHex := encodePushBytes(msgBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestBlake3Hash_FullBlock(t *testing.T) {
+	msg := strings.Repeat("cd", 64)
+	expected := referenceBlake3Hash(msg)
+
+	lockingHex, err := compileRúnarInline(blake3HashSource,
+		fmt.Sprintf(`{"expected":"%s"}`, expected), "Blake3HashTest.runar.ts")
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	msgBytes, _ := hex.DecodeString(msg)
+	unlockingHex := encodePushBytes(msgBytes)
+
+	if err := executeScript(lockingHex, unlockingHex); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
 }
 
 // Ensure the binary and big packages are used.

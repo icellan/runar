@@ -29,8 +29,8 @@ export interface Provider {
   getNetwork(): 'mainnet' | 'testnet';
 
   /**
-   * Get the current fee rate in satoshis per byte.
-   * Defaults to 1 sat/byte for BSV (the standard minimum relay fee).
+   * Get the current fee rate in satoshis per KB (1000 bytes).
+   * Defaults to 100 sat/KB for BSV (0.1 sat/byte standard relay fee).
    */
   getFeeRate(): Promise<number>;
 

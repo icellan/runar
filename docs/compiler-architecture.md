@@ -283,6 +283,20 @@ The SHA-256 codegen is replicated across all four compilers:
 
 All four produce byte-identical Bitcoin Script, verified by the conformance suite.
 
+### BLAKE3 Compression Codegen
+
+The `blake3Compress` and `blake3Hash` built-in functions are handled by a dedicated codegen module:
+
+- **BLAKE3 codegen** (`blake3-codegen.ts`): Inlines the BLAKE3 compression function (~10,000 opcodes, ~11 KB of script). The compression runs 7 rounds of 8 quarter-round G mixing calls (4 column + 4 diagonal) with a precomputed message schedule. Uses native `OP_LSHIFT`/`OP_RSHIFT` for byte-aligned rotations (16-bit, 8-bit) and general rotation for non-aligned (12-bit, 7-bit). State words are tracked at their stack depth positions for efficient rolling. The `blake3Hash` wrapper zero-pads the message to 64 bytes and prepends the IV as chaining value before splicing in the compression ops. Parameters are hardcoded: blockLen=64, counter=0, flags=11 (CHUNK_START|CHUNK_END|ROOT).
+
+The BLAKE3 codegen is replicated across all four compilers:
+- TypeScript: `packages/runar-compiler/src/passes/blake3-codegen.ts`
+- Go: `compilers/go/codegen/blake3.go`
+- Rust: `compilers/rust/src/codegen/blake3.rs`
+- Python: `compilers/python/runar_compiler/codegen/blake3.py`
+
+All four produce byte-identical Bitcoin Script, verified by the conformance suite.
+
 ### OP_CODESEPARATOR
 
 For stateful contracts, the compiler automatically inserts `OP_CODESEPARATOR` (opcode `0xab`) before the `checkPreimage` verification sequence. This causes `OP_CHECKSIG` to use only the script bytes after the separator as the scriptCode in the BIP-143 sighash preimage, reducing preimage size for large scripts and enabling scripts larger than ~32 KB.

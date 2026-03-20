@@ -25,6 +25,7 @@ from runar.builtins import (
     verify_slh_dsa_sha2_192s, verify_slh_dsa_sha2_192f,
     verify_slh_dsa_sha2_256s, verify_slh_dsa_sha2_256f,
     blake3_compress, blake3_hash,
+    sha256_compress, sha256_finalize,
 )
 from runar.ecdsa import (
     sign_test_message, pub_key_from_priv_key,
@@ -99,6 +100,8 @@ __all__ = [
     'ec_point_x', 'ec_point_y', 'EC_P', 'EC_N', 'EC_G',
     # BLAKE3
     'blake3_compress', 'blake3_hash',
+    # SHA-256 compression
+    'sha256_compress', 'sha256_finalize',
     # Test helpers
     'mock_sig', 'mock_pub_key', 'mock_preimage',
     # WOTS+ keygen/sign

@@ -16,7 +16,7 @@ def build_call_transaction(
     change_address: str,
     change_script: str = '',
     additional_utxos: list[Utxo] | None = None,
-    fee_rate: int = 1,
+    fee_rate: int = 100,
     contract_outputs: list[dict] | None = None,
     additional_contract_inputs: list[dict] | None = None,
 ) -> tuple[str, int, int]:
@@ -76,7 +76,7 @@ def build_call_transaction(
 
     estimated_size = 10 + inputs_size + outputs_size
     rate = max(1, fee_rate)
-    fee = estimated_size * rate
+    fee = (estimated_size * rate + 999) // 1000
 
     change = total_input - contract_output_sats - fee
 

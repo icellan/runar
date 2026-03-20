@@ -109,9 +109,9 @@ func BuildCallTransaction(
 	estimatedSize := 10 + inputsSize + outputsSize
 	rate := feeRate
 	if rate <= 0 {
-		rate = 1
+		rate = 100
 	}
-	fee := int64(estimatedSize) * rate
+	fee := (int64(estimatedSize)*rate + 999) / 1000
 
 	change := totalInput - contractOutputSats - fee
 

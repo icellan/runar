@@ -1,6 +1,6 @@
 [package]
 name = "runar-lang"
-version = "0.2.0"
+version = "0.3.2"
 edition = "2021"
 description = "Types and mock functions for Rúnar smart contract development in Rust"
 license = "MIT"
@@ -10,8 +10,8 @@ keywords = ["bitcoin", "smart-contracts", "bsv", "script"]
 categories = ["cryptography"]
 
 [dependencies]
-runar-lang-macros = { version = "0.2.0", path = "../runar-rs-macros" }
-runar-compiler-rust = { version = "0.2.0", path = "../../compilers/rust" }
+runar-lang-macros = { version = "0.3.2", path = "../runar-rs-macros" }
+runar-compiler-rust = { version = "0.3.2", path = "../../compilers/rust" }
 sha2 = "0.10"
 ripemd = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -19,3 +19,4 @@ serde_json = "1"
 k256 = { version = "0.13", features = ["ecdsa"] }
 bs58 = { version = "0.5", features = ["check"] }
 bsv-sdk = "0.1"
+num-bigint = "0.4"

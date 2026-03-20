@@ -16,6 +16,7 @@ from runar.sdk.calling import build_call_transaction, insert_unlocking_script
 from runar.sdk.state import serialize_state, deserialize_state, find_last_op_return
 from runar.sdk.oppushtx import compute_op_push_tx
 from runar.sdk.anf_interpreter import compute_new_state
+from runar.sdk.codegen import generate_python
 
 __all__ = [
     'Utxo', 'TransactionData', 'Transaction', 'TxInput', 'TxOutput',
@@ -30,4 +31,5 @@ __all__ = [
     'serialize_state', 'deserialize_state', 'find_last_op_return',
     'compute_op_push_tx',
     'compute_new_state',
+    'generate_python',
 ]

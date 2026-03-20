@@ -119,16 +119,17 @@ func SelectUtxos(utxos []UTXO, targetSatoshis int64, lockingScriptByteLen int, f
 
 // EstimateDeployFee estimates the fee for a deploy transaction given the
 // number of P2PKH inputs and the contract locking script byte length.
-// Includes a P2PKH change output. feeRate is in satoshis per byte (0 defaults to 1).
+// Includes a P2PKH change output. feeRate is in satoshis per KB (0 defaults to 100).
 func EstimateDeployFee(numInputs int, lockingScriptByteLen int, feeRate ...int64) int64 {
-	rate := int64(1)
+	rate := int64(100)
 	if len(feeRate) > 0 && feeRate[0] > 0 {
 		rate = feeRate[0]
 	}
 	inputsSize := numInputs * p2pkhInputSize
 	contractOutputSize := 8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen
 	changeOutputSize := p2pkhOutputSize
-	return int64(txOverhead+inputsSize+contractOutputSize+changeOutputSize) * rate
+	txSize := int64(txOverhead + inputsSize + contractOutputSize + changeOutputSize)
+	return (txSize*rate + 999) / 1000
 }
 
 // ---------------------------------------------------------------------------

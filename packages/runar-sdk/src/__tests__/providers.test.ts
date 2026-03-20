@@ -418,10 +418,9 @@ describe('RPCProvider: getFeeRate (row 417)', () => {
     vi.restoreAllMocks();
   });
 
-  it('getFeeRate returns 1 (constant rate for BSV)', async () => {
-    // The TS RPCProvider hardcodes getFeeRate to return 1 (BSV has fixed fee rate)
+  it('getFeeRate returns 100 sat/KB (standard BSV relay fee)', async () => {
     const provider = new RPCProvider('http://localhost:8332', 'user', 'pass');
     const rate = await provider.getFeeRate();
-    expect(rate).toBe(1);
+    expect(rate).toBe(100);
   });
 });

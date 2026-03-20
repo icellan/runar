@@ -1,6 +1,6 @@
 {
   "name": "runar-lang",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "type": "module",
   "description": "Rúnar smart contract language: base class, types, and builtins",
   "main": "dist/index.js",

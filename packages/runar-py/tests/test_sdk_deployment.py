@@ -127,8 +127,8 @@ class TestEstimateDeployFee:
         assert fee3 > fee1
 
     def test_fee_rate_scales_fee(self):
-        fee1 = estimate_deploy_fee(num_inputs=1, locking_script_byte_len=25, fee_rate=1)
-        fee2 = estimate_deploy_fee(num_inputs=1, locking_script_byte_len=25, fee_rate=2)
+        fee1 = estimate_deploy_fee(num_inputs=1, locking_script_byte_len=25, fee_rate=1000)
+        fee2 = estimate_deploy_fee(num_inputs=1, locking_script_byte_len=25, fee_rate=2000)
         assert fee2 == fee1 * 2
 
 

@@ -414,6 +414,12 @@ export class RunarInterpreter {
         return expr.prefix ? newVal : operand;
       }
 
+      case 'array_literal': {
+        // Array literals are not supported at runtime — they exist for
+        // compile-time constructs only. Throw if encountered during interpretation.
+        throw new Error('Array literals are not supported in the interpreter');
+      }
+
       default: {
         const _exhaustive: never = expr;
         throw new Error(`Unknown expression kind: ${(_exhaustive as Expression).kind}`);
@@ -563,6 +569,14 @@ export class RunarInterpreter {
           }
         }
         this._outputs.push({ satoshis, stateValues });
+        return { kind: 'void' };
+      }
+
+      if (methodName === 'addRawOutput') {
+        const evaluatedArgs = argExprs.map(a => this.evalExpr(a, env, methods));
+        const satoshis = evaluatedArgs[0]!;
+        const scriptBytes = evaluatedArgs[1]!;
+        this._outputs.push({ satoshis, stateValues: { _rawScript: scriptBytes } });
         return { kind: 'void' };
       }
 

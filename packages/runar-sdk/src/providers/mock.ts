@@ -21,7 +21,7 @@ export class MockProvider implements Provider {
   private readonly broadcastedTxObjects: Transaction[] = [];
   private readonly network: 'mainnet' | 'testnet';
   private broadcastCount = 0;
-  private feeRate = 1;
+  private feeRate = 100;
 
   constructor(network: 'mainnet' | 'testnet' = 'testnet') {
     this.network = network;

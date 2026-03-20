@@ -221,6 +221,149 @@ pub fn blake3_hash(_message: &[u8]) -> ByteString {
 }
 
 // ---------------------------------------------------------------------------
+// Real SHA-256 compression (FIPS 180-4 Section 6.2.2)
+// ---------------------------------------------------------------------------
+
+const SHA256_K: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+/// Real SHA-256 single-block compression function (FIPS 180-4 Section 6.2.2).
+///
+/// Takes a 32-byte state (8 big-endian u32 words) and a 64-byte block,
+/// returns the 32-byte updated state.
+pub fn sha256_compress(state: &[u8], block: &[u8]) -> ByteString {
+    assert!(state.len() == 32, "sha256_compress: state must be 32 bytes");
+    assert!(block.len() == 64, "sha256_compress: block must be 64 bytes");
+
+    // Parse state as 8 big-endian u32 words
+    let mut h = [0u32; 8];
+    for i in 0..8 {
+        h[i] = u32::from_be_bytes(state[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+
+    // Parse block as 16 big-endian u32 words
+    let mut w = [0u32; 64];
+    for i in 0..16 {
+        w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+    }
+
+    // W-expansion for t = 16..64
+    for t in 16..64 {
+        let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
+        let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
+        w[t] = w[t - 16]
+            .wrapping_add(s0)
+            .wrapping_add(w[t - 7])
+            .wrapping_add(s1);
+    }
+
+    // Initialize working variables
+    let mut a = h[0];
+    let mut b = h[1];
+    let mut c = h[2];
+    let mut d = h[3];
+    let mut e = h[4];
+    let mut f = h[5];
+    let mut g = h[6];
+    let mut hh = h[7];
+
+    // 64 rounds
+    for t in 0..64 {
+        let big_s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let ch = (e & f) ^ ((!e) & g);
+        let temp1 = hh
+            .wrapping_add(big_s1)
+            .wrapping_add(ch)
+            .wrapping_add(SHA256_K[t])
+            .wrapping_add(w[t]);
+        let big_s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let maj = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = big_s0.wrapping_add(maj);
+
+        hh = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+
+    // Compute final hash values
+    h[0] = h[0].wrapping_add(a);
+    h[1] = h[1].wrapping_add(b);
+    h[2] = h[2].wrapping_add(c);
+    h[3] = h[3].wrapping_add(d);
+    h[4] = h[4].wrapping_add(e);
+    h[5] = h[5].wrapping_add(f);
+    h[6] = h[6].wrapping_add(g);
+    h[7] = h[7].wrapping_add(hh);
+
+    // Encode as big-endian bytes
+    let mut result = vec![0u8; 32];
+    for i in 0..8 {
+        result[i * 4..i * 4 + 4].copy_from_slice(&h[i].to_be_bytes());
+    }
+    result
+}
+
+/// Real SHA-256 finalize function.
+///
+/// Takes the current 32-byte state, remaining unprocessed bytes, and the
+/// total message bit length. Applies SHA-256 padding (append 0x80, zero-pad,
+/// append 64-bit big-endian bit length) and runs the final 1-2 compression rounds.
+pub fn sha256_finalize(state: &[u8], remaining: &[u8], msg_bit_len: i64) -> ByteString {
+    assert!(state.len() == 32, "sha256_finalize: state must be 32 bytes");
+    assert!(remaining.len() <= 64, "sha256_finalize: remaining must be <= 64 bytes");
+
+    let rem_len = remaining.len();
+
+    // Build padded buffer: remaining + 0x80 + zeros + 8-byte big-endian bit length
+    // If remaining + 1 (0x80) + 8 (bit length) <= 64, it fits in one block.
+    // Otherwise we need two blocks.
+    if rem_len < 56 {
+        // Fits in one 64-byte block
+        let mut block = [0u8; 64];
+        block[..rem_len].copy_from_slice(remaining);
+        block[rem_len] = 0x80;
+        // Last 8 bytes = bit length in big-endian
+        let bit_len = msg_bit_len as u64;
+        block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        sha256_compress(state, &block)
+    } else {
+        // Needs two blocks
+        let mut block1 = [0u8; 64];
+        block1[..rem_len].copy_from_slice(remaining);
+        block1[rem_len] = 0x80;
+        // First block: remaining + 0x80 + zeros (no room for bit length)
+        let intermediate = sha256_compress(state, &block1);
+
+        // Second block: all zeros except last 8 bytes = bit length
+        let mut block2 = [0u8; 64];
+        let bit_len = msg_bit_len as u64;
+        block2[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        sha256_compress(&intermediate, &block2)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock preimage extraction functions
 // ---------------------------------------------------------------------------
 
@@ -696,5 +839,67 @@ mod tests {
     fn test_log2_non_power() {
         // floor(log2(9)) == 3
         assert_eq!(log2(9), 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-256 compress / finalize
+    // -----------------------------------------------------------------------
+
+    /// Decode a hex string to bytes.
+    fn hex_decode(s: &str) -> Vec<u8> {
+        assert!(s.len() % 2 == 0, "hex string must have even length");
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// Encode bytes as a lowercase hex string.
+    fn hex_encode(data: &[u8]) -> String {
+        data.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    #[test]
+    fn test_sha256_compress_abc() {
+        let state = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        let block = hex_decode(
+            "6162638000000000000000000000000000000000000000000000000000000000\
+             0000000000000000000000000000000000000000000000000000000000000018"
+        );
+        let result = sha256_compress(&state, &block);
+        assert_eq!(
+            hex_encode(&result),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_sha256_finalize_abc() {
+        let state = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        let result = sha256_finalize(&state, b"abc", 24);
+        assert_eq!(
+            hex_encode(&result),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_sha256_finalize_empty() {
+        let state = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        let result = sha256_finalize(&state, b"", 0);
+        assert_eq!(
+            hex_encode(&result),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_finalize_cross_verify() {
+        let state = hex_decode("6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19");
+        for msg in &["", "abc", "hello world"] {
+            let finalized = sha256_finalize(&state, msg.as_bytes(), (msg.len() * 8) as i64);
+            let hashed = sha256(msg.as_bytes());
+            assert_eq!(finalized, hashed, "mismatch for {:?}", msg);
+        }
     }
 }

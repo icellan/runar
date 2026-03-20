@@ -1,6 +1,6 @@
 [package]
 name = "runar-compiler-rust"
-version = "0.2.0"
+version = "0.3.2"
 edition = "2021"
 description = "Rust implementation of the Rúnar compiler (full pipeline: .runar.ts → Bitcoin Script)"
 license = "MIT"

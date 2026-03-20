@@ -342,12 +342,32 @@ class TestDeterministicOutput:
 
 BASIC_CONFORMANCE_TESTS = [
     "arithmetic",
+    "auction",
     "basic-p2pkh",
+    "blake3",
     "boolean-logic",
     "bounded-loop",
+    "convergence-proof",
+    "covenant-vault",
+    "ec-demo",
+    "ec-primitives",
+    "escrow",
+    "function-patterns",
     "if-else",
+    "if-without-else",
+    "math-demo",
     "multi-method",
+    "oracle-price",
+    "post-quantum-slhdsa",
+    "post-quantum-wallet",
+    "post-quantum-wots",
+    "property-initializers",
+    "schnorr-zkp",
+    "sphincs-wallet",
     "stateful",
+    "stateful-counter",
+    "token-ft",
+    "token-nft",
 ]
 
 

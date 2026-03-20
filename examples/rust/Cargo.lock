@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "runar-compiler-rust"
-version = "0.2.0"
+version = "0.3.2"
 dependencies = [
  "clap",
  "hex",
@@ -854,11 +854,12 @@ dependencies = [
 
 [[package]]
 name = "runar-lang"
-version = "0.2.0"
+version = "0.3.2"
 dependencies = [
  "bs58",
  "bsv-sdk",
  "k256",
+ "num-bigint",
  "ripemd",
  "runar-compiler-rust",
  "runar-lang-macros",
@@ -869,7 +870,7 @@ dependencies = [
 
 [[package]]
 name = "runar-lang-macros"
-version = "0.2.0"
+version = "0.3.2"
 
 [[package]]
 name = "rustc-hash"

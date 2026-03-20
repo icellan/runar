@@ -139,4 +139,21 @@ describe('blake3 codegen — isolated phase tests', () => {
     expect(result.error).toBeUndefined();
     expect(result.hash).toBe(expected);
   });
+
+  it('7 rounds — non-zero block data ("abc" padded)', () => {
+    const abcBlock = '616263' + '00'.repeat(61);
+    const result = runCompress(vm, BLAKE3_IV_HEX, abcBlock, 7);
+    const expected = referenceCompress(BLAKE3_IV_HEX, abcBlock, 7);
+    expect(result.error).toBeUndefined();
+    expect(result.hash).toBe(expected);
+  });
+
+  it('7 rounds — non-IV chaining value', () => {
+    const customCV = 'deadbeef'.repeat(8);
+    const ffBlock = 'ff'.repeat(64);
+    const result = runCompress(vm, customCV, ffBlock, 7);
+    const expected = referenceCompress(customCV, ffBlock, 7);
+    expect(result.error).toBeUndefined();
+    expect(result.hash).toBe(expected);
+  });
 });

@@ -382,6 +382,8 @@ private helper(x: bigint): bigint {
 | `checkPreimage` | `(preimage: SigHashPreimage) => boolean` | Verifies sighash preimage matches current transaction (OP_PUSH_TX pattern). Auto-injected for `StatefulSmartContract`; manually callable for stateless covenants. |
 | `sha256Compress` | `(state: ByteString, block: ByteString) => ByteString` | One round of SHA-256 compression. Takes a 32-byte intermediate state and a 64-byte message block, returns the updated 32-byte state. Inlines ~3000 opcodes. |
 | `sha256Finalize` | `(state: ByteString, remaining: ByteString, msgBitLen: bigint) => ByteString` | Finalize a partial SHA-256 hash. Applies padding to the remaining bytes (< 64 bytes) and runs 1-2 final compression rounds. Returns the final 32-byte hash. |
+| `blake3Compress` | `(chainingValue: ByteString, block: ByteString) => ByteString` | BLAKE3 single-block compression. Takes a 32-byte chaining value and a 64-byte block, returns the 32-byte hash. Hardcodes blockLen=64, counter=0, flags=11 (CHUNK_START\|CHUNK_END\|ROOT). Inlines ~10,000 opcodes (~11 KB). |
+| `blake3Hash` | `(message: ByteString) => ByteString` | BLAKE3 hash for messages up to 64 bytes. Zero-pads the message to 64 bytes and calls the compression function with the BLAKE3 IV as the chaining value. Returns the 32-byte hash. |
 
 ### Byte Operations
 

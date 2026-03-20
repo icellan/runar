@@ -58,6 +58,7 @@ class AbiMethod:
     name: str
     params: list[AbiParam] = field(default_factory=list)
     is_public: bool = True
+    is_terminal: bool | None = None
 
 
 @dataclass
@@ -112,6 +113,7 @@ class RunarArtifact:
                 name=m['name'],
                 params=[AbiParam(name=p['name'], type=p['type']) for p in m.get('params', [])],
                 is_public=m.get('isPublic', True),
+                is_terminal=m.get('isTerminal'),
             )
             for m in abi_raw.get('methods', [])
         ]

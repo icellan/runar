@@ -124,8 +124,8 @@ pub fn build_call_transaction_ext(
         outputs_size += 34; // P2PKH change
     }
     let estimated_size = 10 + inputs_size + outputs_size;
-    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(1);
-    let fee = estimated_size * rate;
+    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(100);
+    let fee = (estimated_size * rate + 999) / 1000;
 
     let change = total_input - contract_output_sats - fee;
 
@@ -442,18 +442,20 @@ mod tests {
             &utxo, "00", Some("51"), Some(50_000), Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
-        // Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
-        // Change = 100000 - 50000 - 96 = 49904
+        // txSize: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
+        // Fee: ceil(96 * 100 / 1000) = 10
+        // Change = 100000 - 50000 - 10 = 49990
         assert_eq!(parsed.output_count, 2);
         assert_eq!(parsed.outputs[0].satoshis, 50_000);
-        assert_eq!(parsed.outputs[1].satoshis, 49_904);
+        assert_eq!(parsed.outputs[1].satoshis, 49_990);
         assert_eq!(parsed.outputs[1].script, change_script);
     }
 
     #[test]
     fn omits_change_when_zero() {
-        // Fee: input0(42) + contractOut(10) + changeOut(34) + overhead(10) = 96
-        let utxo = make_utxo(50_096, 0);
+        // txSize: input0(42) + contractOut(10) + changeOut(34) + overhead(10) = 96
+        // Fee: ceil(96 * 100 / 1000) = 10
+        let utxo = make_utxo(50_010, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, _, _) = build_call_transaction(
             &utxo, "00", Some("51"), Some(50_000), Some("changeaddr"), Some(&change_script), None, None,
@@ -471,17 +473,19 @@ mod tests {
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), None, None,
         );
         let parsed = parse_tx_hex(&tx_hex);
-        // Fee: input0(42) + changeOut(34) + overhead(10) = 86
-        // Change: 100000 - 0 - 86 = 99914
+        // txSize: input0(42) + changeOut(34) + overhead(10) = 86
+        // Fee: ceil(86 * 100 / 1000) = 9
+        // Change: 100000 - 0 - 9 = 99991
         assert_eq!(parsed.output_count, 1);
         assert_eq!(parsed.outputs[0].script, change_script);
-        assert_eq!(parsed.outputs[0].satoshis, 99_914);
+        assert_eq!(parsed.outputs[0].satoshis, 99_991);
     }
 
     #[test]
     fn stateless_no_outputs_when_change_zero() {
-        // Fee: input0(42) + changeOut(34) + overhead(10) = 86
-        let utxo = make_utxo(86, 0);
+        // txSize: input0(42) + changeOut(34) + overhead(10) = 86
+        // Fee: ceil(86 * 100 / 1000) = 9
+        let utxo = make_utxo(9, 0);
         let change_script = format!("76a914{}88ac", "ff".repeat(20));
         let (tx_hex, _, _) = build_call_transaction(
             &utxo, "51", None, None, Some("changeaddr"), Some(&change_script), None, None,
@@ -499,10 +503,11 @@ mod tests {
             &utxo, "00", Some("51"), Some(40_000), Some("changeaddr"), Some(&change_script), Some(&additional), None,
         );
         let parsed = parse_tx_hex(&tx_hex);
-        // Fee: input0(42) + additional(148) + contractOut(10) + changeOut(34) + overhead(10) = 244
-        // Total input: 80000, Change: 80000 - 40000 - 244 = 39756
+        // txSize: input0(42) + additional(148) + contractOut(10) + changeOut(34) + overhead(10) = 244
+        // Fee: ceil(244 * 100 / 1000) = 25
+        // Total input: 80000, Change: 80000 - 40000 - 25 = 39975
         assert_eq!(parsed.output_count, 2);
         assert_eq!(parsed.outputs[0].satoshis, 40_000);
-        assert_eq!(parsed.outputs[1].satoshis, 39_756);
+        assert_eq!(parsed.outputs[1].satoshis, 39_975);
     }
 }

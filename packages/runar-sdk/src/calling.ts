@@ -27,7 +27,7 @@ export function buildCallTransaction(
   changeAddress?: string,
   changeScript?: string,
   additionalUtxos?: UTXO[],
-  feeRate: number = 1,
+  feeRate: number = 100,
   options?: {
     /** Multiple contract outputs (replaces single newLockingScript). */
     contractOutputs?: Array<{ script: string; satoshis: number }>;
@@ -69,7 +69,7 @@ export function buildCallTransaction(
     outputsSize += 34; // P2PKH change
   }
   const estimatedSize = 10 + inputsSize + outputsSize;
-  const fee = Math.ceil(estimatedSize * feeRate);
+  const fee = Math.ceil(estimatedSize * feeRate / 1000);
 
   const change = totalInput - contractOutputSats - fee;
 
@@ -142,14 +142,14 @@ export function estimateCallFee(
   lockingScriptByteLen: number,
   unlockingScriptByteLen: number,
   numFundingInputs: number,
-  feeRate: number = 1,
+  feeRate: number = 100,
 ): number {
   const contractInputSize = 32 + 4 + varIntByteSize(unlockingScriptByteLen) + unlockingScriptByteLen + 4;
   const fundingInputsSize = numFundingInputs * P2PKH_INPUT_SIZE;
   const contractOutputSize = 8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen;
   const changeOutputSize = P2PKH_OUTPUT_SIZE;
   const txSize = TX_OVERHEAD + contractInputSize + fundingInputsSize + contractOutputSize + changeOutputSize;
-  return Math.ceil(txSize * feeRate);
+  return Math.ceil(txSize * feeRate / 1000);
 }
 
 // ---------------------------------------------------------------------------

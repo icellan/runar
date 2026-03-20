@@ -15,7 +15,7 @@ def build_deploy_transaction(
     satoshis: int,
     change_address: str,
     change_script: str = '',
-    fee_rate: int = 1,
+    fee_rate: int = 100,
 ) -> tuple[str, int]:
     """Build an unsigned deployment transaction.
 
@@ -74,7 +74,7 @@ def select_utxos(
     utxos: list[Utxo],
     target_satoshis: int,
     locking_script_byte_len: int,
-    fee_rate: int = 1,
+    fee_rate: int = 100,
 ) -> list[Utxo]:
     """Select the minimum set of UTXOs using largest-first strategy."""
     sorted_utxos = sorted(utxos, key=lambda u: u.satoshis, reverse=True)
@@ -94,14 +94,15 @@ def select_utxos(
 def estimate_deploy_fee(
     num_inputs: int,
     locking_script_byte_len: int,
-    fee_rate: int = 1,
+    fee_rate: int = 100,
 ) -> int:
-    """Estimate the fee for a deploy transaction."""
+    """Estimate the fee for a deploy transaction. Fee rate is in sat/KB."""
     rate = max(1, fee_rate)
     inputs_size = num_inputs * _P2PKH_INPUT_SIZE
     contract_output_size = 8 + _varint_byte_size(locking_script_byte_len) + locking_script_byte_len
     change_output_size = _P2PKH_OUTPUT_SIZE
-    return (_TX_OVERHEAD + inputs_size + contract_output_size + change_output_size) * rate
+    tx_size = _TX_OVERHEAD + inputs_size + contract_output_size + change_output_size
+    return (tx_size * rate + 999) // 1000
 
 
 _BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"

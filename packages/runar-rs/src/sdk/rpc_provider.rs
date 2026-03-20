@@ -192,7 +192,7 @@ impl Provider for RPCProvider {
     }
 
     fn get_fee_rate(&self) -> Result<i64, String> {
-        Ok(1)
+        Ok(100)
     }
 }
 
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn rpc_provider_get_fee_rate() {
         let p = RPCProvider::new("http://localhost:8332", "u", "p");
-        assert_eq!(p.get_fee_rate().unwrap(), 1);
+        assert_eq!(p.get_fee_rate().unwrap(), 100);
     }
 
     // -----------------------------------------------------------------------

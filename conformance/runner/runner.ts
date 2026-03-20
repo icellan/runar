@@ -51,7 +51,7 @@ export const INPUT_FORMATS = [
   { ext: '.runar.py',   compilers: ['ts', 'go', 'rust', 'python'] as const },
   { ext: '.runar.go',   compilers: ['go', 'python'] as const },
   { ext: '.runar.rs',   compilers: ['rust', 'python'] as const },
-  { ext: '.runar.rb',   compilers: ['ts', 'go', 'rust'] as const },
+  { ext: '.runar.rb',   compilers: ['ts', 'go', 'rust', 'python'] as const },
 ] as const;
 
 type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];

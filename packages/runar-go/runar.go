@@ -16,6 +16,7 @@ package runar
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"math"
 
 	"golang.org/x/crypto/ripemd160"
@@ -254,6 +255,147 @@ func Blake3Compress(chainingValue, block ByteString) ByteString {
 // The mock returns 32 zero bytes for business-logic testing.
 func Blake3Hash(message ByteString) ByteString {
 	return ByteString(make([]byte, 32))
+}
+
+// ---------------------------------------------------------------------------
+// SHA-256 compression / finalization (FIPS 180-4 Section 6.2.2)
+// ---------------------------------------------------------------------------
+
+// sha256K contains the 64 round constants for SHA-256.
+var sha256K = [64]uint32{
+	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+	0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+	0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+	0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+	0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+	0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+	0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+	0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+	0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+	0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+	0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+	0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+	0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+}
+
+// Sha256Compress performs a single SHA-256 compression function (FIPS 180-4 Section 6.2.2).
+// state must be 32 bytes (8 big-endian uint32 words H[0..7]).
+// block must be 64 bytes (the 512-bit message block).
+// Returns the updated 32-byte state.
+func Sha256Compress(state, block ByteString) ByteString {
+	if len(state) != 32 {
+		panic("Sha256Compress: state must be 32 bytes")
+	}
+	if len(block) != 64 {
+		panic("Sha256Compress: block must be 64 bytes")
+	}
+
+	// Parse state into 8 uint32 words
+	var h [8]uint32
+	for i := 0; i < 8; i++ {
+		h[i] = binary.BigEndian.Uint32([]byte(state)[i*4 : i*4+4])
+	}
+
+	// Parse block into 16 uint32 words and expand to 64
+	var w [64]uint32
+	for i := 0; i < 16; i++ {
+		w[i] = binary.BigEndian.Uint32([]byte(block)[i*4 : i*4+4])
+	}
+	for t := 16; t < 64; t++ {
+		// sigma0(x) = ROTR(7,x) ^ ROTR(18,x) ^ SHR(3,x)
+		x := w[t-15]
+		s0 := (x>>7 | x<<25) ^ (x>>18 | x<<14) ^ (x >> 3)
+		// sigma1(x) = ROTR(17,x) ^ ROTR(19,x) ^ SHR(10,x)
+		x = w[t-2]
+		s1 := (x>>17 | x<<15) ^ (x>>19 | x<<13) ^ (x >> 10)
+		w[t] = s1 + w[t-7] + s0 + w[t-16]
+	}
+
+	// Initialize working variables
+	a, b, c, d, e, f, g, hh := h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]
+
+	// 64 compression rounds
+	for t := 0; t < 64; t++ {
+		// Sigma1(e) = ROTR(6,e) ^ ROTR(11,e) ^ ROTR(25,e)
+		S1 := (e>>6 | e<<26) ^ (e>>11 | e<<21) ^ (e>>25 | e<<7)
+		// Ch(e,f,g) = (e AND f) XOR (NOT e AND g)
+		ch := (e & f) ^ (^e & g)
+		temp1 := hh + S1 + ch + sha256K[t] + w[t]
+		// Sigma0(a) = ROTR(2,a) ^ ROTR(13,a) ^ ROTR(22,a)
+		S0 := (a>>2 | a<<30) ^ (a>>13 | a<<19) ^ (a>>22 | a<<10)
+		// Maj(a,b,c) = (a AND b) XOR (a AND c) XOR (b AND c)
+		maj := (a & b) ^ (a & c) ^ (b & c)
+		temp2 := S0 + maj
+
+		hh = g
+		g = f
+		f = e
+		e = d + temp1
+		d = c
+		c = b
+		b = a
+		a = temp1 + temp2
+	}
+
+	// Add working variables to current hash value
+	h[0] += a
+	h[1] += b
+	h[2] += c
+	h[3] += d
+	h[4] += e
+	h[5] += f
+	h[6] += g
+	h[7] += hh
+
+	// Encode result as 32 big-endian bytes
+	out := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		binary.BigEndian.PutUint32(out[i*4:i*4+4], h[i])
+	}
+	return ByteString(out)
+}
+
+// Sha256Finalize applies FIPS 180-4 padding to the remaining bytes and performs
+// the final compression round(s).
+// state must be 32 bytes (the intermediate hash state).
+// remaining is the unprocessed trailing bytes.
+// msgBitLen is the total message length in bits.
+// Returns the final 32-byte SHA-256 digest.
+func Sha256Finalize(state, remaining ByteString, msgBitLen int64) ByteString {
+	if len(state) != 32 {
+		panic("Sha256Finalize: state must be 32 bytes")
+	}
+
+	// Start padding: append 0x80
+	padded := append([]byte(nil), []byte(remaining)...)
+	padded = append(padded, 0x80)
+
+	if len(padded)+8 <= 64 {
+		// Fits in one block: zero-pad to 56 bytes, then append 8-byte BE bit length
+		for len(padded) < 56 {
+			padded = append(padded, 0)
+		}
+		var bitLen [8]byte
+		binary.BigEndian.PutUint64(bitLen[:], uint64(msgBitLen))
+		padded = append(padded, bitLen[:]...)
+		return Sha256Compress(state, ByteString(padded))
+	}
+
+	// Needs two blocks: zero-pad to 120 bytes, then append 8-byte BE bit length
+	for len(padded) < 120 {
+		padded = append(padded, 0)
+	}
+	var bitLen [8]byte
+	binary.BigEndian.PutUint64(bitLen[:], uint64(msgBitLen))
+	padded = append(padded, bitLen[:]...)
+
+	// Compress first block
+	intermediate := Sha256Compress(state, ByteString(padded[:64]))
+	// Compress second block
+	return Sha256Compress(intermediate, ByteString(padded[64:128]))
 }
 
 // ---------------------------------------------------------------------------

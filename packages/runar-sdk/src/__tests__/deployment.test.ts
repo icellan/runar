@@ -187,9 +187,10 @@ describe('buildDeployTransaction', () => {
   it('produces single output when change is zero', () => {
     // Fee estimation uses actual script sizes:
     //   TX_OVERHEAD(10) + 1 input * P2PKH(148) + contract output(8 + 1 + 1) + change output(34)
-    //   = 10 + 148 + 10 + 34 = 202
-    // So totalInput = satoshis + fee = 50000 + 202 = 50202
-    const utxos = [makeUtxo(50202)];
+    //   = 10 + 148 + 10 + 34 = 202 bytes
+    // At 100 sat/KB: fee = ceil(202 * 100 / 1000) = 21
+    // So totalInput = satoshis + fee = 50000 + 21 = 50021
+    const utxos = [makeUtxo(50021)];
     const { tx } = buildDeployTransaction(
       '51',
       utxos,

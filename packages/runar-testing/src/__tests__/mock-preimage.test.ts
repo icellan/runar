@@ -146,7 +146,7 @@ describe('mock-preimage', () => {
 
     it('builds a locking script for a stateless contract (no OP_RETURN)', () => {
       const artifact = compileArtifact(statelessSource, 'Simple.runar.ts');
-      const script = buildLockingScript(artifact, { target: 10n }, {});
+      buildLockingScript(artifact, { target: 10n }, {});
 
       // Should NOT contain OP_RETURN separator since there are no state fields
       // (The script itself may contain 6a as data, but there should be no

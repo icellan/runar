@@ -29,8 +29,8 @@ pub trait Provider {
     /// Return the network this provider is connected to.
     fn get_network(&self) -> &str;
 
-    /// Get the current fee rate in satoshis per byte.
-    /// BSV standard is 1 sat/byte.
+    /// Get the current fee rate in satoshis per KB (1000 bytes).
+    /// BSV standard is 100 sat/KB (0.1 sat/byte).
     fn get_fee_rate(&self) -> Result<i64, String>;
 
     /// Fetch the raw transaction hex by its txid.
@@ -67,7 +67,7 @@ impl MockProvider {
             broadcasted_txs: Vec::new(),
             network: network.to_string(),
             broadcast_count: 0,
-            fee_rate: 1,
+            fee_rate: 100,
         }
     }
 

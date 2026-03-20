@@ -20,7 +20,7 @@ export function buildDeployTransaction(
   satoshis: number,
   changeAddress: string,
   changeScript: string,
-  feeRate: number = 1,
+  feeRate: number = 100,
 ): { tx: Transaction; inputCount: number } {
   if (utxos.length === 0) {
     throw new Error('buildDeployTransaction: no UTXOs provided');
@@ -91,19 +91,19 @@ function varIntByteSize(n: number): number {
  *
  * @param numInputs              - Number of P2PKH inputs.
  * @param lockingScriptByteLen   - Byte length of the contract locking script.
- * @param feeRate                - Fee rate in satoshis per byte (default: 1).
+ * @param feeRate                - Fee rate in satoshis per KB (default: 100).
  */
 export function estimateDeployFee(
   numInputs: number,
   lockingScriptByteLen: number,
-  feeRate: number = 1,
+  feeRate: number = 100,
 ): number {
   const inputsSize = numInputs * P2PKH_INPUT_SIZE;
   const contractOutputSize =
     8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen;
   const changeOutputSize = P2PKH_OUTPUT_SIZE;
   const txSize = TX_OVERHEAD + inputsSize + contractOutputSize + changeOutputSize;
-  return txSize * feeRate;
+  return Math.ceil(txSize * feeRate / 1000);
 }
 
 /**
@@ -115,7 +115,7 @@ export function selectUtxos(
   utxos: UTXO[],
   targetSatoshis: number,
   lockingScriptByteLen: number,
-  feeRate: number = 1,
+  feeRate: number = 100,
 ): UTXO[] {
   const sorted = [...utxos].sort((a, b) => b.satoshis - a.satoshis);
   const selected: UTXO[] = [];

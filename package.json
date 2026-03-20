@@ -1,6 +1,6 @@
 {
   "name": "runar",
-  "version": "0.2.0",
+  "version": "0.3.2",
   "type": "module",
   "private": true,
   "description": "TypeScript-to-Bitcoin Script compiler for BSV smart contracts",
@@ -37,7 +37,10 @@
     "integration:python": "cd integration/python && ([ -d .venv ] || (python3.13 -m venv .venv 2>/dev/null || python3 -m venv .venv) && .venv/bin/pip install -q -r requirements.txt) && PYTHONPATH=../../compilers/python:../../packages/runar-py .venv/bin/pytest -v",
     "integration:all": "cd integration && ./run-all.sh",
     "integration:all:run": "cd integration && ./run-all.sh --start --stop",
-    "whitepaper": "cd docs && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex"
+    "whitepaper": "cd docs && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex && pdflatex -interaction=nonstopmode runar-whitepaper.tex",
+    "release": "./scripts/release.sh",
+    "publish-all": "./scripts/publish-all.sh",
+    "bump-version": "./scripts/bump-version.sh"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",

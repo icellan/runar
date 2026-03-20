@@ -5,35 +5,42 @@
       "extension": ".runar.ts",
       "name": "TypeScript",
       "description": "Primary TypeScript contract syntax",
-      "compilers": ["ts", "go", "rust"],
+      "compilers": ["ts", "go", "rust", "python"],
       "status": "stable"
     },
     {
       "extension": ".runar.sol",
       "name": "Solidity-like",
       "description": "Solidity-inspired contract syntax",
-      "compilers": ["ts", "go", "rust"],
+      "compilers": ["ts", "go", "rust", "python"],
       "status": "experimental"
     },
     {
       "extension": ".runar.move",
       "name": "Move-style",
       "description": "Move-inspired resource language syntax",
-      "compilers": ["ts", "go", "rust"],
+      "compilers": ["ts", "go", "rust", "python"],
+      "status": "experimental"
+    },
+    {
+      "extension": ".runar.py",
+      "name": "Python",
+      "description": "Python DSL contract syntax",
+      "compilers": ["ts", "go", "rust", "python"],
       "status": "experimental"
     },
     {
       "extension": ".runar.go",
       "name": "Go Contracts",
       "description": "Go struct/method contract syntax",
-      "compilers": ["go"],
+      "compilers": ["go", "python"],
       "status": "experimental"
     },
     {
       "extension": ".runar.rs",
       "name": "Rust DSL",
       "description": "Rust attribute-macro contract syntax",
-      "compilers": ["rust"],
+      "compilers": ["rust", "python"],
       "status": "experimental"
     },
     {

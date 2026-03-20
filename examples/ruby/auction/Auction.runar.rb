@@ -14,8 +14,9 @@ class Auction < Runar::StatefulSmartContract
     @deadline = deadline
   end
 
-  runar_public bidder: PubKey, bid_amount: Bigint
-  def bid(bidder, bid_amount)
+  runar_public sig: Sig, bidder: PubKey, bid_amount: Bigint
+  def bid(sig, bidder, bid_amount)
+    assert check_sig(sig, bidder)
     assert bid_amount > @highest_bid
     assert extract_locktime(@tx_preimage) < @deadline
     @highest_bidder = bidder

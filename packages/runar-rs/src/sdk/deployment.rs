@@ -83,15 +83,17 @@ pub fn build_deploy_transaction(
 }
 
 /// Estimate the fee for a deploy transaction given the number of P2PKH
-/// inputs and the contract locking script byte length. Assumes 1 sat/byte
-/// fee rate and includes a P2PKH change output.
+/// inputs and the contract locking script byte length. Fee rate is in
+/// satoshis per KB (default 100, i.e. 0.1 sat/byte). Includes a P2PKH
+/// change output.
 pub fn estimate_deploy_fee(num_inputs: usize, locking_script_byte_len: usize, fee_rate: Option<i64>) -> i64 {
-    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(1);
+    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(100);
     let inputs_size = num_inputs as i64 * P2PKH_INPUT_SIZE;
     let contract_output_size =
         8 + varint_byte_size(locking_script_byte_len) + locking_script_byte_len as i64;
     let change_output_size = P2PKH_OUTPUT_SIZE;
-    (TX_OVERHEAD + inputs_size + contract_output_size + change_output_size) * rate
+    let tx_size = TX_OVERHEAD + inputs_size + contract_output_size + change_output_size;
+    (tx_size * rate + 999) / 1000
 }
 
 /// Select the minimum set of UTXOs needed to fund a deployment, using a
@@ -385,8 +387,9 @@ mod tests {
 
     #[test]
     fn single_output_when_change_zero() {
-        // Fee: TX_OVERHEAD(10) + 1 * P2PKH(148) + contract output(8 + 1 + 1) + change(34) = 202
-        let utxos = vec![make_utxo(50_202, 0)];
+        // txSize: TX_OVERHEAD(10) + 1 * P2PKH(148) + contract output(8 + 1 + 1) + change(34) = 202
+        // Fee: ceil(202 * 100 / 1000) = 21
+        let utxos = vec![make_utxo(50_021, 0)];
         let (tx_hex, _) = build_deploy_transaction("51", &utxos, 50_000, "addr", "51", None);
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.output_count, 1);

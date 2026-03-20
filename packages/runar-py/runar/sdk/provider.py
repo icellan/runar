@@ -39,7 +39,7 @@ class Provider(ABC):
 
     @abstractmethod
     def get_fee_rate(self) -> int:
-        """Return the current fee rate in satoshis per byte."""
+        """Return the current fee rate in satoshis per KB (1000 bytes)."""
         ...
 
     @abstractmethod
@@ -59,7 +59,7 @@ class MockProvider(Provider):
         self._broadcasted_txs: list[str] = []
         self._network = network
         self._broadcast_count = 0
-        self._fee_rate = 1
+        self._fee_rate = 100
 
     def add_transaction(self, tx: TransactionData) -> None:
         self._transactions[tx.txid] = tx

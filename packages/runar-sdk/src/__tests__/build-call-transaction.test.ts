@@ -308,19 +308,20 @@ describe('buildCallTransaction — change and fees', () => {
     );
     const parsed = parseTxHex(tx.toHex());
 
-    // Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96
-    // Change = 100000 - 50000 - 96 = 49904
+    // Fee: input0(32+4+1+1+4=42) + contractOut(8+1+1=10) + changeOut(34) + overhead(10) = 96 bytes
+    // At 100 sat/KB: fee = ceil(96 * 100 / 1000) = 10
+    // Change = 100000 - 50000 - 10 = 49990
     expect(parsed.outputCount).toBe(2);
     expect(parsed.outputs[0]!.satoshis).toBe(50000);
-    expect(parsed.outputs[1]!.satoshis).toBe(49904);
+    expect(parsed.outputs[1]!.satoshis).toBe(49990);
     expect(parsed.outputs[1]!.script).toBe(changeScript);
   });
 
   it('omits change output when change is zero', () => {
-    // Fee: input0(42) + contractOut(10) + changeOut(34) + overhead(10) = 96
+    // Fee: 96 bytes at 100 sat/KB = ceil(96 * 100 / 1000) = 10
     // To get change = 0: totalInput = contractOutput + fee
-    // 50096 = 50000 + 96
-    const utxo = makeUtxo(50096);
+    // 50010 = 50000 + 10
+    const utxo = makeUtxo(50010);
     const newLockingScript = '51';
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
@@ -341,10 +342,10 @@ describe('buildCallTransaction — change and fees', () => {
   });
 
   it('omits change output when change is negative (all funds consumed by fee)', () => {
-    // Fee: input0(42) + contractOut(10) + changeOut(34) + overhead(10) = 96
+    // Fee: 96 bytes at 100 sat/KB = ceil(96 * 100 / 1000) = 10
     // Set up so totalInput - contractOutput < fee
-    // 50050 - 50000 = 50 < 96 → change = -46, negative
-    const utxo = makeUtxo(50050);
+    // 50005 - 50000 = 5 < 10 → change = -5, negative
+    const utxo = makeUtxo(50005);
     const newLockingScript = '51';
     const newSatoshis = 50000;
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
@@ -381,15 +382,16 @@ describe('buildCallTransaction — change and fees', () => {
     );
     const parsed = parseTxHex(tx.toHex());
 
-    // Fee: input0(42) + additional(148) + contractOut(10) + changeOut(34) + overhead(10) = 244
+    // Fee: input0(42) + additional(148) + contractOut(10) + changeOut(34) + overhead(10) = 244 bytes
+    // At 100 sat/KB: fee = ceil(244 * 100 / 1000) = 25
     // Total input: 50000 + 30000 = 80000
-    // Change: 80000 - 40000 - 244 = 39756
+    // Change: 80000 - 40000 - 25 = 39975
     expect(parsed.outputCount).toBe(2);
     expect(parsed.outputs[0]!.satoshis).toBe(40000);
-    expect(parsed.outputs[1]!.satoshis).toBe(39756);
+    expect(parsed.outputs[1]!.satoshis).toBe(39975);
   });
 
-  it('fee scales linearly with input count (1 sat/byte estimate)', () => {
+  it('fee scales with input count', () => {
     const utxo = makeUtxo(200000);
     const threeAdditional = [makeUtxo(100000, 1), makeUtxo(100000, 2), makeUtxo(100000, 3)];
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
@@ -417,14 +419,15 @@ describe('buildCallTransaction — change and fees', () => {
     const parsed4 = parseTxHex(tx4.toHex());
 
     // Both are stateless (no contract output), so just change output
-    // 1 input: fee = input0(42) + changeOut(34) + overhead(10) = 86; change = 200000 - 86 = 199914
-    // 4 inputs: fee = input0(42) + 3*P2PKH(444) + changeOut(34) + overhead(10) = 530; change = 500000 - 530 = 499470
-    expect(parsed1.outputs[0]!.satoshis).toBe(199914);
-    expect(parsed4.outputs[0]!.satoshis).toBe(499470);
+    // 1 input: 86 bytes at 100 sat/KB → fee = ceil(8.6) = 9; change = 200000 - 9 = 199991
+    // 4 inputs: 530 bytes at 100 sat/KB → fee = ceil(53) = 53; change = 500000 - 53 = 499947
+    expect(parsed1.outputs[0]!.satoshis).toBe(199991);
+    expect(parsed4.outputs[0]!.satoshis).toBe(499947);
 
-    // The fee difference should be exactly 3 * 148 = 444 sats (additional P2PKH inputs)
-    const feeDiff = (500000 - parsed4.outputs[0]!.satoshis) - (200000 - parsed1.outputs[0]!.satoshis);
-    expect(feeDiff).toBe(3 * 148);
+    // More inputs → higher fee
+    const fee1 = 200000 - parsed1.outputs[0]!.satoshis;
+    const fee4 = 500000 - parsed4.outputs[0]!.satoshis;
+    expect(fee4).toBeGreaterThan(fee1);
   });
 });
 
@@ -447,17 +450,18 @@ describe('buildCallTransaction — stateless call', () => {
     );
     const parsed = parseTxHex(tx.toHex());
 
-    // Fee: input0(42) + changeOut(34) + overhead(10) = 86
-    // Change: 100000 - 0 - 86 = 99914
+    // Fee: input0(42) + changeOut(34) + overhead(10) = 86 bytes
+    // At 100 sat/KB: fee = ceil(86 * 100 / 1000) = 9
+    // Change: 100000 - 0 - 9 = 99991
     expect(parsed.outputCount).toBe(1);
     expect(parsed.outputs[0]!.script).toBe(changeScript);
-    expect(parsed.outputs[0]!.satoshis).toBe(99914);
+    expect(parsed.outputs[0]!.satoshis).toBe(99991);
   });
 
   it('produces no outputs when stateless and change is zero or negative', () => {
-    // Fee: input0(42) + changeOut(34) + overhead(10) = 86
-    // To get exactly 0 change: satoshis = fee = 86
-    const utxo = makeUtxo(86);
+    // Fee: 86 bytes at 100 sat/KB = ceil(86 * 100 / 1000) = 9
+    // To get exactly 0 change: satoshis = fee = 9
+    const utxo = makeUtxo(9);
     const changeScript = '76a914' + 'ff'.repeat(20) + '88ac';
 
     const { tx } = buildCallTransaction(
