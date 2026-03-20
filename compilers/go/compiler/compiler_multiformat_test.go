@@ -341,7 +341,21 @@ func TestGoContract_CompileConformance(t *testing.T) {
 				t.Error("expected non-empty script hex")
 			}
 
-			t.Logf("%s: hex=%d bytes", dir, len(artifact.Script)/2)
+			// Compare against golden expected-script.hex
+			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
+			goldenHex, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Logf("%s: no golden file, script hex=%d bytes", dir, len(artifact.Script)/2)
+				return
+			}
+
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: script hex does not match golden file (got %d chars, expected %d chars)",
+					dir, len(artifact.Script), len(expected))
+			} else {
+				t.Logf("%s: MATCH (hex=%d bytes)", dir, len(artifact.Script)/2)
+			}
 		})
 	}
 }

@@ -1288,12 +1288,9 @@ end
         threw = true;
       }
       expect(threw).toBe(false);
-      // The block syntax is not valid Rúnar Ruby; errors or a mangled AST
-      // are both acceptable outcomes.
-      const errors = result!.errors.filter(e => e.severity === 'error');
-      // Document current behavior: either errors are present or the block
-      // tokens are silently absorbed.  At minimum, no exception was raised.
-      expect(errors.length >= 0).toBe(true);
+      // The block syntax is not valid Runar Ruby.  The main guarantee is
+      // that the parser did not throw (verified above).  Whether errors are
+      // emitted depends on how the tokenizer handles '{', '}', and '|'.
     });
 
     it('does not throw on lambda syntax (-> { ... })', () => {
