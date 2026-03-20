@@ -9,6 +9,7 @@
 //! focus on parse-level correctness and dispatch routing.
 
 use runar_compiler_rust::compile_from_source_str;
+use runar_compiler_rust::frontend::ast::Visibility;
 use runar_compiler_rust::frontend::parser::parse_source;
 
 fn conformance_dir() -> std::path::PathBuf {
