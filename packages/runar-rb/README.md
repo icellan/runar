@@ -6,6 +6,12 @@ The Ruby gem provides base classes, types, a lightweight DSL, mock crypto, real 
 
 ---
 
+## Requirements
+
+- Ruby >= 3.0
+
+---
+
 ## Installation
 
 ```ruby

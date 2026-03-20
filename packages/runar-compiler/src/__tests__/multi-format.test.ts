@@ -17,7 +17,7 @@ import { join } from 'path';
 
 const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', 'tests');
 
-const FORMAT_EXTENSIONS = ['.runar.ts', '.runar.sol', '.runar.move'] as const;
+const FORMAT_EXTENSIONS = ['.runar.ts', '.runar.sol', '.runar.move', '.runar.rb'] as const;
 
 function readConformanceSource(testName: string, ext: string): string | null {
   const path = join(CONFORMANCE_DIR, testName, `${testName}${ext}`);
