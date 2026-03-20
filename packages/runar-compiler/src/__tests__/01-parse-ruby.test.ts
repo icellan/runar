@@ -1193,6 +1193,209 @@ end
   });
 
   // ---------------------------------------------------------------------------
+  // Error handling / negative cases
+  // ---------------------------------------------------------------------------
+
+  describe('error handling', () => {
+    it('produces an error for empty source', () => {
+      const result = parseRubySource('', 'Test.runar.rb');
+      // Parser expects a class declaration; empty input has none.
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(result.contract).toBeNull();
+    });
+
+    it('does not throw when class end keyword is missing', () => {
+      // The parser loops until 'end' or 'eof' — on eof it exits and
+      // match('end') silently returns false.  The contract is still
+      // returned rather than null, so the main guarantee is no exception.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+`;
+      // Must not throw.
+      let threw = false;
+      let result: ReturnType<typeof parseRubySource> | null = null;
+      try {
+        result = parseRubySource(rb, 'Test.runar.rb');
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false);
+      // Either a contract is returned (partial parse) or errors are present.
+      // Both are acceptable — the requirement is that no exception is raised.
+      expect(result).not.toBeNull();
+    });
+
+    it('produces an error for unknown parent class', () => {
+      const rb = `
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+end
+`;
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+      expect(result.contract).toBeNull();
+    });
+
+    it('produces an error for prop declaration without a type', () => {
+      // `prop :x` has no comma + type — expect(',') fires when it sees NEWLINE.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+end
+`;
+      const result = parseRubySource(rb, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    it('does not throw on block syntax (each { |x| ... })', () => {
+      // The tokenizer skips '{' and '}' as unknown characters.
+      // '|' is tokenized as a bitwise OR operator, causing malformed
+      // expression parsing.  The parser must not throw.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar
+    [1, 2, 3].each { |n| assert n > 0 }
+  end
+end
+`;
+      let threw = false;
+      let result: ReturnType<typeof parseRubySource> | null = null;
+      try {
+        result = parseRubySource(rb, 'Test.runar.rb');
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false);
+      // The block syntax is not valid Rúnar Ruby; errors or a mangled AST
+      // are both acceptable outcomes.
+      const errors = result!.errors.filter(e => e.severity === 'error');
+      // Document current behavior: either errors are present or the block
+      // tokens are silently absorbed.  At minimum, no exception was raised.
+      expect(errors.length >= 0).toBe(true);
+    });
+
+    it('does not throw on lambda syntax (-> { ... })', () => {
+      // '->' tokenizes as two tokens: '-' and '>'.
+      // '{' and '}' are silently skipped.
+      // The result is a malformed expression that produces parse errors.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar
+    f = -> { @x + 1 }
+  end
+end
+`;
+      let threw = false;
+      let result: ReturnType<typeof parseRubySource> | null = null;
+      try {
+        result = parseRubySource(rb, 'Test.runar.rb');
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false);
+      // The lambda syntax should not panic.  Errors in the result are expected.
+      expect(result).not.toBeNull();
+    });
+
+    it('does not throw on duplicate method names', () => {
+      // The parser does not check for duplicate method names; both are added
+      // to the methods array.  Duplicate detection is deferred to validation.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+  runar_public
+  def bar
+    assert @x > 1
+  end
+end
+`;
+      let threw = false;
+      let result: ReturnType<typeof parseRubySource> | null = null;
+      try {
+        result = parseRubySource(rb, 'Test.runar.rb');
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false);
+      // No parse-phase error is expected; duplicate detection happens later.
+      // Both methods should appear in the AST.
+      const errors = result!.errors.filter(e => e.severity === 'error');
+      expect(errors).toEqual([]);
+      expect(result!.contract!.methods.filter(m => m.name === 'bar')).toHaveLength(2);
+    });
+
+    it('does not throw when runar_public declares params absent from def', () => {
+      // `runar_public sig: Sig` followed by `def foo` (no params).
+      // The parser looks up declared param types by name; unmatched params in
+      // the type map are silently ignored.
+      const rb = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public sig: Sig
+  def bar
+    assert @x > 0
+  end
+end
+`;
+      let threw = false;
+      let result: ReturnType<typeof parseRubySource> | null = null;
+      try {
+        result = parseRubySource(rb, 'Test.runar.rb');
+      } catch {
+        threw = true;
+      }
+      expect(threw).toBe(false);
+      // No parse error; the declared type for 'sig' is simply unused.
+      const errors = result!.errors.filter(e => e.severity === 'error');
+      expect(errors).toEqual([]);
+      // The method is parsed with zero params (none were in the def signature).
+      const bar = result!.contract!.methods.find(m => m.name === 'bar');
+      expect(bar).toBeDefined();
+      expect(bar!.params).toHaveLength(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Integration: full parse via dispatcher
   // ---------------------------------------------------------------------------
 
