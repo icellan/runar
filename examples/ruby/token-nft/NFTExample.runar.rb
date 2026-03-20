@@ -15,6 +15,7 @@ class SimpleNFT < Runar::StatefulSmartContract
   runar_public sig: Sig, new_owner: PubKey, output_satoshis: Bigint
   def transfer(sig, new_owner, output_satoshis)
     assert check_sig(sig, @owner)
+    assert output_satoshis >= 1
     add_output(output_satoshis, new_owner)
   end
 

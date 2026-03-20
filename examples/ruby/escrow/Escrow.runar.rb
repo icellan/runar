@@ -12,23 +12,15 @@ class Escrow < Runar::SmartContract
     @arbiter = arbiter
   end
 
-  runar_public sig: Sig
-  def release_by_seller(sig)
-    assert check_sig(sig, @seller)
+  runar_public seller_sig: Sig, arbiter_sig: Sig
+  def release(seller_sig, arbiter_sig)
+    assert check_sig(seller_sig, @seller)
+    assert check_sig(arbiter_sig, @arbiter)
   end
 
-  runar_public sig: Sig
-  def release_by_arbiter(sig)
-    assert check_sig(sig, @arbiter)
-  end
-
-  runar_public sig: Sig
-  def refund_to_buyer(sig)
-    assert check_sig(sig, @buyer)
-  end
-
-  runar_public sig: Sig
-  def refund_by_arbiter(sig)
-    assert check_sig(sig, @arbiter)
+  runar_public buyer_sig: Sig, arbiter_sig: Sig
+  def refund(buyer_sig, arbiter_sig)
+    assert check_sig(buyer_sig, @buyer)
+    assert check_sig(arbiter_sig, @arbiter)
   end
 end
