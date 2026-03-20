@@ -3,5 +3,6 @@
 source 'https://rubygems.org'
 
 gem 'rspec', '~> 3.12'
+gem 'base64'
 gem 'bsv-sdk'
 gem 'runar-lang', path: '../../packages/runar-rb'
