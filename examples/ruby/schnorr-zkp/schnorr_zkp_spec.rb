@@ -13,13 +13,13 @@ RSpec.describe SchnorrZKP do
     r = 67_890
     r_point = ec_mul_gen(r)
 
-    # Challenge e (in real protocol, hash of R and message)
-    e = 42
+    # Derive challenge via Fiat-Shamir (must match the contract's internal computation)
+    e = bin2num(hash256(cat(r_point, pub_key)))
 
     # Response s = r + e*k (mod n)
     s = (r + e * k) % EC_N
 
     c = SchnorrZKP.new(pub_key)
-    expect { c.verify(r_point, s, e) }.not_to raise_error
+    expect { c.verify(r_point, s) }.not_to raise_error
   end
 end

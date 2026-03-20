@@ -6,15 +6,15 @@ require_relative 'Auction.runar'
 RSpec.describe Auction do
   it 'accepts a higher bid' do
     c = Auction.new(mock_pub_key, mock_pub_key, 100, 1000)
-    new_bidder = '03' + '01' * 32
-    c.bid(new_bidder, 200)
+    new_bidder = mock_pub_key
+    c.bid(mock_sig, new_bidder, 200)
     expect(c.highest_bidder).to eq(new_bidder)
     expect(c.highest_bid).to eq(200)
   end
 
   it 'rejects a lower bid' do
     c = Auction.new(mock_pub_key, mock_pub_key, 100, 1000)
-    expect { c.bid(mock_pub_key, 50) }.to raise_error(RuntimeError)
+    expect { c.bid(mock_sig, mock_pub_key, 50) }.to raise_error(RuntimeError)
   end
 
   it 'closes the auction' do
