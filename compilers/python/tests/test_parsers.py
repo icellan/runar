@@ -1,16 +1,36 @@
 """Tests for the multi-format parser dispatch and individual parsers.
 
-Covers TS, Solidity, Move, Python, Go, and Rust format parsers. Each test
+Covers TS, Solidity, Move, Python, Go, Rust, and Ruby format parsers. Each test
 provides a minimal contract source string and verifies the resulting AST
 has the correct contract name, parent class, properties, and methods.
 """
 
 from __future__ import annotations
 
+import os
 import pytest
 
 from runar_compiler.frontend.parser_dispatch import parse_source, ParseResult
-from runar_compiler.frontend.ast_nodes import ContractNode, PrimitiveType
+from runar_compiler.frontend.ast_nodes import (
+    ContractNode,
+    PrimitiveType,
+    ArrayLiteralExpr,
+    AssignmentStmt,
+    BinaryExpr,
+    BigIntLiteral,
+    BoolLiteral,
+    ByteStringLiteral,
+    CallExpr,
+    ExpressionStmt,
+    ForStmt,
+    Identifier,
+    IfStmt,
+    PropertyAccessExpr,
+    ReturnStmt,
+    TernaryExpr,
+    UnaryExpr,
+    VariableDeclStmt,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -669,3 +689,1239 @@ class TestGoParserAdditional:
         assert result.contract is None or len(result.errors) > 0, (
             "expected error for non-Runar Go struct, but got a valid contract"
         )
+
+
+# ---------------------------------------------------------------------------
+# Ruby contract source fixtures
+# ---------------------------------------------------------------------------
+
+RB_P2PKH_SOURCE = """\
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+"""
+
+RB_COUNTER_SOURCE = """\
+require 'runar'
+
+class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  def initialize(count)
+    super(count)
+    @count = count
+  end
+
+  runar_public
+  def increment
+    @count += 1
+  end
+
+  runar_public
+  def decrement
+    assert @count > 0
+    @count -= 1
+  end
+end
+"""
+
+RB_ESCROW_SOURCE = """\
+require 'runar'
+
+class Escrow < Runar::SmartContract
+  prop :buyer, PubKey
+  prop :seller, PubKey
+  prop :arbiter, PubKey
+
+  def initialize(buyer, seller, arbiter)
+    super(buyer, seller, arbiter)
+    @buyer = buyer
+    @seller = seller
+    @arbiter = arbiter
+  end
+
+  runar_public sig: Sig
+  def release_by_seller(sig)
+    assert check_sig(sig, @seller)
+  end
+
+  runar_public sig: Sig
+  def release_by_arbiter(sig)
+    assert check_sig(sig, @arbiter)
+  end
+
+  runar_public sig: Sig
+  def refund_to_buyer(sig)
+    assert check_sig(sig, @buyer)
+  end
+end
+"""
+
+RB_FUNGIBLE_TOKEN_SOURCE = """\
+require 'runar'
+
+class FungibleToken < Runar::StatefulSmartContract
+  prop :owner, PubKey
+  prop :balance, Bigint
+  prop :token_id, ByteString, readonly: true
+
+  def initialize(owner, balance, token_id)
+    super(owner, balance, token_id)
+    @owner = owner
+    @balance = balance
+    @token_id = token_id
+  end
+
+  runar_public sig: Sig, to: PubKey, amount: Bigint, output_satoshis: Bigint
+  def transfer(sig, to, amount, output_satoshis)
+    assert check_sig(sig, @owner)
+    assert amount > 0
+    assert amount <= @balance
+    add_output(output_satoshis, to, amount)
+    add_output(output_satoshis, @owner, @balance - amount)
+  end
+
+  runar_public sig: Sig, to: PubKey, output_satoshis: Bigint
+  def send_all(sig, to, output_satoshis)
+    assert check_sig(sig, @owner)
+    add_output(output_satoshis, to, @balance)
+  end
+end
+"""
+
+
+def _rb_simple_contract(method_body: str, prop_type: str = "Bigint") -> str:
+    """Return a minimal SmartContract with one property and one public method."""
+    return f"""\
+class Foo < Runar::SmartContract
+  prop :x, {prop_type}
+
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+
+  runar_public
+  def bar
+    {method_body}
+  end
+end
+"""
+
+
+def _rb_stateful_contract(method_body: str) -> str:
+    """Return a minimal StatefulSmartContract with one mutable property."""
+    return f"""\
+class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  def initialize(count)
+    super(count)
+    @count = count
+  end
+
+  runar_public
+  def act
+    {method_body}
+  end
+end
+"""
+
+
+# ---------------------------------------------------------------------------
+# Ruby parser — basic contract parsing
+# ---------------------------------------------------------------------------
+
+class TestRubyParser:
+    def test_parse_p2pkh_name(self):
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert len(result.errors) == 0
+        assert result.contract is not None
+        assert result.contract.name == "P2PKH"
+
+    def test_parse_p2pkh_parent_class(self):
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.parent_class == "SmartContract"
+
+    def test_parse_p2pkh_has_constructor(self):
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.constructor is not None
+        assert result.contract.constructor.name == "constructor"
+
+    def test_parse_p2pkh_unlock_params(self):
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        param_names = [p.name for p in unlock.params]
+        assert "sig" in param_names
+        assert "pubKey" in param_names
+
+    def test_parse_p2pkh_property_readonly(self):
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        prop = result.contract.properties[0]
+        assert prop.readonly is True
+
+    def test_parse_stateful_counter_parent_class(self):
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        assert result.contract.parent_class == "StatefulSmartContract"
+
+    def test_parse_stateful_counter_mutable_property(self):
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        count_prop = result.contract.properties[0]
+        assert count_prop.name == "count"
+        assert count_prop.readonly is False
+
+    def test_parse_stateful_no_arg_method(self):
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        inc = next(m for m in result.contract.methods if m.name == "increment")
+        assert len(inc.params) == 0
+
+    def test_parse_multiple_properties_in_order(self):
+        result = parse_source(RB_ESCROW_SOURCE, "Escrow.runar.rb")
+        assert result.contract is not None
+        assert len(result.contract.properties) == 3
+        assert [p.name for p in result.contract.properties] == ["buyer", "seller", "arbiter"]
+
+    def test_parse_runar_namespace_prefix(self):
+        """Runar::SmartContract namespace prefix is stripped correctly."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.parent_class == "SmartContract"
+
+    def test_parse_bare_parent_class_without_namespace(self):
+        """Bare SmartContract without Runar:: prefix is accepted."""
+        source = """\
+class Foo < SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.parent_class == "SmartContract"
+
+    def test_parse_require_skipped(self):
+        """require 'runar' lines are silently skipped."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert len(result.errors) == 0
+        assert result.contract is not None
+        assert result.contract.name == "P2PKH"
+
+
+# ---------------------------------------------------------------------------
+# Ruby property declarations
+# ---------------------------------------------------------------------------
+
+class TestRubyPropDeclarations:
+    def test_prop_snake_case_to_camel(self):
+        """prop :pub_key_hash, Addr → property name 'pubKeyHash'."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].name == "pubKeyHash"
+
+    def test_prop_readonly_true(self):
+        """prop :x, Bigint, readonly: true → readonly=True."""
+        source = """\
+class Foo < Runar::StatefulSmartContract
+  prop :x, Bigint, readonly: true
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].readonly is True
+
+    def test_stateful_default_mutable(self):
+        """StatefulSmartContract props are mutable by default."""
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].readonly is False
+
+    def test_smart_contract_default_readonly(self):
+        """SmartContract props are readonly by default."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].readonly is True
+
+    def test_type_bigint(self):
+        """Bigint → bigint primitive."""
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="bigint")
+
+    def test_type_addr(self):
+        """Addr → Addr primitive."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="Addr")
+
+    def test_type_pubkey(self):
+        """PubKey → PubKey primitive."""
+        result = parse_source(RB_ESCROW_SOURCE, "Escrow.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="PubKey")
+
+    def test_type_bytestring(self):
+        """ByteString → ByteString primitive."""
+        result = parse_source(RB_FUNGIBLE_TOKEN_SOURCE, "FT.runar.rb")
+        assert result.contract is not None
+        token_id = next(p for p in result.contract.properties if p.name == "tokenId")
+        assert token_id.type == PrimitiveType(name="ByteString")
+
+    def test_type_boolean(self):
+        """Boolean → boolean primitive."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :active, Boolean
+  def initialize(active)
+    super(active)
+    @active = active
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="boolean")
+
+    def test_type_point(self):
+        """Point → Point primitive."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :pt, Point
+  def initialize(pt)
+    super(pt)
+    @pt = pt
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].type == PrimitiveType(name="Point")
+
+
+# ---------------------------------------------------------------------------
+# Ruby method visibility
+# ---------------------------------------------------------------------------
+
+class TestRubyVisibility:
+    def test_runar_public_makes_method_public(self):
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        inc = next(m for m in result.contract.methods if m.name == "increment")
+        assert inc.visibility == "public"
+
+    def test_method_without_runar_public_is_private(self):
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  def helper
+    return @x
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        helper = next((m for m in result.contract.methods if m.name == "helper"), None)
+        assert helper is not None
+        assert helper.visibility == "private"
+
+    def test_runar_public_propagates_param_types(self):
+        """runar_public sig: Sig, pub_key: PubKey → typed params on next method."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        sig_param = next(p for p in unlock.params if p.name == "sig")
+        pub_key_param = next(p for p in unlock.params if p.name == "pubKey")
+        assert sig_param.type == PrimitiveType(name="Sig")
+        assert pub_key_param.type == PrimitiveType(name="PubKey")
+
+    def test_bare_private_keyword_does_not_break_parsing(self):
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  private
+  def helper
+    return @x
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        # Should parse without crashing; helper may or may not be captured
+        assert result.contract is not None
+
+
+# ---------------------------------------------------------------------------
+# Ruby instance variables
+# ---------------------------------------------------------------------------
+
+class TestRubyInstanceVars:
+    def test_ivar_read_is_property_access(self):
+        """@pub_key_hash in expression → PropertyAccessExpr(property='pubKeyHash')."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        # First assert: assert hash160(pub_key) == @pub_key_hash
+        stmt = unlock.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        eq_expr = call.args[0]
+        assert isinstance(eq_expr, BinaryExpr)
+        assert isinstance(eq_expr.right, PropertyAccessExpr)
+        assert eq_expr.right.property == "pubKeyHash"
+
+    def test_ivar_assignment(self):
+        """@count = expr → AssignmentStmt targeting PropertyAccessExpr."""
+        source = _rb_stateful_contract("@count = 5")
+        result = parse_source(source, "Counter.runar.rb")
+        assert result.contract is not None
+        act = next(m for m in result.contract.methods if m.name == "act")
+        stmt = act.body[0]
+        assert isinstance(stmt, AssignmentStmt)
+        assert isinstance(stmt.target, PropertyAccessExpr)
+        assert stmt.target.property == "count"
+
+    def test_ivar_plus_equals(self):
+        """@count += 1 → AssignmentStmt with BinaryExpr(op='+')."""
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        inc = next(m for m in result.contract.methods if m.name == "increment")
+        stmt = inc.body[0]
+        assert isinstance(stmt, AssignmentStmt)
+        assert isinstance(stmt.target, PropertyAccessExpr)
+        assert stmt.target.property == "count"
+        assert isinstance(stmt.value, BinaryExpr)
+        assert stmt.value.op == "+"
+
+    def test_ivar_minus_equals(self):
+        """@count -= 1 → AssignmentStmt with BinaryExpr(op='-')."""
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        dec = next(m for m in result.contract.methods if m.name == "decrement")
+        stmt = dec.body[1]  # first stmt is assert, second is @count -= 1
+        assert isinstance(stmt, AssignmentStmt)
+        assert isinstance(stmt.value, BinaryExpr)
+        assert stmt.value.op == "-"
+
+
+# ---------------------------------------------------------------------------
+# Ruby name mapping
+# ---------------------------------------------------------------------------
+
+class TestRubyNameMapping:
+    def test_check_sig_maps_to_camel(self):
+        """check_sig → checkSig via _SPECIAL_NAMES."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        # Second assert: assert check_sig(sig, pub_key)
+        stmt = unlock.body[1]
+        assert isinstance(stmt, ExpressionStmt)
+        outer_call = stmt.expr
+        assert isinstance(outer_call, CallExpr)
+        inner_call = outer_call.args[0]
+        assert isinstance(inner_call, CallExpr)
+        assert isinstance(inner_call.callee, Identifier)
+        assert inner_call.callee.name == "checkSig"
+
+    def test_hash160_maps_to_camel(self):
+        """hash160 passes through unchanged (in SPECIAL_NAMES with same value)."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        stmt = unlock.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        assert isinstance(stmt.expr, CallExpr)
+        eq_expr = stmt.expr.args[0]
+        assert isinstance(eq_expr, BinaryExpr)
+        hash_call = eq_expr.left
+        assert isinstance(hash_call, CallExpr)
+        assert isinstance(hash_call.callee, Identifier)
+        assert hash_call.callee.name == "hash160"
+
+    def test_add_output_maps_to_camel(self):
+        """add_output → addOutput (rewritten as this.addOutput via intrinsic set)."""
+        result = parse_source(RB_FUNGIBLE_TOKEN_SOURCE, "FT.runar.rb")
+        assert result.contract is not None
+        transfer = next(m for m in result.contract.methods if m.name == "transfer")
+        # After 3 asserts, first add_output call
+        stmt = transfer.body[3]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        # add_output is in the intrinsic methods set, so it is rewritten to
+        # a PropertyAccessExpr by the bare-call rewriter
+        assert isinstance(call.callee, PropertyAccessExpr)
+        assert call.callee.property == "addOutput"
+
+    def test_ec_add_maps_to_camel(self):
+        """ec_add → ecAdd via _SPECIAL_NAMES."""
+        source = _rb_simple_contract("z = ec_add(@x, @x)")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        call = stmt.init
+        assert isinstance(call, CallExpr)
+        assert isinstance(call.callee, Identifier)
+        assert call.callee.name == "ecAdd"
+
+    def test_snake_to_camel_generic(self):
+        """Generic snake_case: pub_key_hash → pubKeyHash."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].name == "pubKeyHash"
+
+    def test_single_word_unchanged(self):
+        """Single-word names are not altered: count → count."""
+        result = parse_source(RB_COUNTER_SOURCE, "Counter.runar.rb")
+        assert result.contract is not None
+        assert result.contract.properties[0].name == "count"
+
+    def test_ec_constant_passthrough(self):
+        """EC_P passes through unchanged (uppercase letters not split)."""
+        source = _rb_simple_contract("z = EC_P")
+        result = parse_source(source, "Foo.runar.rb")
+        # Mainly ensure it parses without error
+        assert result.contract is not None
+
+    def test_abs_passthrough(self):
+        """abs is in _PASSTHROUGH_NAMES and maps to itself."""
+        source = _rb_simple_contract("z = abs(@x)")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        call = stmt.init
+        assert isinstance(call, CallExpr)
+        assert isinstance(call.callee, Identifier)
+        assert call.callee.name == "abs"
+
+
+# ---------------------------------------------------------------------------
+# Ruby expressions
+# ---------------------------------------------------------------------------
+
+class TestRubyExpressions:
+    def test_eq_maps_to_triple_eq(self):
+        """Ruby == maps to === in AST."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        unlock = next(m for m in result.contract.methods if m.name == "unlock")
+        stmt = unlock.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        eq_expr = call.args[0]
+        assert isinstance(eq_expr, BinaryExpr)
+        assert eq_expr.op == "==="
+
+    def test_neq_maps_to_strict_neq(self):
+        """Ruby != maps to !== in AST."""
+        source = _rb_simple_contract("assert @x != 0")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        neq = call.args[0]
+        assert isinstance(neq, BinaryExpr)
+        assert neq.op == "!=="
+
+    def test_and_maps_to_double_ampersand(self):
+        """Ruby 'and' keyword → '&&' in AST."""
+        source = _rb_simple_contract("assert @x > 0 and @x < 10")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        and_expr = call.args[0]
+        assert isinstance(and_expr, BinaryExpr)
+        assert and_expr.op == "&&"
+
+    def test_or_maps_to_double_pipe(self):
+        """Ruby 'or' keyword → '||' in AST."""
+        source = _rb_simple_contract("assert @x == 0 or @x == 1")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        or_expr = call.args[0]
+        assert isinstance(or_expr, BinaryExpr)
+        assert or_expr.op == "||"
+
+    def test_not_maps_to_bang(self):
+        """Ruby 'not' keyword → UnaryExpr(op='!') in AST."""
+        source = _rb_simple_contract("assert not @x == 0")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        not_expr = call.args[0]
+        assert isinstance(not_expr, UnaryExpr)
+        assert not_expr.op == "!"
+
+    def test_starstar_maps_to_pow_call(self):
+        """Ruby ** → pow(base, exp) CallExpr."""
+        source = _rb_simple_contract("assert @x ** 2 > 0")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        cmp_expr = call.args[0]
+        assert isinstance(cmp_expr, BinaryExpr)
+        pow_call = cmp_expr.left
+        assert isinstance(pow_call, CallExpr)
+        assert isinstance(pow_call.callee, Identifier)
+        assert pow_call.callee.name == "pow"
+        assert len(pow_call.args) == 2
+
+    def test_ternary_expression(self):
+        """cond ? a : b → TernaryExpr."""
+        source = _rb_simple_contract("y = @x > 0 ? @x : 0")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, TernaryExpr)
+
+    def test_bitwise_and(self):
+        """& operator is accepted."""
+        source = _rb_simple_contract("z = @x & 0xFF")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, BinaryExpr)
+        assert stmt.init.op == "&"
+
+    def test_bitwise_or(self):
+        """| operator is accepted."""
+        source = _rb_simple_contract("z = @x | 1")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, BinaryExpr)
+        assert stmt.init.op == "|"
+
+    def test_bitwise_xor(self):
+        """^ operator is accepted."""
+        source = _rb_simple_contract("z = @x ^ 3")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, BinaryExpr)
+        assert stmt.init.op == "^"
+
+    def test_bitwise_not(self):
+        """~ operator → UnaryExpr(op='~')."""
+        source = _rb_simple_contract("z = ~@x")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, UnaryExpr)
+        assert stmt.init.op == "~"
+
+    def test_left_shift(self):
+        """<< operator → BinaryExpr(op='<<')."""
+        source = _rb_simple_contract("z = @x << 2")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, BinaryExpr)
+        assert stmt.init.op == "<<"
+
+    def test_right_shift(self):
+        """>> operator → BinaryExpr(op='>>')."""
+        source = _rb_simple_contract("z = @x >> 1")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, BinaryExpr)
+        assert stmt.init.op == ">>"
+
+
+# ---------------------------------------------------------------------------
+# Ruby control flow
+# ---------------------------------------------------------------------------
+
+class TestRubyControlFlow:
+    def test_if_end(self):
+        """if/end → IfStmt with no else branch."""
+        source = _rb_simple_contract(
+            "if @x > 0\n    @x = @x + 1\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, IfStmt)
+        assert len(stmt.then) == 1
+        assert len(stmt.else_) == 0
+
+    def test_if_else_end(self):
+        """if/else/end → IfStmt with then and else branches."""
+        source = _rb_simple_contract(
+            "if @x > 0\n    @x = @x + 1\n  else\n    @x = 0\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, IfStmt)
+        assert len(stmt.then) == 1
+        assert len(stmt.else_) == 1
+
+    def test_if_elsif_else_end(self):
+        """if/elsif/else/end → nested IfStmt in else branch."""
+        source = _rb_simple_contract(
+            "if @x > 10\n    @x = 10\n  elsif @x > 0\n    @x = @x + 1\n  else\n    @x = 0\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, IfStmt)
+        assert len(stmt.then) == 1
+        assert len(stmt.else_) == 1
+        # The else branch contains a nested if (the elsif)
+        nested = stmt.else_[0]
+        assert isinstance(nested, IfStmt)
+        assert len(nested.else_) == 1
+
+    def test_unless_is_negated_if(self):
+        """unless cond → IfStmt with UnaryExpr(op='!') condition."""
+        source = _rb_simple_contract(
+            "unless @x == 0\n    @x = @x - 1\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, IfStmt)
+        cond = stmt.condition
+        assert isinstance(cond, UnaryExpr)
+        assert cond.op == "!"
+
+    def test_for_exclusive_range(self):
+        """for i in 0...n → ForStmt with condition op '<'."""
+        source = _rb_simple_contract(
+            "for i in 0...@x\n    assert i >= 0\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ForStmt)
+        assert isinstance(stmt.condition, BinaryExpr)
+        assert stmt.condition.op == "<"
+
+    def test_for_inclusive_range(self):
+        """for i in 0..n → ForStmt with condition op '<='."""
+        source = _rb_simple_contract(
+            "for i in 0..@x\n    assert i >= 0\n  end"
+        )
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ForStmt)
+        assert isinstance(stmt.condition, BinaryExpr)
+        assert stmt.condition.op == "<="
+
+
+# ---------------------------------------------------------------------------
+# Ruby literals
+# ---------------------------------------------------------------------------
+
+class TestRubyLiterals:
+    def test_integer_literal(self):
+        source = _rb_simple_contract("assert @x == 42")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        eq = call.args[0]
+        assert isinstance(eq, BinaryExpr)
+        assert isinstance(eq.right, BigIntLiteral)
+        assert eq.right.value == 42
+
+    def test_hex_integer_literal(self):
+        source = _rb_simple_contract("assert @x == 0xFF")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        eq = call.args[0]
+        assert isinstance(eq, BinaryExpr)
+        assert isinstance(eq.right, BigIntLiteral)
+        assert eq.right.value == 255
+
+    def test_boolean_true_literal(self):
+        source = _rb_simple_contract("assert true")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        assert isinstance(call.args[0], BoolLiteral)
+        assert call.args[0].value is True
+
+    def test_boolean_false_literal(self):
+        source = _rb_simple_contract("assert not false")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        not_expr = call.args[0]
+        assert isinstance(not_expr, UnaryExpr)
+        assert isinstance(not_expr.operand, BoolLiteral)
+        assert not_expr.operand.value is False
+
+    def test_hex_bytestring_literal(self):
+        """Single-quoted string → ByteStringLiteral."""
+        source = _rb_simple_contract("assert @x == 'deadbeef'", prop_type="ByteString")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        eq = call.args[0]
+        assert isinstance(eq, BinaryExpr)
+        assert isinstance(eq.right, ByteStringLiteral)
+        assert eq.right.value == "deadbeef"
+
+
+# ---------------------------------------------------------------------------
+# Ruby property initializers
+# ---------------------------------------------------------------------------
+
+class TestRubyPropertyInitializers:
+    def test_bigint_default_initializer(self):
+        """prop :count, Bigint, default: 0 → initializer BigIntLiteral(value=0)."""
+        source = """\
+class Foo < Runar::StatefulSmartContract
+  prop :count, Bigint, default: 0
+  def initialize
+    super
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        count_prop = result.contract.properties[0]
+        assert count_prop.name == "count"
+        assert isinstance(count_prop.initializer, BigIntLiteral)
+        assert count_prop.initializer.value == 0
+
+    def test_bool_default_initializer(self):
+        """prop :active, Boolean, default: true → initializer BoolLiteral(value=True)."""
+        source = """\
+class Foo < Runar::StatefulSmartContract
+  prop :active, Boolean, default: true
+  def initialize
+    super
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        active_prop = result.contract.properties[0]
+        assert active_prop.name == "active"
+        assert isinstance(active_prop.initializer, BoolLiteral)
+        assert active_prop.initializer.value is True
+
+    def test_initialized_props_excluded_from_auto_constructor(self):
+        """Properties with initializer are excluded from auto-generated constructor params."""
+        source = """\
+class BoundedCounter < Runar::StatefulSmartContract
+  prop :count,     Bigint,  default: 0
+  prop :max_count, Bigint,  readonly: true
+
+  def initialize(max_count)
+    super(max_count)
+    @max_count = max_count
+  end
+end
+"""
+        result = parse_source(source, "BoundedCounter.runar.rb")
+        assert result.contract is not None
+        # Constructor should accept only max_count (count has a default)
+        param_names = [p.name for p in result.contract.constructor.params]
+        assert "maxCount" in param_names
+        assert "count" not in param_names
+
+
+# ---------------------------------------------------------------------------
+# Ruby array literals
+# ---------------------------------------------------------------------------
+
+class TestRubyArrayLiterals:
+    def test_multi_element_array(self):
+        """[a, b, c] → ArrayLiteralExpr with 3 elements."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar(a, b, c)
+    arr = [a, b, c]
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, ArrayLiteralExpr)
+        assert len(stmt.init.elements) == 3
+
+    def test_empty_array(self):
+        """[] → ArrayLiteralExpr with 0 elements."""
+        source = _rb_simple_contract("arr = []")
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, ArrayLiteralExpr)
+        assert len(stmt.init.elements) == 0
+
+    def test_single_element_array(self):
+        """[a] → ArrayLiteralExpr with 1 element."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar(a)
+    arr = [a]
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, ArrayLiteralExpr)
+        assert len(stmt.init.elements) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ruby implicit returns
+# ---------------------------------------------------------------------------
+
+class TestRubyImplicitReturns:
+    def test_private_method_last_expr_becomes_return(self):
+        """Last ExpressionStmt in a private method → ReturnStmt."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  def helper
+    @x + 1
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        helper = next(m for m in result.contract.methods if m.name == "helper")
+        last_stmt = helper.body[-1]
+        assert isinstance(last_stmt, ReturnStmt)
+
+    def test_public_method_last_expr_stays_as_expression(self):
+        """Last stmt in a public (runar_public) method stays as ExpressionStmt."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        last_stmt = bar.body[-1]
+        assert isinstance(last_stmt, ExpressionStmt)
+
+
+# ---------------------------------------------------------------------------
+# Ruby bare call rewriting
+# ---------------------------------------------------------------------------
+
+class TestRubyBareCallRewriting:
+    def test_bare_call_to_declared_method_is_rewritten(self):
+        """Bare call (with parens) to a contract method → PropertyAccessExpr callee."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  def helper(n)
+    return n + 1
+  end
+  runar_public
+  def bar
+    y = helper(@x)
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        bar = next(m for m in result.contract.methods if m.name == "bar")
+        stmt = bar.body[0]
+        assert isinstance(stmt, VariableDeclStmt)
+        assert isinstance(stmt.init, CallExpr)
+        assert isinstance(stmt.init.callee, PropertyAccessExpr), (
+            f"expected PropertyAccessExpr callee, got {type(stmt.init.callee).__name__}"
+        )
+        assert stmt.init.callee.property == "helper"
+
+    def test_add_output_is_rewritten_to_property_access(self):
+        """Bare add_output(...) → PropertyAccessExpr(property='addOutput').
+
+        add_output is listed in the parser's intrinsic methods set, so the
+        bare-call rewriter promotes it to a this.addOutput() call, yielding
+        a PropertyAccessExpr callee rather than an Identifier.
+        """
+        result = parse_source(RB_FUNGIBLE_TOKEN_SOURCE, "FT.runar.rb")
+        assert result.contract is not None
+        transfer = next(m for m in result.contract.methods if m.name == "transfer")
+        stmt = transfer.body[3]
+        assert isinstance(stmt, ExpressionStmt)
+        call = stmt.expr
+        assert isinstance(call, CallExpr)
+        assert isinstance(call.callee, PropertyAccessExpr)
+        assert call.callee.property == "addOutput"
+
+
+# ---------------------------------------------------------------------------
+# Ruby auto constructor
+# ---------------------------------------------------------------------------
+
+class TestRubyAutoConstructor:
+    def test_no_initialize_gets_auto_constructor(self):
+        """Contract without initialize gets an auto-generated constructor."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert result.contract.constructor is not None
+        assert result.contract.constructor.name == "constructor"
+
+    def test_auto_constructor_params_match_non_initialized_props(self):
+        """Auto constructor has params for all non-initialized properties."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        assert len(result.contract.constructor.params) == 1
+        assert result.contract.constructor.params[0].name == "x"
+
+    def test_auto_constructor_param_types_from_props(self):
+        """Auto constructor param types are backfilled from prop declarations."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is not None
+        param = result.contract.constructor.params[0]
+        assert param.type == PrimitiveType(name="bigint")
+
+
+# ---------------------------------------------------------------------------
+# Ruby errors and dispatch
+# ---------------------------------------------------------------------------
+
+class TestRubyErrors:
+    def test_empty_source_produces_no_contract(self):
+        result = parse_source("", "Empty.runar.rb")
+        assert result.contract is None or len(result.errors) > 0
+
+    def test_rb_extension_dispatches_to_ruby_parser(self):
+        """.runar.rb extension routes to the Ruby parser."""
+        result = parse_source(RB_P2PKH_SOURCE, "P2PKH.runar.rb")
+        assert result.contract is not None
+        assert result.contract.name == "P2PKH"
+
+    def test_malformed_class_missing_end(self):
+        """Class without a closing 'end' produces errors or no contract."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+    @x = x
+  end
+  runar_public
+  def bar
+    assert @x > 0
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        # Parser should either report errors or return no contract
+        assert result.contract is None or len(result.errors) > 0
+
+
+# ---------------------------------------------------------------------------
+# Ruby integration: all example .runar.rb files parse without errors
+# ---------------------------------------------------------------------------
+
+class TestRubyIntegration:
+    def _examples_dir(self) -> str:
+        here = os.path.dirname(__file__)
+        return os.path.normpath(os.path.join(here, "..", "..", "..", "examples", "ruby"))
+
+    def test_all_example_contracts_parse_without_errors(self):
+        """All .runar.rb files in examples/ruby/ parse without errors."""
+        examples_dir = self._examples_dir()
+        rb_files: list[str] = []
+        for root, _dirs, files in os.walk(examples_dir):
+            for f in files:
+                if f.endswith(".runar.rb"):
+                    rb_files.append(os.path.join(root, f))
+
+        assert len(rb_files) > 0, (
+            f"no .runar.rb files found in {examples_dir}"
+        )
+
+        failures: list[str] = []
+        for path in sorted(rb_files):
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            file_name = os.path.basename(path)
+            result = parse_source(source, file_name)
+            errors = [e for e in result.errors if "error" in e.lower()] if result.errors else []
+            if result.contract is None:
+                failures.append(f"{file_name}: no contract returned, errors={result.errors}")
+            elif result.errors:
+                # Some warnings are acceptable; only flag hard errors
+                hard = [e for e in result.errors if "error" in e.lower()]
+                if hard:
+                    failures.append(f"{file_name}: {hard}")
+
+        assert not failures, "Some example contracts failed to parse:\n" + "\n".join(failures)
