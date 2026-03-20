@@ -72,6 +72,9 @@ pub fn parse_ruby(source: &str, file_name: Option<&str>) -> ParseResult {
 fn snake_to_camel(name: &str) -> String {
     // Strip leading underscores so `_require_owner` becomes `requireOwner` not `RequireOwner`.
     let stripped = name.trim_start_matches('_');
+    if stripped.is_empty() {
+        return name.to_string();
+    }
     let mut result = String::new();
     let mut capitalize_next = false;
 

@@ -1144,7 +1144,7 @@ end
       expect(last.value).toBeDefined();
     });
 
-    it('does not convert assert statements to returns', () => {
+    it('converts assert expression statements to returns in private methods', () => {
       const rb = `
 class Foo < Runar::SmartContract
   prop :x, Bigint

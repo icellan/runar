@@ -341,7 +341,7 @@ function tokenize(source: string): Token[] {
 
 /** Convert snake_case to camelCase. Single words pass through unchanged. */
 function snakeToCamel(name: string): string {
-  // Strip leading underscores, convert, then restore them.
+  // Strip leading underscores before conversion.
   // Without this, `_require_owner` would become `RequireOwner` instead of `requireOwner`.
   const match = name.match(/^(_+)(.*)/);
   if (match) {
