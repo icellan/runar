@@ -248,6 +248,7 @@ def _map_builtin_name(name: str) -> str:
 _TYPE_MAP: dict[str, str] = {
     "Bigint": "bigint",
     "Integer": "bigint",
+    "Int": "bigint",
     "Fixnum": "bigint",
     "Boolean": "boolean",
     "TrueClass": "boolean",

@@ -144,6 +144,12 @@ fn map_builtin_name(name: &str) -> String {
         "extract_input_index" => return "extractInputIndex".to_string(),
         "extract_sig_hash_type" => return "extractSigHashType".to_string(),
         "extract_outputs" => return "extractOutputs".to_string(),
+        // Trailing-underscore variants (avoid Ruby Kernel method clashes)
+        "sign_" => return "sign".to_string(),
+        "pow_" => return "pow".to_string(),
+        "sqrt_" => return "sqrt".to_string(),
+        "gcd_" => return "gcd".to_string(),
+        "log2_" => return "log2".to_string(),
         // EC constants
         "EC_P" => return "EC_P".to_string(),
         "EC_N" => return "EC_N".to_string(),
@@ -167,7 +173,7 @@ fn map_builtin_name(name: &str) -> String {
 /// Map Ruby type names to Rúnar AST types.
 fn map_rb_type(name: &str) -> &str {
     match name {
-        "Bigint" | "Integer" => "bigint",
+        "Bigint" | "Integer" | "Int" => "bigint",
         "Boolean" => "boolean",
         "ByteString" => "ByteString",
         "PubKey" => "PubKey",

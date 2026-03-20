@@ -128,7 +128,7 @@ assert hash160(pub_key) == @pub_key_hash    # reads property
 
 | Ruby Type | Runar AST Type |
 |-----------|---------------|
-| `Bigint` / `Int` | `bigint` |
+| `Bigint` / `Integer` / `Int` | `bigint` |
 | `Boolean` | `boolean` |
 | `ByteString` | `ByteString` |
 | `PubKey` | `PubKey` |
@@ -174,14 +174,18 @@ Compiles to the same AST as all other formats: `CallExpr { callee: "assert", arg
 
 ## Loops
 
-Only bounded `for` loops are supported, using Ruby's `Integer#times` or range iteration:
+Only bounded `for` loops are supported, using Ruby's range syntax:
 
 ```ruby
-5.times do |i|         # i = 0, 1, 2, 3, 4
+for i in 0...5         # i = 0, 1, 2, 3, 4  (exclusive upper bound)
   ...
 end
 
-(a...b).each do |i|    # i = a, a+1, ..., b-1
+for i in 0..4          # i = 0, 1, 2, 3, 4  (inclusive upper bound)
+  ...
+end
+
+for i in a...b do      # 'do' keyword is optional
   ...
 end
 ```
@@ -191,7 +195,8 @@ end
 ## Byte Literals
 
 ```ruby
-data = ['deadbeef'].pack('H*')    # hex byte string
+data = 'deadbeef'                  # single-quoted hex byte string
+hash = "cafebabe"                  # double-quoted also works
 ```
 
 ---

@@ -541,6 +541,13 @@ var rbSpecialNames = map[string]string{
 	"log2":   "log2",
 	"divmod": "divmod",
 
+	// Trailing-underscore variants (avoid Ruby Kernel method clashes)
+	"sign_": "sign",
+	"pow_":  "pow",
+	"sqrt_": "sqrt",
+	"gcd_":  "gcd",
+	"log2_": "log2",
+
 	// EC constants
 	"EC_P": "EC_P",
 	"EC_N": "EC_N",
@@ -581,7 +588,7 @@ func rbConvertName(name string) string {
 // rbMapType maps Ruby type names to Rúnar AST type names.
 func rbMapType(name string) string {
 	switch name {
-	case "Bigint", "Integer":
+	case "Bigint", "Integer", "Int":
 		return "bigint"
 	case "Boolean":
 		return "boolean"
