@@ -190,6 +190,14 @@ _SPECIAL_NAMES: dict[str, str] = {
     "safe_div": "safediv",
     "safe_mod": "safemod",
     "div_mod": "divmod",
+    # Ruby trailing-underscore variants (used to avoid clashing with Ruby built-ins
+    # such as ``Kernel#p``, ``Integer#pow``, etc.). These strip the trailing ``_``
+    # and map to their canonical Rúnar built-in names.
+    "sign_": "sign",
+    "pow_": "pow",
+    "sqrt_": "sqrt",
+    "gcd_": "gcd",
+    "log2_": "log2",
     # SHA-256 partial verification (explicit for documentation clarity)
     "sha256_compress": "sha256Compress",
     "sha256_finalize": "sha256Finalize",
@@ -799,10 +807,25 @@ class _RbParser:
                 if prop_type is not None:
                     param.type = prop_type
 
-        # Rewrite bare calls to declared methods as this.method() calls.
-        method_names = {m.name for m in methods}
+        # Rewrite bare calls to declared methods and intrinsics as this.method().
+        # In Ruby, bare calls like `add_output(...)` are equivalent to
+        # `self.add_output(...)` / `this.addOutput(...)`.
+        _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "getStateScript"}
+        method_names = {m.name for m in methods} | _INTRINSIC_METHODS
         for method in methods:
             _rewrite_bare_method_calls(method.body, method_names)
+
+        # Convert implicit returns in private methods: in Ruby, the last
+        # expression in a method body is its return value.  The Rúnar AST
+        # requires explicit ReturnStmt nodes for this.
+        for method in methods:
+            if method.visibility == "private" and method.body:
+                last = method.body[-1]
+                if isinstance(last, ExpressionStmt):
+                    method.body[-1] = ReturnStmt(
+                        value=last.expr,
+                        source_location=getattr(last, "source_location", None),
+                    )
 
         return ContractNode(
             name=contract_name,
