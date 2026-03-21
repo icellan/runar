@@ -20,20 +20,21 @@ require 'tempfile'
 # @param file_name [String] desired file name suffix (e.g. "MyContract.runar.ts")
 # @return [Runar::SDK::RunarArtifact]
 def compile_source(source, file_name)
-  tmp_path = File.join('/tmp', file_name)
-  File.write(tmp_path, source)
+  require 'shellwords'
 
-  begin
-    output = Dir.chdir(PROJECT_ROOT) do
-      `npx runar compile #{tmp_path} --json 2>&1`
-    end
+  script = <<~JS
+    const { compile } = require('#{PROJECT_ROOT}/packages/runar-compiler/dist/index.js');
+    const result = compile(#{source.inspect}, { fileName: #{file_name.inspect} });
+    if (!result.success) { console.error(JSON.stringify(result.diagnostics)); process.exit(1); }
+    const json = JSON.stringify(result.artifact, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v);
+    process.stdout.write(json);
+  JS
 
-    raise "Compilation failed for #{file_name}:\n#{output}" unless $CHILD_STATUS.success?
+  output = `node -e #{Shellwords.escape(script)} 2>&1`
+  status = Process.last_status
+  raise "Compilation failed for #{file_name}:\n#{output}" unless status&.success?
 
-    Runar::SDK::RunarArtifact.from_json(output)
-  ensure
-    File.unlink(tmp_path) if File.exist?(tmp_path)
-  end
+  Runar::SDK::RunarArtifact.from_json(output)
 end
 
 RSpec.describe 'EC isolation' do # rubocop:disable RSpec/DescribeClass

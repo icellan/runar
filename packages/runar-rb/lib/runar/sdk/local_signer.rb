@@ -29,7 +29,7 @@ module Runar
       # We store the result in a constant so every instance can check it
       # without rescuing again.
       begin
-        require 'bsv'
+        require 'bsv-sdk'
         BSV_SDK_AVAILABLE = true
       rescue LoadError
         BSV_SDK_AVAILABLE = false

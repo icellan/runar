@@ -15,6 +15,7 @@ require 'json'
 require 'net/http'
 require 'openssl'
 require 'securerandom'
+require 'shellwords'
 require 'uri'
 
 require 'runar/sdk'
@@ -215,12 +216,22 @@ module IntegrationHelpers
   # @raise [RuntimeError] if compilation fails
   def compile_contract(rel_path)
     abs_path = File.join(PROJECT_ROOT, rel_path)
+    file_name = File.basename(rel_path)
 
-    output = Dir.chdir(PROJECT_ROOT) do
-      `npx runar compile #{abs_path} --json 2>&1`
-    end
+    # Use the compiler dist directly (avoids ESM/TS import issues with the CLI)
+    script = <<~JS
+      const { compile } = require('#{PROJECT_ROOT}/packages/runar-compiler/dist/index.js');
+      const fs = require('fs');
+      const source = fs.readFileSync(#{abs_path.inspect}, 'utf-8');
+      const result = compile(source, { fileName: #{file_name.inspect} });
+      if (!result.success) { console.error(result.diagnostics); process.exit(1); }
+      const json = JSON.stringify(result.artifact, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v);
+      process.stdout.write(json);
+    JS
 
-    raise "Compilation failed for #{rel_path}:\n#{output}" unless $CHILD_STATUS.success?
+    output = `node -e #{Shellwords.escape(script)} 2>&1`
+    status = Process.last_status
+    raise "Compilation failed for #{rel_path}:\n#{output}" unless status&.success?
 
     Runar::SDK::RunarArtifact.from_json(output)
   end
