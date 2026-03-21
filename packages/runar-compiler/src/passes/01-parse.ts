@@ -874,13 +874,13 @@ function parseExpression(
       const text = node.getText();
       // Remove quotes
       const raw = text.slice(1, -1);
-      return { kind: 'bytestring_literal', value: raw };
+      return { kind: 'bytestring_literal', value: raw, sourceLocation: locFromNode(node, file) };
     }
 
     case SyntaxKind.NoSubstitutionTemplateLiteral: {
       const text = node.getText();
       const raw = text.slice(1, -1);
-      return { kind: 'bytestring_literal', value: raw };
+      return { kind: 'bytestring_literal', value: raw, sourceLocation: locFromNode(node, file) };
     }
 
     case SyntaxKind.ConditionalExpression:

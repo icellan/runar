@@ -458,9 +458,28 @@ function validateExpression(expr: Expression, ctx: ValidationContext): void {
     case 'identifier':
     case 'bigint_literal':
     case 'bool_literal':
-    case 'bytestring_literal':
     case 'property_access':
       break;
+
+    case 'bytestring_literal': {
+      const val = expr.value;
+      if (val.length > 0) {
+        if (val.length % 2 !== 0) {
+          ctx.errors.push(makeDiagnostic(
+            `ByteString literal '${val}' has odd length (${val.length}) — hex strings must have an even number of characters`,
+            'error',
+            expr.sourceLocation,
+          ));
+        } else if (!/^[0-9a-fA-F]*$/.test(val)) {
+          ctx.errors.push(makeDiagnostic(
+            `ByteString literal '${val}' contains non-hex characters — only 0-9, a-f, A-F are allowed`,
+            'error',
+            expr.sourceLocation,
+          ));
+        }
+      }
+      break;
+    }
   }
 }
 
