@@ -243,7 +243,10 @@ module Runar
         opts           = options || CallOptions.new
         change_address = opts.change_address.to_s.empty? ? address : opts.change_address
 
-        resolved_args, sig_indices, preimage_index = resolve_method_args(args, user_params, signer)
+        extra_input_count = Array(opts.additional_contract_inputs).length
+        estimated_inputs  = 1 + extra_input_count + 1
+        resolved_args, sig_indices, preimage_index, prevouts_indices =
+          resolve_method_args(args, user_params, signer, estimated_inputs: estimated_inputs)
 
         needs_op_push_tx    = preimage_index >= 0 || is_stateful
         method_selector_hex = compute_method_selector(method_name, is_stateful)
@@ -273,7 +276,52 @@ module Runar
           )
         end
 
-        new_locking_script, new_satoshis = build_continuation(is_stateful, opts)
+        # Multi-output path: build contract_outputs from opts.outputs when present.
+        # Single-output path: fall through to build_continuation.
+        has_multi_output = is_stateful && opts.outputs && !Array(opts.outputs).empty?
+        contract_outputs = nil
+        new_locking_script = ''
+        new_satoshis = 0
+
+        if has_multi_output
+          code_script = @code_script.empty? ? build_code_script : @code_script
+          contract_outputs = Array(opts.outputs).map do |out_spec|
+            state_dict = out_spec.is_a?(OutputSpec) ? out_spec.state : (out_spec['state'] || out_spec[:state])
+            sats = out_spec.is_a?(OutputSpec) ? out_spec.satoshis : (out_spec['satoshis'] || out_spec[:satoshis] || 1)
+            state_hex = State.serialize_state(@artifact.state_fields, state_dict)
+            { script: "#{code_script}6a#{state_hex}", satoshis: sats }
+          end
+        else
+          new_locking_script, new_satoshis = build_continuation(is_stateful, opts)
+        end
+
+        # Normalise additional contract inputs to Utxo objects.
+        extra_contract_utxos = Array(opts.additional_contract_inputs).map do |item|
+          case item
+          when Utxo then item
+          when Hash
+            Utxo.new(
+              txid: item[:txid] || item['txid'],
+              output_index: item[:output_index] || item['output_index'],
+              satoshis: item[:satoshis] || item['satoshis'],
+              script: item[:script] || item['script']
+            )
+          else item
+          end
+        end
+
+        # Resolve per-input args for additional contract inputs.
+        raw_per_input_args = Array(opts.additional_contract_input_args)
+        resolved_per_input_args = extra_contract_utxos.each_with_index.map do |_, i|
+          input_args = (raw_per_input_args[i] || resolved_args).dup
+          user_params.each_with_index do |param, j|
+            case param.type
+            when 'Sig'    then input_args[j] = '00' * 72 if input_args[j].nil?
+            when 'PubKey' then input_args[j] = signer.get_public_key if input_args[j].nil?
+            end
+          end
+          input_args
+        end
 
         fee_rate          = provider.get_fee_rate
         change_script     = SDK.build_p2pkh_script(change_address)
@@ -289,14 +337,31 @@ module Runar
                              build_unlocking_script(method_name, resolved_args)
                            end
 
+        # Build placeholder unlocking scripts for extra contract inputs.
+        extra_unlock_placeholders = extra_contract_utxos.each_with_index.map do |_, i|
+          args_for_placeholder = resolved_per_input_args[i] || resolved_args
+          build_stateful_prefix('00' * 72, method_needs_change) +
+            build_unlocking_script(method_name, args_for_placeholder)
+        end
+
+        call_options = {}
+        call_options[:contract_outputs] = contract_outputs if contract_outputs
+        if extra_contract_utxos.any?
+          call_options[:additional_contract_inputs] = extra_contract_utxos.each_with_index.map do |utxo, i|
+            { utxo: utxo, unlocking_script: extra_unlock_placeholders[i] }
+          end
+        end
+
         tx_hex, _input_count, change_amount = SDK.build_call_transaction(
           contract_utxo, unlocking_script, new_locking_script,
           new_satoshis, change_address, change_script,
           additional_utxos.empty? ? nil : additional_utxos,
-          fee_rate: fee_rate
+          fee_rate: fee_rate,
+          options: call_options.empty? ? nil : call_options
         )
 
-        signed_tx = sign_funding_inputs(tx_hex, additional_utxos, signer)
+        p2pkh_start_idx = 1 + extra_contract_utxos.length
+        signed_tx = sign_funding_inputs(tx_hex, additional_utxos, signer, p2pkh_start_idx)
 
         signed_tx, change_amount, final_op_push_tx_sig, final_preimage =
           compute_preimage_passes(
@@ -305,7 +370,11 @@ module Runar
             change_pkh_hex, method_selector_hex, code_sep_idx,
             change_amount, new_satoshis, new_locking_script,
             change_address, change_script, additional_utxos, fee_rate, signer,
-            is_stateful, needs_op_push_tx, preimage_index
+            is_stateful, needs_op_push_tx, preimage_index,
+            contract_outputs: contract_outputs,
+            extra_contract_utxos: extra_contract_utxos,
+            resolved_per_input_args: resolved_per_input_args,
+            prevouts_indices: prevouts_indices
           )
 
         sighash = final_preimage.empty? ? '' : Digest::SHA256.hexdigest([final_preimage].pack('H*'))
@@ -315,7 +384,9 @@ module Runar
           sig_indices, method_name, resolved_args, method_selector_hex,
           is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
           change_amount, method_needs_new_amount, new_satoshis, preimage_index,
-          contract_utxo, new_locking_script, code_sep_idx
+          contract_utxo, new_locking_script, code_sep_idx,
+          has_multi_output: has_multi_output,
+          contract_outputs: contract_outputs || []
         )
       end
       # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
@@ -655,10 +726,12 @@ module Runar
         result
       end
 
-      def resolve_method_args(args, user_params, signer)
-        resolved_args  = args.dup
-        sig_indices    = []
-        preimage_index = -1
+      # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength
+      def resolve_method_args(args, user_params, signer, estimated_inputs: 2)
+        resolved_args    = args.dup
+        sig_indices      = []
+        preimage_index   = -1
+        prevouts_indices = []
 
         user_params.each_with_index do |param, i|
           case param.type
@@ -674,11 +747,18 @@ module Runar
               preimage_index   = i
               resolved_args[i] = '00' * 181
             end
+          when 'ByteString'
+            if args[i].nil?
+              prevouts_indices << i
+              # 36 bytes per input (txid 32 + vout 4) as placeholder
+              resolved_args[i] = '00' * (36 * estimated_inputs)
+            end
           end
         end
 
-        [resolved_args, sig_indices, preimage_index]
+        [resolved_args, sig_indices, preimage_index, prevouts_indices]
       end
+      # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength
 
       def compute_change_pkh(signer, is_stateful, method_needs_change)
         return '' unless is_stateful && method_needs_change
@@ -695,25 +775,30 @@ module Runar
         [get_locking_script, new_satoshis]
       end
 
-      def sign_funding_inputs(tx_hex, additional_utxos, signer)
+      def sign_funding_inputs(tx_hex, additional_utxos, signer, start_idx = 1)
         signed_tx = tx_hex
         pub_key   = signer.get_public_key
         additional_utxos.each_with_index do |utxo, i|
-          sig       = signer.sign(signed_tx, 1 + i, utxo.script, utxo.satoshis)
+          idx       = start_idx + i
+          sig       = signer.sign(signed_tx, idx, utxo.script, utxo.satoshis)
           unlock    = State.encode_push_data(sig) + State.encode_push_data(pub_key)
-          signed_tx = SDK.insert_unlocking_script(signed_tx, 1 + i, unlock)
+          signed_tx = SDK.insert_unlocking_script(signed_tx, idx, unlock)
         end
         signed_tx
       end
 
-      # rubocop:disable Metrics/MethodLength, Metrics/ParameterLists
+      # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/ParameterLists, Metrics/PerceivedComplexity
       def compute_preimage_passes(
         signed_tx, contract_utxo, resolved_args, sig_indices,
         method_name, method_needs_change, method_needs_new_amount,
         change_pkh_hex, method_selector_hex, code_sep_idx,
         change_amount, new_satoshis, new_locking_script,
         change_address, change_script, additional_utxos, fee_rate, signer,
-        is_stateful, needs_op_push_tx, preimage_index
+        is_stateful, needs_op_push_tx, preimage_index,
+        contract_outputs: nil,
+        extra_contract_utxos: [],
+        resolved_per_input_args: [],
+        prevouts_indices: []
       )
         final_op_push_tx_sig = ''
         final_preimage       = ''
@@ -725,8 +810,19 @@ module Runar
               method_name, method_needs_change, method_needs_new_amount,
               change_pkh_hex, method_selector_hex, code_sep_idx,
               change_amount, new_satoshis, new_locking_script,
-              change_address, change_script, additional_utxos, fee_rate, signer
+              change_address, change_script, additional_utxos, fee_rate, signer,
+              contract_outputs: contract_outputs,
+              extra_contract_utxos: extra_contract_utxos,
+              resolved_per_input_args: resolved_per_input_args,
+              prevouts_indices: prevouts_indices
             )
+
+          # Update resolved_args with final prevouts so finalize_call can rebuild
+          # the primary unlock with the correct allPrevouts values.
+          if prevouts_indices.any?
+            all_prevouts = extract_all_prevouts(signed_tx)
+            prevouts_indices.each { |idx| resolved_args[idx] = all_prevouts }
+          end
 
         elsif needs_op_push_tx || !sig_indices.empty?
           signed_tx, final_op_push_tx_sig, final_preimage =
@@ -739,54 +835,112 @@ module Runar
 
         [signed_tx, change_amount, final_op_push_tx_sig, final_preimage]
       end
-      # rubocop:enable Metrics/MethodLength, Metrics/ParameterLists
+      # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/ParameterLists, Metrics/PerceivedComplexity
 
-      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
       def stateful_preimage_passes(
         signed_tx, contract_utxo, resolved_args,
         method_name, method_needs_change, method_needs_new_amount,
         change_pkh_hex, method_selector_hex, code_sep_idx,
         change_amount, new_satoshis, new_locking_script,
-        change_address, change_script, additional_utxos, fee_rate, signer
+        change_address, change_script, additional_utxos, fee_rate, signer,
+        contract_outputs: nil,
+        extra_contract_utxos: [],
+        resolved_per_input_args: [],
+        prevouts_indices: []
       )
-        pub_key = signer.get_public_key
+        pub_key     = signer.get_public_key
+        p2pkh_start = 1 + extra_contract_utxos.length
 
-        # First pass — build unlock with placeholder Sig params.
+        call_opts = {}
+        call_opts[:contract_outputs] = contract_outputs if contract_outputs
+
+        # First pass — build unlock with placeholder Sig/prevouts params.
         input0_unlock, = build_stateful_unlock(
           signed_tx, 0, contract_utxo, resolved_args,
           method_name, method_needs_change, method_needs_new_amount,
           change_pkh_hex, method_selector_hex, code_sep_idx,
-          change_amount, new_satoshis
+          change_amount, new_satoshis,
+          prevouts_indices: prevouts_indices
         )
 
-        # Rebuild TX with real unlock (size may differ from placeholder).
+        # First-pass unlocks for extra contract inputs.
+        extra_unlocks_pass1 = extra_contract_utxos.each_with_index.map do |extra_utxo, i|
+          args_for = resolved_per_input_args[i] || resolved_args
+          unlock, = build_stateful_unlock(
+            signed_tx, i + 1, extra_utxo, args_for,
+            method_name, method_needs_change, method_needs_new_amount,
+            change_pkh_hex, method_selector_hex, code_sep_idx,
+            change_amount, new_satoshis,
+            prevouts_indices: prevouts_indices
+          )
+          unlock
+        end
+
+        # Rebuild TX with real-sized unlocks for all contract inputs.
+        rebuild_opts = call_opts.dup
+        if extra_contract_utxos.any?
+          rebuild_opts[:additional_contract_inputs] = extra_contract_utxos.each_with_index.map do |utxo, i|
+            { utxo: utxo, unlocking_script: extra_unlocks_pass1[i] }
+          end
+        end
+
         tx_hex, _ic, change_amount = SDK.build_call_transaction(
           contract_utxo, input0_unlock, new_locking_script,
           new_satoshis, change_address, change_script,
           additional_utxos.empty? ? nil : additional_utxos,
-          fee_rate: fee_rate
+          fee_rate: fee_rate,
+          options: rebuild_opts.empty? ? nil : rebuild_opts
         )
-        signed_tx = sign_funding_inputs(tx_hex, additional_utxos, signer)
+        signed_tx = sign_funding_inputs(tx_hex, additional_utxos, signer, p2pkh_start)
 
         # Second pass — stable preimage with finalised TX layout.
         final_unlock, op_sig, preimage = build_stateful_unlock(
           signed_tx, 0, contract_utxo, resolved_args,
           method_name, method_needs_change, method_needs_new_amount,
           change_pkh_hex, method_selector_hex, code_sep_idx,
-          change_amount, new_satoshis
+          change_amount, new_satoshis,
+          prevouts_indices: prevouts_indices
         )
         signed_tx = SDK.insert_unlocking_script(signed_tx, 0, final_unlock)
 
+        # Second-pass unlocks for extra contract inputs.
+        # Sig params for extra inputs are signed with the signer (not kept as placeholders).
+        extra_contract_utxos.each_with_index do |extra_utxo, i|
+          args_for = (resolved_per_input_args[i] || resolved_args).dup
+
+          # Sign Sig params for extra contract inputs using the signer.
+          # Use subscript trimmed at OP_CODESEPARATOR, as the script verifies
+          # user checkSig after the separator.
+          sig_subscript = extra_utxo.script
+          if code_sep_idx >= 0
+            trim_pos = (code_sep_idx + 1) * 2
+            sig_subscript = extra_utxo.script[trim_pos..] if trim_pos <= extra_utxo.script.length
+          end
+          args_for.each_with_index do |arg, j|
+            args_for[j] = signer.sign(signed_tx, i + 1, sig_subscript, extra_utxo.satoshis) if arg == '00' * 72
+          end
+
+          extra_unlock, = build_stateful_unlock(
+            signed_tx, i + 1, extra_utxo, args_for,
+            method_name, method_needs_change, method_needs_new_amount,
+            change_pkh_hex, method_selector_hex, code_sep_idx,
+            change_amount, new_satoshis,
+            prevouts_indices: prevouts_indices
+          )
+          signed_tx = SDK.insert_unlocking_script(signed_tx, i + 1, extra_unlock)
+        end
+
         # Re-sign P2PKH inputs after second-pass rebuild.
         additional_utxos.each_with_index do |utxo, i|
-          sig    = signer.sign(signed_tx, 1 + i, utxo.script, utxo.satoshis)
+          sig    = signer.sign(signed_tx, p2pkh_start + i, utxo.script, utxo.satoshis)
           unlock = State.encode_push_data(sig) + State.encode_push_data(pub_key)
-          signed_tx = SDK.insert_unlocking_script(signed_tx, 1 + i, unlock)
+          signed_tx = SDK.insert_unlocking_script(signed_tx, p2pkh_start + i, unlock)
         end
 
         [signed_tx, change_amount, op_sig, preimage]
       end
-      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
 
       def stateless_preimage_pass(signed_tx, contract_utxo, resolved_args, method_name,
                                   code_sep_idx, needs_op_push_tx, preimage_index)
@@ -825,7 +979,9 @@ module Runar
         sig_indices, method_name, resolved_args, method_selector_hex,
         is_stateful, needs_op_push_tx, method_needs_change, change_pkh_hex,
         change_amount, method_needs_new_amount, new_satoshis, preimage_index,
-        contract_utxo, new_locking_script, code_sep_idx
+        contract_utxo, new_locking_script, code_sep_idx,
+        has_multi_output: false,
+        contract_outputs: []
       )
         PreparedCall.new(
           sighash: sighash,
@@ -848,6 +1004,8 @@ module Runar
           contract_utxo: contract_utxo,
           new_locking_script: new_locking_script,
           new_satoshis: new_satoshis,
+          has_multi_output: has_multi_output,
+          contract_outputs: contract_outputs,
           code_sep_idx: code_sep_idx
         )
       end
@@ -887,10 +1045,19 @@ module Runar
       end
       # rubocop:enable Metrics/AbcSize
 
+      # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
       def update_tracked_utxo(txid, prepared)
         if prepared.is_terminal
           # Terminal call consumes the contract UTXO — no continuation to track.
           @current_utxo = nil
+        elsif prepared.is_stateful && prepared.has_multi_output && !prepared.contract_outputs.empty?
+          # Multi-output: track output 0 (first continuation), matching TS SDK behavior.
+          first = prepared.contract_outputs[0]
+          @current_utxo = Utxo.new(
+            txid: txid, output_index: 0,
+            satoshis: first[:satoshis],
+            script: first[:script]
+          )
         elsif prepared.is_stateful && !prepared.new_locking_script.empty?
           @current_utxo = Utxo.new(
             txid: txid, output_index: 0,
@@ -901,6 +1068,7 @@ module Runar
           @current_utxo = nil
         end
       end
+      # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
 
       # ---------------------------------------------------------------------------
       # Code separator helpers
@@ -1009,6 +1177,37 @@ module Runar
       end
 
       # ---------------------------------------------------------------------------
+      # Transaction parsing helpers
+      # ---------------------------------------------------------------------------
+
+      # Extract all input outpoints (txid + vout, 36 bytes each) from a raw tx hex.
+      #
+      # Returns the concatenated outpoints as a hex string, matching the
+      # BIP-143 allPrevouts format used by contracts that call extractHashPrevouts.
+      #
+      # @param tx_hex [String] hex-encoded raw transaction
+      # @return [String] hex-encoded concatenation of all (txid LE + vout LE) pairs
+      # rubocop:disable Metrics/MethodLength
+      def extract_all_prevouts(tx_hex)
+        # Positions are in hex chars (2 chars = 1 byte).
+        pos = 8 # skip version (4 bytes = 8 hex chars)
+
+        input_count, ic_hex_len = SDK.read_varint_hex(tx_hex, pos)
+        pos += ic_hex_len
+
+        prevouts = +''
+        input_count.times do
+          prevouts << tx_hex[pos, 72] # txid (32 bytes) + vout (4 bytes) = 36 bytes = 72 hex chars
+          pos += 72
+
+          script_len, sl_hex_len = SDK.read_varint_hex(tx_hex, pos)
+          pos += sl_hex_len + script_len * 2 + 8 # scriptSig + sequence (4 bytes = 8 hex chars)
+        end
+        prevouts
+      end
+      # rubocop:enable Metrics/MethodLength
+
+      # ---------------------------------------------------------------------------
       # Stateful unlock builder
       # ---------------------------------------------------------------------------
 
@@ -1021,16 +1220,27 @@ module Runar
       #
       # Returns [unlock_hex, op_sig_hex, preimage_hex].
       #
-      # rubocop:disable Metrics/ParameterLists
+      # rubocop:disable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
       def build_stateful_unlock(tx_hex, input_idx, contract_utxo, resolved_args,
                                 _method_name, method_needs_change, method_needs_new_amount,
                                 change_pkh_hex, method_selector_hex, code_sep_idx,
-                                change_amount, new_satoshis)
+                                change_amount, new_satoshis,
+                                prevouts_indices: [])
         op_sig, preimage = SDK.compute_op_push_tx(
           tx_hex, input_idx, contract_utxo.script, contract_utxo.satoshis, code_sep_idx
         )
 
-        args_hex = resolved_args.map { |a| encode_arg(a) }.join
+        # Inject real allPrevouts into any ByteString placeholders.
+        effective_args = if prevouts_indices.any?
+                           all_prevouts = extract_all_prevouts(tx_hex)
+                           args = resolved_args.dup
+                           prevouts_indices.each { |idx| args[idx] = all_prevouts }
+                           args
+                         else
+                           resolved_args
+                         end
+
+        args_hex = effective_args.map { |a| encode_arg(a) }.join
 
         change_hex = ''
         if method_needs_change && !change_pkh_hex.empty?
@@ -1046,7 +1256,7 @@ module Runar
 
         [unlock, op_sig, preimage]
       end
-      # rubocop:enable Metrics/ParameterLists
+      # rubocop:enable Metrics/AbcSize, Metrics/MethodLength, Metrics/ParameterLists
     end
     # rubocop:enable Naming/AccessorMethodName, Naming/PredicatePrefix
   end
