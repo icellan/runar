@@ -381,6 +381,191 @@ class _LoweringContext:
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         # --- Stack: [..., script, varint] ---
 
+    def emit_push_data_encode(self) -> None:
+        """Emit push-data encoding for a ByteString value on top of the stack.
+
+        Expects stack: [..., bs_value]
+        Leaves stack:  [..., pushdata_encoded_value]
+        """
+        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(76)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_outer_if = self.sm.clone()
+
+        # THEN: len <= 75
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        sm_end_target = self.sm.clone()
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_outer_if.clone()
+
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(256)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_inner_if = self.sm.clone()
+
+        # THEN: 76-255 -> 0x4c + 1-byte
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x4C]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_inner_if
+
+        # ELSE: >= 256 -> 0x4d + 2-byte LE
+        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0x4D]))))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.sm.pop(); self.sm.pop()
+        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.sm = sm_end_target
+
+    def emit_push_data_decode(self) -> None:
+        """Emit push-data decoding for a ByteString state field.
+
+        Expects stack: [..., state_bytes]
+        Leaves stack:  [..., data, remaining_state]
+        """
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(76)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_outer_if = self.sm.clone()
+
+        # THEN: fb < 76 -> direct length
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        sm_end_target = self.sm.clone()
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_outer_if.clone()
+
+        self.emit_op(StackOp(op="dup"))
+        self.sm.push("")
+        self.emit_op(StackOp(op="push", value=big_int_push(77)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_after_inner_if = self.sm.clone()
+
+        # THEN: fb == 77 -> 2-byte LE
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_after_inner_if
+
+        # ELSE: fb == 76 -> 1-byte
+        self.emit_op(StackOp(op="drop")); self.sm.pop()
+        self.emit_op(StackOp(op="push", value=big_int_push(1)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+        self.emit_op(StackOp(op="swap")); self.sm.swap()
+        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.sm = sm_end_target
+
     # -----------------------------------------------------------------
     # bring_to_top
     # -----------------------------------------------------------------
@@ -1268,6 +1453,9 @@ class _LoweringContext:
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()  # pop the width
+            elif prop.type == "ByteString":
+                # Prepend push-data length prefix (matching SDK format)
+                self.emit_push_data_encode()
 
             if not first:
                 self.sm.pop()
@@ -1531,7 +1719,7 @@ class _LoweringContext:
                                  binding_index: int, last_uses: dict[str, int]) -> None:
         state_props: list[ANFProperty] = []
         prop_sizes: list[int] = []
-        state_len = 0
+        has_variable_length = False
         for p in self.properties:
             if p.readonly:
                 continue
@@ -1548,10 +1736,12 @@ class _LoweringContext:
                 sz = 32
             elif p.type == "Point":
                 sz = 64
+            elif p.type == "ByteString":
+                sz = -1
+                has_variable_length = True
             else:
                 raise RuntimeError(f"deserialize_state: unsupported type: {p.type}")
             prop_sizes.append(sz)
-            state_len += sz
 
         if not state_props:
             return
@@ -1563,13 +1753,10 @@ class _LoweringContext:
         self.emit_op(StackOp(op="push", value=big_int_push(104)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.sm.push("")
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="nip"))
-        self.sm.pop()
-        self.sm.pop()
+        self.sm.pop(); self.sm.pop()
         self.sm.push("")
 
         # 2. Drop tail 44 bytes
@@ -1578,14 +1765,11 @@ class _LoweringContext:
         self.emit_op(StackOp(op="push", value=big_int_push(44)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
+        self.sm.pop(); self.sm.pop()
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.sm.push("")
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="drop"))
         self.sm.pop()
 
@@ -1595,37 +1779,110 @@ class _LoweringContext:
         self.emit_op(StackOp(op="push", value=big_int_push(8)))
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
+        self.sm.pop(); self.sm.pop()
         self.sm.push("")
         self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.sm.push("")
+        self.sm.pop(); self.sm.pop()
+        self.sm.push(""); self.sm.push("")
         self.emit_op(StackOp(op="drop"))
         self.sm.pop()
 
-        # 4. Extract last stateLen bytes (the state section)
-        self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(state_len)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SUB"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.sm.push("")
-        self.emit_op(StackOp(op="nip"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
+        if not has_variable_length:
+            state_len = sum(prop_sizes)
 
-        # 5. Split into individual properties
+            # 4. Extract last stateLen bytes
+            self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+            self.sm.push("")
+            self.emit_op(StackOp(op="push", value=big_int_push(state_len)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+            # 5. Split fixed-size fields
+            self._split_fixed_state_fields(state_props, prop_sizes)
+        elif not self.sm.has("_codePart"):
+            # Variable-length state but _codePart not available (terminal method).
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+        else:
+            # Variable-length path: strip varint, use _codePart
+            self.emit_op(StackOp(op="push", value=big_int_push(1)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="swap"))
+            self.sm.swap()
+            self.emit_op(StackOp(op="dup"))
+            self.sm.push(self.sm.peek_at_depth(0))
+            # Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+            self.emit_op(StackOp(op="push", value=bytes([0])))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self.emit_op(StackOp(op="push", value=big_int_push(253)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+            self.emit_op(StackOp(op="opcode", code="OP_IF"))
+            self.sm.pop()
+            sm_at_varint_if = self.sm.clone()
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+            self.sm = sm_at_varint_if.clone()
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            self.emit_op(StackOp(op="push", value=big_int_push(2)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+
+            # Compute skip = SIZE(_codePart) - codeSepIdx
+            self.bring_to_top("_codePart", False)
+            self.emit_op(StackOp(op="opcode", code="OP_SIZE"))
+            self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="push_codesep_index"))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SUB"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+            # Split scriptCode at skip to get state
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push(""); self.sm.push("")
+            self.emit_op(StackOp(op="nip"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+
+            # Parse variable-length state fields
+            self._parse_variable_length_state_fields(state_props, prop_sizes)
+
+        self._track_depth()
+
+    def _split_fixed_state_fields(self, state_props: list[ANFProperty], prop_sizes: list[int]) -> None:
         if len(state_props) == 1:
             prop = state_props[0]
             if prop.type in ("bigint", "boolean"):
@@ -1639,18 +1896,15 @@ class _LoweringContext:
                     self.emit_op(StackOp(op="push", value=big_int_push(sz)))
                     self.sm.push("")
                     self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-                    self.sm.pop()
-                    self.sm.pop()
-                    self.sm.push("")
-                    self.sm.push("")
+                    self.sm.pop(); self.sm.pop()
+                    self.sm.push(""); self.sm.push("")
                     self.emit_op(StackOp(op="swap"))
                     self.sm.swap()
                     if prop.type in ("bigint", "boolean"):
                         self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.emit_op(StackOp(op="swap"))
                     self.sm.swap()
-                    self.sm.pop()
-                    self.sm.pop()
+                    self.sm.pop(); self.sm.pop()
                     self.sm.push(prop.name)
                     self.sm.push("")
                 else:
@@ -1658,7 +1912,50 @@ class _LoweringContext:
                         self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.sm.pop()
                     self.sm.push(prop.name)
-        self._track_depth()
+
+    def _parse_variable_length_state_fields(self, state_props: list[ANFProperty], prop_sizes: list[int]) -> None:
+        if len(state_props) == 1:
+            prop = state_props[0]
+            if prop.type == "ByteString":
+                # Single ByteString field: decode push-data prefix, drop trailing empty
+                self.emit_push_data_decode()  # [..., data, remaining]
+                self.emit_op(StackOp(op="drop")); self.sm.pop()
+            elif prop.type in ("bigint", "boolean"):
+                self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            self.sm.pop()
+            self.sm.push(prop.name)
+        else:
+            for i, prop in enumerate(state_props):
+                if i < len(state_props) - 1:
+                    if prop.type == "ByteString":
+                        # ByteString: decode push-data prefix, extract data
+                        self.emit_push_data_decode()  # [..., data, rest]
+                        self.sm.pop(); self.sm.pop()
+                        self.sm.push(prop.name)
+                        self.sm.push("")  # rest on top
+                    else:
+                        sz = prop_sizes[i]
+                        self.emit_op(StackOp(op="push", value=big_int_push(sz)))
+                        self.sm.push("")
+                        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+                        self.sm.pop(); self.sm.pop()
+                        self.sm.push(""); self.sm.push("")
+                        self.emit_op(StackOp(op="swap")); self.sm.swap()
+                        if prop.type in ("bigint", "boolean"):
+                            self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+                        self.emit_op(StackOp(op="swap")); self.sm.swap()
+                        self.sm.pop(); self.sm.pop()
+                        self.sm.push(prop.name)
+                        self.sm.push("")
+                else:
+                    if prop.type == "ByteString":
+                        # Last ByteString: decode push-data prefix, drop trailing empty
+                        self.emit_push_data_decode()  # [..., data, remaining]
+                        self.emit_op(StackOp(op="drop")); self.sm.pop()
+                    elif prop.type in ("bigint", "boolean"):
+                        self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+                    self.sm.pop()
+                    self.sm.push(prop.name)
 
     # -----------------------------------------------------------------
     # add_output
@@ -1706,7 +2003,10 @@ class _LoweringContext:
                 self.sm.push("")
                 self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
                 self.sm.pop()
-            # Byte types used as-is
+            elif prop.type == "ByteString":
+                # Prepend push-data length prefix (matching SDK format)
+                self.emit_push_data_encode()
+            # Other byte types used as-is
 
             # Concatenate with accumulator
             self.sm.pop()
@@ -3122,11 +3422,12 @@ def _lower_method_with_private_methods(
     # These are inserted at the base of the stack so they can be consumed later.
     if _method_uses_check_preimage(method.body):
         param_names = ["_opPushTxSig"] + param_names
-        # _codePart is only needed when the method has add_output or add_raw_output
-        # (it provides the code script for continuation output construction).
-        # Stateless contracts and terminal methods don't use it.
+        # _codePart is needed when the method has add_output or add_raw_output
+        # (it provides the code script for continuation output construction),
+        # or when deserializing variable-length (ByteString) state fields.
         if _method_uses_code_part(method.body):
             param_names = ["_codePart"] + param_names
+        # No else needed — terminal methods without addOutput don't need _codePart
 
     ctx = _LoweringContext(param_names, properties)
     ctx.private_methods = private_methods

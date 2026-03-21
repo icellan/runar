@@ -463,6 +463,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Undefined variable '${expr.name}'`,
           'error',
+          expr.sourceLocation,
         ));
         return '<unknown>';
       }
@@ -475,6 +476,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Property '${expr.property}' does not exist on the contract`,
           'error',
+          expr.sourceLocation,
         ));
         return '<unknown>';
       }
@@ -497,6 +499,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Property or method '${expr.property}' does not exist on the contract`,
             'error',
+            expr.sourceLocation,
           ));
           return '<unknown>';
         }
@@ -524,6 +527,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Ternary condition must be boolean, got '${condType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         const consequentType = this.inferExprType(expr.consequent, env);
@@ -537,6 +541,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Ternary branches have incompatible types: '${consequentType}' and '${alternateType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return consequentType;
@@ -550,6 +555,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Array index must be bigint, got '${indexType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
 
@@ -568,6 +574,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `${expr.kind === 'increment_expr' ? '++' : '--'} operator requires bigint, got '${operandType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return BIGINT;
@@ -584,6 +591,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `Array element type mismatch: expected '${elemType}', got '${et}'`,
               'error',
+              expr.sourceLocation,
             ));
           }
         }
@@ -613,12 +621,14 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Left operand of '${expr.op}' must be bigint, got '${leftType}'`,
           'error',
+          expr.left.sourceLocation,
         ));
       }
       if (!isBigintFamily(rightType)) {
         this.errors.push(makeDiagnostic(
           `Right operand of '${expr.op}' must be bigint, got '${rightType}'`,
           'error',
+          expr.right.sourceLocation,
         ));
       }
       return BIGINT;
@@ -631,12 +641,14 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Left operand of '${expr.op}' must be bigint, got '${leftType}'`,
           'error',
+          expr.left.sourceLocation,
         ));
       }
       if (!isBigintFamily(rightType)) {
         this.errors.push(makeDiagnostic(
           `Right operand of '${expr.op}' must be bigint, got '${rightType}'`,
           'error',
+          expr.right.sourceLocation,
         ));
       }
       return BOOLEAN;
@@ -651,6 +663,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Cannot compare '${leftType}' and '${rightType}' with '${expr.op}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
       }
@@ -664,12 +677,14 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Left operand of '${expr.op}' must be boolean, got '${leftType}'`,
           'error',
+          expr.left.sourceLocation,
         ));
       }
       if (rightType !== BOOLEAN && rightType !== '<unknown>') {
         this.errors.push(makeDiagnostic(
           `Right operand of '${expr.op}' must be boolean, got '${rightType}'`,
           'error',
+          expr.right.sourceLocation,
         ));
       }
       return BOOLEAN;
@@ -682,12 +697,14 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Left operand of '${expr.op}' must be bigint, got '${leftType}'`,
           'error',
+          expr.left.sourceLocation,
         ));
       }
       if (!isBigintFamily(rightType)) {
         this.errors.push(makeDiagnostic(
           `Right operand of '${expr.op}' must be bigint, got '${rightType}'`,
           'error',
+          expr.right.sourceLocation,
         ));
       }
       return BIGINT;
@@ -703,12 +720,14 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Left operand of '${expr.op}' must be bigint or ByteString, got '${leftType}'`,
           'error',
+          expr.left.sourceLocation,
         ));
       }
       if (!isBigintFamily(rightType)) {
         this.errors.push(makeDiagnostic(
           `Right operand of '${expr.op}' must be bigint or ByteString, got '${rightType}'`,
           'error',
+          expr.right.sourceLocation,
         ));
       }
       return BIGINT;
@@ -729,6 +748,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Operand of '!' must be boolean, got '${operandType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return BOOLEAN;
@@ -738,6 +758,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Operand of unary '-' must be bigint, got '${operandType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return BIGINT;
@@ -750,6 +771,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `Operand of '~' must be bigint or ByteString, got '${operandType}'`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return BIGINT;
@@ -798,6 +820,7 @@ class TypeChecker {
       this.errors.push(makeDiagnostic(
         `Unknown function '${callee.name}'. Only Rúnar built-in functions and contract methods are allowed.`,
         'error',
+        expr.sourceLocation,
       ));
       for (const arg of args) {
         this.inferExprType(arg, env);
@@ -814,6 +837,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `getStateScript() takes no arguments`,
             'error',
+            expr.sourceLocation,
           ));
         }
         return BYTESTRING;
@@ -824,6 +848,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addOutput() is only available in StatefulSmartContract`,
             'error',
+            expr.sourceLocation,
           ));
           return VOID;
         }
@@ -833,6 +858,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${args.length}`,
             'error',
+            expr.sourceLocation,
           ));
         }
         // Type-check: first arg = bigint (satoshis)
@@ -842,6 +868,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
+              args[0]!.sourceLocation,
             ));
           }
         }
@@ -853,6 +880,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
               'error',
+              args[i + 1]!.sourceLocation,
             ));
           }
         }
@@ -868,6 +896,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() is only available in StatefulSmartContract`,
             'error',
+            expr.sourceLocation,
           ));
           return VOID;
         }
@@ -875,6 +904,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
             'error',
+            expr.sourceLocation,
           ));
         }
         if (args.length >= 1) {
@@ -883,6 +913,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
               'error',
+              args[0]!.sourceLocation,
             ));
           }
         }
@@ -892,6 +923,7 @@ class TypeChecker {
             this.errors.push(makeDiagnostic(
               `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
               'error',
+              args[1]!.sourceLocation,
             ));
           }
         }
@@ -907,6 +939,7 @@ class TypeChecker {
       this.errors.push(makeDiagnostic(
         `Unknown method 'this.${methodName}'. Only Rúnar built-in methods (addOutput, addRawOutput, getStateScript) and contract methods are allowed.`,
         'error',
+        expr.sourceLocation,
       ));
       for (const arg of args) {
         this.inferExprType(arg, env);
@@ -936,6 +969,7 @@ class TypeChecker {
       this.errors.push(makeDiagnostic(
         `Unknown function '${objName}.${callee.property}'. Only Rúnar built-in functions and contract methods are allowed.`,
         'error',
+        expr.sourceLocation,
       ));
       for (const arg of args) {
         this.inferExprType(arg, env);
@@ -963,6 +997,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `assert() expects 1 or 2 arguments, got ${args.length}`,
           'error',
+          args[0]?.sourceLocation,
         ));
       }
       if (args.length >= 1) {
@@ -971,6 +1006,7 @@ class TypeChecker {
           this.errors.push(makeDiagnostic(
             `assert() condition must be boolean, got '${condType}'`,
             'error',
+            args[0]!.sourceLocation,
           ));
         }
       }
@@ -986,6 +1022,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `checkMultiSig() expects 2 arguments, got ${args.length}`,
           'error',
+          args[0]?.sourceLocation,
         ));
       }
       for (const arg of args) {
@@ -1000,6 +1037,7 @@ class TypeChecker {
       this.errors.push(makeDiagnostic(
         `${funcName}() expects ${sig.params.length} argument(s), got ${args.length}`,
         'error',
+        args[0]?.sourceLocation,
       ));
     }
 
@@ -1012,6 +1050,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `Argument ${i + 1} of ${funcName}(): expected '${expectedType}', got '${argType}'`,
           'error',
+          args[i]!.sourceLocation,
         ));
       }
     }
@@ -1054,6 +1093,7 @@ class TypeChecker {
         this.errors.push(makeDiagnostic(
           `affine value '${argName}' has already been consumed`,
           'error',
+          arg.sourceLocation,
         ));
       } else {
         this.consumedValues.add(argName);

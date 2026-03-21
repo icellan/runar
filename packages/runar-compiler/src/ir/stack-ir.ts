@@ -104,6 +104,11 @@ export interface PlaceholderOp {
   sourceLoc?: StackSourceLoc;
 }
 
+export interface PushCodeSepIndexOp {
+  op: 'push_codesep_index';
+  sourceLoc?: StackSourceLoc;
+}
+
 export type StackOp =
   | PushOp
   | DupOp
@@ -117,4 +122,5 @@ export type StackOp =
   | OverOp
   | RotOp
   | TuckOp
-  | PlaceholderOp;
+  | PlaceholderOp
+  | PushCodeSepIndexOp;

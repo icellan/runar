@@ -48,6 +48,7 @@ pub enum StackOp {
         param_index: usize,
         param_name: String,
     },
+    PushCodeSepIndex,
 }
 
 /// Typed value for push operations.
@@ -436,6 +437,191 @@ impl LoweringContext {
 
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         // --- Stack: [..., script, varint] ---
+    }
+
+    /// Emit push-data encoding for a ByteString value on top of the stack.
+    ///
+    /// Expects stack: [..., bs_value]
+    /// Leaves stack:  [..., pushdata_encoded_value]
+    fn emit_push_data_encode(&mut self) {
+        self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(76)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_outer_if = self.sm.clone();
+
+        // THEN: len <= 75
+        self.emit_op(StackOp::Push(PushValue::Int(2)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        let sm_end_target = self.sm.clone();
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_outer_if.clone();
+
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(256)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_inner_if = self.sm.clone();
+
+        // THEN: 76-255 → 0x4c + 1-byte
+        self.emit_op(StackOp::Push(PushValue::Int(2)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x4c])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_inner_if;
+
+        // ELSE: >= 256 → 0x4d + 2-byte LE
+        self.emit_op(StackOp::Push(PushValue::Int(4)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(2)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0x4d])));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.sm.pop(); self.sm.pop();
+        self.emit_op(StackOp::Opcode("OP_CAT".into()));
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.sm = sm_end_target;
+    }
+
+    /// Emit push-data decoding for a ByteString state field.
+    ///
+    /// Expects stack: [..., state_bytes]
+    /// Leaves stack:  [..., data, remaining_state]
+    fn emit_push_data_decode(&mut self) {
+        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(76)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_outer_if = self.sm.clone();
+
+        // THEN: fb < 76 → direct length
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        let sm_end_target = self.sm.clone();
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_outer_if.clone();
+
+        self.emit_op(StackOp::Dup);
+        self.sm.push("");
+        self.emit_op(StackOp::Push(PushValue::Int(77)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_after_inner_if = self.sm.clone();
+
+        // THEN: fb == 77 → 2-byte LE
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(2)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_after_inner_if;
+
+        // ELSE: fb == 76 → 1-byte
+        self.emit_op(StackOp::Drop); self.sm.pop();
+        self.emit_op(StackOp::Push(PushValue::Int(1)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+        self.emit_op(StackOp::Swap); self.sm.swap();
+        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.sm = sm_end_target;
     }
 
     fn is_last_use(&self, name: &str, current_index: usize, last_uses: &HashMap<String, usize>) -> bool {
@@ -1579,8 +1765,11 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop(); // pop the width
+            } else if prop.prop_type == "ByteString" {
+                // Prepend push-data length prefix (matching SDK format)
+                self.emit_push_data_encode();
             }
-            // Byte types (ByteString, PubKey, Sig, Sha256, etc.) need no conversion
+            // Other byte types (PubKey, Sig, Sha256, etc.) need no conversion
 
             if !first {
                 self.sm.pop();
@@ -1901,6 +2090,9 @@ impl LoweringContext {
                 self.sm.push("");
                 self.emit_op(StackOp::Opcode("OP_NUM2BIN".to_string()));
                 self.sm.pop();
+            } else if prop.prop_type == "ByteString" {
+                // Prepend push-data length prefix (matching SDK format)
+                self.emit_push_data_encode();
             }
 
             self.sm.pop();
@@ -2151,13 +2343,10 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        // Collect mutable (non-readonly) properties and their serialized sizes.
-        // We clone the data upfront to avoid borrowing self.properties while
-        // mutating self later.
         let mut prop_names: Vec<String> = Vec::new();
         let mut prop_types: Vec<String> = Vec::new();
         let mut prop_sizes: Vec<i128> = Vec::new();
-        let mut state_len: i128 = 0;
+        let mut has_variable_length = false;
 
         for p in &self.properties {
             if p.readonly {
@@ -2172,17 +2361,16 @@ impl LoweringContext {
                 "Addr" => 20,
                 "Sha256" => 32,
                 "Point" => 64,
+                "ByteString" => { has_variable_length = true; -1 },
                 _ => panic!("deserialize_state: unsupported type: {}", p.prop_type),
             };
             prop_sizes.push(sz);
-            state_len += sz;
         }
 
         if prop_names.is_empty() {
             return;
         }
 
-        // Bring preimage to top of stack.
         let is_last = self.is_last_use(preimage_ref, binding_index, last_uses);
         self.bring_to_top(preimage_ref, is_last);
 
@@ -2190,13 +2378,10 @@ impl LoweringContext {
         self.emit_op(StackOp::Push(PushValue::Int(104)));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.sm.push("");
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Nip);
-        self.sm.pop();
-        self.sm.pop();
+        self.sm.pop(); self.sm.pop();
         self.sm.push("");
 
         // 2. Drop tail 44 bytes.
@@ -2205,14 +2390,11 @@ impl LoweringContext {
         self.emit_op(StackOp::Push(PushValue::Int(44)));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SUB".to_string()));
-        self.sm.pop();
-        self.sm.pop();
+        self.sm.pop(); self.sm.pop();
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.sm.push("");
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Drop);
         self.sm.pop();
 
@@ -2222,75 +2404,144 @@ impl LoweringContext {
         self.emit_op(StackOp::Push(PushValue::Int(8)));
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SUB".to_string()));
-        self.sm.pop();
-        self.sm.pop();
+        self.sm.pop(); self.sm.pop();
         self.sm.push("");
         self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.sm.push("");
+        self.sm.pop(); self.sm.pop();
+        self.sm.push(""); self.sm.push("");
         self.emit_op(StackOp::Drop);
         self.sm.pop();
 
-        // 4. Extract last stateLen bytes (the state section).
-        self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(state_len)));
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SUB".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.sm.push("");
-        self.emit_op(StackOp::Nip);
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
+        if !has_variable_length {
+            let state_len: i128 = prop_sizes.iter().sum();
 
-        // 5. Split into individual properties.
+            // 4. Extract last stateLen bytes.
+            self.emit_op(StackOp::Opcode("OP_SIZE".to_string()));
+            self.sm.push("");
+            self.emit_op(StackOp::Push(PushValue::Int(state_len)));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SUB".to_string()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Nip);
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+
+            // 5. Split fixed-size state fields.
+            self.split_fixed_state_fields(&prop_names, &prop_types, &prop_sizes);
+        } else if !self.sm.has("_codePart") {
+            // Variable-length state but _codePart not available (terminal method).
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        } else {
+            // Variable-length path: strip varint, use _codePart to find state
+            self.emit_op(StackOp::Push(PushValue::Int(1)));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Swap);
+            self.sm.swap();
+            self.emit_op(StackOp::Dup);
+            self.sm.push("");
+            // Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+            self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_CAT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+            self.emit_op(StackOp::Push(PushValue::Int(253)));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+
+            self.emit_op(StackOp::Opcode("OP_IF".into()));
+            self.sm.pop();
+            let sm_at_varint_if = self.sm.clone();
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+
+            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+            self.sm = sm_at_varint_if.clone();
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+            self.emit_op(StackOp::Push(PushValue::Int(2)));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Nip);
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+
+            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+
+            // Compute skip = SIZE(_codePart) - codeSepIdx
+            self.bring_to_top("_codePart", false);
+            self.emit_op(StackOp::Opcode("OP_SIZE".into()));
+            self.sm.push("");
+            self.emit_op(StackOp::Nip);
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+            self.emit_op(StackOp::PushCodeSepIndex);
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_SUB".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+
+            // Split scriptCode at skip to get state
+            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push(""); self.sm.push("");
+            self.emit_op(StackOp::Nip);
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+
+            // Parse variable-length state fields
+            self.parse_variable_length_state_fields(&prop_names, &prop_types, &prop_sizes);
+        }
+
+        self.track_depth();
+    }
+
+    fn split_fixed_state_fields(
+        &mut self,
+        prop_names: &[String],
+        prop_types: &[String],
+        prop_sizes: &[i128],
+    ) {
         let num_props = prop_names.len();
-
         if num_props == 1 {
-            // Single property: convert if needed, name it.
             if prop_types[0] == "bigint" || prop_types[0] == "boolean" {
                 self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
             }
             self.sm.pop();
             self.sm.push(&prop_names[0]);
         } else {
-            // Multiple properties: split at each boundary.
             for i in 0..num_props {
                 let sz = prop_sizes[i];
                 if i < num_props - 1 {
-                    // Split off sz bytes for this property.
                     self.emit_op(StackOp::Push(PushValue::Int(sz)));
                     self.sm.push("");
                     self.emit_op(StackOp::Opcode("OP_SPLIT".to_string()));
-                    self.sm.pop();
-                    self.sm.pop();
-                    self.sm.push("");
-                    self.sm.push("");
-                    // Swap so the extracted portion is on top.
+                    self.sm.pop(); self.sm.pop();
+                    self.sm.push(""); self.sm.push("");
                     self.emit_op(StackOp::Swap);
                     self.sm.swap();
-                    // Convert if needed.
                     if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
                         self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
                     }
-                    // Swap back and name the property.
                     self.emit_op(StackOp::Swap);
                     self.sm.swap();
-                    self.sm.pop();
-                    self.sm.pop();
+                    self.sm.pop(); self.sm.pop();
                     self.sm.push(&prop_names[i]);
                     self.sm.push("");
                 } else {
-                    // Last property: just convert and name.
                     if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
                         self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
                     }
@@ -2299,8 +2550,62 @@ impl LoweringContext {
                 }
             }
         }
+    }
 
-        self.track_depth();
+    fn parse_variable_length_state_fields(
+        &mut self,
+        prop_names: &[String],
+        prop_types: &[String],
+        prop_sizes: &[i128],
+    ) {
+        let num_props = prop_names.len();
+        if num_props == 1 {
+            if prop_types[0] == "ByteString" {
+                // Single ByteString field: decode push-data prefix, drop trailing empty
+                self.emit_push_data_decode(); // [..., data, remaining]
+                self.emit_op(StackOp::Drop); self.sm.pop();
+            } else if prop_types[0] == "bigint" || prop_types[0] == "boolean" {
+                self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+            }
+            self.sm.pop();
+            self.sm.push(&prop_names[0]);
+        } else {
+            for i in 0..num_props {
+                if i < num_props - 1 {
+                    if prop_types[i] == "ByteString" {
+                        // ByteString: decode push-data prefix, extract data
+                        self.emit_push_data_decode(); // [..., data, rest]
+                        self.sm.pop(); self.sm.pop();
+                        self.sm.push(&prop_names[i]);
+                        self.sm.push(""); // rest on top
+                    } else {
+                        self.emit_op(StackOp::Push(PushValue::Int(prop_sizes[i])));
+                        self.sm.push("");
+                        self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+                        self.sm.pop(); self.sm.pop();
+                        self.sm.push(""); self.sm.push("");
+                        self.emit_op(StackOp::Swap); self.sm.swap();
+                        if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                            self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                        }
+                        self.emit_op(StackOp::Swap); self.sm.swap();
+                        self.sm.pop(); self.sm.pop();
+                        self.sm.push(&prop_names[i]);
+                        self.sm.push("");
+                    }
+                } else {
+                    if prop_types[i] == "ByteString" {
+                        // Last ByteString: decode push-data prefix, drop trailing empty
+                        self.emit_push_data_decode(); // [..., data, remaining]
+                        self.emit_op(StackOp::Drop); self.sm.pop();
+                    } else if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                        self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+                    }
+                    self.sm.pop();
+                    self.sm.push(&prop_names[i]);
+                }
+            }
+        }
     }
 
     /// Lower a preimage field extractor call.
@@ -3745,9 +4050,9 @@ fn lower_method_with_private_methods(
     // These are inserted at the base of the stack so they can be consumed later.
     if method_uses_check_preimage(&method.body) {
         param_names.insert(0, "_opPushTxSig".to_string());
-        // _codePart is only needed when the method has add_output or add_raw_output
-        // (it provides the code script for continuation output construction).
-        // Stateless contracts and terminal methods don't use it.
+        // _codePart is needed when the method has add_output or add_raw_output
+        // (it provides the code script for continuation output construction),
+        // or when deserializing variable-length (ByteString) state fields.
         if method_uses_code_part(&method.body) {
             param_names.insert(0, "_codePart".to_string());
         }

@@ -90,3 +90,7 @@ path = "sha256-compress/Sha256CompressTest_test.rs"
 [[test]]
 name = "sha256_finalize_test"
 path = "sha256-finalize/Sha256FinalizeTest_test.rs"
+
+[[test]]
+name = "message_board"
+path = "message-board/MessageBoard_test.rs"

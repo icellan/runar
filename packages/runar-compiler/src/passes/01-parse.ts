@@ -852,7 +852,7 @@ function parseExpression(
       return parseElementAccessExpression(node, file, errors);
 
     case SyntaxKind.Identifier:
-      return { kind: 'identifier', name: node.getText() };
+      return { kind: 'identifier', name: node.getText(), sourceLocation: locFromNode(node, file) };
 
     case SyntaxKind.BigIntLiteral: {
       const text = node.getText();
@@ -878,13 +878,13 @@ function parseExpression(
       const text = node.getText();
       // Remove quotes
       const raw = text.slice(1, -1);
-      return { kind: 'bytestring_literal', value: raw };
+      return { kind: 'bytestring_literal', value: raw, sourceLocation: locFromNode(node, file) };
     }
 
     case SyntaxKind.NoSubstitutionTemplateLiteral: {
       const text = node.getText();
       const raw = text.slice(1, -1);
-      return { kind: 'bytestring_literal', value: raw };
+      return { kind: 'bytestring_literal', value: raw, sourceLocation: locFromNode(node, file) };
     }
 
     case SyntaxKind.ConditionalExpression:
@@ -1079,12 +1079,12 @@ function parsePropertyAccessExpression(
 
   // `this.x` -> PropertyAccessExpr
   if (objExpr.isKind(SyntaxKind.ThisKeyword)) {
-    return { kind: 'property_access', property: propName };
+    return { kind: 'property_access', property: propName, sourceLocation: locFromNode(node, file) };
   }
 
   // General member access: obj.method
   const object = parseExpression(objExpr, file, errors);
-  return { kind: 'member_expr', object, property: propName };
+  return { kind: 'member_expr', object, property: propName, sourceLocation: locFromNode(node, file) };
 }
 
 function parseElementAccessExpression(

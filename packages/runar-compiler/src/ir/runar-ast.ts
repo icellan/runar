@@ -179,44 +179,52 @@ export interface BinaryExpr {
   op: BinaryOp;
   left: Expression;
   right: Expression;
+  sourceLocation?: SourceLocation;
 }
 
 export interface UnaryExpr {
   kind: 'unary_expr';
   op: UnaryOp;
   operand: Expression;
+  sourceLocation?: SourceLocation;
 }
 
 export interface CallExpr {
   kind: 'call_expr';
   callee: Expression;
   args: Expression[];
+  sourceLocation?: SourceLocation;
 }
 
 export interface MemberExpr {
   kind: 'member_expr';
   object: Expression;
   property: string;
+  sourceLocation?: SourceLocation;
 }
 
 export interface Identifier {
   kind: 'identifier';
   name: string;
+  sourceLocation?: SourceLocation;
 }
 
 export interface BigIntLiteral {
   kind: 'bigint_literal';
   value: bigint;
+  sourceLocation?: SourceLocation;
 }
 
 export interface BoolLiteral {
   kind: 'bool_literal';
   value: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface ByteStringLiteral {
   kind: 'bytestring_literal';
   value: string; // hex-encoded
+  sourceLocation?: SourceLocation;
 }
 
 export interface TernaryExpr {
@@ -224,34 +232,40 @@ export interface TernaryExpr {
   condition: Expression;
   consequent: Expression;
   alternate: Expression;
+  sourceLocation?: SourceLocation;
 }
 
 export interface PropertyAccessExpr {
   kind: 'property_access';
   property: string; // `this.x` -> property = "x"
+  sourceLocation?: SourceLocation;
 }
 
 export interface IndexAccessExpr {
   kind: 'index_access';
   object: Expression;
   index: Expression;
+  sourceLocation?: SourceLocation;
 }
 
 export interface IncrementExpr {
   kind: 'increment_expr';
   operand: Expression;
   prefix: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface DecrementExpr {
   kind: 'decrement_expr';
   operand: Expression;
   prefix: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface ArrayLiteralExpr {
   kind: 'array_literal';
   elements: Expression[];
+  sourceLocation?: SourceLocation;
 }
 
 export type Expression =

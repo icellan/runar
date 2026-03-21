@@ -1,0 +1,450 @@
+{
+  "contractName": "MessageBoard",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 8
+          },
+          "value": {
+            "kind": "load_prop",
+            "name": "message"
+          }
+        },
+        {
+          "name": "t1",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 8
+          },
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t2",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 8
+          },
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 9
+          },
+          "value": {
+            "kind": "load_prop",
+            "name": "message"
+          }
+        },
+        {
+          "name": "t4",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 9
+          },
+          "value": {
+            "kind": "update_prop",
+            "name": "message",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 10
+          },
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t6",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 10
+          },
+          "value": {
+            "kind": "update_prop",
+            "name": "owner",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "message",
+          "type": "ByteString"
+        },
+        {
+          "name": "owner",
+          "type": "PubKey"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 14
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "newMessage"
+          }
+        },
+        {
+          "name": "t6",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 14
+          },
+          "value": {
+            "kind": "update_prop",
+            "name": "message",
+            "value": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 15
+          },
+          "value": {
+            "kind": "load_const",
+            "value": true
+          }
+        },
+        {
+          "name": "t8",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 15
+          },
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "args": [
+              "t9",
+              "t10"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "args": [
+              "t13",
+              "t12",
+              "t14"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "args": [
+              "t15",
+              "t11"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "args": [
+              "t16"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "args": [
+              "t18"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t17",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t19"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "assert",
+            "value": "t20"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "post",
+      "params": [
+        {
+          "name": "newMessage",
+          "type": "ByteString"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "load_prop",
+            "name": "owner"
+          }
+        },
+        {
+          "name": "t7",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "sourceLoc": {
+            "column": 4,
+            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
+            "line": 19
+          },
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "burn",
+      "params": [
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "message",
+      "readonly": false,
+      "type": "ByteString"
+    },
+    {
+      "name": "owner",
+      "readonly": true,
+      "type": "PubKey"
+    }
+  ]
+}

@@ -264,6 +264,16 @@ fn emit_stack_op(op: &StackOp, ctx: &mut EmitContext) -> Result<(), String> {
             ctx.emit_placeholder(*param_index, param_name);
             Ok(())
         }
+        StackOp::PushCodeSepIndex => {
+            // Push the codeSeparatorIndex as a numeric constant.
+            let idx = if ctx.code_separator_index < 0 {
+                0i64
+            } else {
+                ctx.code_separator_index
+            };
+            ctx.emit_push(&PushValue::Int(idx as i128));
+            Ok(())
+        }
     }
 }
 

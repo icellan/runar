@@ -338,6 +338,10 @@ def _emit_stack_op(op: StackOp, ctx: _EmitContext) -> None:
         _emit_if(op.then, op.else_ops, ctx)
     elif op.op == "placeholder":
         ctx.emit_placeholder(op.param_index)
+    elif op.op == "push_codesep_index":
+        # Push the codeSeparatorIndex as a numeric constant.
+        idx = ctx.code_separator_index if ctx.code_separator_index >= 0 else 0
+        ctx.emit_push(PushValue(kind="bigint", big_int=idx))
     else:
         raise ValueError(f"unknown stack op: {op.op}")
 

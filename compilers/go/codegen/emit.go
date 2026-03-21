@@ -375,6 +375,14 @@ func emitStackOp(op *StackOp, ctx *emitContext) error {
 		return emitIf(op.Then, op.Else, ctx)
 	case "placeholder":
 		ctx.emitPlaceholder(op.ParamIndex)
+	case "push_codesep_index":
+		// Push the codeSeparatorIndex as a numeric constant.
+		// This value is known at emit time (set when OP_CODESEPARATOR was emitted).
+		idx := ctx.codeSeparatorIndex
+		if idx < 0 {
+			idx = 0
+		}
+		ctx.emitPush(PushValue{Kind: "bigint", BigInt: big.NewInt(int64(idx))})
 	default:
 		return fmt.Errorf("unknown stack op: %s", op.Op)
 	}

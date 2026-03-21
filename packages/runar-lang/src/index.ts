@@ -94,6 +94,12 @@ export {
   verifySLHDSA_SHA2_192f,
   verifySLHDSA_SHA2_256s,
   verifySLHDSA_SHA2_256f,
+  // SHA-256 partial
+  sha256Compress,
+  sha256Finalize,
+  // BLAKE3
+  blake3Compress,
+  blake3Hash,
   // Elliptic curve operations
   ecAdd,
   ecMul,

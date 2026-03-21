@@ -475,6 +475,12 @@ function emitStackOp(op: StackOp, ctx: EmitContext): void {
     case 'placeholder':
       ctx.emitPlaceholder(op.paramIndex, op.paramName);
       break;
+
+    case 'push_codesep_index':
+      // Push the codeSeparatorIndex as a numeric constant.
+      // This value is known at emit time (set when OP_CODESEPARATOR was emitted).
+      ctx.emitPush(BigInt(ctx.codeSeparatorIndex ?? 0));
+      break;
   }
 
   // Clear after emitting so the location doesn't leak to the next op

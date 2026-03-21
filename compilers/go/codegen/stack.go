@@ -408,6 +408,206 @@ func (ctx *loweringContext) emitVarintEncoding() {
 	// --- Stack: [..., script, varint] ---
 }
 
+// emitPushDataEncode emits opcodes to encode a ByteString value on top of the
+// stack with a Bitcoin Script push-data length prefix.
+//
+// Expects stack: [..., bs_value]
+// Leaves stack:  [..., pushdata_encoded_value]
+func (ctx *loweringContext) emitPushDataEncode() {
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterOuterIf := ctx.sm.clone()
+
+	// THEN: len <= 75
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+	smEndTarget := ctx.sm.clone()
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterOuterIf.clone()
+
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(256)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterInnerIf := ctx.sm.clone()
+
+	// THEN: 76-255 → 0x4c + 1-byte
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4c}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterInnerIf.clone()
+
+	// ELSE: >= 256 → 0x4d + 2-byte LE
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x4d}}})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.sm = smEndTarget
+}
+
+// emitPushDataDecode emits opcodes to decode a push-data encoded ByteString
+// from the state bytes on top of the stack.
+//
+// Expects stack: [..., state_bytes]
+// Leaves stack:  [..., data, remaining_state]
+func (ctx *loweringContext) emitPushDataDecode() {
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(76)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterOuterIf := ctx.sm.clone()
+
+	// THEN: fb < 76 → direct length
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	smEndTarget := ctx.sm.clone()
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterOuterIf.clone()
+
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(77)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAfterInnerIf := ctx.sm.clone()
+
+	// THEN: fb == 77 → 2-byte LE
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAfterInnerIf.clone()
+
+	// ELSE: fb == 76 → 1-byte
+	ctx.emitOp(StackOp{Op: "drop"})
+	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "swap"})
+	ctx.sm.swap()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push(""); ctx.sm.push("")
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.sm = smEndTarget
+}
+
 // bringToTop moves the named value to the top of the stack.
 // If consume is true, the original position is freed (ROLL semantics).
 // If consume is false, a copy is made (PICK semantics).
@@ -1453,9 +1653,11 @@ func (ctx *loweringContext) lowerGetStateScript(bindingName string) {
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop() // pop the width
+		} else if prop.Type == "ByteString" {
+			// Prepend push-data length prefix (matching SDK format)
+			ctx.emitPushDataEncode()
 		}
-		// Byte-typed properties (ByteString, PubKey, Sig, etc.) need no
-		// conversion — they are already byte sequences on the stack.
+		// Other byte-typed properties (PubKey, Sig, etc.) need no conversion.
 
 		if !first {
 			ctx.sm.pop()
@@ -1724,7 +1926,7 @@ func (ctx *loweringContext) lowerBuildChangeOutput(bindingName string, args []st
 func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingIndex int, lastUses map[string]int) {
 	var stateProps []ir.ANFProperty
 	var propSizes []int
-	stateLen := 0
+	hasVariableLength := false
 	for _, p := range ctx.properties {
 		if p.Readonly {
 			continue
@@ -1744,11 +1946,13 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 			sz = 32
 		case "Point":
 			sz = 64
+		case "ByteString":
+			sz = -1
+			hasVariableLength = true
 		default:
 			panic("deserialize_state: unsupported type: " + p.Type)
 		}
 		propSizes = append(propSizes, sz)
-		stateLen += sz
 	}
 	if len(stateProps) == 0 {
 		return
@@ -1804,26 +2008,127 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 	ctx.emitOp(StackOp{Op: "drop"})
 	ctx.sm.pop()
 
-	// 4. Extract last stateLen bytes (the state section)
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(stateLen))})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "nip"})
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
+	if !hasVariableLength {
+		// All fields fixed-size — existing code path (backward compatible)
+		stateLen := 0
+		for _, sz := range propSizes {
+			stateLen += sz
+		}
 
-	// 5. Split into individual properties
+		// 4. Extract last stateLen bytes (the state section)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(stateLen))})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		// 5. Split fixed-size state fields
+		ctx.splitFixedStateFields(stateProps, propSizes)
+	} else if !ctx.sm.has("_codePart") {
+		// Variable-length state but _codePart not available (terminal method).
+		// Skip deserialization — the method body doesn't use mutable state.
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	} else {
+		// Variable-length path: strip varint, use _codePart to find state
+		// Strip varint prefix from varint+scriptCode
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("") // firstByte
+		ctx.sm.push("") // rest
+		ctx.emitOp(StackOp{Op: "swap"})
+		ctx.sm.swap()
+		ctx.emitOp(StackOp{Op: "dup"})
+		ctx.sm.push(ctx.sm.peekAtDepth(0))
+		// Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+		ctx.sm.pop()
+		smAtVarintIf := ctx.sm.clone()
+
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+		ctx.sm = smAtVarintIf.clone()
+
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+
+		// Compute skip = SIZE(_codePart) - codeSepIdx
+		ctx.bringToTop("_codePart", false)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SIZE"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "push_codesep_index"})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SUB"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		// Split scriptCode at skip to get state
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+
+		// Parse state fields left-to-right
+		ctx.parseVariableLengthStateFields(stateProps, propSizes)
+	}
+	ctx.trackDepth()
+}
+
+// splitFixedStateFields splits fixed-size state bytes into individual properties.
+func (ctx *loweringContext) splitFixedStateFields(stateProps []ir.ANFProperty, propSizes []int) {
 	if len(stateProps) == 1 {
 		prop := stateProps[0]
 		if prop.Type == "bigint" || prop.Type == "boolean" {
@@ -1862,7 +2167,62 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 			}
 		}
 	}
-	ctx.trackDepth()
+}
+
+// parseVariableLengthStateFields parses state fields left-to-right, handling ByteString.
+func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFProperty, propSizes []int) {
+	if len(stateProps) == 1 {
+		prop := stateProps[0]
+		if prop.Type == "ByteString" {
+			// Single ByteString field: decode push-data prefix, drop trailing empty
+			ctx.emitPushDataDecode() // [..., data, remaining]
+			ctx.emitOp(StackOp{Op: "drop"})
+			ctx.sm.pop()
+		} else if prop.Type == "bigint" || prop.Type == "boolean" {
+			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		}
+		ctx.sm.pop()
+		ctx.sm.push(prop.Name)
+	} else {
+		for i, prop := range stateProps {
+			if i < len(stateProps)-1 {
+				if prop.Type == "ByteString" {
+					// ByteString: decode push-data prefix, extract data
+					ctx.emitPushDataDecode() // [..., data, rest]
+					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.push(prop.Name)
+					ctx.sm.push("") // rest on top
+				} else {
+					ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(propSizes[i]))})
+					ctx.sm.push("")
+					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.push(""); ctx.sm.push("")
+					ctx.emitOp(StackOp{Op: "swap"})
+					ctx.sm.swap()
+					if prop.Type == "bigint" || prop.Type == "boolean" {
+						ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+					}
+					ctx.emitOp(StackOp{Op: "swap"})
+					ctx.sm.swap()
+					ctx.sm.pop(); ctx.sm.pop()
+					ctx.sm.push(prop.Name)
+					ctx.sm.push("")
+				}
+			} else {
+				if prop.Type == "ByteString" {
+					// Last ByteString: decode push-data prefix, drop trailing empty
+					ctx.emitPushDataDecode() // [..., data, remaining]
+					ctx.emitOp(StackOp{Op: "drop"})
+					ctx.sm.pop()
+				} else if prop.Type == "bigint" || prop.Type == "boolean" {
+					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+				}
+				ctx.sm.pop()
+				ctx.sm.push(prop.Name)
+			}
+		}
+	}
 }
 
 func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateValues []string, _ string, bindingIndex int, lastUses map[string]int) {
@@ -1910,8 +2270,11 @@ func (ctx *loweringContext) lowerAddOutput(bindingName, satoshis string, stateVa
 			ctx.sm.push("")
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
 			ctx.sm.pop()
+		} else if prop.Type == "ByteString" {
+			// Prepend push-data length prefix (matching SDK format)
+			ctx.emitPushDataEncode()
 		}
-		// Byte types used as-is
+		// Other byte types used as-is
 
 		// Concatenate with accumulator
 		ctx.sm.pop()
@@ -3152,9 +3515,9 @@ func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProp
 	// These are inserted at the base of the stack so they can be consumed later.
 	if methodUsesCheckPreimage(method.Body) {
 		paramNames = append([]string{"_opPushTxSig"}, paramNames...)
-		// _codePart is only needed when the method has add_output or add_raw_output
-		// (it provides the code script for continuation output construction).
-		// Stateless contracts and terminal methods don't use it.
+		// _codePart is needed when the method has add_output or add_raw_output
+		// (it provides the code script for continuation output construction),
+		// or when deserializing variable-length (ByteString) state fields.
 		if methodUsesCodePart(method.Body) {
 			paramNames = append([]string{"_codePart"}, paramNames...)
 		}

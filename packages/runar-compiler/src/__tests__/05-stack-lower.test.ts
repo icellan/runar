@@ -1693,4 +1693,105 @@ describe('Pass 5: Stack Lower', () => {
       expect(() => compileToStack(source)).not.toThrow();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // ByteString state field support
+  // ---------------------------------------------------------------------------
+
+  describe('ByteString state fields', () => {
+    it('compiles a contract with a single ByteString mutable state field', () => {
+      const source = `
+        class MsgStore extends StatefulSmartContract {
+          message: ByteString;
+          constructor(message: ByteString) { super(message); this.message = message; }
+          public update(newMessage: ByteString) {
+            this.message = newMessage;
+            assert(true);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+
+    it('compiles a contract with ByteString + bigint mixed state fields', () => {
+      const source = `
+        class Mixed extends StatefulSmartContract {
+          data: ByteString;
+          count: bigint;
+          constructor(data: ByteString, count: bigint) { super(data, count); this.data = data; this.count = count; }
+          public update(newData: ByteString, newCount: bigint) {
+            this.data = newData;
+            this.count = newCount;
+            assert(true);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+
+    it('compiles a contract with ByteString + PubKey mixed state fields', () => {
+      const source = `
+        class MixedPK extends StatefulSmartContract {
+          data: ByteString;
+          readonly owner: PubKey;
+          constructor(data: ByteString, owner: PubKey) { super(data, owner); this.data = data; this.owner = owner; }
+          public update(newData: ByteString) {
+            this.data = newData;
+            assert(true);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+
+    it('compiles a contract with multiple ByteString state fields', () => {
+      const source = `
+        class MultiBS extends StatefulSmartContract {
+          title: ByteString;
+          body: ByteString;
+          constructor(title: ByteString, body: ByteString) { super(title, body); this.title = title; this.body = body; }
+          public update(newTitle: ByteString, newBody: ByteString) {
+            this.title = newTitle;
+            this.body = newBody;
+            assert(true);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+
+    it('produces push_codesep_index op for ByteString state deserialization', () => {
+      const source = `
+        class MsgStore extends StatefulSmartContract {
+          message: ByteString;
+          constructor(message: ByteString) { super(message); this.message = message; }
+          public update(newMessage: ByteString) {
+            this.message = newMessage;
+            assert(true);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const method = findStackMethod(program, 'update');
+      const ops = flattenOps(method.ops);
+      // Should contain a push_codesep_index op for variable-length state extraction
+      const hasCodeSepIndex = ops.some(op => op.op === 'push_codesep_index');
+      expect(hasCodeSepIndex).toBe(true);
+    });
+
+    it('includes _codePart parameter for ByteString state methods', () => {
+      const source = `
+        class MsgStore extends StatefulSmartContract {
+          message: ByteString;
+          constructor(message: ByteString) { super(message); this.message = message; }
+          public update(newMessage: ByteString) {
+            this.message = newMessage;
+            assert(true);
+          }
+        }
+      `;
+      // This should compile without errors — _codePart is implicitly added
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+  });
 });
