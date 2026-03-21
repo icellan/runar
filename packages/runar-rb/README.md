@@ -40,7 +40,7 @@ gem install runar-lang
   [2. Test]            Test business logic natively with RSpec (mock crypto).
          |
          v
-  [3. Compile]         Compile with any Runar compiler (TS, Go, or Rust) => Bitcoin Script.
+  [3. Compile]         Compile with any Runar compiler (TS, Go, Rust, or Python) => Bitcoin Script.
          |
          v
   [4. Deploy]          Deploy using any language's SDK.

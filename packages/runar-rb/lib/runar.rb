@@ -78,8 +78,10 @@ module Runar
 end
 Runar::SmartContract.include(Runar::ECMixin)
 
-# Define top-level module functions for use outside contract instances
-# (e.g., in test setup code).
+# Define top-level helper functions on Kernel for use outside contract instances
+# (e.g., in test setup code: `hash160(mock_pub_key)`). This is intentional —
+# the gem is purpose-built for Runar contracts, not a general-purpose library,
+# and matches the Python SDK's approach of exposing builtins at module scope.
 module Kernel
   # Hash functions
   def hash160(data)

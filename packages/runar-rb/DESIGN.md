@@ -1,6 +1,6 @@
 # Ruby Format Design Decisions
 
-**Status:** Pre-implementation
+**Status:** Implemented
 **Date:** 2026-03-07
 **Authors:** @sgbett, Claude (Anthropic)
 

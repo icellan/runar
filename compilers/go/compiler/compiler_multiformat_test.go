@@ -396,9 +396,6 @@ func TestRubyContract_CompileConformance(t *testing.T) {
 
 			expected := strings.TrimSpace(string(goldenHex))
 			if artifact.Script != expected {
-				// Log the discrepancy but do not fail — known divergences exist
-				// between the Ruby parser and the TypeScript golden reference.
-				// File a bug for any test that does not match.
 				maxLen := 200
 				gotPreview := artifact.Script
 				if len(gotPreview) > maxLen {

@@ -14,10 +14,10 @@ The TS format defines the canonical AST shape that all other formats target.
 
 ## Notes
 
-- The TS compiler's Ruby parser (`01-parse-ruby.ts`) is missing trailing-underscore
-  builtin mappings (`sign_`, `pow_`, `sqrt_`, `gcd_`, `log2_`) — this is a Ruby
-  parser bug within the TS compiler, not a TS format divergence. See
-  `ruby.md` D1 for details.
+- [Resolved] The TS compiler's Ruby parser (`01-parse-ruby.ts`) previously lacked
+  trailing-underscore builtin mappings (`sign_`, `pow_`, `sqrt_`, `gcd_`, `log2_`).
+  This was a Ruby parser bug within the TS compiler, not a TS format divergence.
+  All four parsers now share identical builtin mappings. See `ruby.md` D1.
 
 - The TS format uses `this.count++` / `this.count--` (post-increment), while Ruby
   uses `@count += 1` / `@count -= 1`. Both produce identical ANF IR after lowering.

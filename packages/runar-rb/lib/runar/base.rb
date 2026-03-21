@@ -11,9 +11,9 @@ module Runar
     include Runar::DSL
 
     def initialize(*args)
-      # Apply property defaults declared with `default:` before the
-      # developer-written initializer body runs. Because Ruby calls super
-      # at the top of each constructor, this executes first.
+      # Apply property defaults declared with `default:`. Subclasses should
+      # call `super(...)` at the beginning of their `initialize` method so
+      # that defaults are set before any custom initialization logic runs.
       self.class.runar_defaults.each do |prop_name, default_value|
         instance_variable_set(:"@#{prop_name}", default_value)
       end
