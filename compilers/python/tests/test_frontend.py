@@ -137,7 +137,7 @@ class Bad extends SmartContract {
         assert result.contract is not None
 
         valid_result = validate(result.contract)
-        assert any("super" in e.lower() for e in valid_result.errors)
+        assert any("super" in e.message.lower() for e in valid_result.errors)
 
     def test_validate_stateful_no_trailing_assert(self):
         """Stateful contract methods don't need a trailing assert."""
@@ -171,7 +171,7 @@ class NoAssert extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("assert" in e.lower() for e in valid_result.errors), (
+        assert any("assert" in e.message.lower() for e in valid_result.errors), (
             f"expected error about missing assert, got: {valid_result.errors}"
         )
 
@@ -199,7 +199,7 @@ class Recursive extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("recurs" in e.lower() for e in valid_result.errors), (
+        assert any("recurs" in e.message.lower() for e in valid_result.errors), (
             f"expected error about recursion, got: {valid_result.errors}"
         )
 
@@ -225,7 +225,7 @@ class Bad extends SmartContract {
         assert result.contract is not None
 
         valid_result = validate(result.contract)
-        assert any("super" in e.lower() for e in valid_result.errors), (
+        assert any("super" in e.message.lower() for e in valid_result.errors), (
             f"expected error about super() not first, got: {valid_result.errors}"
         )
 
@@ -253,7 +253,7 @@ class Bad extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("x" in e for e in valid_result.errors), (
+        assert any("x" in e.message for e in valid_result.errors), (
             f"expected error about property 'x' not assigned in constructor, got: {valid_result.errors}"
         )
 
@@ -289,7 +289,7 @@ class Indirect extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("recurs" in e.lower() for e in valid_result.errors), (
+        assert any("recurs" in e.message.lower() for e in valid_result.errors), (
             f"expected error about recursion, got: {valid_result.errors}"
         )
 
@@ -318,7 +318,7 @@ class LoopBad extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("constant" in e.lower() or "bound" in e.lower() for e in valid_result.errors), (
+        assert any("constant" in e.message.lower() or "bound" in e.message.lower() for e in valid_result.errors), (
             f"expected error about non-constant loop bound, got: {valid_result.errors}"
         )
 
@@ -344,7 +344,7 @@ class Bad extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("void" in e.lower() for e in valid_result.errors), (
+        assert any("void" in e.message.lower() for e in valid_result.errors), (
             f"expected error about void property type, got: {valid_result.errors}"
         )
 
@@ -376,7 +376,7 @@ class Bad extends SmartContract {
 
         valid_result = validate(result.contract)
         assert len(valid_result.errors) > 0
-        assert any("readonly" in e.lower() or "mutable" in e.lower() or "stateless" in e.lower() for e in valid_result.errors), (
+        assert any("readonly" in e.message.lower() or "mutable" in e.message.lower() or "stateless" in e.message.lower() for e in valid_result.errors), (
             f"expected error about non-readonly property on SmartContract, got: {valid_result.errors}"
         )
 
@@ -403,7 +403,7 @@ class Counter extends StatefulSmartContract {
         assert result.contract is not None
 
         valid_result = validate(result.contract)
-        assert not any("readonly" in e.lower() for e in valid_result.errors), (
+        assert not any("readonly" in e.message.lower() for e in valid_result.errors), (
             f"expected no readonly errors for StatefulSmartContract mutable property, got: {valid_result.errors}"
         )
 
@@ -708,7 +708,7 @@ class DoubleSpend extends SmartContract {
         validate(result.contract)
 
         tc_result = type_check(result.contract)
-        assert any("affine" in e.lower() or "consumed" in e.lower() for e in tc_result.errors), (
+        assert any("affine" in e.message.lower() or "consumed" in e.message.lower() for e in tc_result.errors), (
             f"expected affine/consumed error for Sig used twice, got: {tc_result.errors}"
         )
 
@@ -769,7 +769,7 @@ class Bad extends SmartContract {
         assert len(tc_result.errors) > 0, (
             "expected type error for non-boolean if condition"
         )
-        assert any("boolean" in e.lower() for e in tc_result.errors), (
+        assert any("boolean" in e.message.lower() for e in tc_result.errors), (
             f"expected 'boolean' in error message, got: {tc_result.errors}"
         )
 
@@ -799,7 +799,7 @@ class Bad extends SmartContract {
         assert len(tc_result.errors) > 0, (
             "expected type error for assert() called with non-boolean"
         )
-        assert any("boolean" in e.lower() for e in tc_result.errors), (
+        assert any("boolean" in e.message.lower() for e in tc_result.errors), (
             f"expected 'boolean' in error message, got: {tc_result.errors}"
         )
 
@@ -859,7 +859,7 @@ class Bad extends SmartContract {
         assert len(tc_result.errors) > 0, (
             "expected type error for console.log call"
         )
-        assert any("unknown" in e.lower() or "console" in e.lower() for e in tc_result.errors), (
+        assert any("unknown" in e.message.lower() or "console" in e.message.lower() for e in tc_result.errors), (
             f"expected 'unknown' or 'console' in error message, got: {tc_result.errors}"
         )
 
@@ -890,7 +890,7 @@ class Bad extends SmartContract {
         assert len(tc_result.errors) > 0, (
             "expected type error for unknown standalone function call"
         )
-        assert any("unknown" in e.lower() for e in tc_result.errors), (
+        assert any("unknown" in e.message.lower() for e in tc_result.errors), (
             f"expected 'unknown' in error message, got: {tc_result.errors}"
         )
 
@@ -1496,7 +1496,7 @@ class NotBigint extends SmartContract {
         assert len(tc_result.errors) > 0, (
             "expected type error for !bigint"
         )
-        assert any("boolean" in e.lower() for e in tc_result.errors), (
+        assert any("boolean" in e.message.lower() for e in tc_result.errors), (
             f"expected 'boolean' in error message for !bigint, got: {tc_result.errors}"
         )
 
@@ -1604,7 +1604,7 @@ class DoublePreimage extends SmartContract {
         assert result.contract is not None
         validate(result.contract)
         tc_result = type_check(result.contract)
-        assert any("affine" in e.lower() or "consumed" in e.lower() for e in tc_result.errors), (
+        assert any("affine" in e.message.lower() or "consumed" in e.message.lower() for e in tc_result.errors), (
             f"expected affine/consumed error for SigHashPreimage used twice, got: {tc_result.errors}"
         )
 
@@ -1702,7 +1702,7 @@ class BadEnd extends SmartContract {
         assert len(vr.errors) > 0, (
             "expected error when public method ends with non-assert call"
         )
-        assert any("assert" in e.lower() for e in vr.errors), (
+        assert any("assert" in e.message.lower() for e in vr.errors), (
             f"expected error mentioning 'assert', got: {vr.errors}"
         )
 
@@ -1760,7 +1760,7 @@ class EmptyMethod extends SmartContract {
         assert len(vr.errors) > 0, (
             "expected error for empty public method body"
         )
-        assert any("assert" in e.lower() for e in vr.errors), (
+        assert any("assert" in e.message.lower() for e in vr.errors), (
             f"expected error mentioning 'assert', got: {vr.errors}"
         )
 
@@ -1844,7 +1844,7 @@ class NoSuper extends SmartContract {
         assert result.contract is not None
         vr = validate(result.contract)
         assert len(vr.errors) > 0, "expected error for constructor missing super()"
-        assert any("super" in e.lower() for e in vr.errors), (
+        assert any("super" in e.message.lower() for e in vr.errors), (
             f"expected error mentioning 'super', got: {vr.errors}"
         )
 
@@ -1903,7 +1903,7 @@ class NonRecursive extends SmartContract {
         result = parse_source(source, "NonRecursive.runar.ts")
         assert result.contract is not None
         vr = validate(result.contract)
-        assert not any("recurs" in e.lower() for e in vr.errors), (
+        assert not any("recurs" in e.message.lower() for e in vr.errors), (
             f"expected no recursion errors for A->B (non-recursive), got: {vr.errors}"
         )
 
@@ -1932,7 +1932,7 @@ class NoAssert extends SmartContract {
         assert len(vr.errors) > 0, (
             "expected error for SmartContract public method without trailing assert"
         )
-        assert any("assert" in e.lower() for e in vr.errors), (
+        assert any("assert" in e.message.lower() for e in vr.errors), (
             f"expected error mentioning 'assert', got: {vr.errors}"
         )
 
@@ -2058,7 +2058,7 @@ class ExplicitPreimage extends StatefulSmartContract {
             "expected error for explicit txPreimage property declaration "
             "(source does not implement this check — known source bug)"
         )
-        assert any("txPreimage" in e or "preimage" in e.lower() for e in vr.errors), (
+        assert any("txPreimage" in e.message or "preimage" in e.message.lower() for e in vr.errors), (
             f"expected error mentioning txPreimage, got: {vr.errors}"
         )
 
@@ -2446,7 +2446,7 @@ class ReusePubKey extends SmartContract {
         result = parse_source(source, "ReusePubKey.runar.ts")
         assert result.contract is not None
         tc_result = type_check(result.contract)
-        assert not any("affine" in e.lower() or "consumed" in e.lower() for e in tc_result.errors), (
+        assert not any("affine" in e.message.lower() or "consumed" in e.message.lower() for e in tc_result.errors), (
             f"expected PubKey to be reusable (not affine), got errors: {tc_result.errors}"
         )
 
@@ -2512,7 +2512,7 @@ class SplitOk extends SmartContract {
         # SOURCE BUG: typecheck rejects data.split() as unknown function.
         # When fixed, this assertion should change to: assert len(tc_result.errors) == 0
         # For now, document that the source bug exists:
-        split_errors = [e for e in tc_result.errors if "split" in e.lower()]
+        split_errors = [e for e in tc_result.errors if "split" in e.message.lower()]
         assert len(split_errors) > 0, (
             "expected source bug: typecheck should reject data.split() as unknown function "
             "but the behavior changed — please update this test"
@@ -2801,7 +2801,7 @@ class DynLoop extends SmartContract {
         assert len(vr.errors) > 0, (
             "expected error for non-constant loop bound (a + b)"
         )
-        assert any("constant" in e.lower() or "bound" in e.lower() for e in vr.errors), (
+        assert any("constant" in e.message.lower() or "bound" in e.message.lower() for e in vr.errors), (
             f"expected error about non-constant bound, got: {vr.errors}"
         )
 

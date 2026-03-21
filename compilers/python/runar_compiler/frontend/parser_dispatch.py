@@ -6,13 +6,19 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from runar_compiler.frontend.ast_nodes import ContractNode
 
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity
+
 
 class ParseResult:
     __slots__ = ("contract", "errors")
 
-    def __init__(self, contract: ContractNode | None = None, errors: list[str] | None = None):
+    def __init__(self, contract: ContractNode | None = None, errors: list[Diagnostic] | None = None):
         self.contract = contract
         self.errors = errors or []
+
+    def error_strings(self) -> list[str]:
+        """Return formatted error messages as plain strings."""
+        return [d.format_message() for d in self.errors]
 
 
 def parse_source(source: str, file_name: str) -> ParseResult:
@@ -38,4 +44,7 @@ def parse_source(source: str, file_name: str) -> ParseResult:
         from runar_compiler.frontend.parser_rust import parse_rust
         return parse_rust(source, file_name)
     else:
-        return ParseResult(errors=[f"unsupported file extension: {file_name}"])
+        return ParseResult(errors=[Diagnostic(
+            message=f"unsupported file extension: {file_name}",
+            severity=Severity.ERROR,
+        )])

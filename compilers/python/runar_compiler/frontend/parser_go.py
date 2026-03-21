@@ -16,6 +16,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
 # ---------------------------------------------------------------------------
@@ -479,11 +480,11 @@ class _GoParser:
         self.file_name = file_name
         self.tokens: list[Token] = []
         self.pos = 0
-        self.errors: list[str] = []
+        self.errors: list[Diagnostic] = []
         self.receiver_name: str = ""
 
     def add_error(self, msg: str) -> None:
-        self.errors.append(msg)
+        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
 
     # -- Token helpers -------------------------------------------------------
 
@@ -1638,7 +1639,7 @@ def parse_go(source: str, file_name: str) -> ParseResult:
     try:
         contract = p.parse_file()
     except (ValueError, IndexError) as e:
-        return ParseResult(errors=[f"Go parse error: {e}"])
+        return ParseResult(errors=[Diagnostic(message=f"Go parse error: {e}", severity=Severity.ERROR)])
 
     if contract is None and not p.errors:
         p.errors.append("no Runar contract struct found in Go source")

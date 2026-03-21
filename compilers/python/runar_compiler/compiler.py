@@ -253,19 +253,19 @@ def compile_from_source(source_path: str, disable_constant_folding: bool = False
     # Pass 1: Parse
     parse_result = _parse_source(source, source_path)
     if parse_result.errors:
-        raise CompilationError("parse errors:\n  " + "\n  ".join(parse_result.errors))
+        raise CompilationError("parse errors:\n  " + "\n  ".join(parse_result.error_strings()))
     if parse_result.contract is None:
         raise CompilationError(f"no contract found in {source_path}")
 
     # Pass 2: Validate
     valid_result = _validate(parse_result.contract)
     if valid_result.errors:
-        raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.errors))
+        raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
 
     # Pass 3: Type check
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors:
-        raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.errors))
+        raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.error_strings()))
 
     # Pass 4: ANF lowering
     program = _lower_to_anf(parse_result.contract)
@@ -280,17 +280,17 @@ def compile_source_to_ir(source_path: str, disable_constant_folding: bool = Fals
 
     parse_result = _parse_source(source, source_path)
     if parse_result.errors:
-        raise CompilationError("parse errors:\n  " + "\n  ".join(parse_result.errors))
+        raise CompilationError("parse errors:\n  " + "\n  ".join(parse_result.error_strings()))
     if parse_result.contract is None:
         raise CompilationError(f"no contract found in {source_path}")
 
     valid_result = _validate(parse_result.contract)
     if valid_result.errors:
-        raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.errors))
+        raise CompilationError("validation errors:\n  " + "\n  ".join(valid_result.error_strings()))
 
     tc_result = _type_check(parse_result.contract)
     if tc_result.errors:
-        raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.errors))
+        raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.error_strings()))
 
     program = _lower_to_anf(parse_result.contract)
 

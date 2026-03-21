@@ -8,11 +8,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import re
+
 from runar_compiler.frontend.ast_nodes import (
     AssignmentStmt,
     BigIntLiteral,
     BinaryExpr,
     BoolLiteral,
+    ByteStringLiteral,
     CallExpr,
     ContractNode,
     CustomType,
@@ -36,6 +39,7 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
 # ---------------------------------------------------------------------------
@@ -46,8 +50,16 @@ from runar_compiler.frontend.ast_nodes import (
 class ValidationResult:
     """Output of the validation pass."""
 
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    errors: list[Diagnostic] = field(default_factory=list)
+    warnings: list[Diagnostic] = field(default_factory=list)
+
+    def error_strings(self) -> list[str]:
+        """Return formatted error messages as plain strings."""
+        return [d.format_message() for d in self.errors]
+
+    def warning_strings(self) -> list[str]:
+        """Return formatted warning messages as plain strings."""
+        return [d.format_message() for d in self.warnings]
 
 
 def validate(contract: ContractNode) -> ValidationResult:
@@ -92,11 +104,11 @@ _VALID_PROP_TYPES: frozenset[str] = frozenset({
 @dataclass
 class _ValidationContext:
     contract: ContractNode
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
+    errors: list[Diagnostic] = field(default_factory=list)
+    warnings: list[Diagnostic] = field(default_factory=list)
 
     def _add_error(self, msg: str) -> None:
-        self.errors.append(msg)
+        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
 
     # -------------------------------------------------------------------
     # Property validation
@@ -125,10 +137,11 @@ class _ValidationContext:
         if self.contract.parent_class == "StatefulSmartContract":
             has_mutable = any(not p.readonly for p in self.contract.properties)
             if not has_mutable:
-                self.warnings.append(
-                    "StatefulSmartContract has no mutable properties; "
-                    "consider using SmartContract instead"
-                )
+                self.warnings.append(Diagnostic(
+                    message="StatefulSmartContract has no mutable properties; "
+                    "consider using SmartContract instead",
+                    severity=Severity.WARNING,
+                ))
 
     def _validate_property_type(self, t: TypeNode | None, loc: SourceLocation) -> None:
         if t is None:
@@ -266,7 +279,11 @@ class _ValidationContext:
             self._validate_expression(expr.operand)
         elif isinstance(expr, CallExpr):
             self._validate_expression(expr.callee)
-            for arg in expr.args:
+            # assert() message (2nd arg) is a human-readable string, not hex — skip validation
+            is_assert = isinstance(expr.callee, Identifier) and expr.callee.name == "assert"
+            for i, arg in enumerate(expr.args):
+                if is_assert and i >= 1:
+                    continue
                 self._validate_expression(arg)
         elif isinstance(expr, MemberExpr):
             self._validate_expression(expr.object)
@@ -281,6 +298,19 @@ class _ValidationContext:
             self._validate_expression(expr.operand)
         elif isinstance(expr, DecrementExpr):
             self._validate_expression(expr.operand)
+        elif isinstance(expr, ByteStringLiteral):
+            val = expr.value
+            if len(val) > 0:
+                if len(val) % 2 != 0:
+                    self._add_error(
+                        f"ByteString literal '{val}' has odd length ({len(val)}) "
+                        f"\u2014 hex strings must have an even number of characters"
+                    )
+                elif not re.fullmatch(r'[0-9a-fA-F]*', val):
+                    self._add_error(
+                        f"ByteString literal '{val}' contains non-hex characters "
+                        f"\u2014 only 0-9, a-f, A-F are allowed"
+                    )
 
     # -------------------------------------------------------------------
     # Recursion detection
@@ -368,30 +398,33 @@ def _is_compile_time_constant(expr: Expression | None) -> bool:
 # V24/V25: warn on manual preimage/state-script usage
 # ---------------------------------------------------------------------------
 
-def _warn_manual_preimage_usage(method, warnings: list[str]) -> None:
+def _warn_manual_preimage_usage(method, warnings: list[Diagnostic]) -> None:
     """Walk method body and warn on checkPreimage() or this.getStateScript() calls."""
 
     def visitor(expr: Expression) -> None:
         if isinstance(expr, CallExpr):
             # V24: bare checkPreimage(...) call
             if isinstance(expr.callee, Identifier) and expr.callee.name == "checkPreimage":
-                warnings.append(
-                    f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
-                    f"in '{method.name}' will cause a duplicate verification"
-                )
+                warnings.append(Diagnostic(
+                    message=f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
+                    f"in '{method.name}' will cause a duplicate verification",
+                    severity=Severity.WARNING,
+                ))
             # V24: this.checkPreimage(...) call via PropertyAccessExpr or MemberExpr
             callee_prop = _callee_property(expr.callee)
             if callee_prop == "checkPreimage":
-                warnings.append(
-                    f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
-                    f"in '{method.name}' will cause a duplicate verification"
-                )
+                warnings.append(Diagnostic(
+                    message=f"StatefulSmartContract auto-injects checkPreimage(); calling it manually "
+                    f"in '{method.name}' will cause a duplicate verification",
+                    severity=Severity.WARNING,
+                ))
             # V25: this.getStateScript() call
             if callee_prop == "getStateScript":
-                warnings.append(
-                    f"StatefulSmartContract auto-injects state continuation; calling "
-                    f"getStateScript() manually in '{method.name}' is redundant"
-                )
+                warnings.append(Diagnostic(
+                    message=f"StatefulSmartContract auto-injects state continuation; calling "
+                    f"getStateScript() manually in '{method.name}' is redundant",
+                    severity=Severity.WARNING,
+                ))
 
     _walk_expressions_in_body(method.body, visitor)
 

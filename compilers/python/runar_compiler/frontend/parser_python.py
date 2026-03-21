@@ -16,6 +16,7 @@ from runar_compiler.frontend.ast_nodes import (
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
 from runar_compiler.frontend.parser_dispatch import ParseResult
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
 # ---------------------------------------------------------------------------
@@ -521,10 +522,10 @@ class _PyParser:
         self.file_name = file_name
         self.tokens: list[Token] = []
         self.pos = 0
-        self.errors: list[str] = []
+        self.errors: list[Diagnostic] = []
 
     def add_error(self, msg: str) -> None:
-        self.errors.append(msg)
+        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
 
     # -- Token helpers -------------------------------------------------------
 
@@ -1395,7 +1396,7 @@ def parse_python(source: str, file_name: str) -> ParseResult:
     try:
         contract = p.parse_contract()
     except ValueError as e:
-        return ParseResult(errors=[str(e)])
+        return ParseResult(errors=[Diagnostic(message=str(e), severity=Severity.ERROR)])
 
     if p.errors:
         return ParseResult(contract=contract, errors=p.errors)

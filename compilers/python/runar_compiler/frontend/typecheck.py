@@ -37,6 +37,7 @@ from runar_compiler.frontend.ast_nodes import (
     UnaryExpr,
     VariableDeclStmt,
 )
+from runar_compiler.frontend.diagnostic import Diagnostic, Severity
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +49,11 @@ class TypeCheckResult:
     """Output of the type checking pass."""
 
     contract: ContractNode | None = None
-    errors: list[str] = field(default_factory=list)
+    errors: list[Diagnostic] = field(default_factory=list)
+
+    def error_strings(self) -> list[str]:
+        """Return formatted error messages as plain strings."""
+        return [d.format_message() for d in self.errors]
 
 
 def type_check(contract: ContractNode) -> TypeCheckResult:
@@ -246,7 +251,7 @@ _CONSUMING_FUNCTIONS: dict[str, list[int]] = {
 class _TypeChecker:
     def __init__(self, contract: ContractNode) -> None:
         self.contract = contract
-        self.errors: list[str] = []
+        self.errors: list[Diagnostic] = []
         self.prop_types: dict[str, str] = {}
         self.method_sigs: dict[str, FuncSig] = {}
         self.consumed_values: dict[str, bool] = {}
@@ -266,7 +271,7 @@ class _TypeChecker:
             self.method_sigs[method.name] = FuncSig(params=params, return_type=ret_type)
 
     def _add_error(self, msg: str) -> None:
-        self.errors.append(msg)
+        self.errors.append(Diagnostic(message=msg, severity=Severity.ERROR))
 
     def check_constructor(self) -> None:
         ctor = self.contract.constructor
@@ -585,7 +590,7 @@ class _TypeChecker:
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "<unknown>"
-            self.errors.append(
+            self._add_error(
                 f"unknown function '{name}' -- only Runar built-in functions "
                 f"and contract methods are allowed"
             )
@@ -608,7 +613,7 @@ class _TypeChecker:
                 return "void"
             if prop in self.method_sigs:
                 return self._check_call_args(prop, self.method_sigs[prop], e.args, env)
-            self.errors.append(
+            self._add_error(
                 f"unknown method 'this.{prop}' -- only Runar built-in methods "
                 f"and contract methods are allowed"
             )
@@ -644,7 +649,7 @@ class _TypeChecker:
             obj_name = "<expr>"
             if isinstance(e.callee.object, Identifier):
                 obj_name = e.callee.object.name
-            self.errors.append(
+            self._add_error(
                 f"unknown function '{obj_name}.{e.callee.property}' -- only Runar "
                 f"built-in functions and contract methods are allowed"
             )
@@ -653,7 +658,7 @@ class _TypeChecker:
             return "<unknown>"
 
         # Fallback -- unknown callee shape
-        self.errors.append(
+        self._add_error(
             "unsupported function call expression -- only Runar built-in "
             "functions and contract methods are allowed"
         )
