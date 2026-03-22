@@ -5,11 +5,6 @@
       "body": [
         {
           "name": "t0",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 8
-          },
           "value": {
             "kind": "load_prop",
             "name": "message"
@@ -17,11 +12,6 @@
         },
         {
           "name": "t1",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 8
-          },
           "value": {
             "kind": "load_prop",
             "name": "owner"
@@ -29,11 +19,6 @@
         },
         {
           "name": "t2",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 8
-          },
           "value": {
             "args": [
               "t0",
@@ -45,11 +30,6 @@
         },
         {
           "name": "t3",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 9
-          },
           "value": {
             "kind": "load_prop",
             "name": "message"
@@ -57,11 +37,6 @@
         },
         {
           "name": "t4",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 9
-          },
           "value": {
             "kind": "update_prop",
             "name": "message",
@@ -70,11 +45,6 @@
         },
         {
           "name": "t5",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 10
-          },
           "value": {
             "kind": "load_prop",
             "name": "owner"
@@ -82,11 +52,6 @@
         },
         {
           "name": "t6",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 10
-          },
           "value": {
             "kind": "update_prop",
             "name": "owner",
@@ -146,11 +111,6 @@
         },
         {
           "name": "t5",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 14
-          },
           "value": {
             "kind": "load_param",
             "name": "newMessage"
@@ -158,11 +118,6 @@
         },
         {
           "name": "t6",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 14
-          },
           "value": {
             "kind": "update_prop",
             "name": "message",
@@ -171,11 +126,6 @@
         },
         {
           "name": "t7",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 15
-          },
           "value": {
             "kind": "load_const",
             "value": true
@@ -183,11 +133,6 @@
         },
         {
           "name": "t8",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 15
-          },
           "value": {
             "kind": "assert",
             "value": "t7"
@@ -370,11 +315,6 @@
         },
         {
           "name": "t5",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 19
-          },
           "value": {
             "kind": "load_param",
             "name": "sig"
@@ -382,11 +322,6 @@
         },
         {
           "name": "t6",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 19
-          },
           "value": {
             "kind": "load_prop",
             "name": "owner"
@@ -394,11 +329,6 @@
         },
         {
           "name": "t7",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 19
-          },
           "value": {
             "args": [
               "t5",
@@ -410,11 +340,6 @@
         },
         {
           "name": "t8",
-          "sourceLoc": {
-            "column": 4,
-            "file": "/Users/siggioskarsson/gitcheckout/runar/conformance/.tmp/stateful-bytestring.runar.ts",
-            "line": 19
-          },
           "value": {
             "kind": "assert",
             "value": "t7"

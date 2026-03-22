@@ -155,6 +155,7 @@ _SNAKE_TO_CAMEL = {
 # Fields that should be excluded from IR output (internal decoded fields)
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
+    "source_loc",  # debug-only, not part of conformance
 })
 
 

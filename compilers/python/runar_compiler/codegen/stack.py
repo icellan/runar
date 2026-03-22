@@ -1833,7 +1833,7 @@ class _LoweringContext:
             self.emit_op(StackOp(op="dup"))
             self.sm.push(self.sm.peek_at_depth(0))
             # Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
-            self.emit_op(StackOp(op="push", value=bytes([0])))
+            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_CAT"))
             self.sm.pop(); self.sm.pop()
