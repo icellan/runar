@@ -838,12 +838,17 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		}
 	}
 
-	// Convert bare calls to declared methods into this.method() calls.
-	// In Ruby, `compute_threshold(a, b)` is equivalent to `self.compute_threshold(a, b)`.
+	// Convert bare calls to declared methods and intrinsics into this.method() calls.
+	// In Ruby, bare calls like `add_output(...)` are equivalent to
+	// `self.add_output(...)` / `this.addOutput(...)`.
 	methodNames := make(map[string]bool)
 	for _, m := range methods {
 		methodNames[m.Name] = true
 	}
+	// Intrinsic methods that must also be rewritten to property_access style.
+	methodNames["addOutput"] = true
+	methodNames["addRawOutput"] = true
+	methodNames["getStateScript"] = true
 	for i := range methods {
 		rewriteBareMethodCallsGo(methods[i].Body, methodNames)
 	}

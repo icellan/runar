@@ -550,15 +550,16 @@ end
       expect(binExpr.op).toBe('-');
     });
 
-    it('parses add_output as addOutput function call', () => {
+    it('parses add_output as this.addOutput property_access call', () => {
       const result = parseRubySource(FUNGIBLE_TOKEN_RB, 'FT.runar.rb');
       const transfer = result.contract!.methods.find(m => m.name === 'transfer')!;
-      // After 3 assert statements, there should be add_output calls
+      // After 3 assert statements, there should be add_output calls rewritten as this.addOutput
       const addOutputStmt = transfer.body[3] as ExpressionStatement;
       expect(addOutputStmt.kind).toBe('expression_statement');
       const call = addOutputStmt.expression as CallExpr;
       expect(call.kind).toBe('call_expr');
-      expect((call.callee as Identifier).name).toBe('addOutput');
+      expect(call.callee.kind).toBe('property_access');
+      expect((call.callee as PropertyAccessExpr).property).toBe('addOutput');
     });
 
     it('parses variable declarations', () => {
@@ -866,11 +867,12 @@ end
     it('parses add_output calls with correct argument count', () => {
       const result = parseRubySource(FUNGIBLE_TOKEN_RB, 'FT.runar.rb');
       const transfer = result.contract!.methods.find(m => m.name === 'transfer')!;
-      // Body: 3 asserts + 2 add_output calls
+      // Body: 3 asserts + 2 add_output calls (rewritten to this.addOutput)
       expect(transfer.body).toHaveLength(5);
       const addOutput1 = transfer.body[3] as ExpressionStatement;
       const call1 = addOutput1.expression as CallExpr;
-      expect((call1.callee as Identifier).name).toBe('addOutput');
+      expect(call1.callee.kind).toBe('property_access');
+      expect((call1.callee as PropertyAccessExpr).property).toBe('addOutput');
       expect(call1.args).toHaveLength(3);
     });
   });

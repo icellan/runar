@@ -746,9 +746,11 @@ class RbParser {
       }
     }
 
-    // Convert bare calls to declared methods into this.method() calls.
-    // In Ruby, `compute_threshold(a, b)` is equivalent to `self.compute_threshold(a, b)`.
-    const methodNames = new Set(methods.map(m => m.name));
+    // Convert bare calls to declared methods and intrinsics into this.method() calls.
+    // In Ruby, bare calls like `add_output(...)` are equivalent to
+    // `self.add_output(...)` / `this.addOutput(...)`.
+    const intrinsicMethods = ['addOutput', 'addRawOutput', 'getStateScript'];
+    const methodNames = new Set([...methods.map(m => m.name), ...intrinsicMethods]);
     for (const method of methods) {
       rewriteBareMethodCalls(method.body, methodNames);
     }

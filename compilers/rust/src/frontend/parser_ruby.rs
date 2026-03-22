@@ -919,10 +919,15 @@ impl<'a> RbParser<'a> {
             }
         }
 
-        // Convert bare calls to declared methods into this.method() calls.
-        // In Ruby, `compute_threshold(a, b)` is equivalent to `self.compute_threshold(a, b)`.
-        let method_names: std::collections::HashSet<String> =
+        // Convert bare calls to declared methods and intrinsics into this.method() calls.
+        // In Ruby, bare calls like `add_output(...)` are equivalent to
+        // `self.add_output(...)` / `this.addOutput(...)`.
+        let mut method_names: std::collections::HashSet<String> =
             methods.iter().map(|m| m.name.clone()).collect();
+        // Intrinsic methods that must also be rewritten to property_access style.
+        method_names.insert("addOutput".to_string());
+        method_names.insert("addRawOutput".to_string());
+        method_names.insert("getStateScript".to_string());
         for method in &mut methods {
             rewrite_bare_method_calls(&mut method.body, &method_names);
         }

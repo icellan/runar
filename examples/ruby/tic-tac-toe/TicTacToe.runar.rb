@@ -204,7 +204,9 @@ class TicTacToe < Runar::StatefulSmartContract
 
   # Get cell value, overriding the specified position with override_val.
   def get_cell_or_override(cell_index, override_pos, override_val)
-    return override_val if cell_index == override_pos
+    if cell_index == override_pos
+      return override_val
+    end
 
     if cell_index == 0
       @c0
@@ -239,14 +241,30 @@ class TicTacToe < Runar::StatefulSmartContract
     v7 = get_cell_or_override(7, position, player)
     v8 = get_cell_or_override(8, position, player)
 
-    return true if v0 == player && v1 == player && v2 == player
-    return true if v3 == player && v4 == player && v5 == player
-    return true if v6 == player && v7 == player && v8 == player
-    return true if v0 == player && v3 == player && v6 == player
-    return true if v1 == player && v4 == player && v7 == player
-    return true if v2 == player && v5 == player && v8 == player
-    return true if v0 == player && v4 == player && v8 == player
-    return true if v2 == player && v4 == player && v6 == player
+    if v0 == player && v1 == player && v2 == player
+      return true
+    end
+    if v3 == player && v4 == player && v5 == player
+      return true
+    end
+    if v6 == player && v7 == player && v8 == player
+      return true
+    end
+    if v0 == player && v3 == player && v6 == player
+      return true
+    end
+    if v1 == player && v4 == player && v7 == player
+      return true
+    end
+    if v2 == player && v5 == player && v8 == player
+      return true
+    end
+    if v0 == player && v4 == player && v8 == player
+      return true
+    end
+    if v2 == player && v4 == player && v6 == player
+      return true
+    end
 
     false
   end
@@ -254,15 +272,33 @@ class TicTacToe < Runar::StatefulSmartContract
   # Count the number of occupied cells on the board.
   def count_occupied
     count = 0
-    count += 1 if @c0 != 0
-    count += 1 if @c1 != 0
-    count += 1 if @c2 != 0
-    count += 1 if @c3 != 0
-    count += 1 if @c4 != 0
-    count += 1 if @c5 != 0
-    count += 1 if @c6 != 0
-    count += 1 if @c7 != 0
-    count += 1 if @c8 != 0
+    if @c0 != 0
+      count += 1
+    end
+    if @c1 != 0
+      count += 1
+    end
+    if @c2 != 0
+      count += 1
+    end
+    if @c3 != 0
+      count += 1
+    end
+    if @c4 != 0
+      count += 1
+    end
+    if @c5 != 0
+      count += 1
+    end
+    if @c6 != 0
+      count += 1
+    end
+    if @c7 != 0
+      count += 1
+    end
+    if @c8 != 0
+      count += 1
+    end
     count
   end
 end
