@@ -44,12 +44,12 @@ pub fn compile_check(source: &str, file_name: &str) -> Result<(), String> {
 
     let validation = runar_compiler_rust::frontend::validator::validate(&contract);
     if !validation.errors.is_empty() {
-        return Err(format!("validation errors: {}", validation.errors.join("; ")));
+        return Err(format!("validation errors: {}", validation.error_strings().join("; ")));
     }
 
     let tc = runar_compiler_rust::frontend::typecheck::typecheck(&contract);
     if !tc.errors.is_empty() {
-        return Err(format!("type check errors: {}", tc.errors.join("; ")));
+        return Err(format!("type check errors: {}", tc.error_strings().join("; ")));
     }
 
     Ok(())
