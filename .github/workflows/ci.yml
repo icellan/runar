@@ -84,6 +84,23 @@ jobs:
       - name: Python example tests
         run: cd examples/python && PYTHONPATH=../../packages/runar-py python -m pytest
 
+  ruby:
+    name: Ruby SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: packages/runar-rb
+      - run: cd packages/runar-rb && bundle exec rspec
+      - name: Ruby example tests
+        run: |
+          cd examples/ruby
+          bundle install
+          bundle exec rspec **/*_spec.rb
+
   conformance:
     name: Conformance Tests
     needs: [typescript, go, rust, python]
@@ -117,7 +134,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: [typescript, go, rust, python]
+    needs: [typescript, go, rust, python, ruby]
     runs-on: ubuntu-latest
     env:
       RPC_URL: http://localhost:18332
@@ -139,6 +156,11 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install pytest bsv-sdk
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+          bundler-cache: true
+          working-directory: integration/ruby
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
@@ -170,6 +192,15 @@ jobs:
 
       - name: Python integration tests
         run: cd integration/python && PYTHONPATH=../../compilers/python:../../packages/runar-py pytest -v
+
+      - name: Ruby integration tests
+        run: cd integration/ruby && bundle exec rspec --format documentation
+
+      - name: Ruby end-to-end example tests
+        run: |
+          cd end2end-example/ruby
+          bundle install
+          bundle exec rspec price_bet_spec.rb --format documentation
 
       - name: Stop regtest node
         if: always()

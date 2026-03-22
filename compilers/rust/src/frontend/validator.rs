@@ -407,6 +407,11 @@ fn validate_expression(expr: &Expression, errors: &mut Vec<Diagnostic>) {
         Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
             validate_expression(operand, errors);
         }
+        Expression::ArrayLiteral { elements } => {
+            for elem in elements {
+                validate_expression(elem, errors);
+            }
+        }
         // Leaf nodes -- nothing to validate (except ByteStringLiteral)
         Expression::Identifier { .. }
         | Expression::BigIntLiteral { .. }

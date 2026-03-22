@@ -160,6 +160,13 @@ class DecrementExpr:
     prefix: bool = False
 
 
+@dataclass
+class ArrayLiteralExpr:
+    """An array literal: ``[elem, ...]``."""
+
+    elements: list[Expression] = field(default_factory=list)
+
+
 # Discriminated union of all expression nodes.
 Expression = (
     BigIntLiteral
@@ -175,6 +182,7 @@ Expression = (
     | IndexAccessExpr
     | IncrementExpr
     | DecrementExpr
+    | ArrayLiteralExpr
 )
 
 

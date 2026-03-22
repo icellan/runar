@@ -3,6 +3,7 @@ package compiler
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/icellan/runar/compilers/go/frontend"
@@ -21,7 +22,7 @@ import (
 // Int→bigint, etc.). These tests focus on parse-level correctness.
 // ---------------------------------------------------------------------------
 
-var multiFormats = []string{".runar.ts", ".runar.sol", ".runar.move", ".runar.go"}
+var multiFormats = []string{".runar.ts", ".runar.sol", ".runar.move", ".runar.go", ".runar.rb"}
 
 func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
 	t.Helper()
@@ -340,7 +341,76 @@ func TestGoContract_CompileConformance(t *testing.T) {
 				t.Error("expected non-empty script hex")
 			}
 
-			t.Logf("%s: hex=%d bytes", dir, len(artifact.Script)/2)
+			// Compare against golden expected-script.hex
+			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
+			goldenHex, err := os.ReadFile(goldenPath)
+			if err != nil {
+				t.Logf("%s: no golden file, script hex=%d bytes", dir, len(artifact.Script)/2)
+				return
+			}
+
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				t.Errorf("%s: script hex does not match golden file (got %d chars, expected %d chars)",
+					dir, len(artifact.Script), len(expected))
+			} else {
+				t.Logf("%s: MATCH (hex=%d bytes)", dir, len(artifact.Script)/2)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: .runar.rb conformance tests compile to Bitcoin Script hex
+// ---------------------------------------------------------------------------
+
+func TestRubyContract_CompileConformance(t *testing.T) {
+	// "stateful" and "stateful-counter" excluded: stateful preimage injection
+	// requires deeper work in the Go compiler.
+	testDirs := []string{"arithmetic", "basic-p2pkh", "boolean-logic", "bounded-loop", "if-else", "multi-method"}
+
+	for _, dir := range testDirs {
+		t.Run(dir, func(t *testing.T) {
+			source := filepath.Join(conformanceDir(), dir, dir+".runar.rb")
+			if _, err := os.Stat(source); os.IsNotExist(err) {
+				t.Skipf("source not found: %s", source)
+			}
+
+			artifact, err := CompileFromSource(source)
+			if err != nil {
+				t.Fatalf("Rúnar compilation failed: %v", err)
+			}
+
+			if artifact.Script == "" {
+				t.Error("expected non-empty script hex")
+			}
+
+			// Compare against golden expected-script.hex
+			goldenPath := filepath.Join(conformanceDir(), dir, "expected-script.hex")
+			goldenHex, err := os.ReadFile(goldenPath)
+			if err != nil {
+				// No golden file — just verify non-empty output
+				t.Logf("%s: no golden file, script hex=%d bytes", dir, len(artifact.Script)/2)
+				return
+			}
+
+			expected := strings.TrimSpace(string(goldenHex))
+			if artifact.Script != expected {
+				maxLen := 200
+				gotPreview := artifact.Script
+				if len(gotPreview) > maxLen {
+					gotPreview = gotPreview[:maxLen] + "..."
+				}
+				expectedPreview := expected
+				if len(expectedPreview) > maxLen {
+					expectedPreview = expectedPreview[:maxLen] + "..."
+				}
+				t.Logf("%s: script hex mismatch (len expected=%d, got=%d)\n  expected: %s\n  got:      %s",
+					dir, len(expected), len(artifact.Script), expectedPreview, gotPreview)
+				t.Errorf("%s: script hex does not match golden file", dir)
+			} else {
+				t.Logf("%s: MATCH (hex=%d bytes)", dir, len(artifact.Script)/2)
+			}
 		})
 	}
 }

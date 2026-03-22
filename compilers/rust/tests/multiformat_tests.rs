@@ -9,6 +9,7 @@
 //! focus on parse-level correctness and dispatch routing.
 
 use runar_compiler_rust::compile_from_source_str;
+use runar_compiler_rust::frontend::ast::Visibility;
 use runar_compiler_rust::frontend::parser::parse_source;
 
 fn conformance_dir() -> std::path::PathBuf {
@@ -151,6 +152,157 @@ fn test_ts_end_to_end_all_conformance() {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Ruby parser dispatch
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_parse_dispatch_ruby() {
+    let source = r#"
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+"#;
+    let result = parse_source(source, Some("P2PKH.runar.rb"));
+    assert!(result.errors.is_empty(), "Ruby parser errors: {:?}", result.errors);
+    assert!(result.contract.is_some(), "Ruby parser should produce a contract");
+    let contract = result.contract.unwrap();
+    assert_eq!(contract.name, "P2PKH");
+    assert_eq!(contract.parent_class, "SmartContract");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Ruby parser produces correct AST structure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_parse_ruby_p2pkh_structure() {
+    let source = r#"
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+"#;
+
+    let result = parse_source(source, Some("P2PKH.runar.rb"));
+    assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+    let contract = result.contract.expect("should parse contract");
+
+    assert_eq!(contract.name, "P2PKH");
+    assert_eq!(contract.parent_class, "SmartContract");
+    assert_eq!(contract.properties.len(), 1);
+    assert_eq!(contract.properties[0].name, "pubKeyHash");
+    assert!(contract.properties[0].readonly);
+
+    assert_eq!(contract.methods.len(), 1);
+    assert_eq!(contract.methods[0].name, "unlock");
+    assert_eq!(contract.methods[0].visibility, Visibility::Public);
+    assert_eq!(contract.methods[0].params.len(), 2);
+    assert_eq!(contract.methods[0].params[0].name, "sig");
+    assert_eq!(contract.methods[0].params[1].name, "pubKey");
+}
+
+// ---------------------------------------------------------------------------
+// Test: Ruby P2PKH compiles end-to-end and produces same script as TS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ruby_p2pkh_end_to_end() {
+    let rb_source = r#"
+require 'runar'
+
+class P2PKH < Runar::SmartContract
+  prop :pub_key_hash, Addr
+
+  def initialize(pub_key_hash)
+    super(pub_key_hash)
+    @pub_key_hash = pub_key_hash
+  end
+
+  runar_public sig: Sig, pub_key: PubKey
+  def unlock(sig, pub_key)
+    assert hash160(pub_key) == @pub_key_hash
+    assert check_sig(sig, pub_key)
+  end
+end
+"#;
+
+    let rb_artifact = compile_from_source_str(rb_source, Some("P2PKH.runar.rb"))
+        .expect("Ruby P2PKH compilation should succeed");
+
+    assert!(!rb_artifact.script.is_empty(), "Ruby script hex should not be empty");
+    assert!(!rb_artifact.asm.is_empty(), "Ruby ASM should not be empty");
+    assert_eq!(rb_artifact.contract_name, "P2PKH");
+
+    // Compare with TypeScript compilation
+    let ts_source = read_conformance_format("basic-p2pkh", ".runar.ts");
+    if let Some(ts_src) = ts_source {
+        let ts_artifact = compile_from_source_str(&ts_src, Some("basic-p2pkh.runar.ts"))
+            .expect("TS P2PKH compilation should succeed");
+
+        assert_eq!(
+            rb_artifact.script, ts_artifact.script,
+            "Ruby and TypeScript P2PKH should produce identical script"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test: Ruby stateful contract compiles end-to-end
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_ruby_stateful_end_to_end() {
+    let source = r#"
+require 'runar'
+
+class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  def initialize(count)
+    super(count)
+    @count = count
+  end
+
+  runar_public
+  def increment
+    @count += 1
+  end
+end
+"#;
+
+    let artifact = compile_from_source_str(source, Some("Counter.runar.rb"))
+        .expect("Ruby Counter compilation should succeed");
+
+    assert!(!artifact.script.is_empty(), "Ruby Counter script hex should not be empty");
+    assert_eq!(artifact.contract_name, "Counter");
+}
+
+// ---------------------------------------------------------------------------
 // Test: Cross-format property consistency (parse-level)
 // ---------------------------------------------------------------------------
 
@@ -285,5 +437,75 @@ fn test_parse_dispatch_unknown_extension() {
     assert!(
         !has_contract || has_errors,
         "unrecognized extension should produce errors or no contract; got contract with no errors"
+    );
+}
+
+#[test]
+fn test_ruby_unknown_parent_class() {
+    let source = r#"
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for unknown parent class"
+    );
+}
+
+#[test]
+fn test_ruby_missing_prop_type() {
+    let source = r#"
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for prop missing type"
+    );
+}
+
+#[test]
+fn test_ruby_missing_method_end() {
+    let source = r#"
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for unclosed method"
+    );
+}
+
+#[test]
+fn test_ruby_empty_source() {
+    let result = parse_source("", Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for empty source"
     );
 }

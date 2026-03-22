@@ -36,6 +36,7 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.go -> ParseGoContract
 //   - .runar.py -> ParsePython
 //   - .runar.rs -> ParseRustMacro
+//   - .runar.rb -> ParseRuby
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
 	lower := strings.ToLower(fileName)
@@ -50,6 +51,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		return ParsePython(source, fileName)
 	case strings.HasSuffix(lower, ".runar.rs"):
 		return ParseRustMacro(source, fileName)
+	case strings.HasSuffix(lower, ".runar.rb"):
+		return ParseRuby(source, fileName)
 	default:
 		return Parse(source, fileName)
 	}

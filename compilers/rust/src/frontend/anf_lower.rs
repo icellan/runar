@@ -779,6 +779,17 @@ fn lower_expr_to_ref(expr: &Expression, ctx: &mut LoweringContext) -> String {
         Expression::DecrementExpr { operand, prefix } => {
             lower_decrement_expr(operand, *prefix, ctx)
         }
+
+        Expression::ArrayLiteral { elements } => {
+            // Lower each element to a reference, then emit an array_literal ANF node.
+            let element_refs: Vec<String> = elements
+                .iter()
+                .map(|elem| lower_expr_to_ref(elem, ctx))
+                .collect();
+            ctx.emit(ANFValue::ArrayLiteral {
+                elements: element_refs,
+            })
+        }
     }
 }
 

@@ -30,7 +30,7 @@ function cargoAwareEnv(): NodeJS.ProcessEnv {
 
 export interface ConformanceResult {
   testName: string;
-  /** Source format used (e.g. '.runar.ts', '.runar.yaml', '.runar.sol', '.runar.move', '.runar.py', '.runar.go', '.runar.rs') */
+  /** Source format used (e.g. '.runar.ts', '.runar.sol', '.runar.move', '.runar.py', '.runar.go', '.runar.rs', '.runar.rb') */
   format?: string;
   tsCompiler: CompilerOutput;
   goCompiler?: CompilerOutput;
@@ -51,6 +51,7 @@ export const INPUT_FORMATS = [
   { ext: '.runar.py',   compilers: ['ts', 'go', 'rust', 'python'] as const },
   { ext: '.runar.go',   compilers: ['go', 'python'] as const },
   { ext: '.runar.rs',   compilers: ['rust', 'python'] as const },
+  { ext: '.runar.rb',   compilers: ['ts', 'go', 'rust', 'python'] as const },
 ] as const;
 
 type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];

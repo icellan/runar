@@ -17,3 +17,9 @@ __pycache__/
 *.egg-info/
 .venv/
 compilers/go/runar*-go
+
+# runar-rb
+/packages/runar-rb/tmp/
+
+# Local Claude settings (user-specific, not shared)
+.claude/settings.local.json

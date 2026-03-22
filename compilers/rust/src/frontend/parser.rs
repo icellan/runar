@@ -1148,6 +1148,9 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     if name.ends_with(".runar.go") {
         return super::parser_gocontract::parse_go_contract(source, file_name);
     }
+    if name.ends_with(".runar.rb") {
+        return super::parser_ruby::parse_ruby(source, file_name);
+    }
     // Default: TypeScript parser
     parse(source, file_name)
 }

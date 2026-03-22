@@ -1,0 +1,7 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+gem 'runar-lang', path: '../../packages/runar-rb'
+gem 'bsv-sdk', '~> 0.2'
+gem 'rspec', '~> 3.0'

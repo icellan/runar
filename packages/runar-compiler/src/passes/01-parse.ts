@@ -48,6 +48,7 @@ import { parseMoveSource } from './01-parse-move.js';
 import { parsePythonSource } from './01-parse-python.js';
 import { parseGoSource } from './01-parse-go.js';
 import { parseRustSource } from './01-parse-rust.js';
+import { parseRubySource } from './01-parse-ruby.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -83,6 +84,9 @@ export function parse(source: string, fileName?: string): ParseResult {
   }
   if (file.endsWith('.runar.rs')) {
     return parseRustSource(source, file);
+  }
+  if (file.endsWith('.runar.rb')) {
+    return parseRubySource(source, file);
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)

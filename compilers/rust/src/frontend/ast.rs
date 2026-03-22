@@ -304,4 +304,7 @@ pub enum Expression {
         operand: Box<Expression>,
         prefix: bool,
     },
+    ArrayLiteral {
+        elements: Vec<Expression>,
+    },
 }

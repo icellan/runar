@@ -599,6 +599,16 @@ impl<'a> TypeChecker<'a> {
                 }
                 BIGINT.to_string()
             }
+
+            Expression::ArrayLiteral { elements } => {
+                // Infer element type from the first element; treat as element-type array.
+                if let Some(first) = elements.first() {
+                    let elem_type = self.infer_expr_type(first, env);
+                    format!("{}[]", elem_type)
+                } else {
+                    "<unknown>[]".to_string()
+                }
+            }
         }
     }
 

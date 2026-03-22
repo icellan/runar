@@ -258,6 +258,13 @@ type DecrementExpr struct {
 
 func (DecrementExpr) exprMarker() {}
 
+// ArrayLiteralExpr represents an array literal: [a, b, c].
+type ArrayLiteralExpr struct {
+	Elements []Expression
+}
+
+func (ArrayLiteralExpr) exprMarker() {}
+
 // ---------------------------------------------------------------------------
 // Primitive type names
 // ---------------------------------------------------------------------------

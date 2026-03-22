@@ -32,6 +32,7 @@ export type {
   IndexAccessExpr,
   IncrementExpr,
   DecrementExpr,
+  ArrayLiteralExpr,
   Expression,
 } from './runar-ast.js';
 

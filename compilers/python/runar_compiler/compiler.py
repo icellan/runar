@@ -122,10 +122,13 @@ def _parse_source(source: bytes, file_name: str) -> Any:
     elif lower.endswith(".runar.rs"):
         from runar_compiler.frontend.parser_rust import parse_rust
         return parse_rust(source, file_name)
+    elif lower.endswith(".runar.rb"):
+        from runar_compiler.frontend.parser_ruby import parse_ruby
+        return parse_ruby(source, file_name)
     else:
         raise ValueError(
             f"Unsupported source format: {file_name}. "
-            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, or .runar.py"
+            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, or .runar.rb"
         )
 
 

@@ -99,6 +99,14 @@ class TestParserDispatch:
         assert result.contract is not None
         assert result.contract.name == "P2PKH"
 
+    def test_parse_dispatch_rb(self):
+        source = _read_source("basic-p2pkh", ".runar.rb")
+        result = parse_source(source, "P2PKH.runar.rb")
+
+        assert len(result.errors) == 0
+        assert result.contract is not None
+        assert result.contract.name == "P2PKH"
+
     def test_parse_dispatch_unknown(self):
         result = parse_source("anything", "test.runar.xyz")
         assert len(result.errors) > 0

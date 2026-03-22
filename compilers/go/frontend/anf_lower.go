@@ -816,6 +816,13 @@ func (ctx *lowerCtx) lowerExprToRef(expr Expression) string {
 
 	case DecrementExpr:
 		return ctx.lowerDecrementExpr(e)
+
+	case ArrayLiteralExpr:
+		elementRefs := make([]string, len(e.Elements))
+		for i, elem := range e.Elements {
+			elementRefs[i] = ctx.lowerExprToRef(elem)
+		}
+		return ctx.emit(ir.ANFValue{Kind: "array_literal", Elements: elementRefs})
 	}
 
 	return ctx.emit(makeLoadConstInt(0))

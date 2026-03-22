@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 from runar_compiler.frontend.ast_nodes import (
+    ArrayLiteralExpr,
     AssignmentStmt,
     BigIntLiteral,
     BinaryExpr,
@@ -635,6 +636,10 @@ class _LowerCtx:
 
         if isinstance(expr, DecrementExpr):
             return self._lower_decrement_expr(expr)
+
+        if isinstance(expr, ArrayLiteralExpr):
+            element_refs = [self.lower_expr_to_ref(elem) for elem in expr.elements]
+            return self.emit(ANFValue(kind="array_literal", elements=element_refs))
 
         return self.emit(_make_load_const_int(0))
 
