@@ -33,6 +33,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::Diagnostic;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -42,7 +43,7 @@ use super::parser::ParseResult;
 /// Parse a Solidity-format Rúnar contract source.
 pub fn parse_solidity(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.sol");
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     let tokens = tokenize(source);
     let mut parser = SolParser::new(tokens, file, &mut errors);
@@ -350,11 +351,11 @@ struct SolParser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     file: &'a str,
-    errors: &'a mut Vec<String>,
+    errors: &'a mut Vec<Diagnostic>,
 }
 
 impl<'a> SolParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<String>) -> Self {
+    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
         Self {
             tokens,
             pos: 0,
@@ -378,11 +379,11 @@ impl<'a> SolParser<'a> {
             self.advance();
             true
         } else {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Expected {:?}, got {:?}",
                 expected,
                 self.peek()
-            ));
+            ), None));
             false
         }
     }
@@ -392,7 +393,7 @@ impl<'a> SolParser<'a> {
             Token::Ident(name) => name,
             other => {
                 self.errors
-                    .push(format!("Expected identifier, got {:?}", other));
+                    .push(Diagnostic::error(format!("Expected identifier, got {:?}", other), None));
                 "_error".to_string()
             }
         }
@@ -418,7 +419,7 @@ impl<'a> SolParser<'a> {
 
         if *self.peek() == Token::Eof {
             self.errors
-                .push("No 'contract' declaration found".to_string());
+                .push(Diagnostic::error("No 'contract' declaration found", None));
             return None;
         }
 
@@ -455,10 +456,10 @@ impl<'a> SolParser<'a> {
                     properties.push(self.parse_property(false));
                 }
                 _ => {
-                    self.errors.push(format!(
+                    self.errors.push(Diagnostic::error(format!(
                         "Unexpected token in contract body: {:?}",
                         self.peek()
-                    ));
+                    ), None));
                     self.advance();
                 }
             }
@@ -468,7 +469,7 @@ impl<'a> SolParser<'a> {
 
         let constructor = constructor.unwrap_or_else(|| {
             self.errors
-                .push("Contract must have a constructor".to_string());
+                .push(Diagnostic::error("Contract must have a constructor", None));
             MethodNode {
                 name: "constructor".to_string(),
                 params: Vec::new(),
@@ -536,7 +537,7 @@ impl<'a> SolParser<'a> {
                     Token::NumberLit(n) => n as usize,
                     _ => {
                         self.errors
-                            .push("FixedArray requires numeric length".to_string());
+                            .push(Diagnostic::error("FixedArray requires numeric length", None));
                         0
                     }
                 };
@@ -877,7 +878,7 @@ impl<'a> SolParser<'a> {
             self.parse_var_decl()
         } else {
             self.errors
-                .push("For loop init must be a variable declaration".to_string());
+                .push(Diagnostic::error("For loop init must be a variable declaration", None));
             self.expect(&Token::Semicolon);
             Statement::VariableDecl {
                 name: "_i".to_string(),
@@ -1352,7 +1353,7 @@ impl<'a> SolParser<'a> {
             }
             other => {
                 self.errors
-                    .push(format!("Unexpected token in expression: {:?}", other));
+                    .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
                 Expression::BigIntLiteral { value: 0 }
             }
         }

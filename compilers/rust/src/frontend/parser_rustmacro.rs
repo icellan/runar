@@ -7,6 +7,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::Diagnostic;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -231,7 +232,7 @@ struct RustDslParser {
     tokens: Vec<Token>,
     pos: usize,
     file: String,
-    errors: Vec<String>,
+    errors: Vec<Diagnostic>,
 }
 
 impl RustDslParser {
@@ -251,7 +252,7 @@ impl RustDslParser {
 
     fn expect(&mut self, expected: &TokenType) {
         if std::mem::discriminant(&self.current().typ) != std::mem::discriminant(expected) {
-            self.errors.push(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col));
+            self.errors.push(Diagnostic::error(format!("Expected {:?}, got {:?} at {}:{}", expected, self.current().typ, self.current().line, self.current().col), None));
         }
         self.advance_clone();
     }
@@ -371,7 +372,7 @@ impl RustDslParser {
         }
 
         if contract_name.is_empty() {
-            self.errors.push("No Rúnar contract struct found".to_string());
+            self.errors.push(Diagnostic::error("No Rúnar contract struct found", None));
             return ParseResult { contract: None, errors: self.errors };
         }
 
@@ -923,9 +924,9 @@ impl RustDslParser {
             _ => {
                 let tok = self.current().clone();
                 self.advance_clone();
-                self.errors.push(format!(
+                self.errors.push(Diagnostic::error(format!(
                     "unsupported token '{:?}' at {}:{} — not valid in Rúnar contract",
-                    tok.typ, tok.line, tok.col));
+                    tok.typ, tok.line, tok.col), None));
                 Expression::Identifier { name: "unknown".to_string() }
             }
         }

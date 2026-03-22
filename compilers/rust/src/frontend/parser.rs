@@ -20,6 +20,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName,
     PropertyNode, SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::Diagnostic;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -28,12 +29,19 @@ use super::ast::{
 /// Result of parsing a source file.
 pub struct ParseResult {
     pub contract: Option<ContractNode>,
-    pub errors: Vec<String>,
+    pub errors: Vec<Diagnostic>,
+}
+
+impl ParseResult {
+    /// Get error messages as plain strings (for backward compatibility).
+    pub fn error_strings(&self) -> Vec<String> {
+        self.errors.iter().map(|d| d.format_message()).collect()
+    }
 }
 
 /// Parse a TypeScript source string and extract the Rúnar contract AST.
 pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
     let file = file_name.unwrap_or("contract.ts");
 
     // Set up SWC parser
@@ -54,7 +62,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let module = match parser.parse_module() {
         Ok(m) => m,
         Err(e) => {
-            errors.push(format!("Parse error: {:?}", e));
+            errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
             return ParseResult {
                 contract: None,
                 errors,
@@ -64,7 +72,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
 
     // Collect any parser errors
     for e in parser.take_errors() {
-        errors.push(format!("Parse error: {:?}", e));
+        errors.push(Diagnostic::error(format!("Parse error: {:?}", e), None));
     }
 
     // Find the class that extends SmartContract or StatefulSmartContract
@@ -76,9 +84,9 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
             if let Some(super_class) = &class_decl.class.super_class {
                 if let Some(base_name) = get_base_class_name(super_class) {
                     if contract_class.is_some() {
-                        errors.push(
-                            "Only one SmartContract subclass is allowed per file".to_string(),
-                        );
+                        errors.push(Diagnostic::error(
+                            "Only one SmartContract subclass is allowed per file", None,
+                        ));
                     }
                     contract_class = Some(class_decl);
                     detected_parent_class = base_name;
@@ -94,9 +102,9 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
                 if let Some(super_class) = &class_decl.class.super_class {
                     if let Some(base_name) = get_base_class_name(super_class) {
                         if contract_class.is_some() {
-                            errors.push(
-                                "Only one SmartContract subclass is allowed per file".to_string(),
-                            );
+                            errors.push(Diagnostic::error(
+                                "Only one SmartContract subclass is allowed per file", None,
+                            ));
                         }
                         contract_class = Some(class_decl);
                         detected_parent_class = base_name;
@@ -109,7 +117,7 @@ pub fn parse(source: &str, file_name: Option<&str>) -> ParseResult {
     let class_decl = match contract_class {
         Some(c) => c,
         None => {
-            errors.push("No class extending SmartContract or StatefulSmartContract found".to_string());
+            errors.push(Diagnostic::error("No class extending SmartContract or StatefulSmartContract found", None));
             return ParseResult {
                 contract: None,
                 errors,
@@ -178,7 +186,7 @@ fn default_loc(file: &str) -> SourceLocation {
 // Properties
 // ---------------------------------------------------------------------------
 
-fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<PropertyNode> {
+fn parse_properties(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<PropertyNode> {
     let mut result = Vec::new();
 
     for member in &class.body {
@@ -186,7 +194,7 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<
             let name = match &prop.key {
                 PropName::Ident(ident) => ident.sym.to_string(),
                 _ => {
-                    errors.push("Property must have an identifier name".to_string());
+                    errors.push(Diagnostic::error("Property must have an identifier name", None));
                     continue;
                 }
             };
@@ -196,10 +204,10 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<
             let prop_type = if let Some(ref ann) = prop.type_ann {
                 parse_type_node(&ann.type_ann, file, errors)
             } else {
-                errors.push(format!(
+                errors.push(Diagnostic::error(format!(
                     "Property '{}' must have an explicit type annotation",
                     name
-                ));
+                ), None));
                 TypeNode::Custom("unknown".to_string())
             };
 
@@ -223,7 +231,7 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<
 // Constructor
 // ---------------------------------------------------------------------------
 
-fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<String>) -> MethodNode {
+fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> MethodNode {
     for member in &class.body {
         if let ClassMember::Constructor(ctor) = member {
             let params = parse_constructor_params(&ctor.params, file, errors);
@@ -243,7 +251,7 @@ fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<String>) -> Met
         }
     }
 
-    errors.push("Contract must have a constructor".to_string());
+    errors.push(Diagnostic::error("Contract must have a constructor", None));
     MethodNode {
         name: "constructor".to_string(),
         params: Vec::new(),
@@ -256,7 +264,7 @@ fn parse_constructor(class: &Class, file: &str, errors: &mut Vec<String>) -> Met
 fn parse_constructor_params(
     params: &[ParamOrTsParamProp],
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Vec<ParamNode> {
     let mut result = Vec::new();
 
@@ -274,16 +282,16 @@ fn parse_constructor_params(
                         let param_type = if let Some(ref ann) = ident.type_ann {
                             parse_type_node(&ann.type_ann, file, errors)
                         } else {
-                            errors.push(format!(
+                            errors.push(Diagnostic::error(format!(
                                 "Parameter '{}' must have an explicit type annotation",
                                 name
-                            ));
+                            ), None));
                             TypeNode::Custom("unknown".to_string())
                         };
                         result.push(ParamNode { name, param_type });
                     }
                     TsParamPropParam::Assign(_) => {
-                        errors.push("Default parameter values are not supported".to_string());
+                        errors.push(Diagnostic::error("Default parameter values are not supported", None));
                     }
                 }
             }
@@ -297,7 +305,7 @@ fn parse_constructor_params(
 // Methods
 // ---------------------------------------------------------------------------
 
-fn parse_methods(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<MethodNode> {
+fn parse_methods(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> Vec<MethodNode> {
     let mut result = Vec::new();
 
     for member in &class.body {
@@ -305,7 +313,7 @@ fn parse_methods(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<Met
             let name = match &method.key {
                 PropName::Ident(ident) => ident.sym.to_string(),
                 _ => {
-                    errors.push("Method must have an identifier name".to_string());
+                    errors.push(Diagnostic::error("Method must have an identifier name", None));
                     continue;
                 }
             };
@@ -340,7 +348,7 @@ fn parse_methods(class: &Class, file: &str, errors: &mut Vec<String>) -> Vec<Met
 fn parse_method_params(
     params: &[Param],
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Vec<ParamNode> {
     let mut result = Vec::new();
     for param in params {
@@ -354,7 +362,7 @@ fn parse_method_params(
 fn parse_param_pat(
     pat: &Pat,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Option<ParamNode> {
     match pat {
         Pat::Ident(ident) => {
@@ -362,16 +370,16 @@ fn parse_param_pat(
             let param_type = if let Some(ref ann) = ident.type_ann {
                 parse_type_node(&ann.type_ann, file, errors)
             } else {
-                errors.push(format!(
+                errors.push(Diagnostic::error(format!(
                     "Parameter '{}' must have an explicit type annotation",
                     name
-                ));
+                ), None));
                 TypeNode::Custom("unknown".to_string())
             };
             Some(ParamNode { name, param_type })
         }
         _ => {
-            errors.push("Unsupported parameter pattern".to_string());
+            errors.push(Diagnostic::error("Unsupported parameter pattern", None));
             None
         }
     }
@@ -381,7 +389,7 @@ fn parse_param_pat(
 // Type nodes
 // ---------------------------------------------------------------------------
 
-fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> TypeNode {
+fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<Diagnostic>) -> TypeNode {
     match ts_type {
         // Keyword types
         TsType::TsKeywordType(kw) => match kw.kind {
@@ -391,15 +399,15 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> Ty
             }
             TsKeywordTypeKind::TsVoidKeyword => TypeNode::Primitive(PrimitiveTypeName::Void),
             TsKeywordTypeKind::TsNumberKeyword => {
-                errors.push("'number' type is not allowed in Rúnar contracts; use 'bigint' instead".to_string());
+                errors.push(Diagnostic::error("'number' type is not allowed in Rúnar contracts; use 'bigint' instead", None));
                 TypeNode::Primitive(PrimitiveTypeName::Bigint)
             }
             TsKeywordTypeKind::TsStringKeyword => {
-                errors.push("'string' type is not allowed in Rúnar contracts; use 'ByteString' instead".to_string());
+                errors.push(Diagnostic::error("'string' type is not allowed in Rúnar contracts; use 'ByteString' instead", None));
                 TypeNode::Primitive(PrimitiveTypeName::ByteString)
             }
             _ => {
-                errors.push(format!("Unsupported keyword type: {:?}", kw.kind));
+                errors.push(Diagnostic::error(format!("Unsupported keyword type: {:?}", kw.kind), None));
                 TypeNode::Custom("unknown".to_string())
             }
         },
@@ -413,10 +421,10 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> Ty
                 if let Some(ref type_params) = type_ref.type_params {
                     let params = &type_params.params;
                     if params.len() != 2 {
-                        errors.push(
-                            "FixedArray requires exactly 2 type arguments: FixedArray<T, N>"
-                                .to_string(),
-                        );
+                        errors.push(Diagnostic::error(
+                            "FixedArray requires exactly 2 type arguments: FixedArray<T, N>",
+                            None,
+                        ));
                         return TypeNode::Custom(type_name);
                     }
 
@@ -430,13 +438,14 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> Ty
                             length: len,
                         };
                     } else {
-                        errors.push(
-                            "FixedArray size must be a non-negative integer literal".to_string(),
-                        );
+                        errors.push(Diagnostic::error(
+                            "FixedArray size must be a non-negative integer literal",
+                            None,
+                        ));
                         return TypeNode::Custom(type_name);
                     }
                 } else {
-                    errors.push("FixedArray requires type arguments".to_string());
+                    errors.push(Diagnostic::error("FixedArray requires type arguments", None));
                     return TypeNode::Custom(type_name);
                 }
             }
@@ -451,7 +460,7 @@ fn parse_type_node(ts_type: &TsType, file: &str, errors: &mut Vec<String>) -> Ty
         }
 
         _ => {
-            errors.push("Unsupported type annotation".to_string());
+            errors.push(Diagnostic::error("Unsupported type annotation", None));
             TypeNode::Custom("unknown".to_string())
         }
     }
@@ -485,7 +494,7 @@ fn extract_type_literal_number(ts_type: &TsType) -> Option<usize> {
 // Statements
 // ---------------------------------------------------------------------------
 
-fn parse_block_stmts(stmts: &[Stmt], file: &str, errors: &mut Vec<String>) -> Vec<Statement> {
+fn parse_block_stmts(stmts: &[Stmt], file: &str, errors: &mut Vec<Diagnostic>) -> Vec<Statement> {
     let mut result = Vec::new();
     for stmt in stmts {
         if let Some(parsed) = parse_statement(stmt, file, errors) {
@@ -495,7 +504,7 @@ fn parse_block_stmts(stmts: &[Stmt], file: &str, errors: &mut Vec<String>) -> Ve
     result
 }
 
-fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<String>) -> Option<Statement> {
+fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<Diagnostic>) -> Option<Statement> {
     match stmt {
         Stmt::Decl(Decl::Var(var_decl)) => parse_variable_statement(var_decl, file, errors),
 
@@ -515,13 +524,13 @@ fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<String>) -> Option<
             if stmts.is_empty() {
                 None
             } else {
-                errors.push("Standalone block statements are not supported; use if/for".to_string());
+                errors.push(Diagnostic::error("Standalone block statements are not supported; use if/for", None));
                 None
             }
         }
 
         _ => {
-            errors.push(format!("Unsupported statement kind: {:?}", stmt));
+            errors.push(Diagnostic::error(format!("Unsupported statement kind: {:?}", stmt), None));
             None
         }
     }
@@ -530,7 +539,7 @@ fn parse_statement(stmt: &Stmt, file: &str, errors: &mut Vec<String>) -> Option<
 fn parse_variable_statement(
     var_decl: &VarDecl,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Option<Statement> {
     if var_decl.decls.is_empty() {
         return None;
@@ -540,7 +549,7 @@ fn parse_variable_statement(
     let name = match &decl.name {
         Pat::Ident(ident) => ident.id.sym.to_string(),
         _ => {
-            errors.push("Destructuring patterns are not supported in variable declarations".to_string());
+            errors.push(Diagnostic::error("Destructuring patterns are not supported in variable declarations", None));
             return None;
         }
     };
@@ -550,7 +559,7 @@ fn parse_variable_statement(
     let init = if let Some(ref init_expr) = decl.init {
         parse_expression(init_expr, file, errors)
     } else {
-        errors.push(format!("Variable '{}' must have an initializer", name));
+        errors.push(Diagnostic::error(format!("Variable '{}' must have an initializer", name), None));
         Expression::BigIntLiteral { value: 0 }
     };
 
@@ -576,7 +585,7 @@ fn parse_variable_statement(
 fn parse_expression_statement(
     expr: &Expr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Option<Statement> {
     // Check if this is an assignment expression (a = b, this.x = b)
     if let Expr::Assign(assign) = expr {
@@ -593,7 +602,7 @@ fn parse_expression_statement(
 fn parse_assignment_expr(
     assign: &AssignExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Statement {
     let target = parse_assign_target(&assign.left, file, errors);
 
@@ -615,7 +624,7 @@ fn parse_assignment_expr(
                 AssignOp::DivAssign => Some(BinaryOp::Div),
                 AssignOp::ModAssign => Some(BinaryOp::Mod),
                 _ => {
-                    errors.push(format!("Unsupported compound assignment operator: {:?}", op));
+                    errors.push(Diagnostic::error(format!("Unsupported compound assignment operator: {:?}", op), None));
                     None
                 }
             };
@@ -648,7 +657,7 @@ fn parse_assignment_expr(
 fn parse_assign_target(
     target: &AssignTarget,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     match target {
         AssignTarget::Simple(simple) => match simple {
@@ -659,14 +668,14 @@ fn parse_assign_target(
                 parse_member_expression(member, file, errors)
             }
             _ => {
-                errors.push("Unsupported assignment target".to_string());
+                errors.push(Diagnostic::error("Unsupported assignment target", None));
                 Expression::Identifier {
                     name: "_error".to_string(),
                 }
             }
         },
         AssignTarget::Pat(_) => {
-            errors.push("Destructuring assignment is not supported".to_string());
+            errors.push(Diagnostic::error("Destructuring assignment is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
             }
@@ -674,7 +683,7 @@ fn parse_assign_target(
     }
 }
 
-fn parse_if_statement(if_stmt: &IfStmt, file: &str, errors: &mut Vec<String>) -> Statement {
+fn parse_if_statement(if_stmt: &IfStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
     let condition = parse_expression(&if_stmt.test, file, errors);
     let then_branch = parse_stmt_or_block(&if_stmt.cons, file, errors);
 
@@ -694,7 +703,7 @@ fn parse_if_statement(if_stmt: &IfStmt, file: &str, errors: &mut Vec<String>) ->
 fn parse_stmt_or_block(
     stmt: &Stmt,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Vec<Statement> {
     match stmt {
         Stmt::Block(block) => parse_block_stmts(&block.stmts, file, errors),
@@ -708,7 +717,7 @@ fn parse_stmt_or_block(
     }
 }
 
-fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<String>) -> Statement {
+fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<Diagnostic>) -> Statement {
     // Parse initializer
     let init = if let Some(ref init_expr) = for_stmt.init {
         match init_expr {
@@ -720,14 +729,15 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<String>)
                 }
             }
             VarDeclOrExpr::Expr(_) => {
-                errors.push(
-                    "For loop must have a variable declaration initializer".to_string(),
-                );
+                errors.push(Diagnostic::error(
+                    "For loop must have a variable declaration initializer",
+                    None,
+                ));
                 make_default_for_init(file)
             }
         }
     } else {
-        errors.push("For loop must have an initializer".to_string());
+        errors.push(Diagnostic::error("For loop must have an initializer", None));
         make_default_for_init(file)
     };
 
@@ -735,7 +745,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<String>)
     let condition = if let Some(ref cond) = for_stmt.test {
         parse_expression(cond, file, errors)
     } else {
-        errors.push("For loop must have a condition".to_string());
+        errors.push(Diagnostic::error("For loop must have a condition", None));
         Expression::BoolLiteral { value: false }
     };
 
@@ -743,7 +753,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<String>)
     let update = if let Some(ref upd) = for_stmt.update {
         parse_for_update(upd, file, errors)
     } else {
-        errors.push("For loop must have an update expression".to_string());
+        errors.push(Diagnostic::error("For loop must have an update expression", None));
         Statement::ExpressionStatement {
             expression: Expression::BigIntLiteral { value: 0 },
             source_location: default_loc(file),
@@ -765,7 +775,7 @@ fn parse_for_statement(for_stmt: &ForStmt, file: &str, errors: &mut Vec<String>)
 fn parse_for_update(
     expr: &Expr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Statement {
     match expr {
         Expr::Update(update) => {
@@ -800,7 +810,7 @@ fn parse_for_update(
 fn parse_return_statement(
     ret_stmt: &ReturnStmt,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Statement {
     let value = ret_stmt
         .arg
@@ -827,7 +837,7 @@ fn make_default_for_init(file: &str) -> Statement {
 // Expressions
 // ---------------------------------------------------------------------------
 
-fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expression {
+fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Expression {
     match expr {
         Expr::Bin(bin) => parse_binary_expression(bin, file, errors),
 
@@ -850,7 +860,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
                 },
                 SuperProp::Computed(comp) => {
                     let _ = parse_expression(&comp.expr, file, errors);
-                    errors.push("Computed super property access not supported".to_string());
+                    errors.push(Diagnostic::error("Computed super property access not supported", None));
                     Expression::Identifier {
                         name: "super".to_string(),
                     }
@@ -891,7 +901,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
                     value: tpl.quasis[0].raw.to_string(),
                 }
             } else {
-                errors.push("Template literals with expressions are not supported".to_string());
+                errors.push(Diagnostic::error("Template literals with expressions are not supported", None));
                 Expression::ByteStringLiteral {
                     value: String::new(),
                 }
@@ -928,13 +938,13 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
         Expr::Assign(assign) => {
             // Assignment expression in expression context -- should be handled
             // at statement level, but in case it appears in an expression context
-            errors.push("Assignment expressions in expression context are not recommended".to_string());
+            errors.push(Diagnostic::error("Assignment expressions in expression context are not recommended", None));
             let value = parse_expression(&assign.right, file, errors);
             value
         }
 
         _ => {
-            errors.push(format!("Unsupported expression: {:?}", expr));
+            errors.push(Diagnostic::error(format!("Unsupported expression: {:?}", expr), None));
             Expression::BigIntLiteral { value: 0 }
         }
     }
@@ -943,7 +953,7 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<String>) -> Expres
 fn parse_binary_expression(
     bin: &swc::BinExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     let left = parse_expression(&bin.left, file, errors);
     let right = parse_expression(&bin.right, file, errors);
@@ -974,7 +984,7 @@ fn parse_binary_expression(
             BinaryOp::StrictNe
         }
         _ => {
-            errors.push(format!("Unsupported binary operator: {:?}", bin.op));
+            errors.push(Diagnostic::error(format!("Unsupported binary operator: {:?}", bin.op), None));
             BinaryOp::Add
         }
     };
@@ -989,7 +999,7 @@ fn parse_binary_expression(
 fn parse_unary_expression(
     unary: &SwcUnaryExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     let operand = parse_expression(&unary.arg, file, errors);
 
@@ -998,7 +1008,7 @@ fn parse_unary_expression(
         swc::UnaryOp::Minus => UnaryOp::Neg,
         swc::UnaryOp::Tilde => UnaryOp::BitNot,
         _ => {
-            errors.push(format!("Unsupported unary operator: {:?}", unary.op));
+            errors.push(Diagnostic::error(format!("Unsupported unary operator: {:?}", unary.op), None));
             UnaryOp::Neg
         }
     };
@@ -1012,7 +1022,7 @@ fn parse_unary_expression(
 fn parse_update_expression(
     update: &UpdateExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     let operand = parse_expression(&update.arg, file, errors);
 
@@ -1032,7 +1042,7 @@ fn parse_update_expression(
 fn parse_call_expression(
     call: &CallExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     let callee = match &call.callee {
         Callee::Expr(e) => parse_expression(e, file, errors),
@@ -1040,7 +1050,7 @@ fn parse_call_expression(
             name: "super".to_string(),
         },
         Callee::Import(_) => {
-            errors.push("Dynamic import is not supported".to_string());
+            errors.push(Diagnostic::error("Dynamic import is not supported", None));
             Expression::Identifier {
                 name: "_error".to_string(),
             }
@@ -1062,7 +1072,7 @@ fn parse_call_expression(
 fn parse_member_expression(
     member: &SwcMemberExpr,
     file: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<Diagnostic>,
 ) -> Expression {
     let prop_name = match &member.prop {
         MemberProp::Ident(ident) => ident.sym.to_string(),
@@ -1076,7 +1086,7 @@ fn parse_member_expression(
             };
         }
         MemberProp::PrivateName(_priv_name) => {
-            errors.push("Private field access (#field) is not supported".to_string());
+            errors.push(Diagnostic::error("Private field access (#field) is not supported", None));
             "_private".to_string()
         }
     };
@@ -1360,7 +1370,7 @@ mod tests {
         let result = parse(source, Some("bad.runar.ts"));
         assert!(result.contract.is_none(), "should not produce a contract");
         assert!(
-            result.errors.iter().any(|e| e.contains("No class extending SmartContract")),
+            result.errors.iter().any(|e| e.message.contains("No class extending SmartContract")),
             "should report missing SmartContract error, got: {:?}",
             result.errors
         );
@@ -1382,7 +1392,7 @@ mod tests {
         let result = parse(source, Some("empty.runar.ts"));
         assert!(result.contract.is_none());
         assert!(
-            result.errors.iter().any(|e| e.contains("No class extending SmartContract")),
+            result.errors.iter().any(|e| e.message.contains("No class extending SmartContract")),
             "empty source should report no contract found, got: {:?}",
             result.errors
         );

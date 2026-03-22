@@ -40,6 +40,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::Diagnostic;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ use super::parser::ParseResult;
 /// Parse a Go-format Rúnar contract source.
 pub fn parse_go_contract(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.go");
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     let tokens = tokenize(source);
     let mut parser = GoParser::new(tokens, file, &mut errors);
@@ -463,13 +464,13 @@ struct GoParser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     file: String,
-    errors: &'a mut Vec<String>,
+    errors: &'a mut Vec<Diagnostic>,
     /// The current method's receiver name (e.g. "c", "self", "m")
     receiver_name: String,
 }
 
 impl<'a> GoParser<'a> {
-    fn new(tokens: Vec<Token>, file: &str, errors: &'a mut Vec<String>) -> Self {
+    fn new(tokens: Vec<Token>, file: &str, errors: &'a mut Vec<Diagnostic>) -> Self {
         Self {
             tokens,
             pos: 0,
@@ -515,26 +516,26 @@ impl<'a> GoParser<'a> {
             self.advance();
             name
         } else {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Expected identifier, got {:?} at {}:{}",
                 self.current().typ,
                 self.current().line,
                 self.current().col
-            ));
+            ), None));
             String::new()
         }
     }
 
     fn expect_tok(&mut self, expected: &TokenType) {
         if std::mem::discriminant(&self.current().typ) != std::mem::discriminant(expected) {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Expected {:?}, got {:?} at {}:{}:{}",
                 expected,
                 self.current().typ,
                 self.file,
                 self.current().line,
                 self.current().col
-            ));
+            ), None));
         }
         self.advance();
     }
@@ -608,7 +609,7 @@ impl<'a> GoParser<'a> {
         }
 
         if contract_name.is_empty() {
-            self.errors.push("no Rúnar contract struct found in Go source".to_string());
+            self.errors.push(Diagnostic::error("no Rúnar contract struct found in Go source", None));
             return None;
         }
 

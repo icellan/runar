@@ -38,6 +38,7 @@ use super::ast::{
     BinaryOp, ContractNode, Expression, MethodNode, ParamNode, PrimitiveTypeName, PropertyNode,
     SourceLocation, Statement, TypeNode, UnaryOp, Visibility,
 };
+use super::diagnostic::Diagnostic;
 use super::parser::ParseResult;
 
 // ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ use super::parser::ParseResult;
 /// Parse a Python-format Rúnar contract source.
 pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
     let file = file_name.unwrap_or("contract.runar.py");
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Diagnostic> = Vec::new();
 
     let tokens = tokenize(source);
     let mut parser = PyParser::new(tokens, file, &mut errors);
@@ -675,11 +676,11 @@ struct PyParser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     file: &'a str,
-    errors: &'a mut Vec<String>,
+    errors: &'a mut Vec<Diagnostic>,
 }
 
 impl<'a> PyParser<'a> {
-    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<String>) -> Self {
+    fn new(tokens: Vec<Token>, file: &'a str, errors: &'a mut Vec<Diagnostic>) -> Self {
         Self {
             tokens,
             pos: 0,
@@ -703,11 +704,11 @@ impl<'a> PyParser<'a> {
             self.advance();
             true
         } else {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Expected {:?}, got {:?}",
                 expected,
                 self.peek()
-            ));
+            ), None));
             false
         }
     }
@@ -726,7 +727,7 @@ impl<'a> PyParser<'a> {
             Token::Ident(name) => name,
             other => {
                 self.errors
-                    .push(format!("Expected identifier, got {:?}", other));
+                    .push(Diagnostic::error(format!("Expected identifier, got {:?}", other), None));
                 "_error".to_string()
             }
         }
@@ -764,7 +765,7 @@ impl<'a> PyParser<'a> {
 
         if *self.peek() != Token::Class {
             self.errors
-                .push("Expected 'class' declaration".to_string());
+                .push(Diagnostic::error("Expected 'class' declaration", None));
             return None;
         }
 
@@ -779,10 +780,10 @@ impl<'a> PyParser<'a> {
         self.skip_newlines();
 
         if parent_class != "SmartContract" && parent_class != "StatefulSmartContract" {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Unknown parent class: {}",
                 parent_class
-            ));
+            ), None));
             return None;
         }
 
@@ -804,7 +805,7 @@ impl<'a> PyParser<'a> {
                     Token::Ident(name) => name,
                     other => {
                         self.errors
-                            .push(format!("Expected decorator name, got {:?}", other));
+                            .push(Diagnostic::error(format!("Expected decorator name, got {:?}", other), None));
                         String::new()
                     }
                 };
@@ -960,7 +961,7 @@ impl<'a> PyParser<'a> {
                 Token::NumberLit(n) => n as usize,
                 _ => {
                     self.errors
-                        .push("FixedArray requires numeric length".to_string());
+                        .push(Diagnostic::error("FixedArray requires numeric length", None));
                     0
                 }
             };
@@ -990,7 +991,7 @@ impl<'a> PyParser<'a> {
             Token::Ident(name) => name,
             other => {
                 self.errors
-                    .push(format!("Expected method name, got {:?}", other));
+                    .push(Diagnostic::error(format!("Expected method name, got {:?}", other), None));
                 "_error".to_string()
             }
         };
@@ -1297,10 +1298,10 @@ impl<'a> PyParser<'a> {
         // Expect __init__
         let method_name = self.expect_ident();
         if method_name != "__init__" {
-            self.errors.push(format!(
+            self.errors.push(Diagnostic::error(format!(
                 "Expected __init__ after super(), got '{}'",
                 method_name
-            ));
+            ), None));
         }
 
         self.expect(&Token::LParen);
@@ -1973,7 +1974,7 @@ impl<'a> PyParser<'a> {
                                 Token::StringLit(s) => s,
                                 _ => {
                                     self.errors
-                                        .push("Expected string in bytes.fromhex()".to_string());
+                                        .push(Diagnostic::error("Expected string in bytes.fromhex()", None));
                                     String::new()
                                 }
                             };
@@ -2001,7 +2002,7 @@ impl<'a> PyParser<'a> {
             }
             other => {
                 self.errors
-                    .push(format!("Unexpected token in expression: {:?}", other));
+                    .push(Diagnostic::error(format!("Unexpected token in expression: {:?}", other), None));
                 Expression::BigIntLiteral { value: 0 }
             }
         }
