@@ -53,6 +53,7 @@ const VOID: TType = 'void';
 const BIGINT: TType = 'bigint';
 const BOOLEAN: TType = 'boolean';
 const BYTESTRING: TType = 'ByteString';
+const STATEFUL_CONTEXT: TType = 'StatefulContext';
 
 // ---------------------------------------------------------------------------
 // Built-in function signatures
@@ -140,6 +141,7 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['extractOutputs',       { params: ['SigHashPreimage'], returnType: 'Sha256' }],
   ['extractLocktime',      { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractSigHashType',   { params: ['SigHashPreimage'], returnType: 'bigint' }],
+  ['buildChangeOutput',    { params: ['ByteString', 'bigint'], returnType: 'ByteString' }],
 ]);
 
 // ---------------------------------------------------------------------------
@@ -208,6 +210,17 @@ function isBigintFamily(t: TType): boolean {
 
 function isByteFamily(t: TType): boolean {
   return BYTESTRING_SUBTYPES.has(t);
+}
+
+function isStatefulContextType(t: TType): boolean {
+  return t === STATEFUL_CONTEXT;
+}
+
+function flattenAddOutputArgs(args: Expression[]): Expression[] {
+  if (args.length === 2 && args[1]?.kind === 'array_literal') {
+    return [args[0]!, ...args[1].elements];
+  }
+  return args;
 }
 
 // ---------------------------------------------------------------------------
@@ -502,6 +515,13 @@ class TypeChecker {
             expr.sourceLocation,
           ));
           return '<unknown>';
+        }
+
+        if (isStatefulContextType(objType)) {
+          if (expr.property === 'txPreimage') return 'SigHashPreimage';
+          if (expr.property === 'getStateScript' || expr.property === 'addOutput' || expr.property === 'addRawOutput') {
+            return '<method>';
+          }
         }
 
         // SigHash.ALL, SigHash.FORKID, etc.
@@ -844,6 +864,7 @@ class TypeChecker {
       }
 
       if (methodName === 'addOutput') {
+        const normalizedArgs = flattenAddOutputArgs(args);
         if (this.contract.parentClass !== 'StatefulSmartContract') {
           this.errors.push(makeDiagnostic(
             `addOutput() is only available in StatefulSmartContract`,
@@ -854,16 +875,16 @@ class TypeChecker {
         }
         const mutableProps = this.contract.properties.filter(p => !p.readonly);
         const expectedArgCount = 1 + mutableProps.length;
-        if (args.length !== expectedArgCount) {
+        if (normalizedArgs.length !== expectedArgCount) {
           this.errors.push(makeDiagnostic(
-            `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${args.length}`,
+            `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
             'error',
             expr.sourceLocation,
           ));
         }
         // Type-check: first arg = bigint (satoshis)
-        if (args.length >= 1) {
-          const satoshisType = this.inferExprType(args[0]!, env);
+        if (normalizedArgs.length >= 1) {
+          const satoshisType = this.inferExprType(normalizedArgs[0]!, env);
           if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
             this.errors.push(makeDiagnostic(
               `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
@@ -873,8 +894,8 @@ class TypeChecker {
           }
         }
         // Type-check: remaining args match mutable property types
-        for (let i = 0; i < mutableProps.length && i + 1 < args.length; i++) {
-          const argType = this.inferExprType(args[i + 1]!, env);
+        for (let i = 0; i < mutableProps.length && i + 1 < normalizedArgs.length; i++) {
+          const argType = this.inferExprType(normalizedArgs[i + 1]!, env);
           const propType = typeNodeToTType(mutableProps[i]!.type);
           if (!isSubtype(argType, propType) && argType !== '<unknown>') {
             this.errors.push(makeDiagnostic(
@@ -885,8 +906,8 @@ class TypeChecker {
           }
         }
         // Infer remaining args
-        for (let i = expectedArgCount; i < args.length; i++) {
-          this.inferExprType(args[i]!, env);
+        for (let i = expectedArgCount; i < normalizedArgs.length; i++) {
+          this.inferExprType(normalizedArgs[i]!, env);
         }
         return VOID;
       }
@@ -950,6 +971,97 @@ class TypeChecker {
     // member_expr call: obj.method(...)
     if (callee.kind === 'member_expr') {
       const objType = this.inferExprType(callee.object, env);
+
+      if (isStatefulContextType(objType)) {
+        const methodName = callee.property;
+
+        if (methodName === 'getStateScript') {
+          if (args.length !== 0) {
+            this.errors.push(makeDiagnostic(
+              `getStateScript() takes no arguments`,
+              'error',
+            ));
+          }
+          return BYTESTRING;
+        }
+
+        if (methodName === 'addOutput') {
+          const normalizedArgs = flattenAddOutputArgs(args);
+          if (this.contract.parentClass !== 'StatefulSmartContract') {
+            this.errors.push(makeDiagnostic(
+              `addOutput() is only available in StatefulSmartContract`,
+              'error',
+            ));
+            return VOID;
+          }
+          const mutableProps = this.contract.properties.filter(p => !p.readonly);
+          const expectedArgCount = 1 + mutableProps.length;
+          if (normalizedArgs.length !== expectedArgCount) {
+            this.errors.push(makeDiagnostic(
+              `addOutput() expects ${expectedArgCount} argument(s): satoshis + ${mutableProps.length} state value(s), got ${normalizedArgs.length}`,
+              'error',
+            ));
+          }
+          if (normalizedArgs.length >= 1) {
+            const satoshisType = this.inferExprType(normalizedArgs[0]!, env);
+            if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
+                'error',
+              ));
+            }
+          }
+          for (let i = 0; i < mutableProps.length && i + 1 < normalizedArgs.length; i++) {
+            const argType = this.inferExprType(normalizedArgs[i + 1]!, env);
+            const propType = typeNodeToTType(mutableProps[i]!.type);
+            if (!isSubtype(argType, propType) && argType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addOutput() argument ${i + 2} (${mutableProps[i]!.name}) must be '${propType}', got '${argType}'`,
+                'error',
+              ));
+            }
+          }
+          for (let i = expectedArgCount; i < normalizedArgs.length; i++) {
+            this.inferExprType(normalizedArgs[i]!, env);
+          }
+          return VOID;
+        }
+
+        if (methodName === 'addRawOutput') {
+          if (this.contract.parentClass !== 'StatefulSmartContract') {
+            this.errors.push(makeDiagnostic(
+              `addRawOutput() is only available in StatefulSmartContract`,
+              'error',
+            ));
+            return VOID;
+          }
+          if (args.length !== 2) {
+            this.errors.push(makeDiagnostic(
+              `addRawOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
+              'error',
+            ));
+          }
+          if (args.length >= 1) {
+            const satoshisType = this.inferExprType(args[0]!, env);
+            if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addRawOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
+                'error',
+              ));
+            }
+          }
+          if (args.length >= 2) {
+            const scriptType = this.inferExprType(args[1]!, env);
+            if (!isSubtype(scriptType, BYTESTRING) && scriptType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
+                'error',
+              ));
+            }
+          }
+          return VOID;
+        }
+      }
 
       if (objType === '<this>' || (callee.object.kind === 'identifier' && callee.object.name === 'this')) {
         const methodName = callee.property;

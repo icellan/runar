@@ -2,12 +2,12 @@
 
 *Old Norse plural for "runes" (rún = secret/script/mystery). Pronounced ROO-nar.*
 
-**Write Bitcoin smart contracts in TypeScript, Go, Rust, Python, Solidity, or Move. Compile to Bitcoin Script.**
+**Write Bitcoin smart contracts in TypeScript, Go, Rust, Python, Zig, Solidity, or Move. Compile to Bitcoin Script.**
 
 <!-- Badges -->
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![npm version](https://img.shields.io/badge/npm-v0.1.0-orange)
+![npm version](https://img.shields.io/badge/npm-v0.3.2-orange)
 
 ---
 
@@ -137,7 +137,27 @@ class P2PKH(SmartContract):
 </tr>
 </table>
 
-All six formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
+**Zig**
+```zig
+const runar = @import("runar");
+
+pub const P2PKH = struct {
+    pub const Contract = runar.SmartContract;
+
+    pub_key_hash: runar.Addr,
+
+    pub fn init(pub_key_hash: runar.Addr) P2PKH {
+        return .{ .pub_key_hash = pub_key_hash };
+    }
+
+    pub fn unlock(self: *const P2PKH, sig: runar.Sig, pub_key: runar.PubKey) void {
+        runar.assert(runar.hash160(pub_key) == self.pub_key_hash);
+        runar.assert(runar.checkSig(sig, pub_key));
+    }
+};
+```
+
+All seven formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash> OP_EQUALVERIFY OP_CHECKSIG`
 
 ---
 
@@ -146,9 +166,9 @@ All six formats produce the same Bitcoin Script: `OP_DUP OP_HASH160 <pubKeyHash>
 Bitcoin Script development today forces a choice between hand-writing opcodes (error-prone, unauditable) or adopting a framework with heavy decorator-based DSLs that obscure what happens on-chain. Rúnar takes a different path:
 
 - **No decorators** — uses native language keywords (`readonly`, `public`, `immutable`, `#[readonly]`)
-- **Write in your language** — TypeScript, Go, Rust, Python, Solidity-like, or Move-style
-- **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust, `pytest` for Python
-- **Four compilers** — TypeScript (reference), Go, Rust, Python — all produce byte-identical output
+- **Write in your language** — TypeScript, Go, Rust, Python, Zig, Solidity-like, or Move-style
+- **Test natively** — `vitest` for TS, `go test` for Go, `cargo test` for Rust, `pytest` for Python, `zig build test` for Zig examples
+- **Five compilers** — TypeScript (reference), Go, Rust, Python, Zig — all produce byte-identical output
 - **Post-quantum ready** — WOTS+ and SLH-DSA (FIPS 205) signature verification in Bitcoin Script
 - **Nanopass architecture** — 6 small passes, each auditable in a single sitting
 - **Full IDE support** — type checking, autocompletion, go-to-definition in every language
@@ -189,11 +209,19 @@ cargo test
 PYTHONPATH=packages/runar-py python3 -m pytest
 ```
 
+### Zig
+
+```bash
+cd examples/zig && zig build test
+cd ../..
+cd compilers/zig && zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runar.zig
+```
+
 ---
 
 ## Test Your Contracts
 
-Every contract format has native testing support. Business logic tests run the contract as real code in the host language. Rúnar compile checks verify the contract will produce valid Bitcoin Script.
+The maintained frontends all have native test workflows. Go, Rust, and Python tests execute contract logic directly in the host language; Zig example tests live next to the contracts and combine compile checks, direct contract execution where the current Zig surface supports it, and Zig-native helper/runtime tests.
 
 **TypeScript** (vitest):
 ```typescript
@@ -252,13 +280,22 @@ def test_unlock():
     c.unlock(mock_sig(), pk)
 ```
 
+**Zig** (`zig build test`):
+```bash
+cd examples/zig
+zig build test
+```
+
+Zig example tests live next to the contracts under `examples/zig/` and use `packages/runar-zig` for compile checks, fixtures, direct-execution coverage on simpler contracts, and native helper/runtime coverage.
+
 ---
 
 ## Supported Formats
 
 | Format | Extension | Compilers | IDE Support | Status |
 |--------|-----------|-----------|-------------|--------|
-| TypeScript | `.runar.ts` | TS, Go, Rust, Python | Full (`tsc`) | **Stable** |
+| TypeScript | `.runar.ts` | TS, Go, Rust, Python, Zig | Full (`tsc`) | **Stable** |
+| Zig | `.runar.zig` | TS, Zig | Full (`zls`) | Experimental |
 | Go | `.runar.go` | Go, Python | Full (`gopls`) | Experimental |
 | Rust DSL | `.runar.rs` | Rust, Python | Full (`rust-analyzer`) | Experimental |
 | Python | `.runar.py` | TS, Go, Rust, Python | Full (`pyright`) | Experimental |
@@ -269,6 +306,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ```
   .runar.ts ──┐
+  .runar.zig ──┤
   .runar.sol ──┤
   .runar.move ─┤
   .runar.py ───┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
@@ -280,7 +318,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 
 ## Example Contracts
 
-16 example contracts demonstrate all major patterns:
+21 example contracts demonstrate the major contract patterns implemented across the maintained native-language frontends:
 
 | Contract | Pattern | Stateful | Multi-method |
 |----------|---------|----------|-------------|
@@ -300,17 +338,25 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [ConvergenceProof](examples/ts/convergence-proof/) | Convergence proof pattern | No | No |
 | [ECDemo](examples/ts/ec-demo/) | EC point operations | No | No |
 | [BoundedCounter](examples/ts/property-initializers/) | Property initializers with defaults | Yes | Yes |
+| [P2Blake3PKH](examples/ts/p2blake3pkh/) | BLAKE3-based pay-to-hash | No | No |
+| [TicTacToe](examples/ts/tic-tac-toe/) | Stateful game logic | Yes | Yes |
+| [Blake3Test](examples/ts/blake3/) | BLAKE3 compression/hash built-ins | No | No |
+| [Sha256CompressTest](examples/ts/sha256-compress/) | SHA-256 compression builtin | No | No |
+| [Sha256FinalizeTest](examples/ts/sha256-finalize/) | SHA-256 finalize builtin | No | No |
 
-11 contracts are available in all 6 formats (TypeScript, Go, Rust, Solidity, Move, Python). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, and Python.
+All 21 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. A 16-contract subset is also available in `sol/` and `move/`.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
+  zig/p2pkh/         P2PKH.runar.zig + P2PKH_test.zig
   go/p2pkh/          P2PKH.runar.go + P2PKH_test.go
   rust/p2pkh/        P2PKH.runar.rs + P2PKH_test.rs
   sol/p2pkh/         P2PKH.runar.sol + P2PKH.test.ts
   move/p2pkh/        P2PKH.runar.move + P2PKH.test.ts
   python/p2pkh/      P2PKH.runar.py + test_p2pkh.py
 ```
+
+The Zig example tree is backed by `packages/runar-zig` and a shared runner at `examples/zig/examples_test.zig`.
 
 ---
 
@@ -339,8 +385,9 @@ Rúnar defines a **canonical IR conformance boundary** at the ANF level. Any com
 - The **Go compiler** produces identical output for all example contracts including post-quantum
 - The **Rust compiler** produces identical output for all example contracts including post-quantum
 - The **Python compiler** produces identical output for all example contracts including post-quantum
+- The **Zig compiler** produces identical output for the conformance suite and benchmarked example workloads
 
-The conformance suite in `conformance/` contains 25 golden-file tests (including WOTS+, SLH-DSA, and EC primitives). All four compilers must pass the same suite.
+The conformance suite in `conformance/` contains 27 golden-file tests (including WOTS+, SLH-DSA, SHA-256, BLAKE3, and EC primitives). The maintained compilers target the same suite.
 
 ### Contract Model
 
@@ -373,10 +420,12 @@ packages/
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
   runar-py/            # Python package: types, mock crypto, real hashes, deployment SDK
+  runar-zig/           # Zig package: native testing/runtime helpers and compile checks
 compilers/
   go/                 # Go compiler (tree-sitter + native Go frontend)
   rust/               # Rust compiler (SWC + native Rust frontend)
   python/             # Python compiler (native Python frontend)
+  zig/                # Zig compiler (native Zig + TypeScript frontends)
 conformance/          # Cross-compiler conformance test suite
 examples/
   ts/                 # TypeScript contracts + tests
@@ -385,6 +434,7 @@ examples/
   sol/                # Solidity-like contracts + tests
   move/               # Move-style contracts + tests
   python/             # Python contracts + tests
+  zig/                # Zig contracts + adjacent Zig tests
   sdk-usage/          # SDK usage reference docs (not runnable)
 end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
 spec/                 # Language specification

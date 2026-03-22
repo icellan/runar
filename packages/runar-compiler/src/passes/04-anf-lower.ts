@@ -188,7 +188,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       }
 
       // Build augmented params list for ABI
-      const augmentedParams: ParamNode[] = [...method.params];
+      const augmentedParams: ParamNode[] = method.params.filter(param => !isStatefulContextParam(param));
       if (needsChangeOutput) {
         augmentedParams.push(
           { kind: 'param', name: '_changePKH', type: { kind: 'primitive_type', name: 'Ripemd160' } },
@@ -337,6 +337,10 @@ class LoweringContext {
       }
     }
     return null;
+  }
+
+  isStatefulContextParam(name: string): boolean {
+    return this.getParamType(name) === 'StatefulContext';
   }
 
   /** Look up the type of a contract property by name. Returns the type string or null. */
@@ -745,6 +749,12 @@ function lowerMemberExpr(
     }
   }
 
+  if (expr.object.kind === 'identifier' &&
+      ctx.isStatefulContextParam(expr.object.name) &&
+      expr.property === 'txPreimage') {
+    return ctx.emit({ kind: 'load_param', name: 'txPreimage' });
+  }
+
   // General member access: lower the object, then emit a method_call placeholder
   const objRef = lowerExprToRef(expr.object, ctx);
   return ctx.emit({ kind: 'method_call', object: objRef, method: expr.property, args: [] });
@@ -798,6 +808,7 @@ function lowerCallExpr(
   ctx: LoweringContext,
 ): string {
   const callee = expr.callee;
+  const normalizedAddOutputArgs = flattenAddOutputArgs(expr.args);
 
   // super(...) call -- emit property initializations
   if (callee.kind === 'identifier' && callee.name === 'super') {
@@ -825,7 +836,7 @@ function lowerCallExpr(
 
   // this.addOutput(satoshis, val1, val2, ...) -> special node
   if (callee.kind === 'property_access' && callee.property === 'addOutput') {
-    const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
     const satoshis = argRefs[0]!;
     const stateValues = argRefs.slice(1);
     const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
@@ -845,6 +856,34 @@ function lowerCallExpr(
 
   // this.getStateScript() -> special node
   if (callee.kind === 'property_access' && callee.property === 'getStateScript') {
+    return ctx.emit({ kind: 'get_state_script' });
+  }
+  if (callee.kind === 'member_expr' &&
+      callee.object.kind === 'identifier' &&
+      ctx.isStatefulContextParam(callee.object.name) &&
+      callee.property === 'addOutput') {
+    const argRefs = normalizedAddOutputArgs.map(arg => lowerExprToRef(arg, ctx));
+    const satoshis = argRefs[0]!;
+    const stateValues = argRefs.slice(1);
+    const ref = ctx.emit({ kind: 'add_output', satoshis, stateValues, preimage: '' });
+    ctx.addOutputRef(ref);
+    return ref;
+  }
+  if (callee.kind === 'member_expr' &&
+      callee.object.kind === 'identifier' &&
+      ctx.isStatefulContextParam(callee.object.name) &&
+      callee.property === 'addRawOutput') {
+    const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    const satoshis = argRefs[0]!;
+    const scriptBytes = argRefs[1]!;
+    const ref = ctx.emit({ kind: 'add_raw_output', satoshis, scriptBytes });
+    ctx.addOutputRef(ref);
+    return ref;
+  }
+  if (callee.kind === 'member_expr' &&
+      callee.object.kind === 'identifier' &&
+      ctx.isStatefulContextParam(callee.object.name) &&
+      callee.property === 'getStateScript') {
     return ctx.emit({ kind: 'get_state_script' });
   }
   if (callee.kind === 'member_expr' &&
@@ -886,6 +925,17 @@ function lowerCallExpr(
   const calleeRef = lowerExprToRef(callee, ctx);
   const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
   return ctx.emit({ kind: 'method_call', object: calleeRef, method: 'call', args: argRefs });
+}
+
+function isStatefulContextParam(param: ParamNode): boolean {
+  return param.type.kind === 'custom_type' && param.type.name === 'StatefulContext';
+}
+
+function flattenAddOutputArgs(args: Expression[]): Expression[] {
+  if (args.length === 2 && args[1]?.kind === 'array_literal') {
+    return [args[0]!, ...args[1].elements];
+  }
+  return args;
 }
 
 function lowerTernaryExpr(

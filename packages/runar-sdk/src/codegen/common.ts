@@ -188,6 +188,23 @@ export function mapTypeToPython(abiType: string): string {
   return PYTHON_TYPE_MAP[abiType] ?? 'Any';
 }
 
+const ZIG_TYPE_MAP: Record<string, string> = {
+  bigint: 'i64',
+  boolean: 'bool',
+  Sig: '[]const u8',
+  PubKey: '[]const u8',
+  ByteString: '[]const u8',
+  Addr: '[]const u8',
+  Ripemd160: '[]const u8',
+  Sha256: '[]const u8',
+  Point: '[]const u8',
+  SigHashPreimage: '[]const u8',
+};
+
+export function mapTypeToZig(abiType: string): string {
+  return ZIG_TYPE_MAP[abiType] ?? '[]const u8';
+}
+
 // ---------------------------------------------------------------------------
 // Name conversion utilities
 // ---------------------------------------------------------------------------
@@ -245,7 +262,7 @@ export function rustSdkValueExpr(abiType: string, varName: string): string {
 // Codegen context builder
 // ---------------------------------------------------------------------------
 
-export type TargetLang = 'ts' | 'go' | 'rust' | 'python';
+export type TargetLang = 'ts' | 'go' | 'rust' | 'python' | 'zig';
 
 interface CodegenParam {
   name: string;
@@ -299,22 +316,25 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
   const mapType = lang === 'go' ? mapTypeToGo
     : lang === 'rust' ? mapTypeToRust
     : lang === 'python' ? mapTypeToPython
+    : lang === 'zig' ? mapTypeToZig
     : mapTypeToTS;
 
   const safeName = lang === 'go' ? safeGoMethodName
     : lang === 'rust' ? safeRustMethodName
     : lang === 'python' ? safePythonMethodName
+    : lang === 'zig' ? safeRustMethodName
     : safeMethodName;
 
   const nullExpr = lang === 'go' ? 'nil'
     : lang === 'rust' ? 'SdkValue::Auto'
     : lang === 'python' ? 'None'
+    : lang === 'zig' ? 'null'
     : 'null';
 
   // Constructor params
   const ctorParams = artifact.abi.constructor.params;
   const constructorParams: CodegenParam[] = ctorParams.map((p, i) => ({
-    name: lang === 'go' ? toPascalCase(p.name) : (lang === 'rust' || lang === 'python') ? toSnakeCase(p.name) : p.name,
+    name: lang === 'go' ? toPascalCase(p.name) : (lang === 'rust' || lang === 'python' || lang === 'zig') ? toSnakeCase(p.name) : p.name,
     type: mapType(p.type),
     abiType: p.type,
     isLast: i === ctorParams.length - 1,
@@ -344,7 +364,7 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
     const methodName = safeName(method.name);
 
     const userParams: CodegenParam[] = userParamsRaw.map((p, i) => ({
-      name: lang === 'go' ? toPascalCase(p.name) : (lang === 'rust' || lang === 'python') ? toSnakeCase(p.name) : p.name,
+      name: lang === 'go' ? toPascalCase(p.name) : (lang === 'rust' || lang === 'python' || lang === 'zig') ? toSnakeCase(p.name) : p.name,
       type: mapType(p.abiType),
       abiType: p.abiType,
       isLast: i === userParamsRaw.length - 1,
@@ -374,7 +394,7 @@ export function buildCodegenContext(artifact: RunarArtifact, lang: TargetLang): 
     const sigParams: CodegenSigParam[] = sigParamsRaw.map((sp, i) => {
       const idx = sdkArgsRaw.findIndex((p) => p.name === sp.name);
       return {
-        name: lang === 'go' ? toPascalCase(sp.name) : (lang === 'rust' || lang === 'python') ? toSnakeCase(sp.name) : sp.name,
+        name: lang === 'go' ? toPascalCase(sp.name) : (lang === 'rust' || lang === 'python' || lang === 'zig') ? toSnakeCase(sp.name) : sp.name,
         argIndex: idx,
         isLast: i === sigParamsRaw.length - 1,
       };

@@ -5,15 +5,33 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+type Lang = 'ts' | 'zig';
+
+interface InitOptions {
+  lang: Lang;
+}
+
 /**
  * Initialize a new Rúnar project with scaffolded directory structure,
  * configuration files, and a sample contract.
  */
-export async function initCommand(name?: string): Promise<void> {
+export async function initCommand(name: string | undefined, options: InitOptions): Promise<void> {
+  const lang = options.lang;
+  if (lang !== 'ts' && lang !== 'zig') {
+    console.error(`Unsupported language: ${lang}. Supported: ts, zig`);
+    process.exitCode = 1;
+    return;
+  }
+
   const projectName = name ?? 'my-runar-project';
   const projectDir = path.resolve(process.cwd(), projectName);
 
-  console.log(`Initializing Rúnar project: ${projectName}`);
+  console.log(`Initializing Rúnar project: ${projectName} (${lang})`);
+
+  if (lang === 'zig') {
+    scaffoldZig(projectDir, projectName);
+    return;
+  }
 
   // Create directory structure
   const dirs = [
@@ -422,4 +440,106 @@ contract.connect(provider, signer);
   console.log(`  cd ${projectName}`);
   console.log('  npm install');
   console.log('  npm run build               # compile + codegen');
+}
+
+// ---------------------------------------------------------------------------
+// Zig scaffolding
+// ---------------------------------------------------------------------------
+
+function scaffoldZig(projectDir: string, projectName: string): void {
+  fs.mkdirSync(path.join(projectDir, 'src'), { recursive: true });
+
+  fs.writeFileSync(path.join(projectDir, 'build.zig'), `const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const runar_dep = b.dependency("runar-zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const runar_module = runar_dep.module("runar");
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/P2PKH_test.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    tests.root_module.addImport("runar", runar_module);
+
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run contract tests");
+    test_step.dependOn(&run_tests.step);
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'build.zig.zon'), `.{
+    .name = "${projectName}",
+    .version = .{ 0, 1, 0 },
+    .fingerprint = 0x0000000000000000,
+    .dependencies = .{
+        .@"runar-zig" = .{
+            .url = "https://github.com/icellan/runar/archive/refs/heads/main.tar.gz",
+            .lazy = true,
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'src', 'P2PKH.runar.zig'), `const runar = @import("runar");
+
+pub const P2PKH = struct {
+    pub const Contract = runar.SmartContract;
+
+    pubKeyHash: runar.Addr,
+
+    pub fn init(pubKeyHash: runar.Addr) P2PKH {
+        return .{ .pubKeyHash = pubKeyHash };
+    }
+
+    pub fn unlock(self: *const P2PKH, sig: runar.Sig, pubKey: runar.PubKey) void {
+        runar.assert(runar.hash160(pubKey) == self.pubKeyHash);
+        runar.assert(runar.checkSig(sig, pubKey));
+    }
+};
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'src', 'P2PKH_test.zig'), `const std = @import("std");
+const runar = @import("runar");
+
+fn compileCheck(comptime basename: []const u8) !void {
+    const result = try runar.compileCheckSource(
+        std.testing.allocator,
+        @embedFile(basename),
+        basename,
+    );
+    defer result.deinit(std.testing.allocator);
+    if (!result.ok()) {
+        for (result.messages) |message| {
+            std.debug.print("compile-check {s}: {s}\\n", .{ basename, message });
+        }
+        return error.CompileCheckFailed;
+    }
+}
+
+test "compile-check P2PKH.runar.zig" {
+    try compileCheck("P2PKH.runar.zig");
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, '.gitignore'), `zig-out/
+.zig-cache/
+.zig-global-cache/
+.zig-local-cache/
+`);
+
+  console.log(`Project created at: ${projectDir}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  cd ${projectName}`);
+  console.log('  zig build test              # run contract compile-check tests');
 }

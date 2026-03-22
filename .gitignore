@@ -17,3 +17,7 @@ __pycache__/
 *.egg-info/
 .venv/
 compilers/go/runar*-go
+.zig-cache/
+.zig-global-cache/
+.zig-local-cache/
+zig-out/

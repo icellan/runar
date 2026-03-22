@@ -9,6 +9,7 @@
  *   - `.runar.py`   → Python (hand-written tokenizer with INDENT/DEDENT + recursive descent)
  *   - `.runar.go`   → Go (hand-written tokenizer + recursive descent, extends ParserCore)
  *   - `.runar.rs`   → Rust (hand-written tokenizer + recursive descent, extends ParserCore)
+ *   - `.runar.zig`  → Zig (hand-written tokenizer + recursive descent, extends ParserCore)
  */
 
 import {
@@ -48,6 +49,7 @@ import { parseMoveSource } from './01-parse-move.js';
 import { parsePythonSource } from './01-parse-python.js';
 import { parseGoSource } from './01-parse-go.js';
 import { parseRustSource } from './01-parse-rust.js';
+import { parseZigSource } from './01-parse-zig.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -83,6 +85,9 @@ export function parse(source: string, fileName?: string): ParseResult {
   }
   if (file.endsWith('.runar.rs')) {
     return parseRustSource(source, file);
+  }
+  if (file.endsWith('.runar.zig')) {
+    return parseZigSource(source, file);
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
@@ -1136,4 +1141,3 @@ function locFromNode(node: Node, file: string): SourceLocation {
     column: lineAndCol.column - 1, // 0-based
   };
 }
-

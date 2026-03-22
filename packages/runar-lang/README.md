@@ -313,7 +313,7 @@ Stateless hash-based signatures supporting multiple signings per keypair. Six pa
 | `verifySLHDSA_SHA2_192s` | 192-bit | small | 16,224 bytes |
 | `verifySLHDSA_SHA2_192f` | 192-bit | fast | 35,664 bytes |
 | `verifySLHDSA_SHA2_256s` | 256-bit | small | 29,792 bytes |
-| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 49,856 bytes |
+| `verifySLHDSA_SHA2_256f` | 256-bit | fast | 48,736 bytes |
 
 All SLH-DSA functions share the same signature: `(msg: ByteString, sig: ByteString, pubkey: ByteString) => boolean`.
 

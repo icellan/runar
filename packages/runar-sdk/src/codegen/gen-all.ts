@@ -27,7 +27,7 @@ function loadTemplate(lang: TargetLang): string {
   // packages/runar-sdk/src/codegen/gen-all.ts → codegen/templates/
   const thisDir = path.dirname(fileURLToPath(import.meta.url));
   const templateDir = path.resolve(thisDir, '../../../../codegen/templates');
-  const ext = lang === 'python' ? 'py' : lang === 'rust' ? 'rs' : lang;
+  const ext = lang === 'python' ? 'py' : lang === 'rust' ? 'rs' : lang === 'zig' ? 'zig' : lang;
   const templatePath = path.join(templateDir, `wrapper.${ext}.mustache`);
 
   const content = fs.readFileSync(templatePath, 'utf8');
@@ -58,6 +58,11 @@ export function generateRust(artifact: RunarArtifact): string {
 /** Generate a typed Python wrapper from a compiled Runar artifact. */
 export function generatePython(artifact: RunarArtifact): string {
   return generate(artifact, 'python');
+}
+
+/** Generate a typed Zig wrapper from a compiled Runar artifact. */
+export function generateZig(artifact: RunarArtifact): string {
+  return generate(artifact, 'zig');
 }
 
 /**

@@ -17,6 +17,7 @@ export { parseMoveSource } from './passes/01-parse-move.js';
 export { parsePythonSource } from './passes/01-parse-python.js';
 export { parseGoSource } from './passes/01-parse-go.js';
 export { parseRustSource } from './passes/01-parse-rust.js';
+export { parseZigSource } from './passes/01-parse-zig.js';
 
 export { validate } from './passes/02-validate.js';
 export type { ValidationResult } from './passes/02-validate.js';

@@ -466,7 +466,7 @@ export function verifySLHDSA_SHA2_256s(_msg: ByteString, _sig: ByteString, _pubk
 
 /**
  * Verify an SLH-DSA-SHA2-256f (SPHINCS+) signature.
- * NIST FIPS 205, 256-bit security, fast signatures (49,856 bytes).
+ * NIST FIPS 205, 256-bit security, fast signatures (48,736 bytes).
  */
 export function verifySLHDSA_SHA2_256f(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
   return compilerStub('verifySLHDSA_SHA2_256f');

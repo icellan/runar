@@ -678,10 +678,10 @@ Built-in implementations: `LocalSigner` (in-memory key, testing/CLI), `ExternalS
 
 ## Cross-Compiler Workflow
 
-All four compilers (TypeScript, Go, Rust, Python) produce byte-identical Bitcoin Script for the same contract. You can:
+The maintained compilers (TypeScript, Go, Rust, Python, Zig) target byte-identical Bitcoin Script for the same contract on the shared conformance corpus. You can:
 
-1. **Write** in any format (`.runar.ts`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`, `.runar.py`)
-2. **Test** with the native test runner (`vitest`, `go test`, `cargo test`, `pytest`)
+1. **Write** in any supported format (`.runar.ts`, `.runar.zig`, `.runar.go`, `.runar.rs`, `.runar.sol`, `.runar.move`, `.runar.py`)
+2. **Test** with the native test runner (`vitest`, `cd examples/zig && zig build test`, `go test`, `cargo test`, `pytest`)
 3. **Compile** with any compiler
 4. **Deploy** the same artifact from any language
 
@@ -693,13 +693,13 @@ runar-go --ir Counter-anf.json -o Counter.json
 runar-rust --ir Counter-anf.json -o Counter.json
 ```
 
-All four produce identical `script` hex. The conformance test suite validates this.
+Compilers that consume the same ANF IR produce identical `script` hex. The conformance test suite validates this on the shared corpus.
 
 ---
 
 ## Deployment SDKs
 
-Deployment SDKs are available in all four languages. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
+Deployment SDKs are available in TypeScript, Go, Rust, and Python. Each provides the same API surface: `RunarContract` for lifecycle management, `Provider` for blockchain access, and `Signer` for key operations.
 
 ### Go SDK (`packages/runar-go/`)
 

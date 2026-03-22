@@ -1,0 +1,11 @@
+# Source-mode cross-implementation benchmark set.
+# Shared parity-clean workload for Zig, Rust, and TypeScript.
+
+ec-demo
+function-patterns
+math-demo
+oracle-price
+post-quantum-wallet
+post-quantum-wots
+stateful-counter
+convergence-proof

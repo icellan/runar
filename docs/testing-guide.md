@@ -4,9 +4,9 @@ This guide covers how to test Rúnar smart contracts at every level, from unit t
 
 ---
 
-## Unit Testing with Vitest
+## TypeScript Unit Testing with Vitest
 
-Rúnar uses vitest as its test runner. Contract tests compile a `.runar.ts` file to an artifact, then execute methods against the built-in Script VM.
+TypeScript contract tests use vitest. Contract tests compile a `.runar.ts` file to an artifact, then execute methods against the built-in Script VM.
 
 ### Basic Test Structure
 
@@ -40,6 +40,17 @@ describe('P2PKH', () => {
   });
 });
 ```
+
+## Native Example Test Runners
+
+The maintained native frontends use their own language test runners for the example trees:
+
+- Go: `cd examples/go && go test ./...`
+- Rust: `cd examples/rust && cargo test`
+- Python: `cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest`
+- Zig: `cd examples/zig && zig build test`
+
+The Zig example suite is backed by `packages/runar-zig`, which provides the `runar` module, compile-check helpers, fixtures, and the native helper/runtime surface used by `examples/zig/*/*_test.zig`. Some Zig examples now execute the real contract module directly; others still rely on mirror coverage where the current Zig execution model is not yet natural enough.
 
 ### Running Tests
 
@@ -689,7 +700,7 @@ Both paths must agree on valid signatures (accept) and invalid signatures (rejec
 
 ### Conformance Golden Files
 
-`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. All four compilers (TS, Go, Rust, Python) must produce byte-identical output.
+`conformance/tests/post-quantum-wots/` and `conformance/tests/post-quantum-slhdsa/` contain golden `expected-script.hex` files. The maintained compilers with post-quantum support (TS, Go, Rust, Python, Zig) target byte-identical output.
 
 ---
 
@@ -763,7 +774,7 @@ describe('SchnorrZKP contract', () => {
 
 ## Conformance Testing Across Compilers
 
-The conformance suite in `conformance/` ensures all Rúnar compilers (TypeScript, Go, Rust, Python) produce identical output.
+The conformance suite in `conformance/` ensures the maintained Rúnar compilers produce identical output for the shared test corpus.
 
 ### Golden-File Tests
 
@@ -772,6 +783,7 @@ Each test case is a directory containing:
 ```
 conformance/tests/basic-p2pkh/
   basic-p2pkh.runar.ts      # Source contract
+  P2PKH.runar.zig           # Optional alternate-source frontend fixture
   expected-ir.json          # Expected ANF IR (canonical JSON)
   expected-script.hex       # Expected compiled script (hex)
 ```
@@ -790,6 +802,9 @@ pnpm run conformance:rust
 
 # Test the Python compiler
 pnpm run conformance:python
+
+# Test the Zig compiler
+cd compilers/zig && zig build conformance
 ```
 
 The runner compiles each source file, serializes the ANF IR using canonical JSON (RFC 8785), and compares the SHA-256 hash against the expected output. Byte-identical output is required.

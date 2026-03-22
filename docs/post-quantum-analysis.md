@@ -111,7 +111,7 @@ Six SHA-256 parameter sets (pre-implementation projections):
 | SLH-DSA-SHA2-192s | 16,224 B | ~3,200 | ~40 KB | 306 KB | 192-bit |
 | SLH-DSA-SHA2-192f | 35,664 B | ~2,100 | ~60 KB | 905 KB | 192-bit |
 | SLH-DSA-SHA2-256s | 29,792 B | ~4,500 | ~60 KB | 417 KB | 256-bit |
-| SLH-DSA-SHA2-256f | 49,856 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
+| SLH-DSA-SHA2-256f | 48,736 B | ~3,000 | ~80 KB | 848 KB | 256-bit |
 
 > **Note:** The "Script est." column contains pre-implementation projections that significantly underestimated the actual script sizes. The "Measured script" column shows the real sizes after implementation. The 4-10x difference is due to the overhead of tweakable hashing (each SHA-256 call requires constructing a 22-byte ADRS for domain separation, adding ~7 opcodes per hash) and the stack management code needed to track named positions across thousands of operations. See the Implementation Status section below for exact byte counts.
 
@@ -151,17 +151,17 @@ The signer must track which keys have been used. Reusing an index breaks securit
 
 ## Implementation Status
 
-Both WOTS+ and SLH-DSA are fully implemented in all four Rúnar compilers (TypeScript, Go, Rust, Python), producing byte-identical Bitcoin Script verified by the conformance suite.
+Both WOTS+ and SLH-DSA are fully implemented in the maintained compiler set (TypeScript, Go, Rust, Python, Zig), producing byte-identical Bitcoin Script on the shared conformance suite.
 
 | Scheme | Measured Script Size | Conformance Status |
 |--------|---------------------|-------------------|
-| WOTS+ (`verifyWOTS`) | 10,530 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-128s | 207,874 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-128f | 612,518 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-192s | 306,049 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-192f | 905,067 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-256s | 416,592 bytes | TS, Go, Rust, Python: byte-identical |
-| SLH-DSA-SHA2-256f | 848,327 bytes | TS, Go, Rust, Python: byte-identical |
+| WOTS+ (`verifyWOTS`) | 10,530 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-128s | 207,874 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-128f | 612,518 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-192s | 306,049 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-192f | 905,067 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-256s | 416,592 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| SLH-DSA-SHA2-256f | 848,327 bytes | TS, Go, Rust, Python, Zig: byte-identical |
 
 ## Hybrid ECDSA + Post-Quantum Patterns
 

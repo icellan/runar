@@ -14,6 +14,7 @@ Before you begin, make sure you have the following installed:
 | **pnpm** | 9.0.0+          | Package manager (workspace support required) |
 | **Go** | 1.26+           | Only needed if you want to build/use the Go compiler |
 | **Rust** | 1.75+           | Only needed if you want to build/use the Rust compiler |
+| **Zig** | 0.15.x           | Only needed if you want to build/use the Zig compiler |
 
 Verify your installations:
 
@@ -21,6 +22,7 @@ Verify your installations:
 node --version   # v20.x.x or higher
 pnpm --version   # 9.x.x or higher
 go version       # go1.26.x or higher (optional)
+zig version      # 0.15.x (optional)
 ```
 
 ---
@@ -36,7 +38,15 @@ pnpm install
 pnpm build
 ```
 
-This builds all packages in the workspace: `runar-lang`, `runar-compiler`, `runar-cli`, `runar-sdk`, `runar-testing`, and `runar-ir-schema`.
+This installs the pnpm workspace packages and builds the JavaScript/TypeScript workspace packages such as `runar-lang`, `runar-compiler`, `runar-cli`, `runar-sdk`, `runar-testing`, and `runar-ir-schema`.
+
+If you also want the Zig tooling, build and test it from source:
+
+```bash
+cd packages/runar-zig && zig build test
+cd ../../examples/zig && zig build test
+cd ../../compilers/zig && zig build
+```
 
 ### As npm Packages
 

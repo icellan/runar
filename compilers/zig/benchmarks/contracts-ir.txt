@@ -1,0 +1,15 @@
+# IR-mode default benchmark set.
+# Keep this list conservative until backend parity is fully green.
+# One contract name per line. Blank lines and comments are ignored.
+
+# Small baseline
+basic-p2pkh
+boolean-logic
+
+# Control flow
+bounded-loop
+if-else
+if-without-else
+
+# Multi-entry contract shape
+multi-method

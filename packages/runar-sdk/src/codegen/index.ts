@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 export { generateTypescript } from './gen-typescript.js';
-export { generateGo, generateRust, generatePython, generateTypescriptFromTemplate } from './gen-all.js';
+export { generateGo, generateRust, generatePython, generateZig, generateTypescriptFromTemplate } from './gen-all.js';
 
 // Re-export analysis utilities for programmatic use
 export {
@@ -18,6 +18,7 @@ export {
   mapTypeToGo,
   mapTypeToRust,
   mapTypeToPython,
+  mapTypeToZig,
   buildCodegenContext,
 } from './common.js';
 export type { TargetLang, CodegenContext } from './common.js';

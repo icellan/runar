@@ -2,13 +2,13 @@
 
 **A collection of example smart contracts demonstrating Rúnar patterns and features.**
 
-Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rust/`, and `python/`. Each format directory contains parallel implementations of the same contracts, plus format-specific extras.
+Examples are organized by input format under `ts/`, `sol/`, `move/`, `go/`, `rust/`, `python/`, and `zig/`. Each directory contains the contract sources for that frontend, and the native-language frontends share the same 21-contract example set with adjacent native tests.
 
 ---
 
 ## Contract Index
 
-Contracts available across all six formats (TypeScript, Solidity-like, Move-style, Go, Rust, Python):
+Contracts available across the native-language frontends (`ts/`, `go/`, `rust/`, `python/`, `zig/`):
 
 | Contract | Directory | Pattern | Complexity | Description |
 |---|---|---|---|---|
@@ -23,16 +23,18 @@ Contracts available across all six formats (TypeScript, Solidity-like, Move-styl
 | **Math Demo** | `*/math-demo/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates built-in math functions (abs, min, max, sqrt, pow, etc.). |
 | **EC Demo** | `*/ec-demo/` | Stateless, EC | Intermediate | Demonstrates EC point operations (ecAdd, ecMul, ecMulGen, etc.). |
 | **Property Initializers** | `*/property-initializers/` | Stateful (OP_PUSH_TX) | Beginner | Demonstrates default values on contract properties. |
+| **Function Patterns** | `{ts,go,rust,python,zig}/function-patterns/` | Stateful (OP_PUSH_TX) | Intermediate | Demonstrates private helper methods and function call patterns. |
+| **Post-Quantum Wallet** | `{ts,go,rust,python,zig}/post-quantum-wallet/` | Stateless, PQ | Advanced | WOTS+ (Winternitz One-Time Signature) wallet for post-quantum security. |
+| **SPHINCS+ Wallet** | `{ts,go,rust,python,zig}/sphincs-wallet/` | Stateless, PQ | Advanced | SLH-DSA-SHA2-128s (SPHINCS+) wallet for stateless post-quantum signatures. |
+| **SchnorrZKP** | `{ts,go,rust,python,zig}/schnorr-zkp/` | Stateless, EC | Advanced | Schnorr zero-knowledge proof using EC point operations. |
+| **Convergence Proof** | `{ts,go,rust,python,zig}/convergence-proof/` | Stateless | Advanced | Demonstrates convergence proof patterns. |
+| **P2Blake3PKH** | `{ts,go,rust,python,zig}/p2blake3pkh/` | Stateless, BLAKE3 | Intermediate | Pay-to-public-key-hash variant using BLAKE3 instead of HASH160. |
+| **Tic-Tac-Toe** | `{ts,go,rust,python,zig}/tic-tac-toe/` | Stateful game | Advanced | Two-player stateful game with turn tracking and board validation. |
+| **BLAKE3 Test** | `{ts,go,rust,python,zig}/blake3/` | Stateless, BLAKE3 | Intermediate | Exercises `blake3Compress` and `blake3` codegen. |
+| **SHA-256 Compress** | `{ts,go,rust,python,zig}/sha256-compress/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 compression builtin directly. |
+| **SHA-256 Finalize** | `{ts,go,rust,python,zig}/sha256-finalize/` | Stateless, SHA-256 | Intermediate | Exercises the SHA-256 finalize builtin directly. |
 
-Contracts available in TypeScript, Go, Rust, and Python:
-
-| Contract | Directory | Pattern | Complexity | Description |
-|---|---|---|---|---|
-| **Function Patterns** | `{ts,go,rust,python}/function-patterns/` | Stateful (OP_PUSH_TX) | Intermediate | Demonstrates private helper methods and function call patterns. |
-| **Post-Quantum Wallet** | `{ts,go,rust,python}/post-quantum-wallet/` | Stateless, PQ | Advanced | WOTS+ (Winternitz One-Time Signature) wallet for post-quantum security. |
-| **SPHINCS+ Wallet** | `{ts,go,rust,python}/sphincs-wallet/` | Stateless, PQ | Advanced | SLH-DSA-SHA2-128s (SPHINCS+) wallet for stateless post-quantum signatures. |
-| **SchnorrZKP** | `{ts,go,rust,python}/schnorr-zkp/` | Stateless, EC | Advanced | Schnorr zero-knowledge proof using EC point operations. |
-| **Convergence Proof** | `{ts,go,rust,python}/convergence-proof/` | Stateless | Advanced | Demonstrates convergence proof patterns. |
+The Solidity-like and Move-style example trees currently cover a 16-contract subset: `auction`, `blake3`, `covenant-vault`, `ec-demo`, `escrow`, `math-demo`, `oracle-price`, `p2blake3pkh`, `p2pkh`, `property-initializers`, `sha256-compress`, `sha256-finalize`, `stateful-counter`, `tic-tac-toe`, `token-ft`, and `token-nft`.
 
 ---
 
@@ -60,6 +62,13 @@ runar compile examples/ts/p2pkh/P2PKH.runar.ts --output artifacts/
 
 ```bash
 runar compile examples/ts/**/*.runar.ts --output artifacts/
+```
+
+### Single Zig Contract
+
+```bash
+cd compilers/zig
+zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runar.zig
 ```
 
 ---
@@ -127,6 +136,28 @@ Python examples are tested as native Python code with mock types from the `runar
 
 ```bash
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest
+```
+
+### Zig
+
+Run the native Zig example suite:
+
+```bash
+cd examples/zig && zig build test
+```
+
+The Zig example runner imports `packages/runar-zig` as the `runar` module and executes the adjacent `*_test.zig` files under each example directory. Today that suite mixes compile checks, direct contract execution on the simpler examples, and helper/runtime-backed tests while the more complex Zig-native execution model continues to mature.
+
+Compile a Zig example through the Zig compiler:
+
+```bash
+cd compilers/zig && zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runar.zig
+```
+
+Run the Zig compiler verification suite:
+
+```bash
+cd compilers/zig && zig build test && zig build conformance
 ```
 
 ---
