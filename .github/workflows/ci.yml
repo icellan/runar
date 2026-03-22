@@ -95,6 +95,11 @@ jobs:
           bundler-cache: true
           working-directory: packages/runar-rb
       - run: cd packages/runar-rb && bundle exec rspec
+      - name: Ruby example tests
+        run: |
+          cd examples/ruby
+          bundle install
+          bundle exec rspec **/*_spec.rb
 
   conformance:
     name: Conformance Tests

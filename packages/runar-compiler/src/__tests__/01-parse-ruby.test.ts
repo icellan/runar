@@ -1387,6 +1387,66 @@ end
   // Integration: full parse via dispatcher
   // ---------------------------------------------------------------------------
 
+  describe('error handling', () => {
+    it('rejects an unknown parent class', () => {
+      const source = `
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+`;
+      const result = parseRubySource(source, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length > 0 || result.contract === null).toBe(true);
+    });
+
+    it('rejects a prop declaration missing its type argument', () => {
+      const source = `
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+`;
+      const result = parseRubySource(source, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length).toBeGreaterThan(0);
+    });
+
+    it('rejects a method body that is never closed with end', () => {
+      const source = `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+`;
+      const result = parseRubySource(source, 'Test.runar.rb');
+      const errors = result.errors.filter(e => e.severity === 'error');
+      expect(errors.length > 0 || result.contract === null).toBe(true);
+    });
+
+    it('handles empty source gracefully', () => {
+      const result = parseRubySource('', 'Test.runar.rb');
+      expect(result.contract === null || result.errors.filter(e => e.severity === 'error').length > 0).toBe(true);
+    });
+
+  });
+
   describe('integration', () => {
     it('parses without errors for all example contracts', () => {
       for (const [name, src] of [

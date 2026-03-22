@@ -753,9 +753,15 @@ class RbParser {
       rewriteBareMethodCalls(method.body, methodNames);
     }
 
-    // Convert implicit returns in private methods: in Ruby, the last
-    // expression in a method body is its return value.  The Runar AST
-    // requires explicit return_statement nodes for this.
+    // Implicit return conversion for private methods.
+    //
+    // Ruby methods implicitly return the value of their last expression.
+    // Private helper methods that return computed values (e.g. a fee
+    // calculation) rely on this — without conversion, the calling method
+    // would receive no return value and the type checker would reject the
+    // call.  We detect ExpressionStatement as the final statement and
+    // promote it to a ReturnStatement so the Runar AST has an explicit
+    // return node for ANF lowering and type checking to consume.
     for (const method of methods) {
       if (method.visibility === 'private' && method.body.length > 0) {
         const last = method.body[method.body.length - 1]!;

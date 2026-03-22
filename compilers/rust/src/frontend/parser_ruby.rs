@@ -920,8 +920,15 @@ impl<'a> RbParser<'a> {
             rewrite_bare_method_calls(&mut method.body, &method_names);
         }
 
-        // Convert implicit returns in private methods: in Ruby, the last
-        // expression in a method body is its return value.
+        // Implicit return conversion for private methods.
+        //
+        // Ruby methods implicitly return the value of their last expression.
+        // Private helper methods that return computed values (e.g. a fee
+        // calculation) rely on this — without conversion, the calling method
+        // would receive no return value and the type checker would reject
+        // the call.  We detect ExpressionStatement as the final statement
+        // and promote it to a ReturnStatement so the AST has an explicit
+        // return node for ANF lowering and type checking to consume.
         for method in &mut methods {
             if method.visibility == Visibility::Private && !method.body.is_empty() {
                 let last_idx = method.body.len() - 1;

@@ -390,3 +390,65 @@ end
 		t.Error("expected non-empty method body for unless statement")
 	}
 }
+
+func TestRubyParser_UnknownParentClass(t *testing.T) {
+	source := `
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+`
+	result := ParseSource([]byte(source), "Test.runar.rb")
+	if result.Contract != nil && len(result.Errors) == 0 {
+		t.Error("expected errors or nil contract for unknown parent class, got neither")
+	}
+}
+
+func TestRubyParser_MissingPropType(t *testing.T) {
+	source := `
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+`
+	result := ParseSource([]byte(source), "Test.runar.rb")
+	if result.Contract != nil && len(result.Errors) == 0 {
+		t.Error("expected errors or nil contract for prop missing type, got neither")
+	}
+}
+
+func TestRubyParser_MissingMethodEnd(t *testing.T) {
+	source := `
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+`
+	result := ParseSource([]byte(source), "Test.runar.rb")
+	if result.Contract != nil && len(result.Errors) == 0 {
+		t.Error("expected errors or nil contract for unclosed method, got neither")
+	}
+}
+
+func TestRubyParser_EmptySource(t *testing.T) {
+	result := ParseSource([]byte(""), "Test.runar.rb")
+	if result.Contract != nil && len(result.Errors) == 0 {
+		t.Error("expected errors or nil contract for empty source, got neither")
+	}
+}

@@ -848,8 +848,15 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 		rewriteBareMethodCallsGo(methods[i].Body, methodNames)
 	}
 
-	// Convert implicit returns in private methods: in Ruby, the last
-	// expression in a method body is its return value.
+	// Implicit return conversion for private methods.
+	//
+	// Ruby methods implicitly return the value of their last expression.
+	// Private helper methods that return computed values (e.g. a fee
+	// calculation) rely on this — without conversion, the calling method
+	// would receive no return value and the type checker would reject the
+	// call.  We detect ExpressionStmt as the final statement and promote
+	// it to a ReturnStmt so the AST has an explicit return node for ANF
+	// lowering and type checking to consume.
 	for i := range methods {
 		if methods[i].Visibility == "private" && len(methods[i].Body) > 0 {
 			last := methods[i].Body[len(methods[i].Body)-1]

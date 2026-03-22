@@ -1886,6 +1886,55 @@ class Foo < Runar::SmartContract
         # Parser should either report errors or return no contract
         assert result.contract is None or len(result.errors) > 0
 
+    def test_unknown_parent_class(self):
+        """Unknown parent class produces errors or no contract."""
+        source = """\
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is None or len(result.errors) > 0
+
+    def test_missing_prop_type(self):
+        """A prop declaration without a type argument produces errors or no contract."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is None or len(result.errors) > 0
+
+    def test_method_without_end(self):
+        """A method body that is never closed produces errors or no contract."""
+        source = """\
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+"""
+        result = parse_source(source, "Foo.runar.rb")
+        assert result.contract is None or len(result.errors) > 0
+
 
 # ---------------------------------------------------------------------------
 # Ruby integration: all example .runar.rb files parse without errors

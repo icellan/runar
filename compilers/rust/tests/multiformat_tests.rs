@@ -439,3 +439,73 @@ fn test_parse_dispatch_unknown_extension() {
         "unrecognized extension should produce errors or no contract; got contract with no errors"
     );
 }
+
+#[test]
+fn test_ruby_unknown_parent_class() {
+    let source = r#"
+class Foo < Runar::UnknownBase
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for unknown parent class"
+    );
+}
+
+#[test]
+fn test_ruby_missing_prop_type() {
+    let source = r#"
+class Foo < Runar::SmartContract
+  prop :x
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+  end
+end
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for prop missing type"
+    );
+}
+
+#[test]
+fn test_ruby_missing_method_end() {
+    let source = r#"
+class Foo < Runar::SmartContract
+  prop :x, Bigint
+  def initialize(x)
+    super(x)
+  end
+  runar_public
+  def bar
+    assert @x > 0
+"#;
+    let result = parse_source(source, Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for unclosed method"
+    );
+}
+
+#[test]
+fn test_ruby_empty_source() {
+    let result = parse_source("", Some("Test.runar.rb"));
+    assert!(
+        result.contract.is_none() || !result.errors.is_empty(),
+        "expected errors or no contract for empty source"
+    );
+}
