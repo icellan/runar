@@ -191,6 +191,12 @@ jobs:
       - name: Ruby integration tests
         run: cd integration/ruby && bundle exec rspec --format documentation
 
+      - name: Ruby end-to-end example tests
+        run: |
+          cd end2end-example/ruby
+          bundle install
+          bundle exec rspec price_bet_spec.rb --format documentation
+
       - name: Stop regtest node
         if: always()
         run: cd integration && ./regtest.sh stop

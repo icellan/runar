@@ -9,6 +9,7 @@
 
 require 'spec_helper'
 require 'digest'
+require 'json'
 require_relative 'PriceBet.runar.rb'
 
 # ---------------------------------------------------------------------------
@@ -198,6 +199,17 @@ RSpec.describe PriceBet do
       expect do
         make_bet.settle(30_000, signed[:rabin_sig_hex], signed[:padding_hex], dummy_sig, BOB_SIG)
       end.not_to raise_error
+    end
+  end
+
+  describe 'compile check' do
+    it 'compiles PriceBet.runar.rb through the Runar compiler pipeline' do
+      json = compile_contract('PriceBet.runar.rb')
+      artifact = JSON.parse(json)
+
+      expect(artifact['contractName']).to eq('PriceBet')
+      expect(artifact['script']).to be_a(String)
+      expect(artifact['script'].length).to be > 0
     end
   end
 
