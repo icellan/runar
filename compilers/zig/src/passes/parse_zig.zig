@@ -655,7 +655,28 @@ const Parser = struct {
     fn parseBlock(self: *Parser) []Statement {
         var stmts: std.ArrayListUnmanaged(Statement) = .empty;
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
-            if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
+            if (self.parseStatement()) |s| {
+                // Merge `var i: i64 = 0; while (i < N) : (i += 1) { ... }` into a single for_stmt
+                // by patching the init_value from the preceding let_decl.
+                if (s == .for_stmt and stmts.items.len > 0) {
+                    const last = &stmts.items[stmts.items.len - 1];
+                    if (last.* == .let_decl) {
+                        const ld = last.let_decl;
+                        if (std.mem.eql(u8, ld.name, s.for_stmt.var_name)) {
+                            const init_val: i64 = if (ld.value) |v| switch (v) {
+                                .literal_int => |n| n,
+                                else => 0,
+                            } else 0;
+                            stmts.items.len -= 1; // pop the let_decl
+                            var merged = s.for_stmt;
+                            merged.init_value = init_val;
+                            stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
+                            continue;
+                        }
+                    }
+                }
+                stmts.append(self.allocator, s) catch {};
+            }
         }
         _ = self.expect(.rbrace);
         return stmts.items;
@@ -666,7 +687,8 @@ const Parser = struct {
             .kw_const => self.parseVarDeclStmt(false),
             .kw_var => self.parseVarDeclStmt(true),
             .kw_if => self.parseIfStmt(),
-            .kw_for, .kw_while => { self.addError("loops not yet supported in .runar.zig"); _ = self.bump(); self.skipToClosingBrace(); return null; },
+            .kw_while => self.parseWhileStmt(),
+            .kw_for => { self.addError("unsupported 'for' syntax in .runar.zig — use 'while' loops instead"); _ = self.bump(); self.skipToClosingBrace(); return null; },
             .kw_return => self.parseReturnStmt(),
             else => self.parseExpressionStatement(),
         };
@@ -706,6 +728,72 @@ const Parser = struct {
             } else { if (self.expect(.lbrace) == null) return null; else_body = self.parseBlock(); }
         }
         return Statement{ .if_stmt = .{ .condition = cond, .then_body = then_body, .else_body = else_body } };
+    }
+
+    /// Parse Zig while loop: `while (cond) : (continue_expr) { body }`
+    ///
+    /// Expects the common Runar pattern:
+    ///   var i: i64 = 0;
+    ///   while (i < 10) : (i += 1) { ... }
+    ///
+    /// Produces a ForStmt. The init_value defaults to 0 and is patched by
+    /// parseBlock when a preceding let_decl matches the loop variable.
+    fn parseWhileStmt(self: *Parser) ?Statement {
+        _ = self.bump(); // consume 'while'
+
+        // Condition: while (i < N)
+        var has_paren = false;
+        if (self.current.kind == .lparen) { has_paren = true; _ = self.bump(); }
+        const cond = self.parseExpression() orelse {
+            self.addError("expected condition expression in while loop");
+            self.skipToClosingBrace();
+            return null;
+        };
+        if (has_paren) _ = self.expect(.rparen);
+
+        // Extract var_name and bound from condition (expected: ident < literal)
+        var var_name: []const u8 = "_loop_var";
+        var bound: i64 = 0;
+        switch (cond) {
+            .binary_op => |bop| {
+                if (bop.op == .lt or bop.op == .lte) {
+                    if (bop.left == .identifier) {
+                        var_name = bop.left.identifier;
+                    }
+                    if (bop.right == .literal_int) {
+                        bound = bop.right.literal_int;
+                    }
+                }
+            },
+            else => {
+                self.addError("while loop condition must be 'variable < constant'");
+            },
+        }
+
+        // Continue expression: : (i += 1)
+        if (self.current.kind == .colon) {
+            _ = self.bump();
+            if (self.current.kind == .lparen) _ = self.bump();
+            // Parse and discard the continue expression (e.g. i += 1)
+            // We only need the var_name and bound which we already extracted
+            _ = self.parseExpression();
+            // Handle compound assignment operator if present
+            if (isCompoundAssignOp(self.current.kind)) {
+                _ = self.bump(); // consume +=, -=, etc.
+                _ = self.parseExpression(); // consume RHS
+            }
+            if (self.current.kind == .rparen) _ = self.bump();
+        }
+
+        if (self.expect(.lbrace) == null) return null;
+        const body = self.parseBlock();
+
+        return Statement{ .for_stmt = .{
+            .var_name = var_name,
+            .init_value = 0, // will be patched by parseBlock if preceding let_decl matches
+            .bound = bound,
+            .body = body,
+        } };
     }
 
     fn parseReturnStmt(self: *Parser) ?Statement {

@@ -206,8 +206,7 @@ const Emitter = struct {
     }
 
     fn assertDepth(self: *const Emitter, expected: usize) Blake3EmitterError!void {
-        _ = self;
-        _ = expected;
+        if (self.depth != expected) return error.UnexpectedDepth;
     }
 
     fn reverseBytes4(self: *Emitter) Blake3EmitterError!void {

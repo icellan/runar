@@ -39,7 +39,7 @@ python3 compilers/zig/scripts/benchmark_compare.py ir
 python3 compilers/zig/scripts/benchmark_compare.py source --with-rust
 ```
 
-For workload definitions, prerequisites, JSON output, committed manifests, and reproducible command examples, see [benchmarks/README.md](/Users/satchmo/code/runar/compilers/zig/benchmarks/README.md).
+For workload definitions, prerequisites, JSON output, committed manifests, and reproducible command examples, see [benchmarks/README.md](benchmarks/README.md).
 
 ## .runar.zig Syntax
 

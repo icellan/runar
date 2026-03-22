@@ -1056,6 +1056,11 @@ const LowerCtx = struct {
         min,
         max,
         within,
+        split,
+        left,
+        int2str,
+        bool_builtin,
+        unpack,
         assert,
         substr,
         reverseBytes,
@@ -1119,6 +1124,11 @@ const LowerCtx = struct {
         .{ "min", .min },
         .{ "max", .max },
         .{ "within", .within },
+        .{ "split", .split },
+        .{ "left", .left },
+        .{ "int2str", .int2str },
+        .{ "bool", .bool_builtin },
+        .{ "unpack", .unpack },
         .{ "assert", .assert },
         .{ "substr", .substr },
         .{ "reverseBytes", .reverseBytes },
@@ -1163,6 +1173,11 @@ const LowerCtx = struct {
         .{ "ecMul", .ecMul },
         .{ "ecPairing", .ecPairing },
         .{ "verifySLHDSA_SHA2_128s", .slhDsaVerify },
+        .{ "verifySLHDSA_SHA2_128f", .slhDsaVerify },
+        .{ "verifySLHDSA_SHA2_192s", .slhDsaVerify },
+        .{ "verifySLHDSA_SHA2_192f", .slhDsaVerify },
+        .{ "verifySLHDSA_SHA2_256s", .slhDsaVerify },
+        .{ "verifySLHDSA_SHA2_256f", .slhDsaVerify },
         .{ "slhDsaVerify", .slhDsaVerify },
         .{ "schnorrVerify", .schnorrVerify },
         .{ "super", .super_call },
@@ -1188,6 +1203,11 @@ const LowerCtx = struct {
             .min => try self.lowerSimpleBinaryBuiltin(bind_name, args, .op_min),
             .max => try self.lowerSimpleBinaryBuiltin(bind_name, args, .op_max),
             .within => try self.lowerWithin(bind_name, args),
+            .split => try self.lowerSplit(bind_name, args),
+            .left => try self.lowerLeft(bind_name, args),
+            .int2str => try self.lowerNum2Bin(bind_name, args),
+            .bool_builtin => try self.lowerSimpleUnaryBuiltin(bind_name, args, .op_0notequal),
+            .unpack => try self.lowerSimpleUnaryBuiltin(bind_name, args, .op_bin2num),
             .assert => try self.lowerAssertBuiltin(bind_name, args),
             .substr => try self.lowerSubstr(bind_name, args),
             .reverseBytes => try self.lowerReverseBytes(bind_name, args),
@@ -1537,6 +1557,31 @@ const LowerCtx = struct {
         try self.emitOp(.op_verify);
         _ = self.stack.pop();
         _ = bind_name;
+    }
+
+    fn lowerSplit(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 2) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]); // data
+        try self.bringToTopAuto(args[1]); // position
+        try self.emitOp(.op_split);
+        // OP_SPLIT consumes data + position, produces left + right (two outputs)
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null); // left part
+        try self.stack.push(self.allocator, bind_name); // right part (top)
+        self.trackDepth();
+    }
+
+    fn lowerLeft(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {
+        if (args.len < 2) return LowerError.InvalidBuiltin;
+        try self.bringToTopAuto(args[0]); // data
+        try self.bringToTopAuto(args[1]); // length
+        try self.emitOp(.op_split);
+        try self.emitOp(.op_drop); // drop right, keep left
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
     }
 
     fn lowerSubstr(self: *LowerCtx, bind_name: []const u8, args: []const []const u8) !void {

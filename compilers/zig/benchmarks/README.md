@@ -18,9 +18,9 @@ The harness is isolated from the compiler implementation:
 - `contracts-source-representative.txt`: larger parity-clean source suite for shareable benchmark summaries
 - `contracts-source-cross-impl.txt`: parity-clean source suite shared across Zig, Rust, and TypeScript
 - `contracts-ir.txt`: default contracts for backend-only benchmarks
-- [`../scripts/benchmark_compare.py`](/Users/satchmo/code/runar/compilers/zig/scripts/benchmark_compare.py): main benchmark runner
-- [`../scripts/ts_compile_source_hex.mjs`](/Users/satchmo/code/runar/compilers/zig/scripts/ts_compile_source_hex.mjs): TS full-source helper
-- [`../scripts/ts_compile_ir_hex.mjs`](/Users/satchmo/code/runar/compilers/zig/scripts/ts_compile_ir_hex.mjs): TS backend-only helper
+- [`../scripts/benchmark_compare.py`](../scripts/benchmark_compare.py): main benchmark runner
+- [`../scripts/ts_compile_source_hex.mjs`](../scripts/ts_compile_source_hex.mjs): TS full-source helper
+- [`../scripts/ts_compile_ir_hex.mjs`](../scripts/ts_compile_ir_hex.mjs): TS backend-only helper
 
 ## What It Benchmarks
 
