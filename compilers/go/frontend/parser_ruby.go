@@ -1724,7 +1724,7 @@ func (p *rbParser) parsePrimary() Expression {
 	// Number literal
 	if tok.kind == rbTokNumber {
 		p.advance()
-		return parseRbNumber(tok.value)
+		return p.parseRbNumber(tok.value)
 	}
 
 	// Boolean literals
@@ -1830,9 +1830,10 @@ func (p *rbParser) parseCallArgs() []Expression {
 	return args
 }
 
-func parseRbNumber(s string) Expression {
+func (p *rbParser) parseRbNumber(s string) Expression {
 	val, err := strconv.ParseInt(s, 0, 64)
 	if err != nil {
+		p.addError(fmt.Sprintf("line %d: invalid number literal %q: %v", p.peek().line, s, err))
 		return BigIntLiteral{Value: 0}
 	}
 	return BigIntLiteral{Value: val}

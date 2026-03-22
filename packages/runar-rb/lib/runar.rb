@@ -145,6 +145,14 @@ module Kernel
     Runar.verify_slh_dsa_sha2_256f(msg, sig, pubkey)
   end
 
+  def sha256_compress(state, block)
+    Runar.sha256_compress(state, block)
+  end
+
+  def sha256_finalize(state, remaining, msg_bit_len)
+    Runar.sha256_finalize(state, remaining, msg_bit_len)
+  end
+
   def blake3_compress(chaining_value, block)
     Runar.blake3_compress(chaining_value, block)
   end
