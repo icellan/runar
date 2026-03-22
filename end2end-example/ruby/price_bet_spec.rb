@@ -34,9 +34,14 @@ def chinese_remainder(a1, m1, a2, m2)
   (a1 * m2 * p1 + a2 * m1 * p2) % m
 end
 
+# DEMO ONLY -- DO NOT USE IN PRODUCTION.
+# These are 130-bit test primes (~65-bit security). For production, use
+# OpenSSL::BN.generate_prime(512, true) for each prime (512-bit primes give
+# roughly 128-bit security against factoring attacks).
+#
 # Generate the deterministic Rabin test keypair.
 # Uses 130-bit primes matching the TypeScript and Go helpers.
-def generate_rabin_key_pair
+def generate_demo_rabin_key_pair
   p_val = 1361129467683753853853498429727072846227
   q_val = 1361129467683753853853498429727082846007
   { p: p_val, q: q_val, n: p_val * q_val }
@@ -53,7 +58,7 @@ def rabin_sign(msg_bytes, kp)
 
   1000.times do |padding|
     target = (hash_bn - padding) % n
-    target += n if target < 0
+    # Ruby % is always non-negative for positive modulus -- no adjustment needed
     next unless quadratic_residue?(target, p_val) && quadratic_residue?(target, q_val)
 
     sp  = target.pow((p_val + 1) / 4, p_val)
@@ -109,7 +114,7 @@ end
 # Shared test fixtures
 # ---------------------------------------------------------------------------
 
-RABIN_KP      = generate_rabin_key_pair.freeze
+RABIN_KP      = generate_demo_rabin_key_pair.freeze
 ORACLE_PUB_HEX = int_to_unsigned_le_hex(RABIN_KP[:n]).freeze
 STRIKE_PRICE  = 50_000
 
@@ -156,6 +161,43 @@ RSpec.describe PriceBet do
       expect do
         bet.settle(60_000, signed[:rabin_sig_hex], signed[:padding_hex], ALICE_SIG, BOB_SIG)
       end.to raise_error(RuntimeError, 'runar: assertion failed')
+    end
+
+    # L1: Oracle signatures are replayable across contracts with the same oracle key.
+    # This is a documented limitation of Rabin signatures — the oracle signs a price
+    # value, not a contract-specific commitment.
+    it 'oracle sig is replayable on another contract with same oracle key (documented limitation)' do
+      signed = sign_price(60_000, RABIN_KP)
+      # Same oracle key, different strike price — the same oracle signature still satisfies
+      # the on-chain verification because verify_rabin_sig only checks sig² + pad ≡ hash(msg).
+      bet2 = PriceBet.new(ALICE_PUB, BOB_PUB, ORACLE_PUB_HEX, 30_000)
+
+      expect do
+        bet2.settle(60_000, signed[:rabin_sig_hex], signed[:padding_hex], ALICE_SIG, BOB_SIG)
+      end.not_to raise_error
+    end
+
+    # L2: The losing party's signature is not verified by the contract.
+    it 'settle: alice wins even when bob_sig is invalid' do
+      # When price > strike Alice wins; bob_sig is present for stack alignment but
+      # the contract does not call checkSig on it.
+      signed    = sign_price(60_000, RABIN_KP)
+      dummy_sig = int_to_unsigned_le_hex(0)
+
+      expect do
+        make_bet.settle(60_000, signed[:rabin_sig_hex], signed[:padding_hex], ALICE_SIG, dummy_sig)
+      end.not_to raise_error
+    end
+
+    it 'settle: bob wins even when alice_sig is invalid' do
+      # When price <= strike Bob wins; alice_sig is present for stack alignment but
+      # the contract does not call checkSig on it.
+      signed    = sign_price(30_000, RABIN_KP)
+      dummy_sig = int_to_unsigned_le_hex(0)
+
+      expect do
+        make_bet.settle(30_000, signed[:rabin_sig_hex], signed[:padding_hex], dummy_sig, BOB_SIG)
+      end.not_to raise_error
     end
   end
 

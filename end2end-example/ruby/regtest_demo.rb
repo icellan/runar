@@ -420,12 +420,15 @@ def chinese_remainder(a1, m1, a2, m2)
   (a1 * m2 * p1 + a2 * m1 * p2) % m
 end
 
-# Generate a Rabin keypair using two 130-bit primes p ≡ q ≡ 3 (mod 4).
+# DEMO ONLY -- DO NOT USE IN PRODUCTION.
+# These are 130-bit test primes (~65-bit security). For production, use
+# OpenSSL::BN.generate_prime(512, true) for each prime (512-bit primes give
+# roughly 128-bit security against factoring attacks).
 #
 # Uses deterministic test primes (same as the integration test suite) to keep
-# prime generation fast in the demo. Replace with OpenSSL::BN.generate_prime
-# for a production key.
-def generate_rabin_key_pair
+# prime generation fast in the demo.
+# WARNING: Never log, display, or persist oracle_keys[:p] or oracle_keys[:q]
+def generate_demo_rabin_key_pair
   p_val = 1361129467683753853853498429727072846227
   q_val = 1361129467683753853853498429727082846007
   { p: p_val, q: q_val, n: p_val * q_val }
@@ -447,7 +450,7 @@ def rabin_sign(msg_bytes, kp)
 
   1000.times do |padding|
     target = (hash_bn - padding) % n
-    target += n if target < 0
+    # Ruby % is always non-negative for positive modulus -- no adjustment needed
     next unless quadratic_residue?(target, p_val) && quadratic_residue?(target, q_val)
 
     sp  = target.pow((p_val + 1) / 4, p_val)
@@ -508,7 +511,7 @@ def main # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/Cyclom
   puts C[:reset]
 
   label('RPC endpoint', RPC_URL)
-  label('RPC user', RPC_USER)
+  label('RPC auth', 'credentials loaded from environment')
 
   # Verify regtest connection
   begin
@@ -571,11 +574,10 @@ def main # rubocop:disable Metrics/MethodLength, Metrics/AbcSize, Metrics/Cyclom
 
   heading('Oracle (Rabin)')
   puts '  Using deterministic 130-bit test primes (p ≡ q ≡ 3 mod 4)...'
-  oracle_keys = generate_rabin_key_pair
-  label('p', oracle_keys[:p].to_s[0, 30] + '...')
-  label('q', oracle_keys[:q].to_s[0, 30] + '...')
-  label('n = p × q', oracle_keys[:n].to_s[0, 40] + '...')
+  oracle_keys = generate_demo_rabin_key_pair
+  # WARNING: Never log, display, or persist oracle_keys[:p] or oracle_keys[:q]
   label('n bit length', "~#{oracle_keys[:n].to_s(2).length} bits")
+  label('n (public key)', oracle_keys[:n].to_s[0, 40] + '...')
   ok('Oracle Rabin keypair generated')
 
   pause unless non_interactive
