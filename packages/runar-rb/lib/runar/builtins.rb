@@ -92,6 +92,136 @@ module Runar
       true
     end
 
+    # -- SHA-256 Compression (real implementation, FIPS 180-4) ----------------
+
+    # SHA-256 round constants (first 32 bits of the fractional parts of the
+    # cube roots of the first 64 primes).
+    SHA256_K = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+      0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+      0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+      0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+      0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+      0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+      0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+      0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+      0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+      0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+      0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+      0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+      0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+      0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ].freeze
+
+    # Right-rotate a 32-bit unsigned integer by n bits.
+    def _sha256_rotr(x, n)
+      ((x >> n) | (x << (32 - n))) & 0xFFFFFFFF
+    end
+    private :_sha256_rotr
+
+    # SHA-256 single-block compression function (FIPS 180-4 Section 6.2.2).
+    #
+    # Performs one round of SHA-256 block compression: message schedule
+    # expansion (W[0..63]), 64 compression rounds with Sigma/Ch/Maj functions
+    # and the K constants, then addition back to the initial state.
+    #
+    # Both state and block are hex-encoded strings. State is 32 bytes (64 hex
+    # chars); block is 64 bytes (128 hex chars). Returns a 32-byte hex string.
+    #
+    # Use the SHA-256 IV as state for the first block:
+    #   6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19
+    def sha256_compress(state, block)
+      state_bytes = [state].pack('H*')
+      block_bytes = [block].pack('H*')
+
+      raise ArgumentError, "state must be 32 bytes, got #{state_bytes.bytesize}" unless state_bytes.bytesize == 32
+      raise ArgumentError, "block must be 64 bytes, got #{block_bytes.bytesize}" unless block_bytes.bytesize == 64
+
+      # Parse state as 8 big-endian uint32 words
+      h = state_bytes.unpack('N8')
+
+      # Parse block as 16 big-endian uint32 words and expand to message schedule
+      w = block_bytes.unpack('N16')
+      (16..63).each do |t|
+        s0 = (_sha256_rotr(w[t - 15], 7) ^ _sha256_rotr(w[t - 15], 18) ^ (w[t - 15] >> 3)) & 0xFFFFFFFF
+        s1 = (_sha256_rotr(w[t - 2], 17) ^ _sha256_rotr(w[t - 2], 19) ^ (w[t - 2] >> 10)) & 0xFFFFFFFF
+        w << ((s1 + w[t - 7] + s0 + w[t - 16]) & 0xFFFFFFFF)
+      end
+
+      # Initialize working variables
+      a, b, c, d, e, f, g, hh = h
+
+      # 64 compression rounds
+      64.times do |t|
+        s1   = (_sha256_rotr(e, 6) ^ _sha256_rotr(e, 11) ^ _sha256_rotr(e, 25)) & 0xFFFFFFFF
+        ch   = ((e & f) ^ (~e & g)) & 0xFFFFFFFF
+        temp1 = (hh + s1 + ch + SHA256_K[t] + w[t]) & 0xFFFFFFFF
+        s0   = (_sha256_rotr(a, 2) ^ _sha256_rotr(a, 13) ^ _sha256_rotr(a, 22)) & 0xFFFFFFFF
+        maj  = ((a & b) ^ (a & c) ^ (b & c)) & 0xFFFFFFFF
+        temp2 = (s0 + maj) & 0xFFFFFFFF
+
+        hh = g
+        g  = f
+        f  = e
+        e  = (d + temp1) & 0xFFFFFFFF
+        d  = c
+        c  = b
+        b  = a
+        a  = (temp1 + temp2) & 0xFFFFFFFF
+      end
+
+      # Add compressed chunk back to state
+      new_state = [
+        (h[0] + a) & 0xFFFFFFFF,
+        (h[1] + b) & 0xFFFFFFFF,
+        (h[2] + c) & 0xFFFFFFFF,
+        (h[3] + d) & 0xFFFFFFFF,
+        (h[4] + e) & 0xFFFFFFFF,
+        (h[5] + f) & 0xFFFFFFFF,
+        (h[6] + g) & 0xFFFFFFFF,
+        (h[7] + hh) & 0xFFFFFFFF
+      ]
+      new_state.pack('N8').unpack1('H*')
+    end
+
+    # SHA-256 finalization with FIPS 180-4 padding.
+    #
+    # Applies SHA-256 padding (append 0x80 byte, zero-pad, append 8-byte
+    # big-endian bit length) and runs the final 1-2 compression rounds:
+    #
+    # - Single-block path (remaining <= 55 bytes): pads to one 64-byte block
+    #   and compresses once.
+    # - Two-block path (56-119 bytes): pads to two 64-byte blocks and
+    #   compresses twice.
+    #
+    # state is a 32-byte hex string (SHA-256 IV for first call, or output of
+    # a prior sha256_compress for multi-block). remaining is a hex string of
+    # unprocessed trailing message bytes (0-119 bytes). msg_bit_len is the
+    # total message length in bits across all blocks. Returns a 32-byte hex string.
+    def sha256_finalize(state, remaining, msg_bit_len)
+      remaining_bytes = [remaining].pack('H*')
+
+      # Append the 0x80 padding byte
+      padded = remaining_bytes + "\x80".b
+
+      if padded.bytesize + 8 <= 64
+        # Single-block path: pad to 56 bytes, then append 8-byte BE bit length
+        padded = padded.ljust(56, "\x00".b)
+        padded += [msg_bit_len].pack('Q>')
+        sha256_compress(state, padded.unpack1('H*'))
+      else
+        # Two-block path: pad to 120 bytes, then append 8-byte BE bit length
+        padded = padded.ljust(120, "\x00".b)
+        padded += [msg_bit_len].pack('Q>')
+        intermediate = sha256_compress(state, padded[0, 64].unpack1('H*'))
+        sha256_compress(intermediate, padded[64, 64].unpack1('H*'))
+      end
+    end
+
+    # -- Mock BLAKE3 Functions -------------------------------------------------
+
     # Mock BLAKE3 single-block compression.
     # In compiled Bitcoin Script this expands to ~10,000 opcodes.
     # Returns 32 zero bytes as hex for business-logic testing.
