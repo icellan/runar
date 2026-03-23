@@ -806,6 +806,10 @@ test "conformance: stateful" {
     try runConformanceTest("stateful");
 }
 
+test "conformance: stateful-bytestring" {
+    try runConformanceTest("stateful-bytestring");
+}
+
 test "conformance: stateful-counter" {
     try runConformanceTest("stateful-counter");
 }
