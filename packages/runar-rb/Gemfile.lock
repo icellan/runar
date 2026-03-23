@@ -41,7 +41,7 @@ PLATFORMS
 DEPENDENCIES
   ostruct
   rspec (~> 3.0)
-  ruby-lsp (~> 0.23)
+  ruby-lsp (~> 0.26)
   runar-lang!
 
 BUNDLED WITH
