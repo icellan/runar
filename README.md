@@ -394,7 +394,7 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [Sha256CompressTest](examples/ts/sha256-compress/) | SHA-256 compression builtin | No | No |
 | [Sha256FinalizeTest](examples/ts/sha256-finalize/) | SHA-256 finalize builtin | No | No |
 
-All 21 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 11 contracts are available in all 8 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. A 16-contract subset is also available in `sol/` and `move/`.
+All 21 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 16 contracts are available in all 8 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -468,7 +468,7 @@ packages/
   runar-sdk/           # Deployment SDK (providers, signers)
   runar-cli/           # CLI tool
   runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
-  runar-rb/            # Ruby gem: types, DSL, mock crypto, real hashes, EC operations
+  runar-rb/            # Ruby gem: types, DSL, mock crypto, real hashes, EC operations, deployment SDK
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
   runar-py/            # Python package: types, mock crypto, real hashes, deployment SDK

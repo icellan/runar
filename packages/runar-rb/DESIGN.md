@@ -11,7 +11,7 @@
 Runar compiles a strict subset of several languages (TypeScript, Go, Rust, Solidity-like, Move-style, Python) into Bitcoin Script. All formats parse into the same `ContractNode` AST, after which the pipeline is identical. This document captures the rationale for adding Ruby as a supported format (`.runar.rb`).
 
 The implementation adds:
-- A hand-written parser (tokenizer + recursive descent) in all three compilers (TypeScript, Go, Rust)
+- A hand-written parser (tokenizer + recursive descent) in all four compilers (TypeScript, Go, Rust, Python)
 - A Ruby gem (`runar-rb`) providing base classes, types, mock crypto, and SDK
 - Example contracts, conformance tests, integration tests, and documentation
 
