@@ -336,15 +336,14 @@ module Runar
       value
     end
 
-    # Named sign_ to avoid conflict with Ruby's Kernel methods.
-    def sign_(n)
+    def sign(n)
       return 1 if n > 0
       return -1 if n < 0
 
       0
     end
 
-    def pow_(base, exp)
+    def pow(base, exp)
       base**exp
     end
 
@@ -357,7 +356,7 @@ module Runar
     end
 
     # Integer square root using Newton's method.
-    def sqrt_(n)
+    def sqrt(n)
       raise ArgumentError, 'sqrt of negative number' if n < 0
       return 0 if n == 0
 
@@ -370,7 +369,7 @@ module Runar
       x
     end
 
-    def gcd_(a, b)
+    def gcd(a, b)
       a = a.abs
       b = b.abs
       a, b = b, a % b while b != 0
@@ -378,17 +377,17 @@ module Runar
     end
 
     # Returns quotient only (matching Runar's divmod which returns quotient).
-    def divmod_(a, b)
+    def divmod(a, b)
       a / b
     end
 
-    def log2_(n)
+    def log2(n)
       return 0 if n <= 0
 
       n.bit_length - 1
     end
 
-    def bool_cast(n)
+    def bool(n)
       n != 0
     end
 
@@ -400,7 +399,7 @@ module Runar
     # Operate on hex-encoded strings.
 
     # Byte length of a hex string (hex.length / 2).
-    def len_(data)
+    def len(data)
       data.length / 2
     end
 

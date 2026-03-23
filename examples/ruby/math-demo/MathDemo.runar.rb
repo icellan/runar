@@ -28,22 +28,22 @@ class MathDemo < Runar::StatefulSmartContract
 
   runar_public
   def normalize
-    @value = sign_(@value)
+    @value = sign(@value)
   end
 
   runar_public exp: Bigint
   def exponentiate(exp)
-    @value = pow_(@value, exp)
+    @value = pow(@value, exp)
   end
 
   runar_public
   def square_root
-    @value = sqrt_(@value)
+    @value = sqrt(@value)
   end
 
   runar_public other: Bigint
   def reduce_gcd(other)
-    @value = gcd_(@value, other)
+    @value = gcd(@value, other)
   end
 
   runar_public numerator: Bigint, denominator: Bigint
@@ -53,6 +53,6 @@ class MathDemo < Runar::StatefulSmartContract
 
   runar_public
   def compute_log2
-    @value = log2_(@value)
+    @value = log2(@value)
   end
 end

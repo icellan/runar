@@ -190,8 +190,8 @@ module Kernel
     Runar.reverse_bytes(data)
   end
 
-  def len_(data)
-    Runar.len_(data)
+  def len(data)
+    Runar.len(data)
   end
 
   # Math
@@ -207,12 +207,12 @@ module Kernel
     Runar.within(x, lo, hi)
   end
 
-  def sign_(n)
-    Runar.sign_(n)
+  def sign(n)
+    Runar.sign(n)
   end
 
-  def pow_(base, exp)
-    Runar.pow_(base, exp)
+  def pow(base, exp)
+    Runar.pow(base, exp)
   end
 
   def mul_div(a, b, c)
@@ -223,24 +223,24 @@ module Kernel
     Runar.percent_of(amount, bps)
   end
 
-  def sqrt_(n)
-    Runar.sqrt_(n)
+  def sqrt(n)
+    Runar.sqrt(n)
   end
 
-  def gcd_(a, b)
-    Runar.gcd_(a, b)
+  def gcd(a, b)
+    Runar.gcd(a, b)
   end
 
-  def divmod_(a, b)
-    Runar.divmod_(a, b)
+  def divmod(a, b)
+    Runar.divmod(a, b)
   end
 
-  def log2_(n)
-    Runar.log2_(n)
+  def log2(n)
+    Runar.log2(n)
   end
 
-  def bool_cast(n)
-    Runar.bool_cast(n)
+  def bool(n)
+    Runar.bool(n)
   end
 
   # Test helpers

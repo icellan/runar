@@ -190,14 +190,6 @@ _SPECIAL_NAMES: dict[str, str] = {
     "safe_div": "safediv",
     "safe_mod": "safemod",
     "div_mod": "divmod",
-    # Ruby trailing-underscore variants (used to avoid clashing with Ruby built-ins
-    # such as ``Kernel#p``, ``Integer#pow``, etc.). These strip the trailing ``_``
-    # and map to their canonical Rúnar built-in names.
-    "sign_": "sign",
-    "pow_": "pow",
-    "sqrt_": "sqrt",
-    "gcd_": "gcd",
-    "log2_": "log2",
     # SHA-256 partial verification (explicit for documentation clarity)
     "sha256_compress": "sha256Compress",
     "sha256_finalize": "sha256Finalize",

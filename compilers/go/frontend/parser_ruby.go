@@ -541,13 +541,6 @@ var rbSpecialNames = map[string]string{
 	"log2":   "log2",
 	"divmod": "divmod",
 
-	// Trailing-underscore variants (avoid Ruby Kernel method clashes)
-	"sign_": "sign",
-	"pow_":  "pow",
-	"sqrt_": "sqrt",
-	"gcd_":  "gcd",
-	"log2_": "log2",
-
 	// EC constants
 	"EC_P": "EC_P",
 	"EC_N": "EC_N",

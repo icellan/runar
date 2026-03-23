@@ -142,26 +142,26 @@ RSpec.describe Runar::Builtins do
       expect(ctx.clamp(15, 0, 10)).to eq(10)
     end
 
-    it 'sign_ returns -1, 0, or 1' do
-      expect(ctx.sign_(5)).to eq(1)
-      expect(ctx.sign_(0)).to eq(0)
-      expect(ctx.sign_(-3)).to eq(-1)
+    it 'sign returns -1, 0, or 1' do
+      expect(ctx.sign(5)).to eq(1)
+      expect(ctx.sign(0)).to eq(0)
+      expect(ctx.sign(-3)).to eq(-1)
     end
 
-    it 'pow_ computes exponentiation' do
-      expect(ctx.pow_(2, 10)).to eq(1024)
+    it 'pow computes exponentiation' do
+      expect(ctx.pow(2, 10)).to eq(1024)
     end
 
-    it 'sqrt_ computes integer square root' do
-      expect(ctx.sqrt_(0)).to eq(0)
-      expect(ctx.sqrt_(1)).to eq(1)
-      expect(ctx.sqrt_(4)).to eq(2)
-      expect(ctx.sqrt_(10)).to eq(3)
+    it 'sqrt computes integer square root' do
+      expect(ctx.sqrt(0)).to eq(0)
+      expect(ctx.sqrt(1)).to eq(1)
+      expect(ctx.sqrt(4)).to eq(2)
+      expect(ctx.sqrt(10)).to eq(3)
     end
 
-    it 'gcd_ computes greatest common divisor' do
-      expect(ctx.gcd_(12, 8)).to eq(4)
-      expect(ctx.gcd_(-12, 8)).to eq(4)
+    it 'gcd computes greatest common divisor' do
+      expect(ctx.gcd(12, 8)).to eq(4)
+      expect(ctx.gcd(-12, 8)).to eq(4)
     end
 
     it 'within checks half-open range' do
@@ -170,10 +170,10 @@ RSpec.describe Runar::Builtins do
       expect(ctx.within(-1, 0, 10)).to be false
     end
 
-    it 'bool_cast returns true for non-zero' do
-      expect(ctx.bool_cast(1)).to be true
-      expect(ctx.bool_cast(0)).to be false
-      expect(ctx.bool_cast(-1)).to be true
+    it 'bool returns true for non-zero' do
+      expect(ctx.bool(1)).to be true
+      expect(ctx.bool(0)).to be false
+      expect(ctx.bool(-1)).to be true
     end
   end
 
@@ -265,9 +265,9 @@ RSpec.describe Runar::Builtins do
   end
 
   describe 'byte operations' do
-    it 'len_ returns byte length of hex string' do
-      expect(ctx.len_('aabb')).to eq(2)
-      expect(ctx.len_('aabbcc')).to eq(3)
+    it 'len returns byte length of hex string' do
+      expect(ctx.len('aabb')).to eq(2)
+      expect(ctx.len('aabbcc')).to eq(3)
     end
 
     it 'cat concatenates hex strings' do

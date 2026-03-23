@@ -112,27 +112,6 @@ Special cases:
 - `verify_wots` maps to `verifyWOTS` (not `verifyWots`)
 - All SLH-DSA variants have explicit mappings (e.g., `verify_slh_dsa_sha2_128s` → `verifySLHDSA_SHA2_128s`)
 
-#### Trailing underscore convention
-
-Five built-in math functions use a trailing underscore in Ruby contracts to avoid conflicts with Ruby's built-in `Kernel`, `Integer`, and `Math` methods. The underscore is stripped during AST conversion:
-
-| Ruby name | AST name | Reason for underscore |
-|-----------|----------|-----------------------|
-| `sign_` | `sign` | Avoids conflict with `Comparable#<=>` / `sign` conventions |
-| `pow_` | `pow` | Shadows `Integer#pow` |
-| `sqrt_` | `sqrt` | Shadows `Math.sqrt` |
-| `gcd_` | `gcd` | Shadows `Integer#gcd` |
-| `log2_` | `log2` | Shadows `Math.log2` |
-
-Use the underscore form in Ruby contracts; generated scripts use the plain name:
-
-```ruby
-result = sqrt_(value)    # compiles to: sqrt(value) in the AST
-bits = log2_(n)          # compiles to: log2(n) in the AST
-```
-
-The unadorned names (`sqrt`, `gcd`, etc.) are also accepted by the parser but will call the Ruby standard library method at runtime rather than the Runar builtin — always use the underscore form to avoid subtle bugs.
-
 ### Property Access
 
 Ruby contracts use instance variables (`@var`) to access properties:

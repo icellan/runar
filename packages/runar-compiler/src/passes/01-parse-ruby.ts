@@ -413,12 +413,6 @@ function mapBuiltinName(name: string): string {
     'EC_G': 'EC_G',
     // Additional hash builtins
     'bin2num': 'bin2num',
-    // Trailing-underscore variants (avoid Ruby Kernel method clashes)
-    'sign_': 'sign',
-    'pow_': 'pow',
-    'sqrt_': 'sqrt',
-    'gcd_': 'gcd',
-    'log2_': 'log2',
   };
   const special = SPECIAL[name];
   if (special) return special;
