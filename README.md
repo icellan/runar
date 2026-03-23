@@ -468,7 +468,7 @@ packages/
   runar-sdk/           # Deployment SDK (providers, signers)
   runar-cli/           # CLI tool
   runar-go/            # Go package: types, mock crypto, real hashes, CompileCheck(), deployment SDK
-  runar-rb/            # Ruby gem: types, DSL, mock crypto, real hashes, EC operations
+  runar-rb/            # Ruby gem: types, DSL, mock crypto, real hashes, EC operations, deployment SDK
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macros (#[runar::contract], #[public], etc.)
   runar-py/            # Python package: types, mock crypto, real hashes, deployment SDK
