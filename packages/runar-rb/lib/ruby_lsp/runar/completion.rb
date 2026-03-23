@@ -23,82 +23,14 @@ module RubyLsp
     # function names in .runar.rb contract files.
     #
     # See module-level comment for full documentation.
-    # rubocop:disable Metrics/ClassLength — constant arrays for all builtins
     class Completion
       # All Runar type constant names, matching the constants defined in
       # Runar::Types.
-      TYPE_NAMES = %w[
-        Bigint
-        ByteString
-        PubKey
-        Sig
-        Addr
-        Point
-        Boolean
-        Sha256
-        Ripemd160
-        SigHashPreimage
-        RabinPubKey
-        RabinSig
-        OpCodeType
-        Int
-      ].freeze
+      TYPE_NAMES = Hover::TYPE_DOCS.keys.freeze
 
-      # All Runar builtin function names, extracted from Runar::Builtins.
-      # Listed in the same logical groupings as the source module.
-      BUILTIN_NAMES = %w[
-        assert
-        check_sig
-        check_multi_sig
-        check_preimage
-        verify_rabin_sig
-        verify_wots
-        verify_slh_dsa_sha2_128s
-        verify_slh_dsa_sha2_128f
-        verify_slh_dsa_sha2_192s
-        verify_slh_dsa_sha2_192f
-        verify_slh_dsa_sha2_256s
-        verify_slh_dsa_sha2_256f
-        sha256_compress
-        sha256_finalize
-        blake3_compress
-        blake3_hash
-        sha256
-        ripemd160
-        hash160
-        hash256
-        extract_locktime
-        extract_output_hash
-        extract_amount
-        extract_version
-        extract_sequence
-        extract_hash_prevouts
-        extract_outpoint
-        safediv
-        safemod
-        clamp
-        sign
-        pow
-        mul_div
-        percent_of
-        sqrt
-        gcd
-        div_mod
-        log2
-        bool
-        within
-        len
-        cat
-        substr
-        left
-        right
-        reverse_bytes
-        num2bin
-        bin2num
-        mock_sig
-        mock_pub_key
-        mock_preimage
-      ].freeze
+      # All Runar builtin function names, derived from Hover::BUILTIN_DOCS
+      # to keep a single source of truth.
+      BUILTIN_NAMES = Hover::BUILTIN_DOCS.keys.freeze
 
       # Instantiate the listener and register it with the dispatcher.
       #
@@ -203,6 +135,5 @@ module RubyLsp
         )
       end
     end
-    # rubocop:enable Metrics/ClassLength
   end
 end
