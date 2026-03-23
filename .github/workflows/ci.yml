@@ -154,6 +154,77 @@ jobs:
           done
           exit $fail
 
+      - name: Ruby format conformance (source → hex)
+        run: |
+          fail=0
+          for dir in conformance/tests/*/; do
+            name=$(basename "$dir")
+
+            # Find the .runar.rb source file: prefer a local file in the test dir,
+            # fall back to source.json pointer if present.
+            rb_file=""
+            local_rb=$(ls "$dir"*.runar.rb 2>/dev/null | head -1)
+            if [ -n "$local_rb" ]; then
+              rb_file="$local_rb"
+            elif [ -f "$dir/source.json" ]; then
+              rel=$(jq -r '.sources[".runar.rb"] // empty' "$dir/source.json")
+              if [ -n "$rel" ]; then
+                rb_file="$dir/$rel"
+              fi
+            fi
+
+            if [ -z "$rb_file" ] || [ ! -f "$rb_file" ]; then
+              echo "=== $name === SKIP (no .runar.rb)"
+              continue
+            fi
+
+            echo -n "=== $name === "
+
+            go_out=$(./runar-go --source "$rb_file" --hex --disable-constant-folding 2>&1)
+            go_exit=$?
+            rust_out=$(./runar-compiler-rust --source "$rb_file" --hex --disable-constant-folding 2>&1)
+            rust_exit=$?
+
+            if [ $go_exit -ne 0 ]; then
+              echo "FAIL (Go compiler error on $name)"
+              echo "$go_out"
+              fail=1
+              continue
+            fi
+            if [ $rust_exit -ne 0 ]; then
+              echo "FAIL (Rust compiler error on $name)"
+              echo "$rust_out"
+              fail=1
+              continue
+            fi
+
+            # Normalize: lowercase, strip all whitespace
+            go_hex=$(echo "$go_out" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+            rust_hex=$(echo "$rust_out" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+
+            test_fail=0
+
+            if [ "$go_hex" != "$rust_hex" ]; then
+              echo "MISMATCH Go vs Rust (Go: ${#go_hex} chars, Rust: ${#rust_hex} chars)"
+              fail=1
+              test_fail=1
+            fi
+
+            if [ -f "$dir/expected-script.hex" ]; then
+              golden=$(cat "$dir/expected-script.hex" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+              if [ "$go_hex" != "$golden" ]; then
+                echo "MISMATCH vs golden (compiler: ${#go_hex} chars, golden: ${#golden} chars)"
+                fail=1
+                test_fail=1
+              fi
+            fi
+
+            if [ $test_fail -eq 0 ]; then
+              echo "OK (${#go_hex} hex chars)"
+            fi
+          done
+          exit $fail
+
   integration:
     name: Integration Tests
     needs: [typescript, go, rust, python, ruby]
