@@ -321,6 +321,28 @@ Zero external dependencies. EC operations use pure Ruby integer arithmetic with 
 
 ---
 
+## IDE Support (Ruby LSP)
+
+The `runar-lang` gem includes a built-in [Ruby LSP](https://shopify.github.io/ruby-lsp/) addon that provides IDE features for `.runar.rb` contract files:
+
+- **Hover documentation** for builtin functions (`sha256`, `check_sig`, `pow`, etc.), type constants (`Bigint`, `ByteString`, etc.), and DSL methods (`prop`, `runar_public`, `params`)
+- **Autocompletion** for type constants and builtin function names
+- **Go-to-definition** for properties declared with `prop`
+- **Instance variable indexing** — `prop :count, Bigint` teaches the LSP that `@count` exists
+
+### Setup
+
+1. Add `runar-lang` to your project's `Gemfile`:
+   ```ruby
+   gem 'runar-lang', path: 'packages/runar-rb'
+   ```
+2. Install the [Ruby LSP extension](https://marketplace.visualstudio.com/items?itemName=Shopify.ruby-lsp) in VS Code
+3. Run `bundle install` — the addon is discovered automatically
+
+The addon only activates for files ending in `.runar.rb`, so it won't interfere with regular Ruby code in the same project.
+
+---
+
 ## Design Rationale
 
 Ruby has no native type annotations for instance variables or method parameters. The `prop`/`runar_public`/`params` DSL was chosen over alternatives (YARD tags, Sorbet, RBS) because types in Runar are **compilation inputs that drive code generation**, not documentation. The DSL keeps types in the code channel where Ruby's constant resolution provides free validation (a typo raises `NameError` immediately).

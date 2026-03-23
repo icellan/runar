@@ -346,7 +346,7 @@ Zig example tests live next to the contracts under `examples/zig/` and use `pack
 | Zig | `.runar.zig` | TS, Zig | Full (`zls`) | Experimental |
 | Go | `.runar.go` | Go, Python | Full (`gopls`) | Experimental |
 | Rust DSL | `.runar.rs` | Rust, Python | Full (`rust-analyzer`) | Experimental |
-| Ruby | `.runar.rb` | TS, Go, Rust, Python | Basic | Experimental |
+| Ruby | `.runar.rb` | TS, Go, Rust, Python | Full (Ruby LSP) | Experimental |
 | Python | `.runar.py` | TS, Go, Rust, Python | Full (`pyright`) | Experimental |
 | Solidity-like | `.runar.sol` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
 | Move-style | `.runar.move` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
