@@ -42,11 +42,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    const bsvz_module = b.createModule(.{
-        .root_source_file = b.path("../../../bsvz/src/lib.zig"),
+    const bsvz_dep = b.dependency("bsvz", .{
         .target = target,
         .optimize = optimize,
     });
+    const bsvz_module = bsvz_dep.module("bsvz");
 
     const runar_module = createRunarModule(b, target, optimize, frontend_module, bsvz_module);
 
