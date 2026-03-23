@@ -39,7 +39,7 @@ All formats parse into the same `ContractNode` AST. From that point forward, the
 | Feature | TypeScript | Zig | Solidity | Move | Python | Ruby | Go | Rust |
 |---------|-----------|-----|----------|------|--------|------|-----|------|
 | Status | **Stable** | Experimental | Experimental | Experimental | Experimental | Experimental | Experimental | Experimental |
-| IDE support | Full (`tsc`) | Full (`zls`) | Syntax highlighting | Syntax highlighting | Full (`pyright`) | Full (Solargraph) | Full (`go vet`) | Full (`rustc`) |
+| IDE support | Full (`tsc`) | Full (`zls`) | Syntax highlighting | Syntax highlighting | Full (`pyright`) | Basic | Full (`go vet`) | Full (`rustc`) |
 | TS compiler | Yes | Yes | Yes | Yes | Yes | Yes | No | No |
 | Zig compiler | Yes | **Yes (native)** | No | No | No | No | No | No |
 | Go compiler | Yes | No | Yes | Yes | Yes | Yes | **Yes (native)** | No |
