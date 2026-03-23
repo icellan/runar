@@ -194,7 +194,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: [typescript, go, rust, python, ruby]
+    needs: [typescript, go, rust, python, ruby, zig-compiler]
     runs-on: ubuntu-latest
     env:
       RPC_URL: http://localhost:18332
@@ -221,6 +221,9 @@ jobs:
           ruby-version: '3.3'
           bundler-cache: true
           working-directory: integration/ruby
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
@@ -255,6 +258,12 @@ jobs:
 
       - name: Ruby integration tests
         run: cd integration/ruby && bundle exec rspec --format documentation
+
+      - name: Zig integration tests
+        run: |
+          cd compilers/go && go build -o runar-go .
+          cd ../../integration/zig && zig build test
+        timeout-minutes: 5
 
       - name: Ruby end-to-end example tests
         run: |
