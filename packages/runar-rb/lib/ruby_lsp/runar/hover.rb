@@ -198,6 +198,7 @@ module RubyLsp
 
         dispatcher.register(self, :on_call_node_enter)
         dispatcher.register(self, :on_constant_read_node_enter)
+        dispatcher.register(self, :on_def_node_enter)
       end
 
       # Handle hover over a method call node.
@@ -210,6 +211,22 @@ module RubyLsp
 
         @response_builder.push(name, category: :title)
         @response_builder.push(doc, category: :documentation)
+      end
+
+      # Handle hover over a method definition.
+      # If the method was preceded by `runar_public` or `params` with type
+      # annotations, show the parameter types.
+      def on_def_node_enter(node)
+        param_types = find_preceding_param_types(node)
+        return if param_types.empty?
+
+        method_name = node.name.to_s
+        type_list = param_types.map { |name, type| "#{name}: #{type}" }.join(', ')
+        @response_builder.push(method_name, category: :title)
+        @response_builder.push(
+          "**Parameter types:** #{type_list}",
+          category: :documentation
+        )
       end
 
       # Handle hover over a constant reference node (e.g. Bigint, ByteString).
@@ -232,6 +249,60 @@ module RubyLsp
         return false unless uri
 
         uri.to_s.end_with?('.runar.rb')
+      end
+
+      # Walks the parent node's children to find a `runar_public` or `params`
+      # call immediately preceding the given DefNode. Returns a hash of
+      # { param_name => type_name } or an empty hash.
+      def find_preceding_param_types(def_node)
+        parent = @node_context.parent
+        return {} unless parent
+
+        # Get the list of child statements from the parent body.
+        children = if parent.respond_to?(:body) && parent.body.respond_to?(:body)
+                     parent.body.body
+                   elsif parent.respond_to?(:statements) && parent.statements.respond_to?(:body)
+                     parent.statements.body
+                   else
+                     []
+                   end
+        return {} unless children.is_a?(Array)
+
+        # Find the def node's index in the sibling list.
+        def_index = children.index { |c| c.equal?(def_node) }
+        return {} unless def_index && def_index > 0
+
+        # Check the immediately preceding sibling is a method call.
+        prev = children[def_index - 1]
+        return {} unless prev.respond_to?(:name) && prev.respond_to?(:arguments)
+
+        name = prev.name.to_s
+        return {} unless name == 'runar_public' || name == 'params'
+
+        extract_type_hash(prev)
+      rescue StandardError
+        {}
+      end
+
+      # Extract { param_name => type_name } from the keyword arguments of a
+      # runar_public or params call node.
+      def extract_type_hash(call_node)
+        args = call_node.arguments&.arguments
+        return {} unless args
+
+        result = {}
+        args.each do |arg|
+          next unless arg.is_a?(Prism::KeywordHashNode)
+
+          arg.elements.each do |pair|
+            next unless pair.is_a?(Prism::AssocNode)
+            next unless pair.key.is_a?(Prism::SymbolNode)
+            next unless pair.value.is_a?(Prism::ConstantReadNode)
+
+            result[pair.key.value] = pair.value.name.to_s
+          end
+        end
+        result
       end
 
       # Extract the URI from node_context. Ruby LSP exposes the document URI

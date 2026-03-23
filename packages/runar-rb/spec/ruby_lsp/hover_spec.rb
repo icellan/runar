@@ -92,6 +92,7 @@ def build_node_context(uri_string)
   uri = URI.parse(uri_string)
   ctx = Object.new
   ctx.define_singleton_method(:document_uri) { uri }
+  ctx.define_singleton_method(:parent) { nil }
   ctx
 end
 
@@ -130,6 +131,61 @@ def constant_read_node(const_name)
   node = Object.new
   node.define_singleton_method(:name) { const_name }
   node
+end
+
+# Builds a fake DefNode with the given method name.
+def def_node(method_name)
+  node = Object.new
+  node.define_singleton_method(:name) { method_name }
+  node
+end
+
+# Builds a fake runar_public/params CallNode with keyword type arguments.
+# type_hash: { 'sig' => 'Sig', 'pub_key' => 'PubKey' }
+def annotation_call_node(method_name, type_hash)
+  pairs = type_hash.map do |param_name, type_name|
+    key = Object.new
+    key.define_singleton_method(:is_a?) { |klass| klass == Prism::SymbolNode }
+    key.define_singleton_method(:value) { param_name }
+
+    value = Object.new
+    value.define_singleton_method(:is_a?) { |klass| klass == Prism::ConstantReadNode }
+    value.define_singleton_method(:name) { type_name }
+
+    pair = Object.new
+    pair.define_singleton_method(:is_a?) { |klass| klass == Prism::AssocNode }
+    pair.define_singleton_method(:key) { key }
+    pair.define_singleton_method(:value) { value }
+    pair
+  end
+
+  kw_hash = Object.new
+  kw_hash.define_singleton_method(:is_a?) { |klass| klass == Prism::KeywordHashNode }
+  kw_hash.define_singleton_method(:elements) { pairs }
+
+  args = Object.new
+  args.define_singleton_method(:arguments) { [kw_hash] }
+
+  node = Object.new
+  node.define_singleton_method(:name) { method_name.to_sym }
+  node.define_singleton_method(:is_a?) { |klass| klass == Prism::CallNode }
+  node.define_singleton_method(:arguments) { args }
+  node
+end
+
+# Builds a node_context with a parent that contains the given children as
+# sibling statements. Used for testing def-node hover with preceding annotations.
+def build_node_context_with_parent(uri_string, children)
+  uri = URI.parse(uri_string)
+  body = Object.new
+  body.define_singleton_method(:body) { children }
+  parent = Object.new
+  parent.define_singleton_method(:body) { body }
+
+  ctx = Object.new
+  ctx.define_singleton_method(:document_uri) { uri }
+  ctx.define_singleton_method(:parent) { parent }
+  ctx
 end
 
 # ---------------------------------------------------------------------------
@@ -340,6 +396,82 @@ RSpec.describe RubyLsp::Runar::Hover do
     it 'provides documentation for params' do
       the_hover.on_call_node_enter(call_node(:params))
       expect(the_builder.pushes).not_to be_empty
+    end
+  end
+
+  # -------------------------------------------------------------------------
+  # Method definition hover — parameter types from runar_public / params
+  # -------------------------------------------------------------------------
+
+  describe '#on_def_node_enter — parameter type annotations' do
+    def build_hover_with_parent(uri_string, children)
+      builder    = build_response_builder
+      context    = build_node_context_with_parent(uri_string, children)
+      dispatcher = build_dispatcher
+
+      hover = described_class.new(builder, context, dispatcher)
+      [hover, builder, dispatcher]
+    end
+
+    it 'shows parameter types when preceded by runar_public with types' do
+      annotation = annotation_call_node(:runar_public, { 'sig' => 'Sig', 'pub_key' => 'PubKey' })
+      method_def = def_node(:unlock)
+      children = [annotation, method_def]
+
+      hover, builder, _dispatcher = build_hover_with_parent(runar_uri, children)
+      hover.on_def_node_enter(method_def)
+
+      doc = builder.pushes.find { |p| p[:category] == :documentation }
+      expect(doc).not_to be_nil
+      expect(doc[:text]).to include('sig: Sig')
+      expect(doc[:text]).to include('pub_key: PubKey')
+    end
+
+    it 'shows parameter types when preceded by params' do
+      annotation = annotation_call_node(:params, { 'amount' => 'Bigint' })
+      method_def = def_node(:transfer)
+      children = [annotation, method_def]
+
+      hover, builder, _dispatcher = build_hover_with_parent(runar_uri, children)
+      hover.on_def_node_enter(method_def)
+
+      doc = builder.pushes.find { |p| p[:category] == :documentation }
+      expect(doc).not_to be_nil
+      expect(doc[:text]).to include('amount: Bigint')
+    end
+
+    it 'shows method name as title' do
+      annotation = annotation_call_node(:runar_public, { 'sig' => 'Sig' })
+      method_def = def_node(:unlock)
+      children = [annotation, method_def]
+
+      hover, builder, _dispatcher = build_hover_with_parent(runar_uri, children)
+      hover.on_def_node_enter(method_def)
+
+      title = builder.pushes.find { |p| p[:category] == :title }
+      expect(title).not_to be_nil
+      expect(title[:text]).to eq('unlock')
+    end
+
+    it 'does nothing when def has no preceding annotation' do
+      method_def = def_node(:unlock)
+      other_call = call_node(:sha256)
+      children = [other_call, method_def]
+
+      hover, builder, _dispatcher = build_hover_with_parent(runar_uri, children)
+      hover.on_def_node_enter(method_def)
+
+      expect(builder.pushes).to be_empty
+    end
+
+    it 'does nothing when def is the first statement' do
+      method_def = def_node(:unlock)
+      children = [method_def]
+
+      hover, builder, _dispatcher = build_hover_with_parent(runar_uri, children)
+      hover.on_def_node_enter(method_def)
+
+      expect(builder.pushes).to be_empty
     end
   end
 
