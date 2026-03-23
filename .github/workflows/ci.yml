@@ -196,7 +196,7 @@ jobs:
 
   integration:
     name: Integration Tests
-    needs: [typescript, go, rust, python, ruby, zig-compiler]
+    needs: [typescript, go, rust, python, ruby, zig-compiler, zig-sdk]
     runs-on: ubuntu-latest
     env:
       RPC_URL: http://localhost:18332
