@@ -138,8 +138,16 @@ fn lowerProperties(allocator: Allocator, contract: ContractNode) LowerError![]AN
             .type_info = prop.type_info,
             .readonly = prop.readonly,
         };
+        // Only emit initialValue for properties that have defaults AND are NOT
+        // constructor params. This matches the TS compiler: properties with
+        // initializers are excluded from auto-generated constructors.
         if (prop.initializer) |init_expr| {
-            anf_prop.initial_value = extractLiteralValue(init_expr);
+            const is_ctor_param = for (contract.constructor.params) |p| {
+                if (std.mem.eql(u8, p.name, prop.name)) break true;
+            } else false;
+            if (!is_ctor_param) {
+                anf_prop.initial_value = extractLiteralValue(init_expr);
+            }
         }
         try result.append(allocator, anf_prop);
     }
@@ -171,12 +179,13 @@ fn extractLiteralValue(expr: Expression) ?ConstValue {
 fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMethod {
     var result: std.ArrayListUnmanaged(ANFMethod) = .empty;
 
-    // Lower constructor
+    // Lower constructor — do NOT register constructor params with addParam;
+    // the TS/Go/Rust/Python compilers treat constructor param names as property
+    // references (load_prop) rather than parameter references (load_param).
     {
         var ctor_ctx = LowerCtx.init(allocator, contract);
         defer ctor_ctx.deinit();
         for (contract.constructor.params) |param| {
-            ctor_ctx.addParam(param.name);
             if (isByteType(param.type_info)) ctor_ctx.markByteTyped(param.name);
         }
         try lowerConstructorBody(&ctor_ctx, contract.constructor);
@@ -565,6 +574,8 @@ fn lowerStatement(ctx: *LowerCtx, stmt: Statement) LowerError!void {
             }
         },
         .assign => |assign| {
+            // Skip Zig discard assignments: _ = self; _ = expr;
+            if (std.mem.eql(u8, assign.target, "_")) return;
             const value_ref = try lowerExprToRef(ctx, assign.value);
             // Check if target is a property
             if (ctx.isProperty(assign.target)) {
@@ -843,6 +854,19 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
         if (c.args.len >= 1) {
             const preimage_ref = try lowerExprToRef(ctx, c.args[0]);
             return try ctx.emit(.{ .check_preimage = .{ .preimage = preimage_ref } });
+        }
+    }
+
+    // Check if callee is a contract method (private helper) — emit method_call with @this
+    for (ctx.contract.methods) |method| {
+        if (std.mem.eql(u8, method.name, c.callee)) {
+            const arg_refs = try lowerArgs(ctx, c.args);
+            const this_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
+            return try ctx.emit(.{ .method_call = .{
+                .object = this_ref,
+                .method = c.callee,
+                .args = arg_refs,
+            } });
         }
     }
 

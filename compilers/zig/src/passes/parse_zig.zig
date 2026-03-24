@@ -588,9 +588,16 @@ const Parser = struct {
             }
         }
 
+        // Auto-generate super() args from constructor params (matching TS/Go/Rust/Python
+        // behavior — all format parsers auto-inject super() as the first statement).
+        var super_args: std.ArrayListUnmanaged(Expression) = .empty;
+        for (params.items) |param| {
+            super_args.append(self.allocator, .{ .identifier = param.name }) catch {};
+        }
+
         return .{
             .params = params.items,
-            .super_args = &.{},
+            .super_args = super_args.items,
             .assignments = assignments.items,
         };
     }
@@ -1034,6 +1041,32 @@ const Parser = struct {
                 break :blk Expression{ .identifier = tok.text };
             },
             .lparen => blk: { _ = self.bump(); const inner = self.parseExpression() orelse break :blk null; _ = self.expect(.rparen); break :blk inner; },
+            .at_sign => blk: {
+                // Zig builtins: @divTrunc(a,b) → a/b, @rem(a,b) → a%b, @mod(a,b) → a%b,
+                // @intCast(expr) → expr, @as(T, expr) → expr
+                _ = self.bump();
+                if (self.current.kind != .ident) { self.addError("expected builtin name after '@'"); break :blk null; }
+                const builtin_name = self.bump().text;
+                _ = self.expect(.lparen) orelse break :blk null;
+                const args = self.parseArgList();
+                if (std.mem.eql(u8, builtin_name, "divTrunc") or std.mem.eql(u8, builtin_name, "divFloor")) {
+                    if (args.len != 2) { self.addError("@divTrunc/@divFloor expects 2 arguments"); break :blk null; }
+                    break :blk self.makeBinOp(.div, args[0], args[1]);
+                } else if (std.mem.eql(u8, builtin_name, "rem") or std.mem.eql(u8, builtin_name, "mod")) {
+                    if (args.len != 2) { self.addError("@rem/@mod expects 2 arguments"); break :blk null; }
+                    break :blk self.makeBinOp(.mod, args[0], args[1]);
+                } else if (std.mem.eql(u8, builtin_name, "intCast")) {
+                    if (args.len != 1) { self.addError("@intCast expects 1 argument"); break :blk null; }
+                    break :blk args[0];
+                } else if (std.mem.eql(u8, builtin_name, "as")) {
+                    // @as(T, expr) — type coercion, return the expression
+                    if (args.len != 2) { self.addError("@as expects 2 arguments"); break :blk null; }
+                    break :blk args[1];
+                } else {
+                    self.addErrorFmt("unsupported Zig builtin: @{s}", .{builtin_name});
+                    break :blk null;
+                }
+            },
             else => blk: { self.addErrorFmt("unexpected token: '{s}'", .{self.current.text}); break :blk null; },
         };
     }

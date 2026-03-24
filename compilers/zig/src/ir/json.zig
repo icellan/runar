@@ -553,7 +553,7 @@ fn writePropertiesArray(writer: anytype, properties: []const types.ANFProperty, 
         try writeIndent(writer, depth + 1);
         try writer.writeAll("{\n");
 
-        // Sorted keys: initialValue, name, readonly, type
+        // Sorted keys: initialValue (optional), name, readonly, type
         if (prop.initial_value) |initial_value| {
             try writeIndent(writer, depth + 2);
             try writeJsonString(writer, "initialValue");

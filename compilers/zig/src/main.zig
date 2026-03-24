@@ -246,8 +246,11 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         },
     };
 
-    // Pass 2: Validate
-    const val_result = try validate_pass.validate(work_allocator, contract);
+    // Pass 2: Validate (use Zig mode for .runar.zig — relaxes super() requirement)
+    const val_result = if (format == .runar_zig)
+        try validate_pass.validateZig(work_allocator, contract)
+    else
+        try validate_pass.validate(work_allocator, contract);
     if (val_result.errors.len > 0) {
         for (val_result.errors) |diag| std.debug.print("  validation error: {s}\n", .{diag.message});
         return error.ValidationFailed;
@@ -269,7 +272,7 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         program = try constant_fold.foldConstants(work_allocator, program);
     }
 
-    // Pass 4.5: EC Optimize
+    // Pass 4.5: EC Optimize (always-on, matches TS compiler behavior)
     program = try ec_optimizer.optimize(work_allocator, program);
 
     // --emit-ir: output canonical ANF IR JSON and stop
