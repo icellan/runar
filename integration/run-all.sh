@@ -68,32 +68,39 @@ fi
 
 echo ""
 echo "=== Ruby integration tests ==="
-# Requires Ruby >= 3.1 and bundler; skip when unavailable.
-if ruby -e 'exit(RUBY_VERSION >= "3.1" ? 0 : 1)' 2>/dev/null && command -v bundle >/dev/null 2>&1; then
-  if [ ! -d ruby/vendor ]; then
-    (cd ruby && bundle install --quiet)
+# Find a Ruby >= 3.1 — Homebrew installs to /opt/homebrew/opt/ruby/bin on
+# Apple Silicon and /usr/local/opt/ruby/bin on Intel, but macOS ships 2.6
+# at /usr/bin/ruby which is too old.
+RUBY_BIN=""
+for candidate in ruby /opt/homebrew/opt/ruby/bin/ruby /usr/local/opt/ruby/bin/ruby; do
+  if $candidate -e 'exit(RUBY_VERSION >= "3.1" ? 0 : 1)' 2>/dev/null; then
+    RUBY_BIN="$candidate"
+    break
   fi
-  if (cd ruby && bundle exec rspec --format documentation); then
+done
+if [ -z "$RUBY_BIN" ]; then
+  echo "--- Ruby: FAILED (no Ruby >= 3.1 found) ---"
+  FAILED=$((FAILED + 1))
+else
+  RUBY_DIR="$(dirname "$RUBY_BIN")"
+  BUNDLE="$RUBY_DIR/bundle"
+  [ -x "$BUNDLE" ] || BUNDLE=bundle  # fall back to PATH
+  (cd ruby && "$BUNDLE" install --quiet 2>/dev/null || "$BUNDLE" install --quiet)
+  if (cd ruby && "$BUNDLE" exec rspec --format documentation); then
     echo "--- Ruby: PASSED ---"
   else
     echo "--- Ruby: FAILED ---"
     FAILED=$((FAILED + 1))
   fi
-else
-  echo "--- Ruby: SKIPPED (requires Ruby >= 3.1 with bundler) ---"
 fi
 
 echo ""
 echo "=== Zig integration tests ==="
-if command -v zig >/dev/null 2>&1; then
-  if (cd zig && zig build test); then
-    echo "--- Zig: PASSED ---"
-  else
-    echo "--- Zig: FAILED ---"
-    FAILED=$((FAILED + 1))
-  fi
+if (cd zig && zig build test); then
+  echo "--- Zig: PASSED ---"
 else
-  echo "--- Zig: SKIPPED (zig not found) ---"
+  echo "--- Zig: FAILED ---"
+  FAILED=$((FAILED + 1))
 fi
 
 if $STOP_NODE; then
