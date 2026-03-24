@@ -68,24 +68,32 @@ fi
 
 echo ""
 echo "=== Ruby integration tests ==="
-# Ensure gems are installed
-if [ ! -d ruby/vendor ]; then
-  (cd ruby && bundle install --quiet)
-fi
-if (cd ruby && bundle exec rspec --format documentation); then
-  echo "--- Ruby: PASSED ---"
+# Requires Ruby >= 3.1 and bundler; skip when unavailable.
+if ruby -e 'exit(RUBY_VERSION >= "3.1" ? 0 : 1)' 2>/dev/null && command -v bundle >/dev/null 2>&1; then
+  if [ ! -d ruby/vendor ]; then
+    (cd ruby && bundle install --quiet)
+  fi
+  if (cd ruby && bundle exec rspec --format documentation); then
+    echo "--- Ruby: PASSED ---"
+  else
+    echo "--- Ruby: FAILED ---"
+    FAILED=$((FAILED + 1))
+  fi
 else
-  echo "--- Ruby: FAILED ---"
-  FAILED=$((FAILED + 1))
+  echo "--- Ruby: SKIPPED (requires Ruby >= 3.1 with bundler) ---"
 fi
 
 echo ""
 echo "=== Zig integration tests ==="
-if (cd zig && zig build test); then
-  echo "--- Zig: PASSED ---"
+if command -v zig >/dev/null 2>&1; then
+  if (cd zig && zig build test); then
+    echo "--- Zig: PASSED ---"
+  else
+    echo "--- Zig: FAILED ---"
+    FAILED=$((FAILED + 1))
+  fi
 else
-  echo "--- Zig: FAILED ---"
-  FAILED=$((FAILED + 1))
+  echo "--- Zig: SKIPPED (zig not found) ---"
 fi
 
 if $STOP_NODE; then
