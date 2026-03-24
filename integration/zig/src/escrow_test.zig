@@ -7,7 +7,7 @@ const compile = @import("compile.zig");
 test "Escrow_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/ts/escrow/Escrow.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
         return;
     };
@@ -25,7 +25,7 @@ test "Escrow_DeployThreePubKeys" {
         return;
     }
 
-    var artifact = compile.compileContract(allocator, "examples/ts/escrow/Escrow.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
         return;
     };
@@ -76,7 +76,7 @@ test "Escrow_DeploySameKey" {
         return;
     }
 
-    var artifact = compile.compileContract(allocator, "examples/ts/escrow/Escrow.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
         return;
     };
@@ -113,7 +113,7 @@ test "Escrow_DeploySameKey" {
 test "Escrow_ABI_Methods" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/ts/escrow/Escrow.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
         return;
     };
@@ -138,7 +138,7 @@ test "Escrow_ABI_Methods" {
 test "Escrow_NotStateful" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/ts/escrow/Escrow.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
         return;
     };

@@ -66,6 +66,28 @@ else
   FAILED=$((FAILED + 1))
 fi
 
+echo ""
+echo "=== Ruby integration tests ==="
+# Ensure gems are installed
+if [ ! -d ruby/vendor ]; then
+  (cd ruby && bundle install --quiet)
+fi
+if (cd ruby && bundle exec rspec --format documentation); then
+  echo "--- Ruby: PASSED ---"
+else
+  echo "--- Ruby: FAILED ---"
+  FAILED=$((FAILED + 1))
+fi
+
+echo ""
+echo "=== Zig integration tests ==="
+if (cd zig && zig build test); then
+  echo "--- Zig: PASSED ---"
+else
+  echo "--- Zig: FAILED ---"
+  FAILED=$((FAILED + 1))
+fi
+
 if $STOP_NODE; then
   echo ""
   echo "=== Stopping regtest node ==="

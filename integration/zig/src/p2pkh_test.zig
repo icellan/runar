@@ -6,7 +6,7 @@ const compile = @import("compile.zig");
 
 /// Deploy a P2PKH contract locked to the given owner wallet.
 fn deployP2PKH(allocator: std.mem.Allocator, owner: *helpers.Wallet) !struct { contract: runar.RunarContract, provider: helpers.RPCProvider, signer: runar.LocalSigner } {
-    var artifact = try compile.compileContract(allocator, "examples/ts/p2pkh/P2PKH.runar.ts");
+    var artifact = try compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig");
     errdefer artifact.deinit();
 
     const pkh_hex = try owner.pubKeyHashHex(allocator);
@@ -43,7 +43,7 @@ test "P2PKH_ValidUnlock" {
     var owner = try helpers.newWallet(allocator);
     defer owner.deinit();
 
-    var artifact = compile.compileContract(allocator, "examples/ts/p2pkh/P2PKH.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
         std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
         return;
     };
@@ -89,7 +89,7 @@ test "P2PKH_DeployDifferentPubKeyHash" {
         return;
     }
 
-    var artifact = compile.compileContract(allocator, "examples/ts/p2pkh/P2PKH.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
         std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
         return;
     };

@@ -15,7 +15,7 @@ fn deployCounter(
     wallet: helpers.Wallet,
     artifact: runar.RunarArtifact,
 } {
-    var artifact = try compile.compileContract(allocator, "examples/ts/stateful-counter/Counter.runar.ts");
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     errdefer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -53,7 +53,7 @@ test "Counter_Increment" {
         return;
     }
 
-    var artifact = compile.compileContract(allocator, "examples/ts/stateful-counter/Counter.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
         return;
     };
@@ -97,7 +97,7 @@ test "Counter_Deploy_WithInitialValue" {
         return;
     }
 
-    var artifact = compile.compileContract(allocator, "examples/ts/stateful-counter/Counter.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
         return;
     };
@@ -128,7 +128,7 @@ test "Counter_Deploy_WithInitialValue" {
 test "Counter_LockingScript_Includes_OpReturn" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/ts/stateful-counter/Counter.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
         return;
     };
@@ -150,7 +150,7 @@ test "Counter_LockingScript_Includes_OpReturn" {
 test "Counter_StateField_Metadata" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/ts/stateful-counter/Counter.runar.ts") catch |err| {
+    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
         return;
     };
