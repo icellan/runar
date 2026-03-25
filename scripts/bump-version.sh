@@ -83,12 +83,12 @@ check_versions() {
     fi
   done
 
-  # Rust Cargo.toml
+  # Rust Cargo.toml (Cargo versions never have 'v' prefix)
   for f in "${RUST_TOMLS[@]}"; do
     if [ -f "$f" ]; then
       local v
       v=$(grep '^version' "$f" | head -1 | sed 's/version = "\([^"]*\)".*/\1/')
-      if [ "$v" != "$expected" ]; then
+      if [ "$v" != "$expected" ] && [ "$v" != "${expected#v}" ]; then
         echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"): $v"
         ok=false
       fi
@@ -143,7 +143,8 @@ check_versions() {
 # --- bump: main version bump logic ---
 
 bump_version() {
-  local NEW="$1"
+  # Strip leading 'v' — Cargo.toml and pyproject.toml require plain semver.
+  local NEW="${1#v}"
   local OLD
   OLD=$(get_current_version)
   if [ -z "$OLD" ]; then

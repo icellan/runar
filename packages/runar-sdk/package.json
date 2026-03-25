@@ -1,6 +1,6 @@
 {
   "name": "runar-sdk",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "type": "module",
   "description": "Rúnar SDK: deploy, call, and interact with compiled smart contracts",
   "main": "dist/index.js",
