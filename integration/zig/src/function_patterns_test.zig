@@ -63,8 +63,7 @@ test "FunctionPatterns_Deploy_And_Call_Deposit" {
         rpc_provider.provider(),
         local_signer.signer(),
         .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = pk_hex },
-            .{ .int = 50 },
+            .{ .int = 50 }, // balance: 0 + 50 = 50
         } },
     );
     defer allocator.free(call_txid);
