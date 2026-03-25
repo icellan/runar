@@ -40,6 +40,19 @@ PY_FILES=(
   "$ROOT/compilers/python/pyproject.toml"
 )
 
+# Compiler version strings (schema + per-language)
+COMPILER_VERSION_FILES=(
+  "$ROOT/packages/runar-compiler/src/artifact/assembler.ts"
+  "$ROOT/compilers/go/compiler/compiler.go"
+  "$ROOT/compilers/zig/src/codegen/emit.zig"
+  "$ROOT/compilers/ruby/lib/runar_compiler/compiler.rb"
+  "$ROOT/compilers/python/runar_compiler/compiler.py"
+)
+
+# Package manifests for Zig and Ruby
+ZIG_ZON="$ROOT/packages/runar-zig/build.zig.zon"
+RUBY_GEMSPEC="$ROOT/packages/runar-rb/runar.gemspec"
+
 get_current_version() {
   grep '"version"' "$ROOT/package.json" | head -1 | sed 's/.*"version": "\([^"]*\)".*/\1/'
 }
@@ -193,6 +206,52 @@ bump_version() {
       echo "  ✓ $(echo "$f" | sed "s|$ROOT/||")"
     fi
   done
+
+  # Zig package version
+  if [ -f "$ZIG_ZON" ]; then
+    sed -i '' "s/\.version = \"$OLD\"/\.version = \"$NEW\"/" "$ZIG_ZON"
+    echo "  ✓ packages/runar-zig/build.zig.zon"
+  fi
+
+  # Ruby gem version
+  if [ -f "$RUBY_GEMSPEC" ]; then
+    sed -i '' "s/spec\.version.*=.*'$OLD'/spec.version       = '$NEW'/" "$RUBY_GEMSPEC"
+    echo "  ✓ packages/runar-rb/runar.gemspec"
+  fi
+
+  # Compiler version strings (schema + per-language identifiers)
+  # TS: ARTIFACT_VERSION and DEFAULT_COMPILER_VERSION
+  sed -i '' "s/const ARTIFACT_VERSION = 'runar-v$OLD'/const ARTIFACT_VERSION = 'runar-v$NEW'/" \
+    "$ROOT/packages/runar-compiler/src/artifact/assembler.ts"
+  sed -i '' "s/const DEFAULT_COMPILER_VERSION = '$OLD'/const DEFAULT_COMPILER_VERSION = '$NEW'/" \
+    "$ROOT/packages/runar-compiler/src/artifact/assembler.ts"
+  echo "  ✓ TS compiler version strings"
+
+  # Go
+  sed -i '' "s/schemaVersion   = \"runar-v$OLD\"/schemaVersion   = \"runar-v$NEW\"/" \
+    "$ROOT/compilers/go/compiler/compiler.go"
+  sed -i '' "s/compilerVersion = \"$OLD-go\"/compilerVersion = \"$NEW-go\"/" \
+    "$ROOT/compilers/go/compiler/compiler.go"
+  echo "  ✓ Go compiler version strings"
+
+  # Zig
+  sed -i '' "s/runar-v$OLD/runar-v$NEW/" "$ROOT/compilers/zig/src/codegen/emit.zig"
+  sed -i '' "s/$OLD-zig/$NEW-zig/" "$ROOT/compilers/zig/src/codegen/emit.zig"
+  echo "  ✓ Zig compiler version strings"
+
+  # Ruby
+  sed -i '' "s/SCHEMA_VERSION = \"runar-v$OLD\"/SCHEMA_VERSION = \"runar-v$NEW\"/" \
+    "$ROOT/compilers/ruby/lib/runar_compiler/compiler.rb"
+  sed -i '' "s/COMPILER_VERSION = \"$OLD-ruby\"/COMPILER_VERSION = \"$NEW-ruby\"/" \
+    "$ROOT/compilers/ruby/lib/runar_compiler/compiler.rb"
+  echo "  ✓ Ruby compiler version strings"
+
+  # Python
+  sed -i '' "s/SCHEMA_VERSION = \"runar-v$OLD\"/SCHEMA_VERSION = \"runar-v$NEW\"/" \
+    "$ROOT/compilers/python/runar_compiler/compiler.py"
+  sed -i '' "s/COMPILER_VERSION = \"$OLD-python\"/COMPILER_VERSION = \"$NEW-python\"/" \
+    "$ROOT/compilers/python/runar_compiler/compiler.py"
+  echo "  ✓ Python compiler version strings"
 
   echo ""
   echo "Done. Verify with:  git diff"

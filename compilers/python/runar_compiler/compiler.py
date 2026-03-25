@@ -90,8 +90,8 @@ class Artifact:
     anf: ANFProgram | None = None
 
 
-SCHEMA_VERSION = "runar-v0.1.0"
-COMPILER_VERSION = "0.1.0-python"
+SCHEMA_VERSION = "runar-v0.4.0"
+COMPILER_VERSION = "0.4.0-python"
 
 
 # ---------------------------------------------------------------------------

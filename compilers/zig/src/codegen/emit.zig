@@ -386,10 +386,10 @@ pub fn emitArtifact(
     try w.writeAll("{");
 
     // version
-    try w.writeAll("\"version\":\"runar-v0.1.0\",");
+    try w.writeAll("\"version\":\"runar-v0.4.0\",");
 
     // compilerVersion
-    try w.writeAll("\"compilerVersion\":\"runar-zig-0.2.7\",");
+    try w.writeAll("\"compilerVersion\":\"0.4.0-zig\",");
 
     // contractName
     try w.writeAll("\"contractName\":");

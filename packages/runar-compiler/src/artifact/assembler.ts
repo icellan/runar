@@ -140,8 +140,8 @@ export interface AssembleOptions {
 // Constants
 // ---------------------------------------------------------------------------
 
-const ARTIFACT_VERSION = 'runar-v0.1.0';
-const DEFAULT_COMPILER_VERSION = '0.1.0';
+const ARTIFACT_VERSION = 'runar-v0.4.0';
+const DEFAULT_COMPILER_VERSION = '0.4.0';
 
 // ---------------------------------------------------------------------------
 // Type serialization
