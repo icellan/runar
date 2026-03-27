@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = 'runar-lang'
-  spec.version       = '0.4.1'
+  spec.version       = '0.4.2'
   spec.authors       = ['Runar Contributors']
   spec.summary       = 'Ruby runtime for Runar Bitcoin Script contracts'
   spec.description   = 'Provides base classes, types, mock crypto, real hashes, and EC operations ' \

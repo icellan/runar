@@ -88,8 +88,8 @@ module RunarCompiler
     end
   end
 
-  SCHEMA_VERSION = "runar-v0.4.1"
-  COMPILER_VERSION = "0.4.1-ruby"
+  SCHEMA_VERSION = "runar-v0.4.2"
+  COMPILER_VERSION = "0.4.2-ruby"
 
   # -------------------------------------------------------------------------
   # CompilationError

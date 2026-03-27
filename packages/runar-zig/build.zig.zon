@@ -1,6 +1,6 @@
 .{
     .name = .runar_zig,
-    .version = "0.4.1",
+    .version = "0.4.2",
     .fingerprint = 0xea3eee86094a0f21,
     .dependencies = .{
         .bsvz = .{
