@@ -529,6 +529,14 @@ class RustParser extends ParserCore<RustToken> {
 
       if (!readonly) hasMutableField = true;
 
+      // Skip txPreimage — it's an implicit property injected by the compiler
+      // for StatefulSmartContract. Rust contracts must declare all struct fields
+      // explicitly, but txPreimage should not appear in the parsed AST.
+      if (fieldName === 'txPreimage') {
+        this.match(',');
+        continue;
+      }
+
       properties.push({
         kind: 'property',
         name: fieldName,
@@ -683,9 +691,11 @@ class RustParser extends ParserCore<RustToken> {
     this.expect(')');
 
     // Optional return type: -> Type
+    let hasReturnType = false;
     if (this.current().type === '->') {
       this.advance();
-      this.parseRustType(); // consume and discard
+      this.parseRustType(); // consume (type not stored — inferred from body)
+      hasReturnType = true;
     }
 
     // Body
@@ -695,6 +705,20 @@ class RustParser extends ParserCore<RustToken> {
       body.push(this.parseStatement());
     }
     this.expect('}');
+
+    // Rust implicit returns: if the method has `-> Type` and the last statement
+    // is an expression_statement (no semicolon in source), convert it to a
+    // return_statement so the type checker can infer the return type.
+    if (hasReturnType && body.length > 0) {
+      const last = body[body.length - 1]!;
+      if (last.kind === 'expression_statement') {
+        body[body.length - 1] = {
+          kind: 'return_statement',
+          value: last.expression,
+          sourceLocation: last.sourceLocation,
+        };
+      }
+    }
 
     const visibility: 'public' | 'private' = isPublic ? 'public' : 'private';
 

@@ -55,8 +55,8 @@ func (c *FunctionPatterns) Deposit(sig runar.Sig, amount runar.Bigint) {
 	// Built-in: signature verification
 	c.requireOwner(sig)
 
-	// Built-in: assertion with a standalone helper
-	runar.Assert(isPositive(amount))
+	// Private method: positive-amount guard
+	runar.Assert(c.isPositive(amount))
 
 	// Update state
 	c.Balance = c.Balance + amount
@@ -131,8 +131,8 @@ func (c *FunctionPatterns) computeFee(amount runar.Bigint, feeBps runar.Bigint) 
 // computation that doesn't need contract fields.
 
 // isPositive returns true if n > 0.
-// Demonstrates the simplest standalone helper: a boolean predicate.
-func isPositive(n runar.Bigint) bool {
+// Demonstrates the simplest private method: a boolean predicate.
+func (c *FunctionPatterns) isPositive(n runar.Bigint) bool {
 	return n > 0
 }
 

@@ -143,6 +143,7 @@ class TicTacToe < Runar::StatefulSmartContract
   # --- Private helpers ---
 
   # Assert the provided player pubkey matches whoever's turn it is.
+  params player: PubKey
   def assert_correct_player(player)
     if @turn == 1
       assert player == @player_x
@@ -152,6 +153,7 @@ class TicTacToe < Runar::StatefulSmartContract
   end
 
   # Assert the cell at the given position is empty.
+  params position: Bigint
   def assert_cell_empty(position)
     if position == 0
       assert @c0 == 0
@@ -177,6 +179,7 @@ class TicTacToe < Runar::StatefulSmartContract
   end
 
   # Place the current turn's mark at the given position.
+  params position: Bigint
   def place_move(position)
     assert_cell_empty(position)
     if position == 0
@@ -203,6 +206,7 @@ class TicTacToe < Runar::StatefulSmartContract
   end
 
   # Get cell value, overriding the specified position with override_val.
+  params cell_index: Bigint, override_pos: Bigint, override_val: Bigint
   def get_cell_or_override(cell_index, override_pos, override_val)
     if cell_index == override_pos
       return override_val
@@ -230,6 +234,7 @@ class TicTacToe < Runar::StatefulSmartContract
   end
 
   # Check if placing player's mark at position would create a winning line.
+  params position: Bigint, player: Bigint
   def check_win_after_move(position, player)
     v0 = get_cell_or_override(0, position, player)
     v1 = get_cell_or_override(1, position, player)

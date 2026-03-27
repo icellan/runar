@@ -75,6 +75,10 @@ function tokenize(source: string): Token[] {
   // Track state for multi-line expressions (parentheses nesting)
   let parenDepth = 0;
 
+  // Track multi-line triple-quoted strings (docstrings).
+  // When non-null, holds the closing quote sequence ('"""' or "'''").
+  let inTripleQuote: string | null = null;
+
   function add(type: TokenType, value: string, line: number, col: number) {
     tokens.push({ type, value, line, column: col });
   }
@@ -86,9 +90,32 @@ function tokenize(source: string): Token[] {
     // Strip trailing \r
     const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine;
 
+    // If we're inside a multi-line triple-quoted string, skip until closing.
+    if (inTripleQuote !== null) {
+      if (line.includes(inTripleQuote)) {
+        inTripleQuote = null;
+      }
+      continue;
+    }
+
     // Skip blank lines and comment-only lines (they don't affect indentation)
     const stripped = line.trimStart();
     if (stripped === '' || stripped.startsWith('#')) {
+      continue;
+    }
+
+    // Skip lines that are standalone triple-quoted docstrings (single-line or opening).
+    // These appear as: """docstring""" or '''docstring''' (single line)
+    // or opening: """multi-line docstring or '''multi-line docstring
+    if (stripped.startsWith('"""') || stripped.startsWith("'''")) {
+      const quote = stripped.substring(0, 3);
+      // Check if the closing triple-quote is on the same line (after position 3)
+      const closeIdx = stripped.indexOf(quote, 3);
+      if (closeIdx === -1) {
+        // Multi-line docstring: skip until closing quote found
+        inTripleQuote = quote;
+      }
+      // Either way, skip this line (it's a docstring, not code)
       continue;
     }
 
@@ -260,8 +287,24 @@ function tokenize(source: string): Token[] {
         continue;
       }
 
-      // String literals (single or double quoted)
+      // String literals: handle triple-quoted strings first, then single-quoted
       if (ch === '\'' || ch === '"') {
+        // Check for triple-quoted string (docstring): """ or '''
+        if (pos + 2 < line.length && line[pos + 1] === ch && line[pos + 2] === ch) {
+          const tripleQuote = ch + ch + ch;
+          pos += 3; // skip opening triple-quote
+          // Check if closing triple-quote is on this same line
+          const closeIdx = line.indexOf(tripleQuote, pos);
+          if (closeIdx !== -1) {
+            pos = closeIdx + 3; // skip to after closing triple-quote
+          } else {
+            // Multi-line: skip rest of this line, mark for skipping subsequent lines
+            inTripleQuote = tripleQuote;
+            break; // stop tokenizing this line
+          }
+          continue; // triple-quoted strings are docstrings — skip, don't emit a token
+        }
+
         const quote = ch;
         pos++;
         let val = '';

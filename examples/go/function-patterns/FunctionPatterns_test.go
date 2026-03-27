@@ -166,16 +166,17 @@ func TestNormalize_ClampsUp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIsPositive(t *testing.T) {
-	if !isPositive(1) {
+	c := newContract()
+	if !c.isPositive(1) {
 		t.Error("expected true for 1")
 	}
-	if !isPositive(100) {
+	if !c.isPositive(100) {
 		t.Error("expected true for 100")
 	}
-	if isPositive(0) {
+	if c.isPositive(0) {
 		t.Error("expected false for 0")
 	}
-	if isPositive(-5) {
+	if c.isPositive(-5) {
 		t.Error("expected false for -5")
 	}
 }

@@ -51,7 +51,7 @@ module TicTacToe {
     public fun move(position: bigint, player: PubKey, sig: Sig) {
         assert!(self.status == 1, 0);
         assert!(check_sig(sig, player), 0);
-        assert_correct_player(player);
+        self.assert_correct_player(player);
         place_move(position);
         if (self.turn == 1) {
             self.turn = 2;
@@ -64,7 +64,7 @@ module TicTacToe {
     public fun move_and_win(position: bigint, player: PubKey, sig: Sig, change_pkh: ByteString, change_amount: bigint) {
         assert!(self.status == 1, 0);
         assert!(check_sig(sig, player), 0);
-        assert_correct_player(player);
+        self.assert_correct_player(player);
         assert_cell_empty(position);
         assert!(check_win_after_move(position, self.turn), 0);
 
@@ -82,7 +82,7 @@ module TicTacToe {
     public fun move_and_tie(position: bigint, player: PubKey, sig: Sig, change_pkh: ByteString, change_amount: bigint) {
         assert!(self.status == 1, 0);
         assert!(check_sig(sig, player), 0);
-        assert_correct_player(player);
+        self.assert_correct_player(player);
         assert_cell_empty(position);
         assert!(count_occupied() == 8, 0);
         assert!(!check_win_after_move(position, self.turn), 0);
