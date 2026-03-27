@@ -1,15 +1,20 @@
 /**
- * Full pipeline compilation test for ALL example contracts.
+ * Full 6-pass compilation test for ALL example contracts.
  *
- * Runs every example contract through parse → validate → typecheck to verify
- * it compiles without errors. This catches regressions in parsers, validators,
- * and type checkers that format-specific parser tests miss.
+ * Runs every example contract through the COMPLETE compiler pipeline:
+ *   parse → validate → typecheck → ANF lower → stack lower → emit
+ *
+ * This uses the same compile() function that the CLI uses. It catches
+ * bugs at every level — parser issues, validator rejections, type errors,
+ * ANF lowering failures, stack lowering crashes, and emit errors.
+ *
+ * Previously this test only ran passes 1-3, which missed stack lowering
+ * crashes (e.g., "Value 't40' not found on stack") and ANF lowering
+ * issues (e.g., addOutput not recognized as an intrinsic).
  */
 
 import { describe, it, expect } from 'vitest';
-import { parse } from '../passes/01-parse.js';
-import { validate } from '../passes/02-validate.js';
-import { typecheck } from '../passes/03-typecheck.js';
+import { compile } from '../index.js';
 import { readFileSync, existsSync, readdirSync } from 'fs';
 import { join } from 'path';
 
@@ -34,110 +39,123 @@ function findContracts(langDir: string, ext: string): { name: string; path: stri
 
 function compileContract(filePath: string) {
   const source = readFileSync(filePath, 'utf-8');
-  const parseResult = parse(source, filePath);
-  const parseErrors = parseResult.errors.filter(e => e.severity === 'error');
-  if (parseErrors.length > 0) {
-    return { stage: 'parse', errors: parseErrors.map(e => e.message) };
-  }
-  if (!parseResult.contract) {
-    return { stage: 'parse', errors: ['no contract found'] };
-  }
-
-  const valResult = validate(parseResult.contract);
-  const valErrors = valResult.errors.filter(e => e.severity === 'error');
-  if (valErrors.length > 0) {
-    return { stage: 'validate', errors: valErrors.map(e => e.message) };
-  }
-
-  const tcResult = typecheck(parseResult.contract);
-  const tcErrors = tcResult.errors.filter(e => e.severity === 'error');
-  if (tcErrors.length > 0) {
-    return { stage: 'typecheck', errors: tcErrors.map(e => e.message) };
-  }
-
-  return { stage: 'ok', errors: [] };
+  const result = compile(source, { fileName: filePath });
+  const errors = result.diagnostics.filter(d => d.severity === 'error');
+  return {
+    success: result.success,
+    errors: errors.map(e => e.message),
+    hasScript: !!result.scriptHex && result.scriptHex.length > 0,
+  };
 }
 
 // -------------------------------------------------------------------------
-// Rust example contracts: full pipeline
+// TypeScript examples
 // -------------------------------------------------------------------------
 
-describe('Rust examples: full pipeline (parse + validate + typecheck)', () => {
-  const contracts = findContracts('rust', '.runar.rs');
-  for (const { name, path } of contracts) {
-    it(`compiles ${name}`, () => {
-      const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
-    });
-  }
-});
-
-// -------------------------------------------------------------------------
-// Python example contracts: full pipeline
-// -------------------------------------------------------------------------
-
-describe('Python examples: full pipeline (parse + validate + typecheck)', () => {
-  const contracts = findContracts('python', '.runar.py');
-  for (const { name, path } of contracts) {
-    it(`compiles ${name}`, () => {
-      const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
-    });
-  }
-});
-
-// -------------------------------------------------------------------------
-// Move example contracts: full pipeline
-// -------------------------------------------------------------------------
-
-describe('Move examples: full pipeline (parse + validate + typecheck)', () => {
-  const contracts = findContracts('move', '.runar.move');
-  for (const { name, path } of contracts) {
-    it(`compiles ${name}`, () => {
-      const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
-    });
-  }
-});
-
-// -------------------------------------------------------------------------
-// Go example contracts: full pipeline
-// -------------------------------------------------------------------------
-
-describe('Go examples: full pipeline (parse + validate + typecheck)', () => {
-  const contracts = findContracts('go', '.runar.go');
-  for (const { name, path } of contracts) {
-    it(`compiles ${name}`, () => {
-      const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
-    });
-  }
-});
-
-// -------------------------------------------------------------------------
-// Solidity example contracts: full pipeline
-// -------------------------------------------------------------------------
-
-describe('Solidity examples: full pipeline (parse + validate + typecheck)', () => {
-  const contracts = findContracts('sol', '.runar.sol');
-  for (const { name, path } of contracts) {
-    it(`compiles ${name}`, () => {
-      const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
-    });
-  }
-});
-
-// -------------------------------------------------------------------------
-// TypeScript example contracts: full pipeline
-// -------------------------------------------------------------------------
-
-describe('TypeScript examples: full pipeline (parse + validate + typecheck)', () => {
+describe('TypeScript examples: full 6-pass compilation', () => {
   const contracts = findContracts('ts', '.runar.ts');
   for (const { name, path } of contracts) {
     it(`compiles ${name}`, () => {
       const result = compileContract(path);
-      expect(result.errors, `${result.stage} errors`).toEqual([]);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Solidity examples
+// -------------------------------------------------------------------------
+
+describe('Solidity examples: full 6-pass compilation', () => {
+  const contracts = findContracts('sol', '.runar.sol');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Move examples
+// -------------------------------------------------------------------------
+
+describe('Move examples: full 6-pass compilation', () => {
+  const contracts = findContracts('move', '.runar.move');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Go examples
+// -------------------------------------------------------------------------
+
+describe('Go examples: full 6-pass compilation', () => {
+  const contracts = findContracts('go', '.runar.go');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Rust examples
+// -------------------------------------------------------------------------
+
+describe('Rust examples: full 6-pass compilation', () => {
+  const contracts = findContracts('rust', '.runar.rs');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Python examples
+// -------------------------------------------------------------------------
+
+describe('Python examples: full 6-pass compilation', () => {
+  const contracts = findContracts('python', '.runar.py');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
+    });
+  }
+});
+
+// -------------------------------------------------------------------------
+// Ruby examples
+// -------------------------------------------------------------------------
+
+describe('Ruby examples: full 6-pass compilation', () => {
+  const contracts = findContracts('ruby', '.runar.rb');
+  for (const { name, path } of contracts) {
+    it(`compiles ${name}`, () => {
+      const result = compileContract(path);
+      expect(result.errors, 'compilation errors').toEqual([]);
+      expect(result.success).toBe(true);
+      expect(result.hasScript, 'should produce Bitcoin Script').toBe(true);
     });
   }
 });
