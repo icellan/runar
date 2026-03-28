@@ -27,6 +27,12 @@ export { typecheck } from './passes/03-typecheck.js';
 export type { TypeCheckResult } from './passes/03-typecheck.js';
 
 export { lowerToANF } from './passes/04-anf-lower.js';
+export { lowerToStack } from './passes/05-stack-lower.js';
+export { emit } from './passes/06-emit.js';
+export { optimizeStackIR } from './optimizer/peephole.js';
+export { optimizeEC } from './optimizer/anf-ec.js';
+export { foldConstants } from './optimizer/constant-fold.js';
+export { assembleArtifact } from './artifact/assembler.js';
 
 export type { CompilerDiagnostic, Severity } from './errors.js';
 export { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic } from './errors.js';
@@ -68,6 +74,9 @@ export interface CompileOptions {
 
   /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
   disableConstantFolding?: boolean;
+
+  /** Called between compilation passes with the current stage name and progress percentage (0-100). */
+  onProgress?: (stage: string, percent: number) => void;
 }
 
 export interface CompileResult {
@@ -121,8 +130,10 @@ export interface CompileResult {
 export function compile(source: string, options?: CompileOptions): CompileResult {
   const diagnostics: CompilerDiagnostic[] = [];
   const opts = options ?? {};
+  const onProgress = opts.onProgress;
 
   // Pass 1: Parse
+  onProgress?.('Parsing', 0);
   // parse() uses asKindOrThrow() in 20+ places and can throw on malformed input.
   let parseResult: ReturnType<typeof parse>;
   try {
@@ -158,6 +169,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 2: Validate
+  onProgress?.('Validating', 10);
   let validationResult: ReturnType<typeof validate>;
   try {
     validationResult = validate(parseResult.contract);
@@ -193,6 +205,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 3: Type-Check
+  onProgress?.('Type checking', 20);
   let typeCheckResult: ReturnType<typeof typecheck>;
   try {
     typeCheckResult = typecheck(parseResult.contract);
@@ -227,6 +240,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   }
 
   // Pass 4: ANF Lower
+  onProgress?.('Lowering to ANF', 35);
   let anf: ANFProgram;
   try {
     anf = lowerToANF(parseResult.contract);
@@ -253,24 +267,30 @@ export function compile(source: string, options?: CompileOptions): CompileResult
 
   // Pass 4.25: Constant folding (on by default)
   if (!opts.disableConstantFolding) {
+    onProgress?.('Constant folding', 45);
     anf = foldConstants(anf);
   }
 
   // Pass 4.5: ANF EC Optimizer (always-on)
+  onProgress?.('EC optimization', 50);
   const optimizedAnf = optimizeEC(anf);
 
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {
+    onProgress?.('Stack lowering', 60);
     const stackProgram = lowerToStack(optimizedAnf);
 
     // Apply peephole optimization to each method's ops (runs on Stack IR,
     // after the ANF conformance boundary, so it doesn't affect cross-compiler
     // conformance).
+    onProgress?.('Peephole optimizing', 75);
     for (const method of stackProgram.methods) {
       method.ops = optimizeStackIR(method.ops);
     }
 
+    onProgress?.('Emitting script', 85);
     const emitResult = emit(stackProgram);
+    onProgress?.('Assembling artifact', 95);
     const artifact = assembleArtifact(
       parseResult.contract,
       optimizedAnf,

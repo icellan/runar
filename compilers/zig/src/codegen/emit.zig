@@ -473,10 +473,10 @@ pub fn emitArtifact(
     try w.writeAll("{");
 
     // version
-    try w.writeAll("\"version\":\"runar-v0.4.3\",");
+    try w.writeAll("\"version\":\"runar-v0.4.4\",");
 
     // compilerVersion
-    try w.writeAll("\"compilerVersion\":\"0.4.3-zig\",");
+    try w.writeAll("\"compilerVersion\":\"0.4.4-zig\",");
 
     // contractName
     try w.writeAll("\"contractName\":");

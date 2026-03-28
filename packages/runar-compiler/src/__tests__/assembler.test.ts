@@ -122,7 +122,7 @@ describe('Assembler', () => {
     it('has correct contract name and version fields', () => {
       const artifact = assemble(P2PKH_SOURCE);
       expect(artifact.contractName).toBe('P2PKH');
-      expect(artifact.version).toBe('runar-v0.4.3');
+      expect(artifact.version).toBe('runar-v0.4.4');
       expect(artifact.script).toBe('deadbeef');
       expect(artifact.asm).toBe('OP_DUP OP_HASH160');
     });
@@ -370,7 +370,7 @@ describe('Assembler', () => {
   describe('compiler version', () => {
     it('uses default compiler version', () => {
       const artifact = assemble(P2PKH_SOURCE);
-      expect(artifact.compilerVersion).toBe('0.4.3');
+      expect(artifact.compilerVersion).toBe('0.4.4');
     });
 
     it('allows overriding compiler version', () => {
