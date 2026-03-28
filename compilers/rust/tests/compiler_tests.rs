@@ -37,7 +37,7 @@ fn test_load_ir_basic_p2pkh() {
     assert_eq!(artifact.contract_name, "P2PKH");
     assert!(!artifact.script.is_empty(), "script hex should not be empty");
     assert!(!artifact.asm.is_empty(), "asm should not be empty");
-    assert_eq!(artifact.version, "runar-v0.1.0");
+    assert_eq!(artifact.version, "runar-v0.4.4");
 
     println!("P2PKH script hex: {}", artifact.script);
     println!("P2PKH script asm: {}", artifact.asm);
@@ -277,7 +277,7 @@ fn test_artifact_json_structure() {
     );
     assert_eq!(
         parsed["version"].as_str().unwrap(),
-        "runar-v0.1.0"
+        "runar-v0.4.4"
     );
 }
 

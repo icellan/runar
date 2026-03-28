@@ -92,7 +92,7 @@ class TestArtifactJSON:
         d = json.loads(json_str)
 
         assert "version" in d
-        assert d["version"] == "runar-v0.1.0"
+        assert d["version"] == "runar-v0.4.4"
         assert "contractName" in d
         assert d["contractName"] == "P2PKH"
         assert "abi" in d

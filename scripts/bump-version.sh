@@ -44,6 +44,7 @@ PY_FILES=(
 COMPILER_VERSION_FILES=(
   "$ROOT/packages/runar-compiler/src/artifact/assembler.ts"
   "$ROOT/compilers/go/compiler/compiler.go"
+  "$ROOT/compilers/rust/src/artifact.rs"
   "$ROOT/compilers/zig/src/codegen/emit.zig"
   "$ROOT/compilers/ruby/lib/runar_compiler/compiler.rb"
   "$ROOT/compilers/python/runar_compiler/compiler.py"
@@ -241,6 +242,25 @@ bump_version() {
     "$ROOT/compilers/go/compiler/compiler.go"
   echo "  ✓ Go compiler version strings"
 
+  # Go compiler tests (hardcoded version expectations)
+  sed -i '' "s/runar-v$OLD/runar-v$NEW/g" \
+    "$ROOT/compilers/go/compiler/compiler_test.go"
+  sed -i '' "s/runar-v$OLD/runar-v$NEW/g" \
+    "$ROOT/compilers/go/compiler/integration_test.go"
+  echo "  ✓ Go compiler test version expectations"
+
+  # Rust compiler
+  sed -i '' "s/SCHEMA_VERSION: &str = \"runar-v$OLD\"/SCHEMA_VERSION: \&str = \"runar-v$NEW\"/" \
+    "$ROOT/compilers/rust/src/artifact.rs"
+  sed -i '' "s/COMPILER_VERSION: &str = \"$OLD-rust\"/COMPILER_VERSION: \&str = \"$NEW-rust\"/" \
+    "$ROOT/compilers/rust/src/artifact.rs"
+  echo "  ✓ Rust compiler version strings"
+
+  # Rust compiler tests (hardcoded version expectations)
+  sed -i '' "s/runar-v$OLD/runar-v$NEW/g" \
+    "$ROOT/compilers/rust/tests/compiler_tests.rs"
+  echo "  ✓ Rust compiler test version expectations"
+
   # Zig
   sed -i '' "s/runar-v$OLD/runar-v$NEW/" "$ROOT/compilers/zig/src/codegen/emit.zig"
   sed -i '' "s/$OLD-zig/$NEW-zig/" "$ROOT/compilers/zig/src/codegen/emit.zig"
@@ -259,6 +279,11 @@ bump_version() {
   sed -i '' "s/COMPILER_VERSION = \"$OLD-python\"/COMPILER_VERSION = \"$NEW-python\"/" \
     "$ROOT/compilers/python/runar_compiler/compiler.py"
   echo "  ✓ Python compiler version strings"
+
+  # Python compiler tests (hardcoded version expectations)
+  sed -i '' "s/runar-v$OLD/runar-v$NEW/g" \
+    "$ROOT/compilers/python/tests/test_compiler.py"
+  echo "  ✓ Python compiler test version expectations"
 
   echo ""
   echo "Done. Verify with:  git diff"
