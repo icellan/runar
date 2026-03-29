@@ -555,15 +555,350 @@ func TestMultiMethod_SpendWithOwner_ThresholdFail(t *testing.T) {
 // Part 5: Stateful Full Execution (OP_PUSH_TX)
 // ---------------------------------------------------------------------------
 
+// opPushTxPrivKey is k=1 — the OP_PUSH_TX private key (public key = generator G).
+var opPushTxPrivKey *ec.PrivateKey
+
+// curveOrderN is the secp256k1 curve order for low-S enforcement.
+var curveOrderN, _ = new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+
+func init() {
+	keyBytes := make([]byte, 32)
+	keyBytes[31] = 1
+	opPushTxPrivKey, _ = ec.PrivateKeyFromBytes(keyBytes)
+}
+
+// buildP2PKHLockingScript constructs OP_DUP OP_HASH160 <pkh> OP_EQUALVERIFY OP_CHECKSIG.
+func buildP2PKHLockingScript(pkh []byte) *script.Script {
+	// 76 a9 14 <20 bytes> 88 ac
+	h := "76a914" + hex.EncodeToString(pkh) + "88ac"
+	s, _ := script.NewFromHex(h)
+	return s
+}
+
+// findCodeSeparatorOffset returns the byte offset of the nth OP_CODESEPARATOR (0xab)
+// in the script hex, skipping occurrences inside push-data. n is 0-based.
+func findCodeSeparatorOffset(scriptHex string, nth int) int {
+	scriptBytes, _ := hex.DecodeString(scriptHex)
+	count := 0
+	for i := 0; i < len(scriptBytes); {
+		op := scriptBytes[i]
+		if op == 0xab { // OP_CODESEPARATOR
+			if count == nth {
+				return i
+			}
+			count++
+			i++
+		} else if op >= 0x01 && op <= 0x4b {
+			// Direct push: skip op bytes of data
+			i += 1 + int(op)
+		} else if op == 0x4c { // OP_PUSHDATA1
+			if i+1 < len(scriptBytes) {
+				i += 2 + int(scriptBytes[i+1])
+			} else {
+				i++
+			}
+		} else if op == 0x4d { // OP_PUSHDATA2
+			if i+2 < len(scriptBytes) {
+				size := int(scriptBytes[i+1]) | int(scriptBytes[i+2])<<8
+				i += 3 + size
+			} else {
+				i++
+			}
+		} else {
+			i++
+		}
+	}
+	return -1
+}
+
+// serializeBigintState encodes a bigint as 8-byte little-endian hex for state storage.
+func serializeBigintState(n int64) string {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], uint64(n))
+	return hex.EncodeToString(buf[:])
+}
+
 func TestStateful_Increment(t *testing.T) {
-	// TODO: The compiled stateful contract has a pre-existing stack ordering issue
-	// in the state hash comparison (ROT/SWAP sequence compares the wrong operands).
-	// The load_prop after update_prop also loads the initial constructor value
-	// instead of the updated one. These compiler bugs need to be fixed before
-	// stateful contracts can pass real script execution tests.
-	// The TS interpreter tests pass because they mock checkPreimage and
-	// extractOutputHash, so they never run the actual Bitcoin Script.
-	t.Skip("stateful contract compilation has pre-existing stack ordering bugs — needs compiler fix")
+	// Step 1: Compile the stateful counter contract.
+	// The codePart is the logic script without state — state is appended after OP_RETURN.
+	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	codePartBytes, _ := hex.DecodeString(codePartHex)
+
+	// Step 2: Build the full locking script: codePart + OP_RETURN + state(count=0).
+	// State for a single bigint property is 8 bytes LE, stored as raw bytes after OP_RETURN.
+	initialStateHex := serializeBigintState(0)
+	fullLockingHex := codePartHex + "6a" + initialStateHex
+
+	// Step 3: Build continuation output script with updated state (count=1).
+	newStateHex := serializeBigintState(1)
+	continuationScriptHex := codePartHex + "6a" + newStateHex
+
+	// Step 4: Find the OP_CODESEPARATOR for the increment method (method 0).
+	// Method dispatch: DUP 0 NUMEQUAL IF DROP DUP CODESEP ...
+	// The first OP_CODESEPARATOR in the code is for the increment method.
+	codeSepOffset := findCodeSeparatorOffset(codePartHex, 0)
+	if codeSepOffset < 0 {
+		t.Fatal("OP_CODESEPARATOR not found in codePart")
+	}
+
+	// Step 5: Set satoshi amounts.
+	prevSatoshis := uint64(10000)
+	contSatoshis := uint64(9000)
+	changeSatoshis := uint64(500)
+
+	// Step 6: Create a change address (P2PKH).
+	changePKH := make([]byte, 20) // all-zeros is fine for testing
+
+	// Step 7: Build the previous output (UTXO being spent).
+	fullLockingScript, err := script.NewFromHex(fullLockingHex)
+	if err != nil {
+		t.Fatalf("parse full locking script: %v", err)
+	}
+	prevOutput := &transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: fullLockingScript,
+	}
+
+	// Step 8: Build the spending transaction.
+	spendTx := transaction.NewTransaction()
+	spendTx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       makeFundingTxID(),
+		SourceTxOutIndex: 0,
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, prevOutput)
+
+	// Output 0: continuation (same codePart + OP_RETURN + count=1)
+	contScript, _ := script.NewFromHex(continuationScriptHex)
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      contSatoshis,
+		LockingScript: contScript,
+	})
+
+	// Output 1: P2PKH change
+	p2pkhScript := buildP2PKHLockingScript(changePKH)
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      changeSatoshis,
+		LockingScript: p2pkhScript,
+	})
+
+	// Step 9: Compute BIP-143 preimage using scriptCode = everything after OP_CODESEPARATOR.
+	// The scriptCode includes the locking logic AFTER the separator, plus OP_RETURN + state.
+	scriptCodeHex := fullLockingHex[(codeSepOffset+1)*2:]
+	scriptCodeScript, _ := script.NewFromHex(scriptCodeHex)
+
+	// Temporarily set the source output to use scriptCode for preimage computation.
+	spendTx.Inputs[0].SetSourceTxOutput(&transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: scriptCodeScript,
+	})
+
+	preimage, err := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	if err != nil {
+		t.Fatalf("calc preimage: %v", err)
+	}
+
+	sigHashBytes, err := spendTx.CalcInputSignatureHash(0, sighash.AllForkID)
+	if err != nil {
+		t.Fatalf("calc sighash: %v", err)
+	}
+
+	// Step 10: Sign with k=1 (OP_PUSH_TX pattern).
+	sig, err := opPushTxPrivKey.Sign(sigHashBytes)
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	// Enforce low-S.
+	halfN := new(big.Int).Rsh(curveOrderN, 1)
+	if sig.S.Cmp(halfN) > 0 {
+		sig.S = new(big.Int).Sub(curveOrderN, sig.S)
+	}
+	derSig := append(sig.Serialize(), byte(sighash.AllForkID))
+
+	// Restore the source output to the full locking script for execution.
+	spendTx.Inputs[0].SetSourceTxOutput(prevOutput)
+
+	// Step 11: Build the unlocking script.
+	// Stack layout (bottom to top / first pushed to last pushed):
+	//   _codePart, _opPushTxSig, _changePKH, _changeAmount, _newAmount, txPreimage, methodSelector
+	unlockingHex := encodePushBytes(codePartBytes) + // _codePart
+		encodePushBytes(derSig) + // _opPushTxSig
+		encodePushBytes(changePKH) + // _changePKH
+		encodePushInt(int64(changeSatoshis)) + // _changeAmount
+		encodePushInt(int64(contSatoshis)) + // _newAmount
+		encodePushBytes(preimage) + // txPreimage
+		encodePushInt(0) // methodSelector = 0 (increment)
+
+	unlockScript, _ := script.NewFromHex(unlockingHex)
+	spendTx.Inputs[0].UnlockingScript = unlockScript
+
+	// Step 12: Execute the script with transaction context.
+	if err := executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestStateful_Decrement(t *testing.T) {
+	// Decrement from count=5 to count=4 (method selector = 1).
+	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	codePartBytes, _ := hex.DecodeString(codePartHex)
+
+	// Initial state: count=5
+	fullLockingHex := codePartHex + "6a" + serializeBigintState(5)
+	// Continuation state: count=4
+	continuationScriptHex := codePartHex + "6a" + serializeBigintState(4)
+
+	// The second OP_CODESEPARATOR is for the decrement method.
+	codeSepOffset := findCodeSeparatorOffset(codePartHex, 1)
+	if codeSepOffset < 0 {
+		t.Fatal("second OP_CODESEPARATOR not found")
+	}
+
+	prevSatoshis := uint64(10000)
+	contSatoshis := uint64(9000)
+	changeSatoshis := uint64(500)
+	changePKH := make([]byte, 20)
+
+	fullLockingScript, _ := script.NewFromHex(fullLockingHex)
+	prevOutput := &transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: fullLockingScript,
+	}
+
+	spendTx := transaction.NewTransaction()
+	spendTx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       makeFundingTxID(),
+		SourceTxOutIndex: 0,
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, prevOutput)
+
+	contScript, _ := script.NewFromHex(continuationScriptHex)
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      contSatoshis,
+		LockingScript: contScript,
+	})
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      changeSatoshis,
+		LockingScript: buildP2PKHLockingScript(changePKH),
+	})
+
+	// scriptCode after the decrement method's OP_CODESEPARATOR
+	scriptCodeHex := fullLockingHex[(codeSepOffset+1)*2:]
+	scriptCodeScript, _ := script.NewFromHex(scriptCodeHex)
+	spendTx.Inputs[0].SetSourceTxOutput(&transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: scriptCodeScript,
+	})
+
+	preimage, _ := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	sigHashBytes, _ := spendTx.CalcInputSignatureHash(0, sighash.AllForkID)
+
+	sig, _ := opPushTxPrivKey.Sign(sigHashBytes)
+	halfN := new(big.Int).Rsh(curveOrderN, 1)
+	if sig.S.Cmp(halfN) > 0 {
+		sig.S = new(big.Int).Sub(curveOrderN, sig.S)
+	}
+	derSig := append(sig.Serialize(), byte(sighash.AllForkID))
+
+	spendTx.Inputs[0].SetSourceTxOutput(prevOutput)
+
+	unlockingHex := encodePushBytes(codePartBytes) +
+		encodePushBytes(derSig) +
+		encodePushBytes(changePKH) +
+		encodePushInt(int64(changeSatoshis)) +
+		encodePushInt(int64(contSatoshis)) +
+		encodePushBytes(preimage) +
+		encodePushInt(1) // methodSelector = 1 (decrement)
+
+	unlockScript, _ := script.NewFromHex(unlockingHex)
+	spendTx.Inputs[0].UnlockingScript = unlockScript
+
+	if err := executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput); err != nil {
+		t.Fatalf("execution failed: %v", err)
+	}
+}
+
+func TestStateful_WrongState_Fail(t *testing.T) {
+	// Increment from count=0, but build the continuation output with WRONG state (count=99).
+	// The hashOutputs comparison should fail.
+	codePartHex, err := compileRúnar("stateful-counter", `{"count":"0"}`)
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	codePartBytes, _ := hex.DecodeString(codePartHex)
+
+	fullLockingHex := codePartHex + "6a" + serializeBigintState(0)
+	// WRONG: continuation should have count=1 but we use count=99
+	continuationScriptHex := codePartHex + "6a" + serializeBigintState(99)
+
+	codeSepOffset := findCodeSeparatorOffset(codePartHex, 0)
+
+	prevSatoshis := uint64(10000)
+	contSatoshis := uint64(9000)
+	changeSatoshis := uint64(500)
+	changePKH := make([]byte, 20)
+
+	fullLockingScript, _ := script.NewFromHex(fullLockingHex)
+	prevOutput := &transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: fullLockingScript,
+	}
+
+	spendTx := transaction.NewTransaction()
+	spendTx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       makeFundingTxID(),
+		SourceTxOutIndex: 0,
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, prevOutput)
+
+	contScript, _ := script.NewFromHex(continuationScriptHex)
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      contSatoshis,
+		LockingScript: contScript,
+	})
+	spendTx.AddOutput(&transaction.TransactionOutput{
+		Satoshis:      changeSatoshis,
+		LockingScript: buildP2PKHLockingScript(changePKH),
+	})
+
+	scriptCodeHex := fullLockingHex[(codeSepOffset+1)*2:]
+	scriptCodeScript, _ := script.NewFromHex(scriptCodeHex)
+	spendTx.Inputs[0].SetSourceTxOutput(&transaction.TransactionOutput{
+		Satoshis:      prevSatoshis,
+		LockingScript: scriptCodeScript,
+	})
+
+	preimage, _ := spendTx.CalcInputPreimage(0, sighash.AllForkID)
+	sigHashBytes, _ := spendTx.CalcInputSignatureHash(0, sighash.AllForkID)
+
+	sig, _ := opPushTxPrivKey.Sign(sigHashBytes)
+	halfN := new(big.Int).Rsh(curveOrderN, 1)
+	if sig.S.Cmp(halfN) > 0 {
+		sig.S = new(big.Int).Sub(curveOrderN, sig.S)
+	}
+	derSig := append(sig.Serialize(), byte(sighash.AllForkID))
+
+	spendTx.Inputs[0].SetSourceTxOutput(prevOutput)
+
+	unlockingHex := encodePushBytes(codePartBytes) +
+		encodePushBytes(derSig) +
+		encodePushBytes(changePKH) +
+		encodePushInt(int64(changeSatoshis)) +
+		encodePushInt(int64(contSatoshis)) +
+		encodePushBytes(preimage) +
+		encodePushInt(0)
+
+	unlockScript, _ := script.NewFromHex(unlockingHex)
+	spendTx.Inputs[0].UnlockingScript = unlockScript
+
+	if err := executeScriptWithTx(fullLockingHex, unlockingHex, spendTx, 0, prevOutput); err == nil {
+		t.Fatal("expected failure with wrong state but execution succeeded")
+	}
 }
 
 // ---------------------------------------------------------------------------
