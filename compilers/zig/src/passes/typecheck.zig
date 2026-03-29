@@ -89,6 +89,7 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "reverseBytes", sig(&.{.byte_string}, .byte_string) },
     .{ "left", sig(&.{ .byte_string, .bigint }, .byte_string) },
     .{ "right", sig(&.{ .byte_string, .bigint }, .byte_string) },
+    .{ "split", sig(&.{ .byte_string, .bigint }, .byte_string) },
     .{ "int2str", sig(&.{ .bigint, .bigint }, .byte_string) },
     .{ "toByteString", sig(&.{.byte_string}, .byte_string) },
     // Rabin / WOTS / SLH-DSA
@@ -174,12 +175,22 @@ fn isBigintFamily(t: RunarType) bool {
 }
 
 /// Returns true if `actual` is a subtype of `expected`.
+/// ByteString-family types are bidirectionally compatible (ByteString, PubKey, Sig, etc.).
+/// Bigint-family types are bidirectionally compatible (bigint, RabinSig, RabinPubKey).
 fn isSubtype(actual: RunarType, expected: RunarType) bool {
     if (actual == expected) return true;
     if (actual == .unknown) return true;
     if (expected == .unknown) return true;
+    // ByteString subtypes (bidirectional)
     if (expected == .byte_string and isByteFamily(actual)) return true;
+    if (actual == .byte_string and isByteFamily(expected)) return true;
+    // Both in ByteString family -> compatible (e.g. Addr and Ripemd160, Sig and ByteString)
+    if (isByteFamily(actual) and isByteFamily(expected)) return true;
+    // Bigint subtypes (bidirectional)
     if (expected == .bigint and isBigintFamily(actual)) return true;
+    if (actual == .bigint and isBigintFamily(expected)) return true;
+    // Both in bigint family -> compatible
+    if (isBigintFamily(actual) and isBigintFamily(expected)) return true;
     return false;
 }
 
@@ -1005,7 +1016,8 @@ test "builtin_functions: all 60+ entries present" {
         "checkPreimage",   "assert",            "len",
         "cat",             "substr",            "num2bin",
         "bin2num",         "reverseBytes",      "left",
-        "right",           "int2str",           "toByteString",
+        "right",           "split",             "int2str",
+        "toByteString",
         "verifyRabinSig",  "verifyWOTS",        "verifySLHDSA_SHA2_128s",
         "verifySLHDSA_SHA2_128f",               "verifySLHDSA_SHA2_192s",
         "verifySLHDSA_SHA2_192f",               "verifySLHDSA_SHA2_256s",

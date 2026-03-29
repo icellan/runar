@@ -3,6 +3,12 @@ const types = @import("ir/types.zig");
 const json_parser = @import("ir/json.zig");
 const parse_zig = @import("passes/parse_zig.zig");
 const parse_ts = @import("passes/parse_ts.zig");
+const parse_sol = @import("passes/parse_sol.zig");
+const parse_move = @import("passes/parse_move.zig");
+const parse_go = @import("passes/parse_go.zig");
+const parse_rust = @import("passes/parse_rust.zig");
+const parse_python = @import("passes/parse_python.zig");
+const parse_ruby = @import("passes/parse_ruby.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const anf_lower = @import("passes/anf_lower.zig");
@@ -135,11 +141,17 @@ pub fn main() !void {
     std.process.exit(1);
 }
 
-const FileFormat = enum { runar_zig, runar_ts, anf_json, unknown };
+const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, anf_json, unknown };
 
 fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
     if (std.mem.endsWith(u8, path, ".runar.ts")) return .runar_ts;
+    if (std.mem.endsWith(u8, path, ".runar.sol")) return .runar_sol;
+    if (std.mem.endsWith(u8, path, ".runar.move")) return .runar_move;
+    if (std.mem.endsWith(u8, path, ".runar.go")) return .runar_go;
+    if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
+    if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
+    if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
     if (std.mem.endsWith(u8, path, ".json")) return .anf_json;
     return .unknown;
 }
@@ -159,7 +171,7 @@ fn printUsage() void {
         \\  --hex                     Output script hex only (no artifact JSON)
         \\  --disable-constant-folding  Skip constant folding pass
         \\
-        \\Formats: .runar.zig, .runar.ts, .json
+        \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .json
         \\
     , .{});
 }
@@ -234,6 +246,54 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         },
         .runar_ts => blk: {
             const r = parse_ts.parseTs(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_sol => blk: {
+            const r = parse_sol.parseSol(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_move => blk: {
+            const r = parse_move.parseMove(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_go => blk: {
+            const r = parse_go.parseGo(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_rs => blk: {
+            const r = parse_rust.parseRust(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_py => blk: {
+            const r = parse_python.parsePython(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_rb => blk: {
+            const r = parse_ruby.parseRuby(work_allocator, source, path);
             if (r.errors.len > 0) {
                 for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
                 return error.ParseFailed;

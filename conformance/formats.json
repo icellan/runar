@@ -12,35 +12,35 @@
       "extension": ".runar.sol",
       "name": "Solidity-like",
       "description": "Solidity-inspired contract syntax",
-      "compilers": ["ts", "go", "rust", "python"],
+      "compilers": ["ts", "go", "rust", "python", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.move",
       "name": "Move-style",
       "description": "Move-inspired resource language syntax",
-      "compilers": ["ts", "go", "rust", "python"],
+      "compilers": ["ts", "go", "rust", "python", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.py",
       "name": "Python",
       "description": "Python DSL contract syntax",
-      "compilers": ["ts", "go", "rust", "python"],
+      "compilers": ["ts", "go", "rust", "python", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.go",
       "name": "Go Contracts",
       "description": "Go struct/method contract syntax",
-      "compilers": ["go", "python"],
+      "compilers": ["go", "python", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.rs",
       "name": "Rust DSL",
       "description": "Rust attribute-macro contract syntax",
-      "compilers": ["rust", "python"],
+      "compilers": ["rust", "python", "ruby"],
       "status": "experimental"
     },
     {
@@ -54,7 +54,7 @@
       "extension": ".runar.zig",
       "name": "Zig",
       "description": "Zig struct/method contract syntax",
-      "compilers": ["zig"],
+      "compilers": ["zig", "python", "ruby"],
       "status": "experimental"
     }
   ]
