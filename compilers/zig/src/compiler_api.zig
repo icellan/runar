@@ -5,7 +5,6 @@ const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
-const dce = @import("passes/dce.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
@@ -61,10 +60,7 @@ pub fn compileSource(
     // Pass 4.25: Constant Fold
     program = constant_fold.foldConstants(work, program) catch return error.ANFLowerFailed;
 
-    // Pass 4.3: Dead Code Elimination
-    program = dce.eliminateDeadCode(work, program) catch return error.ANFLowerFailed;
-
-    // Pass 4.5: EC Optimize
+    // Pass 4.5: EC Optimize (includes internal DCE when EC rewrites produce dead code)
     program = ec_optimizer.optimize(work, program) catch return error.ANFLowerFailed;
 
     // Pass 5: Stack Lower + Peephole

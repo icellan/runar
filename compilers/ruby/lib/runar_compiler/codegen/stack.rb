@@ -334,6 +334,7 @@ module RunarCompiler::Codegen
       @properties = properties
       @private_methods = {}
       @local_bindings = {}
+      @array_lengths = {}
       @outer_protected_refs = nil
       @inside_branch = false
       @current_source_loc = nil
@@ -1059,6 +1060,18 @@ module RunarCompiler::Codegen
         return
       end
 
+      # exit(condition) => condition OP_VERIFY — same as assert
+      if func_name == "exit"
+        if args && !args.empty?
+          is_last = _is_last_use(args[0], binding_index, last_uses)
+          bring_to_top(args[0], is_last)
+          @sm.pop
+          emit_opcode("OP_VERIFY")
+          @sm.push(binding_name)
+        end
+        return
+      end
+
       # super() in constructor
       if func_name == "super"
         @sm.push(binding_name)
@@ -1711,26 +1724,80 @@ module RunarCompiler::Codegen
     # -----------------------------------------------------------------
 
     def _lower_check_multi_sig(binding_name, args, binding_index, last_uses)
-      # TODO: Full implementation in Part 2
-      # For now, push args and emit OP_CHECKMULTISIG
-      args.each do |arg|
-        is_last = _is_last_use(arg, binding_index, last_uses)
-        bring_to_top(arg, is_last)
-      end
-      args.length.times { @sm.pop }
+      raise "checkMultiSig expects 2 arguments" unless args.length == 2
+
+      sigs_ref = args[0]
+      pks_ref = args[1]
+      n_sigs = @array_lengths[sigs_ref] || 1
+      n_pks = @array_lengths[pks_ref] || 1
+
+      # Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
+      emit_op({ op: "push", value: 0 })
+      @sm.push(nil)
+
+      # Bring sigs array to top
+      bring_to_top(sigs_ref, _is_last_use(sigs_ref, binding_index, last_uses))
+
+      # Push nSigs count
+      emit_op({ op: "push", value: n_sigs })
+      @sm.push(nil)
+
+      # Bring pubkeys array to top
+      bring_to_top(pks_ref, _is_last_use(pks_ref, binding_index, last_uses))
+
+      # Push nPKs count
+      emit_op({ op: "push", value: n_pks })
+      @sm.push(nil)
+
+      # Pop everything: OP_0 + sigs + nSigs + pks + nPKs
+      5.times { @sm.pop }
+
       emit_opcode("OP_CHECKMULTISIG")
       @sm.push(binding_name)
+      _track_depth
     end
 
     def _lower_reverse_bytes(binding_name, args, binding_index, last_uses)
-      # TODO: Full implementation in Part 2
-      if args && !args.empty?
-        is_last = _is_last_use(args[0], binding_index, last_uses)
-        bring_to_top(args[0], is_last)
-        @sm.pop
+      raise "reverseBytes requires 1 argument" unless args.length == 1
+
+      # Bring data to top of stack
+      is_last = _is_last_use(args[0], binding_index, last_uses)
+      bring_to_top(args[0], is_last)
+      @sm.pop
+
+      # Push OP_0 as empty accumulator
+      emit_op({ op: "push", value: 0 })
+      @sm.push(nil)
+
+      # Swap so data is on top: stack = [result, data]
+      emit_op({ op: "swap" })
+      @sm.swap
+
+      # 520-iteration unrolled loop
+      520.times do
+        # DUP data
+        emit_op({ op: "dup" })
+        # OP_SIZE -> [result, data, data, len]
+        emit_opcode("OP_SIZE")
+        # NIP -> [result, data, len]
+        emit_op({ op: "nip" })
+        # IF len > 0
+        emit_op({ op: "if", then: [
+          { op: "push", value: { kind: "bigint", big_int: 1 } },
+          { op: "opcode", code: "OP_SPLIT" },
+          { op: "swap" },
+          { op: "rot" },
+          { op: "opcode", code: "OP_CAT" },
+          { op: "swap" },
+        ] })
       end
-      # reverseBytes is a loop-based reversal -- placeholder
+
+      # DROP the empty remainder
+      emit_op({ op: "drop" })
+      @sm.pop
+
       @sm.push(binding_name)
+      _track_depth
     end
 
     def _lower_substr(binding_name, args, binding_index, last_uses)
@@ -2629,6 +2696,7 @@ module RunarCompiler::Codegen
     # -----------------------------------------------------------------
 
     def _lower_array_literal(binding_name, elements, binding_index, last_uses)
+      @array_lengths[binding_name] = elements.length
       elements.each do |elem|
         is_last = _is_last_use(elem, binding_index, last_uses)
         bring_to_top(elem, is_last)

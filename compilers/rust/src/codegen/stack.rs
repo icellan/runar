@@ -1049,6 +1049,18 @@ impl LoweringContext {
             return;
         }
 
+        // exit(condition) => condition OP_VERIFY — same as assert
+        if func_name == "exit" {
+            if !args.is_empty() {
+                let is_last = self.is_last_use(&args[0], binding_index, last_uses);
+                self.bring_to_top(&args[0], is_last);
+                self.sm.pop();
+                self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
+                self.sm.push(binding_name);
+            }
+            return;
+        }
+
         // super() in constructor -- no opcode emission needed.
         // Constructor args are already on the stack.
         if func_name == "super" {

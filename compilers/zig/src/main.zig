@@ -7,7 +7,6 @@ const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
-const dce = @import("passes/dce.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
 const stack_lower = @import("passes/stack_lower.zig");
 const peephole = @import("passes/peephole.zig");
@@ -273,10 +272,12 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         program = try constant_fold.foldConstants(work_allocator, program);
     }
 
-    // Pass 4.3: Dead Code Elimination
-    program = try dce.eliminateDeadCode(work_allocator, program);
-
     // Pass 4.5: EC Optimize (always-on, matches TS compiler behavior)
+    // Note: The EC optimizer has its own internal dead binding elimination
+    // that runs only when EC optimizations produce dead code. A standalone
+    // DCE pass must NOT run here because it incorrectly removes bindings
+    // from private method bodies (whose last binding is the return value,
+    // only referenced at inlining call sites in other methods).
     program = try ec_optimizer.optimize(work_allocator, program);
 
     // --emit-ir: output canonical ANF IR JSON and stop

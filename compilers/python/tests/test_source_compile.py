@@ -102,6 +102,7 @@ ALL_CONFORMANCE_TESTS = [
     "schnorr-zkp",
     "sphincs-wallet",
     "stateful",
+    "stateful-bytestring",
     "stateful-counter",
     "token-ft",
     "token-nft",

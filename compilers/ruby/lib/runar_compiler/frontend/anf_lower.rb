@@ -238,8 +238,10 @@ module RunarCompiler
             end
           end
 
-          # Build augmented params list for ABI
-          augmented_params = _lower_params(method.params)
+          # Build augmented params list for ABI (filter out StatefulContext params)
+          augmented_params = _lower_params(
+            method.params.reject { |p| _is_stateful_context_param(p) }
+          )
           if needs_change_output
             augmented_params << IR::ANFParam.new(name: "_changePKH", type: "Ripemd160")
             augmented_params << IR::ANFParam.new(name: "_changeAmount", type: "bigint")
@@ -259,7 +261,9 @@ module RunarCompiler
           method_ctx.lower_statements(method.body)
           result << IR::ANFMethod.new(
             name: method.name,
-            params: _lower_params(method.params),
+            params: _lower_params(
+              method.params.reject { |p| _is_stateful_context_param(p) }
+            ),
             body: method_ctx.bindings,
             is_public: method.visibility == "public"
           )
@@ -269,6 +273,12 @@ module RunarCompiler
       result
     end
     private_class_method :_lower_methods
+
+    # Check if a parameter is a StatefulContext parameter (should be filtered from ANF).
+    def self._is_stateful_context_param(param)
+      param.type.is_a?(Frontend::CustomType) && param.type.name == "StatefulContext"
+    end
+    private_class_method :_is_stateful_context_param
 
     # @param params [Array<ParamNode>]
     # @return [Array<IR::ANFParam>]
@@ -372,6 +382,16 @@ module RunarCompiler
       # @return [Array<String>]
       def get_add_output_refs
         @add_output_refs
+      end
+
+      # Flatten addOutput args: if the second arg is an array literal,
+      # expand its elements inline (e.g., [satoshis, [a, b, c]] -> [satoshis, a, b, c]).
+      def _flatten_add_output_args(args)
+        if args.length == 2 && args[1].is_a?(ArrayLiteralExpr)
+          [args[0], *args[1].elements]
+        else
+          args
+        end
       end
 
       # @return [Boolean]
@@ -754,7 +774,8 @@ module RunarCompiler
 
         # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr
         if callee.is_a?(PropertyAccessExpr) && callee.property == "addOutput"
-          arg_refs = _lower_args(e.args)
+          flattened = _flatten_add_output_args(e.args)
+          arg_refs = _lower_args(flattened)
           satoshis = arg_refs[0]
           state_values = arg_refs[1..]
           ref = emit(IR::ANFValue.new(kind: "add_output").tap do |v|
@@ -784,7 +805,8 @@ module RunarCompiler
            callee.object.is_a?(Identifier) &&
            callee.object.name == "this" &&
            callee.property == "addOutput"
-          arg_refs = _lower_args(e.args)
+          flattened = _flatten_add_output_args(e.args)
+          arg_refs = _lower_args(flattened)
           satoshis = arg_refs[0]
           state_values = arg_refs[1..]
           ref = emit(IR::ANFValue.new(kind: "add_output").tap do |v|

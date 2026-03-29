@@ -961,6 +961,18 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	// exit(condition) => condition OP_VERIFY — same as assert
+	if funcName == "exit" {
+		if len(args) >= 1 {
+			isLast := ctx.isLastUse(args[0], bindingIndex, lastUses)
+			ctx.bringToTop(args[0], isLast)
+			ctx.sm.pop()
+			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+			ctx.sm.push(bindingName)
+		}
+		return
+	}
+
 	// super() in constructor — no opcode emission needed.
 	// Constructor args are already on the stack.
 	if funcName == "super" {

@@ -362,6 +362,11 @@ def _collect_refs(v: ANFValue, used: set[str]) -> None:
     if v.state_values is not None:
         for sv in v.state_values:
             used.add(sv)
+    if v.script_bytes is not None:
+        used.add(v.script_bytes)
+    if v.elements is not None:
+        for elem in v.elements:
+            used.add(elem)
     if v.then is not None:
         for b in v.then:
             _collect_refs(b.value, used)
@@ -381,6 +386,7 @@ def _has_side_effect(v: ANFValue) -> bool:
         "check_preimage",
         "deserialize_state",
         "add_output",
+        "add_raw_output",
         "if",
         "loop",
         "call",

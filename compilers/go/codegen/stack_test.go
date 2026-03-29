@@ -1621,3 +1621,72 @@ func TestStack_LargeBigintConst_100000_Encoding(t *testing.T) {
 		t.Errorf("expected 100000 to encode as '03a08601' (len-prefixed LE), got '%s'", hexStr)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: exit() builtin emits OP_VERIFY (same as assert)
+// ---------------------------------------------------------------------------
+
+func TestLowerToStack_ExitBuiltin_EmitsVerify(t *testing.T) {
+	// Contract:
+	//   class ExitTest extends SmartContract {
+	//     constructor(public readonly value: bigint) { super(value); }
+	//     public check(x: bigint) { exit(x > 0n); }
+	//   }
+	//
+	// ANF:
+	//   t0 = load_param(x)
+	//   t1 = load_const(0)
+	//   t2 = bin_op >(t0, t1)
+	//   t3 = call exit(t2)
+	program := &ir.ANFProgram{
+		ContractName: "ExitTest",
+		Properties: []ir.ANFProperty{
+			{Name: "value", Type: "bigint", Readonly: true},
+		},
+		Methods: []ir.ANFMethod{
+			{
+				Name:     "constructor",
+				Params:   []ir.ANFParam{{Name: "value", Type: "bigint"}},
+				Body:     nil,
+				IsPublic: false,
+			},
+			{
+				Name:   "check",
+				Params: []ir.ANFParam{{Name: "x", Type: "bigint"}},
+				Body: []ir.ANFBinding{
+					{Name: "t0", Value: ir.ANFValue{Kind: "load_param", Name: "x"}},
+					{Name: "t1", Value: ir.ANFValue{Kind: "load_const", RawValue: []byte("0"), ConstBigInt: big.NewInt(0), ConstInt: func() *int64 { v := int64(0); return &v }()}},
+					{Name: "t2", Value: ir.ANFValue{Kind: "bin_op", Op: ">", Left: "t0", Right: "t1"}},
+					{Name: "t3", Value: ir.ANFValue{Kind: "call", Func: "exit", Args: []string{"t2"}}},
+				},
+				IsPublic: true,
+			},
+		},
+	}
+
+	methods := mustLowerToStackOps(t, program)
+
+	var check *StackMethod
+	for i := range methods {
+		if methods[i].Name == "check" {
+			check = &methods[i]
+			break
+		}
+	}
+	if check == nil {
+		t.Fatal("could not find 'check' stack method")
+	}
+
+	asm := opsToString(check.Ops)
+	t.Logf("exit builtin ops: %s", asm)
+
+	// exit(condition) should produce OP_VERIFY, same as assert
+	if !strings.Contains(asm, "OP_VERIFY") {
+		t.Errorf("exit() should emit OP_VERIFY, got: %s", asm)
+	}
+
+	// Should also contain OP_GREATERTHAN for the > comparison
+	if !strings.Contains(asm, "OP_GREATERTHAN") {
+		t.Errorf("expected OP_GREATERTHAN for > comparison, got: %s", asm)
+	}
+}

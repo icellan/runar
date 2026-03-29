@@ -505,6 +505,7 @@ fn test_all_conformance_tests() {
         "schnorr-zkp",
         "sphincs-wallet",
         "stateful",
+        "stateful-bytestring",
         "stateful-counter",
         "token-ft",
         "token-nft",
@@ -946,6 +947,7 @@ fn test_source_compile_all_conformance() {
         "schnorr-zkp",
         "sphincs-wallet",
         "stateful",
+        "stateful-bytestring",
         "stateful-counter",
         "token-ft",
         "token-nft",
@@ -1178,6 +1180,11 @@ fn test_conformance_golden_property_initializers() {
 #[test]
 fn test_conformance_golden_sphincs_wallet() {
     conformance_golden_test("sphincs-wallet");
+}
+
+#[test]
+fn test_conformance_golden_stateful_bytestring() {
+    conformance_golden_test("stateful-bytestring");
 }
 
 #[test]
@@ -2033,4 +2040,43 @@ fn test_three_method_dispatch_last_uses_numequalverify() {
         "3-method contract should use OP_NUMEQUALVERIFY for the last dispatch entry; got asm: {}",
         artifact.asm
     );
+}
+
+// ---------------------------------------------------------------------------
+// Test: exit() builtin compiles to OP_VERIFY (same as assert)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_exit_builtin() {
+    let ir_json = r#"{
+        "contractName": "ExitTest",
+        "properties": [],
+        "methods": [{
+            "name": "check",
+            "params": [{"name": "x", "type": "bigint"}],
+            "body": [
+                {"name": "t0", "value": {"kind": "load_param", "name": "x"}},
+                {"name": "t1", "value": {"kind": "load_const", "value": 0}},
+                {"name": "t2", "value": {"kind": "bin_op", "op": ">", "left": "t0", "right": "t1"}},
+                {"name": "t3", "value": {"kind": "call", "func": "exit", "args": ["t2"]}},
+                {"name": "t4", "value": {"kind": "load_const", "value": true}},
+                {"name": "t5", "value": {"kind": "assert", "value": "t4"}}
+            ],
+            "isPublic": true
+        }]
+    }"#;
+
+    let artifact = compile_from_ir_str(ir_json).expect("exit() contract should compile");
+    assert_eq!(artifact.contract_name, "ExitTest");
+    assert!(!artifact.script.is_empty(), "script hex should not be empty");
+
+    // exit() should produce OP_VERIFY in the output
+    assert!(
+        artifact.asm.contains("OP_VERIFY"),
+        "exit() should compile to OP_VERIFY; got asm: {}",
+        artifact.asm
+    );
+
+    println!("ExitTest script hex: {}", artifact.script);
+    println!("ExitTest script asm: {}", artifact.asm);
 }

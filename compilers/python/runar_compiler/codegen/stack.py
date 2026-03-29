@@ -881,6 +881,16 @@ class _LoweringContext:
                 self.sm.push(binding_name)
             return
 
+        # exit(condition) => condition OP_VERIFY — same as assert
+        if func_name == "exit":
+            if args:
+                is_last = self._is_last_use(args[0], binding_index, last_uses)
+                self.bring_to_top(args[0], is_last)
+                self.sm.pop()
+                self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+                self.sm.push(binding_name)
+            return
+
         # super() in constructor
         if func_name == "super":
             self.sm.push(binding_name)
@@ -893,6 +903,10 @@ class _LoweringContext:
 
         if func_name == "reverseBytes":
             self._lower_reverse_bytes(binding_name, args, binding_index, last_uses)
+            return
+
+        if func_name == "__array_access":
+            self._lower_array_access(binding_name, args, binding_index, last_uses)
             return
 
         if func_name == "substr":

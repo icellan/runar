@@ -152,6 +152,8 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "extractOutputs":       FuncSig(params=["SigHashPreimage"], return_type="Sha256"),
     "extractLocktime":      FuncSig(params=["SigHashPreimage"], return_type="bigint"),
     "extractSigHashType":   FuncSig(params=["SigHashPreimage"], return_type="bigint"),
+    "split":                FuncSig(params=["ByteString", "bigint"], return_type="ByteString"),
+    "buildChangeOutput":    FuncSig(params=["ByteString", "bigint"], return_type="ByteString"),
 }
 
 
