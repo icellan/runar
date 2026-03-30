@@ -437,10 +437,13 @@ class _MoveParser:
 
             # resource struct or struct
             if self.check_ident("resource") or self.check_ident("struct"):
-                if self.check_ident("resource"):
+                is_resource = self.check_ident("resource")
+                if is_resource:
                     self.advance()  # skip "resource"
                 props = self._parse_move_struct()
                 properties.extend(props)
+                if is_resource or any(not p.readonly for p in props):
+                    parent_class = "StatefulSmartContract"
                 continue
 
             # public fun or fun

@@ -4,6 +4,15 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "slow: marks tests as slow (deselect with -m 'not slow')",
+    )
+
 
 def load_contract(file_path: str):
     """Import a .runar.py file as a Python module."""

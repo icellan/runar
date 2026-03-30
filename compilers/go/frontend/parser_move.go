@@ -490,12 +490,14 @@ func moveMapBuiltin(name string) string {
 // moveMapType maps Move-style type names to Rúnar types.
 func moveMapType(name string) TypeNode {
 	switch name {
-	case "u64", "u128", "u256":
+	case "u64", "u128", "u256", "Int":
 		return PrimitiveType{Name: "bigint"}
-	case "bool":
+	case "bool", "Bool":
 		return PrimitiveType{Name: "boolean"}
-	case "vector":
+	case "vector", "Bytes":
 		return PrimitiveType{Name: "ByteString"}
+	case "address":
+		return PrimitiveType{Name: "Addr"}
 	}
 	// Handle snake_case type conversions
 	camel := snakeToCamel(name)
@@ -1354,11 +1356,19 @@ func (p *moveParser) buildMoveConstructor(properties []PropertyNode) MethodNode 
 	body := []Statement{
 		ExpressionStmt{
 			Expr: CallExpr{
-				Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+				Callee: Identifier{Name: "super"},
 				Args:   superArgs,
 			},
 			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
 		},
+	}
+
+	for _, prop := range uninitProps {
+		body = append(body, AssignmentStmt{
+			Target:         PropertyAccessExpr{Property: prop.Name},
+			Value:          Identifier{Name: prop.Name},
+			SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
+		})
 	}
 
 	return MethodNode{

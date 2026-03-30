@@ -1,7 +1,7 @@
 module BooleanLogic {
     use runar::types::{Int};
 
-    resource struct BooleanLogic {
+    struct BooleanLogic {
         threshold: Int,
     }
 

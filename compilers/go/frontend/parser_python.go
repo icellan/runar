@@ -714,6 +714,8 @@ func parsePyType(name string) TypeNode {
 		return PrimitiveType{Name: "bigint"}
 	case "Int":
 		return PrimitiveType{Name: "bigint"}
+	case "Bigint":
+		return PrimitiveType{Name: "bigint"}
 	case "bool":
 		return PrimitiveType{Name: "boolean"}
 	case "bytes":
@@ -933,7 +935,7 @@ func (p *pyParser) parseContract() (*ContractNode, error) {
 		body := []Statement{
 			ExpressionStmt{
 				Expr: CallExpr{
-					Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+					Callee: Identifier{Name: "super"},
 					Args:   superArgs,
 				},
 				SourceLocation: SourceLocation{File: p.fileName, Line: 1, Column: 0},
@@ -1053,7 +1055,7 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 							// Convert to super(...) call
 							constructorBody = append(constructorBody, ExpressionStmt{
 								Expr: CallExpr{
-									Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+									Callee: Identifier{Name: "super"},
 									Args:   call.Args,
 								},
 								SourceLocation: es.SourceLocation,
@@ -1077,7 +1079,7 @@ func (p *pyParser) parsePyConstructor(properties []PropertyNode) MethodNode {
 		constructorBody = append([]Statement{
 			ExpressionStmt{
 				Expr: CallExpr{
-					Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+					Callee: Identifier{Name: "super"},
 					Args:   superArgs,
 				},
 				SourceLocation: loc,

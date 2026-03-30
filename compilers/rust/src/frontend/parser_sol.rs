@@ -443,7 +443,7 @@ impl<'a> SolParser<'a> {
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
             match self.peek().clone() {
                 Token::Constructor => {
-                    constructor = Some(self.parse_constructor());
+                    constructor = Some(self.parse_constructor(&properties));
                 }
                 Token::Function => {
                     methods.push(self.parse_function());
@@ -499,6 +499,15 @@ impl<'a> SolParser<'a> {
         }
 
         let type_node = self.parse_type();
+
+        // Handle "Type immutable name;" syntax (immutable after type)
+        let is_immutable = if !is_immutable && *self.peek() == Token::Immutable {
+            self.advance(); // consume 'immutable'
+            true
+        } else {
+            is_immutable
+        };
+
         let name = self.expect_ident();
 
         // Parse optional initializer: = value
@@ -569,10 +578,11 @@ impl<'a> SolParser<'a> {
     // Constructor
     // -----------------------------------------------------------------------
 
-    fn parse_constructor(&mut self) -> MethodNode {
+    fn parse_constructor(&mut self, properties: &[PropertyNode]) -> MethodNode {
+        let loc = self.loc();
         self.advance(); // consume 'constructor'
         self.expect(&Token::LParen);
-        let params = self.parse_param_list();
+        let mut params = self.parse_param_list();
         self.expect(&Token::RParen);
 
         // Optional visibility
@@ -580,14 +590,50 @@ impl<'a> SolParser<'a> {
             self.advance();
         }
 
-        let body = self.parse_block();
+        let raw_body = self.parse_block();
+
+        // Strip _ prefix from param names and build rename map
+        let mut rename_map = std::collections::HashMap::new();
+        for param in &mut params {
+            if param.name.starts_with('_') {
+                let original = param.name.clone();
+                param.name = param.name[1..].to_string();
+                rename_map.insert(original, param.name.clone());
+            }
+        }
+
+        // Build set of property names
+        let prop_names: std::collections::HashSet<String> =
+            properties.iter().map(|p| p.name.clone()).collect();
+
+        // Inject super(...) as first statement
+        let super_call = Statement::ExpressionStatement {
+            expression: Expression::CallExpr {
+                callee: Box::new(Expression::Identifier {
+                    name: "super".to_string(),
+                }),
+                args: params.iter().map(|p| Expression::Identifier {
+                    name: p.name.clone(),
+                }).collect(),
+            },
+            source_location: loc.clone(),
+        };
+
+        // Process body: rename _-prefixed identifiers and convert bare
+        // property assignments to this.property assignments
+        let mut fixed_body = Vec::new();
+        for stmt in raw_body {
+            let renamed = sol_rename_identifiers_in_stmt(stmt, &rename_map);
+            let fixed = sol_fix_property_assignment(renamed, &prop_names);
+            fixed_body.push(fixed);
+        }
 
         MethodNode {
             name: "constructor".to_string(),
             params,
-            body,
+            body: std::iter::once(super_call).chain(fixed_body).collect(),
             visibility: Visibility::Public,
-            source_location: self.loc(),
+            source_location: loc,
         }
     }
 
@@ -667,6 +713,11 @@ impl<'a> SolParser<'a> {
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
+        // Check for Solidity-style local variable declaration: Type name = expr; or Type name;
+        if self.is_type_then_name() {
+            return Some(self.parse_typed_var_decl());
+        }
+
         match self.peek().clone() {
             Token::Let | Token::Const => Some(self.parse_var_decl()),
             Token::If => Some(self.parse_if()),
@@ -819,6 +870,30 @@ impl<'a> SolParser<'a> {
             (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)),
             (Some(Token::Ident(_)), Some(Token::Ident(_)))
         )
+    }
+
+    /// Parse Solidity-style typed variable declaration: `Type name = expr;` or `Type name;`
+    fn parse_typed_var_decl(&mut self) -> Statement {
+        let type_node = self.parse_type();
+        let name = self.expect_ident();
+
+        let init = if *self.peek() == Token::Eq {
+            self.advance();
+            self.parse_expression()
+        } else {
+            // Type name; — declaration without initializer, default to 0
+            Expression::BigIntLiteral { value: 0 }
+        };
+
+        self.expect(&Token::Semicolon);
+
+        Statement::VariableDecl {
+            name,
+            var_type: Some(type_node),
+            mutable: false,
+            init,
+            source_location: self.loc(),
+        }
     }
 
     fn parse_require(&mut self) -> Statement {
@@ -1357,6 +1432,165 @@ impl<'a> SolParser<'a> {
                 Expression::BigIntLiteral { value: 0 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constructor helper functions
+// ---------------------------------------------------------------------------
+
+/// Recursively rename identifiers in a statement using the provided rename map.
+/// Used to fix _-prefixed constructor param references in the body.
+fn sol_rename_identifiers_in_stmt(
+    stmt: Statement,
+    rename_map: &std::collections::HashMap<String, String>,
+) -> Statement {
+    if rename_map.is_empty() {
+        return stmt;
+    }
+    match stmt {
+        Statement::Assignment {
+            target,
+            value,
+            source_location,
+        } => Statement::Assignment {
+            target: sol_rename_identifiers_in_expr(target, rename_map),
+            value: sol_rename_identifiers_in_expr(value, rename_map),
+            source_location,
+        },
+        Statement::ExpressionStatement {
+            expression,
+            source_location,
+        } => Statement::ExpressionStatement {
+            expression: sol_rename_identifiers_in_expr(expression, rename_map),
+            source_location,
+        },
+        Statement::VariableDecl {
+            name,
+            var_type,
+            mutable,
+            init,
+            source_location,
+        } => Statement::VariableDecl {
+            name,
+            var_type,
+            mutable,
+            init: sol_rename_identifiers_in_expr(init, rename_map),
+            source_location,
+        },
+        Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+            source_location,
+        } => Statement::IfStatement {
+            condition: sol_rename_identifiers_in_expr(condition, rename_map),
+            then_branch: then_branch
+                .into_iter()
+                .map(|s| sol_rename_identifiers_in_stmt(s, rename_map))
+                .collect(),
+            else_branch: else_branch.map(|stmts| {
+                stmts
+                    .into_iter()
+                    .map(|s| sol_rename_identifiers_in_stmt(s, rename_map))
+                    .collect()
+            }),
+            source_location,
+        },
+        Statement::ReturnStatement {
+            value,
+            source_location,
+        } => Statement::ReturnStatement {
+            value: value.map(|v| sol_rename_identifiers_in_expr(v, rename_map)),
+            source_location,
+        },
+        other => other,
+    }
+}
+
+/// Recursively rename identifiers in an expression using the provided rename map.
+fn sol_rename_identifiers_in_expr(
+    expr: Expression,
+    rename_map: &std::collections::HashMap<String, String>,
+) -> Expression {
+    match expr {
+        Expression::Identifier { name } => {
+            if let Some(new_name) = rename_map.get(&name) {
+                Expression::Identifier {
+                    name: new_name.clone(),
+                }
+            } else {
+                Expression::Identifier { name }
+            }
+        }
+        Expression::CallExpr { callee, args } => Expression::CallExpr {
+            callee: Box::new(sol_rename_identifiers_in_expr(*callee, rename_map)),
+            args: args
+                .into_iter()
+                .map(|a| sol_rename_identifiers_in_expr(a, rename_map))
+                .collect(),
+        },
+        Expression::BinaryExpr { op, left, right } => Expression::BinaryExpr {
+            op,
+            left: Box::new(sol_rename_identifiers_in_expr(*left, rename_map)),
+            right: Box::new(sol_rename_identifiers_in_expr(*right, rename_map)),
+        },
+        Expression::UnaryExpr { op, operand } => Expression::UnaryExpr {
+            op,
+            operand: Box::new(sol_rename_identifiers_in_expr(*operand, rename_map)),
+        },
+        Expression::MemberExpr { object, property } => Expression::MemberExpr {
+            object: Box::new(sol_rename_identifiers_in_expr(*object, rename_map)),
+            property,
+        },
+        Expression::IndexAccess { object, index } => Expression::IndexAccess {
+            object: Box::new(sol_rename_identifiers_in_expr(*object, rename_map)),
+            index: Box::new(sol_rename_identifiers_in_expr(*index, rename_map)),
+        },
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => Expression::TernaryExpr {
+            condition: Box::new(sol_rename_identifiers_in_expr(*condition, rename_map)),
+            consequent: Box::new(sol_rename_identifiers_in_expr(*consequent, rename_map)),
+            alternate: Box::new(sol_rename_identifiers_in_expr(*alternate, rename_map)),
+        },
+        other => other,
+    }
+}
+
+/// Convert bare identifier assignments to property access assignments when the
+/// target is a known property name.
+/// e.g., `pubKeyHash = x` -> `this.pubKeyHash = x`
+fn sol_fix_property_assignment(
+    stmt: Statement,
+    prop_names: &std::collections::HashSet<String>,
+) -> Statement {
+    if let Statement::Assignment {
+        target,
+        value,
+        source_location,
+    } = stmt
+    {
+        if let Expression::Identifier { ref name } = target {
+            if prop_names.contains(name) {
+                return Statement::Assignment {
+                    target: Expression::PropertyAccess {
+                        property: name.clone(),
+                    },
+                    value,
+                    source_location,
+                };
+            }
+        }
+        Statement::Assignment {
+            target,
+            value,
+            source_location,
+        }
+    } else {
+        stmt
     }
 }
 

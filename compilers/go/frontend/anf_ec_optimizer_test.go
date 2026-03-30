@@ -624,9 +624,6 @@ func TestANFECOptimizer_ChainedRules_Rule12ThenRule5(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2)
-// NOTE: Rule 10 is not implemented in the Go optimizer (it returns false
-// after reverting the transformation). This test documents expected behavior.
-// Source bug: compilers/go/frontend/anf_optimize.go Rule 10 explicitly skips.
 // ---------------------------------------------------------------------------
 
 func TestANFECOptimizer_Rule10_EcAddMulGenMulGen(t *testing.T) {

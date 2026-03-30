@@ -625,10 +625,21 @@ module RunarCompiler
           source_location: location
         )
 
-        # Append any additional statements from the body,
-        # converting bare property name assignments to this.property form
+        # Build a rename map for _-prefixed param names (e.g., _pubKeyHash -> pubKeyHash).
+        # parse_sol_params already stripped the underscore from param names, but the
+        # body was parsed with the original _-prefixed identifiers still in place.
+        rename_map = {}
+        params.each do |p|
+          original = "_" + p.name
+          rename_map[original] = p.name
+        end
+
+        # Append any additional statements from the body:
+        # 1. Rename _-prefixed identifiers to their stripped versions
+        # 2. Convert bare property name assignments to this.property form
         prop_names = properties.map(&:name).to_set
         body.each do |stmt|
+          stmt = Frontend.sol_rename_identifiers_in_stmt(stmt, rename_map) unless rename_map.empty?
           if stmt.is_a?(AssignmentStmt) && stmt.target.is_a?(Identifier)
             if prop_names.include?(stmt.target.name)
               stmt = AssignmentStmt.new(
@@ -1285,6 +1296,85 @@ module RunarCompiler
           0
         end
         BigIntLiteral.new(value: val)
+      end
+    end
+
+    # -----------------------------------------------------------------------
+    # Constructor identifier renaming helpers
+    # -----------------------------------------------------------------------
+
+    # Recursively rename identifiers in an expression using +rename_map+.
+    # Used to fix _-prefixed constructor param references in the body
+    # (e.g. +_pubKeyHash+ -> +pubKeyHash+).
+    def self.sol_rename_identifiers_in_expr(expr, rename_map)
+      rn = lambda { |e| sol_rename_identifiers_in_expr(e, rename_map) }
+      case expr
+      when Identifier
+        new_name = rename_map[expr.name]
+        return Identifier.new(name: new_name) if new_name
+        expr
+      when BinaryExpr
+        BinaryExpr.new(op: expr.op, left: rn.call(expr.left), right: rn.call(expr.right))
+      when UnaryExpr
+        UnaryExpr.new(op: expr.op, operand: rn.call(expr.operand))
+      when CallExpr
+        CallExpr.new(callee: rn.call(expr.callee), args: expr.args.map { |a| rn.call(a) })
+      when MemberExpr
+        MemberExpr.new(object: rn.call(expr.object), property: expr.property)
+      when TernaryExpr
+        TernaryExpr.new(
+          condition: rn.call(expr.condition),
+          consequent: rn.call(expr.consequent),
+          alternate: rn.call(expr.alternate)
+        )
+      when IndexAccessExpr
+        IndexAccessExpr.new(object: rn.call(expr.object), index: rn.call(expr.index))
+      when IncrementExpr
+        IncrementExpr.new(operand: rn.call(expr.operand), prefix: expr.prefix)
+      when DecrementExpr
+        DecrementExpr.new(operand: rn.call(expr.operand), prefix: expr.prefix)
+      else
+        # PropertyAccessExpr, literals, etc. -- no identifiers to rename
+        expr
+      end
+    end
+
+    # Recursively rename identifiers in a statement tree.
+    # Used to fix _-prefixed constructor params in the body.
+    def self.sol_rename_identifiers_in_stmt(stmt, rename_map)
+      return stmt if rename_map.empty?
+      rn = lambda { |e| sol_rename_identifiers_in_expr(e, rename_map) }
+      rs = lambda { |s| sol_rename_identifiers_in_stmt(s, rename_map) }
+      case stmt
+      when AssignmentStmt
+        AssignmentStmt.new(target: rn.call(stmt.target), value: rn.call(stmt.value), source_location: stmt.source_location)
+      when ExpressionStmt
+        ExpressionStmt.new(expr: rn.call(stmt.expr), source_location: stmt.source_location)
+      when VariableDeclStmt
+        VariableDeclStmt.new(
+          name: stmt.name, type: stmt.type, mutable: stmt.mutable,
+          init: stmt.init ? rn.call(stmt.init) : nil,
+          source_location: stmt.source_location
+        )
+      when IfStmt
+        IfStmt.new(
+          condition: rn.call(stmt.condition),
+          then: stmt.then.map { |s| rs.call(s) },
+          else_: stmt.else_ ? stmt.else_.map { |s| rs.call(s) } : [],
+          source_location: stmt.source_location
+        )
+      when ForStmt
+        ForStmt.new(
+          init: stmt.init ? rs.call(stmt.init) : nil,
+          condition: stmt.condition ? rn.call(stmt.condition) : nil,
+          update: stmt.update ? rs.call(stmt.update) : nil,
+          body: stmt.body.map { |s| rs.call(s) },
+          source_location: stmt.source_location
+        )
+      when ReturnStmt
+        ReturnStmt.new(value: stmt.value ? rn.call(stmt.value) : nil, source_location: stmt.source_location)
+      else
+        stmt
       end
     end
 

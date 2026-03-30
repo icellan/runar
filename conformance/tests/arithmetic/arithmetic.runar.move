@@ -1,7 +1,7 @@
 module Arithmetic {
     use runar::types::{Int};
 
-    resource struct Arithmetic {
+    struct Arithmetic {
         target: Int,
     }
 

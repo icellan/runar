@@ -2,7 +2,7 @@ module P2PKH {
     use runar::types::{Addr, Sig, PubKey};
     use runar::crypto::{hash160, check_sig};
 
-    resource struct P2PKH {
+    struct P2PKH {
         pub_key_hash: Addr,
     }
 

@@ -2,7 +2,7 @@ module ECPrimitives {
     use runar::types::{Point, ByteString};
     use runar::crypto::{ecPointX, ecPointY, ecOnCurve, ecNegate, ecModReduce, ecAdd, ecMul, ecMulGen, ecMakePoint, ecEncodeCompressed};
 
-    resource struct ECPrimitives {
+    struct ECPrimitives {
         pt: Point,
     }
 

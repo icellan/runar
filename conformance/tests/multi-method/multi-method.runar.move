@@ -2,7 +2,7 @@ module MultiMethod {
     use runar::types::{PubKey, Sig, Int};
     use runar::crypto::{check_sig};
 
-    resource struct MultiMethod {
+    struct MultiMethod {
         owner: PubKey,
         backup: PubKey,
     }

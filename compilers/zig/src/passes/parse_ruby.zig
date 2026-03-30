@@ -2074,6 +2074,7 @@ const Parser = struct {
 test "rb tokenizer basics" {
     const allocator = std.testing.allocator;
     var tokenizer = Tokenizer.init(allocator, "class P2PKH < Runar::SmartContract");
+    defer tokenizer.tokens.deinit(allocator);
     const tokens = tokenizer.tokenize();
     // class P2PKH < Runar :: SmartContract NEWLINE EOF
     try std.testing.expectEqual(TokenKind.kw_class, tokens[0].kind);
@@ -2088,6 +2089,7 @@ test "rb tokenizer basics" {
 test "rb tokenizer symbols and ivars" {
     const allocator = std.testing.allocator;
     var tokenizer = Tokenizer.init(allocator, "prop :pub_key_hash, Addr\n@count += 1");
+    defer tokenizer.tokens.deinit(allocator);
     const tokens = tokenizer.tokenize();
     // prop :pub_key_hash , Addr NEWLINE @count += 1 NEWLINE EOF
     try std.testing.expectEqual(TokenKind.ident, tokens[0].kind); // prop
@@ -2106,6 +2108,7 @@ test "rb tokenizer symbols and ivars" {
 test "rb tokenizer keywords" {
     const allocator = std.testing.allocator;
     var tokenizer = Tokenizer.init(allocator, "if true and false or not end elsif else unless for in def return do super require assert self nil");
+    defer tokenizer.tokens.deinit(allocator);
     const tokens = tokenizer.tokenize();
     const expected_kinds = [_]TokenKind{
         .kw_if, .kw_true, .kw_and, .kw_false, .kw_or, .kw_not, .kw_end,
@@ -2120,6 +2123,7 @@ test "rb tokenizer keywords" {
 test "rb tokenizer range operators" {
     const allocator = std.testing.allocator;
     var tokenizer = Tokenizer.init(allocator, "0...10 0..10");
+    defer tokenizer.tokens.deinit(allocator);
     const tokens = tokenizer.tokenize();
     try std.testing.expectEqual(TokenKind.number, tokens[0].kind);
     try std.testing.expectEqual(TokenKind.dot_dot_dot, tokens[1].kind);
@@ -2130,7 +2134,9 @@ test "rb tokenizer range operators" {
 }
 
 test "rb snake_case to camelCase" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     try std.testing.expectEqualStrings("checkSig", rbConvertName(allocator, "check_sig"));
     try std.testing.expectEqualStrings("pubKeyHash", rbConvertName(allocator, "pub_key_hash"));
     try std.testing.expectEqualStrings("hash160", rbConvertName(allocator, "hash160"));
@@ -2138,7 +2144,6 @@ test "rb snake_case to camelCase" {
     try std.testing.expectEqualStrings("ecAdd", rbConvertName(allocator, "ec_add"));
     try std.testing.expectEqualStrings("extractLocktime", rbConvertName(allocator, "extract_locktime"));
     try std.testing.expectEqualStrings("hello", rbConvertName(allocator, "hello"));
-    // Verify we can free allocations without issues (arena-like usage)
 }
 
 test "rb type mapping" {
@@ -2155,7 +2160,9 @@ test "rb type mapping" {
 }
 
 test "rb parse basic P2PKH" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2193,7 +2200,9 @@ test "rb parse basic P2PKH" {
 }
 
 test "rb parse stateful counter" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2235,7 +2244,9 @@ test "rb parse stateful counter" {
 }
 
 test "rb parse auction" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2286,7 +2297,9 @@ test "rb parse auction" {
 }
 
 test "rb parse auto-generated constructor" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2312,7 +2325,9 @@ test "rb parse auto-generated constructor" {
 }
 
 test "rb parse unless statement" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2348,7 +2363,9 @@ test "rb parse unless statement" {
 }
 
 test "rb parse for loop" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\
@@ -2380,7 +2397,9 @@ test "rb parse for loop" {
 }
 
 test "rb parse property with default" {
-    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
     const source =
         \\require 'runar'
         \\

@@ -2,7 +2,7 @@ module PostQuantumWOTS {
     use runar::types::{ByteString};
     use runar::crypto::{verifyWOTS};
 
-    resource struct PostQuantumWOTS {
+    struct PostQuantumWOTS {
         pubkey: ByteString,
     }
 

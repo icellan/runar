@@ -160,11 +160,10 @@ module RunarCompiler
         return name
       end
 
-      # Strip trailing underscore
+      # Strip trailing underscore (e.g. sum_ -> sum, assert_ -> assert)
       if name.end_with?("_") && name != "_"
-        cleaned = name.chomp("_")
-        key = cleaned + "_"
-        return PY_SPECIAL_NAMES[key] if PY_SPECIAL_NAMES.key?(key)
+        name = name.chomp("_")
+        return PY_SPECIAL_NAMES[name + "_"] if PY_SPECIAL_NAMES.key?(name + "_")
       end
 
       # Strip leading single underscore for private methods

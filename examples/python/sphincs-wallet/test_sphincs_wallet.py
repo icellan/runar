@@ -9,12 +9,18 @@ import pytest
 contract_mod = load_contract(str(Path(__file__).parent / "SPHINCSWallet.runar.py"))
 SPHINCSWallet = contract_mod.SPHINCSWallet
 
-# Import real SLH-DSA crypto. Skip signature tests if not installed.
 from runar import slh_keygen
 from runar.slhdsa_impl import _HAS_SLHDSA
 
 # Module-level shared SLH-DSA keypair (keygen is slow, ~2-3s).
 _slh_kp = None
+
+# Tests that use real SLH-DSA keygen/sign/verify are slow (~10s each) and
+# require the optional ``slh-dsa`` package.  They are marked ``slow`` so
+# fast CI runs can exclude them with ``-m "not slow"``, and they are
+# additionally skipped when the package is not installed.
+_requires_slhdsa = pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed (pip install slh-dsa)")
+_slow = pytest.mark.slow
 
 
 def get_slh_kp():
@@ -25,7 +31,8 @@ def get_slh_kp():
     return _slh_kp
 
 
-@pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed")
+@_slow
+@_requires_slhdsa
 def test_spend():
     """Valid spend with real SLH-DSA keygen and signature."""
     ecdsa_pub_key = ALICE.pub_key
@@ -92,7 +99,8 @@ def test_wrong_slhdsa_pub_key_hash():
         )
 
 
-@pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed")
+@_slow
+@_requires_slhdsa
 def test_tampered_slhdsa_sig():
     """Tampered SLH-DSA signature should fail verification."""
     ecdsa_pub_key = ALICE.pub_key
@@ -119,7 +127,8 @@ def test_tampered_slhdsa_sig():
         )
 
 
-@pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed")
+@_slow
+@_requires_slhdsa
 def test_slhdsa_signed_wrong_message():
     """SLH-DSA signed different bytes than the ECDSA sig -- should fail verification."""
     ecdsa_pub_key = ALICE.pub_key
@@ -146,7 +155,8 @@ def test_slhdsa_signed_wrong_message():
         )
 
 
-@pytest.mark.skipif(not _HAS_SLHDSA, reason="slh-dsa package not installed")
+@_slow
+@_requires_slhdsa
 def test_spend_multiple_messages():
     """The same SLH-DSA keypair can sign multiple different messages (stateless)."""
     ecdsa_pub_key = ALICE.pub_key

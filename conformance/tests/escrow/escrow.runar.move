@@ -2,7 +2,7 @@ module Escrow {
     use runar::types::{PubKey, Sig};
     use runar::crypto::{check_sig};
 
-    resource struct Escrow {
+    struct Escrow {
         buyer: PubKey,
         seller: PubKey,
         arbiter: PubKey,

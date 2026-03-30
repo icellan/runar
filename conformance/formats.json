@@ -33,28 +33,28 @@
       "extension": ".runar.go",
       "name": "Go Contracts",
       "description": "Go struct/method contract syntax",
-      "compilers": ["go", "python", "ruby"],
+      "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.rs",
       "name": "Rust DSL",
       "description": "Rust attribute-macro contract syntax",
-      "compilers": ["rust", "python", "ruby"],
+      "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.rb",
       "name": "Ruby",
       "description": "Ruby DSL contract syntax",
-      "compilers": ["ts", "go", "rust", "python", "ruby"],
+      "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
       "status": "experimental"
     },
     {
       "extension": ".runar.zig",
       "name": "Zig",
       "description": "Zig struct/method contract syntax",
-      "compilers": ["zig", "python", "ruby"],
+      "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
       "status": "experimental"
     }
   ]

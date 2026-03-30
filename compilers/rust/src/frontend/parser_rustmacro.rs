@@ -24,7 +24,7 @@ enum TokenType {
     HashBracket, // #[
     // Punctuation
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
-    Semi, Comma, Dot, Colon, ColonColon, Arrow,
+    Semi, Comma, Dot, DotDot, Colon, ColonColon, Arrow,
     // Operators
     Plus, Minus, Star, Slash, Percent,
     EqEq, BangEq, Lt, LtEq, Gt, GtEq,
@@ -103,6 +103,7 @@ fn tokenize(source: &str) -> Vec<Token> {
                 "||" => Some(TokenType::PipePipe),
                 "+=" => Some(TokenType::PlusEq),
                 "-=" => Some(TokenType::MinusEq),
+                ".." => Some(TokenType::DotDot),
                 _ => None,
             };
             if let Some(t) = tok {
@@ -651,6 +652,56 @@ impl RustDslParser {
                 None
             };
             return Some(Statement::IfStatement { condition, then_branch, else_branch, source_location: loc });
+        }
+
+        // for i in start..end { body }
+        if matches!(self.current().typ, TokenType::For) {
+            self.advance_clone();
+            let var_name = if let TokenType::Ident(name) = self.current().typ.clone() {
+                self.advance_clone();
+                snake_to_camel(&name)
+            } else {
+                self.advance_clone();
+                "i".to_string()
+            };
+            self.expect(&TokenType::In);
+            let start_expr = self.parse_expression();
+            self.expect(&TokenType::DotDot);
+            let end_expr = self.parse_expression();
+
+            self.expect(&TokenType::LBrace);
+            let mut body = Vec::new();
+            while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
+                if let Some(s) = self.parse_statement() { body.push(s); }
+            }
+            self.expect(&TokenType::RBrace);
+
+            let init = Statement::VariableDecl {
+                name: var_name.clone(),
+                var_type: Some(TypeNode::Primitive(PrimitiveTypeName::Bigint)),
+                mutable: true,
+                init: start_expr,
+                source_location: loc.clone(),
+            };
+            let condition = Expression::BinaryExpr {
+                op: BinaryOp::Lt,
+                left: Box::new(Expression::Identifier { name: var_name.clone() }),
+                right: Box::new(end_expr),
+            };
+            let update = Statement::ExpressionStatement {
+                expression: Expression::IncrementExpr {
+                    operand: Box::new(Expression::Identifier { name: var_name }),
+                    prefix: false,
+                },
+                source_location: loc.clone(),
+            };
+            return Some(Statement::ForStatement {
+                init: Box::new(init),
+                condition,
+                update: Box::new(update),
+                body,
+                source_location: loc,
+            });
         }
 
         // return

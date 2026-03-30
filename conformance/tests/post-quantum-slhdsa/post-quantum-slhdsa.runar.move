@@ -2,7 +2,7 @@ module PostQuantumSLHDSA {
     use runar::types::{ByteString};
     use runar::crypto::{verifySlhdsaSha2128s};
 
-    resource struct PostQuantumSLHDSA {
+    struct PostQuantumSLHDSA {
         pubkey: ByteString,
     }
 

@@ -2,7 +2,7 @@ module OraclePriceFeed {
     use runar::types::{PubKey, Sig, ByteString, RabinSig, RabinPubKey};
     use runar::crypto::{check_sig, verify_rabin_sig, num2bin};
 
-    resource struct OraclePriceFeed {
+    struct OraclePriceFeed {
         oracle_pub_key: RabinPubKey,
         receiver: PubKey,
     }

@@ -490,10 +490,21 @@ class _SolParser:
             )
         )
 
-        # Append any additional statements from the body,
-        # converting bare property name assignments to this.property form
+        # Build a rename map for _-prefixed param names (e.g., _pubKeyHash -> pubKeyHash).
+        # parse_sol_params already stripped the underscore from param names, but the
+        # body was parsed with the original _-prefixed identifiers still in place.
+        rename_map: dict[str, str] = {}
+        for p in params:
+            original = "_" + p.name
+            rename_map[original] = p.name
+
+        # Append any additional statements from the body:
+        # 1. Rename _-prefixed identifiers to their stripped versions
+        # 2. Convert bare property name assignments to this.property form
         prop_names = {p.name for p in properties}
         for stmt in body:
+            if rename_map:
+                stmt = _sol_rename_identifiers_in_stmt(stmt, rename_map)
             if isinstance(stmt, AssignmentStmt) and isinstance(stmt.target, Identifier):
                 if stmt.target.name in prop_names:
                     stmt = AssignmentStmt(
@@ -1037,6 +1048,79 @@ class _SolParser:
                 break
         self.expect(TOK_RPAREN)
         return args
+
+
+# ---------------------------------------------------------------------------
+# Constructor identifier renaming helpers
+# ---------------------------------------------------------------------------
+
+def _sol_rename_identifiers_in_expr(expr: Expression, rename_map: dict[str, str]) -> Expression:
+    """Recursively rename identifiers in an expression using *rename_map*.
+
+    Used to fix _-prefixed constructor param references in the body
+    (e.g. ``_pubKeyHash`` -> ``pubKeyHash``).
+    """
+    rn = lambda e: _sol_rename_identifiers_in_expr(e, rename_map)
+    if isinstance(expr, Identifier):
+        new_name = rename_map.get(expr.name)
+        return Identifier(name=new_name) if new_name else expr
+    if isinstance(expr, BinaryExpr):
+        return BinaryExpr(op=expr.op, left=rn(expr.left), right=rn(expr.right))
+    if isinstance(expr, UnaryExpr):
+        return UnaryExpr(op=expr.op, operand=rn(expr.operand))
+    if isinstance(expr, CallExpr):
+        return CallExpr(callee=rn(expr.callee), args=[rn(a) for a in expr.args])
+    if isinstance(expr, MemberExpr):
+        return MemberExpr(object=rn(expr.object), property=expr.property)
+    if isinstance(expr, TernaryExpr):
+        return TernaryExpr(condition=rn(expr.condition), consequent=rn(expr.consequent), alternate=rn(expr.alternate))
+    if isinstance(expr, IndexAccessExpr):
+        return IndexAccessExpr(object=rn(expr.object), index=rn(expr.index))
+    if isinstance(expr, IncrementExpr):
+        return IncrementExpr(operand=rn(expr.operand), prefix=expr.prefix)
+    if isinstance(expr, DecrementExpr):
+        return DecrementExpr(operand=rn(expr.operand), prefix=expr.prefix)
+    # PropertyAccessExpr, literals, etc. — no identifiers to rename
+    return expr
+
+
+def _sol_rename_identifiers_in_stmt(stmt: Statement, rename_map: dict[str, str]) -> Statement:
+    """Recursively rename identifiers in a statement tree.
+
+    Used to fix _-prefixed constructor params in the body.
+    """
+    if not rename_map:
+        return stmt
+    rn = lambda e: _sol_rename_identifiers_in_expr(e, rename_map)
+    rs = lambda s: _sol_rename_identifiers_in_stmt(s, rename_map)
+    if isinstance(stmt, AssignmentStmt):
+        return AssignmentStmt(target=rn(stmt.target), value=rn(stmt.value), source_location=stmt.source_location)
+    if isinstance(stmt, ExpressionStmt):
+        return ExpressionStmt(expr=rn(stmt.expr), source_location=stmt.source_location)
+    if isinstance(stmt, VariableDeclStmt):
+        return VariableDeclStmt(
+            name=stmt.name, type=stmt.type, mutable=stmt.mutable,
+            init=rn(stmt.init) if stmt.init else None,
+            source_location=stmt.source_location,
+        )
+    if isinstance(stmt, IfStmt):
+        return IfStmt(
+            condition=rn(stmt.condition),
+            then=[rs(s) for s in stmt.then],
+            else_=[rs(s) for s in stmt.else_] if stmt.else_ else [],
+            source_location=stmt.source_location,
+        )
+    if isinstance(stmt, ForStmt):
+        return ForStmt(
+            init=rs(stmt.init) if stmt.init else None,
+            condition=rn(stmt.condition) if stmt.condition else None,
+            update=rs(stmt.update) if stmt.update else None,
+            body=[rs(s) for s in stmt.body],
+            source_location=stmt.source_location,
+        )
+    if isinstance(stmt, ReturnStmt):
+        return ReturnStmt(value=rn(stmt.value) if stmt.value else None, source_location=stmt.source_location)
+    return stmt
 
 
 # ---------------------------------------------------------------------------

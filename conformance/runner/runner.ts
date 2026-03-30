@@ -53,10 +53,10 @@ export const INPUT_FORMATS = [
   { ext: '.runar.sol',  compilers: ['ts', 'go', 'rust', 'python', 'ruby'] as const },
   { ext: '.runar.move', compilers: ['ts', 'go', 'rust', 'python', 'ruby'] as const },
   { ext: '.runar.py',   compilers: ['ts', 'go', 'rust', 'python', 'ruby'] as const },
-  { ext: '.runar.go',   compilers: ['go', 'python', 'ruby'] as const },
-  { ext: '.runar.rs',   compilers: ['rust', 'python', 'ruby'] as const },
-  { ext: '.runar.rb',   compilers: ['ts', 'go', 'rust', 'python', 'ruby'] as const },
-  { ext: '.runar.zig',  compilers: ['zig', 'python', 'ruby'] as const },
+  { ext: '.runar.go',   compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby'] as const },
+  { ext: '.runar.rs',   compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby'] as const },
+  { ext: '.runar.rb',   compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby'] as const },
+  { ext: '.runar.zig',  compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby'] as const },
 ] as const;
 
 type CompilerId = (typeof INPUT_FORMATS)[number]['compilers'][number];

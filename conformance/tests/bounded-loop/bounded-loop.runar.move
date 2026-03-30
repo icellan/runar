@@ -1,7 +1,7 @@
 module BoundedLoop {
     use runar::types::{Int};
 
-    resource struct BoundedLoop {
+    struct BoundedLoop {
         expected_sum: Int,
     }
 

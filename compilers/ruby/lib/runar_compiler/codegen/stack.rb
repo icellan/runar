@@ -845,7 +845,7 @@ module RunarCompiler::Codegen
       when "update_prop"
         _lower_update_prop(value.name, value.value_ref, binding_index, last_uses)
 
-      # --- Advanced kinds (TODO: will be added in Part 2) ---
+      # --- Advanced kinds ---
       when "if"
         _lower_if(name, value.cond, value.then, value.else_, binding_index, last_uses)
       when "loop"

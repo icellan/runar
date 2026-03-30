@@ -520,7 +520,7 @@ module RunarCompiler
             end
             expect(TOK_RBRACE)
 
-            parent_class = "StatefulSmartContract" if has_mutable
+            parent_class = "StatefulSmartContract" if is_resource || has_mutable
           elsif check_ident("public") || check_ident("fun")
             method, has_mut_recv = parse_function_with_mut
             parent_class = "StatefulSmartContract" if has_mut_recv

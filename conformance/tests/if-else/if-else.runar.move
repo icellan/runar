@@ -1,7 +1,7 @@
 module IfElse {
     use runar::types::{Int};
 
-    resource struct IfElse {
+    struct IfElse {
         limit: Int,
     }
 

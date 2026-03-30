@@ -91,7 +91,21 @@ fn map_builtin_name(name: &str) -> String {
         "num2bin" => "num2bin".to_string(),
         "bin2num" => "bin2num".to_string(),
         "add_output" => "addOutput".to_string(),
+        "add_raw_output" => "addRawOutput".to_string(),
         "tx_preimage" => "txPreimage".to_string(),
+        "bool_cast" => "bool".to_string(),
+        "verify_wots" => "verifyWOTS".to_string(),
+        "verify_slh_dsa_sha2_128s" | "verifySlhdsaSha2128s" | "verifySlhDsaSha2128s" => "verifySLHDSA_SHA2_128s".to_string(),
+        "verify_slh_dsa_sha2_128f" | "verifySlhdsaSha2128f" | "verifySlhDsaSha2128f" => "verifySLHDSA_SHA2_128f".to_string(),
+        "verify_slh_dsa_sha2_192s" | "verifySlhdsaSha2192s" | "verifySlhDsaSha2192s" => "verifySLHDSA_SHA2_192s".to_string(),
+        "verify_slh_dsa_sha2_192f" | "verifySlhdsaSha2192f" | "verifySlhDsaSha2192f" => "verifySLHDSA_SHA2_192f".to_string(),
+        "verify_slh_dsa_sha2_256s" | "verifySlhdsaSha2256s" | "verifySlhDsaSha2256s" => "verifySLHDSA_SHA2_256s".to_string(),
+        "verify_slh_dsa_sha2_256f" | "verifySlhdsaSha2256f" | "verifySlhDsaSha2256f" => "verifySLHDSA_SHA2_256f".to_string(),
+        "sha256_compress" => "sha256Compress".to_string(),
+        "sha256_finalize" => "sha256Finalize".to_string(),
+        "to_byte_string" => "toByteString".to_string(),
+        "int_2_str" | "int2str" => "int2str".to_string(),
+        "reverse_bytes" => "reverseBytes".to_string(),
         _ => snake_to_camel(name),
     }
 }
@@ -99,8 +113,8 @@ fn map_builtin_name(name: &str) -> String {
 /// Map Move type names to Rúnar type names.
 fn map_type_name(name: &str) -> &str {
     match name {
-        "u64" | "u128" | "u256" => "bigint",
-        "bool" => "boolean",
+        "Int" | "u64" | "u128" | "u256" => "bigint",
+        "Bool" | "bool" => "boolean",
         "vector<u8>" | "Bytes" => "ByteString",
         "address" => "Addr",
         _ => name,
@@ -115,6 +129,8 @@ fn map_type_name(name: &str) -> &str {
 enum Token {
     // Keywords
     Module,
+    Use,
+    Resource,
     Struct,
     Has,
     Public,
@@ -340,6 +356,18 @@ fn tokenize(source: &str) -> Vec<Token> {
             continue;
         }
 
+        // Hex literals: 0x...
+        if ch == '0' && i + 1 < len && chars[i + 1] == 'x' {
+            i += 2; // skip '0x'
+            let start = i;
+            while i < len && chars[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            let hex_val: String = chars[start..i].iter().collect();
+            tokens.push(Token::StringLit(hex_val));
+            continue;
+        }
+
         // Numbers
         if ch.is_ascii_digit() {
             let start = i;
@@ -376,6 +404,8 @@ fn tokenize(source: &str) -> Vec<Token> {
 
             let tok = match word.as_str() {
                 "module" => Token::Module,
+                "use" => Token::Use,
+                "resource" => Token::Resource,
                 "struct" => Token::Struct,
                 "has" => Token::Has,
                 "public" => Token::Public,
@@ -477,7 +507,7 @@ impl<'a> MoveParser<'a> {
         // Skip until 'module'
         while *self.peek() != Token::Module && *self.peek() != Token::Eof {
             // Also allow struct at top level without module wrapper
-            if *self.peek() == Token::Struct || *self.peek() == Token::Public {
+            if *self.peek() == Token::Struct || *self.peek() == Token::Resource || *self.peek() == Token::Public {
                 return self.parse_top_level_without_module();
             }
             self.advance();
@@ -515,9 +545,41 @@ impl<'a> MoveParser<'a> {
         let mut parent_class = "SmartContract".to_string();
         let mut properties: Vec<PropertyNode> = Vec::new();
         let mut methods: Vec<MethodNode> = Vec::new();
+        let mut is_resource = false;
+
+        // Skip use declarations first
+        while *self.peek() == Token::Use {
+            while *self.peek() != Token::Semicolon && *self.peek() != Token::Eof {
+                self.advance();
+            }
+            if *self.peek() == Token::Semicolon {
+                self.advance();
+            }
+        }
 
         while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
             match self.peek().clone() {
+                Token::Use => {
+                    // Skip use declarations that appear after other items
+                    while *self.peek() != Token::Semicolon && *self.peek() != Token::Eof {
+                        self.advance();
+                    }
+                    if *self.peek() == Token::Semicolon {
+                        self.advance();
+                    }
+                }
+                Token::Resource => {
+                    // "resource struct Name { ... }"
+                    is_resource = true;
+                    self.advance(); // consume 'resource'
+                    if *self.peek() == Token::Struct {
+                        let (name, pc, props) = self.parse_struct();
+                        contract_name = Some(name.clone());
+                        self.struct_name = name;
+                        parent_class = pc;
+                        properties = props;
+                    }
+                }
                 Token::Struct => {
                     let (name, pc, props) = self.parse_struct();
                     contract_name = Some(name.clone());
@@ -555,6 +617,12 @@ impl<'a> MoveParser<'a> {
                 return None;
             }
         };
+
+        // If struct was marked as "resource" or has mutable fields, it's stateful
+        let has_mutable = properties.iter().any(|p| !p.readonly);
+        if is_resource || has_mutable {
+            parent_class = "StatefulSmartContract".to_string();
+        }
 
         // Determine readonly based on parent class
         let is_stateless = parent_class == "SmartContract";
@@ -612,6 +680,19 @@ impl<'a> MoveParser<'a> {
     fn parse_struct_field(&mut self) -> PropertyNode {
         let field_name = self.expect_ident();
         self.expect(&Token::Colon);
+
+        // Check for &mut (mutable reference) before parsing type
+        // Default: readonly = true (matching TS parser behavior)
+        // Only &mut explicitly makes a property mutable
+        let mut readonly = true;
+        if *self.peek() == Token::Amp {
+            self.advance(); // consume '&'
+            if *self.peek() == Token::Mut {
+                self.advance(); // consume 'mut'
+                readonly = false;
+            }
+        }
+
         let type_node = self.parse_type();
 
         // Parse optional initializer: = value
@@ -625,7 +706,7 @@ impl<'a> MoveParser<'a> {
         PropertyNode {
             name: map_builtin_name(&field_name),
             prop_type: type_node,
-            readonly: false, // Will be set based on parent class later
+            readonly,
             initializer,
             source_location: self.loc(),
         }
@@ -636,9 +717,12 @@ impl<'a> MoveParser<'a> {
     // -----------------------------------------------------------------------
 
     fn parse_type(&mut self) -> TypeNode {
-        // Handle & reference prefix (Move style) - just skip it
+        // Handle &/&mut reference prefix (Move style) - just skip it
         if *self.peek() == Token::Amp {
             self.advance();
+            if *self.peek() == Token::Mut {
+                self.advance();
+            }
         }
 
         let name = self.expect_ident();
@@ -709,10 +793,10 @@ impl<'a> MoveParser<'a> {
             return params;
         }
 
-        // First param might be `self: &StructName` -- skip it
+        // First param might be `self: &StructName` or `contract: &mut StructName` -- skip it
         let first = self.parse_one_param();
-        if first.name == "self" {
-            // Skip self param -- it's implicit in Rúnar
+        if first.name == "self" || first.name == "contract" {
+            // Skip self/contract param -- it's implicit in Rúnar
         } else {
             params.push(first);
         }
@@ -755,11 +839,25 @@ impl<'a> MoveParser<'a> {
     fn parse_statement(&mut self) -> Option<Statement> {
         match self.peek().clone() {
             Token::Let => Some(self.parse_let()),
-            Token::If => Some(self.parse_if()),
+            Token::If => {
+                let stmt = self.parse_if();
+                // Optional trailing semicolon after if/else block
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                }
+                Some(stmt)
+            }
             Token::Return => Some(self.parse_return()),
             Token::Assert => Some(self.parse_assert()),
             Token::AssertEq => Some(self.parse_assert_eq()),
-            Token::While => Some(self.parse_while_as_for()),
+            Token::While => {
+                let stmt = self.parse_while_as_for();
+                // Optional trailing semicolon after while block
+                if *self.peek() == Token::Semicolon {
+                    self.advance();
+                }
+                Some(stmt)
+            }
             _ => {
                 // Expression statement or assignment
                 let expr = self.parse_expression();
@@ -824,12 +922,23 @@ impl<'a> MoveParser<'a> {
                         })
                     }
                     _ => {
-                        self.expect(&Token::Semicolon);
+                        let had_semi = *self.peek() == Token::Semicolon;
+                        if had_semi {
+                            self.advance(); // consume optional semicolon
+                        }
                         let expr = self.convert_self_to_this(expr);
-                        Some(Statement::ExpressionStatement {
-                            expression: expr,
-                            source_location: self.loc(),
-                        })
+                        // If no semicolon and next token is `}`, treat as implicit return
+                        if !had_semi && *self.peek() == Token::RBrace {
+                            Some(Statement::ReturnStatement {
+                                value: Some(expr),
+                                source_location: self.loc(),
+                            })
+                        } else {
+                            Some(Statement::ExpressionStatement {
+                                expression: expr,
+                                source_location: self.loc(),
+                            })
+                        }
                     }
                 }
             }
@@ -840,8 +949,8 @@ impl<'a> MoveParser<'a> {
     fn convert_self_to_this(&self, expr: Expression) -> Expression {
         match expr {
             Expression::MemberExpr { object, property } => {
-                if matches!(object.as_ref(), Expression::Identifier { name } if name == "self") {
-                    // self.x -> PropertyAccess { property: camelCase(x) }
+                if matches!(object.as_ref(), Expression::Identifier { name } if name == "self" || name == "contract") {
+                    // self.x or contract.x -> PropertyAccess { property: camelCase(x) }
                     Expression::PropertyAccess {
                         property: map_builtin_name(&property),
                     }
@@ -938,6 +1047,11 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::LParen);
         let expr = self.parse_expression();
         let expr = self.convert_self_to_this(expr);
+        // Skip optional error code: assert!(expr, error_code)
+        if *self.peek() == Token::Comma {
+            self.advance();
+            let _error_code = self.parse_expression();
+        }
         self.expect(&Token::RParen);
         self.expect(&Token::Semicolon);
 
@@ -1388,16 +1502,8 @@ impl<'a> MoveParser<'a> {
                     }
                     self.expect(&Token::RParen);
 
-                    // Map callee name
-                    let callee = match &expr {
-                        Expression::Identifier { name } => Expression::Identifier {
-                            name: map_builtin_name(name),
-                        },
-                        _ => expr.clone(),
-                    };
-
                     expr = Expression::CallExpr {
-                        callee: Box::new(callee),
+                        callee: Box::new(expr),
                         args,
                     };
                 }
@@ -1437,7 +1543,7 @@ impl<'a> MoveParser<'a> {
             Token::True => Expression::BoolLiteral { value: true },
             Token::False => Expression::BoolLiteral { value: false },
             Token::StringLit(v) => Expression::ByteStringLiteral { value: v },
-            Token::Ident(name) => Expression::Identifier { name },
+            Token::Ident(name) => Expression::Identifier { name: map_builtin_name(&name) },
             Token::LParen => {
                 let expr = self.parse_expression();
                 self.expect(&Token::RParen);
@@ -1577,7 +1683,7 @@ module p2pkh {
         let source = r#"
 module counter {
     struct Counter has StatefulSmartContract {
-        count: bigint,
+        count: &mut bigint,
     }
 
     public fun increment(self: &Counter) {
@@ -1596,7 +1702,7 @@ module counter {
         let contract = result.contract.unwrap();
         assert_eq!(contract.name, "Counter");
         assert_eq!(contract.parent_class, "StatefulSmartContract");
-        assert!(!contract.properties[0].readonly); // StatefulSmartContract -> mutable by default
+        assert!(!contract.properties[0].readonly); // &mut marks property as mutable
         assert_eq!(contract.methods.len(), 2);
     }
 

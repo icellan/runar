@@ -1,7 +1,7 @@
 module IfWithoutElse {
     use runar::types::{Int};
 
-    resource struct IfWithoutElse {
+    struct IfWithoutElse {
         threshold: Int,
     }
 

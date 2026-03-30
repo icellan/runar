@@ -2,7 +2,7 @@ module SPHINCSWallet {
     use runar::types::{Addr, Sig, PubKey};
     use runar::crypto::{hash160, check_sig, verify_slh_dsa_sha2_128s};
 
-    struct SPHINCSWallet {
+    resource struct SPHINCSWallet {
         ecdsa_pub_key_hash: Addr,
         slhdsa_pub_key_hash: ByteString,
     }

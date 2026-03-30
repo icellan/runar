@@ -617,16 +617,38 @@ func (p *solParser) parseSolConstructor(properties []PropertyNode) MethodNode {
 	}
 	constructorBody = append(constructorBody, ExpressionStmt{
 		Expr: CallExpr{
-			Callee: MemberExpr{Object: Identifier{Name: "super"}, Property: ""},
+			Callee: Identifier{Name: "super"},
 			Args:   superArgs,
 		},
 		SourceLocation: loc,
 	})
 
-	// Append any additional statements from the body (except simple assignments
-	// that mirror constructor params — these are the "pubKeyHash = _pubKeyHash" patterns)
+	// Build a rename map for _-prefixed param names (e.g., _pubKeyHash → pubKeyHash)
+	renameMap := make(map[string]string)
+	for _, param := range params {
+		original := "_" + param.Name
+		renameMap[original] = param.Name
+	}
+
+	// Build set of property names for identifying property assignments
+	propNames := make(map[string]bool)
+	for _, prop := range properties {
+		propNames[prop.Name] = true
+	}
+
+	// Process body statements: rename _-prefixed identifiers and convert bare
+	// identifier assignments to property access (e.g., pubKeyHash = _pk →
+	// this.pubKeyHash = pk) to match validator expectations
 	for _, stmt := range body {
-		constructorBody = append(constructorBody, stmt)
+		fixed := solRenameIdentifiersInStmt(stmt, renameMap)
+		// Convert bare identifier assignments targeting a property name to PropertyAccessExpr
+		if assign, ok := fixed.(AssignmentStmt); ok {
+			if ident, ok := assign.Target.(Identifier); ok && propNames[ident.Name] {
+				assign.Target = PropertyAccessExpr{Property: ident.Name}
+				fixed = assign
+			}
+		}
+		constructorBody = append(constructorBody, fixed)
 	}
 
 	return MethodNode{
@@ -635,6 +657,88 @@ func (p *solParser) parseSolConstructor(properties []PropertyNode) MethodNode {
 		Body:           constructorBody,
 		Visibility:     "public",
 		SourceLocation: loc,
+	}
+}
+
+// solRenameIdentifiersInStmt recursively renames identifiers in a statement
+// using the provided rename map. Used to fix _-prefixed constructor param
+// references in the body.
+func solRenameIdentifiersInStmt(stmt Statement, renameMap map[string]string) Statement {
+	if len(renameMap) == 0 {
+		return stmt
+	}
+	switch s := stmt.(type) {
+	case AssignmentStmt:
+		s.Target = solRenameIdentifiersInExpr(s.Target, renameMap)
+		s.Value = solRenameIdentifiersInExpr(s.Value, renameMap)
+		return s
+	case ExpressionStmt:
+		s.Expr = solRenameIdentifiersInExpr(s.Expr, renameMap)
+		return s
+	case VariableDeclStmt:
+		if s.Init != nil {
+			s.Init = solRenameIdentifiersInExpr(s.Init, renameMap)
+		}
+		return s
+	case IfStmt:
+		s.Condition = solRenameIdentifiersInExpr(s.Condition, renameMap)
+		for i, st := range s.Then {
+			s.Then[i] = solRenameIdentifiersInStmt(st, renameMap)
+		}
+		for i, st := range s.Else {
+			s.Else[i] = solRenameIdentifiersInStmt(st, renameMap)
+		}
+		return s
+	case ReturnStmt:
+		if s.Value != nil {
+			s.Value = solRenameIdentifiersInExpr(s.Value, renameMap)
+		}
+		return s
+	default:
+		return stmt
+	}
+}
+
+// solRenameIdentifiersInExpr recursively renames identifiers in an expression.
+func solRenameIdentifiersInExpr(expr Expression, renameMap map[string]string) Expression {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case Identifier:
+		if newName, ok := renameMap[e.Name]; ok {
+			e.Name = newName
+		}
+		return e
+	case CallExpr:
+		e.Callee = solRenameIdentifiersInExpr(e.Callee, renameMap)
+		for i, arg := range e.Args {
+			e.Args[i] = solRenameIdentifiersInExpr(arg, renameMap)
+		}
+		return e
+	case BinaryExpr:
+		e.Left = solRenameIdentifiersInExpr(e.Left, renameMap)
+		e.Right = solRenameIdentifiersInExpr(e.Right, renameMap)
+		return e
+	case UnaryExpr:
+		e.Operand = solRenameIdentifiersInExpr(e.Operand, renameMap)
+		return e
+	case MemberExpr:
+		e.Object = solRenameIdentifiersInExpr(e.Object, renameMap)
+		return e
+	case IndexAccessExpr:
+		e.Object = solRenameIdentifiersInExpr(e.Object, renameMap)
+		e.Index = solRenameIdentifiersInExpr(e.Index, renameMap)
+		return e
+	case TernaryExpr:
+		e.Condition = solRenameIdentifiersInExpr(e.Condition, renameMap)
+		e.Consequent = solRenameIdentifiersInExpr(e.Consequent, renameMap)
+		e.Alternate = solRenameIdentifiersInExpr(e.Alternate, renameMap)
+		return e
+	case PropertyAccessExpr:
+		return e
+	default:
+		return expr
 	}
 }
 
