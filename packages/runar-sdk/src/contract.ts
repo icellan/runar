@@ -665,6 +665,7 @@ export class RunarContract {
         const namedArgs = buildNamedArgs(userParams, resolvedArgs);
         const computed = computeNewState(
           this.artifact.anf, methodName, this._state, namedArgs,
+          this.constructorArgs,
         );
         this._state = { ...this._state, ...computed };
       }

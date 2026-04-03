@@ -439,6 +439,7 @@ class RunarContract:
                 named_args = _build_named_args(user_params, resolved_args)
                 computed = compute_new_state(
                     self.artifact.anf, method_name, self._state, named_args,
+                    self.constructor_args,
                 )
                 self._state.update(computed)
             new_locking_script = self.get_locking_script()
