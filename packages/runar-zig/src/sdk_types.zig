@@ -102,6 +102,7 @@ pub const RunarArtifact = struct {
     build_timestamp: []const u8 = &.{},
     code_separator_index: ?i32 = null,
     code_separator_indices: []i32 = &.{},
+    anf_json: ?[]const u8 = null, // raw JSON of the ANF IR (for SDK auto-state computation)
 
     pub fn isStateful(self: *const RunarArtifact) bool {
         return self.state_fields.len > 0;
@@ -120,6 +121,7 @@ pub const RunarArtifact = struct {
         if (self.state_fields.len > 0) a.free(self.state_fields);
         if (self.constructor_slots.len > 0) a.free(self.constructor_slots);
         if (self.code_separator_indices.len > 0) a.free(self.code_separator_indices);
+        if (self.anf_json) |aj| a.free(aj);
         self.* = .{ .allocator = a };
     }
 
@@ -181,6 +183,17 @@ pub const RunarArtifact = struct {
                     fields[i] = try StateField.fromJsonValue(allocator, item.object);
                 }
                 artifact.state_fields = fields;
+            }
+        }
+
+        // Store raw ANF JSON for the SDK ANF interpreter
+        if (root.get("anf")) |anf_val| {
+            if (anf_val == .object) {
+                // Re-stringify the ANF object so the interpreter can parse it independently
+                const anf_str = std.json.Stringify.valueAlloc(allocator, anf_val, .{}) catch null;
+                if (anf_str) |s| {
+                    artifact.anf_json = s;
+                }
             }
         }
 

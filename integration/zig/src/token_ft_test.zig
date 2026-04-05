@@ -210,7 +210,7 @@ test "FungibleToken_Send" {
     defer allocator.free(token_id);
 
     const initial_balance: i64 = 1000;
-    const output_satoshis: i64 = 4500;
+    const deploy_sats: i64 = 5000;
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
         .{ .bytes = owner_pk },
@@ -226,26 +226,29 @@ test "FungibleToken_Send" {
     var rpc_provider = helpers.RPCProvider.init(allocator);
     var local_signer = try owner.localSigner();
 
-    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 5000 });
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = deploy_sats });
     defer allocator.free(deploy_txid);
     std.log.info("FungibleToken deployed: {s}", .{deploy_txid});
 
     // Call send(sig, to, outputSatoshis) -- transfers entire balance to new owner
     // State after send: owner=receiver, balance=initial, mergeBalance=0
+    // outputSatoshis must match the continuation UTXO amount (deploy_sats)
+    // because the on-chain addOutput uses this value for the output amount.
     const call_txid = try contract.call(
         "send",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
             .{ .bytes = receiver_pk },
-            .{ .int = output_satoshis },
+            .{ .int = deploy_sats }, // outputSatoshis = deploy amount
         },
         rpc_provider.provider(),
         local_signer.signer(),
+        // State fields (mutable only): owner, balance, mergeBalance
+        // tokenId is readonly and baked into the code script, not in state.
         .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = receiver_pk },
-            .{ .int = initial_balance },
-            .{ .int = 0 },
-            .{ .bytes = token_id },
+            .{ .bytes = receiver_pk }, // owner = receiver
+            .{ .int = initial_balance }, // balance = 1000
+            .{ .int = 0 }, // mergeBalance = 0
         } },
     );
     defer allocator.free(call_txid);

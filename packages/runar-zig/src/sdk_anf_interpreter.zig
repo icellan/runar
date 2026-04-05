@@ -113,6 +113,9 @@ pub const InterpreterError = error{
     OutOfMemory,
 };
 
+/// Sentinel value for "no result" / undefined.
+const anf_none: ANFValue = .{ .none = {} };
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -127,6 +130,11 @@ pub fn computeNewState(
     current_state: std.StringHashMap(ANFValue),
     args: std.StringHashMap(ANFValue),
 ) !std.StringHashMap(ANFValue) {
+    // Use an arena for all intermediate allocations during interpretation
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_alloc = arena.allocator();
+
     // Find the method
     var method: ?*const ANFMethod = null;
     for (anf.methods) |*m| {
@@ -140,8 +148,7 @@ pub fn computeNewState(
     const meth = method.?;
 
     // Initialize environment with property values
-    var env = std.StringHashMap(ANFValue).init(allocator);
-    defer env.deinit();
+    var env = std.StringHashMap(ANFValue).init(arena_alloc);
 
     for (anf.properties) |prop| {
         if (current_state.get(prop.name)) |val| {
@@ -160,13 +167,12 @@ pub fn computeNewState(
     }
 
     // Track state mutations
-    var state_delta = std.StringHashMap(ANFValue).init(allocator);
-    // Note: caller owns state_delta, we don't defer deinit here
+    var state_delta = std.StringHashMap(ANFValue).init(arena_alloc);
 
     // Walk bindings
-    try evalBindings(allocator, meth.body, &env, &state_delta, anf);
+    try evalBindings(arena_alloc, meth.body, &env, &state_delta, anf);
 
-    // Merge with current state
+    // Merge with current state — use caller allocator for result
     var result = std.StringHashMap(ANFValue).init(allocator);
     var cs_it = current_state.iterator();
     while (cs_it.next()) |entry| {
@@ -174,10 +180,14 @@ pub fn computeNewState(
     }
     var sd_it = state_delta.iterator();
     while (sd_it.next()) |entry| {
-        try result.put(entry.key_ptr.*, entry.value_ptr.*);
+        // For bytes values from the arena, we need to dupe them into the caller allocator
+        const val = switch (entry.value_ptr.*) {
+            .bytes => |b| ANFValue{ .bytes = try allocator.dupe(u8, b) },
+            else => entry.value_ptr.*,
+        };
+        try result.put(entry.key_ptr.*, val);
     }
 
-    state_delta.deinit();
     return result;
 }
 
@@ -202,7 +212,7 @@ fn evalBindings(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     anf: *const ANFProgram,
-) !void {
+) error{OutOfMemory}!void {
     for (bindings) |binding| {
         const val = try evalNode(allocator, binding.value, env, state_delta, anf);
         try env.put(binding.name, val);
@@ -215,20 +225,23 @@ fn evalNode(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     anf: *const ANFProgram,
-) !ANFValue {
+) error{OutOfMemory}!ANFValue {
     switch (node) {
         .load_param => |lp| {
-            return env.get(lp.name) orelse .{ .none = {} };
+            return env.get(lp.name) orelse anf_none;
         },
         .load_prop => |lp| {
-            return env.get(lp.name) orelse .{ .none = {} };
+            return env.get(lp.name) orelse anf_none;
         },
         .load_const => |lc| {
-            // Handle @ref: aliases
+            // Handle @ref: aliases and @this marker
             switch (lc.value) {
                 .bytes => |b| {
                     if (b.len > 5 and std.mem.startsWith(u8, b, "@ref:")) {
-                        return env.get(b[5..]) orelse .{ .none = {} };
+                        return env.get(b[5..]) orelse anf_none;
+                    }
+                    if (std.mem.eql(u8, b, "@this")) {
+                        return anf_none;
                     }
                 },
                 else => {},
@@ -236,13 +249,13 @@ fn evalNode(
             return lc.value;
         },
         .bin_op => |bo| {
-            const left = env.get(bo.left) orelse .{ .none = {} };
-            const right = env.get(bo.right) orelse .{ .none = {} };
-            return evalBinOp(bo.op, left, right, bo.result_type);
+            const left = env.get(bo.left) orelse anf_none;
+            const right = env.get(bo.right) orelse anf_none;
+            return evalBinOp(allocator, bo.op, left, right, bo.result_type);
         },
         .unary_op => |uo| {
-            const operand = env.get(uo.operand) orelse .{ .none = {} };
-            return evalUnaryOp(uo.op, operand, uo.result_type);
+            const operand = env.get(uo.operand) orelse anf_none;
+            return evalUnaryOp(allocator, uo.op, operand, uo.result_type);
         },
         .call => |c| {
             return evalCall(allocator, c.func, c.args, env);
@@ -251,34 +264,34 @@ fn evalNode(
             return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, anf);
         },
         .if_node => |ifn| {
-            const cond = env.get(ifn.cond) orelse .{ .none = {} };
+            const cond = env.get(ifn.cond) orelse anf_none;
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
             try evalBindings(allocator, branch, env, state_delta, anf);
             if (branch.len > 0) {
-                return env.get(branch[branch.len - 1].name) orelse .{ .none = {} };
+                return env.get(branch[branch.len - 1].name) orelse anf_none;
             }
-            return .{ .none = {} };
+            return anf_none;
         },
         .loop_node => |ln| {
-            var last_val: ANFValue = .{ .none = {} };
+            var last_val: ANFValue = anf_none;
             for (0..ln.count) |i| {
                 try env.put(ln.iter_var, .{ .int = @intCast(i) });
                 try evalBindings(allocator, ln.body, env, state_delta, anf);
                 if (ln.body.len > 0) {
-                    last_val = env.get(ln.body[ln.body.len - 1].name) orelse .{ .none = {} };
+                    last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
                 }
             }
             return last_val;
         },
         .assert_node => {
             // Skip asserts in simulation
-            return .{ .none = {} };
+            return anf_none;
         },
         .update_prop => |up| {
-            const new_val = env.get(up.value) orelse .{ .none = {} };
+            const new_val = env.get(up.value) orelse anf_none;
             try env.put(up.name, new_val);
             try state_delta.put(up.name, new_val);
-            return .{ .none = {} };
+            return anf_none;
         },
         .add_output => |ao| {
             // Extract implicit state changes from stateValues array.
@@ -288,21 +301,21 @@ fn evalNode(
                 for (anf.properties) |prop| {
                     if (!prop.readonly and mut_idx < ao.state_values.len) {
                         const ref = ao.state_values[mut_idx];
-                        const new_val = env.get(ref) orelse ANFValue{ .none = {} };
+                        const new_val = env.get(ref) orelse anf_none;
                         try env.put(prop.name, new_val);
                         try state_delta.put(prop.name, new_val);
                         mut_idx += 1;
                     }
                 }
             }
-            return .{ .none = {} };
+            return anf_none;
         },
         // On-chain-only operations — skip
         .check_preimage, .deserialize_state, .get_state_script, .add_raw_output => {
-            return .{ .none = {} };
+            return anf_none;
         },
         .unknown => {
-            return .{ .none = {} };
+            return anf_none;
         },
     }
 }
@@ -311,10 +324,10 @@ fn evalNode(
 // Binary operations
 // ---------------------------------------------------------------------------
 
-fn evalBinOp(op: []const u8, left: ANFValue, right: ANFValue, result_type: []const u8) ANFValue {
+fn evalBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right: ANFValue, result_type: []const u8) ANFValue {
     // Bytes operations
     if (std.mem.eql(u8, result_type, "bytes") or (left == .bytes and right == .bytes)) {
-        return evalBytesBinOp(op, left, right);
+        return evalBytesBinOp(allocator, op, left, right);
     }
 
     const l = toInt(left);
@@ -324,7 +337,7 @@ fn evalBinOp(op: []const u8, left: ANFValue, right: ANFValue, result_type: []con
     if (std.mem.eql(u8, op, "-")) return .{ .int = l -% r };
     if (std.mem.eql(u8, op, "*")) return .{ .int = l *% r };
     if (std.mem.eql(u8, op, "/")) return .{ .int = if (r == 0) 0 else @divTrunc(l, r) };
-    if (std.mem.eql(u8, op, "%")) return .{ .int = if (r == 0) 0 else @mod(l, r) };
+    if (std.mem.eql(u8, op, "%")) return .{ .int = if (r == 0) 0 else @rem(l, r) };
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "===")) return .{ .boolean = l == r };
     if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "!==")) return .{ .boolean = l != r };
     if (std.mem.eql(u8, op, "<")) return .{ .boolean = l < r };
@@ -348,7 +361,7 @@ fn evalBinOp(op: []const u8, left: ANFValue, right: ANFValue, result_type: []con
     return .{ .int = 0 };
 }
 
-fn evalBytesBinOp(op: []const u8, left: ANFValue, right: ANFValue) ANFValue {
+fn evalBytesBinOp(allocator: std.mem.Allocator, op: []const u8, left: ANFValue, right: ANFValue) ANFValue {
     const l_str = switch (left) {
         .bytes => |b| b,
         else => "",
@@ -358,13 +371,17 @@ fn evalBytesBinOp(op: []const u8, left: ANFValue, right: ANFValue) ANFValue {
         else => "",
     };
 
+    if (std.mem.eql(u8, op, "+")) {
+        // cat: concatenate hex strings
+        const result = std.mem.concat(allocator, u8, &[_][]const u8{ l_str, r_str }) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
     if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "===")) {
         return .{ .boolean = std.mem.eql(u8, l_str, r_str) };
     }
     if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "!==")) {
         return .{ .boolean = !std.mem.eql(u8, l_str, r_str) };
     }
-    // cat (+) would need allocation, return empty for now
     return .{ .bytes = "" };
 }
 
@@ -372,8 +389,35 @@ fn evalBytesBinOp(op: []const u8, left: ANFValue, right: ANFValue) ANFValue {
 // Unary operations
 // ---------------------------------------------------------------------------
 
-fn evalUnaryOp(op: []const u8, operand: ANFValue, result_type: []const u8) ANFValue {
-    _ = result_type;
+fn evalUnaryOp(allocator: std.mem.Allocator, op: []const u8, operand: ANFValue, result_type: []const u8) ANFValue {
+    if (std.mem.eql(u8, result_type, "bytes")) {
+        // Bitwise NOT on bytes
+        if (std.mem.eql(u8, op, "~")) {
+            const hex = switch (operand) {
+                .bytes => |b| b,
+                else => return operand,
+            };
+            const raw_bytes = bsvz.primitives.hex.decode(allocator, hex) catch return .{ .bytes = "" };
+            defer allocator.free(raw_bytes);
+            const result = allocator.alloc(u8, raw_bytes.len) catch return .{ .bytes = "" };
+            for (raw_bytes, 0..) |b, i| {
+                result[i] = ~b;
+            }
+            const hex_out = allocator.alloc(u8, result.len * 2) catch {
+                allocator.free(result);
+                return .{ .bytes = "" };
+            };
+            _ = bsvz.primitives.hex.encodeLower(result, hex_out) catch {
+                allocator.free(result);
+                allocator.free(hex_out);
+                return .{ .bytes = "" };
+            };
+            allocator.free(result);
+            return .{ .bytes = hex_out };
+        }
+        return operand;
+    }
+
     const val = toInt(operand);
 
     if (std.mem.eql(u8, op, "-")) return .{ .int = -%val };
@@ -394,14 +438,17 @@ fn evalCall(allocator: std.mem.Allocator, func: []const u8, arg_names: []const [
     if (std.mem.eql(u8, func, "checkPreimage")) return .{ .boolean = true };
 
     // Assert — skip
-    if (std.mem.eql(u8, func, "assert")) return .{ .none = {} };
+    if (std.mem.eql(u8, func, "assert")) return anf_none;
+
+    // On-chain-only — skip
+    if (std.mem.eql(u8, func, "buildChangeOutput")) return anf_none;
+    if (std.mem.eql(u8, func, "computeStateOutput")) return anf_none;
 
     // Crypto — real hashes
-    if (std.mem.eql(u8, func, "sha256") or std.mem.eql(u8, func, "hash256") or
-        std.mem.eql(u8, func, "hash160") or std.mem.eql(u8, func, "ripemd160"))
-    {
-        return hashFn(allocator, func, getArg(arg_names, 0, env));
-    }
+    if (std.mem.eql(u8, func, "sha256")) return hashFn(allocator, "sha256", getArg(arg_names, 0, env));
+    if (std.mem.eql(u8, func, "hash256")) return hashFn(allocator, "hash256", getArg(arg_names, 0, env));
+    if (std.mem.eql(u8, func, "hash160")) return hashFn(allocator, "hash160", getArg(arg_names, 0, env));
+    if (std.mem.eql(u8, func, "ripemd160")) return hashFn(allocator, "ripemd160", getArg(arg_names, 0, env));
 
     // Math builtins
     if (std.mem.eql(u8, func, "abs")) {
@@ -432,7 +479,7 @@ fn evalCall(allocator: std.mem.Allocator, func: []const u8, arg_names: []const [
     if (std.mem.eql(u8, func, "safemod")) {
         const a = toInt(getArg(arg_names, 0, env));
         const b = toInt(getArg(arg_names, 1, env));
-        return .{ .int = if (b == 0) 0 else @mod(a, b) };
+        return .{ .int = if (b == 0) 0 else @rem(a, b) };
     }
     if (std.mem.eql(u8, func, "clamp")) {
         const v = toInt(getArg(arg_names, 0, env));
@@ -473,10 +520,16 @@ fn evalCall(allocator: std.mem.Allocator, func: []const u8, arg_names: []const [
         if (b < 0) b = -b;
         while (b != 0) {
             const t = b;
-            b = @mod(a, b);
+            b = @rem(a, b);
             a = t;
         }
         return .{ .int = a };
+    }
+    if (std.mem.eql(u8, func, "divmod")) {
+        const a = toInt(getArg(arg_names, 0, env));
+        const b = toInt(getArg(arg_names, 1, env));
+        if (b == 0) return .{ .int = 0 };
+        return .{ .int = @divTrunc(a, b) };
     }
     if (std.mem.eql(u8, func, "log2")) {
         const v = toInt(getArg(arg_names, 0, env));
@@ -506,20 +559,113 @@ fn evalCall(allocator: std.mem.Allocator, func: []const u8, arg_names: []const [
     }
 
     // Byte operations
+    if (std.mem.eql(u8, func, "cat")) {
+        const a_hex = asHex(getArg(arg_names, 0, env));
+        const b_hex = asHex(getArg(arg_names, 1, env));
+        const result = std.mem.concat(allocator, u8, &[_][]const u8{ a_hex, b_hex }) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
     if (std.mem.eql(u8, func, "len")) {
-        const hex = switch (getArg(arg_names, 0, env)) {
-            .bytes => |b| b,
-            else => "",
-        };
+        const hex = asHex(getArg(arg_names, 0, env));
         return .{ .int = @intCast(hex.len / 2) };
+    }
+    if (std.mem.eql(u8, func, "substr")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const start: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
+        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 2, env))));
+        const hex_start = start * 2;
+        const hex_end = @min((start + length) * 2, hex.len);
+        if (hex_start >= hex.len) return .{ .bytes = "" };
+        const result = allocator.dupe(u8, hex[hex_start..hex_end]) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
+    if (std.mem.eql(u8, func, "split")) {
+        // split returns the first part; in ANF the second result is in a separate binding
+        const hex = asHex(getArg(arg_names, 0, env));
+        const pos: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
+        const hex_pos = @min(pos * 2, hex.len);
+        const result = allocator.dupe(u8, hex[0..hex_pos]) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
+    if (std.mem.eql(u8, func, "left")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
+        const hex_len = @min(length * 2, hex.len);
+        const result = allocator.dupe(u8, hex[0..hex_len]) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
+    if (std.mem.eql(u8, func, "right")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        const length: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
+        const hex_len = length * 2;
+        if (hex_len >= hex.len) {
+            const result = allocator.dupe(u8, hex) catch return .{ .bytes = "" };
+            return .{ .bytes = result };
+        }
+        const result = allocator.dupe(u8, hex[hex.len - hex_len ..]) catch return .{ .bytes = "" };
+        return .{ .bytes = result };
+    }
+    if (std.mem.eql(u8, func, "reverseBytes")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        if (hex.len == 0) return .{ .bytes = "" };
+        const result = allocator.alloc(u8, hex.len) catch return .{ .bytes = "" };
+        const num_bytes = hex.len / 2;
+        var i: usize = 0;
+        while (i < num_bytes) : (i += 1) {
+            const src_pos = (num_bytes - 1 - i) * 2;
+            result[i * 2] = hex[src_pos];
+            result[i * 2 + 1] = hex[src_pos + 1];
+        }
+        return .{ .bytes = result };
+    }
+    if (std.mem.eql(u8, func, "num2bin")) {
+        const n = toInt(getArg(arg_names, 0, env));
+        const byte_len: usize = @intCast(@max(0, toInt(getArg(arg_names, 1, env))));
+        return num2binHex(allocator, n, byte_len);
+    }
+    if (std.mem.eql(u8, func, "bin2num")) {
+        const hex = asHex(getArg(arg_names, 0, env));
+        return .{ .int = bin2numInt(hex) };
+    }
+
+    // Baby Bear field arithmetic (p = 2013265921)
+    const bb_p: i64 = 2013265921;
+    if (std.mem.eql(u8, func, "bbFieldAdd")) {
+        const a = toInt(getArg(arg_names, 0, env));
+        const b = toInt(getArg(arg_names, 1, env));
+        return .{ .int = @rem(@rem(a, bb_p) + @rem(b, bb_p) + bb_p, bb_p) };
+    }
+    if (std.mem.eql(u8, func, "bbFieldSub")) {
+        const a = toInt(getArg(arg_names, 0, env));
+        const b = toInt(getArg(arg_names, 1, env));
+        return .{ .int = @rem(@rem(a, bb_p) - @rem(b, bb_p) + bb_p, bb_p) };
+    }
+    if (std.mem.eql(u8, func, "bbFieldMul")) {
+        const a = toInt(getArg(arg_names, 0, env));
+        const b = toInt(getArg(arg_names, 1, env));
+        return .{ .int = @rem(@rem(a, bb_p) *% @rem(b, bb_p), bb_p) };
+    }
+    if (std.mem.eql(u8, func, "bbFieldInv")) {
+        const a = toInt(getArg(arg_names, 0, env));
+        // Fermat's little theorem: a^(p-2) mod p
+        return .{ .int = modPow(a, bb_p - 2, bb_p) };
+    }
+
+    // Merkle root computation
+    if (std.mem.eql(u8, func, "merkleRootSha256") or std.mem.eql(u8, func, "merkleRootHash256")) {
+        const use_double = std.mem.eql(u8, func, "merkleRootHash256");
+        return computeMerkleRoot(allocator, arg_names, env, use_double);
     }
 
     // Preimage intrinsics — dummy values
     if (std.mem.eql(u8, func, "extractOutputHash") or std.mem.eql(u8, func, "extractAmount")) {
         return .{ .bytes = "00" ** 32 };
     }
+    if (std.mem.eql(u8, func, "extractLocktime")) {
+        return .{ .int = 0 };
+    }
 
-    return .{ .none = {} };
+    return anf_none;
 }
 
 fn evalMethodCall(
@@ -529,7 +675,7 @@ fn evalMethodCall(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     anf: *const ANFProgram,
-) !ANFValue {
+) error{OutOfMemory}!ANFValue {
     // Find the private method
     for (anf.methods) |*m| {
         if (!m.is_public and std.mem.eql(u8, m.name, method_name)) {
@@ -546,7 +692,7 @@ fn evalMethodCall(
             // Map method params to passed args
             for (m.params, 0..) |param, i| {
                 if (i < arg_names.len) {
-                    const val = env.get(arg_names[i]) orelse ANFValue{ .none = {} };
+                    const val = env.get(arg_names[i]) orelse anf_none;
                     try method_env.put(param.name, val);
                 }
             }
@@ -563,12 +709,12 @@ fn evalMethodCall(
 
             // Return last binding's value
             if (m.body.len > 0) {
-                return method_env.get(m.body[m.body.len - 1].name) orelse .{ .none = {} };
+                return method_env.get(m.body[m.body.len - 1].name) orelse anf_none;
             }
-            return .{ .none = {} };
+            return anf_none;
         }
     }
-    return .{ .none = {} };
+    return anf_none;
 }
 
 // ---------------------------------------------------------------------------
@@ -586,14 +732,51 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
     defer allocator.free(bytes);
 
     if (std.mem.eql(u8, name, "sha256")) {
-        const hash = std.crypto.hash.sha2.Sha256.hash(bytes, .{});
-        var result: [64]u8 = undefined;
-        _ = bsvz.primitives.hex.encodeLower(&hash, &result) catch return .{ .bytes = "" };
-        return .{ .bytes = allocator.dupe(u8, &result) catch return .{ .bytes = "" } };
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &hash, .{});
+        const result = allocator.alloc(u8, 64) catch return .{ .bytes = "" };
+        _ = bsvz.primitives.hex.encodeLower(&hash, result) catch {
+            allocator.free(result);
+            return .{ .bytes = "" };
+        };
+        return .{ .bytes = result };
     }
 
-    // For hash256, hash160, ripemd160 — return placeholder since these need
-    // double-hashing which depends on the crypto implementation
+    if (std.mem.eql(u8, name, "hash256")) {
+        // hash256 = SHA256(SHA256(data))
+        var first: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &first, .{});
+        var second: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(&first, &second, .{});
+        const result = allocator.alloc(u8, 64) catch return .{ .bytes = "" };
+        _ = bsvz.primitives.hex.encodeLower(&second, result) catch {
+            allocator.free(result);
+            return .{ .bytes = "" };
+        };
+        return .{ .bytes = result };
+    }
+
+    if (std.mem.eql(u8, name, "hash160")) {
+        // hash160 = RIPEMD160(SHA256(data))
+        const h = bsvz.crypto.hash.hash160(bytes);
+        const result = allocator.alloc(u8, 40) catch return .{ .bytes = "" };
+        _ = bsvz.primitives.hex.encodeLower(&h.bytes, result) catch {
+            allocator.free(result);
+            return .{ .bytes = "" };
+        };
+        return .{ .bytes = result };
+    }
+
+    if (std.mem.eql(u8, name, "ripemd160")) {
+        const h = bsvz.crypto.hash.ripemd160(bytes);
+        const result = allocator.alloc(u8, 40) catch return .{ .bytes = "" };
+        _ = bsvz.primitives.hex.encodeLower(&h.bytes, result) catch {
+            allocator.free(result);
+            return .{ .bytes = "" };
+        };
+        return .{ .bytes = result };
+    }
+
     return .{ .bytes = "" };
 }
 
@@ -602,15 +785,21 @@ fn hashFn(allocator: std.mem.Allocator, name: []const u8, input: ANFValue) ANFVa
 // ---------------------------------------------------------------------------
 
 fn getArg(arg_names: []const []const u8, idx: usize, env: *const std.StringHashMap(ANFValue)) ANFValue {
-    if (idx >= arg_names.len) return .{ .none = {} };
-    return env.get(arg_names[idx]) orelse .{ .none = {} };
+    if (idx >= arg_names.len) return anf_none;
+    return env.get(arg_names[idx]) orelse anf_none;
 }
 
 fn toInt(v: ANFValue) i64 {
     return switch (v) {
         .int => |n| n,
         .boolean => |b| if (b) @as(i64, 1) else @as(i64, 0),
-        .bytes => 0,
+        .bytes => |b| {
+            // Handle "42n" format from JSON
+            if (b.len > 0 and b[b.len - 1] == 'n') {
+                return std.fmt.parseInt(i64, b[0 .. b.len - 1], 10) catch 0;
+            }
+            return std.fmt.parseInt(i64, b, 10) catch 0;
+        },
         .none => 0,
     };
 }
@@ -622,6 +811,143 @@ fn isTruthy(v: ANFValue) bool {
         .bytes => |b| b.len > 0 and !std.mem.eql(u8, b, "0") and !std.mem.eql(u8, b, "false"),
         .none => false,
     };
+}
+
+fn asHex(v: ANFValue) []const u8 {
+    return switch (v) {
+        .bytes => |b| b,
+        else => "",
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Byte encoding helpers
+// ---------------------------------------------------------------------------
+
+fn num2binHex(allocator: std.mem.Allocator, n: i64, byte_len: usize) ANFValue {
+    if (byte_len == 0) return .{ .bytes = "" };
+    if (n == 0) {
+        const result = allocator.alloc(u8, byte_len * 2) catch return .{ .bytes = "" };
+        @memset(result, '0');
+        return .{ .bytes = result };
+    }
+
+    const negative = n < 0;
+    var abs_val: u64 = if (negative) @intCast(-n) else @intCast(n);
+
+    var bytes_buf: [16]u8 = undefined;
+    var num_bytes: usize = 0;
+    while (abs_val > 0 and num_bytes < bytes_buf.len) : (num_bytes += 1) {
+        bytes_buf[num_bytes] = @intCast(abs_val & 0xff);
+        abs_val >>= 8;
+    }
+
+    // Sign bit handling
+    if (num_bytes > 0) {
+        if (negative) {
+            if ((bytes_buf[num_bytes - 1] & 0x80) == 0) {
+                bytes_buf[num_bytes - 1] |= 0x80;
+            } else if (num_bytes < bytes_buf.len) {
+                bytes_buf[num_bytes] = 0x80;
+                num_bytes += 1;
+            }
+        } else {
+            if ((bytes_buf[num_bytes - 1] & 0x80) != 0 and num_bytes < bytes_buf.len) {
+                bytes_buf[num_bytes] = 0x00;
+                num_bytes += 1;
+            }
+        }
+    }
+
+    const result = allocator.alloc(u8, byte_len * 2) catch return .{ .bytes = "" };
+    @memset(result, '0');
+
+    // Write LE bytes as hex
+    const write_len = @min(num_bytes, byte_len);
+    for (0..write_len) |i| {
+        const b = bytes_buf[i];
+        const hex_chars = "0123456789abcdef";
+        result[i * 2] = hex_chars[b >> 4];
+        result[i * 2 + 1] = hex_chars[b & 0x0f];
+    }
+
+    return .{ .bytes = result };
+}
+
+fn bin2numInt(hex: []const u8) i64 {
+    if (hex.len == 0) return 0;
+
+    // Decode hex to bytes (LE)
+    const num_bytes = hex.len / 2;
+    if (num_bytes == 0) return 0;
+
+    var bytes_buf: [16]u8 = undefined;
+    const decode_len = @min(num_bytes, bytes_buf.len);
+    for (0..decode_len) |i| {
+        bytes_buf[i] = hexByteDecode(hex[i * 2], hex[i * 2 + 1]);
+    }
+
+    // Check sign bit
+    const negative = (bytes_buf[decode_len - 1] & 0x80) != 0;
+    if (negative) {
+        bytes_buf[decode_len - 1] &= 0x7f;
+    }
+
+    // Build integer from LE bytes
+    var result: i64 = 0;
+    var i: usize = decode_len;
+    while (i > 0) {
+        i -= 1;
+        result = (result << 8) | @as(i64, bytes_buf[i]);
+    }
+
+    return if (negative) -result else result;
+}
+
+fn hexByteDecode(hi: u8, lo: u8) u8 {
+    return (hexNibble(hi) << 4) | hexNibble(lo);
+}
+
+fn hexNibble(c: u8) u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' and c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Modular exponentiation (for Baby Bear field inverse)
+// ---------------------------------------------------------------------------
+
+fn modPow(base_val: i64, exp_val: i64, modulus: i64) i64 {
+    if (modulus == 1) return 0;
+    var result: i128 = 1;
+    var b: i128 = @rem(@as(i128, base_val), @as(i128, modulus));
+    if (b < 0) b += modulus;
+    var e: i128 = exp_val;
+    const m: i128 = modulus;
+    while (e > 0) {
+        if (@rem(e, 2) == 1) {
+            result = @rem(result * b, m);
+        }
+        e = @divTrunc(e, 2);
+        b = @rem(b * b, m);
+    }
+    return @intCast(result);
+}
+
+// ---------------------------------------------------------------------------
+// Merkle root computation
+// ---------------------------------------------------------------------------
+
+fn computeMerkleRoot(allocator: std.mem.Allocator, arg_names: []const []const u8, env: *const std.StringHashMap(ANFValue), use_double: bool) ANFValue {
+    // merkleRootSha256(leaf, path, flags) or merkleRootHash256(leaf, path, flags)
+    // For the interpreter, return a dummy 32-byte hash
+    _ = allocator;
+    _ = arg_names;
+    _ = env;
+    _ = use_double;
+    return .{ .bytes = "00" ** 32 };
 }
 
 // ---------------------------------------------------------------------------
@@ -637,7 +963,7 @@ pub fn parseANFFromJson(allocator: std.mem.Allocator, json_text: []const u8) !AN
     return parseANFFromJsonValue(allocator, parsed.value);
 }
 
-fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value) !ANFProgram {
+fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value) error{OutOfMemory}!ANFProgram {
     if (root_val != .object) return ANFProgram{};
     const root = root_val.object;
 
@@ -674,7 +1000,7 @@ fn parseANFFromJsonValue(allocator: std.mem.Allocator, root_val: std.json.Value)
     return program;
 }
 
-fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) !ANFProperty {
+fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFProperty {
     if (val != .object) return ANFProperty{};
     const obj = val.object;
     var prop = ANFProperty{};
@@ -693,7 +1019,7 @@ fn parseANFProperty(allocator: std.mem.Allocator, val: std.json.Value) !ANFPrope
     return prop;
 }
 
-fn parseANFMethod(allocator: std.mem.Allocator, val: std.json.Value) !ANFMethod {
+fn parseANFMethod(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFMethod {
     if (val != .object) return ANFMethod{};
     const obj = val.object;
     var meth = ANFMethod{};
@@ -726,7 +1052,7 @@ fn parseANFMethod(allocator: std.mem.Allocator, val: std.json.Value) !ANFMethod 
     return meth;
 }
 
-fn parseANFParam(allocator: std.mem.Allocator, val: std.json.Value) !ANFParam {
+fn parseANFParam(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFParam {
     if (val != .object) return ANFParam{};
     const obj = val.object;
     var param = ANFParam{};
@@ -739,7 +1065,7 @@ fn parseANFParam(allocator: std.mem.Allocator, val: std.json.Value) !ANFParam {
     return param;
 }
 
-fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) !ANFBinding {
+fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFBinding {
     if (val != .object) return ANFBinding{};
     const obj = val.object;
     var binding = ANFBinding{};
@@ -752,7 +1078,7 @@ fn parseANFBinding(allocator: std.mem.Allocator, val: std.json.Value) !ANFBindin
     return binding;
 }
 
-fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) !ANFNode {
+fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMemory}!ANFNode {
     if (val != .object) return .{ .unknown = {} };
     const obj = val.object;
 
@@ -775,43 +1101,43 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) !ANFNode {
             .op = if (obj.get("op")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
             .left = if (obj.get("left")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
             .right = if (obj.get("right")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
-            .result_type = if (obj.get("result_type")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+            .result_type = if (obj.get("result_type")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else if (obj.get("resultType")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
         } };
     }
     if (std.mem.eql(u8, kind, "unary_op")) {
         return .{ .unary_op = .{
             .op = if (obj.get("op")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
             .operand = if (obj.get("operand")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
-            .result_type = if (obj.get("result_type")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+            .result_type = if (obj.get("result_type")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else if (obj.get("resultType")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
         } };
     }
     if (std.mem.eql(u8, kind, "call")) {
-        const func = if (obj.get("func")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var args = std.ArrayListUnmanaged([]const u8){};
+        const func_name = if (obj.get("func")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
+        var call_args = std.ArrayListUnmanaged([]const u8){};
         if (obj.get("args")) |a| {
             if (a == .array) {
                 for (a.array.items) |item| {
                     if (item == .string) {
-                        try args.append(allocator, try allocator.dupe(u8, item.string));
+                        try call_args.append(allocator, try allocator.dupe(u8, item.string));
                     }
                 }
             }
         }
-        return .{ .call = .{ .func = func, .args = try args.toOwnedSlice(allocator) } };
+        return .{ .call = .{ .func = func_name, .args = try call_args.toOwnedSlice(allocator) } };
     }
     if (std.mem.eql(u8, kind, "method_call")) {
-        const method = if (obj.get("method")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var args = std.ArrayListUnmanaged([]const u8){};
+        const mname = if (obj.get("method")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
+        var call_args = std.ArrayListUnmanaged([]const u8){};
         if (obj.get("args")) |a| {
             if (a == .array) {
                 for (a.array.items) |item| {
                     if (item == .string) {
-                        try args.append(allocator, try allocator.dupe(u8, item.string));
+                        try call_args.append(allocator, try allocator.dupe(u8, item.string));
                     }
                 }
             }
         }
-        return .{ .method_call = .{ .method = method, .args = try args.toOwnedSlice(allocator) } };
+        return .{ .method_call = .{ .method = mname, .args = try call_args.toOwnedSlice(allocator) } };
     }
     if (std.mem.eql(u8, kind, "update_prop")) {
         return .{ .update_prop = .{
@@ -878,6 +1204,8 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) !ANFNode {
             .body = try body.toOwnedSlice(allocator),
         } };
     }
+    // nop — skip
+    if (std.mem.eql(u8, kind, "nop")) return .{ .unknown = {} };
 
     return .{ .unknown = {} };
 }
@@ -886,7 +1214,19 @@ fn parseJSONToANFValue(val: std.json.Value) ANFValue {
     return switch (val) {
         .integer => |n| .{ .int = n },
         .bool => |b| .{ .boolean = b },
-        .string => |s| .{ .bytes = s },
+        .string => |s| blk: {
+            // Handle BigInt strings like "42n"
+            if (s.len > 0 and s[s.len - 1] == 'n') {
+                if (std.fmt.parseInt(i64, s[0 .. s.len - 1], 10)) |n| {
+                    break :blk .{ .int = n };
+                } else |_| {}
+            }
+            // Plain numeric string
+            if (std.fmt.parseInt(i64, s, 10)) |n| {
+                break :blk .{ .int = n };
+            } else |_| {}
+            break :blk .{ .bytes = s };
+        },
         .float => |f| .{ .int = @intFromFloat(f) },
         else => .{ .none = {} },
     };
@@ -987,4 +1327,72 @@ test "computeNewState returns error for unknown method" {
 
     const result = computeNewState(allocator, &anf, "nonexistent", current_state, args);
     try std.testing.expectError(InterpreterError.MethodNotFound, result);
+}
+
+test "evalBinOp bytes concatenation" {
+    const allocator = std.testing.allocator;
+    const result = evalBinOp(allocator, "+", .{ .bytes = "aabb" }, .{ .bytes = "ccdd" }, "bytes");
+    switch (result) {
+        .bytes => |b| {
+            try std.testing.expectEqualStrings("aabbccdd", b);
+            allocator.free(b);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "num2bin and bin2num roundtrip" {
+    const allocator = std.testing.allocator;
+
+    // num2bin(42, 4) -> hex LE with 4 bytes
+    const result = num2binHex(allocator, 42, 4);
+    switch (result) {
+        .bytes => |hex| {
+            try std.testing.expectEqual(@as(usize, 8), hex.len); // 4 bytes * 2 hex chars
+            // bin2num should recover the original value
+            const recovered = bin2numInt(hex);
+            try std.testing.expectEqual(@as(i64, 42), recovered);
+            allocator.free(hex);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+
+    // num2bin(-5, 4) -> negative number
+    const neg_result = num2binHex(allocator, -5, 4);
+    switch (neg_result) {
+        .bytes => |hex| {
+            const recovered = bin2numInt(hex);
+            try std.testing.expectEqual(@as(i64, -5), recovered);
+            allocator.free(hex);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseANFFromJson simple counter" {
+    const allocator = std.testing.allocator;
+
+    const json =
+        \\{"contractName":"Counter","properties":[{"name":"count","type":"bigint","readonly":false}],
+        \\"methods":[{"name":"increment","params":[],"body":[
+        \\{"name":"t0","value":{"kind":"load_prop","name":"count"}},
+        \\{"name":"t1","value":{"kind":"load_const","value":1}},
+        \\{"name":"t2","value":{"kind":"bin_op","op":"+","left":"t0","right":"t1"}},
+        \\{"name":"t3","value":{"kind":"update_prop","name":"count","value":"t2"}}
+        \\],"isPublic":true}]}
+    ;
+
+    // Use arena for parsing (parsed data references the arena)
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const program = try parseANFFromJson(arena.allocator(), json);
+
+    try std.testing.expectEqualStrings("Counter", program.contract_name);
+    try std.testing.expectEqual(@as(usize, 1), program.properties.len);
+    try std.testing.expectEqualStrings("count", program.properties[0].name);
+    try std.testing.expectEqual(@as(usize, 1), program.methods.len);
+    try std.testing.expectEqualStrings("increment", program.methods[0].name);
+    try std.testing.expect(program.methods[0].is_public);
+    try std.testing.expectEqual(@as(usize, 4), program.methods[0].body.len);
 }

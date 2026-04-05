@@ -243,26 +243,27 @@ test "NFT_Transfer" {
     var rpc_provider = helpers.RPCProvider.init(allocator);
     var local_signer = try owner.localSigner();
 
-    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 5000 });
+    const deploy_sats: i64 = 5000;
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = deploy_sats });
     defer allocator.free(deploy_txid);
     std.log.info("NFT deployed: {s}", .{deploy_txid});
 
-    const output_satoshis: i64 = 4500;
-
     // Transfer via SDK Call -- state transitions to new owner
+    // outputSatoshis must match the continuation UTXO amount (deploy_sats)
+    // because the on-chain addOutput uses this value for the output amount.
     const call_txid = try contract.call(
         "transfer",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
             .{ .bytes = new_owner_pk },
-            .{ .int = output_satoshis },
+            .{ .int = deploy_sats }, // outputSatoshis = deploy amount
         },
         rpc_provider.provider(),
         local_signer.signer(),
+        // State fields (mutable only): owner
+        // tokenId and metadata are readonly, baked into the code script.
         .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = new_owner_pk },
-            .{ .bytes = token_id },
-            .{ .bytes = metadata },
+            .{ .bytes = new_owner_pk }, // owner = new_owner
         } },
     );
     defer allocator.free(call_txid);

@@ -28,12 +28,31 @@ fn rpcPass() []const u8 {
 }
 
 /// Make a JSON-RPC 1.0 call to the Bitcoin node. Returns the raw "result" JSON string.
+/// Uses a temp file for the request body to avoid ARG_MAX limits on large transactions.
 pub fn rpcCall(allocator: std.mem.Allocator, method: []const u8, params_json: []const u8) ![]u8 {
     const body = try std.fmt.allocPrint(allocator, "{{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"{s}\",\"params\":{s}}}", .{ method, params_json });
     defer allocator.free(body);
 
     const user_pass = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ rpcUser(), rpcPass() });
     defer allocator.free(user_pass);
+
+    // Write body to a unique temp file to avoid ARG_MAX limits for large transactions.
+    // curl's @filename syntax reads the POST body from the file.
+    var tmp_name_buf: [64]u8 = undefined;
+    const thread_id = std.Thread.getCurrentId();
+    const tmp_name_len = (std.fmt.bufPrint(&tmp_name_buf, "/tmp/runar_rpc_{d}.json", .{thread_id}) catch return RpcError.ConnectionFailed).len;
+    const tmp_path = tmp_name_buf[0..tmp_name_len];
+
+    var tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch return RpcError.ConnectionFailed;
+    tmp_file.writeAll(body) catch {
+        tmp_file.close();
+        return RpcError.ConnectionFailed;
+    };
+    tmp_file.close();
+    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+
+    const at_path = std.fmt.allocPrint(allocator, "@{s}", .{tmp_path}) catch return RpcError.ConnectionFailed;
+    defer allocator.free(at_path);
 
     const result = std.process.Child.run(.{
         .allocator = allocator,
@@ -49,9 +68,10 @@ pub fn rpcCall(allocator: std.mem.Allocator, method: []const u8, params_json: []
             "-H",
             "Content-Type: application/json",
             "-d",
-            body,
+            at_path,
             rpcUrl(),
         },
+        .max_output_bytes = 10 * 1024 * 1024,
     }) catch return RpcError.ConnectionFailed;
     defer {
         allocator.free(result.stdout);

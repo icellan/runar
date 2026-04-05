@@ -605,9 +605,353 @@ pub fn emitArtifact(
         try w.writeAll("]");
     }
 
+    // anf — full ANF IR for SDK auto-state computation
+    try w.writeAll(",\"anf\":");
+    try emitANFProgramJson(w, anf_program);
+
     try w.writeByte('}');
 
     return try json_buf.toOwnedSlice(allocator);
+}
+
+// ---------------------------------------------------------------------------
+// ANF IR JSON serialization (for inclusion in artifact)
+// ---------------------------------------------------------------------------
+
+fn emitANFProgramJson(w: anytype, program: types.ANFProgram) !void {
+    try w.writeAll("{\"contractName\":");
+    try writeJsonString(w, program.contract_name);
+
+    // properties
+    try w.writeAll(",\"properties\":[");
+    for (program.properties, 0..) |prop, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeAll("{\"name\":");
+        try writeJsonString(w, prop.name);
+        try w.writeAll(",\"type\":");
+        try writeJsonString(w, prop.type_name);
+        try w.writeAll(",\"readonly\":");
+        try w.writeAll(if (prop.readonly) "true" else "false");
+        if (prop.initial_value) |iv| {
+            try w.writeAll(",\"initialValue\":");
+            try emitConstValueJson(w, iv);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("]");
+
+    // methods (including constructor as a non-public method named "constructor")
+    try w.writeAll(",\"methods\":[");
+    {
+        var first = true;
+        // Emit constructor as a method
+        if (program.constructor.params.len > 0 or program.constructor.assertions.len > 0) {
+            try w.writeAll("{\"name\":\"constructor\",\"params\":[");
+            for (program.constructor.params, 0..) |param, j| {
+                if (j > 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, param.name);
+                try w.writeAll(",\"type\":");
+                try writeJsonString(w, param.type_name);
+                try w.writeByte('}');
+            }
+            try w.writeAll("],\"body\":[");
+            for (program.constructor.assertions, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("],\"isPublic\":false}");
+            first = false;
+        }
+
+        // Emit regular methods
+        for (program.methods) |method| {
+            if (!first) try w.writeByte(',');
+            first = false;
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, method.name);
+            try w.writeAll(",\"params\":[");
+            for (method.params, 0..) |param, j| {
+                if (j > 0) try w.writeByte(',');
+                try w.writeAll("{\"name\":");
+                try writeJsonString(w, param.name);
+                try w.writeAll(",\"type\":");
+                try writeJsonString(w, param.type_name);
+                try w.writeByte('}');
+            }
+            try w.writeAll("],\"body\":[");
+            // Use .body if available (populated by ANF lower), fallback to .bindings
+            const body = if (method.body.len > 0) method.body else method.bindings;
+            for (body, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("],\"isPublic\":");
+            try w.writeAll(if (method.is_public) "true" else "false");
+            try w.writeByte('}');
+        }
+    }
+    try w.writeAll("]");
+
+    try w.writeByte('}');
+}
+
+fn emitANFBindingJson(w: anytype, binding: types.ANFBinding) error{OutOfMemory}!void {
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, binding.name);
+    try w.writeAll(",\"value\":");
+    try emitANFValueJson(w, binding.value);
+    if (binding.source_loc) |loc| {
+        try w.writeAll(",\"sourceLoc\":{\"file\":");
+        try writeJsonString(w, loc.file);
+        try w.print(",\"line\":{d},\"column\":{d}}}", .{ loc.line, loc.column });
+    }
+    try w.writeByte('}');
+}
+
+fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
+    switch (value) {
+        .load_param => |lp| {
+            try w.writeAll("{\"kind\":\"load_param\",\"name\":");
+            try writeJsonString(w, lp.name);
+            try w.writeByte('}');
+        },
+        .load_prop => |lp| {
+            try w.writeAll("{\"kind\":\"load_prop\",\"name\":");
+            try writeJsonString(w, lp.name);
+            try w.writeByte('}');
+        },
+        .load_const => |lc| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            try emitConstValueJson(w, lc.value);
+            try w.writeByte('}');
+        },
+        .bin_op => |bo| {
+            try w.writeAll("{\"kind\":\"bin_op\",\"op\":");
+            try writeJsonString(w, bo.op);
+            try w.writeAll(",\"left\":");
+            try writeJsonString(w, bo.left);
+            try w.writeAll(",\"right\":");
+            try writeJsonString(w, bo.right);
+            if (bo.result_type) |rt| {
+                try w.writeAll(",\"result_type\":");
+                try writeJsonString(w, rt);
+            }
+            try w.writeByte('}');
+        },
+        .unary_op => |uo| {
+            try w.writeAll("{\"kind\":\"unary_op\",\"op\":");
+            try writeJsonString(w, uo.op);
+            try w.writeAll(",\"operand\":");
+            try writeJsonString(w, uo.operand);
+            if (uo.result_type) |rt| {
+                try w.writeAll(",\"result_type\":");
+                try writeJsonString(w, rt);
+            }
+            try w.writeByte('}');
+        },
+        .call => |c| {
+            try w.writeAll("{\"kind\":\"call\",\"func\":");
+            try writeJsonString(w, c.func);
+            try w.writeAll(",\"args\":[");
+            for (c.args, 0..) |arg, j| {
+                if (j > 0) try w.writeByte(',');
+                try writeJsonString(w, arg);
+            }
+            try w.writeAll("]}");
+        },
+        .method_call => |mc| {
+            try w.writeAll("{\"kind\":\"method_call\",\"method\":");
+            try writeJsonString(w, mc.method);
+            try w.writeAll(",\"args\":[");
+            for (mc.args, 0..) |arg, j| {
+                if (j > 0) try w.writeByte(',');
+                try writeJsonString(w, arg);
+            }
+            try w.writeAll("]}");
+        },
+        .@"if" => |ifn| {
+            try w.writeAll("{\"kind\":\"if\",\"cond\":");
+            try writeJsonString(w, ifn.cond);
+            try w.writeAll(",\"then\":[");
+            for (ifn.then, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("],\"else\":[");
+            for (ifn.@"else", 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("]}");
+        },
+        .loop => |ln| {
+            try w.writeAll("{\"kind\":\"loop\",\"count\":");
+            try w.print("{d}", .{ln.count});
+            try w.writeAll(",\"iterVar\":");
+            try writeJsonString(w, ln.iter_var);
+            try w.writeAll(",\"body\":[");
+            for (ln.body, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("]}");
+        },
+        .assert => |a| {
+            try w.writeAll("{\"kind\":\"assert\",\"value\":");
+            try writeJsonString(w, a.value);
+            try w.writeByte('}');
+        },
+        .update_prop => |up| {
+            try w.writeAll("{\"kind\":\"update_prop\",\"name\":");
+            try writeJsonString(w, up.name);
+            try w.writeAll(",\"value\":");
+            try writeJsonString(w, up.value);
+            try w.writeByte('}');
+        },
+        .add_output => |ao| {
+            try w.writeAll("{\"kind\":\"add_output\",\"satoshis\":");
+            try writeJsonString(w, ao.satoshis);
+            if (ao.state_values.len > 0) {
+                try w.writeAll(",\"stateValues\":[");
+                for (ao.state_values, 0..) |sv, j| {
+                    if (j > 0) try w.writeByte(',');
+                    try writeJsonString(w, sv);
+                }
+                try w.writeByte(']');
+            }
+            try w.writeByte('}');
+        },
+        .add_raw_output => {
+            try w.writeAll("{\"kind\":\"add_raw_output\"}");
+        },
+        .get_state_script => {
+            try w.writeAll("{\"kind\":\"get_state_script\"}");
+        },
+        .check_preimage => |cp| {
+            try w.writeAll("{\"kind\":\"check_preimage\",\"preimage\":");
+            try writeJsonString(w, cp.preimage);
+            try w.writeByte('}');
+        },
+        .deserialize_state => |ds| {
+            try w.writeAll("{\"kind\":\"deserialize_state\",\"preimage\":");
+            try writeJsonString(w, ds.preimage);
+            try w.writeByte('}');
+        },
+        .array_literal => {
+            try w.writeAll("{\"kind\":\"array_literal\"}");
+        },
+        // Legacy variants — emit as simple kind markers
+        .literal_int => |n| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            try w.print("{d}", .{n});
+            try w.writeByte('}');
+        },
+        .literal_bigint => |s| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            try writeJsonString(w, s);
+            try w.writeByte('}');
+        },
+        .literal_bool => |b| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            try w.writeAll(if (b) "true" else "false");
+            try w.writeByte('}');
+        },
+        .literal_bytes => |s| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            try writeJsonString(w, s);
+            try w.writeByte('}');
+        },
+        .ref => |name| {
+            try w.writeAll("{\"kind\":\"load_const\",\"value\":");
+            // Emit as @ref:name alias
+            try w.writeByte('"');
+            try w.writeAll("@ref:");
+            try w.writeAll(name);
+            try w.writeByte('"');
+            try w.writeByte('}');
+        },
+        .property_read => |name| {
+            try w.writeAll("{\"kind\":\"load_prop\",\"name\":");
+            try writeJsonString(w, name);
+            try w.writeByte('}');
+        },
+        .property_write => |pw| {
+            try w.writeAll("{\"kind\":\"update_prop\",\"name\":");
+            try writeJsonString(w, pw.name);
+            try w.writeAll(",\"value\":");
+            try writeJsonString(w, pw.value_ref);
+            try w.writeByte('}');
+        },
+        .binary_op => |bo| {
+            try w.writeAll("{\"kind\":\"bin_op\",\"op\":");
+            try writeJsonString(w, @tagName(bo.op));
+            try w.writeAll(",\"left\":");
+            try writeJsonString(w, bo.left);
+            try w.writeAll(",\"right\":");
+            try writeJsonString(w, bo.right);
+            if (bo.result_type) |rt| {
+                try w.writeAll(",\"result_type\":");
+                try writeJsonString(w, rt);
+            }
+            try w.writeByte('}');
+        },
+        .builtin_call => |bc| {
+            try w.writeAll("{\"kind\":\"call\",\"func\":");
+            try writeJsonString(w, bc.name);
+            try w.writeAll(",\"args\":[");
+            for (bc.args, 0..) |arg, j| {
+                if (j > 0) try w.writeByte(',');
+                try writeJsonString(w, arg);
+            }
+            try w.writeAll("]}");
+        },
+        .if_expr => |ie| {
+            try w.writeAll("{\"kind\":\"if\",\"cond\":");
+            try writeJsonString(w, ie.condition);
+            try w.writeAll(",\"then\":[");
+            for (ie.then_bindings, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("],\"else\":[");
+            if (ie.else_bindings) |eb| {
+                for (eb, 0..) |binding, j| {
+                    if (j > 0) try w.writeByte(',');
+                    try emitANFBindingJson(w, binding);
+                }
+            }
+            try w.writeAll("]}");
+        },
+        .for_loop => |fl| {
+            try w.writeAll("{\"kind\":\"loop\",\"count\":");
+            try w.print("{d}", .{fl.bound - fl.init_val});
+            try w.writeAll(",\"iterVar\":");
+            try writeJsonString(w, fl.var_name);
+            try w.writeAll(",\"body\":[");
+            for (fl.body_bindings, 0..) |binding, j| {
+                if (j > 0) try w.writeByte(',');
+                try emitANFBindingJson(w, binding);
+            }
+            try w.writeAll("]}");
+        },
+        .assert_op => |a| {
+            try w.writeAll("{\"kind\":\"assert\",\"value\":");
+            try writeJsonString(w, a.condition);
+            try w.writeByte('}');
+        },
+        .nop => {
+            try w.writeAll("{\"kind\":\"nop\"}");
+        },
+    }
+}
+
+fn emitConstValueJson(w: anytype, cv: types.ConstValue) !void {
+    switch (cv) {
+        .boolean => |b| try w.writeAll(if (b) "true" else "false"),
+        .integer => |n| try w.print("{d}", .{n}),
+        .string => |s| try writeJsonString(w, s),
+    }
 }
 
 // ============================================================================

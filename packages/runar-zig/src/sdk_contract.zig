@@ -7,6 +7,7 @@ const signer_mod = @import("sdk_signer.zig");
 const deploy_mod = @import("sdk_deploy.zig");
 const call_mod = @import("sdk_call.zig");
 const oppushtx_mod = @import("sdk_oppushtx.zig");
+const anf_interp = @import("sdk_anf_interpreter.zig");
 
 // ---------------------------------------------------------------------------
 // RunarContract — main contract runtime wrapper
@@ -333,17 +334,23 @@ pub const RunarContract = struct {
             if (options) |o| {
                 if (o.satoshis > 0) new_satoshis = o.satoshis;
             }
-            // Update state if new_state is provided
-            if (options) |o| {
-                if (o.new_state) |ns| {
-                    for (self.state) |*s| s.deinit(self.allocator);
-                    if (self.state.len > 0) self.allocator.free(self.state);
-                    var vals = try self.allocator.alloc(types.StateValue, ns.len);
-                    for (ns, 0..) |s, i| {
-                        vals[i] = try s.clone(self.allocator);
-                    }
-                    self.state = vals;
+            // Apply new state: explicit newState takes priority (backward compat);
+            // otherwise auto-compute from ANF IR if available.
+            const has_explicit_state = if (options) |o| o.new_state != null else false;
+            if (has_explicit_state) {
+                const ns = options.?.new_state.?;
+                for (self.state) |*s| s.deinit(self.allocator);
+                if (self.state.len > 0) self.allocator.free(self.state);
+                var vals = try self.allocator.alloc(types.StateValue, ns.len);
+                for (ns, 0..) |s, i| {
+                    vals[i] = try s.clone(self.allocator);
                 }
+                self.state = vals;
+            } else if (needs_change and self.artifact.anf_json != null) {
+                // Auto-compute new state from ANF IR
+                self.autoComputeState(method_name, user_params, resolved_args) catch {
+                    // If ANF interpretation fails, continue with current state
+                };
             }
             new_locking_script = try self.getLockingScript();
         }
@@ -843,6 +850,61 @@ pub const RunarContract = struct {
     }
 
     // ---------------------------------------------------------------------------
+    // ANF auto-state computation
+    // ---------------------------------------------------------------------------
+
+    /// Auto-compute state transitions from the ANF IR embedded in the artifact.
+    /// Converts StateValue arrays to/from ANFValue hashmaps for the interpreter.
+    fn autoComputeState(
+        self: *RunarContract,
+        method_name: []const u8,
+        user_params: []types.ABIParam,
+        resolved_args: []const types.StateValue,
+    ) !void {
+        const anf_json = self.artifact.anf_json orelse return;
+
+        // Use an arena for all ANF parsing and interpretation work
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const work = arena.allocator();
+
+        // Parse the ANF IR from JSON
+        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return;
+
+        // Build current state map: property name -> ANFValue
+        var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
+        for (self.artifact.state_fields, 0..) |field, i| {
+            if (i < self.state.len) {
+                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
+            }
+        }
+
+        // Build named args map: param name -> ANFValue
+        var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
+        for (user_params, 0..) |param, i| {
+            if (i < resolved_args.len) {
+                named_args.put(param.name, stateValueToAnf(resolved_args[i])) catch continue;
+            }
+        }
+
+        // Compute new state
+        var computed = anf_interp.computeNewState(work, &anf_program, method_name, current_state, named_args) catch return;
+        defer computed.deinit();
+
+        // Apply computed state back to self.state
+        for (self.artifact.state_fields, 0..) |field, i| {
+            if (i < self.state.len) {
+                if (computed.get(field.name)) |anf_val| {
+                    // Free old state value
+                    self.state[i].deinit(self.allocator);
+                    // Convert ANFValue back to StateValue
+                    self.state[i] = anfToStateValue(self.allocator, anf_val) catch .{ .int = 0 };
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
 
@@ -945,6 +1007,27 @@ pub const RunarContract = struct {
         return self.buildCodeScript();
     }
 };
+
+// ---------------------------------------------------------------------------
+// ANFValue <-> StateValue conversion helpers
+// ---------------------------------------------------------------------------
+
+fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
+    return switch (sv) {
+        .int => |n| .{ .int = n },
+        .boolean => |b| .{ .boolean = b },
+        .bytes => |hex| .{ .bytes = hex },
+    };
+}
+
+fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types.StateValue {
+    return switch (av) {
+        .int => |n| .{ .int = n },
+        .boolean => |b| .{ .boolean = b },
+        .bytes => |hex| .{ .bytes = try allocator.dupe(u8, hex) },
+        .none => .{ .int = 0 },
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Helper: parse initial value string to StateValue

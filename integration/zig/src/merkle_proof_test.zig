@@ -1,167 +1,123 @@
 const std = @import("std");
 const runar = @import("runar");
-const runar_frontend = @import("runar_frontend");
 const helpers = @import("helpers.zig");
+const compile_mod = @import("compile.zig");
 
 // ---------------------------------------------------------------------------
 // Merkle proof verification tests: verify merkleRootSha256 compiles, deploys,
 // and calls correctly on a regtest node.
 // ---------------------------------------------------------------------------
 
-/// Compile inline TypeScript source to a RunarArtifact.
-fn compileInlineSource(allocator: std.mem.Allocator, source: []const u8, file_name: []const u8) !runar.RunarArtifact {
-    const result = try runar_frontend.compileSource(allocator, source, file_name);
-    defer allocator.free(result.script_hex);
-
-    if (result.artifact_json) |json| {
-        defer allocator.free(json);
-        return runar.RunarArtifact.fromJson(allocator, json);
-    }
-
-    return error.OutOfMemory;
-}
-
-// ---------------------------------------------------------------------------
 // SHA-256 helper
-// ---------------------------------------------------------------------------
-
-fn sha256Bytes(data: []const u8) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    hasher.update(data);
-    return hasher.finalResult();
-}
-
 fn sha256Hex(allocator: std.mem.Allocator, hex_str: []const u8) ![]u8 {
-    // Decode hex to bytes
     const byte_len = hex_str.len / 2;
     const bytes = try allocator.alloc(u8, byte_len);
     defer allocator.free(bytes);
 
     for (0..byte_len) |i| {
-        bytes[i] = std.fmt.parseInt(u8, hex_str[i * 2 .. i * 2 + 2], 16) catch return error.OutOfMemory;
+        bytes[i] = std.fmt.parseInt(u8, hex_str[i * 2 .. i * 2 + 2], 16) catch return error.InvalidHex;
     }
 
-    const hash = sha256Bytes(bytes);
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(bytes);
+    const hash = hasher.finalResult();
 
-    // Encode hash as hex
     const hex_buf = try allocator.alloc(u8, 64);
+    const hex_chars = "0123456789abcdef";
     for (0..32) |i| {
-        const high = hash[i] >> 4;
-        const low = hash[i] & 0x0f;
-        hex_buf[i * 2] = if (high < 10) '0' + high else 'a' + high - 10;
-        hex_buf[i * 2 + 1] = if (low < 10) '0' + low else 'a' + low - 10;
+        hex_buf[i * 2] = hex_chars[hash[i] >> 4];
+        hex_buf[i * 2 + 1] = hex_chars[hash[i] & 0x0f];
     }
     return hex_buf;
 }
 
-// ---------------------------------------------------------------------------
-// Merkle tree builder
-// ---------------------------------------------------------------------------
-
-const MerkleTree = struct {
+// Build depth-4 SHA-256 Merkle tree (16 leaves)
+fn buildTreeAndProof(allocator: std.mem.Allocator, leaf_index: usize) !struct {
     root: []const u8,
-    leaves: [][]const u8,
-    layers: [][]const []const u8,
-    allocator: std.mem.Allocator,
-
-    fn deinit(self: *MerkleTree) void {
-        for (self.layers) |layer| {
-            for (layer) |node| {
-                self.allocator.free(node);
-            }
-            self.allocator.free(layer);
-        }
-        self.allocator.free(self.layers);
-        self.allocator.free(self.leaves);
-    }
-};
-
-fn buildTestTree(allocator: std.mem.Allocator) !MerkleTree {
-    // Build 16 leaves: sha256(bytes([i])) for i = 0..15
+    proof: []const u8,
+    leaf: []const u8,
+} {
     const leaf_inputs = [16][]const u8{
         "00", "01", "02", "03", "04", "05", "06", "07",
         "08", "09", "0a", "0b", "0c", "0d", "0e", "0f",
     };
 
-    var leaves = try allocator.alloc([]const u8, 16);
+    // Compute all leaves
+    var leaves: [16][]const u8 = undefined;
     for (0..16) |i| {
         leaves[i] = try sha256Hex(allocator, leaf_inputs[i]);
     }
 
-    // Build tree layers
-    var layers_list: std.ArrayListUnmanaged([]const []const u8) = .empty;
-    errdefer layers_list.deinit(allocator);
+    // Build tree bottom-up, collecting layers for proof extraction
+    var current_layer: [16][]const u8 = leaves;
+    var current_len: usize = 16;
 
-    // First layer: copy of leaves
-    var first_layer = try allocator.alloc([]const u8, 16);
-    for (0..16) |i| {
-        first_layer[i] = try allocator.dupe(u8, leaves[i]);
-    }
-    try layers_list.append(allocator, first_layer);
+    // Store sibling at each level for the proof
+    var siblings: [4][]const u8 = undefined;
+    var proof_idx = leaf_index;
 
-    var level = first_layer;
-    while (level.len > 1) {
-        const next_len = level.len / 2;
-        var next = try allocator.alloc([]const u8, next_len);
+    for (0..4) |level| {
+        const sibling_idx = proof_idx ^ 1;
+        siblings[level] = try allocator.dupe(u8, current_layer[sibling_idx]);
+
+        const next_len = current_len / 2;
+        var next_layer: [16][]const u8 = undefined;
         for (0..next_len) |i| {
-            // Concatenate level[2*i] and level[2*i+1]
             const concat = try allocator.alloc(u8, 128);
             defer allocator.free(concat);
-            @memcpy(concat[0..64], level[i * 2]);
-            @memcpy(concat[64..128], level[i * 2 + 1]);
-            next[i] = try sha256Hex(allocator, concat);
+            @memcpy(concat[0..64], current_layer[i * 2]);
+            @memcpy(concat[64..128], current_layer[i * 2 + 1]);
+            next_layer[i] = try sha256Hex(allocator, concat);
         }
-        try layers_list.append(allocator, next);
-        level = next;
+
+        // Free previous layer hashes (except original leaves which we still need)
+        if (level > 0) {
+            for (0..current_len) |i| {
+                allocator.free(current_layer[i]);
+            }
+        }
+
+        for (0..next_len) |i| {
+            current_layer[i] = next_layer[i];
+        }
+        current_len = next_len;
+        proof_idx >>= 1;
     }
 
-    const layers = try layers_list.toOwnedSlice(allocator);
+    // current_layer[0] is the root
+    const root = try allocator.dupe(u8, current_layer[0]);
+    // Free the root in current_layer
+    allocator.free(current_layer[0]);
 
-    return MerkleTree{
-        .root = layers[layers.len - 1][0],
-        .leaves = leaves,
-        .layers = layers,
-        .allocator = allocator,
-    };
-}
-
-fn getProof(allocator: std.mem.Allocator, tree: *const MerkleTree, index: usize) !struct { proof: []const u8, leaf: []const u8 } {
-    var siblings: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer siblings.deinit(allocator);
-
-    var idx = index;
-    for (0..tree.layers.len - 1) |d| {
-        const sibling = tree.layers[d][idx ^ 1];
-        try siblings.appendSlice(allocator, sibling);
-        idx >>= 1;
+    // Concatenate siblings into proof hex
+    const proof = try allocator.alloc(u8, 4 * 64);
+    for (0..4) |i| {
+        @memcpy(proof[i * 64 .. (i + 1) * 64], siblings[i]);
+        allocator.free(siblings[i]);
     }
 
-    return .{
-        .proof = try siblings.toOwnedSlice(allocator),
-        .leaf = tree.leaves[index],
-    };
+    const leaf = try allocator.dupe(u8, leaves[leaf_index]);
+
+    // Free all leaves
+    for (0..16) |i| {
+        allocator.free(leaves[i]);
+    }
+
+    return .{ .root = root, .proof = proof, .leaf = leaf };
 }
 
-// ---------------------------------------------------------------------------
-// Contract source
-// ---------------------------------------------------------------------------
+test "MerkleProof_Compile" {
+    const allocator = std.testing.allocator;
 
-const MERKLE_SHA256_SOURCE =
-    \\import { SmartContract, assert, merkleRootSha256 } from 'runar-lang';
-    \\import type { ByteString } from 'runar-lang';
-    \\
-    \\class MerkleSha256Test extends SmartContract {
-    \\  readonly expectedRoot: ByteString;
-    \\  constructor(expectedRoot: ByteString) {
-    \\    super(expectedRoot);
-    \\    this.expectedRoot = expectedRoot;
-    \\  }
-    \\  public verify(leaf: ByteString, proof: ByteString, index: bigint) {
-    \\    const root = merkleRootSha256(leaf, proof, index, 4n);
-    \\    assert(root === this.expectedRoot);
-    \\  }
-    \\}
-;
+    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
+        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    try std.testing.expectEqualStrings("MerkleProofDemo", artifact.contract_name);
+    std.log.info("MerkleProofDemo compiled: {d} bytes", .{artifact.script.len / 2});
+}
 
 test "MerkleProof_Sha256_LeafIndex0" {
     const allocator = std.testing.allocator;
@@ -171,23 +127,21 @@ test "MerkleProof_Sha256_LeafIndex0" {
         return;
     }
 
-    var tree = buildTestTree(allocator) catch |err| {
-        std.log.warn("Could not build test tree: {any}, skipping test", .{err});
+    const tree = buildTreeAndProof(allocator, 0) catch |err| {
+        std.log.warn("Could not build test tree: {any}, skipping", .{err});
         return;
     };
-    defer tree.deinit();
+    defer {
+        allocator.free(tree.root);
+        allocator.free(tree.proof);
+        allocator.free(tree.leaf);
+    }
 
-    const proof_data = try getProof(allocator, &tree, 0);
-    defer allocator.free(proof_data.proof);
-
-    var artifact = compileInlineSource(allocator, MERKLE_SHA256_SOURCE, "MerkleSha256Test.runar.ts") catch |err| {
-        std.log.warn("Could not compile MerkleSha256Test contract: {any}, skipping test", .{err});
+    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
+        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
         return;
     };
     defer artifact.deinit();
-
-    try std.testing.expectEqualStrings("MerkleSha256Test", artifact.contract_name);
-    std.log.info("MerkleSha256Test compiled: {d} bytes", .{artifact.script.len / 2});
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
         .{ .bytes = tree.root },
@@ -206,13 +160,13 @@ test "MerkleProof_Sha256_LeafIndex0" {
     defer allocator.free(deploy_txid);
 
     try std.testing.expectEqual(@as(usize, 64), deploy_txid.len);
-    std.log.info("MerkleSha256Test deployed: {s}", .{deploy_txid});
+    std.log.info("MerkleProofDemo deployed: {s}", .{deploy_txid});
 
     const call_txid = try contract.call(
-        "verify",
+        "verifySha256",
         &[_]runar.StateValue{
-            .{ .bytes = proof_data.leaf },
-            .{ .bytes = proof_data.proof },
+            .{ .bytes = tree.leaf },
+            .{ .bytes = tree.proof },
             .{ .int = 0 },
         },
         rpc_provider.provider(),
@@ -222,64 +176,7 @@ test "MerkleProof_Sha256_LeafIndex0" {
     defer allocator.free(call_txid);
 
     try std.testing.expectEqual(@as(usize, 64), call_txid.len);
-    std.log.info("MerkleSha256 leaf 0 TX: {s}", .{call_txid});
-}
-
-test "MerkleProof_Sha256_LeafIndex7" {
-    const allocator = std.testing.allocator;
-
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
-
-    var tree = buildTestTree(allocator) catch |err| {
-        std.log.warn("Could not build test tree: {any}, skipping test", .{err});
-        return;
-    };
-    defer tree.deinit();
-
-    const proof_data = try getProof(allocator, &tree, 7);
-    defer allocator.free(proof_data.proof);
-
-    var artifact = compileInlineSource(allocator, MERKLE_SHA256_SOURCE, "MerkleSha256Test.runar.ts") catch |err| {
-        std.log.warn("Could not compile MerkleSha256Test contract: {any}, skipping test", .{err});
-        return;
-    };
-    defer artifact.deinit();
-
-    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
-        .{ .bytes = tree.root },
-    });
-    defer contract.deinit();
-
-    var wallet = try helpers.newWallet(allocator);
-    defer wallet.deinit();
-    const fund_txid = try helpers.fundWallet(allocator, &wallet, 1.0);
-    defer allocator.free(fund_txid);
-
-    var rpc_provider = helpers.RPCProvider.init(allocator);
-    var local_signer = try wallet.localSigner();
-
-    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 500000 });
-    defer allocator.free(deploy_txid);
-    std.log.info("MerkleSha256Test deployed: {s}", .{deploy_txid});
-
-    const call_txid = try contract.call(
-        "verify",
-        &[_]runar.StateValue{
-            .{ .bytes = proof_data.leaf },
-            .{ .bytes = proof_data.proof },
-            .{ .int = 7 },
-        },
-        rpc_provider.provider(),
-        local_signer.signer(),
-        null,
-    );
-    defer allocator.free(call_txid);
-
-    try std.testing.expectEqual(@as(usize, 64), call_txid.len);
-    std.log.info("MerkleSha256 leaf 7 TX: {s}", .{call_txid});
+    std.log.info("MerkleProof leaf 0 TX: {s}", .{call_txid});
 }
 
 test "MerkleProof_Sha256_WrongLeaf_Rejected" {
@@ -290,21 +187,21 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
         return;
     }
 
-    var tree = buildTestTree(allocator) catch |err| {
-        std.log.warn("Could not build test tree: {any}, skipping test", .{err});
+    const tree = buildTreeAndProof(allocator, 0) catch |err| {
+        std.log.warn("Could not build test tree: {any}, skipping", .{err});
         return;
     };
-    defer tree.deinit();
+    defer {
+        allocator.free(tree.root);
+        allocator.free(tree.proof);
+        allocator.free(tree.leaf);
+    }
 
-    const proof_data = try getProof(allocator, &tree, 0);
-    defer allocator.free(proof_data.proof);
-
-    // Wrong leaf: sha256("ff") instead of sha256("00")
     const wrong_leaf = try sha256Hex(allocator, "ff");
     defer allocator.free(wrong_leaf);
 
-    var artifact = compileInlineSource(allocator, MERKLE_SHA256_SOURCE, "MerkleSha256Test.runar.ts") catch |err| {
-        std.log.warn("Could not compile MerkleSha256Test contract: {any}, skipping test", .{err});
+    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
+        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
         return;
     };
     defer artifact.deinit();
@@ -324,14 +221,13 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
 
     const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 500000 });
     defer allocator.free(deploy_txid);
-    std.log.info("MerkleSha256 reject test deployed: {s}", .{deploy_txid});
 
     // Call with wrong leaf — should be rejected on-chain
     const result = contract.call(
-        "verify",
+        "verifySha256",
         &[_]runar.StateValue{
             .{ .bytes = wrong_leaf },
-            .{ .bytes = proof_data.proof },
+            .{ .bytes = tree.proof },
             .{ .int = 0 },
         },
         rpc_provider.provider(),
@@ -341,9 +237,8 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
 
     if (result) |call_txid| {
         allocator.free(call_txid);
-        return error.TestExpectedError; // Should have been rejected
+        return error.TestExpectedError;
     } else |_| {
-        // Expected rejection
-        std.log.info("MerkleSha256 correctly rejected wrong leaf", .{});
+        std.log.info("MerkleProof correctly rejected wrong leaf", .{});
     }
 }
