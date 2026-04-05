@@ -1,0 +1,46 @@
+{
+  "artifact": {
+    "version": "runar-v0.4.4",
+    "compilerVersion": "0.4.4",
+    "contractName": "P2PKH",
+    "abi": {
+      "constructor": {
+        "params": [
+          {
+            "name": "pubKeyHash",
+            "type": "Addr"
+          }
+        ]
+      },
+      "methods": [
+        {
+          "name": "unlock",
+          "params": [
+            {
+              "name": "sig",
+              "type": "Sig"
+            },
+            {
+              "name": "pubKey",
+              "type": "PubKey"
+            }
+          ],
+          "isPublic": true
+        }
+      ]
+    },
+    "script": "76a90088ac",
+    "constructorSlots": [
+      {
+        "paramIndex": 0,
+        "byteOffset": 2
+      }
+    ]
+  },
+  "constructorArgs": [
+    {
+      "type": "Addr",
+      "value": "89abcdefabbaabbaabbaabbaabbaabbaabbaabba"
+    }
+  ]
+}
