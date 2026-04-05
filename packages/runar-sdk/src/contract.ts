@@ -551,7 +551,11 @@ export class RunarContract {
           if (methodNeedsChange && changePKHHex) {
             changeHex = encodePushData(changePKHHex) + encodeArg(0n);
           }
-          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + encodePushData(preimage) + methodSelectorHex;
+          let newAmountHex = '';
+          if (methodNeedsNewAmount) {
+            newAmountHex = encodeArg(BigInt(contractUtxo.satoshis));
+          }
+          const unlock = this.buildStatefulPrefix(opSig) + argsHex + changeHex + newAmountHex + encodePushData(preimage) + methodSelectorHex;
           return { unlock, opSig, preimage };
         };
 
