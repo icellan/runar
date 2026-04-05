@@ -1,0 +1,240 @@
+{
+  "contractName": "MerkleProofDemo",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRoot"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRoot"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "expectedRoot",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "expectedRoot",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "leaf"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "proof"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "index"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_const",
+            "value": 4
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2",
+              "t3"
+            ],
+            "func": "merkleRootSha256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "root",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRoot"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "root",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verifySha256",
+      "params": [
+        {
+          "name": "leaf",
+          "type": "ByteString"
+        },
+        {
+          "name": "proof",
+          "type": "ByteString"
+        },
+        {
+          "name": "index",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "leaf"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "proof"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "index"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_const",
+            "value": 4
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2",
+              "t3"
+            ],
+            "func": "merkleRootHash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "root",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "expectedRoot"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "root",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verifyHash256",
+      "params": [
+        {
+          "name": "leaf",
+          "type": "ByteString"
+        },
+        {
+          "name": "proof",
+          "type": "ByteString"
+        },
+        {
+          "name": "index",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "expectedRoot",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}

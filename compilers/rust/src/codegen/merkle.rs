@@ -82,15 +82,15 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
         emit(StackOp::Swap);
         // Stack: [current, sibling, index]
 
-        // Compute (index >> i) & 1
+        // Compute direction bit: (index / 2^i) % 2
         emit(StackOp::Dup);
         // Stack: [current, sibling, index, index]
         if i > 0 {
-            emit(StackOp::Push(PushValue::Int(i as i128)));
-            emit(StackOp::Opcode("OP_RSHIFT".into()));
+            emit(StackOp::Push(PushValue::Int((1i128 << i) as i128)));
+            emit(StackOp::Opcode("OP_DIV".into()));
         }
-        emit(StackOp::Push(PushValue::Int(1)));
-        emit(StackOp::Opcode("OP_AND".into()));
+        emit(StackOp::Push(PushValue::Int(2)));
+        emit(StackOp::Opcode("OP_MOD".into()));
         // Stack: [current, sibling, index, direction_bit]
 
         // Move index below for safekeeping

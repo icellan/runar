@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/cross-covenant/CrossCovenantRef.runar.ts",
+    ".runar.sol": "../../../examples/sol/cross-covenant/CrossCovenantRef.runar.sol",
+    ".runar.move": "../../../examples/move/cross-covenant/CrossCovenantRef.runar.move",
+    ".runar.go": "../../../examples/go/cross-covenant/CrossCovenantRef.runar.go",
+    ".runar.rs": "../../../examples/rust/cross-covenant/CrossCovenantRef.runar.rs",
+    ".runar.py": "../../../examples/python/cross-covenant/CrossCovenantRef.runar.py",
+    ".runar.rb": "../../../examples/ruby/cross-covenant/CrossCovenantRef.runar.rb",
+    ".runar.zig": "../../../examples/zig/cross-covenant/CrossCovenantRef.runar.zig"
+  }
+}

@@ -1,0 +1,552 @@
+{
+  "contractName": "BabyBearDemo",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "args": [],
+            "func": "super",
+            "kind": "call"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "bbFieldAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkAdd",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "bbFieldSub",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkSub",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "expected"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "bin_op",
+            "left": "t2",
+            "op": "===",
+            "right": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "assert",
+            "value": "t4"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkMul",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        },
+        {
+          "name": "expected",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "bbFieldInv",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "inv",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t2",
+              "inv"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "bin_op",
+            "left": "t3",
+            "op": "===",
+            "right": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "assert",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkInv",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "bbFieldAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "sum",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t2"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "sum",
+              "t3"
+            ],
+            "func": "bbFieldSub",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "result",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "bin_op",
+            "left": "result",
+            "op": "===",
+            "right": "t5"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "assert",
+            "value": "t6"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkAddSubRoundtrip",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_param",
+            "name": "c"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t1",
+              "t2"
+            ],
+            "func": "bbFieldAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "args": [
+              "t0",
+              "t3"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "lhs",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t4"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "b"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_param",
+            "name": "a"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "c"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t8",
+              "t9"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "args": [
+              "t7",
+              "t10"
+            ],
+            "func": "bbFieldAdd",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "rhs",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t11"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "lhs",
+            "op": "===",
+            "right": "rhs"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "assert",
+            "value": "t12"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "checkDistributive",
+      "params": [
+        {
+          "name": "a",
+          "type": "bigint"
+        },
+        {
+          "name": "b",
+          "type": "bigint"
+        },
+        {
+          "name": "c",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": []
+}

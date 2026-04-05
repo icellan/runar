@@ -397,7 +397,7 @@ class ZigParser extends ParserCore<ZigToken> {
 
     this.properties = this.properties.map((property) => ({
       ...property,
-      readonly: this.parentClass === 'SmartContract' || property.readonly || property.initializer === undefined,
+      readonly: this.parentClass === 'SmartContract' || property.readonly || (this.parentClass === 'StatefulSmartContract' && !property.readonly && property.initializer === undefined && !this.methodsMutateProperty(property.name)),
     }));
 
     const methodNames = new Set(this.methods.map(method => method.name));
@@ -1128,6 +1128,39 @@ class ZigParser extends ParserCore<ZigToken> {
 
     this.advance();
     return { kind: 'identifier', name: token.value || 'unknown' };
+  }
+
+  /** Check if any method body contains an assignment to self.<propName>. */
+  private methodsMutateProperty(propName: string): boolean {
+    const camelName = propName.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase());
+    const walk = (node: unknown): boolean => {
+      if (!node || typeof node !== 'object') return false;
+      const obj = node as Record<string, unknown>;
+      if (obj.kind === 'assignment') {
+        const target = obj.target as Record<string, unknown> | undefined;
+        if (target) {
+          // Check member_access: this.<propName>
+          if (target.kind === 'member_access') {
+            const prop = target.property as string;
+            if (prop === propName || prop === camelName) return true;
+          }
+          // Check property_access: self.<propName>
+          if (target.kind === 'property_access') {
+            const prop = (target.property ?? target.name) as string;
+            if (prop === propName || prop === camelName) return true;
+          }
+          // Check string target like "this.propName"
+          if (typeof obj.target === 'string') {
+            const t = obj.target as string;
+            if (t === `this.${propName}` || t === `this.${camelName}`) return true;
+          }
+        }
+      }
+      return Object.values(obj).some(v =>
+        Array.isArray(v) ? v.some(walk) : walk(v),
+      );
+    };
+    return this.methods.some(m => m.body.some(walk));
   }
 
   private rewriteBareMethodCalls(method: MethodNode, methodNames: Set<string>): MethodNode {

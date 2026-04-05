@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/merkle-proof/MerkleProofDemo.runar.ts",
+    ".runar.sol": "../../../examples/sol/merkle-proof/MerkleProofDemo.runar.sol",
+    ".runar.move": "../../../examples/move/merkle-proof/MerkleProofDemo.runar.move",
+    ".runar.go": "../../../examples/go/merkle-proof/MerkleProofDemo.runar.go",
+    ".runar.rs": "../../../examples/rust/merkle-proof/MerkleProofDemo.runar.rs",
+    ".runar.py": "../../../examples/python/merkle-proof/MerkleProofDemo.runar.py",
+    ".runar.rb": "../../../examples/ruby/merkle-proof/MerkleProofDemo.runar.rb",
+    ".runar.zig": "../../../examples/zig/merkle-proof/MerkleProofDemo.runar.zig"
+  }
+}

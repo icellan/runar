@@ -3415,20 +3415,20 @@ class _LoweringContext:
                 f"{func_name}: depth must be between 1 and 64, got {depth}"
             )
 
-        # Bring leaf, proof, index to stack top (skip depth -- consumed at compile time)
+        # Remove depth from the real stack FIRST (compile-time constant, not runtime).
+        if self.sm.has(depth_arg):
+            self.bring_to_top(depth_arg, True)
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # Bring leaf, proof, index to stack top for the codegen
         for i in range(3):
             arg = args[i]
             is_last = self._is_last_use(arg, binding_index, last_uses)
             self.bring_to_top(arg, is_last)
-        # Pop the 3 args we brought to the stack
+        # Pop the 3 args -- the codegen consumes them and produces 1 result
         for _ in range(3):
             self.sm.pop()
-
-        # Also remove depth from stackMap if it's there (consumed at compile time)
-        if self.sm.has(depth_arg):
-            self.bring_to_top(depth_arg, True)
-            self.sm.pop()
-            self.emit_op(StackOp(op="drop"))
 
         from runar_compiler.codegen.merkle import (
             emit_merkle_root_sha256,

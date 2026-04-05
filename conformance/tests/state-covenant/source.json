@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/state-covenant/StateCovenant.runar.ts",
+    ".runar.sol": "../../../examples/sol/state-covenant/StateCovenant.runar.sol",
+    ".runar.move": "../../../examples/move/state-covenant/StateCovenant.runar.move",
+    ".runar.go": "../../../examples/go/state-covenant/StateCovenant.runar.go",
+    ".runar.rs": "../../../examples/rust/state-covenant/StateCovenant.runar.rs",
+    ".runar.py": "../../../examples/python/state-covenant/StateCovenant.runar.py",
+    ".runar.rb": "../../../examples/ruby/state-covenant/StateCovenant.runar.rb",
+    ".runar.zig": "../../../examples/zig/state-covenant/StateCovenant.runar.zig"
+  }
+}

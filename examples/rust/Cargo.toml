@@ -106,3 +106,7 @@ path = "merkle-proof/MerkleProofDemo_test.rs"
 [[test]]
 name = "cross_covenant_ref"
 path = "cross-covenant/CrossCovenantRef_test.rs"
+
+[[test]]
+name = "state_covenant"
+path = "state-covenant/StateCovenant_test.rs"

@@ -1,0 +1,608 @@
+{
+  "contractName": "StateCovenant",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "stateRoot"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "blockNumber"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "verifyingKeyHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t0",
+              "t1",
+              "t2"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_prop",
+            "name": "stateRoot"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "update_prop",
+            "name": "stateRoot",
+            "value": "t4"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "blockNumber"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "update_prop",
+            "name": "blockNumber",
+            "value": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "load_prop",
+            "name": "verifyingKeyHash"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "update_prop",
+            "name": "verifyingKeyHash",
+            "value": "t8"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "stateRoot",
+          "type": "ByteString"
+        },
+        {
+          "name": "blockNumber",
+          "type": "bigint"
+        },
+        {
+          "name": "verifyingKeyHash",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "check_preimage",
+            "preimage": "t0"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "assert",
+            "value": "t1"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "deserialize_state",
+            "preimage": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "newBlockNumber"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_prop",
+            "name": "blockNumber"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "bin_op",
+            "left": "t5",
+            "op": ">",
+            "right": "t6"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "preStateRoot"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_prop",
+            "name": "stateRoot"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "t9",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "load_param",
+            "name": "proofFieldA"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "proofFieldB"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "args": [
+              "t13",
+              "t14"
+            ],
+            "func": "bbFieldMul",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "proofFieldC"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "bin_op",
+            "left": "t15",
+            "op": "===",
+            "right": "t16"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "assert",
+            "value": "t17"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_param",
+            "name": "merkleLeaf"
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "load_param",
+            "name": "merkleProof"
+          }
+        },
+        {
+          "name": "t21",
+          "value": {
+            "kind": "load_param",
+            "name": "merkleIndex"
+          }
+        },
+        {
+          "name": "t22",
+          "value": {
+            "kind": "load_const",
+            "value": 4
+          }
+        },
+        {
+          "name": "t23",
+          "value": {
+            "args": [
+              "t19",
+              "t20",
+              "t21",
+              "t22"
+            ],
+            "func": "merkleRootSha256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "computedRoot",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t23"
+          }
+        },
+        {
+          "name": "t24",
+          "value": {
+            "kind": "load_prop",
+            "name": "verifyingKeyHash"
+          }
+        },
+        {
+          "name": "t25",
+          "value": {
+            "kind": "bin_op",
+            "left": "computedRoot",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t24"
+          }
+        },
+        {
+          "name": "t26",
+          "value": {
+            "kind": "assert",
+            "value": "t25"
+          }
+        },
+        {
+          "name": "t27",
+          "value": {
+            "kind": "load_param",
+            "name": "preStateRoot"
+          }
+        },
+        {
+          "name": "t28",
+          "value": {
+            "kind": "load_param",
+            "name": "newStateRoot"
+          }
+        },
+        {
+          "name": "t29",
+          "value": {
+            "args": [
+              "t27",
+              "t28"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t30",
+          "value": {
+            "args": [
+              "t29"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "expectedBatchHash",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t30"
+          }
+        },
+        {
+          "name": "t31",
+          "value": {
+            "kind": "load_param",
+            "name": "batchDataHash"
+          }
+        },
+        {
+          "name": "t32",
+          "value": {
+            "kind": "bin_op",
+            "left": "t31",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "expectedBatchHash"
+          }
+        },
+        {
+          "name": "t33",
+          "value": {
+            "kind": "assert",
+            "value": "t32"
+          }
+        },
+        {
+          "name": "t34",
+          "value": {
+            "kind": "load_param",
+            "name": "newStateRoot"
+          }
+        },
+        {
+          "name": "t35",
+          "value": {
+            "kind": "update_prop",
+            "name": "stateRoot",
+            "value": "t34"
+          }
+        },
+        {
+          "name": "t36",
+          "value": {
+            "kind": "load_param",
+            "name": "newBlockNumber"
+          }
+        },
+        {
+          "name": "t37",
+          "value": {
+            "kind": "update_prop",
+            "name": "blockNumber",
+            "value": "t36"
+          }
+        },
+        {
+          "name": "t38",
+          "value": {
+            "kind": "load_param",
+            "name": "_changePKH"
+          }
+        },
+        {
+          "name": "t39",
+          "value": {
+            "kind": "load_param",
+            "name": "_changeAmount"
+          }
+        },
+        {
+          "name": "t40",
+          "value": {
+            "args": [
+              "t38",
+              "t39"
+            ],
+            "func": "buildChangeOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t41",
+          "value": {
+            "kind": "get_state_script"
+          }
+        },
+        {
+          "name": "t42",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t43",
+          "value": {
+            "kind": "load_param",
+            "name": "_newAmount"
+          }
+        },
+        {
+          "name": "t44",
+          "value": {
+            "args": [
+              "t42",
+              "t41",
+              "t43"
+            ],
+            "func": "computeStateOutput",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t45",
+          "value": {
+            "args": [
+              "t44",
+              "t40"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t46",
+          "value": {
+            "args": [
+              "t45"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t47",
+          "value": {
+            "kind": "load_param",
+            "name": "txPreimage"
+          }
+        },
+        {
+          "name": "t48",
+          "value": {
+            "args": [
+              "t47"
+            ],
+            "func": "extractOutputHash",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t49",
+          "value": {
+            "kind": "bin_op",
+            "left": "t46",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t48"
+          }
+        },
+        {
+          "name": "t50",
+          "value": {
+            "kind": "assert",
+            "value": "t49"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "advanceState",
+      "params": [
+        {
+          "name": "newStateRoot",
+          "type": "ByteString"
+        },
+        {
+          "name": "newBlockNumber",
+          "type": "bigint"
+        },
+        {
+          "name": "batchDataHash",
+          "type": "ByteString"
+        },
+        {
+          "name": "preStateRoot",
+          "type": "ByteString"
+        },
+        {
+          "name": "proofFieldA",
+          "type": "bigint"
+        },
+        {
+          "name": "proofFieldB",
+          "type": "bigint"
+        },
+        {
+          "name": "proofFieldC",
+          "type": "bigint"
+        },
+        {
+          "name": "merkleLeaf",
+          "type": "ByteString"
+        },
+        {
+          "name": "merkleProof",
+          "type": "ByteString"
+        },
+        {
+          "name": "merkleIndex",
+          "type": "bigint"
+        },
+        {
+          "name": "_changePKH",
+          "type": "Ripemd160"
+        },
+        {
+          "name": "_changeAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "_newAmount",
+          "type": "bigint"
+        },
+        {
+          "name": "txPreimage",
+          "type": "SigHashPreimage"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "stateRoot",
+      "readonly": false,
+      "type": "ByteString"
+    },
+    {
+      "name": "blockNumber",
+      "readonly": false,
+      "type": "bigint"
+    },
+    {
+      "name": "verifyingKeyHash",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}

@@ -9,6 +9,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { compile } from '../index.js';
+// @ts-expect-error vitest resolves this via alias
 import { TestContract } from 'runar-testing';
 
 const BB_P = 2013265921n;

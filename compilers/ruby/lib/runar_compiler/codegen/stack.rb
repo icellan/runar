@@ -2007,21 +2007,21 @@ module RunarCompiler::Codegen
         raise "#{func_name}: depth must be between 1 and 64, got #{depth}"
       end
 
-      # Bring leaf, proof, index to stack top (skip depth -- consumed at compile time)
+      # Remove depth from the real stack FIRST (compile-time constant, not runtime).
+      if @sm.has?(depth_arg)
+        bring_to_top(depth_arg, true)
+        emit_op({ op: "drop" })
+        @sm.pop
+      end
+
+      # Bring leaf, proof, index to stack top for the codegen
       3.times do |i|
         arg = args[i]
         is_last = _is_last_use(arg, binding_index, last_uses)
         bring_to_top(arg, is_last)
       end
-      # Pop the 3 args we brought to the stack
+      # Pop the 3 args -- the codegen consumes them and produces 1 result
       3.times { @sm.pop }
-
-      # Also remove depth from stackMap if it's there (consumed at compile time)
-      if @sm.has?(depth_arg)
-        bring_to_top(depth_arg, true)
-        @sm.pop
-        emit_op({ op: "drop" })
-      end
 
       emit_fn = ->(op) { emit_op(op) }
 

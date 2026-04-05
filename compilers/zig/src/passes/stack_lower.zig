@@ -1560,20 +1560,20 @@ const LowerCtx = struct {
         const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
         if (depth_value < 1 or depth_value > 64) return LowerError.InvalidBuiltin;
 
-        // Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
-        for (0..3) |i| {
-            try self.bringToTopAuto(args[i]);
-        }
-        // Pop the 3 args we brought to the stack
-        for (0..3) |_| {
+        // Remove depth from the real stack FIRST (compile-time constant, not runtime).
+        if (self.stack.findDepth(depth_arg) != null) {
+            try self.bringToTopAuto(depth_arg);
+            try self.emitOp(.op_drop);
             _ = self.stack.pop();
         }
 
-        // Also remove depth from stackMap if it's there (it's consumed at compile time)
-        if (self.stack.findDepth(depth_arg) != null) {
-            try self.bringToTopAuto(depth_arg);
+        // Bring leaf, proof, index to stack top for the codegen
+        for (0..3) |i| {
+            try self.bringToTopAuto(args[i]);
+        }
+        // Pop the 3 args -- the codegen consumes them and produces 1 result
+        for (0..3) |_| {
             _ = self.stack.pop();
-            try self.emitOp(.op_drop);
         }
 
         var bundle = merkle_emitters.buildBuiltinOps(self.allocator, builtin, @intCast(depth_value)) catch |err| switch (err) {

@@ -1,0 +1,340 @@
+{
+  "contractName": "CrossCovenantRef",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "sourceScriptHash"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "sourceScriptHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "update_prop",
+            "name": "sourceScriptHash",
+            "value": "t2"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "sourceScriptHash",
+          "type": "Sha256"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "referencedOutput"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "outputHash",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "sourceScriptHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "outputHash",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "referencedOutput"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "stateRootOffset"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_const",
+            "value": 32
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "t5",
+              "t6",
+              "t7"
+            ],
+            "func": "substr",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "stateRoot",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t8"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedStateRoot"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "bin_op",
+            "left": "stateRoot",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "assert",
+            "value": "t10"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verifyAndExtract",
+      "params": [
+        {
+          "name": "referencedOutput",
+          "type": "ByteString"
+        },
+        {
+          "name": "expectedStateRoot",
+          "type": "ByteString"
+        },
+        {
+          "name": "stateRootOffset",
+          "type": "bigint"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "referencedOutput"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "hash256",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "outputHash",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t1"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "sourceScriptHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "outputHash",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "referencedOutput"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "valueOffset"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "kind": "load_param",
+            "name": "valueLen"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "t5",
+              "t6",
+              "t7"
+            ],
+            "func": "substr",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "valueBytes",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t8"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "args": [
+              "valueBytes"
+            ],
+            "func": "bin2num",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "value",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t9"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "load_param",
+            "name": "expectedValue"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "bin_op",
+            "left": "value",
+            "op": "===",
+            "right": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "assert",
+            "value": "t11"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "verifyAndExtractNumeric",
+      "params": [
+        {
+          "name": "referencedOutput",
+          "type": "ByteString"
+        },
+        {
+          "name": "expectedValue",
+          "type": "bigint"
+        },
+        {
+          "name": "valueOffset",
+          "type": "bigint"
+        },
+        {
+          "name": "valueLen",
+          "type": "bigint"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "sourceScriptHash",
+      "readonly": true,
+      "type": "Sha256"
+    }
+  ]
+}

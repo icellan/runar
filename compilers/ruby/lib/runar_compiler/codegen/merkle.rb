@@ -111,15 +111,15 @@ module RunarCompiler
           emit.call(make_stack_op(op: "swap"))
           # Stack: [current, sibling, index]
 
-          # Compute (index >> i) & 1
+          # Compute direction bit: (index / 2^i) % 2
           emit.call(make_stack_op(op: "opcode", code: "OP_DUP"))
           # Stack: [current, sibling, index, index]
           if i > 0
-            emit.call(make_stack_op(op: "push", value: big_int_push(i)))
-            emit.call(make_stack_op(op: "opcode", code: "OP_RSHIFT"))
+            emit.call(make_stack_op(op: "push", value: big_int_push(1 << i)))
+            emit.call(make_stack_op(op: "opcode", code: "OP_DIV"))
           end
-          emit.call(make_stack_op(op: "push", value: big_int_push(1)))
-          emit.call(make_stack_op(op: "opcode", code: "OP_AND"))
+          emit.call(make_stack_op(op: "push", value: big_int_push(2)))
+          emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))
           # Stack: [current, sibling, index, direction_bit]
 
           # Move index below for safekeeping

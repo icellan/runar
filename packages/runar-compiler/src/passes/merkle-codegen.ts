@@ -98,15 +98,17 @@ function emitMerkleRoot(emit: (op: StackOp) => void, depth: number, hashOp: stri
     emit({ op: 'swap' });
     // Stack: [current, sibling, index]
 
-    // Compute (index >> i) & 1
+    // Compute direction bit: (index / 2^i) % 2
+    // Uses arithmetic (OP_DIV, OP_MOD) instead of bitwise (OP_RSHIFT, OP_AND)
+    // because BSV bitwise ops require equal-length byte strings.
     emit({ op: 'opcode', code: 'OP_DUP' });
     // Stack: [current, sibling, index, index]
     if (i > 0) {
-      emit({ op: 'push', value: BigInt(i) });
-      emit({ op: 'opcode', code: 'OP_RSHIFT' });
+      emit({ op: 'push', value: BigInt(1 << i) }); // 2^i
+      emit({ op: 'opcode', code: 'OP_DIV' });
     }
-    emit({ op: 'push', value: 1n });
-    emit({ op: 'opcode', code: 'OP_AND' });
+    emit({ op: 'push', value: 2n });
+    emit({ op: 'opcode', code: 'OP_MOD' });
     // Stack: [current, sibling, index, direction_bit]
 
     // Move index below for safekeeping (swap with sibling area)

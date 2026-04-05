@@ -95,6 +95,7 @@ test {
     _ = @import("./sha256-compress/Sha256CompressTest_test.zig");
     _ = @import("./sha256-finalize/Sha256FinalizeTest_test.zig");
     _ = @import("./sphincs-wallet/SPHINCSWallet_test.zig");
+    _ = @import("./state-covenant/StateCovenant_test.zig");
     _ = @import("./stateful-counter/Counter_test.zig");
     _ = @import("./tic-tac-toe/TicTacToe_test.zig");
     _ = @import("./token-ft/FungibleTokenExample_test.zig");

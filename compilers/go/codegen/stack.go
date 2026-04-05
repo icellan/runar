@@ -4071,22 +4071,22 @@ func (ctx *loweringContext) lowerMerkleRoot(bindingName, funcName string, args [
 		panic(fmt.Sprintf("%s: depth must be between 1 and 64, got %d", funcName, depth))
 	}
 
-	// Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
+	// Remove depth from the real stack FIRST (compile-time constant, not runtime).
+	if ctx.sm.has(depthArg) {
+		ctx.bringToTop(depthArg, true)
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	}
+
+	// Bring leaf, proof, index to stack top for the codegen
 	for i := 0; i < 3; i++ {
 		arg := args[i]
 		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
 		ctx.bringToTop(arg, isLast)
 	}
-	// Pop the 3 args we brought to the stack
+	// Pop the 3 args — the codegen consumes them and produces 1 result
 	for i := 0; i < 3; i++ {
 		ctx.sm.pop()
-	}
-
-	// Also remove depth from stackMap if it's there (it's consumed at compile time)
-	if ctx.sm.has(depthArg) {
-		ctx.bringToTop(depthArg, true)
-		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "drop"})
 	}
 
 	emitFn := func(op StackOp) { ctx.emitOp(op) }

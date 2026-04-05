@@ -4215,21 +4215,22 @@ class LoweringContext {
       throw new Error(`${func}: depth must be between 1 and 64, got ${depth}`);
     }
 
-    // Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
+    // Remove depth value from the real stack FIRST (it's consumed at compile time).
+    // Must happen before bringing the 3 runtime args to top, otherwise the stackMap
+    // and real stack get out of sync.
+    if (this.stackMap.has(depthArg)) {
+      this.bringToTop(depthArg, true);
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+    }
+
+    // Now bring leaf, proof, index to stack top for the codegen
     for (let i = 0; i < 3; i++) {
       const arg = args[i]!;
       this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
     }
-    // Pop the 3 args we brought to the stack
+    // Pop the 3 args — the codegen consumes them and produces 1 result
     for (let i = 0; i < 3; i++) this.stackMap.pop();
-
-    // Also remove depth from stackMap if it's there (it's consumed at compile time)
-    if (this.stackMap.has(depthArg)) {
-      // Roll it to top and drop it
-      this.bringToTop(depthArg, true);
-      this.stackMap.pop();
-      this.emitOp({ op: 'drop' });
-    }
 
     const emitFn = (op: StackOp) => this.emitOp(op);
 

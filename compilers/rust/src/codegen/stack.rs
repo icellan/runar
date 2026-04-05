@@ -3710,22 +3710,22 @@ impl LoweringContext {
             func_name, depth
         );
 
-        // Bring leaf, proof, index to stack top (skip depth -- it's consumed at compile time)
+        // Remove depth from the real stack FIRST (compile-time constant, not runtime).
+        if self.sm.has(depth_arg) {
+            self.bring_to_top(depth_arg, true);
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+        }
+
+        // Bring leaf, proof, index to stack top for the codegen
         for i in 0..3 {
             let arg = &args[i];
             let is_last = self.is_last_use(arg, binding_index, last_uses);
             self.bring_to_top(arg, is_last);
         }
-        // Pop the 3 args we brought to the stack
+        // Pop the 3 args -- the codegen consumes them and produces 1 result
         for _ in 0..3 {
             self.sm.pop();
-        }
-
-        // Also remove depth from stackMap if it's there (it's consumed at compile time)
-        if self.sm.has(depth_arg) {
-            self.bring_to_top(depth_arg, true);
-            self.sm.pop();
-            self.emit_op(StackOp::Drop);
         }
 
         let emit = &mut |op: StackOp| self.ops.push(op);
