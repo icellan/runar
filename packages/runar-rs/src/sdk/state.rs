@@ -163,9 +163,19 @@ fn encode_state_value(value: &SdkValue, field_type: &str) -> String {
                 "00".to_string()
             }
         }
-        // All byte-like types: raw hex, no push opcode
-        _ => {
+        "PubKey" | "Addr" | "Ripemd160" | "Sha256" | "Point" => {
+            // Fixed-size byte types: raw hex, no framing needed.
             value.as_bytes().to_string()
+        }
+        _ => {
+            // Variable-length types (ByteString, etc.): use push-data
+            // encoding so the decoder can determine the length.
+            let hex = value.as_bytes();
+            if hex.is_empty() {
+                "00".to_string() // OP_0
+            } else {
+                encode_push_data(hex)
+            }
         }
     }
 }

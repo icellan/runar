@@ -1,0 +1,11 @@
+.{
+    .name = .zig_sdk_tool,
+    .version = "0.1.0",
+    .fingerprint = 0x84002e22506903ce,
+    .dependencies = .{
+        .runar_zig = .{
+            .path = "../../../../packages/runar-zig",
+        },
+    },
+    .paths = .{"."},
+}

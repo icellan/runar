@@ -4,7 +4,7 @@
 
 Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless) or `StatefulSmartContract` (stateful), and the compiler produces Bitcoin Script locking scripts.
 
-Four independent compiler implementations (TypeScript, Go, Rust, Python) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, or Python syntax — all formats compile to the same AST and produce identical Bitcoin Script.
+Six independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, Python, Zig, or Ruby syntax — all formats compile to the same AST and produce identical Bitcoin Script.
 
 ## Repository Structure
 
@@ -20,10 +20,14 @@ packages/
   runar-rs/            # Rust crate: prelude types, mock crypto, real hashes, compile_check(), deployment SDK
   runar-rs-macros/     # Rust proc-macro crate: #[runar::contract], #[public], #[readonly]
   runar-py/            # Python package: types, mock crypto, real hashes, EC operations, deployment SDK
+  runar-zig/           # Zig package: types, mock crypto, real hashes, deployment SDK
+  runar-rb/            # Ruby gem: types, mock crypto, real hashes, deployment SDK
 compilers/
   go/                 # Go compiler implementation
   rust/               # Rust compiler implementation
   python/             # Python compiler implementation
+  zig/                # Zig compiler implementation
+  ruby/               # Ruby compiler implementation
 conformance/          # Cross-compiler conformance test suite (multi-format)
 examples/
   ts/                 # TypeScript contracts + vitest tests
@@ -55,6 +59,9 @@ cd examples/go && go test ./...                 # Run Go contract tests (busines
 cd examples/rust && cargo test                  # Run Rust contract tests (business logic + Rúnar compile check)
 cd packages/runar-py && python3 -m pytest       # Run Python SDK + package tests
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest  # Run Python contract tests
+cd compilers/zig && zig build test              # Run Zig compiler tests
+cd compilers/ruby && rake test                  # Run Ruby compiler tests
+cd packages/runar-zig && zig build test         # Run Zig SDK + package tests
 ```
 
 ## Compiler Pipeline
@@ -102,20 +109,26 @@ When adding a new ANF IR node (like `add_output`), update ALL of these:
 - `compilers/python/runar_compiler/ir/types.py` — add to ANF value types
 - `compilers/python/runar_compiler/frontend/anf_lower.py` — emit the new node
 - `compilers/python/runar_compiler/codegen/stack.py` — add to `collect_refs` + `lower_binding` dispatch
+- `compilers/zig/src/ir/types.zig` — add to ANF value types
+- `compilers/zig/src/frontend/anf_lower.zig` — emit the new node
+- `compilers/zig/src/codegen/stack.zig` — add to `collectRefs` + `lowerBinding` dispatch
+- `compilers/ruby/lib/ir/types.rb` — add to ANF value types
+- `compilers/ruby/lib/frontend/anf_lower.rb` — emit the new node
+- `compilers/ruby/lib/codegen/stack.rb` — add to `collect_refs` + `lower_binding` dispatch
 
 ### Adding a New Input Format Parser
 When adding a new frontend format parser:
 - Add the parser file in `packages/runar-compiler/src/passes/01-parse-{format}.ts`
 - Add dispatch case in `01-parse.ts` based on file extension
 - Export from `packages/runar-compiler/src/index.ts`
-- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`, e.g. `parser_sol.go`, `parser_move.go`, `parser_gocontract.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`, e.g. `parser_sol.rs`, `parser_move.rs`, `parser_rustmacro.rs`), and Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`)
-- Add dispatch in Go `ParseSource()`, Rust `parse_source()`, and Python `parse_source()`
+- Add equivalent parser in Go (`compilers/go/frontend/parser_{format}.go`), Rust (`compilers/rust/src/frontend/parser_{format}.rs`), Python (`compilers/python/runar_compiler/frontend/parser_{format}.py`), Zig (`compilers/zig/src/frontend/parser_{format}.zig`), and Ruby (`compilers/ruby/lib/frontend/parser_{format}.rb`)
+- Add dispatch in Go `ParseSource()`, Rust `parse_source()`, Python `parse_source()`, Zig `parseSource()`, and Ruby `parse_source()`
 - Auto-generated constructors MUST include `super()` as the first statement
 - Type names must map to Rúnar primitives (e.g., `int` → `bigint`, `Int` → `bigint`)
 - Add format docs in `docs/formats/`
 
-### Four Compilers Must Stay in Sync
-Any language feature change must be implemented in TypeScript, Go, Rust, AND Python. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has 25 golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 4 compilers must pass.
+### Six Compilers Must Stay in Sync
+Any language feature change must be implemented in TypeScript, Go, Rust, Python, Zig, AND Ruby. Cross-compiler tests in `packages/runar-compiler/src/__tests__/cross-compiler.test.ts` validate consistency. The conformance suite in `conformance/` has golden-file tests (including WOTS+, SLH-DSA, and EC primitives) that all 6 compilers must pass. The SDK output conformance suite in `conformance/sdk-output/` verifies all 6 SDKs produce identical deployed locking scripts.
 
 ### Contract Model
 - `SmartContract` — stateless, all properties `readonly`, developer writes full logic

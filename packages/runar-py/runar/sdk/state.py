@@ -191,9 +191,16 @@ def _encode_state_value(value, field_type: str) -> str:
         return _encode_num2bin(n, 8)
     elif field_type == 'bool':
         return '01' if value else '00'
-    else:
-        # Raw hex, no push opcode
+    elif field_type in _TYPE_WIDTHS:
+        # Fixed-size byte types: raw hex, no framing needed.
         return value if isinstance(value, str) else ''
+    else:
+        # Variable-length types (ByteString, etc.): use push-data encoding
+        # so the decoder can determine the length.
+        hex_val = value if isinstance(value, str) else ''
+        if not hex_val:
+            return '00'  # OP_0
+        return encode_push_data(hex_val)
 
 
 def _decode_state_value(hex_str: str, offset: int, field_type: str) -> tuple:
