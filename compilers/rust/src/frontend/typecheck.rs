@@ -83,6 +83,16 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("verifySLHDSA_SHA2_192f", FuncSig { params: vec!["ByteString", "ByteString", "ByteString"], return_type: "boolean" });
     m.insert("verifySLHDSA_SHA2_256s", FuncSig { params: vec!["ByteString", "ByteString", "ByteString"], return_type: "boolean" });
     m.insert("verifySLHDSA_SHA2_256f", FuncSig { params: vec!["ByteString", "ByteString", "ByteString"], return_type: "boolean" });
+    // Baby Bear field arithmetic
+    m.insert("bbFieldAdd", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bbFieldSub", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bbFieldMul", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bbFieldInv", FuncSig { params: vec!["bigint"], return_type: "bigint" });
+
+    // Merkle proof verification
+    m.insert("merkleRootSha256", FuncSig { params: vec!["ByteString", "ByteString", "bigint", "bigint"], return_type: "ByteString" });
+    m.insert("merkleRootHash256", FuncSig { params: vec!["ByteString", "ByteString", "bigint", "bigint"], return_type: "ByteString" });
+
     m.insert("ecAdd", FuncSig { params: vec!["Point", "Point"], return_type: "Point" });
     m.insert("ecMul", FuncSig { params: vec!["Point", "bigint"], return_type: "Point" });
     m.insert("ecMulGen", FuncSig { params: vec!["bigint"], return_type: "Point" });

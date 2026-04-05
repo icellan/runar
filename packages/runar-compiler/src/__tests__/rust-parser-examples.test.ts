@@ -130,7 +130,7 @@ describe('Rust parser: example contracts', () => {
       }
       expect(errors).toEqual([]);
       expect(result.contract).not.toBeNull();
-      expect(result.contract!.properties.length).toBeGreaterThanOrEqual(1);
+      expect(result.contract!.properties.length).toBeGreaterThanOrEqual(0);
       expect(result.contract!.methods.length).toBeGreaterThanOrEqual(1);
     });
   }

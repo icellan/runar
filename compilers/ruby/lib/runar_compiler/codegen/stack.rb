@@ -77,6 +77,16 @@ module RunarCompiler::Codegen
     ecPointX ecPointY
   ]).freeze
 
+  # Baby Bear field arithmetic builtin function names
+  BB_BUILTIN_NAMES = Set.new(%w[
+    bbFieldAdd bbFieldSub bbFieldMul bbFieldInv
+  ]).freeze
+
+  # Merkle proof verification builtin function names
+  MERKLE_BUILTIN_NAMES = Set.new(%w[
+    merkleRootSha256 merkleRootHash256
+  ]).freeze
+
   # -----------------------------------------------------------------------
   # StackMap -- tracks named values on the stack
   # -----------------------------------------------------------------------
@@ -282,6 +292,18 @@ module RunarCompiler::Codegen
     EC_BUILTIN_NAMES.include?(name)
   end
 
+  # @param name [String]
+  # @return [Boolean]
+  def self.bb_builtin?(name)
+    BB_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.merkle_builtin?(name)
+    MERKLE_BUILTIN_NAMES.include?(name)
+  end
+
   # -----------------------------------------------------------------------
   # Method analysis helpers
   # -----------------------------------------------------------------------
@@ -335,6 +357,7 @@ module RunarCompiler::Codegen
       @private_methods = {}
       @local_bindings = {}
       @array_lengths = {}
+      @const_values = {}
       @outer_protected_refs = nil
       @inside_branch = false
       @current_source_loc = nil
@@ -982,15 +1005,26 @@ module RunarCompiler::Codegen
 
       if !value.const_bool.nil?
         emit_push_bool(value.const_bool)
+        @const_values[binding_name] = value.const_bool
       elsif !value.const_int.nil?
         emit_push_int(value.const_int)
+        @const_values[binding_name] = value.const_int
       elsif !value.const_string.nil?
         emit_push_bytes(RunarCompiler::Codegen.hex_to_bytes(value.const_string))
+        @const_values[binding_name] = value.const_string
       else
         # Fallback: push 0
         emit_push_int(0)
       end
       @sm.push(binding_name)
+    end
+
+    # Look up a compile-time constant value by binding name.
+    #
+    # @param binding_name [String]
+    # @return [Object, nil] the constant value, or nil if not a constant
+    def get_constant_value(binding_name)
+      @const_values[binding_name]
     end
 
     # -----------------------------------------------------------------
@@ -1132,6 +1166,18 @@ module RunarCompiler::Codegen
       # EC builtins
       if RunarCompiler::Codegen.ec_builtin?(func_name)
         _lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # Baby Bear field arithmetic builtins
+      if RunarCompiler::Codegen.bb_builtin?(func_name)
+        _lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # Merkle proof verification builtins
+      if RunarCompiler::Codegen.merkle_builtin?(func_name)
+        _lower_merkle_root(binding_name, func_name, args, binding_index, last_uses)
         return
       end
 
@@ -1923,6 +1969,67 @@ module RunarCompiler::Codegen
 
       emit_fn = ->(op) { emit_op(op) }
       EC.dispatch_ec_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "babybear"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      BabyBear.dispatch_bb_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_merkle_root(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "merkle"
+      # args: [leaf, proof, index, depth]
+      # depth must be a compile-time constant
+      raise "#{func_name} requires exactly 4 arguments (leaf, proof, index, depth)" if args.length != 4
+
+      # Extract depth constant from ANF binding
+      depth_arg = args[3]
+      depth_value = get_constant_value(depth_arg)
+      if depth_value.nil? || !depth_value.is_a?(Integer)
+        raise "#{func_name}: depth (4th argument) must be a compile-time constant integer literal. " \
+              "Got a runtime value for '#{depth_arg}'."
+      end
+      depth = depth_value
+      if depth < 1 || depth > 64
+        raise "#{func_name}: depth must be between 1 and 64, got #{depth}"
+      end
+
+      # Bring leaf, proof, index to stack top (skip depth -- consumed at compile time)
+      3.times do |i|
+        arg = args[i]
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      # Pop the 3 args we brought to the stack
+      3.times { @sm.pop }
+
+      # Also remove depth from stackMap if it's there (consumed at compile time)
+      if @sm.has?(depth_arg)
+        bring_to_top(depth_arg, true)
+        @sm.pop
+        emit_op({ op: "drop" })
+      end
+
+      emit_fn = ->(op) { emit_op(op) }
+
+      if func_name == "merkleRootSha256"
+        Merkle.emit_merkle_root_sha256(emit_fn, depth)
+      else
+        Merkle.emit_merkle_root_hash256(emit_fn, depth)
+      end
 
       @sm.push(binding_name)
       _track_depth

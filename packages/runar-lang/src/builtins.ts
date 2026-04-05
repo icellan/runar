@@ -550,3 +550,84 @@ export function ecPointX(_p: Point): bigint {
 export function ecPointY(_p: Point): bigint {
   return compilerStub('ecPointY');
 }
+
+// ---------------------------------------------------------------------------
+// Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921)
+// ---------------------------------------------------------------------------
+
+/**
+ * Baby Bear field addition: (a + b) mod p.
+ * Used by SP1 STARK FRI verification.
+ * Compiles to: `OP_ADD <p> OP_MOD`
+ */
+export function bbFieldAdd(_a: bigint, _b: bigint): bigint {
+  return compilerStub('bbFieldAdd');
+}
+
+/**
+ * Baby Bear field subtraction: (a - b + p) mod p.
+ * Used by SP1 STARK FRI verification.
+ */
+export function bbFieldSub(_a: bigint, _b: bigint): bigint {
+  return compilerStub('bbFieldSub');
+}
+
+/**
+ * Baby Bear field multiplication: (a * b) mod p.
+ * Used by SP1 STARK FRI verification.
+ * Products are at most ~2^62, within BSV script number limits.
+ */
+export function bbFieldMul(_a: bigint, _b: bigint): bigint {
+  return compilerStub('bbFieldMul');
+}
+
+/**
+ * Baby Bear field multiplicative inverse: a^(p-2) mod p.
+ * Uses Fermat's little theorem. ~30 squarings + ~27 multiplies.
+ * Used by SP1 STARK FRI verification.
+ */
+export function bbFieldInv(_a: bigint): bigint {
+  return compilerStub('bbFieldInv');
+}
+
+// ---------------------------------------------------------------------------
+// Merkle proof verification
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute Merkle root from a leaf and authentication path using SHA-256.
+ *
+ * @param _leaf  - 32-byte leaf hash
+ * @param _proof - Concatenated 32-byte sibling hashes (depth * 32 bytes)
+ * @param _index - Leaf position (determines left/right at each level)
+ * @param _depth - Number of levels (MUST be a compile-time constant)
+ * @returns The computed 32-byte Merkle root
+ */
+export function merkleRootSha256(
+  _leaf: ByteString,
+  _proof: ByteString,
+  _index: bigint,
+  _depth: bigint,
+): ByteString {
+  return compilerStub('merkleRootSha256');
+}
+
+/**
+ * Compute Merkle root from a leaf and authentication path using Hash256 (double SHA-256).
+ * Same as merkleRootSha256 but uses OP_HASH256 instead of OP_SHA256.
+ * Standard Bitcoin Merkle tree format.
+ *
+ * @param _leaf  - 32-byte leaf hash
+ * @param _proof - Concatenated 32-byte sibling hashes (depth * 32 bytes)
+ * @param _index - Leaf position (determines left/right at each level)
+ * @param _depth - Number of levels (MUST be a compile-time constant)
+ * @returns The computed 32-byte Merkle root
+ */
+export function merkleRootHash256(
+  _leaf: ByteString,
+  _proof: ByteString,
+  _index: bigint,
+  _depth: bigint,
+): ByteString {
+  return compilerStub('merkleRootHash256');
+}

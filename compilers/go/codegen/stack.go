@@ -310,6 +310,7 @@ type loweringContext struct {
 	outerProtectedRefs map[string]bool // parent-scope refs that must not be consumed (used after current if-branch)
 	insideBranch       bool            // true when executing inside an if-branch; update_prop skips old-value removal
 	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
+	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -318,6 +319,7 @@ func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringC
 		properties:     properties,
 		privateMethods: make(map[string]*ir.ANFMethod),
 		localBindings:  make(map[string]bool),
+		constValues:    make(map[string]*big.Int),
 	}
 	ctx.trackDepth()
 	return ctx
@@ -888,6 +890,8 @@ func (ctx *loweringContext) lowerLoadConst(bindingName string, value *ir.ANFValu
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bool", Bool: *value.ConstBool}})
 	} else if value.ConstBigInt != nil {
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(value.ConstBigInt)}})
+		// Track compile-time constant values for extraction (e.g., Merkle depth)
+		ctx.constValues[bindingName] = new(big.Int).Set(value.ConstBigInt)
 	} else if value.ConstString != nil {
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: hexToBytes(*value.ConstString)}})
 	} else {
@@ -1042,6 +1046,16 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 
 	if isEcBuiltin(funcName) {
 		ctx.lowerEcBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if isBBFieldBuiltin(funcName) {
+		ctx.lowerBBFieldBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "merkleRootSha256" || funcName == "merkleRootHash256" {
+		ctx.lowerMerkleRoot(bindingName, funcName, args, bindingIndex, lastUses)
 		return
 	}
 
@@ -3984,6 +3998,103 @@ func (ctx *loweringContext) lowerEcBuiltin(bindingName, funcName string, args []
 		EmitEcPointY(emitFn)
 	default:
 		panic(fmt.Sprintf("unknown EC builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// Baby Bear field arithmetic builtin helpers
+// ---------------------------------------------------------------------------
+
+var bbFieldBuiltinNames = map[string]bool{
+	"bbFieldAdd": true, "bbFieldSub": true,
+	"bbFieldMul": true, "bbFieldInv": true,
+}
+
+func isBBFieldBuiltin(name string) bool {
+	return bbFieldBuiltinNames[name]
+}
+
+func (ctx *loweringContext) lowerBBFieldBuiltin(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Bring all args to stack top in order
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	for range args {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	switch funcName {
+	case "bbFieldAdd":
+		EmitBBFieldAdd(emitFn)
+	case "bbFieldSub":
+		EmitBBFieldSub(emitFn)
+	case "bbFieldMul":
+		EmitBBFieldMul(emitFn)
+	case "bbFieldInv":
+		EmitBBFieldInv(emitFn)
+	default:
+		panic(fmt.Sprintf("unknown Baby Bear builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// Merkle proof verification builtin helpers
+// ---------------------------------------------------------------------------
+
+func (ctx *loweringContext) lowerMerkleRoot(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// args: [leaf, proof, index, depth]
+	// depth must be a compile-time constant
+	if len(args) != 4 {
+		panic(fmt.Sprintf("%s requires exactly 4 arguments (leaf, proof, index, depth)", funcName))
+	}
+
+	// Extract depth constant from tracked constant values
+	depthArg := args[3]
+	depthVal, ok := ctx.constValues[depthArg]
+	if !ok || depthVal == nil {
+		panic(fmt.Sprintf(
+			"%s: depth (4th argument) must be a compile-time constant integer literal. Got a runtime value for '%s'.",
+			funcName, depthArg,
+		))
+	}
+	depth := int(depthVal.Int64())
+	if depth < 1 || depth > 64 {
+		panic(fmt.Sprintf("%s: depth must be between 1 and 64, got %d", funcName, depth))
+	}
+
+	// Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
+	for i := 0; i < 3; i++ {
+		arg := args[i]
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	// Pop the 3 args we brought to the stack
+	for i := 0; i < 3; i++ {
+		ctx.sm.pop()
+	}
+
+	// Also remove depth from stackMap if it's there (it's consumed at compile time)
+	if ctx.sm.has(depthArg) {
+		ctx.bringToTop(depthArg, true)
+		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "drop"})
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	if funcName == "merkleRootSha256" {
+		EmitMerkleRootSha256(emitFn, depth)
+	} else {
+		EmitMerkleRootHash256(emitFn, depth)
 	}
 
 	ctx.sm.push(bindingName)

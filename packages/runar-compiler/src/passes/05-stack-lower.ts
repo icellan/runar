@@ -27,6 +27,10 @@ import {
 } from './ec-codegen.js';
 import { emitSha256Compress, emitSha256Finalize } from './sha256-codegen.js';
 import { emitBlake3Compress, emitBlake3Hash } from './blake3-codegen.js';
+import {
+  emitBBFieldAdd, emitBBFieldSub, emitBBFieldMul, emitBBFieldInv,
+} from './babybear-codegen.js';
+import { emitMerkleRootSha256, emitMerkleRootHash256 } from './merkle-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -326,6 +330,8 @@ class LoweringContext {
   private currentSourceLoc: { file: string; line: number; column: number } | undefined;
   /** Tracks the number of elements in array literal bindings for checkMultiSig. */
   private arrayLengths: Map<string, number> = new Map();
+  /** Tracks constant values by binding name (for compile-time constant extraction). */
+  private constValues: Map<string, bigint | string | boolean> = new Map();
 
   constructor(
     params: string[],
@@ -997,6 +1003,13 @@ class LoweringContext {
     }
     this.pushValue(value);
     this.stackMap.push(bindingName);
+    // Track constant values for compile-time extraction (e.g., Merkle depth)
+    this.constValues.set(bindingName, value);
+  }
+
+  /** Look up a compile-time constant value by binding name. Returns null if not a constant. */
+  private getConstantValue(bindingName: string): bigint | string | boolean | null {
+    return this.constValues.get(bindingName) ?? null;
   }
 
   private pushValue(value: string | bigint | boolean): void {
@@ -1182,6 +1195,19 @@ class LoweringContext {
         func === 'ecEncodeCompressed' || func === 'ecMakePoint' ||
         func === 'ecPointX' || func === 'ecPointY') {
       this.lowerEcBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // Baby Bear field arithmetic builtins
+    if (func === 'bbFieldAdd' || func === 'bbFieldSub' ||
+        func === 'bbFieldMul' || func === 'bbFieldInv') {
+      this.lowerBBFieldBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // Merkle proof verification builtins
+    if (func === 'merkleRootSha256' || func === 'merkleRootHash256') {
+      this.lowerMerkleRoot(bindingName, func, args, bindingIndex, lastUses);
       return;
     }
 
@@ -4121,6 +4147,96 @@ class LoweringContext {
       case 'ecPointX':           emitEcPointX(emitFn); break;
       case 'ecPointY':           emitEcPointY(emitFn); break;
       default: throw new Error(`Unknown EC builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // Baby Bear field arithmetic — delegates to babybear-codegen.ts
+  // =========================================================================
+
+  private lowerBBFieldBuiltin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring all args to stack top
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'bbFieldAdd': emitBBFieldAdd(emitFn); break;
+      case 'bbFieldSub': emitBBFieldSub(emitFn); break;
+      case 'bbFieldMul': emitBBFieldMul(emitFn); break;
+      case 'bbFieldInv': emitBBFieldInv(emitFn); break;
+      default: throw new Error(`Unknown Baby Bear builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // Merkle proof verification — delegates to merkle-codegen.ts
+  // =========================================================================
+
+  private lowerMerkleRoot(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // args: [leaf, proof, index, depth]
+    // depth must be a compile-time constant
+    if (args.length !== 4) {
+      throw new Error(`${func} requires exactly 4 arguments (leaf, proof, index, depth)`);
+    }
+
+    // Extract depth constant from ANF binding
+    const depthArg = args[3]!;
+    const depthValue = this.getConstantValue(depthArg);
+    if (depthValue === null || typeof depthValue !== 'bigint') {
+      throw new Error(
+        `${func}: depth (4th argument) must be a compile-time constant integer literal. ` +
+        `Got a runtime value for '${depthArg}'.`,
+      );
+    }
+    const depth = Number(depthValue);
+    if (depth < 1 || depth > 64) {
+      throw new Error(`${func}: depth must be between 1 and 64, got ${depth}`);
+    }
+
+    // Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
+    for (let i = 0; i < 3; i++) {
+      const arg = args[i]!;
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    // Pop the 3 args we brought to the stack
+    for (let i = 0; i < 3; i++) this.stackMap.pop();
+
+    // Also remove depth from stackMap if it's there (it's consumed at compile time)
+    if (this.stackMap.has(depthArg)) {
+      // Roll it to top and drop it
+      this.bringToTop(depthArg, true);
+      this.stackMap.pop();
+      this.emitOp({ op: 'drop' });
+    }
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    if (func === 'merkleRootSha256') {
+      emitMerkleRootSha256(emitFn, depth);
+    } else {
+      emitMerkleRootHash256(emitFn, depth);
     }
 
     this.stackMap.push(bindingName);

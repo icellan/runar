@@ -90,6 +90,17 @@ fn is_ec_builtin(name: &str) -> bool {
     )
 }
 
+fn is_bb_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "bbFieldAdd" | "bbFieldSub" | "bbFieldMul" | "bbFieldInv"
+    )
+}
+
+fn is_merkle_builtin(name: &str) -> bool {
+    matches!(name, "merkleRootSha256" | "merkleRootHash256")
+}
+
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "sha256" => Some(vec!["OP_SHA256"]),
@@ -342,6 +353,8 @@ struct LoweringContext {
     inside_branch: bool,
     /// Current source location from the ANF binding being lowered.
     current_source_loc: Option<crate::ir::SourceLocation>,
+    /// Tracks compile-time constant values by binding name (for Merkle depth extraction, etc.).
+    const_values: HashMap<String, ConstValue>,
 }
 
 impl LoweringContext {
@@ -357,6 +370,7 @@ impl LoweringContext {
             outer_protected_refs: None,
             inside_branch: false,
             current_source_loc: None,
+            const_values: HashMap::new(),
         };
         ctx.track_depth();
         ctx
@@ -948,20 +962,25 @@ impl LoweringContext {
             }
         }
 
-        match value.const_value() {
+        let cv = value.const_value();
+        match &cv {
             Some(ConstValue::Bool(b)) => {
-                self.emit_op(StackOp::Push(PushValue::Bool(b)));
+                self.emit_op(StackOp::Push(PushValue::Bool(*b)));
             }
             Some(ConstValue::Int(n)) => {
-                self.emit_op(StackOp::Push(PushValue::Int(n)));
+                self.emit_op(StackOp::Push(PushValue::Int(*n)));
             }
             Some(ConstValue::Str(s)) => {
-                let bytes = hex_to_bytes(&s);
+                let bytes = hex_to_bytes(s);
                 self.emit_op(StackOp::Push(PushValue::Bytes(bytes)));
             }
             None => {
                 self.emit_op(StackOp::Push(PushValue::Int(0)));
             }
+        }
+        // Track constant values for compile-time extraction (e.g., Merkle depth)
+        if let Some(c) = cv {
+            self.const_values.insert(binding_name.to_string(), c);
         }
         self.sm.push(binding_name);
     }
@@ -1127,6 +1146,16 @@ impl LoweringContext {
 
         if is_ec_builtin(func_name) {
             self.lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_bb_builtin(func_name) {
+            self.lower_bb_field_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_merkle_builtin(func_name) {
+            self.lower_merkle_root(binding_name, func_name, args, binding_index, last_uses);
             return;
         }
 
@@ -3603,6 +3632,108 @@ impl LoweringContext {
             "ecPointX" => super::ec::emit_ec_point_x(emit),
             "ecPointY" => super::ec::emit_ec_point_y(emit),
             _ => panic!("unknown EC builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
+    // Baby Bear field arithmetic -- delegates to babybear.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_bb_field_builtin(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // Bring all args to stack top
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in args {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "bbFieldAdd" => super::babybear::emit_bb_field_add(emit),
+            "bbFieldSub" => super::babybear::emit_bb_field_sub(emit),
+            "bbFieldMul" => super::babybear::emit_bb_field_mul(emit),
+            "bbFieldInv" => super::babybear::emit_bb_field_inv(emit),
+            _ => panic!("unknown Baby Bear builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
+    // Merkle proof verification -- delegates to merkle.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_merkle_root(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // args: [leaf, proof, index, depth]
+        // depth must be a compile-time constant
+        assert!(
+            args.len() == 4,
+            "{} requires exactly 4 arguments (leaf, proof, index, depth)",
+            func_name
+        );
+
+        // Extract depth constant from ANF binding
+        let depth_arg = &args[3];
+        let depth_value = self.const_values.get(depth_arg).cloned();
+        let depth = match depth_value {
+            Some(ConstValue::Int(n)) => n as usize,
+            _ => panic!(
+                "{}: depth (4th argument) must be a compile-time constant integer literal. \
+                 Got a runtime value for '{}'.",
+                func_name, depth_arg
+            ),
+        };
+        assert!(
+            depth >= 1 && depth <= 64,
+            "{}: depth must be between 1 and 64, got {}",
+            func_name, depth
+        );
+
+        // Bring leaf, proof, index to stack top (skip depth -- it's consumed at compile time)
+        for i in 0..3 {
+            let arg = &args[i];
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        // Pop the 3 args we brought to the stack
+        for _ in 0..3 {
+            self.sm.pop();
+        }
+
+        // Also remove depth from stackMap if it's there (it's consumed at compile time)
+        if self.sm.has(depth_arg) {
+            self.bring_to_top(depth_arg, true);
+            self.sm.pop();
+            self.emit_op(StackOp::Drop);
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),
+            "merkleRootHash256" => super::merkle::emit_merkle_root_hash256(emit, depth),
+            _ => panic!("unknown Merkle builtin: {}", func_name),
         }
 
         self.sm.push(binding_name);

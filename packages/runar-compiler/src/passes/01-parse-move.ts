@@ -783,6 +783,11 @@ class MoveParser {
         ecNegate: 'ecNegate', ecOnCurve: 'ecOnCurve', ecModReduce: 'ecModReduce',
         ecEncodeCompressed: 'ecEncodeCompressed', ecMakePoint: 'ecMakePoint',
         ecPointX: 'ecPointX', ecPointY: 'ecPointY',
+        // Baby Bear field arithmetic
+        bbFieldAdd: 'bbFieldAdd', bbFieldSub: 'bbFieldSub',
+        bbFieldMul: 'bbFieldMul', bbFieldInv: 'bbFieldInv',
+        // Merkle proof verification
+        merkleRootSha256: 'merkleRootSha256', merkleRootHash256: 'merkleRootHash256',
       };
       return { kind: 'identifier', name: builtinMap[name] || name };
     }

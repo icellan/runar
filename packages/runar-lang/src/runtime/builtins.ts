@@ -467,3 +467,89 @@ export function ecPointX(p: Point): bigint {
 export function ecPointY(p: Point): bigint {
   return BigInt('0x' + (p as string).slice(64, 128));
 }
+
+// ---------------------------------------------------------------------------
+// Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921)
+// ---------------------------------------------------------------------------
+
+const BB_P = 2013265921n;
+
+export function bbFieldAdd(a: bigint, b: bigint): bigint {
+  return (a + b) % BB_P;
+}
+
+export function bbFieldSub(a: bigint, b: bigint): bigint {
+  return ((a - b) % BB_P + BB_P) % BB_P;
+}
+
+export function bbFieldMul(a: bigint, b: bigint): bigint {
+  return (a * b) % BB_P;
+}
+
+export function bbFieldInv(a: bigint): bigint {
+  // Fermat's little theorem: a^(p-2) mod p
+  let result = 1n;
+  let base = ((a % BB_P) + BB_P) % BB_P;
+  let exp = BB_P - 2n;
+  while (exp > 0n) {
+    if (exp & 1n) result = (result * base) % BB_P;
+    base = (base * base) % BB_P;
+    exp >>= 1n;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Merkle proof verification
+// ---------------------------------------------------------------------------
+
+export function merkleRootSha256(
+  leaf: ByteString,
+  proof: ByteString,
+  index: bigint,
+  depth: bigint,
+): ByteString {
+  return merkleRootImpl(leaf, proof, index, Number(depth), (data) =>
+    Hash.sha256(hexToUint8Array(data as string)),
+  );
+}
+
+export function merkleRootHash256(
+  leaf: ByteString,
+  proof: ByteString,
+  index: bigint,
+  depth: bigint,
+): ByteString {
+  return merkleRootImpl(leaf, proof, index, Number(depth), (data) =>
+    Hash.sha256(Hash.sha256(hexToUint8Array(data as string))),
+  );
+}
+
+function hexToUint8Array(hex: string): number[] {
+  const bytes: number[] = [];
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes.push(parseInt(hex.slice(i, i + 2), 16));
+  }
+  return bytes;
+}
+
+function merkleRootImpl(
+  leaf: ByteString,
+  proof: ByteString,
+  index: bigint,
+  depth: number,
+  hashFn: (data: ByteString) => number[],
+): ByteString {
+  let current = leaf as string;
+  const proofStr = proof as string;
+
+  for (let i = 0; i < depth; i++) {
+    const sibling = proofStr.slice(i * 64, (i + 1) * 64);
+    const bit = (index >> BigInt(i)) & 1n;
+    const preimage = bit === 1n ? sibling + current : current + sibling;
+    const hashBytes = hashFn(preimage as ByteString);
+    current = hashBytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  return current as ByteString;
+}

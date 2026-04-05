@@ -1048,6 +1048,63 @@ export class RunarInterpreter {
         return { kind: 'bytes', value: blake3CompressImpl(BLAKE3_IV_BYTES, padded) };
       }
 
+      // Baby Bear field arithmetic (p = 2013265921)
+      case 'bbFieldAdd': {
+        const a = this.toBigInt(args[0]!);
+        const b = this.toBigInt(args[1]!);
+        return { kind: 'bigint', value: (a + b) % 2013265921n };
+      }
+      case 'bbFieldSub': {
+        const a = this.toBigInt(args[0]!);
+        const b = this.toBigInt(args[1]!);
+        return { kind: 'bigint', value: ((a - b) % 2013265921n + 2013265921n) % 2013265921n };
+      }
+      case 'bbFieldMul': {
+        const a = this.toBigInt(args[0]!);
+        const b = this.toBigInt(args[1]!);
+        return { kind: 'bigint', value: (a * b) % 2013265921n };
+      }
+      case 'bbFieldInv': {
+        const a = this.toBigInt(args[0]!);
+        const p = 2013265921n;
+        let result = 1n, base = ((a % p) + p) % p, exp = p - 2n;
+        while (exp > 0n) {
+          if (exp & 1n) result = (result * base) % p;
+          base = (base * base) % p;
+          exp >>= 1n;
+        }
+        return { kind: 'bigint', value: result };
+      }
+
+      // Merkle proof verification
+      case 'merkleRootSha256':
+      case 'merkleRootHash256': {
+        const leaf = this.toBytes(args[0]!);
+        const proof = this.toBytes(args[1]!);
+        const index = this.toBigInt(args[2]!);
+        const depth = Number(this.toBigInt(args[3]!));
+        const useSha256 = funcName === 'merkleRootSha256';
+
+        let current = leaf;
+        for (let i = 0; i < depth; i++) {
+          const sibling = proof.subarray(i * 32, (i + 1) * 32);
+          const bit = (index >> BigInt(i)) & 1n;
+          const preimage = new Uint8Array(64);
+          if (bit === 1n) {
+            preimage.set(sibling, 0);
+            preimage.set(current, 32);
+          } else {
+            preimage.set(current, 0);
+            preimage.set(sibling, 32);
+          }
+          const h1 = createHash('sha256').update(preimage).digest();
+          current = useSha256
+            ? new Uint8Array(h1)
+            : new Uint8Array(createHash('sha256').update(h1).digest());
+        }
+        return { kind: 'bytes', value: current };
+      }
+
       default: {
         // Try to find a private method in the contract.
         const method = methods.find((m) => m.name === funcName);

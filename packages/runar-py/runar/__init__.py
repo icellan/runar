@@ -26,6 +26,8 @@ from runar.builtins import (
     verify_slh_dsa_sha2_256s, verify_slh_dsa_sha2_256f,
     blake3_compress, blake3_hash,
     sha256_compress, sha256_finalize,
+    bb_field_add, bb_field_sub, bb_field_mul, bb_field_inv,
+    merkle_root_sha256, merkle_root_hash256,
 )
 from runar.ecdsa import (
     sign_test_message, pub_key_from_priv_key,
@@ -102,6 +104,10 @@ __all__ = [
     'blake3_compress', 'blake3_hash',
     # SHA-256 compression
     'sha256_compress', 'sha256_finalize',
+    # Baby Bear field arithmetic
+    'bb_field_add', 'bb_field_sub', 'bb_field_mul', 'bb_field_inv',
+    # Merkle proof verification
+    'merkle_root_sha256', 'merkle_root_hash256',
     # Test helpers
     'mock_sig', 'mock_pub_key', 'mock_preimage',
     # WOTS+ keygen/sign

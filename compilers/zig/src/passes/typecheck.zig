@@ -117,6 +117,14 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "sha256Finalize", sig(&.{ .byte_string, .byte_string, .bigint }, .byte_string) },
     .{ "blake3Compress", sig(&.{ .byte_string, .byte_string }, .byte_string) },
     .{ "blake3Hash", sig(&.{.byte_string}, .byte_string) },
+    // Baby Bear field arithmetic
+    .{ "bbFieldAdd", sig(&.{ .bigint, .bigint }, .bigint) },
+    .{ "bbFieldSub", sig(&.{ .bigint, .bigint }, .bigint) },
+    .{ "bbFieldMul", sig(&.{ .bigint, .bigint }, .bigint) },
+    .{ "bbFieldInv", sig(&.{.bigint}, .bigint) },
+    // Merkle proof verification
+    .{ "merkleRootSha256", sig(&.{ .byte_string, .byte_string, .bigint, .bigint }, .byte_string) },
+    .{ "merkleRootHash256", sig(&.{ .byte_string, .byte_string, .bigint, .bigint }, .byte_string) },
     // Math
     .{ "abs", sig(&.{.bigint}, .bigint) },
     .{ "min", sig(&.{ .bigint, .bigint }, .bigint) },
@@ -1026,7 +1034,10 @@ test "builtin_functions: all 60+ entries present" {
         "ecOnCurve",       "ecModReduce",       "ecEncodeCompressed",
         "ecMakePoint",     "ecPointX",          "ecPointY",
         "sha256Compress",  "sha256Finalize",    "blake3Compress",
-        "blake3Hash",      "abs",               "min",
+        "blake3Hash",
+        "bbFieldAdd",      "bbFieldSub",        "bbFieldMul",
+        "bbFieldInv",      "merkleRootSha256",  "merkleRootHash256",
+        "abs",               "min",
         "max",             "within",            "safediv",
         "safemod",         "clamp",             "sign",
         "pow",             "mulDiv",            "percentOf",

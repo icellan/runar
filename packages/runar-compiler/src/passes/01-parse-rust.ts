@@ -263,6 +263,11 @@ const RUST_BUILTIN_MAP: Record<string, string> = {
   ecNegate: 'ecNegate', ecOnCurve: 'ecOnCurve', ecModReduce: 'ecModReduce',
   ecEncodeCompressed: 'ecEncodeCompressed', ecMakePoint: 'ecMakePoint',
   ecPointX: 'ecPointX', ecPointY: 'ecPointY',
+  // Baby Bear field arithmetic
+  bb_field_add: 'bbFieldAdd', bb_field_sub: 'bbFieldSub',
+  bb_field_mul: 'bbFieldMul', bb_field_inv: 'bbFieldInv',
+  // Merkle proof verification
+  merkle_root_sha256: 'merkleRootSha256', merkle_root_hash256: 'merkleRootHash256',
   // SHA-256 partial
   sha256Compress: 'sha256Compress', sha256Finalize: 'sha256Finalize',
   // BLAKE3

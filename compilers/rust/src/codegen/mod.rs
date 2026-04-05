@@ -5,9 +5,11 @@
 //! - `opcodes`: Complete BSV opcode table
 //! - `optimizer`: Peephole optimizer for Stack IR
 
+pub mod babybear;
 pub mod blake3;
 pub mod ec;
 pub mod emit;
+pub mod merkle;
 pub mod opcodes;
 pub mod optimizer;
 pub mod sha256;

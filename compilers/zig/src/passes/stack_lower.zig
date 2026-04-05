@@ -18,6 +18,8 @@ const blake3_emitters = @import("helpers/blake3_emitters.zig");
 const ec_emitters = @import("helpers/ec_emitters.zig");
 const pq_emitters = @import("helpers/pq_emitters.zig");
 const sha256_emitters = @import("helpers/sha256_emitters.zig");
+const babybear_emitters = @import("helpers/babybear_emitters.zig");
+const merkle_emitters = @import("helpers/merkle_emitters.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
 
@@ -1120,6 +1122,14 @@ const LowerCtx = struct {
         ecPairing,
         slhDsaVerify,
         schnorrVerify,
+        // Baby Bear field arithmetic
+        bbFieldAdd,
+        bbFieldSub,
+        bbFieldMul,
+        bbFieldInv,
+        // Merkle proof verification
+        merkleRootSha256,
+        merkleRootHash256,
         super_call,
     };
 
@@ -1195,6 +1205,12 @@ const LowerCtx = struct {
         .{ "verifySLHDSA_SHA2_256f", .slhDsaVerify },
         .{ "slhDsaVerify", .slhDsaVerify },
         .{ "schnorrVerify", .schnorrVerify },
+        .{ "bbFieldAdd", .bbFieldAdd },
+        .{ "bbFieldSub", .bbFieldSub },
+        .{ "bbFieldMul", .bbFieldMul },
+        .{ "bbFieldInv", .bbFieldInv },
+        .{ "merkleRootSha256", .merkleRootSha256 },
+        .{ "merkleRootHash256", .merkleRootHash256 },
         .{ "super", .super_call },
     });
 
@@ -1269,6 +1285,14 @@ const LowerCtx = struct {
                 const crypto_builtin = crypto_builtins.classify(call.name) orelse return LowerError.InvalidBuiltin;
                 try self.lowerPqBuiltin(bind_name, args, crypto_builtin);
             },
+            // Baby Bear field arithmetic
+            .bbFieldAdd => try self.lowerBBBuiltin(bind_name, args, .bb_field_add),
+            .bbFieldSub => try self.lowerBBBuiltin(bind_name, args, .bb_field_sub),
+            .bbFieldMul => try self.lowerBBBuiltin(bind_name, args, .bb_field_mul),
+            .bbFieldInv => try self.lowerBBBuiltin(bind_name, args, .bb_field_inv),
+            // Merkle proof verification
+            .merkleRootSha256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_sha256),
+            .merkleRootHash256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_hash256),
             // super() is the constructor superclass call — no-op in Bitcoin Script
             .super_call => {
                 try self.stack.push(self.allocator, bind_name);
@@ -1489,6 +1513,98 @@ const LowerCtx = struct {
 
         try self.stack.push(self.allocator, bind_name);
         self.trackDepth();
+    }
+
+    fn lowerBBBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, builtin: babybear_emitters.BBBuiltin) LowerError!void {
+        const required: usize = switch (builtin) {
+            .bb_field_add, .bb_field_sub, .bb_field_mul => 2,
+            .bb_field_inv => 1,
+        };
+        if (args.len < required) return LowerError.InvalidBuiltin;
+
+        for (args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var bundle = babybear_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerMerkleBuiltin(
+        self: *LowerCtx,
+        bind_name: []const u8,
+        args: []const []const u8,
+        func_name: []const u8,
+        builtin: merkle_emitters.MerkleBuiltin,
+    ) LowerError!void {
+        // args: [leaf, proof, index, depth]
+        // depth must be a compile-time constant
+        if (args.len != 4) return LowerError.InvalidBuiltin;
+        _ = func_name;
+
+        // Extract depth constant from ANF binding
+        const depth_arg = args[3];
+        const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
+        if (depth_value < 1 or depth_value > 64) return LowerError.InvalidBuiltin;
+
+        // Bring leaf, proof, index to stack top (skip depth — it's consumed at compile time)
+        for (0..3) |i| {
+            try self.bringToTopAuto(args[i]);
+        }
+        // Pop the 3 args we brought to the stack
+        for (0..3) |_| {
+            _ = self.stack.pop();
+        }
+
+        // Also remove depth from stackMap if it's there (it's consumed at compile time)
+        if (self.stack.findDepth(depth_arg) != null) {
+            try self.bringToTopAuto(depth_arg);
+            _ = self.stack.pop();
+            try self.emitOp(.op_drop);
+        }
+
+        var bundle = merkle_emitters.buildBuiltinOps(self.allocator, builtin, @intCast(depth_value)) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    /// Look up a binding name in scope_bindings to find a compile-time constant integer.
+    fn findConstantInt(self: *const LowerCtx, name: []const u8) ?i64 {
+        for (self.scope_bindings) |binding| {
+            if (std.mem.eql(u8, binding.name, name)) {
+                switch (binding.value) {
+                    .literal_int => |n| return n,
+                    .load_const => |lc| switch (lc.value) {
+                        .integer => |n| return std.math.cast(i64, n),
+                        else => return null,
+                    },
+                    else => return null,
+                }
+            }
+        }
+        return null;
     }
 
     // ========================================================================

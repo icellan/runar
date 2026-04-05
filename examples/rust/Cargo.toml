@@ -94,3 +94,15 @@ path = "sha256-finalize/Sha256FinalizeTest_test.rs"
 [[test]]
 name = "message_board"
 path = "message-board/MessageBoard_test.rs"
+
+[[test]]
+name = "babybear_demo"
+path = "babybear/BabyBearDemo_test.rs"
+
+[[test]]
+name = "merkle_proof_demo"
+path = "merkle-proof/MerkleProofDemo_test.rs"
+
+[[test]]
+name = "cross_covenant_ref"
+path = "cross-covenant/CrossCovenantRef_test.rs"

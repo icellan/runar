@@ -452,3 +452,48 @@ def mock_pub_key() -> bytes:
 
 def mock_preimage() -> bytes:
     return b'\x00' * 181
+
+
+# -- Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921) ---------
+
+_BB_P = 2013265921
+
+def bb_field_add(a: int, b: int) -> int:
+    """Baby Bear field addition: (a + b) mod p."""
+    return (a + b) % _BB_P
+
+def bb_field_sub(a: int, b: int) -> int:
+    """Baby Bear field subtraction: (a - b + p) mod p."""
+    return ((a - b) % _BB_P + _BB_P) % _BB_P
+
+def bb_field_mul(a: int, b: int) -> int:
+    """Baby Bear field multiplication: (a * b) mod p."""
+    return (a * b) % _BB_P
+
+def bb_field_inv(a: int) -> int:
+    """Baby Bear field inverse via Fermat's little theorem: a^(p-2) mod p."""
+    return pow(((a % _BB_P) + _BB_P) % _BB_P, _BB_P - 2, _BB_P)
+
+
+# -- Merkle proof verification -----------------------------------------------
+
+def merkle_root_sha256(leaf: bytes, proof: bytes, index: int, depth: int) -> bytes:
+    """Compute a Merkle root using SHA-256 as the hash function."""
+    return _merkle_root_impl(leaf, proof, index, depth, sha256)
+
+def merkle_root_hash256(leaf: bytes, proof: bytes, index: int, depth: int) -> bytes:
+    """Compute a Merkle root using Hash256 (double SHA-256)."""
+    return _merkle_root_impl(leaf, proof, index, depth, hash256)
+
+def _merkle_root_impl(leaf: bytes, proof: bytes, index: int, depth: int, hash_fn) -> bytes:
+    current = _as_bytes(leaf)
+    proof_bytes = _as_bytes(proof)
+    for i in range(depth):
+        sibling = proof_bytes[i * 32:(i + 1) * 32]
+        bit = (index >> i) & 1
+        if bit == 1:
+            preimage = sibling + current
+        else:
+            preimage = current + sibling
+        current = hash_fn(preimage)
+    return current

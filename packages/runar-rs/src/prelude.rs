@@ -566,6 +566,85 @@ pub fn bool_cast(n: Int) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921)
+// ---------------------------------------------------------------------------
+
+const BB_P: i64 = 2013265921;
+
+/// Baby Bear field addition: (a + b) mod p.
+pub fn bb_field_add(a: i64, b: i64) -> i64 {
+    (a + b) % BB_P
+}
+
+/// Baby Bear field subtraction: (a - b + p) mod p.
+pub fn bb_field_sub(a: i64, b: i64) -> i64 {
+    ((a - b) % BB_P + BB_P) % BB_P
+}
+
+/// Baby Bear field multiplication: (a * b) mod p.
+pub fn bb_field_mul(a: i64, b: i64) -> i64 {
+    (a * b) % BB_P
+}
+
+/// Baby Bear field inverse via Fermat's little theorem: a^(p-2) mod p.
+pub fn bb_field_inv(a: i64) -> i64 {
+    let mut result: i64 = 1;
+    let mut base = ((a % BB_P) + BB_P) % BB_P;
+    let mut exp = BB_P - 2;
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = (result * base) % BB_P;
+        }
+        base = (base * base) % BB_P;
+        exp >>= 1;
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Merkle proof verification
+// ---------------------------------------------------------------------------
+
+/// Compute a Merkle root using SHA-256 as the hash function.
+///
+/// `leaf` is a 32-byte hash, `proof` is `depth * 32` concatenated sibling
+/// hashes, `index` determines left/right at each level.
+pub fn merkle_root_sha256(leaf: &[u8], proof: &[u8], index: i64, depth: i64) -> ByteString {
+    merkle_root_impl(leaf, proof, index, depth, sha256)
+}
+
+/// Compute a Merkle root using Hash256 (double SHA-256) as the hash function.
+pub fn merkle_root_hash256(leaf: &[u8], proof: &[u8], index: i64, depth: i64) -> ByteString {
+    merkle_root_impl(leaf, proof, index, depth, hash256)
+}
+
+fn merkle_root_impl(
+    leaf: &[u8],
+    proof: &[u8],
+    index: i64,
+    depth: i64,
+    hash_fn: fn(&[u8]) -> ByteString,
+) -> ByteString {
+    let mut current = leaf.to_vec();
+    for i in 0..depth {
+        let start = (i as usize) * 32;
+        let sibling = &proof[start..start + 32];
+        let bit = (index >> i) & 1;
+        let preimage = if bit == 1 {
+            let mut p = sibling.to_vec();
+            p.extend_from_slice(&current);
+            p
+        } else {
+            let mut p = current.clone();
+            p.extend_from_slice(sibling);
+            p
+        };
+        current = hash_fn(&preimage);
+    }
+    current
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 

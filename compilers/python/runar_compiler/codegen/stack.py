@@ -303,6 +303,7 @@ class _LoweringContext:
         self.outer_protected_refs: Optional[set[str]] = None
         self.inside_branch: bool = False
         self.current_source_loc: Optional[SourceLocation] = None
+        self.const_values: dict[str, int | str | bool] = {}
         self._track_depth()
 
     def _track_depth(self) -> None:
@@ -808,10 +809,13 @@ class _LoweringContext:
 
         if value.const_bool is not None:
             self.emit_op(StackOp(op="push", value=PushValue(kind="bool", bool_val=value.const_bool)))
+            self.const_values[binding_name] = value.const_bool
         elif value.const_int is not None:
             self.emit_op(StackOp(op="push", value=big_int_push(value.const_int)))
+            self.const_values[binding_name] = value.const_int
         elif value.const_string is not None:
             self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=_hex_to_bytes(value.const_string))))
+            self.const_values[binding_name] = value.const_string
         else:
             # Fallback: push 0
             self.emit_op(StackOp(op="push", value=big_int_push(0)))
@@ -944,6 +948,14 @@ class _LoweringContext:
 
         if _is_ec_builtin(func_name):
             self._lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if _is_bb_builtin(func_name):
+            self._lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if _is_merkle_builtin(func_name):
+            self._lower_merkle_root(binding_name, func_name, args, binding_index, last_uses)
             return
 
         if func_name in ("safediv", "safemod"):
@@ -3353,6 +3365,85 @@ class _LoweringContext:
         self.sm.push(binding_name)
         self._track_depth()
 
+    # -----------------------------------------------------------------
+    # Baby Bear field arithmetic builtins
+    # -----------------------------------------------------------------
+
+    def _lower_bb_builtin(self, binding_name: str, func_name: str,
+                          args: list[str], binding_index: int,
+                          last_uses: dict[str, int]) -> None:
+        # Bring args to top in order
+        for arg in args:
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        for _ in args:
+            self.sm.pop()
+
+        # Delegate to the Baby Bear codegen module
+        from runar_compiler.codegen.babybear import dispatch_bb_builtin
+        emit_fn = lambda op: self.emit_op(op)
+        dispatch_bb_builtin(func_name, emit_fn)
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # Merkle proof verification builtins
+    # -----------------------------------------------------------------
+
+    def _lower_merkle_root(self, binding_name: str, func_name: str,
+                           args: list[str], binding_index: int,
+                           last_uses: dict[str, int]) -> None:
+        # args: [leaf, proof, index, depth]
+        # depth must be a compile-time constant
+        if len(args) != 4:
+            raise RuntimeError(
+                f"{func_name} requires exactly 4 arguments (leaf, proof, index, depth)"
+            )
+
+        # Extract depth constant from ANF binding
+        depth_arg = args[3]
+        depth_value = self.const_values.get(depth_arg)
+        if depth_value is None or not isinstance(depth_value, int):
+            raise RuntimeError(
+                f"{func_name}: depth (4th argument) must be a compile-time constant "
+                f"integer literal. Got a runtime value for '{depth_arg}'."
+            )
+        depth = int(depth_value)
+        if depth < 1 or depth > 64:
+            raise RuntimeError(
+                f"{func_name}: depth must be between 1 and 64, got {depth}"
+            )
+
+        # Bring leaf, proof, index to stack top (skip depth -- consumed at compile time)
+        for i in range(3):
+            arg = args[i]
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        # Pop the 3 args we brought to the stack
+        for _ in range(3):
+            self.sm.pop()
+
+        # Also remove depth from stackMap if it's there (consumed at compile time)
+        if self.sm.has(depth_arg):
+            self.bring_to_top(depth_arg, True)
+            self.sm.pop()
+            self.emit_op(StackOp(op="drop"))
+
+        from runar_compiler.codegen.merkle import (
+            emit_merkle_root_sha256,
+            emit_merkle_root_hash256,
+        )
+        emit_fn = lambda op: self.emit_op(op)
+
+        if func_name == "merkleRootSha256":
+            emit_merkle_root_sha256(emit_fn, depth)
+        else:
+            emit_merkle_root_hash256(emit_fn, depth)
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
 
 # ---------------------------------------------------------------------------
 # EC builtin names
@@ -3368,6 +3459,32 @@ _EC_BUILTIN_NAMES = frozenset({
 
 def _is_ec_builtin(name: str) -> bool:
     return name in _EC_BUILTIN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Baby Bear builtin names
+# ---------------------------------------------------------------------------
+
+_BB_BUILTIN_NAMES = frozenset({
+    "bbFieldAdd", "bbFieldSub", "bbFieldMul", "bbFieldInv",
+})
+
+
+def _is_bb_builtin(name: str) -> bool:
+    return name in _BB_BUILTIN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# Merkle builtin names
+# ---------------------------------------------------------------------------
+
+_MERKLE_BUILTIN_NAMES = frozenset({
+    "merkleRootSha256", "merkleRootHash256",
+})
+
+
+def _is_merkle_builtin(name: str) -> bool:
+    return name in _MERKLE_BUILTIN_NAMES
 
 
 # ---------------------------------------------------------------------------

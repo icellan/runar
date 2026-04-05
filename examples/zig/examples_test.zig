@@ -75,13 +75,16 @@ pub fn expectAssertFailure(probe_case: []const u8) !void {
 
 test {
     _ = @import("./auction/Auction_test.zig");
+    _ = @import("./babybear/BabyBearDemo_test.zig");
     _ = @import("./blake3/Blake3Test_test.zig");
     _ = @import("./convergence-proof/ConvergenceProof_test.zig");
     _ = @import("./covenant-vault/CovenantVault_test.zig");
+    _ = @import("./cross-covenant/CrossCovenantRef_test.zig");
     _ = @import("./ec-demo/ECDemo_test.zig");
     _ = @import("./escrow/Escrow_test.zig");
     _ = @import("./function-patterns/FunctionPatterns_test.zig");
     _ = @import("./math-demo/MathDemo_test.zig");
+    _ = @import("./merkle-proof/MerkleProofDemo_test.zig");
     _ = @import("./message-board/MessageBoard_test.zig");
     _ = @import("./oracle-price/OraclePriceFeed_test.zig");
     _ = @import("./p2blake3pkh/P2Blake3PKH_test.zig");

@@ -128,6 +128,16 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['ecPointX',           { params: ['Point'], returnType: 'bigint' }],
   ['ecPointY',           { params: ['Point'], returnType: 'bigint' }],
 
+  // Baby Bear field arithmetic (p = 2013265921)
+  ['bbFieldAdd',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bbFieldSub',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bbFieldMul',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bbFieldInv',         { params: ['bigint'], returnType: 'bigint' }],
+
+  // Merkle proof verification
+  ['merkleRootSha256',   { params: ['ByteString', 'ByteString', 'bigint', 'bigint'], returnType: 'ByteString' }],
+  ['merkleRootHash256',  { params: ['ByteString', 'ByteString', 'bigint', 'bigint'], returnType: 'ByteString' }],
+
   // Preimage extractors — numeric fields return bigint, byte fields return ByteString/Sha256
   ['extractVersion',       { params: ['SigHashPreimage'], returnType: 'bigint' }],
   ['extractHashPrevouts',  { params: ['SigHashPreimage'], returnType: 'Sha256' }],

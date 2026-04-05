@@ -313,6 +313,11 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   EcNegate: 'ecNegate', EcOnCurve: 'ecOnCurve', EcModReduce: 'ecModReduce',
   EcEncodeCompressed: 'ecEncodeCompressed', EcMakePoint: 'ecMakePoint',
   EcPointX: 'ecPointX', EcPointY: 'ecPointY',
+  // Baby Bear field arithmetic
+  BbFieldAdd: 'bbFieldAdd', BbFieldSub: 'bbFieldSub',
+  BbFieldMul: 'bbFieldMul', BbFieldInv: 'bbFieldInv',
+  // Merkle proof verification
+  MerkleRootSha256: 'merkleRootSha256', MerkleRootHash256: 'merkleRootHash256',
   // SHA-256 partial
   Sha256Compress: 'sha256Compress', Sha256Finalize: 'sha256Finalize',
 };

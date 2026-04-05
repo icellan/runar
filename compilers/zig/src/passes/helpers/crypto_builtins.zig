@@ -22,6 +22,12 @@ pub const CryptoBuiltin = enum {
     ec_make_point,
     ec_point_x,
     ec_point_y,
+    bb_field_add,
+    bb_field_sub,
+    bb_field_mul,
+    bb_field_inv,
+    merkle_root_sha256,
+    merkle_root_hash256,
 };
 
 pub const CryptoBuiltinGroup = enum {
@@ -30,6 +36,8 @@ pub const CryptoBuiltinGroup = enum {
     slhdsa,
     blake3,
     ec,
+    babybear,
+    merkle,
 };
 
 pub const CryptoBuiltinStatus = enum {
@@ -59,6 +67,12 @@ const builtin_map = std.StaticStringMap(CryptoBuiltin).initComptime(.{
     .{ "ecMakePoint", .ec_make_point },
     .{ "ecPointX", .ec_point_x },
     .{ "ecPointY", .ec_point_y },
+    .{ "bbFieldAdd", .bb_field_add },
+    .{ "bbFieldSub", .bb_field_sub },
+    .{ "bbFieldMul", .bb_field_mul },
+    .{ "bbFieldInv", .bb_field_inv },
+    .{ "merkleRootSha256", .merkle_root_sha256 },
+    .{ "merkleRootHash256", .merkle_root_hash256 },
 });
 
 pub fn classify(name: []const u8) ?CryptoBuiltin {
@@ -88,6 +102,12 @@ pub fn displayName(builtin: CryptoBuiltin) []const u8 {
         .ec_make_point => "ecMakePoint",
         .ec_point_x => "ecPointX",
         .ec_point_y => "ecPointY",
+        .bb_field_add => "bbFieldAdd",
+        .bb_field_sub => "bbFieldSub",
+        .bb_field_mul => "bbFieldMul",
+        .bb_field_inv => "bbFieldInv",
+        .merkle_root_sha256 => "merkleRootSha256",
+        .merkle_root_hash256 => "merkleRootHash256",
     };
 }
 
@@ -117,6 +137,14 @@ pub fn groupOf(builtin: CryptoBuiltin) CryptoBuiltinGroup {
         .ec_point_x,
         .ec_point_y,
         => .ec,
+        .bb_field_add,
+        .bb_field_sub,
+        .bb_field_mul,
+        .bb_field_inv,
+        => .babybear,
+        .merkle_root_sha256,
+        .merkle_root_hash256,
+        => .merkle,
     };
 }
 
@@ -156,8 +184,16 @@ pub fn requiredArgCount(builtin: CryptoBuiltin) usize {
         .ec_mul,
         .ec_mod_reduce,
         .ec_make_point,
+        .bb_field_add,
+        .bb_field_sub,
+        .bb_field_mul,
         => 2,
-        .ec_mul_gen => 1,
+        .ec_mul_gen,
+        .bb_field_inv,
+        => 1,
+        .merkle_root_sha256,
+        .merkle_root_hash256,
+        => 4,
     };
 }
 
@@ -165,7 +201,8 @@ pub fn statusOf(builtin: CryptoBuiltin) CryptoBuiltinStatus {
     _ = builtin;
     // All crypto builtins are implemented: basic EC helpers and Rabin via
     // crypto_emitters, full EC via ec_emitters, BLAKE3 via blake3_emitters,
-    // WOTS and SLH-DSA via pq_emitters.
+    // WOTS and SLH-DSA via pq_emitters, Baby Bear via babybear_emitters,
+    // Merkle via merkle_emitters.
     return .implemented;
 }
 
@@ -175,6 +212,10 @@ test "crypto builtin classification covers exact names" {
     try std.testing.expectEqual(CryptoBuiltin.verify_slhdsa_sha2_256f, classify("verifySLHDSA_SHA2_256f").?);
     try std.testing.expectEqual(CryptoBuiltin.blake3_hash, classify("blake3Hash").?);
     try std.testing.expectEqual(CryptoBuiltin.ec_encode_compressed, classify("ecEncodeCompressed").?);
+    try std.testing.expectEqual(CryptoBuiltin.bb_field_add, classify("bbFieldAdd").?);
+    try std.testing.expectEqual(CryptoBuiltin.bb_field_inv, classify("bbFieldInv").?);
+    try std.testing.expectEqual(CryptoBuiltin.merkle_root_sha256, classify("merkleRootSha256").?);
+    try std.testing.expectEqual(CryptoBuiltin.merkle_root_hash256, classify("merkleRootHash256").?);
     try std.testing.expectEqual(@as(?CryptoBuiltin, null), classify("schnorrVerify"));
 }
 
@@ -189,4 +230,13 @@ test "crypto builtin metadata stays consistent" {
     try std.testing.expectEqual(CryptoBuiltinStatus.implemented, statusOf(.ec_add));
     try std.testing.expectEqual(CryptoBuiltinStatus.implemented, statusOf(.blake3));
     try std.testing.expectEqual(CryptoBuiltinStatus.implemented, statusOf(.verify_slhdsa_sha2_256f));
+    try std.testing.expectEqual(CryptoBuiltinStatus.implemented, statusOf(.bb_field_add));
+    try std.testing.expectEqual(CryptoBuiltinStatus.implemented, statusOf(.merkle_root_sha256));
+    try std.testing.expectEqual(CryptoBuiltinGroup.babybear, groupOf(.bb_field_mul));
+    try std.testing.expectEqual(CryptoBuiltinGroup.merkle, groupOf(.merkle_root_hash256));
+    try std.testing.expectEqualStrings("bbFieldAdd", displayName(.bb_field_add));
+    try std.testing.expectEqualStrings("merkleRootSha256", displayName(.merkle_root_sha256));
+    try std.testing.expectEqual(@as(usize, 2), requiredArgCount(.bb_field_add));
+    try std.testing.expectEqual(@as(usize, 1), requiredArgCount(.bb_field_inv));
+    try std.testing.expectEqual(@as(usize, 4), requiredArgCount(.merkle_root_sha256));
 }

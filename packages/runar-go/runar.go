@@ -668,6 +668,75 @@ func ToBool(n int64) bool {
 }
 
 // ---------------------------------------------------------------------------
+// Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921)
+// ---------------------------------------------------------------------------
+
+const bbP int64 = 2013265921
+
+// BbFieldAdd returns (a + b) mod p.
+func BbFieldAdd(a, b int64) int64 {
+	return (a + b) % bbP
+}
+
+// BbFieldSub returns (a - b + p) mod p.
+func BbFieldSub(a, b int64) int64 {
+	return ((a - b) % bbP + bbP) % bbP
+}
+
+// BbFieldMul returns (a * b) mod p.
+func BbFieldMul(a, b int64) int64 {
+	return (a * b) % bbP
+}
+
+// BbFieldInv returns the multiplicative inverse of a mod p via Fermat's little theorem.
+func BbFieldInv(a int64) int64 {
+	result := int64(1)
+	base := ((a % bbP) + bbP) % bbP
+	exp := bbP - 2
+	for exp > 0 {
+		if exp&1 == 1 {
+			result = (result * base) % bbP
+		}
+		base = (base * base) % bbP
+		exp >>= 1
+	}
+	return result
+}
+
+// ---------------------------------------------------------------------------
+// Merkle proof verification
+// ---------------------------------------------------------------------------
+
+// MerkleRootSha256 computes a Merkle root using SHA-256 as the hash function.
+// leaf is a 32-byte hash, proof is depth*32 concatenated sibling hashes,
+// index determines left/right at each level, depth is the tree depth.
+func MerkleRootSha256(leaf ByteString, proof ByteString, index, depth int64) ByteString {
+	return merkleRootImpl(leaf, proof, index, depth, Sha256Hash)
+}
+
+// MerkleRootHash256 computes a Merkle root using Hash256 (double SHA-256).
+// Same parameters as MerkleRootSha256 but uses Hash256 instead.
+func MerkleRootHash256(leaf ByteString, proof ByteString, index, depth int64) ByteString {
+	return merkleRootImpl(leaf, proof, index, depth, Hash256)
+}
+
+func merkleRootImpl(leaf ByteString, proof ByteString, index, depth int64, hashFn func(ByteString) ByteString) ByteString {
+	current := leaf
+	for i := int64(0); i < depth; i++ {
+		sibling := proof[i*32 : (i+1)*32]
+		bit := (index >> uint(i)) & 1
+		var preimage ByteString
+		if bit == 1 {
+			preimage = sibling + current
+		} else {
+			preimage = current + sibling
+		}
+		current = hashFn(preimage)
+	}
+	return current
+}
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
