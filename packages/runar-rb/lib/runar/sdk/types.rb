@@ -61,6 +61,9 @@ module Runar
     # Where a constructor placeholder resides in the compiled script.
     ConstructorSlot = Struct.new(:param_index, :byte_offset, keyword_init: true)
 
+    # Slot recording a push_codesep_index placeholder in the template script.
+    CodeSepIndexSlot = Struct.new(:byte_offset, :code_sep_index, keyword_init: true)
+
     # Compiled output of a Runar compiler.
     #
     # Use RunarArtifact.from_hash to load from a JSON-parsed Hash, or
@@ -68,6 +71,7 @@ module Runar
     class RunarArtifact
       attr_reader :version, :compiler_version, :contract_name, :abi,
                   :script, :asm, :state_fields, :constructor_slots,
+                  :code_sep_index_slots,
                   :build_timestamp, :code_separator_index, :code_separator_indices,
                   :anf
 
@@ -80,6 +84,7 @@ module Runar
         asm: '',
         state_fields: [],
         constructor_slots: [],
+        code_sep_index_slots: [],
         build_timestamp: '',
         code_separator_index: nil,
         code_separator_indices: nil,
@@ -93,6 +98,7 @@ module Runar
         @asm                    = asm
         @state_fields           = state_fields
         @constructor_slots      = constructor_slots
+        @code_sep_index_slots   = code_sep_index_slots
         @build_timestamp        = build_timestamp
         @code_separator_index   = code_separator_index
         @code_separator_indices = code_separator_indices
@@ -130,6 +136,10 @@ module Runar
           ConstructorSlot.new(param_index: cs['paramIndex'], byte_offset: cs['byteOffset'])
         end
 
+        code_sep_index_slots = Array(hash['codeSepIndexSlots']).map do |cs|
+          CodeSepIndexSlot.new(byte_offset: cs['byteOffset'], code_sep_index: cs['codeSepIndex'])
+        end
+
         new(
           version:                hash.fetch('version', ''),
           compiler_version:       hash.fetch('compilerVersion', ''),
@@ -139,6 +149,7 @@ module Runar
           asm:                    hash.fetch('asm', ''),
           state_fields:           state_fields,
           constructor_slots:      constructor_slots,
+          code_sep_index_slots:   code_sep_index_slots,
           build_timestamp:        hash.fetch('buildTimestamp', ''),
           code_separator_index:   hash['codeSeparatorIndex'],
           code_separator_indices: hash['codeSeparatorIndices'],

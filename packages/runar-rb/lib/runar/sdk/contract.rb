@@ -613,12 +613,30 @@ module Runar
       def build_code_script
         script = @artifact.script.dup
 
+        # Collect all substitutions: constructor slots + codeSepIndex slots.
+        # Process in descending byte offset so splicing doesn't shift later offsets.
+        substitutions = []
+
         if @artifact.constructor_slots.any?
-          sorted_slots = @artifact.constructor_slots.sort_by { |s| -s.byte_offset }
-          sorted_slots.each do |slot|
-            encoded    = encode_arg(@constructor_args[slot.param_index])
-            hex_offset = slot.byte_offset * 2
-            script     = "#{script[0, hex_offset]}#{encoded}#{script[hex_offset + 2..]}"
+          @artifact.constructor_slots.each do |slot|
+            encoded = encode_arg(@constructor_args[slot.param_index])
+            substitutions << { byte_offset: slot.byte_offset, encoded: encoded }
+          end
+        end
+
+        if @artifact.code_sep_index_slots.any?
+          resolved = resolved_code_sep_slot_values
+          @artifact.code_sep_index_slots.each_with_index do |slot, i|
+            encoded = encode_arg(resolved[i])
+            substitutions << { byte_offset: slot.byte_offset, encoded: encoded }
+          end
+        end
+
+        if substitutions.any?
+          substitutions.sort_by! { |s| -s[:byte_offset] }
+          substitutions.each do |sub|
+            hex_offset = sub[:byte_offset] * 2
+            script = "#{script[0, hex_offset]}#{sub[:encoded]}#{script[hex_offset + 2..]}"
           end
         elsif @artifact.state_fields.empty?
           # Backward compatibility: stateless artifacts without constructorSlots.
@@ -1183,16 +1201,44 @@ module Runar
       end
 
       def adjust_code_sep_offset(base_offset)
-        return base_offset if @artifact.constructor_slots.empty?
-
         shift = 0
+
         @artifact.constructor_slots.each do |slot|
           next unless slot.byte_offset < base_offset
 
           encoded = encode_arg(@constructor_args[slot.param_index])
           shift  += encoded.length / 2 - 1
         end
+
+        # Also account for codeSepIndex slot expansions before this offset
+        if @artifact.code_sep_index_slots.any?
+          resolved = resolved_code_sep_slot_values
+          @artifact.code_sep_index_slots.each_with_index do |slot, i|
+            next unless slot.byte_offset < base_offset
+
+            encoded = encode_arg(resolved[i])
+            shift  += encoded.length / 2 - 1
+          end
+        end
+
         base_offset + shift
+      end
+
+      # Resolve adjusted codeSepIndex values for each codeSepIndexSlot.
+      # Each slot stores the template-relative codeSepIndex; we adjust it
+      # accounting for constructor slot expansions that precede it.
+      def resolved_code_sep_slot_values
+        @artifact.code_sep_index_slots.map do |slot|
+          base = slot.code_sep_index
+          shift = 0
+          @artifact.constructor_slots.each do |cs|
+            next unless cs.byte_offset < base
+
+            encoded = encode_arg(@constructor_args[cs.param_index])
+            shift  += encoded.length / 2 - 1
+          end
+          base + shift
+        end
       end
 
       def get_code_sep_index(method_index)
