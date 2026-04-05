@@ -53,7 +53,7 @@ func CompileContract(sourcePath string, constructorArgs map[string]interface{}) 
 		return nil, fmt.Errorf("parse errors: %v", parseResult.Errors)
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, fmt.Errorf("no contract found in %s", absPath)
 	}
 
 	validResult := frontend.Validate(parseResult.Contract)
@@ -124,10 +124,21 @@ func compileFromProgram(program *ir.ANFProgram) (*Artifact, error) {
 	}, nil
 }
 
-// CompileToSDKArtifact compiles a source file and returns a runar.RunarArtifact
-// suitable for use with RunarContract from the SDK.
+// CompileToSDKArtifactAbs compiles a source file at an absolute path and
+// returns a runar.RunarArtifact suitable for use with RunarContract.
+// Use this when the contract source is outside the Rúnar project tree.
+func CompileToSDKArtifactAbs(absPath string) (*runar.RunarArtifact, error) {
+	return compileToSDKArtifact(absPath)
+}
+
+// CompileToSDKArtifact compiles a source file relative to the Rúnar project
+// root and returns a runar.RunarArtifact suitable for use with RunarContract.
 func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interface{}) (*runar.RunarArtifact, error) {
 	absPath := filepath.Join(projectRoot(), sourcePath)
+	return compileToSDKArtifact(absPath)
+}
+
+func compileToSDKArtifact(absPath string) (*runar.RunarArtifact, error) {
 	source, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading source: %w", err)
@@ -138,7 +149,7 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 		return nil, fmt.Errorf("parse errors: %v", parseResult.Errors)
 	}
 	if parseResult.Contract == nil {
-		return nil, fmt.Errorf("no contract found in %s", sourcePath)
+		return nil, fmt.Errorf("no contract found in %s", absPath)
 	}
 
 	validResult := frontend.Validate(parseResult.Contract)
