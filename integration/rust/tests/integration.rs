@@ -15,3 +15,5 @@ mod schnorr_zkp;
 mod convergence_proof;
 mod ec_isolation;
 mod tic_tac_toe;
+mod babybear;
+mod merkle_proof;

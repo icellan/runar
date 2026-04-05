@@ -21,6 +21,8 @@ comptime {
     _ = @import("sphincs_wallet_test.zig");
     _ = @import("tic_tac_toe_test.zig");
     _ = @import("post_quantum_wallet_test.zig");
+    _ = @import("babybear_test.zig");
+    _ = @import("merkle_proof_test.zig");
 }
 
 test "integration_setup" {
