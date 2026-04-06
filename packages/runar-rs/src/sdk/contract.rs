@@ -544,6 +544,7 @@ impl RunarContract {
                     let named_args = build_named_args(&user_params, &resolved_args);
                     if let Ok(computed) = anf_interpreter::compute_new_state(
                         anf, method_name, &self.state, &named_args,
+                        &self.constructor_args,
                     ) {
                         for (k, v) in computed {
                             self.state.insert(k, v);

@@ -163,11 +163,16 @@ fn json_to_val(v: &serde_json::Value) -> Val {
 /// Compute the new state after executing a contract method.
 ///
 /// Returns the updated state (merged with `current_state`).
+///
+/// `constructor_args` provides deploy-time values for readonly properties
+/// that are not in `current_state` (which only contains mutable fields).
+/// Without these, readonly fields used in method arithmetic evaluate to 0.
 pub fn compute_new_state(
     anf: &ANFProgram,
     method_name: &str,
     current_state: &HashMap<String, SdkValue>,
     args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
 ) -> Result<HashMap<String, SdkValue>, String> {
     // Find the public method
     let method = anf.methods.iter().find(|m| m.name == method_name && m.is_public)
@@ -175,12 +180,16 @@ pub fn compute_new_state(
 
     let mut env: HashMap<String, Val> = HashMap::new();
 
-    // Load properties
-    for prop in &anf.properties {
+    // Load properties: mutable fields from current_state, readonly fields
+    // from constructor_args (matched by declaration index).
+    for (i, prop) in anf.properties.iter().enumerate() {
         if let Some(sv) = current_state.get(&prop.name) {
             env.insert(prop.name.clone(), Val::from_sdk(sv));
         } else if let Some(ref init) = prop.initial_value {
             env.insert(prop.name.clone(), json_to_val(init));
+        } else if prop.readonly && i < constructor_args.len() {
+            // Readonly property set at deploy time — use constructor arg value.
+            env.insert(prop.name.clone(), Val::from_sdk(&constructor_args[i]));
         }
     }
 
@@ -855,7 +864,7 @@ mod tests {
         let mut state = HashMap::new();
         state.insert("count".to_string(), SdkValue::Int(0));
 
-        let result = compute_new_state(&anf, "increment", &state, &HashMap::new()).unwrap();
+        let result = compute_new_state(&anf, "increment", &state, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.get("count"), Some(&SdkValue::Int(1)));
     }
 
@@ -865,14 +874,14 @@ mod tests {
         let mut state = HashMap::new();
         state.insert("count".to_string(), SdkValue::Int(5));
 
-        let result = compute_new_state(&anf, "increment", &state, &HashMap::new()).unwrap();
+        let result = compute_new_state(&anf, "increment", &state, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.get("count"), Some(&SdkValue::Int(6)));
     }
 
     #[test]
     fn test_method_not_found() {
         let anf = make_anf(vec![]);
-        let result = compute_new_state(&anf, "nonexistent", &HashMap::new(), &HashMap::new());
+        let result = compute_new_state(&anf, "nonexistent", &HashMap::new(), &HashMap::new(), &[]);
         assert!(result.is_err());
     }
 
@@ -915,7 +924,7 @@ mod tests {
         let mut state = HashMap::new();
         state.insert("count".to_string(), SdkValue::Int(7));
 
-        let result = compute_new_state(&anf, "test", &state, &HashMap::new()).unwrap();
+        let result = compute_new_state(&anf, "test", &state, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.get("count"), Some(&SdkValue::Int(17)));
     }
 
@@ -967,13 +976,13 @@ mod tests {
         // count > 0: take then branch → decrement
         let mut state = HashMap::new();
         state.insert("count".to_string(), SdkValue::Int(5));
-        let result = compute_new_state(&anf, "test", &state, &HashMap::new()).unwrap();
+        let result = compute_new_state(&anf, "test", &state, &HashMap::new(), &[]).unwrap();
         assert_eq!(result.get("count"), Some(&SdkValue::Int(4)));
 
         // count == 0: take else branch → increment
         let mut state2 = HashMap::new();
         state2.insert("count".to_string(), SdkValue::Int(0));
-        let result2 = compute_new_state(&anf, "test", &state2, &HashMap::new()).unwrap();
+        let result2 = compute_new_state(&anf, "test", &state2, &HashMap::new(), &[]).unwrap();
         assert_eq!(result2.get("count"), Some(&SdkValue::Int(1)));
     }
 
@@ -1058,7 +1067,7 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("amount".to_string(), SdkValue::Int(5));
 
-        let result = compute_new_state(&anf, "add", &state, &args).unwrap();
+        let result = compute_new_state(&anf, "add", &state, &args, &[]).unwrap();
         assert_eq!(result.get("count"), Some(&SdkValue::Int(15)));
     }
 
@@ -1085,5 +1094,96 @@ mod tests {
         assert_eq!(anf.properties.len(), 1);
         assert_eq!(anf.methods.len(), 1);
         assert_eq!(anf.methods[0].body.len(), 1);
+    }
+
+    /// Readonly deploy-time fields must be available in method arithmetic.
+    ///
+    /// Reproduces a bug where `self.strike_price` (readonly, set at deploy via
+    /// constructor args, no compile-time initialValue) evaluated to 0 in
+    /// state-mutating methods. The ANF interpreter's environment only contained
+    /// mutable fields from `current_state`, missing readonly fields entirely.
+    #[test]
+    fn test_readonly_constructor_field_in_arithmetic() {
+        // Build the ANF from JSON (same format as artifact.anf)
+        let json = r#"{
+            "contractName": "Settlement",
+            "properties": [
+                { "name": "strikePrice", "type": "bigint", "readonly": true },
+                { "name": "runningTotal", "type": "bigint", "readonly": false }
+            ],
+            "methods": [{
+                "name": "advanceEpoch",
+                "params": [{ "name": "delta", "type": "bigint" }],
+                "isPublic": true,
+                "body": [
+                    { "name": "_t0", "value": { "kind": "load_prop", "name": "strikePrice" } },
+                    { "name": "_t1", "value": { "kind": "load_prop", "name": "runningTotal" } },
+                    { "name": "_t2", "value": { "kind": "bin_op", "op": "*", "left": "_t0", "right": "delta" } },
+                    { "name": "_t3", "value": { "kind": "bin_op", "op": "+", "left": "_t1", "right": "_t2" } },
+                    { "name": "_t4", "value": { "kind": "update_prop", "name": "runningTotal", "value": "_t3" } }
+                ]
+            }]
+        }"#;
+        let anf: ANFProgram = serde_json::from_str(json).unwrap();
+
+        // Mutable state: runningTotal = 1000
+        let mut state = HashMap::new();
+        state.insert("runningTotal".to_string(), SdkValue::Int(1000));
+
+        // Constructor args in declaration order: [strikePrice=75000, runningTotal=0]
+        let constructor_args = vec![
+            SdkValue::Int(75000),  // strikePrice (readonly, deploy-time)
+            SdkValue::Int(0),      // runningTotal (mutable, initial)
+        ];
+
+        let mut args = HashMap::new();
+        args.insert("delta".to_string(), SdkValue::Int(2500));
+
+        // Expected: runningTotal = 1000 + 75000 * 2500 = 187,501,000
+        let result = compute_new_state(&anf, "advanceEpoch", &state, &args, &constructor_args).unwrap();
+        assert_eq!(
+            result.get("runningTotal"),
+            Some(&SdkValue::Int(187_501_000)),
+            "readonly field strikePrice (75000) must be available in method arithmetic"
+        );
+    }
+
+    /// Verify the bug existed — without constructor_args, readonly fields evaluate to 0.
+    #[test]
+    fn test_readonly_field_without_constructor_args_is_zero() {
+        let json = r#"{
+            "contractName": "Settlement",
+            "properties": [
+                { "name": "strikePrice", "type": "bigint", "readonly": true },
+                { "name": "runningTotal", "type": "bigint", "readonly": false }
+            ],
+            "methods": [{
+                "name": "advanceEpoch",
+                "params": [{ "name": "delta", "type": "bigint" }],
+                "isPublic": true,
+                "body": [
+                    { "name": "_t0", "value": { "kind": "load_prop", "name": "strikePrice" } },
+                    { "name": "_t1", "value": { "kind": "load_prop", "name": "runningTotal" } },
+                    { "name": "_t2", "value": { "kind": "bin_op", "op": "*", "left": "_t0", "right": "delta" } },
+                    { "name": "_t3", "value": { "kind": "bin_op", "op": "+", "left": "_t1", "right": "_t2" } },
+                    { "name": "_t4", "value": { "kind": "update_prop", "name": "runningTotal", "value": "_t3" } }
+                ]
+            }]
+        }"#;
+        let anf: ANFProgram = serde_json::from_str(json).unwrap();
+
+        let mut state = HashMap::new();
+        state.insert("runningTotal".to_string(), SdkValue::Int(1000));
+        let mut args = HashMap::new();
+        args.insert("delta".to_string(), SdkValue::Int(2500));
+
+        // Empty constructor_args — strikePrice falls through to Undefined → 0
+        let result = compute_new_state(&anf, "advanceEpoch", &state, &args, &[]).unwrap();
+        // Without fix: 1000 + 0 * 2500 = 1000 (strikePrice treated as 0)
+        assert_eq!(
+            result.get("runningTotal"),
+            Some(&SdkValue::Int(1000)),
+            "without constructor_args, readonly field defaults to 0 (pre-fix behavior)"
+        );
     }
 }

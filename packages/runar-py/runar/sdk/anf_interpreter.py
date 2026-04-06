@@ -26,6 +26,7 @@ def compute_new_state(
     method_name: str,
     current_state: dict,
     args: dict,
+    constructor_args: list = None,
 ) -> dict:
     """Compute the new state after executing a contract method.
 
@@ -34,10 +35,13 @@ def compute_new_state(
         method_name: The method to execute (must be a public method).
         current_state: Current contract state (property name -> value).
         args: Method arguments (param name -> value).
+        constructor_args: Constructor arg values (declaration order) for readonly fields.
 
     Returns:
         The updated state (merged with current_state).
     """
+    if constructor_args is None:
+        constructor_args = []
     method = None
     for m in anf.get('methods', []):
         if m['name'] == method_name and m.get('isPublic', False):
@@ -52,10 +56,16 @@ def compute_new_state(
     # Initialize the environment with property values and method params
     env: Dict[str, Any] = {}
 
-    # Load properties
-    for prop in anf.get('properties', []):
+    # Load properties: mutable fields from current_state, readonly fields
+    # from constructor_args (matched by declaration index).
+    for i, prop in enumerate(anf.get('properties', [])):
         name = prop['name']
-        env[name] = current_state.get(name, prop.get('initialValue'))
+        if name in current_state:
+            env[name] = current_state[name]
+        elif prop.get('initialValue') is not None:
+            env[name] = prop['initialValue']
+        elif prop.get('readonly', False) and i < len(constructor_args):
+            env[name] = constructor_args[i]
 
     # Load method params (skip implicit ones injected by the compiler)
     implicit_params = {'_changePKH', '_changeAmount', '_newAmount', 'txPreimage'}
