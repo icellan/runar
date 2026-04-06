@@ -57,11 +57,14 @@ type ANFBinding struct {
 
 // ComputeNewState interprets the ANF IR to compute the state transition for
 // a contract method call. It returns the updated state (merged with current).
+// constructorArgs provides deploy-time values for readonly properties that are
+// not in currentState (which only contains mutable fields).
 func ComputeNewState(
 	anf *ANFProgram,
 	methodName string,
 	currentState map[string]interface{},
 	args map[string]interface{},
+	constructorArgs []interface{},
 ) (map[string]interface{}, error) {
 	// Find the method
 	var method *ANFMethod
@@ -75,13 +78,16 @@ func ComputeNewState(
 		return nil, fmt.Errorf("computeNewState: method '%s' not found in ANF IR", methodName)
 	}
 
-	// Initialize environment with property values
+	// Initialize environment with property values: mutable fields from
+	// currentState, readonly fields from constructorArgs (by index).
 	env := make(map[string]interface{})
-	for _, prop := range anf.Properties {
+	for i, prop := range anf.Properties {
 		if v, ok := currentState[prop.Name]; ok {
 			env[prop.Name] = v
 		} else if prop.InitialValue != nil {
 			env[prop.Name] = prop.InitialValue
+		} else if prop.Readonly && i < len(constructorArgs) {
+			env[prop.Name] = constructorArgs[i]
 		}
 	}
 

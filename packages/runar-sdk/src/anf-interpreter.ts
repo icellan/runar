@@ -29,6 +29,7 @@ import { Hash, Utils } from '@bsv/sdk';
  * @param methodName  The method to execute (must be a public method).
  * @param currentState  Current contract state (property name → value).
  * @param args        Method arguments (param name → value).
+ * @param constructorArgs  Constructor arg values (declaration order) for readonly fields.
  * @returns The updated state (merged with currentState).
  */
 export function computeNewState(
@@ -36,6 +37,7 @@ export function computeNewState(
   methodName: string,
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
+  constructorArgs: unknown[] = [],
 ): Record<string, unknown> {
   // Find the method in ANF
   const method = anf.methods.find(
@@ -50,9 +52,17 @@ export function computeNewState(
   // Initialize the environment with property values and method params
   const env: Record<string, unknown> = {};
 
-  // Load properties
-  for (const prop of anf.properties) {
-    env[prop.name] = currentState[prop.name] ?? prop.initialValue;
+  // Load properties: mutable fields from currentState, readonly fields
+  // from constructorArgs (matched by declaration index).
+  for (let i = 0; i < anf.properties.length; i++) {
+    const prop = anf.properties[i]!;
+    if (prop.name in currentState) {
+      env[prop.name] = currentState[prop.name];
+    } else if (prop.initialValue !== undefined) {
+      env[prop.name] = prop.initialValue;
+    } else if (prop.readonly && i < constructorArgs.length) {
+      env[prop.name] = constructorArgs[i];
+    }
   }
 
   // Load method params (skip implicit ones injected by the compiler)

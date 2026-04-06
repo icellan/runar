@@ -2845,7 +2845,7 @@ func TestComputeNewState_Counter_Increment(t *testing.T) {
 	}
 
 	currentState := map[string]interface{}{"count": big.NewInt(0)}
-	newState, err := ComputeNewState(anf, "increment", currentState, nil)
+	newState, err := ComputeNewState(anf, "increment", currentState, nil, nil)
 	if err != nil {
 		t.Fatalf("ComputeNewState failed: %v", err)
 	}
@@ -2876,7 +2876,7 @@ func TestComputeNewState_UnknownMethod_Error(t *testing.T) {
 		},
 	}
 
-	_, err := ComputeNewState(anf, "nonexistent", map[string]interface{}{"count": big.NewInt(0)}, nil)
+	_, err := ComputeNewState(anf, "nonexistent", map[string]interface{}{"count": big.NewInt(0)}, nil, nil)
 	if err == nil {
 		t.Fatal("expected error for unknown method")
 	}

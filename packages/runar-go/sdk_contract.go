@@ -430,7 +430,7 @@ func (c *RunarContract) PrepareCall(
 		} else if methodNeedsChange && c.Artifact.ANF != nil {
 			// Auto-compute new state from ANF IR
 			namedArgs := buildNamedArgs(userParams, resolvedArgs)
-			computed, err := ComputeNewState(c.Artifact.ANF, methodName, c.state, namedArgs)
+			computed, err := ComputeNewState(c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs)
 			if err == nil {
 				for k, v := range computed {
 					c.state[k] = v
