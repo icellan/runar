@@ -5,6 +5,8 @@ package integration
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"testing"
 
 	"runar-integration/helpers"
@@ -133,11 +135,98 @@ func TestNullFailMultiMethod_Chain10Advances(t *testing.T) {
 			proofBlob,
 		}
 
-		txid, _, err := contract.Call("advanceState", args, provider, signer, nil)
+		// Diagnostic: print UTXO being spent
+		utxo := contract.GetCurrentUtxo()
+		t.Logf("block %d: spending UTXO %s:%d (sats=%d, script_len=%d)",
+			block, utxo.Txid, utxo.OutputIndex, utxo.Satoshis, len(utxo.Script)/2)
+		t.Logf("block %d: locking script tail (last 40 hex): ...%s", block, utxo.Script[max(0, len(utxo.Script)-40):])
+
+		// Log the new locking script BEFORE the call (what will be the output)
+		newLockingBefore := contract.GetLockingScript()
+		t.Logf("block %d: newLocking len=%d tail=...%s",
+			block, len(newLockingBefore)/2,
+			newLockingBefore[max(0, len(newLockingBefore)-60):])
+
+		prepared, prepErr := contract.PrepareCall("advanceState", args, provider, signer, nil)
+		if prepErr != nil {
+			t.Fatalf("advance to block %d PrepareCall FAILED: %v", block, prepErr)
+		}
+		// Decode BIP-143 preimage fields
+		pre := prepared.Preimage
+		if len(pre) >= 208*2 { // min preimage is 104+ bytes
+			t.Logf("block %d: preimage len=%d bytes", block, len(pre)/2)
+			t.Logf("  nVersion:      %s", pre[0:8])
+			t.Logf("  hashPrevouts:  %s", pre[8:8+64])
+			t.Logf("  hashSequence:  %s", pre[72:72+64])
+			t.Logf("  outpoint:      %s", pre[136:136+72])
+			// scriptCode has varint length prefix
+			scLenByte, _ := hex.DecodeString(pre[208:210])
+			scLen := int(scLenByte[0])
+			scVarIntSize := 2 // 1 byte varint
+			if scLenByte[0] == 0xfd {
+				lo, _ := hex.DecodeString(pre[210:212])
+				hi, _ := hex.DecodeString(pre[212:214])
+				scLen = int(lo[0]) | int(hi[0])<<8
+				scVarIntSize = 6
+			}
+			scStart := 208 + scVarIntSize
+			scEnd := scStart + scLen*2
+			t.Logf("  scriptCode:    len=%d, first40=%s... last40=...%s", scLen, pre[scStart:min(scStart+40, scEnd)], pre[max(scStart, scEnd-40):scEnd])
+			rest := scEnd
+			t.Logf("  value:         %s", pre[rest:rest+16])
+			t.Logf("  nSequence:     %s", pre[rest+16:rest+24])
+			t.Logf("  hashOutputs:   %s", pre[rest+24:rest+24+64])
+			t.Logf("  nLocktime:     %s", pre[rest+88:rest+96])
+			t.Logf("  sighashType:   %s", pre[rest+96:rest+104])
+		}
+
+		// Dump the TX that would be broadcast
+		t.Logf("block %d: prepared.TxHex len=%d", block, len(prepared.TxHex)/2)
+		os.WriteFile(fmt.Sprintf("/tmp/nullfail-tx-block%d.hex", block), []byte(prepared.TxHex), 0644)
+		os.WriteFile(fmt.Sprintf("/tmp/nullfail-preimage-block%d.hex", block), []byte(prepared.Preimage), 0644)
+		os.WriteFile(fmt.Sprintf("/tmp/nullfail-utxoscript-block%d.hex", block), []byte(utxo.Script), 0644)
+
+		// Verify the sighash matches what we'd compute manually from the preimage
+		preBytes, _ := hex.DecodeString(prepared.Preimage)
+		manualHash := sha256.Sum256(preBytes)
+		manualHashHex := hex.EncodeToString(manualHash[:])
+		t.Logf("block %d: sighash=%s, manual=%s, match=%v",
+			block, prepared.Sighash, manualHashHex, prepared.Sighash == manualHashHex)
+
+		// Manually compute hashOutputs from prepared.TxHex and compare with preimage
+		txHashOutputs := helpers.ComputeHashOutputsFromTxHex(prepared.TxHex)
+		pHex := prepared.Preimage
+		pScLenByte, _ := hex.DecodeString(pHex[208:210])
+		pScLen := int(pScLenByte[0])
+		pScVI := 2
+		if pScLenByte[0] == 0xfd {
+			pLo, _ := hex.DecodeString(pHex[210:212])
+			pHi, _ := hex.DecodeString(pHex[212:214])
+			pScLen = int(pLo[0]) | int(pHi[0])<<8
+			pScVI = 6
+		}
+		restPos := 208 + pScVI + pScLen*2 + 16 + 8
+		preimageHashOutputs := pHex[restPos : restPos+64]
+		t.Logf("block %d: hashOutputs from TX=%s, from preimage=%s, match=%v",
+			block, txHashOutputs, preimageHashOutputs, txHashOutputs == preimageHashOutputs)
+
+		txid, _, err := contract.FinalizeCall(prepared, map[int]string{}, provider)
 		if err != nil {
 			t.Fatalf("advance to block %d FAILED: %v", block, err)
 		}
 		t.Logf("block %d: %s", block, txid)
+		// Log what UTXO we're now tracking
+		newUtxo := contract.GetCurrentUtxo()
+		t.Logf("block %d: new utxo script len=%d tail=...%s",
+			block, len(newUtxo.Script)/2,
+			newUtxo.Script[max(0, len(newUtxo.Script)-60):])
+		// Check consistency: newUtxo.Script should equal the locking script we'd compute now
+		currentLocking := contract.GetLockingScript()
+		if newUtxo.Script != currentLocking {
+			t.Logf("block %d: MISMATCH: utxo.Script != GetLockingScript()", block)
+			t.Logf("  utxo:    ...%s", newUtxo.Script[max(0, len(newUtxo.Script)-80):])
+			t.Logf("  current: ...%s", currentLocking[max(0, len(currentLocking)-80):])
+		}
 		prevRoot = newRoot
 	}
 	t.Log("all 10 advances passed")

@@ -1,11 +1,14 @@
 package helpers
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"time"
 
 	"github.com/icellan/runar/compilers/go/codegen"
@@ -632,4 +635,57 @@ func ConvertBindingsToInterface(bindings []ir.ANFBinding) []interface{} {
 		}
 	}
 	return result
+}
+
+// ComputeHashOutputsFromTxHex manually parses a raw TX hex and computes
+// the BIP-143 hashOutputs (double-SHA256 of serialized outputs).
+func ComputeHashOutputsFromTxHex(txHex string) string {
+	pos := 8 // skip version
+	// Input count
+	ic, icl := readVI(txHex, pos)
+	pos += icl
+	// Skip all inputs
+	for i := 0; i < ic; i++ {
+		pos += 64 + 8 // prevtxid + vout
+		sl, sll := readVI(txHex, pos)
+		pos += sll + sl*2 + 8 // scriptSig + sequence
+	}
+	// Output count
+	oc, ocl := readVI(txHex, pos)
+	pos += ocl
+	// Serialize all outputs
+	var outputsHex string
+	for i := 0; i < oc; i++ {
+		valHex := txHex[pos : pos+16]
+		pos += 16
+		sl, sll := readVI(txHex, pos)
+		viHex := txHex[pos : pos+sll]
+		pos += sll
+		scriptHex := txHex[pos : pos+sl*2]
+		pos += sl * 2
+		outputsHex += valHex + viHex + scriptHex
+		_ = i
+	}
+	outputsBytes, _ := hex.DecodeString(outputsHex)
+	h1 := sha256Sum(outputsBytes)
+	h2 := sha256Sum(h1)
+	return hex.EncodeToString(h2)
+}
+
+func readVI(h string, pos int) (int, int) {
+	fb, _ := strconv.ParseUint(h[pos:pos+2], 16, 8)
+	if fb < 0xfd {
+		return int(fb), 2
+	}
+	if fb == 0xfd {
+		lo, _ := strconv.ParseUint(h[pos+2:pos+4], 16, 8)
+		hi, _ := strconv.ParseUint(h[pos+4:pos+6], 16, 8)
+		return int(lo) | int(hi)<<8, 6
+	}
+	return 0, 2
+}
+
+func sha256Sum(data []byte) []byte {
+	h := sha256.Sum256(data)
+	return h[:]
 }
