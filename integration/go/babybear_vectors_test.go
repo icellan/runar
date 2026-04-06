@@ -147,9 +147,9 @@ func runBinaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 			b := big.NewInt(int64(*vec.B))
 			txid, _, err := contract.Call("verify", []interface{}{big.NewInt(int64(vec.A)), b}, provider, signer, nil)
 			if err != nil {
-				t.Fatalf("verify failed for %s: %v", vec.Description, err)
+				t.Fatalf("FAIL: %s — %v", vec.Description, err)
 			}
-			t.Logf("OK: %s → tx %s", vec.Description, txid)
+			t.Logf("PASS: %s → tx %s", vec.Description, txid)
 		})
 	}
 }
@@ -190,9 +190,9 @@ func runUnaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 
 			txid, _, err := contract.Call("verify", []interface{}{big.NewInt(int64(vec.A))}, provider, signer, nil)
 			if err != nil {
-				t.Fatalf("verify failed for %s: %v", vec.Description, err)
+				t.Fatalf("FAIL: %s — %v", vec.Description, err)
 			}
-			t.Logf("OK: %s → tx %s", vec.Description, txid)
+			t.Logf("PASS: %s → tx %s", vec.Description, txid)
 		})
 	}
 }

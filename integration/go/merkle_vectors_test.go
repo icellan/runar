@@ -127,9 +127,9 @@ func TestMerkle_Vectors_Inclusion(t *testing.T) {
 					big.NewInt(int64(vec.LeafIndex)),
 				}, provider, signer, nil)
 				if err != nil {
-					t.Fatalf("verify failed: %v", err)
+					t.Fatalf("FAIL: %v", err)
 				}
-				t.Logf("OK: %s → tx %s", vec.Description, txid)
+				t.Logf("PASS: %s → tx %s", vec.Description, txid)
 			})
 		}
 	}

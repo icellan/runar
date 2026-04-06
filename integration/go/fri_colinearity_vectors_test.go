@@ -162,9 +162,9 @@ func TestFRI_Vectors_Accept(t *testing.T) {
 
 			txid, _, err := contract.Call("verify", args, provider, signer, nil)
 			if err != nil {
-				t.Fatalf("verify failed: %v", err)
+				t.Fatalf("FAIL: %v", err)
 			}
-			t.Logf("OK: %s → tx %s", vec.Description, txid)
+			t.Logf("PASS: %s → tx %s", vec.Description, txid)
 		})
 	}
 }
