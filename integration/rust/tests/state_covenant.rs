@@ -5,7 +5,7 @@
 //! state transitions and on-chain rejection of invalid inputs.
 
 use crate::helpers::*;
-use runar_lang::sdk::{CallOptions, DeployOptions, RunarContract, SdkValue};
+use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 use sha2::{Digest, Sha256};
 
 const BB_PRIME: i64 = 2013265921;

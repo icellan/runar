@@ -104,11 +104,31 @@ class BBTracker:
             self.nm.append(r)
 
     def pick(self, n: str, d: int) -> None:
+        if d == 0:
+            self.dup(n)
+            return
+        if d == 1:
+            self.over(n)
+            return
+        self.e(_make_stack_op(op="push", value=_big_int_push(d)))
+        self.nm.append(None)
         self.e(_make_stack_op(op="pick", depth=d))
+        self.nm.pop()
         self.nm.append(n)
 
     def roll(self, d: int) -> None:
+        if d == 0:
+            return
+        if d == 1:
+            self.swap()
+            return
+        if d == 2:
+            self.rot()
+            return
+        self.e(_make_stack_op(op="push", value=_big_int_push(d)))
+        self.nm.append(None)
         self.e(_make_stack_op(op="roll", depth=d))
+        self.nm.pop()
         idx = len(self.nm) - 1 - d
         item = self.nm[idx]
         del self.nm[idx]

@@ -193,3 +193,70 @@ test "P2PKH_DeployDifferentPubKeyHash" {
     try std.testing.expect(!std.mem.eql(u8, txid1, txid2));
     std.log.info("owner1 txid: {s}, owner2 txid: {s}", .{ txid1, txid2 });
 }
+
+test "P2PKH_WrongSignerRejected" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
+        std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    // wallet_a is the rightful owner
+    var wallet_a = try helpers.newWallet(allocator);
+    defer wallet_a.deinit();
+    // wallet_b is the wrong signer
+    var wallet_b = try helpers.newWallet(allocator);
+    defer wallet_b.deinit();
+
+    const pkh_a = try wallet_a.pubKeyHashHex(allocator);
+    defer allocator.free(pkh_a);
+
+    // Lock to wallet_a's pubKeyHash
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = pkh_a },
+    });
+    defer contract.deinit();
+
+    // Fund wallet_a and deploy
+    const fund_a = try helpers.fundWallet(allocator, &wallet_a, 1.0);
+    defer allocator.free(fund_a);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var signer_a = try wallet_a.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), signer_a.signer(), .{ .satoshis = 5000 });
+    defer allocator.free(deploy_txid);
+    std.log.info("P2PKH deployed: {s}", .{deploy_txid});
+
+    // Fund wallet_b
+    const fund_b = try helpers.fundWallet(allocator, &wallet_b, 1.0);
+    defer allocator.free(fund_b);
+
+    var signer_b = try wallet_b.localSigner();
+
+    // Try to unlock with wallet_b's signer -- should be rejected
+    const result = contract.call(
+        "unlock",
+        &[_]runar.StateValue{
+            .{ .int = 0 }, // Sig: auto-sign (wrong key)
+            .{ .int = 0 }, // PubKey: auto-fill from wrong signer
+        },
+        rpc_provider.provider(),
+        signer_b.signer(),
+        null,
+    );
+
+    if (result) |call_txid| {
+        allocator.free(call_txid);
+        return error.TestExpectedError;
+    } else |_| {
+        std.log.warn("P2PKH correctly rejected unlock with wrong signer", .{});
+    }
+}

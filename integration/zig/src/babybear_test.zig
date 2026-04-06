@@ -119,3 +119,51 @@ test "BabyBear_FieldAdd_WrongResult_Rejected" {
         std.log.info("BabyBear correctly rejected wrong result", .{});
     }
 }
+
+test "BabyBear_FieldInv_Identity" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
+        std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    // Constructor takes no args
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{});
+    defer contract.deinit();
+
+    var wallet = try helpers.newWallet(allocator);
+    defer wallet.deinit();
+    const fund_txid = try helpers.fundWallet(allocator, &wallet, 1.0);
+    defer allocator.free(fund_txid);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var local_signer = try wallet.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 500000 });
+    defer allocator.free(deploy_txid);
+
+    try std.testing.expectEqual(@as(usize, 64), deploy_txid.len);
+    std.log.info("BabyBearDemo deployed for inv identity: {s}", .{deploy_txid});
+
+    // Call checkInv(42) -- verifies a * inv(a) === 1
+    const call_txid = try contract.call(
+        "checkInv",
+        &[_]runar.StateValue{
+            .{ .int = 42 },
+        },
+        rpc_provider.provider(),
+        local_signer.signer(),
+        null,
+    );
+    defer allocator.free(call_txid);
+
+    try std.testing.expectEqual(@as(usize, 64), call_txid.len);
+    std.log.info("BabyBear checkInv TX: {s}", .{call_txid});
+}

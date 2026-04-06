@@ -174,3 +174,74 @@ test "Auction_ABI_Methods" {
     }
     try std.testing.expect(public_count >= 2);
 }
+
+test "Auction_WrongSignerRejected" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
+        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    // Auctioneer is the funded wallet that deploys
+    var auctioneer = try helpers.newWallet(allocator);
+    defer auctioneer.deinit();
+    var wrong_signer = try helpers.newWallet(allocator);
+    defer wrong_signer.deinit();
+    var bidder = try helpers.newWallet(allocator);
+    defer bidder.deinit();
+
+    const auctioneer_pk = try auctioneer.pubKeyHex(allocator);
+    defer allocator.free(auctioneer_pk);
+    const bidder_pk = try bidder.pubKeyHex(allocator);
+    defer allocator.free(bidder_pk);
+
+    // deadline=0 so extractLocktime(txPreimage) >= deadline passes
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = auctioneer_pk },
+        .{ .bytes = bidder_pk },
+        .{ .int = 100 },
+        .{ .int = 0 },
+    });
+    defer contract.deinit();
+
+    // Fund and deploy with auctioneer
+    const fund_auctioneer = try helpers.fundWallet(allocator, &auctioneer, 1.0);
+    defer allocator.free(fund_auctioneer);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var auctioneer_signer = try auctioneer.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), auctioneer_signer.signer(), .{ .satoshis = 5000 });
+    defer allocator.free(deploy_txid);
+
+    // Fund the wrong signer
+    const fund_wrong = try helpers.fundWallet(allocator, &wrong_signer, 1.0);
+    defer allocator.free(fund_wrong);
+
+    var wrong_local_signer = try wrong_signer.localSigner();
+
+    // Attempt to close with wrong signer -- should be rejected
+    const result = contract.call(
+        "close",
+        &[_]runar.StateValue{
+            .{ .int = 0 }, // sig: auto-sign (wrong key)
+        },
+        rpc_provider.provider(),
+        wrong_local_signer.signer(),
+        null,
+    );
+
+    if (result) |call_txid| {
+        allocator.free(call_txid);
+        return error.TestExpectedError;
+    } else |_| {
+        std.log.warn("Auction correctly rejected close with wrong signer", .{});
+    }
+}

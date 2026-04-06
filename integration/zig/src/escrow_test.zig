@@ -213,3 +213,75 @@ test "Escrow_NotStateful" {
     // Escrow is a stateless contract
     try std.testing.expect(!artifact.isStateful());
 }
+
+test "Escrow_Refund" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
+        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    // Signer is both buyer and arbiter so auto-sign works for refund
+    var wallet = try helpers.newWallet(allocator);
+    defer wallet.deinit();
+    var seller = try helpers.newWallet(allocator);
+    defer seller.deinit();
+
+    const pk_hex = try wallet.pubKeyHex(allocator);
+    defer allocator.free(pk_hex);
+    const seller_pk = try seller.pubKeyHex(allocator);
+    defer allocator.free(seller_pk);
+
+    // buyer=wallet, seller=seller, arbiter=wallet
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = pk_hex },
+        .{ .bytes = seller_pk },
+        .{ .bytes = pk_hex },
+    });
+    defer contract.deinit();
+
+    var funder = try helpers.newWallet(allocator);
+    defer funder.deinit();
+    const fund_txid = try helpers.fundWallet(allocator, &funder, 1.0);
+    defer allocator.free(fund_txid);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var local_signer = try funder.localSigner();
+
+    // Deploy
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 5000 });
+    defer allocator.free(deploy_txid);
+    std.log.info("Escrow deployed for refund: {s}", .{deploy_txid});
+
+    // Fund the wallet for the call
+    const fund_txid2 = try helpers.fundWallet(allocator, &wallet, 1.0);
+    defer allocator.free(fund_txid2);
+
+    var escrow_signer = try wallet.localSigner();
+
+    // Call refund with auto-sign (both Sig params auto-resolved to wallet's key)
+    const call_txid = try contract.call(
+        "refund",
+        &[_]runar.StateValue{
+            .{ .int = 0 }, // buyerSig: auto-sign
+            .{ .int = 0 }, // arbiterSig: auto-sign
+        },
+        rpc_provider.provider(),
+        escrow_signer.signer(),
+        null,
+    );
+    defer allocator.free(call_txid);
+
+    std.log.info("Escrow refund TX: {s}", .{call_txid});
+    try std.testing.expectEqual(@as(usize, 64), call_txid.len);
+
+    // Stateless contract: UTXO should be null after successful spend
+    try std.testing.expect(contract.getCurrentUtxo() == null);
+}

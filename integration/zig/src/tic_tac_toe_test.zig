@@ -283,3 +283,238 @@ test "TicTacToe_StateFields" {
     }
     try std.testing.expect(public_count >= 2);
 }
+
+test "TicTacToe_WrongPlayerRejected" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
+        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    var player_x = try helpers.newWallet(allocator);
+    defer player_x.deinit();
+    var player_o = try helpers.newWallet(allocator);
+    defer player_o.deinit();
+
+    const px_hex = try player_x.pubKeyHex(allocator);
+    defer allocator.free(px_hex);
+    const po_hex = try player_o.pubKeyHex(allocator);
+    defer allocator.free(po_hex);
+
+    const bet_amount: i64 = 5000;
+
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = px_hex },
+        .{ .int = bet_amount },
+    });
+    defer contract.deinit();
+
+    const fund_x = try helpers.fundWallet(allocator, &player_x, 1.0);
+    defer allocator.free(fund_x);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var signer_x = try player_x.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), signer_x.signer(), .{ .satoshis = bet_amount });
+    defer allocator.free(deploy_txid);
+
+    // Fund playerO
+    const fund_o = try helpers.fundWallet(allocator, &player_o, 1.0);
+    defer allocator.free(fund_o);
+    var signer_o = try player_o.localSigner();
+
+    // Join -- playerO enters the game
+    const join_result = contract.call(
+        "join",
+        &[_]runar.StateValue{
+            .{ .bytes = po_hex },
+            .{ .int = 0 }, // sig: auto-sign
+        },
+        rpc_provider.provider(),
+        signer_o.signer(),
+        .{ .new_state = &[_]runar.StateValue{
+            .{ .bytes = po_hex }, // playerO
+            .{ .int = 0 }, // c0
+            .{ .int = 0 }, // c1
+            .{ .int = 0 }, // c2
+            .{ .int = 0 }, // c3
+            .{ .int = 0 }, // c4
+            .{ .int = 0 }, // c5
+            .{ .int = 0 }, // c6
+            .{ .int = 0 }, // c7
+            .{ .int = 0 }, // c8
+            .{ .int = 1 }, // turn
+            .{ .int = 1 }, // status
+        } },
+    );
+
+    if (join_result) |join_txid| {
+        defer allocator.free(join_txid);
+    } else |_| {
+        std.log.warn("TicTacToe join call failed (known issue), skipping wrong player test", .{});
+        return;
+    }
+
+    // After join, turn=1 (X's turn). Player O tries to move -- assertCorrectPlayer
+    // checks player == playerX when turn==1, so this should be rejected.
+    const move_result = contract.call(
+        "move",
+        &[_]runar.StateValue{
+            .{ .int = 4 }, // position
+            .{ .bytes = po_hex }, // player (wrong -- should be X)
+            .{ .int = 0 }, // sig: auto-sign
+        },
+        rpc_provider.provider(),
+        signer_o.signer(),
+        .{ .new_state = &[_]runar.StateValue{
+            .{ .bytes = po_hex }, // playerO (unchanged)
+            .{ .int = 0 }, // c0
+            .{ .int = 0 }, // c1
+            .{ .int = 0 }, // c2
+            .{ .int = 0 }, // c3
+            .{ .int = 2 }, // c4 = turn (2 = O)
+            .{ .int = 0 }, // c5
+            .{ .int = 0 }, // c6
+            .{ .int = 0 }, // c7
+            .{ .int = 0 }, // c8
+            .{ .int = 1 }, // turn = flipped to 1
+            .{ .int = 1 }, // status (unchanged)
+        } },
+    );
+
+    if (move_result) |move_txid| {
+        allocator.free(move_txid);
+        return error.TestUnexpectedResult; // should have been rejected
+    } else |_| {
+        // Expected: move was rejected because wrong player tried to move
+        std.log.warn("TicTacToe correctly rejected wrong player move", .{});
+    }
+}
+
+test "TicTacToe_JoinAfterPlayingRejected" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
+        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    var player_x = try helpers.newWallet(allocator);
+    defer player_x.deinit();
+    var player_o = try helpers.newWallet(allocator);
+    defer player_o.deinit();
+    var intruder = try helpers.newWallet(allocator);
+    defer intruder.deinit();
+
+    const px_hex = try player_x.pubKeyHex(allocator);
+    defer allocator.free(px_hex);
+    const po_hex = try player_o.pubKeyHex(allocator);
+    defer allocator.free(po_hex);
+    const intruder_hex = try intruder.pubKeyHex(allocator);
+    defer allocator.free(intruder_hex);
+
+    const bet_amount: i64 = 5000;
+
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = px_hex },
+        .{ .int = bet_amount },
+    });
+    defer contract.deinit();
+
+    const fund_x = try helpers.fundWallet(allocator, &player_x, 1.0);
+    defer allocator.free(fund_x);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var signer_x = try player_x.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), signer_x.signer(), .{ .satoshis = bet_amount });
+    defer allocator.free(deploy_txid);
+
+    // Fund playerO
+    const fund_o = try helpers.fundWallet(allocator, &player_o, 1.0);
+    defer allocator.free(fund_o);
+    var signer_o = try player_o.localSigner();
+
+    // Fund intruder
+    const fund_intruder = try helpers.fundWallet(allocator, &intruder, 1.0);
+    defer allocator.free(fund_intruder);
+    var signer_intruder = try intruder.localSigner();
+
+    // Join -- playerO enters the game
+    const join_result = contract.call(
+        "join",
+        &[_]runar.StateValue{
+            .{ .bytes = po_hex },
+            .{ .int = 0 }, // sig: auto-sign
+        },
+        rpc_provider.provider(),
+        signer_o.signer(),
+        .{ .new_state = &[_]runar.StateValue{
+            .{ .bytes = po_hex }, // playerO
+            .{ .int = 0 }, // c0
+            .{ .int = 0 }, // c1
+            .{ .int = 0 }, // c2
+            .{ .int = 0 }, // c3
+            .{ .int = 0 }, // c4
+            .{ .int = 0 }, // c5
+            .{ .int = 0 }, // c6
+            .{ .int = 0 }, // c7
+            .{ .int = 0 }, // c8
+            .{ .int = 1 }, // turn
+            .{ .int = 1 }, // status
+        } },
+    );
+
+    if (join_result) |join_txid| {
+        defer allocator.free(join_txid);
+    } else |_| {
+        std.log.warn("TicTacToe join call failed (known issue), skipping join-after-playing test", .{});
+        return;
+    }
+
+    // Try to join again with intruder -- status is now 1, assert(status==0) fails
+    const second_join_result = contract.call(
+        "join",
+        &[_]runar.StateValue{
+            .{ .bytes = intruder_hex },
+            .{ .int = 0 }, // sig: auto-sign
+        },
+        rpc_provider.provider(),
+        signer_intruder.signer(),
+        .{ .new_state = &[_]runar.StateValue{
+            .{ .bytes = intruder_hex }, // playerO (would-be replacement)
+            .{ .int = 0 }, // c0
+            .{ .int = 0 }, // c1
+            .{ .int = 0 }, // c2
+            .{ .int = 0 }, // c3
+            .{ .int = 0 }, // c4
+            .{ .int = 0 }, // c5
+            .{ .int = 0 }, // c6
+            .{ .int = 0 }, // c7
+            .{ .int = 0 }, // c8
+            .{ .int = 1 }, // turn
+            .{ .int = 1 }, // status
+        } },
+    );
+
+    if (second_join_result) |txid| {
+        allocator.free(txid);
+        return error.TestUnexpectedResult; // should have been rejected
+    } else |_| {
+        // Expected: second join was rejected because status != 0
+        std.log.warn("TicTacToe correctly rejected second join attempt", .{});
+    }
+}

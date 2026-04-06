@@ -148,7 +148,18 @@ module RunarCompiler
         # @param n [String] name for the copy
         # @param d [Integer] depth
         def pick(n, d)
+          if d == 0
+            dup(n)
+            return
+          end
+          if d == 1
+            over(n)
+            return
+          end
+          @e.call(BabyBear.make_stack_op(op: "push", value: BabyBear.big_int_push(d)))
+          @nm.push(nil)
           @e.call(BabyBear.make_stack_op(op: "pick", depth: d))
+          @nm.pop
           @nm.push(n)
         end
 
@@ -156,7 +167,19 @@ module RunarCompiler
         #
         # @param d [Integer] depth
         def roll(d)
+          return if d == 0
+          if d == 1
+            swap
+            return
+          end
+          if d == 2
+            rot
+            return
+          end
+          @e.call(BabyBear.make_stack_op(op: "push", value: BabyBear.big_int_push(d)))
+          @nm.push(nil)
           @e.call(BabyBear.make_stack_op(op: "roll", depth: d))
+          @nm.pop
           idx = @nm.length - 1 - d
           item = @nm.delete_at(idx)
           @nm.push(item)

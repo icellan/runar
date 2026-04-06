@@ -372,9 +372,16 @@ fn foldBindings(allocator: Allocator, bindings: []const ANFBinding, env: *ConstE
 fn foldBinding(allocator: Allocator, binding: ANFBinding, env: *ConstEnv) anyerror!ANFBinding {
     const folded_value = try foldValue(allocator, binding.value, env);
 
-    // If the folded value is a load_const, register in the environment
+    // If the folded value is a load_const, register in the environment.
+    // Skip @ref: values — they are symbolic references to runtime bindings, not foldable constants.
     if (anfValueToConst(folded_value)) |cv| {
-        try env.put(binding.name, cv);
+        const skip = switch (cv) {
+            .string => |s| std.mem.startsWith(u8, s, "@ref:"),
+            else => false,
+        };
+        if (!skip) {
+            try env.put(binding.name, cv);
+        }
     }
 
     return .{ .name = binding.name, .value = folded_value, .source_loc = binding.source_loc };

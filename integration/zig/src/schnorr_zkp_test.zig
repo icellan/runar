@@ -147,3 +147,67 @@ test "SchnorrZKP_ABI_Methods" {
     }
     try std.testing.expect(has_verify);
 }
+
+test "SchnorrZKP_SpendValidProof" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
+        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    // Precomputed values:
+    // Private key k=42, public key P = k*G
+    const pub_key_hex = "fe8d1eb1bcb3432b1db5833ff5f2226d9cb5e65cee430558c18ed3a3c86ce1af" ++
+        "07b158f244cd0de2134ac7c1d371cffbfae4db40801a2572e531c573cda9b5b4";
+
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = pub_key_hex },
+    });
+    defer contract.deinit();
+
+    var wallet = try helpers.newWallet(allocator);
+    defer wallet.deinit();
+    const fund_txid = try helpers.fundWallet(allocator, &wallet, 1.0);
+    defer allocator.free(fund_txid);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var local_signer = try wallet.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), local_signer.signer(), .{ .satoshis = 50000 });
+    defer allocator.free(deploy_txid);
+    std.log.info("SchnorrZKP deployed: {s}", .{deploy_txid});
+
+    // Precomputed Schnorr ZKP proof:
+    //   Nonce r=7777, commitment R = r*G
+    //   Challenge e = bin2num(hash256(R || P)) via Fiat-Shamir
+    //   Response s = (r + e*k) mod N = 15404805059957294180371105962960906537181676920494605924177451932397558133607
+    const r_point_hex = "d5e41065eaf890e9e90469360acf6a4359795c7a1939d8ed42941a8c6ef31364" ++
+        "191ec4c8a559fd4e7abbb6b8f2e4c32cbd2f30cb0d06ff6d21f156cbf65bbcad";
+
+    // s as i64 won't fit; pass as LE signed-magnitude hex bytes
+    // s = 15404805059957294180371105962960906537181676920494605924177451932397558133607
+    // Encoded as LE signed-magnitude hex:
+    const s_hex = "67739575b01a9d7d9e055d13d08e241f907a693512034b28473e0cc988cf0e22";
+
+    const call_txid = try contract.call(
+        "verify",
+        &[_]runar.StateValue{
+            .{ .bytes = r_point_hex },
+            .{ .bytes = s_hex },
+        },
+        rpc_provider.provider(),
+        local_signer.signer(),
+        null,
+    );
+    defer allocator.free(call_txid);
+
+    try std.testing.expectEqual(@as(usize, 64), call_txid.len);
+    std.log.info("SchnorrZKP spend TX: {s}", .{call_txid});
+}

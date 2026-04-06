@@ -328,3 +328,80 @@ test "NFT_Burn" {
     std.log.info("NFT burn TX: {s}", .{call_txid});
     try std.testing.expectEqual(@as(usize, 64), call_txid.len);
 }
+
+test "NFT_WrongOwnerRejected" {
+    const allocator = std.testing.allocator;
+
+    if (!helpers.isNodeAvailable(allocator)) {
+        std.log.warn("Regtest node not available, skipping test", .{});
+        return;
+    }
+
+    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
+        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
+        return;
+    };
+    defer artifact.deinit();
+
+    var owner = try helpers.newWallet(allocator);
+    defer owner.deinit();
+    var wrong_signer = try helpers.newWallet(allocator);
+    defer wrong_signer.deinit();
+    var new_owner = try helpers.newWallet(allocator);
+    defer new_owner.deinit();
+
+    const owner_pk = try owner.pubKeyHex(allocator);
+    defer allocator.free(owner_pk);
+    const new_owner_pk = try new_owner.pubKeyHex(allocator);
+    defer allocator.free(new_owner_pk);
+    const token_id = try hexEncodeAscii(allocator, "NFT-REJECT");
+    defer allocator.free(token_id);
+    const metadata = try hexEncodeAscii(allocator, "Reject Test");
+    defer allocator.free(metadata);
+
+    // Deploy with owner
+    var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
+        .{ .bytes = owner_pk },
+        .{ .bytes = token_id },
+        .{ .bytes = metadata },
+    });
+    defer contract.deinit();
+
+    const fund_owner = try helpers.fundWallet(allocator, &owner, 0.01);
+    defer allocator.free(fund_owner);
+
+    var rpc_provider = helpers.RPCProvider.init(allocator);
+    var owner_signer = try owner.localSigner();
+
+    const deploy_txid = try contract.deploy(rpc_provider.provider(), owner_signer.signer(), .{ .satoshis = 5000 });
+    defer allocator.free(deploy_txid);
+    std.log.info("NFT deployed for rejection test: {s}", .{deploy_txid});
+
+    // Fund the wrong signer
+    const fund_wrong = try helpers.fundWallet(allocator, &wrong_signer, 0.01);
+    defer allocator.free(fund_wrong);
+
+    var wrong_local_signer = try wrong_signer.localSigner();
+
+    // Attempt transfer with wrong signer -- should be rejected
+    const result = contract.call(
+        "transfer",
+        &[_]runar.StateValue{
+            .{ .int = 0 }, // sig: auto-sign (wrong key)
+            .{ .bytes = new_owner_pk },
+            .{ .int = 5000 }, // outputSatoshis
+        },
+        rpc_provider.provider(),
+        wrong_local_signer.signer(),
+        .{ .new_state = &[_]runar.StateValue{
+            .{ .bytes = new_owner_pk }, // owner = new_owner
+        } },
+    );
+
+    if (result) |call_txid| {
+        allocator.free(call_txid);
+        return error.TestExpectedError;
+    } else |_| {
+        std.log.warn("NFT correctly rejected transfer with wrong owner", .{});
+    }
+}

@@ -1,6 +1,13 @@
 const std = @import("std");
 const types = @import("ir/types.zig");
 const parse_zig = @import("passes/parse_zig.zig");
+const parse_ts = @import("passes/parse_ts.zig");
+const parse_sol = @import("passes/parse_sol.zig");
+const parse_move = @import("passes/parse_move.zig");
+const parse_go = @import("passes/parse_go.zig");
+const parse_rust = @import("passes/parse_rust.zig");
+const parse_python = @import("passes/parse_python.zig");
+const parse_ruby = @import("passes/parse_ruby.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const anf_lower = @import("passes/anf_lower.zig");
@@ -30,8 +37,66 @@ pub const CompileResult = struct {
     }
 };
 
-// Compile a .runar.zig source string through the full pipeline,
+const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, unknown };
+
+fn detectFormat(path: []const u8) FileFormat {
+    if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
+    if (std.mem.endsWith(u8, path, ".runar.ts")) return .runar_ts;
+    if (std.mem.endsWith(u8, path, ".runar.sol")) return .runar_sol;
+    if (std.mem.endsWith(u8, path, ".runar.move")) return .runar_move;
+    if (std.mem.endsWith(u8, path, ".runar.go")) return .runar_go;
+    if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
+    if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
+    if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
+    return .unknown;
+}
+
+fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u8) struct { contract: ?types.ContractNode, errors: []const []const u8 } {
+    const format = detectFormat(file_name);
+    return switch (format) {
+        .runar_zig => blk: {
+            const r = parse_zig.parseZig(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_ts => blk: {
+            const r = parse_ts.parseTs(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_sol => blk: {
+            const r = parse_sol.parseSol(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_move => blk: {
+            const r = parse_move.parseMove(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_go => blk: {
+            const r = parse_go.parseGo(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_rs => blk: {
+            const r = parse_rust.parseRust(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_py => blk: {
+            const r = parse_python.parsePython(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_rb => blk: {
+            const r = parse_ruby.parseRuby(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .unknown => blk: {
+            // Fall back to Zig parser for unknown extensions
+            const r = parse_zig.parseZig(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+    };
+}
+
+// Compile a source string through the full pipeline,
 // returning both the hex script and the JSON artifact.
+// Automatically detects the input format from the file_name extension.
 pub fn compileSource(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -41,13 +106,17 @@ pub fn compileSource(
     defer arena.deinit();
     const work = arena.allocator();
 
-    // Pass 1: Parse
-    const parse_result = parse_zig.parseZig(work, source, file_name);
+    // Pass 1: Parse (auto-detect format from file extension)
+    const parse_result = parseSource(work, source, file_name);
     if (parse_result.errors.len > 0) return error.ParseFailed;
     const contract = parse_result.contract orelse return error.ParseFailed;
 
-    // Pass 2: Validate (Zig mode — relaxes super() constructor requirement)
-    const val_result = validate_pass.validateZig(work, contract) catch return error.ValidationFailed;
+    // Pass 2: Validate (Zig mode for .runar.zig — relaxes super() constructor requirement)
+    const format = detectFormat(file_name);
+    const val_result = if (format == .runar_zig)
+        validate_pass.validateZig(work, contract) catch return error.ValidationFailed
+    else
+        validate_pass.validate(work, contract) catch return error.ValidationFailed;
     if (val_result.errors.len > 0) return error.ValidationFailed;
 
     // Pass 3: Typecheck

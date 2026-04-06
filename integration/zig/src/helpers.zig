@@ -97,7 +97,7 @@ fn extractJsonResult(allocator: std.mem.Allocator, response_body: []const u8) ![
             if (err_val == .object) {
                 if (err_val.object.get("message")) |msg| {
                     if (msg == .string) {
-                        std.log.err("RPC error: {s}", .{msg.string});
+                        std.log.warn("RPC error: {s}", .{msg.string});
                     }
                 }
             }

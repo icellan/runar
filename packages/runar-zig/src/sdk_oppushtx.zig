@@ -1,6 +1,7 @@
 const std = @import("std");
 const bsvz = @import("bsvz");
 const state_mod = @import("sdk_state.zig");
+const der_mod = @import("sdk_der.zig");
 
 // ---------------------------------------------------------------------------
 // OP_PUSH_TX — private key k=1 signing for sighash preimage verification
@@ -40,89 +41,7 @@ pub fn opPushTxPubKeyHex(allocator: std.mem.Allocator) ![]u8 {
     return hex_buf;
 }
 
-// secp256k1 half-order for low-S normalization (BIP 62)
-const secp256k1_half_order: [32]u8 = .{
-    0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
-    0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
-};
-const secp256k1_order: [32]u8 = .{
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE,
-    0xBA, 0xAE, 0xDC, 0xE6, 0xAF, 0x48, 0xA0, 0x3B,
-    0xBF, 0xD2, 0x5E, 0x8C, 0xD0, 0x36, 0x41, 0x41,
-};
-
-/// Enforce low-S value in DER signature per BIP 62.
-fn enforceLowS(der: bsvz.crypto.DerSignature) bsvz.crypto.DerSignature {
-    const raw = der.asSlice();
-    if (raw.len < 8) return der;
-
-    if (raw[0] != 0x30 or raw[2] != 0x02) return der;
-    const r_len = raw[3];
-    const s_offset: usize = 4 + r_len;
-    if (s_offset + 1 >= raw.len or raw[s_offset] != 0x02) return der;
-    const s_len = raw[s_offset + 1];
-    const s_start = s_offset + 2;
-    if (s_start + s_len > raw.len) return der;
-
-    const s_bytes = raw[s_start .. s_start + s_len];
-
-    var s_padded: [32]u8 = .{0} ** 32;
-    if (s_len <= 32) {
-        @memcpy(s_padded[32 - s_len ..], s_bytes);
-    } else if (s_len == 33 and s_bytes[0] == 0) {
-        @memcpy(&s_padded, s_bytes[1..33]);
-    } else {
-        return der;
-    }
-
-    const cmp = std.mem.order(u8, &s_padded, &secp256k1_half_order);
-    if (cmp != .gt) return der;
-
-    var new_s: [32]u8 = undefined;
-    var borrow: u16 = 0;
-    var i: usize = 31;
-    while (true) : (i -= 1) {
-        const diff: i16 = @as(i16, secp256k1_order[i]) - @as(i16, s_padded[i]) - @as(i16, @intCast(borrow));
-        if (diff < 0) {
-            new_s[i] = @intCast(@as(i16, 256) + diff);
-            borrow = 1;
-        } else {
-            new_s[i] = @intCast(diff);
-            borrow = 0;
-        }
-        if (i == 0) break;
-    }
-
-    var ns_start: usize = 0;
-    while (ns_start < 31 and new_s[ns_start] == 0) ns_start += 1;
-    const needs_pad = (new_s[ns_start] & 0x80) != 0;
-    const new_s_len: u8 = @intCast(32 - ns_start + @as(usize, if (needs_pad) 1 else 0));
-
-    var result: bsvz.crypto.DerSignature = .{ .bytes = .{0} ** 72, .len = 0 };
-    var pos: usize = 0;
-    result.bytes[pos] = 0x30;
-    pos += 1;
-    result.bytes[pos] = @intCast(2 + r_len + 2 + new_s_len);
-    pos += 1;
-    @memcpy(result.bytes[pos .. pos + 2 + r_len], raw[2 .. 4 + r_len]);
-    pos += 2 + r_len;
-    result.bytes[pos] = 0x02;
-    pos += 1;
-    result.bytes[pos] = new_s_len;
-    pos += 1;
-    if (needs_pad) {
-        result.bytes[pos] = 0x00;
-        pos += 1;
-    }
-    @memcpy(result.bytes[pos .. pos + 32 - ns_start], new_s[ns_start..32]);
-    pos += 32 - ns_start;
-    result.len = @intCast(pos);
-
-    return result;
-}
+// DER canonicalization is in sdk_der.zig (shared with sdk_signer.zig)
 
 pub const OpPushTxError = error{
     InvalidKey,
@@ -189,7 +108,7 @@ pub fn computeOpPushTx(
 
     // Sign with k=1 private key and enforce low-S
     var der = priv_key.signDigest256(digest_result.bytes) catch return OpPushTxError.SigningFailed;
-    der = enforceLowS(der);
+    der = der_mod.canonicalizeDer(der);
 
     // Build sig hex: DER bytes + sighash type byte
     const sig_total_len = der.len + 1;

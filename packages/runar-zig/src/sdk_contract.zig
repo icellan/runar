@@ -609,9 +609,12 @@ pub const RunarContract = struct {
         ) catch return ContractError.CallFailed;
         defer ptx_result.deinit(self.allocator);
 
-        // Sign Sig params for the contract input
-        for (sig_indices.items) |idx| {
-            // In stateful contracts, user checkSig is AFTER OP_CODESEPARATOR
+        // Sign Sig params after convergence. The convergence loop used 72-byte
+        // placeholder sigs; the real DER sig may be 70-72 bytes. We do NOT
+        // recompute fees/change after signing — the preimage was computed with
+        // the placeholder-sized tx, and the slightly smaller real sig just means
+        // a marginally higher miner fee. This matches the Python/Go SDK approach.
+        if (sig_indices.items.len > 0) {
             var sig_subscript = contract_utxo.script;
             if (code_sep_idx) |cs| {
                 const hex_offset: usize = @intCast((@as(usize, @intCast(cs)) + 1) * 2);
@@ -619,9 +622,11 @@ pub const RunarContract = struct {
                     sig_subscript = sig_subscript[hex_offset..];
                 }
             }
-            const real_sig = try sign.sign(self.allocator, signed_tx, 0, sig_subscript, contract_utxo.satoshis, null);
-            resolved_args[idx].deinit(self.allocator);
-            resolved_args[idx] = .{ .bytes = real_sig };
+            for (sig_indices.items) |idx| {
+                const real_sig = try sign.sign(self.allocator, signed_tx, 0, sig_subscript, contract_utxo.satoshis, null);
+                resolved_args[idx].deinit(self.allocator);
+                resolved_args[idx] = .{ .bytes = real_sig };
+            }
         }
 
         // Build final unlocking script
@@ -641,6 +646,31 @@ pub const RunarContract = struct {
         const final_tx = try insertUnlockingScript(self.allocator, signed_tx, 0, final_unlock);
         self.allocator.free(signed_tx);
         signed_tx = final_tx;
+
+        // Re-sign P2PKH funding inputs after final unlock insertion (matches Go/Python SDKs)
+        {
+            const input_count = 1 + additional_utxos.items.len;
+            var inp_idx: usize = 1;
+            while (inp_idx < input_count) : (inp_idx += 1) {
+                const utxo_idx = inp_idx - 1;
+                if (utxo_idx < additional_utxos.items.len) {
+                    const utxo = additional_utxos.items[utxo_idx];
+                    const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
+                    defer self.allocator.free(sig_val);
+                    const pub_key = try sign.getPublicKey(self.allocator);
+                    defer self.allocator.free(pub_key);
+                    const s_push = try state_mod.encodePushData(self.allocator, sig_val);
+                    defer self.allocator.free(s_push);
+                    const p_push = try state_mod.encodePushData(self.allocator, pub_key);
+                    defer self.allocator.free(p_push);
+                    const p2pkh_u = try std.mem.concat(self.allocator, u8, &[_][]const u8{ s_push, p_push });
+                    defer self.allocator.free(p2pkh_u);
+                    const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_u);
+                    self.allocator.free(signed_tx);
+                    signed_tx = new_tx;
+                }
+            }
+        }
 
         // Broadcast
         const txid = prov.broadcast(self.allocator, signed_tx) catch return ContractError.CallFailed;
