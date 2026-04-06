@@ -11,7 +11,7 @@ import {
   renderRuby,
   RENDERERS,
 } from '../fuzzer/index.js';
-import type { GeneratedContract } from '../fuzzer/index.js';
+import type { GeneratedContract as _GeneratedContract } from '../fuzzer/index.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

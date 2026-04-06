@@ -80,7 +80,7 @@ function buildBranchStructure(
         branches.push({
           ifIndex: branch.ifIndex,
           elseIndex: branch.elseIndex,
-          endifIndex: branch.endifIndex,
+          endifIndex: i,
           isNotIf: branch.isNotIf,
         });
       }
@@ -294,7 +294,7 @@ export function analyzePaths(
 function describeChoices(
   choices: boolean[],
   opcodes: ParsedOpcode[],
-  branches: BranchPoint[],
+  _branches: BranchPoint[],
 ): string {
   if (choices.length === 0) {
     return 'linear (no branches)';

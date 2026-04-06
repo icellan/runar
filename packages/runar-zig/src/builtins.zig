@@ -274,6 +274,17 @@ pub fn cat(left: base.ByteString, right: base.ByteString) base.ByteString {
     return bsvz.script.cat(std.heap.page_allocator, left, right) catch @panic("OOM");
 }
 
+pub const bytesConcat = cat;
+
+pub fn hexToBytes(comptime hex_str: []const u8) *const [hex_str.len / 2]u8 {
+    return comptime blk: {
+        var out: [hex_str.len / 2]u8 = undefined;
+        _ = std.fmt.hexToBytes(&out, hex_str) catch unreachable;
+        const final = out;
+        break :blk &final;
+    };
+}
+
 pub fn substr(bytes: base.ByteString, start: base.Bigint, len: base.Bigint) base.ByteString {
     if (start < 0 or len <= 0) return &.{};
     const start_usize = std.math.cast(usize, start) orelse return &.{};
@@ -933,6 +944,63 @@ pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
     if (isIdentityPoint(point)) return dupeBytes(&[_]u8{0x00});
     const compressed = p.toCompressedSec1();
     return dupeBytes(compressed.slice());
+}
+
+// -- Baby Bear field arithmetic (p = 2^31 - 2^27 + 1 = 2013265921) --------
+
+const bb_p: i64 = 2013265921;
+
+pub fn bbFieldAdd(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @mod(a + b, bb_p);
+}
+
+pub fn bbFieldSub(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @mod(@mod(a - b, bb_p) + bb_p, bb_p);
+}
+
+pub fn bbFieldMul(a: base.Bigint, b: base.Bigint) base.Bigint {
+    return @mod(a * b, bb_p);
+}
+
+pub fn bbFieldInv(a: base.Bigint) base.Bigint {
+    // Fermat's little theorem: a^(p-2) mod p
+    const normalized = @mod(@mod(a, bb_p) + bb_p, bb_p);
+    var result: i64 = 1;
+    var base_val: i64 = normalized;
+    var exp: u64 = @intCast(bb_p - 2);
+    while (exp != 0) : (exp >>= 1) {
+        if ((exp & 1) != 0) result = @mod(result * base_val, bb_p);
+        if (exp > 1) base_val = @mod(base_val * base_val, bb_p);
+    }
+    return result;
+}
+
+// -- Merkle proof verification ------------------------------------------------
+
+pub fn merkleRootSha256(leaf: base.ByteString, proof: base.ByteString, index: base.Bigint, depth: base.Bigint) base.ByteString {
+    return merkleRootImpl(leaf, proof, index, depth, sha256);
+}
+
+pub fn merkleRootHash256(leaf: base.ByteString, proof: base.ByteString, index: base.Bigint, depth: base.Bigint) base.ByteString {
+    return merkleRootImpl(leaf, proof, index, depth, hash256);
+}
+
+fn merkleRootImpl(leaf: base.ByteString, proof: base.ByteString, index: base.Bigint, depth: base.Bigint, hashFn: fn (base.ByteString) base.ByteString) base.ByteString {
+    var current: base.ByteString = leaf;
+    const depth_u: usize = std.math.cast(usize, depth) orelse return leaf;
+    for (0..depth_u) |i| {
+        const sibling_start = i * 32;
+        const sibling_end = sibling_start + 32;
+        if (sibling_end > proof.len) @panic("merkleRoot: proof too short");
+        const sibling = proof[sibling_start..sibling_end];
+        const bit = (index >> @intCast(i)) & 1;
+        const preimage = if (bit == 1)
+            cat(sibling, current)
+        else
+            cat(current, sibling);
+        current = hashFn(preimage);
+    }
+    return current;
 }
 
 fn lookupCanonicalFixtureSig(pair: test_keys.TestKeyPair) ?[]const u8 {

@@ -7,9 +7,9 @@
 
 import type {
   GeneratedContract,
-  GeneratedProperty,
-  GeneratedParam,
-  GeneratedMethod,
+  GeneratedProperty as _GeneratedProperty,
+  GeneratedParam as _GeneratedParam,
+  GeneratedMethod as _GeneratedMethod,
   Expr,
   Stmt,
   RuinarType,

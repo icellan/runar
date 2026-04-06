@@ -220,6 +220,31 @@ module Runar
       end
     end
 
+    # -- Baby Bear Field Arithmetic (p = 2^31 - 2^27 + 1 = 2013265921) -------
+
+    BB_P = 2013265921
+
+    # Baby Bear field addition: (a + b) mod p.
+    def bb_field_add(a, b)
+      (a + b) % BB_P
+    end
+
+    # Baby Bear field subtraction: (a - b + p) mod p.
+    def bb_field_sub(a, b)
+      ((a - b) % BB_P + BB_P) % BB_P
+    end
+
+    # Baby Bear field multiplication: (a * b) mod p.
+    def bb_field_mul(a, b)
+      (a * b) % BB_P
+    end
+
+    # Baby Bear field inverse via Fermat's little theorem: a^(p-2) mod p.
+    def bb_field_inv(a)
+      base = ((a % BB_P) + BB_P) % BB_P
+      base.pow(BB_P - 2, BB_P)
+    end
+
     # -- Mock BLAKE3 Functions -------------------------------------------------
 
     # Mock BLAKE3 single-block compression.

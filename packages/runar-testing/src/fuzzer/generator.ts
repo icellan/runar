@@ -552,7 +552,7 @@ const DEFAULT_CONFIG: GeneratorConfig = {
 // IR type generator
 // ---------------------------------------------------------------------------
 
-const arbRuinarType: fc.Arbitrary<RuinarType> = fc.oneof(
+export const arbRuinarType: fc.Arbitrary<RuinarType> = fc.oneof(
   { weight: 5, arbitrary: fc.constant('bigint' as RuinarType) },
   { weight: 3, arbitrary: fc.constant('boolean' as RuinarType) },
   { weight: 1, arbitrary: fc.constant('ByteString' as RuinarType) },
@@ -575,7 +575,7 @@ function arbBoolLiteralIR(): fc.Arbitrary<Expr> {
   );
 }
 
-function arbByteStringLiteralIR(): fc.Arbitrary<Expr> {
+export function arbByteStringLiteralIR(): fc.Arbitrary<Expr> {
   return fc
     .array(fc.integer({ min: 0, max: 255 }), { minLength: 0, maxLength: 4 })
     .map((bytes): Expr => ({

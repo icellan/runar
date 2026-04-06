@@ -5,7 +5,7 @@ const StateCovenant = contract.StateCovenant;
 
 test "advanceState increments block number" {
     const root1 = "aa" ** 32;
-    const root2 = "bb" ** 32;
+    _ = "bb" ** 32; // root2 reserved for future use
     const vk_hash = "cc" ** 32;
 
     var c = StateCovenant.init(root1, 0, vk_hash);

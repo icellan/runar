@@ -150,6 +150,14 @@ pub const ecEncodeCompressed = builtins.ecEncodeCompressed;
 pub const ecMakePoint = builtins.ecMakePoint;
 pub const ecPointX = builtins.ecPointX;
 pub const ecPointY = builtins.ecPointY;
+pub const bbFieldAdd = builtins.bbFieldAdd;
+pub const bbFieldSub = builtins.bbFieldSub;
+pub const bbFieldMul = builtins.bbFieldMul;
+pub const bbFieldInv = builtins.bbFieldInv;
+pub const bytesConcat = builtins.bytesConcat;
+pub const hexToBytes = builtins.hexToBytes;
+pub const merkleRootSha256 = builtins.merkleRootSha256;
+pub const merkleRootHash256 = builtins.merkleRootHash256;
 
 test "root exports compile helpers and fixtures" {
     try std.testing.expect(ALICE.pubKey.len != 0);
