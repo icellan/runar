@@ -289,6 +289,31 @@ module Runar
       sha256(sha_hex)
     end
 
+    # -- Merkle Proof Verification ---------------------------------------------
+
+    # Compute Merkle root using SHA-256. All values are hex-encoded strings.
+    # proof is concatenated 32-byte siblings (depth * 64 hex chars).
+    # index determines left/right at each level (bit i = direction at level i).
+    def merkle_root_sha256(leaf, proof, index, depth)
+      merkle_root_impl(leaf, proof, index, depth, method(:sha256))
+    end
+
+    # Compute Merkle root using Hash256 (double SHA-256).
+    def merkle_root_hash256(leaf, proof, index, depth)
+      merkle_root_impl(leaf, proof, index, depth, method(:hash256))
+    end
+
+    def merkle_root_impl(leaf, proof, index, depth, hash_fn)
+      current = leaf
+      depth.times do |i|
+        sibling = proof[i * 64, 64]
+        bit = (index >> i) & 1
+        preimage = bit == 1 ? sibling + current : current + sibling
+        current = hash_fn.call(preimage)
+      end
+      current
+    end
+
     # -- Mock Preimage Extraction ----------------------------------------------
 
     def extract_locktime(_preimage)

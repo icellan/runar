@@ -23,7 +23,7 @@ def make_state_root(n)
   sha256_hex(format('%02x', n))
 end
 
-def build_merkle_tree(leaves)
+def build_sha256_merkle_tree(leaves)
   level = leaves.dup
   layers = [level.dup]
   while level.length > 1
@@ -48,7 +48,7 @@ def get_proof(layers, index, leaves)
 end
 
 MERKLE_LEAVES = (0...16).map { |i| sha256_hex(format('%02x', i)) }
-MERKLE_ROOT, MERKLE_LAYERS = build_merkle_tree(MERKLE_LEAVES)
+MERKLE_ROOT, MERKLE_LAYERS = build_sha256_merkle_tree(MERKLE_LEAVES)
 VERIFYING_KEY_HASH = MERKLE_ROOT
 LEAF_INDEX = 3
 GENESIS_STATE_ROOT = '00' * 32
