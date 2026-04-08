@@ -352,6 +352,16 @@ class LoweringContext {
     return { ops: this.ops, maxStackDepth: this.maxDepth };
   }
 
+  /** Current stack depth (for external inspection). */
+  get stackDepth(): number {
+    return this.stackMap.depth;
+  }
+
+  /** Peek at a stack slot by depth from top (for external inspection). */
+  peekStack(depthFromTop: number): string | null {
+    return this.stackMap.peekAtDepth(depthFromTop);
+  }
+
   /**
    * Clean up excess stack items below the top-of-stack result.
    * Used after method body lowering to ensure a clean stack for Bitcoin Script.
@@ -4566,4 +4576,51 @@ function lowerMethod(
     ops,
     maxStackDepth,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Exported helper: lower individual bindings to StackOps
+// ---------------------------------------------------------------------------
+
+/**
+ * Result of lowering bindings to StackOps.
+ */
+export interface LowerBindingsResult {
+  /** The emitted stack operations. */
+  ops: StackOp[];
+  /** Named values on the stack after lowering (bottom to top). */
+  finalStack: (string | null)[];
+}
+
+/**
+ * Lower a sequence of ANF bindings to StackOps using the existing hex backend.
+ *
+ * This is used by the SX backend to delegate complex stateful intrinsics
+ * (checkPreimage, deserializeState, addOutput, extractors, etc.) to the
+ * proven hex backend, then convert the resulting StackOps to SX text.
+ *
+ * @param bindings      The ANF bindings to lower.
+ * @param stackState    Named values currently on the stack (bottom to top).
+ * @param properties    Contract property definitions.
+ * @param privateMethods Map of private method names to their ANF definitions.
+ * @param terminalAssert If true, the last assert leaves its value on stack.
+ */
+export function lowerBindingsToOps(
+  bindings: ANFBinding[],
+  stackState: string[],
+  properties: ANFProperty[],
+  privateMethods: Map<string, ANFMethod> = new Map(),
+  terminalAssert = false,
+): LowerBindingsResult {
+  const ctx = new LoweringContext(stackState, properties, privateMethods);
+  ctx.lowerBindings(bindings, terminalAssert);
+
+  // Extract the final stack state from the context
+  const depth = ctx.stackDepth;
+  const finalStack: (string | null)[] = [];
+  for (let i = depth - 1; i >= 0; i--) {
+    finalStack.unshift(ctx.peekStack(i));
+  }
+
+  return { ops: ctx.result.ops, finalStack };
 }

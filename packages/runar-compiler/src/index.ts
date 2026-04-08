@@ -27,12 +27,14 @@ export { typecheck } from './passes/03-typecheck.js';
 export type { TypeCheckResult } from './passes/03-typecheck.js';
 
 export { lowerToANF } from './passes/04-anf-lower.js';
-export { lowerToStack } from './passes/05-stack-lower.js';
+export { lowerToStack, lowerBindingsToOps } from './passes/05-stack-lower.js';
+export type { LowerBindingsResult } from './passes/05-stack-lower.js';
 export { emit } from './passes/06-emit.js';
 export { optimizeStackIR } from './optimizer/peephole.js';
 export { optimizeEC } from './optimizer/anf-ec.js';
 export { foldConstants } from './optimizer/constant-fold.js';
 export { assembleArtifact } from './artifact/assembler.js';
+export { emitSX } from './passes/07-sx-emit.js';
 
 export type { CompilerDiagnostic, Severity } from './errors.js';
 export { CompilerError, ParseError, ValidationError, TypeError, makeDiagnostic } from './errors.js';
@@ -49,6 +51,7 @@ import { optimizeStackIR } from './optimizer/peephole.js';
 import { optimizeEC } from './optimizer/anf-ec.js';
 import { foldConstants } from './optimizer/constant-fold.js';
 import { assembleArtifact } from './artifact/assembler.js';
+import { emitSX as emitSXPass } from './passes/07-sx-emit.js';
 import type { CompilerDiagnostic } from './errors.js';
 import type { ContractNode, ANFProgram, RunarArtifact } from './ir/index.js';
 
@@ -75,6 +78,9 @@ export interface CompileOptions {
   /** If true, skip the ANF constant folding pass. Default: false (folding enabled). */
   disableConstantFolding?: boolean;
 
+  /** If true, also emit BitcoinSX (.sx) text via the ANF-to-SX backend (Pass 7). */
+  emitSX?: boolean;
+
   /** Called between compilation passes with the current stage name and progress percentage (0-100). */
   onProgress?: (stage: string, percent: number) => void;
 }
@@ -100,6 +106,9 @@ export interface CompileResult {
 
   /** Human-readable ASM representation (available if passes 5-6 succeed). */
   scriptAsm?: string;
+
+  /** BitcoinSX text representation (available if emitSX option is true). */
+  sx?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +284,20 @@ export function compile(source: string, options?: CompileOptions): CompileResult
   onProgress?.('EC optimization', 50);
   const optimizedAnf = optimizeEC(anf);
 
+  // Pass 7 (parallel): SX emission from ANF (if requested)
+  let sxText: string | undefined;
+  if (opts.emitSX) {
+    try {
+      onProgress?.('Emitting SX', 55);
+      const sxResult = emitSXPass(optimizedAnf);
+      sxText = sxResult.sx;
+    } catch (e: unknown) {
+      // SX emission failure is non-fatal — report as warning
+      const msg = e instanceof Error ? e.message : String(e);
+      diagnostics.push({ message: `SX emission failed: ${msg}`, severity: 'warning' } as CompilerDiagnostic);
+    }
+  }
+
   // Pass 5-6: Stack lower + Peephole optimize + Emit
   try {
     onProgress?.('Stack lowering', 60);
@@ -307,6 +330,11 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       },
     );
 
+    // Attach SX text to artifact if available
+    if (sxText && artifact) {
+      artifact.sx = sxText;
+    }
+
     return {
       anf: optimizedAnf,
       contract: parseResult.contract,
@@ -315,6 +343,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
       artifact,
       scriptHex: emitResult.scriptHex,
       scriptAsm: emitResult.scriptAsm,
+      sx: sxText,
     };
   } catch (e: unknown) {
     // Stack lowering or emit failed — report as a compilation error

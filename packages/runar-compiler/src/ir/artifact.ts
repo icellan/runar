@@ -127,6 +127,9 @@ export interface RunarArtifact {
   /** Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.). */
   codeSeparatorIndices?: number[];
 
+  /** BitcoinSX text representation (available when emitSX option is true) */
+  sx?: string;
+
   /** ISO-8601 build timestamp */
   buildTimestamp: string;
 }
