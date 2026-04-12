@@ -5,17 +5,31 @@
 use serde::{Deserialize, Serialize};
 
 use crate::codegen::emit::{CodeSepIndexSlot, ConstructorSlot, SourceMapping};
-use crate::ir::ANFProgram;
+use crate::ir::{ANFProgram, ANFProperty, ANFSyntheticArrayLevel};
 
 // ---------------------------------------------------------------------------
 // ABI types
 // ---------------------------------------------------------------------------
+
+/// Metadata attached to an expanded FixedArray ABI/state entry so the
+/// SDK can flatten/unflatten nested JS arrays back into the underlying
+/// synthetic scalar slots. Mirrors the TS `fixedArray` annotation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FixedArrayAbiInfo {
+    #[serde(rename = "elementType")]
+    pub element_type: String,
+    pub length: usize,
+    #[serde(rename = "syntheticNames")]
+    pub synthetic_names: Vec<String>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ABIParam {
     pub name: String,
     #[serde(rename = "type")]
     pub param_type: String,
+    #[serde(rename = "fixedArray", skip_serializing_if = "Option::is_none")]
+    pub fixed_array: Option<FixedArrayAbiInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +65,8 @@ pub struct StateField {
     pub index: usize,
     #[serde(rename = "initialValue", skip_serializing_if = "Option::is_none")]
     pub initial_value: Option<serde_json::Value>,
+    #[serde(rename = "fixedArray", skip_serializing_if = "Option::is_none")]
+    pub fixed_array: Option<FixedArrayAbiInfo>,
 }
 
 // ---------------------------------------------------------------------------
@@ -125,29 +141,48 @@ pub fn assemble_artifact(
 ) -> RunarArtifact {
     // Build constructor params from properties, excluding those with initializers
     // (properties with default values are not constructor parameters).
-    let constructor_params: Vec<ABIParam> = program
+    // Group contiguous synthetic FixedArray leaves back into a single
+    // FixedArray-typed ABI param via the iterative regrouper.
+    let ctor_entries: Vec<RegroupEntry> = program
         .properties
         .iter()
         .filter(|p| p.initial_value.is_none())
-        .map(|p| ABIParam {
-            name: p.name.clone(),
-            param_type: p.prop_type.clone(),
+        .map(regroup_entry_from_property)
+        .collect();
+    let ctor_regrouped = regroup_synthetic_runs(ctor_entries);
+    let constructor_params: Vec<ABIParam> = ctor_regrouped
+        .iter()
+        .map(|e| ABIParam {
+            name: e.name.clone(),
+            param_type: e.r#type.clone(),
+            fixed_array: e.fixed_array.clone(),
         })
         .collect();
 
     // Build state fields for stateful contracts.
     // Index = property position (matching constructor arg order), not sequential mutable index.
-    let mut state_fields = Vec::new();
-    for (i, prop) in program.properties.iter().enumerate() {
-        if !prop.readonly {
-            state_fields.push(StateField {
-                name: prop.name.clone(),
-                field_type: prop.prop_type.clone(),
-                index: i,
-                initial_value: prop.initial_value.clone(),
-            });
-        }
-    }
+    let state_entries: Vec<RegroupEntry> = program
+        .properties
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.readonly)
+        .map(|(i, p)| {
+            let mut e = regroup_entry_from_property(p);
+            e.index = Some(i);
+            e
+        })
+        .collect();
+    let state_regrouped = regroup_synthetic_runs(state_entries);
+    let state_fields: Vec<StateField> = state_regrouped
+        .iter()
+        .map(|e| StateField {
+            name: e.name.clone(),
+            field_type: e.r#type.clone(),
+            index: e.index.unwrap_or(0),
+            initial_value: e.initial_value.clone(),
+            fixed_array: e.fixed_array.clone(),
+        })
+        .collect();
     let is_stateful = !state_fields.is_empty();
 
     // Build method ABIs (exclude constructor — it's in abi.constructor, not methods)
@@ -171,6 +206,7 @@ pub fn assemble_artifact(
                     .map(|p| ABIParam {
                         name: p.name.clone(),
                         param_type: p.param_type.clone(),
+                        fixed_array: None,
                     })
                     .collect(),
                 is_public: m.is_public,
@@ -278,4 +314,162 @@ fn epoch_days_to_ymd(days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 1 } else { y };
     (year, m, d)
+}
+
+// ---------------------------------------------------------------------------
+// FixedArray regrouping
+// ---------------------------------------------------------------------------
+//
+// Pass 3b expands FixedArray properties into scalar siblings. The assembler
+// re-groups contiguous synthetic runs back into a single `fixedArray`-tagged
+// ABI/state entry so SDK callers see the declared array shape.
+//
+// Grouping is marker-driven: every participating entry must carry a
+// `synthetic_array_chain` attached at expansion time. Hand-named properties
+// with underscore suffixes will never match and remain as scalars.
+//
+// The regrouper runs iteratively: each pass collapses one level of the
+// innermost FixedArray (popping one entry off the end of every chain) and
+// wraps the resulting group's type in an extra FixedArray layer. Repeat until
+// no entry has any remaining chain.
+
+#[derive(Debug, Clone)]
+struct RegroupEntry {
+    name: String,
+    r#type: String,
+    chain: Vec<ANFSyntheticArrayLevel>,
+    initial_value: Option<serde_json::Value>,
+    fixed_array: Option<FixedArrayAbiInfo>,
+    index: Option<usize>,
+}
+
+fn regroup_entry_from_property(prop: &ANFProperty) -> RegroupEntry {
+    RegroupEntry {
+        name: prop.name.clone(),
+        r#type: prop.prop_type.clone(),
+        chain: prop
+            .synthetic_array_chain
+            .as_ref()
+            .map(|c| c.clone())
+            .unwrap_or_default(),
+        initial_value: prop.initial_value.clone(),
+        fixed_array: None,
+        index: None,
+    }
+}
+
+/// Iteratively regroup synthetic FixedArray runs until no entry has any
+/// remaining chain.
+fn regroup_synthetic_runs(entries: Vec<RegroupEntry>) -> Vec<RegroupEntry> {
+    let mut current = entries;
+    for _ in 0..1024 {
+        let (out, changed) = regroup_one_pass(current);
+        current = out;
+        if !changed {
+            return current;
+        }
+    }
+    panic!("regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)");
+}
+
+/// Run one pass of the iterative regrouper.
+fn regroup_one_pass(entries: Vec<RegroupEntry>) -> (Vec<RegroupEntry>, bool) {
+    let mut out: Vec<RegroupEntry> = Vec::with_capacity(entries.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < entries.len() {
+        let entry = &entries[i];
+        let chain_len = entry.chain.len();
+        if chain_len == 0 {
+            out.push(entry.clone());
+            i += 1;
+            continue;
+        }
+        let marker = &entry.chain[chain_len - 1];
+        if marker.index != 0 {
+            out.push(entry.clone());
+            i += 1;
+            continue;
+        }
+
+        // Greedily extend: every follower shares the same innermost
+        // `{base, length}`, carries the expected index k, and has the
+        // identical current `type`.
+        let mut run_indices: Vec<usize> = vec![i];
+        let mut k = 1usize;
+        let mut j = i + 1;
+        while j < entries.len() && k < marker.length {
+            let next = &entries[j];
+            if next.chain.is_empty() {
+                break;
+            }
+            let m2 = &next.chain[next.chain.len() - 1];
+            if m2.base != marker.base
+                || m2.length != marker.length
+                || m2.index != k
+                || next.r#type != entry.r#type
+            {
+                break;
+            }
+            run_indices.push(j);
+            k += 1;
+            j += 1;
+        }
+
+        if run_indices.len() != marker.length {
+            // Partial/broken run — leave as-is.
+            out.push(entry.clone());
+            i += 1;
+            continue;
+        }
+
+        let inner_type = entry.r#type.clone();
+        let grouped_type = format!("FixedArray<{}, {}>", inner_type, marker.length);
+
+        // Collect synthetic names — leaves contribute their own name,
+        // already-grouped children contribute their `synthetic_names`.
+        let mut synthetic_names: Vec<String> = Vec::new();
+        for &idx in &run_indices {
+            let e = &entries[idx];
+            if let Some(fa) = &e.fixed_array {
+                synthetic_names.extend(fa.synthetic_names.iter().cloned());
+            } else {
+                synthetic_names.push(e.name.clone());
+            }
+        }
+
+        // Collapse initial values into a JSON array when every child has one.
+        let all_have_init = run_indices.iter().all(|&idx| entries[idx].initial_value.is_some());
+        let collapsed_init: Option<serde_json::Value> = if all_have_init {
+            Some(serde_json::Value::Array(
+                run_indices
+                    .iter()
+                    .map(|&idx| entries[idx].initial_value.clone().unwrap())
+                    .collect(),
+            ))
+        } else {
+            None
+        };
+
+        let mut new_chain = entry.chain.clone();
+        new_chain.pop();
+
+        let grouped = RegroupEntry {
+            name: marker.base.clone(),
+            r#type: grouped_type,
+            chain: new_chain,
+            initial_value: collapsed_init,
+            fixed_array: Some(FixedArrayAbiInfo {
+                element_type: inner_type,
+                length: marker.length,
+                synthetic_names,
+            }),
+            index: entries[run_indices[0]].index,
+        };
+
+        out.push(grouped);
+        i = j;
+        changed = true;
+    }
+    (out, changed)
 }

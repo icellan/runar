@@ -1,26 +1,12 @@
 use runar::prelude::*;
 
-/// On-chain Tic-Tac-Toe contract.
+/// TicTacToe v2 -- FixedArray rewrite of the hand-rolled v1 contract.
 ///
-/// Two players compete on a 3x3 board. Each move is an on-chain transaction.
-/// The contract holds both players' bets and enforces correct game rules
-/// entirely in Bitcoin Script.
-///
-/// Board encoding:
-/// Since Runar has no arrays, the 3x3 board uses 9 individual bigint fields
-/// (c0-c8). Values: 0=empty, 1=X, 2=O.
-///
-/// Lifecycle:
-///  1. Player X deploys the contract with their bet amount.
-///  2. Player O calls `join` to enter the game, adding their bet.
-///  3. Players alternate calling `move_piece` (non-terminal) or
-///     `move_and_win` / `move_and_tie` (terminal).
-///  4. Either player can propose `cancel` (requires both signatures).
-///
-/// Method types:
-///   - State-mutating: `join`, `move_piece` -- produce a continuation UTXO.
-///   - Non-mutating terminal: `move_and_win`, `move_and_tie`, `cancel` -- spend
-///     the UTXO and enforce payout outputs via extract_output_hash.
+/// Semantically identical to `TicTacToe.runar.rs`, with the 9 board cells
+/// expressed as a single `[Bigint; 9]` property. The Runar compiler's
+/// `expand-fixed-arrays` pass desugars this to the same 9 scalar siblings
+/// that v1 declares manually, so this file must compile to byte-identical
+/// Bitcoin Script.
 #[runar::contract]
 pub struct TicTacToe {
     #[readonly]
@@ -32,15 +18,7 @@ pub struct TicTacToe {
     #[readonly]
     pub p2pkh_suffix: ByteString,
     pub player_o: PubKey,
-    pub c0: Bigint,
-    pub c1: Bigint,
-    pub c2: Bigint,
-    pub c3: Bigint,
-    pub c4: Bigint,
-    pub c5: Bigint,
-    pub c6: Bigint,
-    pub c7: Bigint,
-    pub c8: Bigint,
+    pub board: [Bigint; 9],
     pub turn: Bigint,
     pub status: Bigint,
     pub tx_preimage: SigHashPreimage,
@@ -52,15 +30,7 @@ impl TicTacToe {
         self.p2pkh_prefix = "1976a914";
         self.p2pkh_suffix = "88ac";
         self.player_o = "000000000000000000000000000000000000000000000000000000000000000000";
-        self.c0 = 0;
-        self.c1 = 0;
-        self.c2 = 0;
-        self.c3 = 0;
-        self.c4 = 0;
-        self.c5 = 0;
-        self.c6 = 0;
-        self.c7 = 0;
-        self.c8 = 0;
+        self.board = [0, 0, 0, 0, 0, 0, 0, 0, 0];
         self.turn = 0;
         self.status = 0;
     }
@@ -181,31 +151,31 @@ impl TicTacToe {
 
     fn assert_cell_empty(&self, position: Bigint) {
         if position == 0 {
-            assert!(self.c0 == 0);
+            assert!(self.board[0] == 0);
         } else {
             if position == 1 {
-                assert!(self.c1 == 0);
+                assert!(self.board[1] == 0);
             } else {
                 if position == 2 {
-                    assert!(self.c2 == 0);
+                    assert!(self.board[2] == 0);
                 } else {
                     if position == 3 {
-                        assert!(self.c3 == 0);
+                        assert!(self.board[3] == 0);
                     } else {
                         if position == 4 {
-                            assert!(self.c4 == 0);
+                            assert!(self.board[4] == 0);
                         } else {
                             if position == 5 {
-                                assert!(self.c5 == 0);
+                                assert!(self.board[5] == 0);
                             } else {
                                 if position == 6 {
-                                    assert!(self.c6 == 0);
+                                    assert!(self.board[6] == 0);
                                 } else {
                                     if position == 7 {
-                                        assert!(self.c7 == 0);
+                                        assert!(self.board[7] == 0);
                                     } else {
                                         if position == 8 {
-                                            assert!(self.c8 == 0);
+                                            assert!(self.board[8] == 0);
                                         } else {
                                             assert!(false);
                                         }
@@ -222,31 +192,31 @@ impl TicTacToe {
     fn place_move(&mut self, position: Bigint) {
         self.assert_cell_empty(position);
         if position == 0 {
-            self.c0 = self.turn;
+            self.board[0] = self.turn;
         } else {
             if position == 1 {
-                self.c1 = self.turn;
+                self.board[1] = self.turn;
             } else {
                 if position == 2 {
-                    self.c2 = self.turn;
+                    self.board[2] = self.turn;
                 } else {
                     if position == 3 {
-                        self.c3 = self.turn;
+                        self.board[3] = self.turn;
                     } else {
                         if position == 4 {
-                            self.c4 = self.turn;
+                            self.board[4] = self.turn;
                         } else {
                             if position == 5 {
-                                self.c5 = self.turn;
+                                self.board[5] = self.turn;
                             } else {
                                 if position == 6 {
-                                    self.c6 = self.turn;
+                                    self.board[6] = self.turn;
                                 } else {
                                     if position == 7 {
-                                        self.c7 = self.turn;
+                                        self.board[7] = self.turn;
                                     } else {
                                         if position == 8 {
-                                            self.c8 = self.turn;
+                                            self.board[8] = self.turn;
                                         } else {
                                             assert!(false);
                                         }
@@ -265,30 +235,30 @@ impl TicTacToe {
             return override_val;
         }
         if cell_index == 0 {
-            return self.c0;
+            return self.board[0];
         } else {
             if cell_index == 1 {
-                return self.c1;
+                return self.board[1];
             } else {
                 if cell_index == 2 {
-                    return self.c2;
+                    return self.board[2];
                 } else {
                     if cell_index == 3 {
-                        return self.c3;
+                        return self.board[3];
                     } else {
                         if cell_index == 4 {
-                            return self.c4;
+                            return self.board[4];
                         } else {
                             if cell_index == 5 {
-                                return self.c5;
+                                return self.board[5];
                             } else {
                                 if cell_index == 6 {
-                                    return self.c6;
+                                    return self.board[6];
                                 } else {
                                     if cell_index == 7 {
-                                        return self.c7;
+                                        return self.board[7];
                                     } else {
-                                        return self.c8;
+                                        return self.board[8];
                                     }
                                 }
                             }
@@ -323,15 +293,15 @@ impl TicTacToe {
 
     fn count_occupied(&self) -> Bigint {
         let mut count: Bigint = 0;
-        if self.c0 != 0 { count = count + 1; }
-        if self.c1 != 0 { count = count + 1; }
-        if self.c2 != 0 { count = count + 1; }
-        if self.c3 != 0 { count = count + 1; }
-        if self.c4 != 0 { count = count + 1; }
-        if self.c5 != 0 { count = count + 1; }
-        if self.c6 != 0 { count = count + 1; }
-        if self.c7 != 0 { count = count + 1; }
-        if self.c8 != 0 { count = count + 1; }
+        if self.board[0] != 0 { count = count + 1; }
+        if self.board[1] != 0 { count = count + 1; }
+        if self.board[2] != 0 { count = count + 1; }
+        if self.board[3] != 0 { count = count + 1; }
+        if self.board[4] != 0 { count = count + 1; }
+        if self.board[5] != 0 { count = count + 1; }
+        if self.board[6] != 0 { count = count + 1; }
+        if self.board[7] != 0 { count = count + 1; }
+        if self.board[8] != 0 { count = count + 1; }
         return count;
     }
 }
