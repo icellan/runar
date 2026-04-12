@@ -151,6 +151,7 @@ fn encodeStateValue(
             .boolean => |b| if (b) @as(i64, 1) else @as(i64, 0),
             .bytes => 0,
             .big_int => unreachable, // handled above
+            .array_value => return error.ArrayValueInScalarField,
         };
         return encodeNum2Bin(allocator, n, 8);
     } else if (std.mem.eql(u8, field_type, "bool")) {
@@ -158,6 +159,7 @@ fn encodeStateValue(
             .boolean => |bv| bv,
             .int => |i| i != 0,
             .bytes, .big_int => false,
+            .array_value => return error.ArrayValueInScalarField,
         };
         return allocator.dupe(u8, if (b) "01" else "00");
     } else if (std.mem.eql(u8, field_type, "PubKey") or
@@ -463,7 +465,68 @@ pub fn encodeArg(allocator: std.mem.Allocator, value: types.StateValue) ![]u8 {
         .big_int => |decimal_str| encodeBigScriptNumber(allocator, decimal_str),
         .boolean => |b| allocator.dupe(u8, if (b) "51" else "00"),
         .bytes => |hex| encodePushData(allocator, hex),
+        // Arrays are not valid standalone arguments — callers must flatten
+        // them via flattenStateValues before passing them in.
+        .array_value => error.ArrayValueInScalarField,
     };
+}
+
+// ---------------------------------------------------------------------------
+// FixedArray flatten / regroup for state values
+// ---------------------------------------------------------------------------
+
+/// Recursively flatten a StateValue into the scalar leaves it represents. Used
+/// to write a nested FixedArray value into N scalar state slots. Scalar values
+/// are passed through unchanged; `.array_value` entries are walked depth-first.
+pub fn flattenStateValue(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged(types.StateValue),
+    value: types.StateValue,
+) !void {
+    switch (value) {
+        .array_value => |items| {
+            for (items) |it| try flattenStateValue(allocator, out, it);
+        },
+        else => try out.append(allocator, try value.clone(allocator)),
+    }
+}
+
+/// Regroup a flat list of scalar StateValues into a nested StateValue tree
+/// matching the shape described by `shape` — a list of per-level fan-out
+/// factors outermost-first. For a `FixedArray<FixedArray<bigint, 2>, 3>`
+/// the shape is `&.{ 3, 2 }` and the input list has length 6.
+///
+/// Returns a newly-allocated `array_value` (or the single scalar when
+/// `shape` is empty). The caller owns the returned value and must call
+/// `deinit` on it.
+pub fn regroupStateValues(
+    allocator: std.mem.Allocator,
+    flat: []const types.StateValue,
+    shape: []const u32,
+) !types.StateValue {
+    if (shape.len == 0) {
+        if (flat.len != 1) return error.ShapeMismatch;
+        return try flat[0].clone(allocator);
+    }
+
+    const outer = shape[0];
+    var total: usize = 1;
+    for (shape) |d| total *= d;
+    if (flat.len != total) return error.ShapeMismatch;
+
+    var items = try allocator.alloc(types.StateValue, outer);
+    errdefer {
+        for (items) |it| it.deinit(allocator);
+        allocator.free(items);
+    }
+    const sub_total = total / outer;
+    var i: usize = 0;
+    while (i < outer) : (i += 1) {
+        const start = i * sub_total;
+        const slice = flat[start .. start + sub_total];
+        items[i] = try regroupStateValues(allocator, slice, shape[1..]);
+    }
+    return .{ .array_value = items };
 }
 
 /// encodeScriptNumber encodes an integer as a Bitcoin Script opcode or push data.
@@ -664,6 +727,85 @@ test "findLastOpReturn finds OP_RETURN at opcode boundary" {
     try std.testing.expectEqual(@as(?usize, 6), findLastOpReturn("00016a6a"));
     // No OP_RETURN
     try std.testing.expectEqual(@as(?usize, null), findLastOpReturn("5151"));
+}
+
+test "flattenStateValue walks nested arrays depth-first" {
+    const allocator = std.testing.allocator;
+    const inner0 = try allocator.alloc(types.StateValue, 2);
+    inner0[0] = .{ .int = 1 };
+    inner0[1] = .{ .int = 2 };
+    const inner1 = try allocator.alloc(types.StateValue, 2);
+    inner1[0] = .{ .int = 3 };
+    inner1[1] = .{ .int = 4 };
+    const outer = try allocator.alloc(types.StateValue, 2);
+    outer[0] = .{ .array_value = inner0 };
+    outer[1] = .{ .array_value = inner1 };
+    const nested = types.StateValue{ .array_value = outer };
+    defer nested.deinit(allocator);
+
+    var out: std.ArrayListUnmanaged(types.StateValue) = .empty;
+    defer {
+        for (out.items) |v| v.deinit(allocator);
+        out.deinit(allocator);
+    }
+    try flattenStateValue(allocator, &out, nested);
+    try std.testing.expectEqual(@as(usize, 4), out.items.len);
+    try std.testing.expectEqual(@as(i64, 1), out.items[0].int);
+    try std.testing.expectEqual(@as(i64, 2), out.items[1].int);
+    try std.testing.expectEqual(@as(i64, 3), out.items[2].int);
+    try std.testing.expectEqual(@as(i64, 4), out.items[3].int);
+}
+
+test "regroupStateValues reconstructs nested shape" {
+    const allocator = std.testing.allocator;
+    const flat = &[_]types.StateValue{
+        .{ .int = 1 }, .{ .int = 2 },
+        .{ .int = 3 }, .{ .int = 4 },
+        .{ .int = 5 }, .{ .int = 6 },
+    };
+    const shape = &[_]u32{ 3, 2 };
+    const result = try regroupStateValues(allocator, flat, shape);
+    defer result.deinit(allocator);
+    try std.testing.expect(result == .array_value);
+    const outer = result.array_value;
+    try std.testing.expectEqual(@as(usize, 3), outer.len);
+    const row0 = outer[0].array_value;
+    try std.testing.expectEqual(@as(usize, 2), row0.len);
+    try std.testing.expectEqual(@as(i64, 1), row0[0].int);
+    try std.testing.expectEqual(@as(i64, 2), row0[1].int);
+    const row2 = outer[2].array_value;
+    try std.testing.expectEqual(@as(i64, 5), row2[0].int);
+    try std.testing.expectEqual(@as(i64, 6), row2[1].int);
+}
+
+test "flatten and regroup round-trip for nested FixedArray" {
+    const allocator = std.testing.allocator;
+
+    // Build a nested value: [[10, 20], [30, 40]]
+    const r0 = try allocator.alloc(types.StateValue, 2);
+    r0[0] = .{ .int = 10 };
+    r0[1] = .{ .int = 20 };
+    const r1 = try allocator.alloc(types.StateValue, 2);
+    r1[0] = .{ .int = 30 };
+    r1[1] = .{ .int = 40 };
+    const outer = try allocator.alloc(types.StateValue, 2);
+    outer[0] = .{ .array_value = r0 };
+    outer[1] = .{ .array_value = r1 };
+    const original = types.StateValue{ .array_value = outer };
+    defer original.deinit(allocator);
+
+    var flat: std.ArrayListUnmanaged(types.StateValue) = .empty;
+    defer {
+        for (flat.items) |v| v.deinit(allocator);
+        flat.deinit(allocator);
+    }
+    try flattenStateValue(allocator, &flat, original);
+
+    const shape = &[_]u32{ 2, 2 };
+    const regrouped = try regroupStateValues(allocator, flat.items, shape);
+    defer regrouped.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 10), regrouped.array_value[0].array_value[0].int);
+    try std.testing.expectEqual(@as(i64, 40), regrouped.array_value[1].array_value[1].int);
 }
 
 test "serializeState and deserializeState roundtrip" {
