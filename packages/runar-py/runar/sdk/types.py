@@ -50,6 +50,8 @@ class AbiParam:
     """A single ABI parameter."""
     name: str
     type: str
+    # Present when this param represents an expanded FixedArray<T, N>.
+    fixed_array: dict | None = None
 
 
 @dataclass
@@ -75,6 +77,9 @@ class StateField:
     type: str
     index: int
     initial_value: object = None  # compile-time default (may be "0n" string from JSON)
+    # Present for grouped FixedArray state fields. Shape:
+    # ``{"elementType": str, "length": int, "syntheticNames": list[str]}``.
+    fixed_array: dict | None = None
 
 
 @dataclass
@@ -117,13 +122,22 @@ class RunarArtifact:
         """Load an artifact from a JSON-parsed dict."""
         abi_raw = d.get('abi', {})
         ctor_params = [
-            AbiParam(name=p['name'], type=p['type'])
+            AbiParam(
+                name=p['name'], type=p['type'],
+                fixed_array=p.get('fixedArray'),
+            )
             for p in abi_raw.get('constructor', {}).get('params', [])
         ]
         methods = [
             AbiMethod(
                 name=m['name'],
-                params=[AbiParam(name=p['name'], type=p['type']) for p in m.get('params', [])],
+                params=[
+                    AbiParam(
+                        name=p['name'], type=p['type'],
+                        fixed_array=p.get('fixedArray'),
+                    )
+                    for p in m.get('params', [])
+                ],
                 is_public=m.get('isPublic', True),
                 is_terminal=m.get('isTerminal'),
             )
@@ -133,6 +147,7 @@ class RunarArtifact:
             StateField(
                 name=sf['name'], type=sf['type'], index=sf['index'],
                 initial_value=sf.get('initialValue'),
+                fixed_array=sf.get('fixedArray'),
             )
             for sf in d.get('stateFields', [])
         ]

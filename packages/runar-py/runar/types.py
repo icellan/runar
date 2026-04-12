@@ -28,3 +28,25 @@ T = TypeVar('T')
 class Readonly(Generic[T]):
     """Marks a property as readonly in StatefulSmartContract."""
     pass
+
+
+class _FixedArrayMeta(type):
+    """Metaclass that makes ``FixedArray[T, N]`` subscriptable at runtime."""
+
+    def __getitem__(cls, item):
+        # ``FixedArray[T, N]`` — simply return a type alias that behaves like
+        # a plain list at runtime. The Rúnar compiler reads the annotation
+        # form directly from source, so this is only for runtime type hints
+        # and test instances.
+        return list
+
+
+class FixedArray(list, metaclass=_FixedArrayMeta):
+    """Compile-time fixed-size array marker.
+
+    At runtime, ``FixedArray[T, N]`` behaves like ``list`` so contract
+    tests can instantiate state with a plain Python list. The Rúnar
+    compiler reads the annotation text and lowers it to
+    ``FixedArrayType(element=T, length=N)``.
+    """
+    pass
