@@ -71,14 +71,14 @@ export interface SourceMap {
  * For scalar state fields this is a single `string | bigint | boolean`.
  * For grouped FixedArray state fields the assembler stores a real
  * JS array of element-typed values so the SDK can consume it without
- * parsing a stringified tuple. Elements follow the same rules as
- * scalar initialValues.
+ * parsing a stringified tuple. For nested FixedArrays the value is a
+ * recursive nested array mirroring the declared shape.
  */
 export type StateFieldInitialValue =
   | string
   | bigint
   | boolean
-  | ReadonlyArray<string | bigint | boolean>;
+  | ReadonlyArray<StateFieldInitialValue>;
 
 export interface StateField {
   name: string;

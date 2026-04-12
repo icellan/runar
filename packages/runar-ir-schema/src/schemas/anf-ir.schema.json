@@ -70,7 +70,18 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "value": { "$ref": "#/$defs/ANFValue" }
+        "value": { "$ref": "#/$defs/ANFValue" },
+        "sourceLoc": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Debug-only: source location of the originating AST node. Not part of conformance.",
+          "required": ["file", "line", "column"],
+          "properties": {
+            "file": { "type": "string" },
+            "line": { "type": "integer", "minimum": 0 },
+            "column": { "type": "integer", "minimum": 0 }
+          }
+        }
       }
     },
     "ANFValue": {
@@ -88,7 +99,10 @@
         { "$ref": "#/$defs/UpdateProp" },
         { "$ref": "#/$defs/GetStateScript" },
         { "$ref": "#/$defs/CheckPreimage" },
-        { "$ref": "#/$defs/AddOutput" }
+        { "$ref": "#/$defs/DeserializeState" },
+        { "$ref": "#/$defs/AddOutput" },
+        { "$ref": "#/$defs/AddRawOutput" },
+        { "$ref": "#/$defs/ArrayLiteral" }
       ]
     },
     "LoadParam": {
@@ -133,7 +147,11 @@
         "op": { "type": "string", "minLength": 1 },
         "left": { "type": "string", "minLength": 1 },
         "right": { "type": "string", "minLength": 1 },
-        "result_type": { "type": "string", "minLength": 1 }
+        "result_type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operand type hint: 'bytes' for ByteString/PubKey/Sig/Sha256 etc., omitted for numeric"
+        }
       }
     },
     "UnaryOp": {
@@ -143,7 +161,12 @@
       "properties": {
         "kind": { "const": "unary_op" },
         "op": { "type": "string", "minLength": 1 },
-        "operand": { "type": "string", "minLength": 1 }
+        "operand": { "type": "string", "minLength": 1 },
+        "result_type": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Operand type hint: 'bytes' for ByteString, omitted for numeric"
+        }
       }
     },
     "Call": {
@@ -240,14 +263,54 @@
         "preimage": { "type": "string", "minLength": 1 }
       }
     },
+    "DeserializeState": {
+      "type": "object",
+      "required": ["kind", "preimage"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "deserialize_state" },
+        "preimage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Reference to a temp name holding the verified preimage"
+        }
+      }
+    },
     "AddOutput": {
       "type": "object",
-      "required": ["kind", "satoshis", "stateValues"],
+      "required": ["kind", "satoshis", "stateValues", "preimage"],
       "additionalProperties": false,
       "properties": {
         "kind": { "const": "add_output" },
         "satoshis": { "type": "string", "minLength": 1 },
         "stateValues": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "preimage": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Reference to a temp holding the verified preimage (for codePart extraction)"
+        }
+      }
+    },
+    "AddRawOutput": {
+      "type": "object",
+      "required": ["kind", "satoshis", "scriptBytes"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "add_raw_output" },
+        "satoshis": { "type": "string", "minLength": 1 },
+        "scriptBytes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ArrayLiteral": {
+      "type": "object",
+      "required": ["kind", "elements"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "array_literal" },
+        "elements": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
         }

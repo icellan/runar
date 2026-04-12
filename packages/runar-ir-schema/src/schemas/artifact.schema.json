@@ -52,9 +52,33 @@
         }
       }
     },
+    "anf": {
+      "$ref": "anf-ir.schema.json",
+      "description": "ANF IR for SDK state computation (always included for stateful contracts)"
+    },
     "stateFields": {
       "type": "array",
       "items": { "$ref": "#/$defs/StateField" }
+    },
+    "constructorSlots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ConstructorSlot" },
+      "description": "Byte offsets of constructor parameter placeholders in the script"
+    },
+    "codeSepIndexSlots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/CodeSepIndexSlot" },
+      "description": "Byte offsets of codeSepIndex placeholders in the script"
+    },
+    "codeSeparatorIndex": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Byte offset of OP_CODESEPARATOR in the locking script (for BIP-143 sighash)"
+    },
+    "codeSeparatorIndices": {
+      "type": "array",
+      "items": { "type": "integer", "minimum": 0 },
+      "description": "Per-method OP_CODESEPARATOR byte offsets (index 0 = first public method, etc.)"
     },
     "buildTimestamp": {
       "type": "string",
@@ -96,7 +120,11 @@
           "type": "array",
           "items": { "$ref": "#/$defs/ABIParam" }
         },
-        "isPublic": { "type": "boolean" }
+        "isPublic": { "type": "boolean" },
+        "isTerminal": {
+          "type": "boolean",
+          "description": "True for stateful contract methods that don't mutate state (no continuation output)."
+        }
       }
     },
     "ABIParam": {
@@ -105,7 +133,21 @@
       "additionalProperties": false,
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "type": { "type": "string", "minLength": 1 }
+        "type": { "type": "string", "minLength": 1 },
+        "fixedArray": { "$ref": "#/$defs/FixedArrayInfo" }
+      }
+    },
+    "FixedArrayInfo": {
+      "type": "object",
+      "required": ["elementType", "length", "syntheticNames"],
+      "additionalProperties": false,
+      "properties": {
+        "elementType": { "type": "string", "minLength": 1 },
+        "length": { "type": "integer", "minimum": 1 },
+        "syntheticNames": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "SourceMap": {
@@ -130,6 +172,18 @@
         "column": { "type": "integer", "minimum": 0 }
       }
     },
+    "StateFieldInitialValue": {
+      "description": "Compile-time default value. Scalar fields use string|integer|boolean; grouped FixedArray fields use a (possibly nested) array of element values.",
+      "oneOf": [
+        { "type": "string" },
+        { "type": "integer" },
+        { "type": "boolean" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/StateFieldInitialValue" }
+        }
+      ]
+    },
     "StateField": {
       "type": "object",
       "required": ["name", "type", "index"],
@@ -138,36 +192,33 @@
         "name": { "type": "string", "minLength": 1 },
         "type": { "type": "string", "minLength": 1 },
         "index": { "type": "integer", "minimum": 0 },
-        "initialValue": {
-          "description": "Compile-time default value. Scalar fields use string|integer|boolean; grouped FixedArray fields use an array of element values.",
-          "oneOf": [
-            { "type": "string" },
-            { "type": "integer" },
-            { "type": "boolean" },
-            {
-              "type": "array",
-              "items": {
-                "oneOf": [
-                  { "type": "string" },
-                  { "type": "integer" },
-                  { "type": "boolean" }
-                ]
-              }
-            }
-          ]
+        "initialValue": { "$ref": "#/$defs/StateFieldInitialValue" },
+        "fixedArray": { "$ref": "#/$defs/FixedArrayInfo" }
+      }
+    },
+    "ConstructorSlot": {
+      "type": "object",
+      "required": ["paramIndex", "byteOffset"],
+      "additionalProperties": false,
+      "properties": {
+        "paramIndex": { "type": "integer", "minimum": 0 },
+        "byteOffset": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "CodeSepIndexSlot": {
+      "type": "object",
+      "required": ["byteOffset", "codeSepIndex"],
+      "additionalProperties": false,
+      "properties": {
+        "byteOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Byte offset of the OP_0 placeholder in the template script"
         },
-        "fixedArray": {
-          "type": "object",
-          "required": ["elementType", "length", "syntheticNames"],
-          "additionalProperties": false,
-          "properties": {
-            "elementType": { "type": "string", "minLength": 1 },
-            "length": { "type": "integer", "minimum": 1 },
-            "syntheticNames": {
-              "type": "array",
-              "items": { "type": "string", "minLength": 1 }
-            }
-          }
+        "codeSepIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "The template-relative codeSeparatorIndex value this placeholder represents"
         }
       }
     }

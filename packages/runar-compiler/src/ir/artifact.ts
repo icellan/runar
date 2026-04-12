@@ -68,13 +68,16 @@ export interface SourceMap {
  *
  * Scalar state fields use `string | bigint | boolean`. Grouped
  * FixedArray state fields use a real JS array of element values; the
- * SDK consumes it directly without parsing a stringified tuple.
+ * SDK consumes it directly without parsing a stringified tuple. For
+ * nested FixedArrays (e.g. `FixedArray<FixedArray<bigint, 2>, 2>`)
+ * the initial value is a recursive nested array that mirrors the
+ * declared shape.
  */
 export type StateFieldInitialValue =
   | string
   | bigint
   | boolean
-  | ReadonlyArray<string | bigint | boolean>;
+  | ReadonlyArray<StateFieldInitialValue>;
 
 export interface StateField {
   name: string;
