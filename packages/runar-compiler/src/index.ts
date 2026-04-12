@@ -26,6 +26,9 @@ export type { ValidationResult } from './passes/02-validate.js';
 export { typecheck } from './passes/03-typecheck.js';
 export type { TypeCheckResult } from './passes/03-typecheck.js';
 
+export { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
+export type { ExpandFixedArraysResult } from './passes/03b-expand-fixed-arrays.js';
+
 export { lowerToANF } from './passes/04-anf-lower.js';
 export { lowerToStack } from './passes/05-stack-lower.js';
 export { emit } from './passes/06-emit.js';
@@ -42,6 +45,7 @@ export * from './ir/index.js';
 import { parse } from './passes/01-parse.js';
 import { validate } from './passes/02-validate.js';
 import { typecheck } from './passes/03-typecheck.js';
+import { expandFixedArrays } from './passes/03b-expand-fixed-arrays.js';
 import { lowerToANF } from './passes/04-anf-lower.js';
 import { lowerToStack } from './passes/05-stack-lower.js';
 import { emit } from './passes/06-emit.js';
@@ -239,11 +243,38 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     };
   }
 
+  // Pass 3b: Expand fixed-size array properties
+  onProgress?.('Expanding fixed arrays', 28);
+  let expandedContract: ContractNode;
+  try {
+    const expandResult = expandFixedArrays(parseResult.contract);
+    diagnostics.push(...expandResult.errors);
+    expandedContract = expandResult.contract;
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
+
+  if (hasErrors(diagnostics)) {
+    return {
+      anf: null,
+      contract: parseResult.contract,
+      diagnostics,
+      success: false,
+    };
+  }
+
   // Pass 4: ANF Lower
   onProgress?.('Lowering to ANF', 35);
   let anf: ANFProgram;
   try {
-    anf = lowerToANF(parseResult.contract);
+    anf = lowerToANF(expandedContract);
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnostics.push({ message: msg, severity: 'error' } as CompilerDiagnostic);
@@ -292,7 +323,7 @@ export function compile(source: string, options?: CompileOptions): CompileResult
     const emitResult = emit(stackProgram);
     onProgress?.('Assembling artifact', 95);
     const artifact = assembleArtifact(
-      parseResult.contract,
+      expandedContract,
       optimizedAnf,
       stackProgram,
       emitResult.scriptHex,

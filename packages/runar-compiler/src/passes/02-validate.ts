@@ -82,7 +82,18 @@ function validateProperties(ctx: ValidationContext): void {
 
     // Validate initializer if present
     if (prop.initializer) {
-      if (!isLiteralExpression(prop.initializer)) {
+      // FixedArray properties may use an array literal of literal elements.
+      // The individual elements are still literal-restricted; nested arrays
+      // are allowed when the property type is a nested FixedArray.
+      if (prop.type.kind === 'fixed_array_type') {
+        if (!isArrayLiteralOfLiterals(prop.initializer)) {
+          ctx.errors.push(makeDiagnostic(
+            `Property '${prop.name}' initializer must be an array literal of literal values`,
+            'error',
+            prop.sourceLocation,
+          ));
+        }
+      } else if (!isLiteralExpression(prop.initializer)) {
         ctx.errors.push(makeDiagnostic(
           `Property '${prop.name}' initializer must be a literal value (number, boolean, or hex string)`,
           'error',
@@ -126,6 +137,23 @@ function isLiteralExpression(expr: Expression): boolean {
   // Allow negative literals: -42n
   if (expr.kind === 'unary_expr' && expr.op === '-' && expr.operand.kind === 'bigint_literal') return true;
   return false;
+}
+
+/**
+ * Allow a property initializer of the form `[lit, lit, ...]` for
+ * FixedArray properties. Elements may themselves be array literals for
+ * nested FixedArrays. Each leaf must still be a literal value.
+ */
+function isArrayLiteralOfLiterals(expr: Expression): boolean {
+  if (expr.kind !== 'array_literal') return false;
+  for (const el of expr.elements) {
+    if (el.kind === 'array_literal') {
+      if (!isArrayLiteralOfLiterals(el)) return false;
+    } else if (!isLiteralExpression(el)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function validatePropertyType(
@@ -229,6 +257,13 @@ function validateConstructor(ctx: ValidationContext): void {
         ctor.sourceLocation,
       ));
     }
+    if (param.type.kind === 'fixed_array_type') {
+      ctx.errors.push(makeDiagnostic(
+        `Constructor parameter '${param.name}' cannot be a FixedArray. Use initialized properties or pass each element as a separate parameter.`,
+        'error',
+        ctor.sourceLocation,
+      ));
+    }
   }
 
   // Validate statements in constructor body
@@ -269,6 +304,15 @@ function validateMethod(method: MethodNode, ctx: ValidationContext): void {
     // No 'number' type
     if (param.type.kind === 'primitive_type') {
       checkNoNumberType(param.type.name, method.sourceLocation, ctx);
+    }
+
+    // FixedArray not allowed as method parameter
+    if (param.type.kind === 'fixed_array_type') {
+      ctx.errors.push(makeDiagnostic(
+        `Parameter '${param.name}' in method '${method.name}' cannot be a FixedArray. Arrays are only allowed as contract properties.`,
+        'error',
+        method.sourceLocation,
+      ));
     }
   }
 
@@ -369,6 +413,13 @@ function validateVariableDecl(
   // Check for disallowed 'number' type
   if (stmt.type && stmt.type.kind === 'primitive_type') {
     checkNoNumberType(stmt.type.name, stmt.sourceLocation, ctx);
+  }
+  if (stmt.type && stmt.type.kind === 'fixed_array_type') {
+    ctx.errors.push(makeDiagnostic(
+      `Local variable '${stmt.name}' cannot be a FixedArray. Arrays are only allowed as contract properties.`,
+      'error',
+      stmt.sourceLocation,
+    ));
   }
   validateExpression(stmt.init, ctx);
 }
