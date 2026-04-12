@@ -134,6 +134,17 @@ func lowerProperties(contract *ContractNode) []ir.ANFProperty {
 		if prop.Initializer != nil {
 			props[i].InitialValue = extractLiteralValue(prop.Initializer)
 		}
+		if len(prop.SyntheticArrayChain) > 0 {
+			chain := make([]ir.ANFSyntheticArrayLevel, len(prop.SyntheticArrayChain))
+			for k, lvl := range prop.SyntheticArrayChain {
+				chain[k] = ir.ANFSyntheticArrayLevel{
+					Base:   lvl.Base,
+					Index:  lvl.Index,
+					Length: lvl.Length,
+				}
+			}
+			props[i].SyntheticArrayChain = chain
+		}
 	}
 	return props
 }

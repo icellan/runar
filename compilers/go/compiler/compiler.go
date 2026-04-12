@@ -16,10 +16,22 @@ import (
 // Artifact types — mirrors the TypeScript RunarArtifact schema
 // ---------------------------------------------------------------------------
 
+// ABIFixedArray describes the fixed-array shape of a grouped ABI
+// parameter or state field. `ElementType` is the immediate child type
+// (possibly itself a nested `FixedArray<...>` string); `SyntheticNames`
+// is the flat leaf list in declaration order so the SDK can walk
+// linearly when flattening or regrouping array values.
+type ABIFixedArray struct {
+	ElementType    string   `json:"elementType"`
+	Length         int      `json:"length"`
+	SyntheticNames []string `json:"syntheticNames"`
+}
+
 // ABIParam describes a parameter in the ABI.
 type ABIParam struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	FixedArray *ABIFixedArray `json:"fixedArray,omitempty"`
 }
 
 // ABIConstructor describes the constructor ABI.
@@ -43,10 +55,11 @@ type ABI struct {
 
 // StateField describes a stateful contract field.
 type StateField struct {
-	Name         string      `json:"name"`
-	Type         string      `json:"type"`
-	Index        int         `json:"index"`
-	InitialValue interface{} `json:"initialValue,omitempty"`
+	Name         string         `json:"name"`
+	Type         string         `json:"type"`
+	Index        int            `json:"index"`
+	InitialValue interface{}    `json:"initialValue,omitempty"`
+	FixedArray   *ABIFixedArray `json:"fixedArray,omitempty"`
 }
 
 // ConstructorSlot records a constructor parameter placeholder in the compiled script.
@@ -155,31 +168,66 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 
 // assembleArtifact builds the final output artifact from the compilation products.
 func assembleArtifact(program *ir.ANFProgram, scriptHex, scriptAsm string, constructorSlots []ConstructorSlot, codeSepIndexSlots []CodeSepIndexSlot, codeSeparatorIndex int, codeSeparatorIndices []int, sourceMap []codegen.SourceMapping, stackMethods []codegen.StackMethod, opts CompileOptions) *Artifact {
+	// ---------------------------------------------------------------------
 	// Build ABI
+	// ---------------------------------------------------------------------
 	// Build constructor params, excluding properties with initializers
 	// (properties with default values are not constructor parameters).
-	var constructorParams []ABIParam
-	for _, prop := range program.Properties {
-		if prop.InitialValue == nil {
-			constructorParams = append(constructorParams, ABIParam{Name: prop.Name, Type: prop.Type})
+	// Run the entries through the iterative synthetic-array regrouper so
+	// that expanded FixedArray siblings collapse back into a single
+	// logical parameter for the user-facing ABI.
+	var ctorEntries []regroupEntry
+	for i, prop := range program.Properties {
+		if prop.InitialValue != nil {
+			continue
 		}
+		ctorEntries = append(ctorEntries, regroupEntry{
+			name:  prop.Name,
+			typ:   prop.Type,
+			chain: append([]ir.ANFSyntheticArrayLevel(nil), prop.SyntheticArrayChain...),
+			index: i,
+		})
+	}
+	regroupedCtor := regroupSyntheticRuns(ctorEntries)
+	var constructorParams []ABIParam
+	for _, e := range regroupedCtor {
+		p := ABIParam{Name: e.name, Type: e.typ}
+		if e.fixedArray != nil {
+			p.FixedArray = e.fixedArray
+		}
+		constructorParams = append(constructorParams, p)
 	}
 
 	// Build state fields for stateful contracts.
 	// Index = property position (matching constructor arg order), not sequential mutable index.
-	var stateFields []StateField
+	var stateEntries []regroupEntry
 	for i, prop := range program.Properties {
-		if !prop.Readonly {
-			sf := StateField{
-				Name:  prop.Name,
-				Type:  prop.Type,
-				Index: i,
-			}
-			if prop.InitialValue != nil {
-				sf.InitialValue = prop.InitialValue
-			}
-			stateFields = append(stateFields, sf)
+		if prop.Readonly {
+			continue
 		}
+		stateEntries = append(stateEntries, regroupEntry{
+			name:         prop.Name,
+			typ:          prop.Type,
+			chain:        append([]ir.ANFSyntheticArrayLevel(nil), prop.SyntheticArrayChain...),
+			initialValue: prop.InitialValue,
+			index:        i,
+		})
+	}
+	regroupedState := regroupSyntheticRuns(stateEntries)
+	var stateFields []StateField
+	for _, e := range regroupedState {
+		sf := StateField{
+			Name:  e.name,
+			Type:  e.typ,
+			Index: e.index,
+		}
+		if e.initialValue != nil {
+			sf.InitialValue = e.initialValue
+		}
+		if e.fixedArray != nil {
+			sf.FixedArray = e.fixedArray
+		}
+		stateFields = append(stateFields, sf)
 	}
 
 	isStateful := len(stateFields) > 0
@@ -295,11 +343,32 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
+	// Pass 3b: Expand FixedArray properties into scalar siblings.
+	// Runs after typecheck and before ANF lowering; downstream passes
+	// see only scalar properties and direct-access / dispatch-chain
+	// expressions, so no further FixedArray plumbing is required in
+	// ANF, stack, or emit.
+	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	if len(expandResult.Errors) > 0 {
+		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+	}
+	expandedContract := expandResult.Contract
+
 	// Pass 4: ANF lowering
-	program := frontend.LowerToANF(parseResult.Contract)
+	program := frontend.LowerToANF(expandedContract)
 
 	// Feed into existing compilation pipeline (passes 4.25+)
 	return CompileFromProgram(program, opts...)
+}
+
+// diagStrings renders a diagnostic slice as a list of error messages for
+// `fmt.Errorf` consumption.
+func diagStrings(diags []frontend.Diagnostic) []string {
+	out := make([]string, len(diags))
+	for i, d := range diags {
+		out[i] = d.Message
+	}
+	return out
 }
 
 // CompileSourceToIR runs passes 1-4 on a .runar.ts source file and returns the ANF program.
@@ -327,7 +396,12 @@ func CompileSourceToIR(sourcePath string, opts ...CompileOptions) (*ir.ANFProgra
 		return nil, fmt.Errorf("type check errors:\n  %s", strings.Join(tcResult.ErrorStrings(), "\n  "))
 	}
 
-	program := frontend.LowerToANF(parseResult.Contract)
+	expandResult := frontend.ExpandFixedArrays(parseResult.Contract)
+	if len(expandResult.Errors) > 0 {
+		return nil, fmt.Errorf("expand-fixed-arrays errors:\n  %s", strings.Join(diagStrings(expandResult.Errors), "\n  "))
+	}
+
+	program := frontend.LowerToANF(expandResult.Contract)
 
 	o := mergeOptions(opts)
 	// Pass 4.25: Constant folding (on by default)
@@ -446,6 +520,14 @@ func CompileFromSourceWithResult(sourcePath string, opts ...CompileOptions) *Com
 		result.Success = !hasErrors(result.Diagnostics)
 		return result
 	}
+
+	// Pass 3b: Expand FixedArray properties.
+	expandResult := frontend.ExpandFixedArrays(result.Contract)
+	result.Diagnostics = append(result.Diagnostics, expandResult.Errors...)
+	if hasErrors(result.Diagnostics) {
+		return result
+	}
+	result.Contract = expandResult.Contract
 
 	// Pass 4: ANF lowering
 	result.ANF = frontend.LowerToANF(result.Contract)
@@ -577,6 +659,14 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 		result.Success = !hasErrors(result.Diagnostics)
 		return result
 	}
+
+	// Pass 3b: Expand FixedArray properties.
+	expandResult := frontend.ExpandFixedArrays(result.Contract)
+	result.Diagnostics = append(result.Diagnostics, expandResult.Errors...)
+	if hasErrors(result.Diagnostics) {
+		return result
+	}
+	result.Contract = expandResult.Contract
 
 	// Pass 4: ANF lowering
 	result.ANF = frontend.LowerToANF(result.Contract)

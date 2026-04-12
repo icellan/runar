@@ -105,6 +105,26 @@ func (ctx *validationContext) validateProperties() {
 		if ctx.contract.ParentClass == "StatefulSmartContract" && prop.Name == "txPreimage" {
 			ctx.addErrorWithLoc("'txPreimage' is an implicit property of StatefulSmartContract and must not be declared", &prop.SourceLocation)
 		}
+
+		// Validate initializer if present. FixedArray properties accept an
+		// array_literal of literal elements (recursively, for nested
+		// arrays); other properties accept a plain literal value. This
+		// mirrors the TS validator in `02-validate.ts`.
+		if prop.Initializer != nil {
+			if _, ok := prop.Type.(FixedArrayType); ok {
+				if !isArrayLiteralOfLiterals(prop.Initializer) {
+					ctx.addErrorWithLoc(
+						fmt.Sprintf("property '%s' initializer must be an array literal of literal values", prop.Name),
+						&prop.SourceLocation,
+					)
+				}
+			} else if !isLiteralExpression(prop.Initializer) {
+				ctx.addErrorWithLoc(
+					fmt.Sprintf("property '%s' initializer must be a literal value", prop.Name),
+					&prop.SourceLocation,
+				)
+			}
+		}
 	}
 
 	// SmartContract requires all properties to be readonly
@@ -129,6 +149,43 @@ func (ctx *validationContext) validateProperties() {
 			ctx.addWarningWithLoc("StatefulSmartContract has no mutable properties; consider using SmartContract instead", &ctx.contract.Constructor.SourceLocation)
 		}
 	}
+}
+
+// isLiteralExpression returns true if the expression is a literal
+// allowed as a property initializer (bigint, bool, bytestring, or a
+// negative bigint literal). Mirrors the TS validator helper.
+func isLiteralExpression(expr Expression) bool {
+	switch e := expr.(type) {
+	case BigIntLiteral, BoolLiteral, ByteStringLiteral:
+		return true
+	case UnaryExpr:
+		if e.Op == "-" {
+			if _, ok := e.Operand.(BigIntLiteral); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isArrayLiteralOfLiterals returns true if the expression is an array
+// literal whose elements are all literal values (recursively, for
+// nested FixedArray initializers). Mirrors the TS validator helper.
+func isArrayLiteralOfLiterals(expr Expression) bool {
+	arr, ok := expr.(ArrayLiteralExpr)
+	if !ok {
+		return false
+	}
+	for _, el := range arr.Elements {
+		if _, isArr := el.(ArrayLiteralExpr); isArr {
+			if !isArrayLiteralOfLiterals(el) {
+				return false
+			}
+		} else if !isLiteralExpression(el) {
+			return false
+		}
+	}
+	return true
 }
 
 func (ctx *validationContext) validatePropertyType(t TypeNode, loc SourceLocation) {
@@ -192,6 +249,17 @@ func (ctx *validationContext) validateConstructor() {
 		}
 	}
 
+	// Reject FixedArray constructor params — arrays are only allowed as
+	// contract properties.
+	for _, param := range ctor.Params {
+		if _, ok := param.Type.(FixedArrayType); ok {
+			ctx.addErrorWithLoc(
+				fmt.Sprintf("constructor parameter '%s' cannot be a FixedArray — use initialized properties or pass each element as a separate parameter", param.Name),
+				&ctor.SourceLocation,
+			)
+		}
+	}
+
 	// Validate constructor body
 	for _, stmt := range ctor.Body {
 		ctx.validateStatement(stmt)
@@ -225,6 +293,17 @@ func (ctx *validationContext) validateMethods() {
 }
 
 func (ctx *validationContext) validateMethod(method MethodNode) {
+	// Reject FixedArray method params — arrays are only allowed as
+	// contract properties.
+	for _, param := range method.Params {
+		if _, ok := param.Type.(FixedArrayType); ok {
+			ctx.addErrorWithLoc(
+				fmt.Sprintf("parameter '%s' in method '%s' cannot be a FixedArray — arrays are only allowed as contract properties", param.Name, method.Name),
+				&method.SourceLocation,
+			)
+		}
+	}
+
 	// Public methods must end with assert() (unless StatefulSmartContract,
 	// where the compiler auto-injects the final assert)
 	if method.Visibility == "public" && ctx.contract.ParentClass != "StatefulSmartContract" {
@@ -282,6 +361,14 @@ func isAssertCall(expr Expression) bool {
 func (ctx *validationContext) validateStatement(stmt Statement) {
 	switch s := stmt.(type) {
 	case VariableDeclStmt:
+		if s.Type != nil {
+			if _, ok := s.Type.(FixedArrayType); ok {
+				ctx.addErrorWithLoc(
+					fmt.Sprintf("local variable '%s' cannot be a FixedArray — arrays are only allowed as contract properties", s.Name),
+					&s.SourceLocation,
+				)
+			}
+		}
 		ctx.validateExpression(s.Init)
 	case AssignmentStmt:
 		ctx.validateExpression(s.Target)

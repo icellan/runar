@@ -20,12 +20,28 @@ type ANFProgram struct {
 	Methods      []ANFMethod   `json:"methods"`
 }
 
+// ANFSyntheticArrayLevel is one level of the synthetic FixedArray chain
+// attached by the expand-fixed-arrays pass to each scalar leaf property
+// that came from an expanded FixedArray declaration. Mirrors the TS
+// `__syntheticArrayChain` field on PropertyNode.
+type ANFSyntheticArrayLevel struct {
+	Base   string `json:"base"`
+	Index  int    `json:"index"`
+	Length int    `json:"length"`
+}
+
 // ANFProperty describes a contract-level property (constructor parameter).
 type ANFProperty struct {
 	Name         string      `json:"name"`
 	Type         string      `json:"type"`
 	Readonly     bool        `json:"readonly"`
 	InitialValue interface{} `json:"initialValue,omitempty"` // string | number | bool
+	// SyntheticArrayChain is populated for scalar leaves that came out
+	// of the expand-fixed-arrays pass; nil otherwise. The iterative
+	// regrouper in the assembler consumes one level per pass until the
+	// chain is empty, collapsing synthetic siblings back into logical
+	// FixedArray entries on the ABI / state-field list.
+	SyntheticArrayChain []ANFSyntheticArrayLevel `json:"syntheticArrayChain,omitempty"`
 }
 
 // ANFMethod is a single contract method.

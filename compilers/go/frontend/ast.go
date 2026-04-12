@@ -60,6 +60,17 @@ type ContractNode struct {
 	SourceFile  string
 }
 
+// SyntheticArrayLevel is one level of the synthetic FixedArray nesting
+// chain attached by the expand-fixed-arrays pass to each scalar leaf
+// property that came from an expanded FixedArray declaration. The
+// outermost entry (index 0) is the user-declared property name; the
+// last entry is the innermost.
+type SyntheticArrayLevel struct {
+	Base   string
+	Index  int
+	Length int
+}
+
 // PropertyNode represents a contract property declaration.
 type PropertyNode struct {
 	Name           string
@@ -67,6 +78,13 @@ type PropertyNode struct {
 	Readonly       bool
 	Initializer    Expression // may be nil — literal default value
 	SourceLocation SourceLocation
+
+	// SyntheticArrayChain records the full nesting of FixedArray levels
+	// that produced a given scalar leaf property. Only populated by the
+	// expand-fixed-arrays pass; a nil chain means the property is
+	// either user-written or was not expanded from a FixedArray.
+	// The outermost level (index 0) is the user-declared property name.
+	SyntheticArrayChain []SyntheticArrayLevel
 }
 
 // MethodNode represents a contract method or constructor.
