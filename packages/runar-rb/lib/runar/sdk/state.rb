@@ -140,15 +140,37 @@ module Runar
       # matches what the compiler emits.  No push opcodes are added; the result
       # is raw bytes suitable for appending after OP_RETURN.
       #
+      # Fields with a +fixed_array+ annotation are expanded into N element
+      # writes (nested arrays flatten recursively) using the declared outer
+      # dimensions.  The supplied value for such a field must be a (possibly
+      # nested) array matching the declared shape.
+      #
       # @param state_fields [Array<StateField>] field descriptors from the artifact
       # @param values [Hash] map of field name → value
       # @return [String] hex-encoded state bytes
       def serialize_state(state_fields, values)
         sorted_fields = state_fields.sort_by(&:index)
-        sorted_fields.map { |field| encode_state_value(values[field.name], field.type) }.join
+        sorted_fields.map do |field|
+          if field.respond_to?(:fixed_array) && field.fixed_array
+            names = field.fixed_array[:synthetic_names]
+            leaf_type = unwrap_fixed_array_leaf(field.type)
+            dims = parse_fixed_array_dims(field.type)
+            flat = flatten_nested_value(values[field.name], dims)
+            raise ArgumentError, "state field '#{field.name}': expected #{names.length} flattened elements, got #{flat.length}" if flat.length != names.length
+
+            flat.map { |v| encode_state_value(v, leaf_type) }.join
+          else
+            encode_state_value(values[field.name], field.type)
+          end
+        end.join
       end
 
       # Decode state values from a raw hex string.
+      #
+      # Fields with a +fixed_array+ annotation are returned as (possibly
+      # nested) arrays matching the declared shape, so the caller sees
+      # +state["board"] = [0, 1, 2, ...]+ instead of the underlying flat
+      # scalar slots.
       #
       # @param state_fields [Array<StateField>] field descriptors from the artifact
       # @param state_hex [String] hex-encoded state bytes (no push opcodes)
@@ -159,12 +181,117 @@ module Runar
         offset = 0
 
         sorted_fields.each do |field|
-          value, chars_read = decode_state_value(state_hex, offset, field.type)
-          result[field.name] = value
-          offset += chars_read
+          if field.respond_to?(:fixed_array) && field.fixed_array
+            leaf_type = unwrap_fixed_array_leaf(field.type)
+            dims = parse_fixed_array_dims(field.type)
+            total = field.fixed_array[:synthetic_names].length
+            flat = []
+            total.times do
+              v, chars_read = decode_state_value(state_hex, offset, leaf_type)
+              flat << v
+              offset += chars_read
+            end
+            result[field.name] = regroup_flat_value(flat, dims)
+          else
+            value, chars_read = decode_state_value(state_hex, offset, field.type)
+            result[field.name] = value
+            offset += chars_read
+          end
         end
 
         result
+      end
+
+      # Parse a nested +FixedArray<...>+ type string into its outer dimensions.
+      #
+      #   "FixedArray<bigint, 9>"                         → [9]
+      #   "FixedArray<FixedArray<bigint, 2>, 3>"          → [3, 2]
+      #   "FixedArray<FixedArray<FixedArray<bigint,2>,3>,4>" → [4, 3, 2]
+      #
+      # Non-FixedArray types return +[]+.
+      def parse_fixed_array_dims(type)
+        current = type.to_s
+        dims = []
+        while current.start_with?('FixedArray<')
+          inner = current[('FixedArray<'.length)..-2]
+          depth = 0
+          comma = -1
+          inner.each_char.with_index do |ch, idx|
+            if ch == '<'
+              depth += 1
+            elsif ch == '>'
+              depth -= 1
+            elsif ch == ',' && depth.zero?
+              comma = idx
+              break
+            end
+          end
+          break if comma == -1
+
+          element_type = inner[0...comma].strip
+          length_str = inner[(comma + 1)..].strip
+          dims << length_str.to_i
+          current = element_type
+        end
+        dims
+      end
+
+      # Strip every +FixedArray<>+ wrapper and return the innermost scalar
+      # type string.  +FixedArray<FixedArray<bigint, 2>, 3>+ → +"bigint"+.
+      def unwrap_fixed_array_leaf(type)
+        current = type.to_s
+        while current.start_with?('FixedArray<')
+          inner = current[('FixedArray<'.length)..-2]
+          depth = 0
+          comma = -1
+          inner.each_char.with_index do |ch, idx|
+            if ch == '<'
+              depth += 1
+            elsif ch == '>'
+              depth -= 1
+            elsif ch == ',' && depth.zero?
+              comma = idx
+              break
+            end
+          end
+          break if comma == -1
+
+          current = inner[0...comma].strip
+        end
+        current
+      end
+
+      # Flatten a (possibly nested) array to a 1-D list matching the declared
+      # dimensions.  +dims+ is outermost-first: +[3, 2]+ means a length-3
+      # outer array of length-2 inner arrays.
+      def flatten_nested_value(value, dims)
+        return [] if dims.empty?
+
+        unless value.is_a?(Array)
+          raise ArgumentError, "expected an Array for FixedArray state field, got #{value.class}"
+        end
+        unless value.length == dims[0]
+          raise ArgumentError, "expected #{dims[0]} elements, got #{value.length}"
+        end
+
+        if dims.length == 1
+          value
+        else
+          rest = dims[1..]
+          value.flat_map { |v| flatten_nested_value(v, rest) }
+        end
+      end
+
+      # Reshape a 1-D list back into a nested array matching +dims+.
+      def regroup_flat_value(flat, dims)
+        return flat.first if dims.empty?
+        return flat if dims.length == 1
+
+        per = flat.length / dims[0]
+        (0...dims[0]).map do |i|
+          chunk = flat[i * per, per]
+          regroup_flat_value(chunk, dims[1..])
+        end
       end
 
       # Extract and decode state from a full locking script.
