@@ -74,6 +74,24 @@ export class RunarContract {
     // to constructor args by name lookup in the ABI constructor params.
     if (artifact.stateFields && artifact.stateFields.length > 0) {
       for (const field of artifact.stateFields) {
+        const fa = (field as { fixedArray?: { elementType: string; length: number; syntheticNames: string[] } }).fixedArray;
+        if (fa) {
+          // FixedArray state field — group. The `initialValue` (if present)
+          // is a stringified literal array; the constructor arg (if
+          // present) is a plain JS array.
+          const rawInit = (field as { initialValue?: unknown }).initialValue;
+          if (rawInit !== undefined) {
+            this._state[field.name] = reviveFixedArrayInit(rawInit, fa.elementType);
+          } else {
+            const paramIdx = artifact.abi.constructor.params.findIndex(p => p.name === field.name);
+            if (paramIdx >= 0 && paramIdx < constructorArgs.length) {
+              this._state[field.name] = constructorArgs[paramIdx];
+            } else if (field.index < constructorArgs.length) {
+              this._state[field.name] = constructorArgs[field.index];
+            }
+          }
+          continue;
+        }
         if ((field as { initialValue?: unknown }).initialValue !== undefined) {
           // Property has a compile-time default value.
           // Revive BigInt strings ("0n") that occur when artifacts are loaded
@@ -667,11 +685,20 @@ export class RunarContract {
       } else if (methodNeedsChange && this.artifact.anf) {
         // Auto-compute new state from ANF IR
         const namedArgs = buildNamedArgs(userParams, resolvedArgs);
+        // Flatten FixedArray grouped state entries into their underlying
+        // synthetic scalar keys so the ANF interpreter (which only sees
+        // expanded scalars) can read them by name.
+        const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
+        const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
         const computed = computeNewState(
-          this.artifact.anf, methodName, this._state, namedArgs,
-          this.constructorArgs,
+          this.artifact.anf, methodName, flatState, namedArgs,
+          flatCtorArgs,
         );
-        this._state = { ...this._state, ...computed };
+        const merged = { ...flatState, ...computed };
+        // Re-group synthetic scalars back into array values, then merge
+        // into the user-visible state.
+        const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
+        this._state = { ...this._state, ...regrouped };
       }
       newLockingScript = this.getLockingScript();
     }
@@ -1405,6 +1432,119 @@ function reviveJsonValue(value: unknown, type: string): unknown {
     return BigInt(value);
   }
   return value;
+}
+
+/**
+ * Flatten a state record whose grouped FixedArray entries (`Board`) hold
+ * a JS array of length N into a new record where each element is keyed
+ * by its underlying synthetic scalar name (`Board__0`..`Board__8`). The
+ * grouped entries are also preserved for callers that read them later.
+ *
+ * Used at the ANF-interpreter boundary, which knows only the expanded
+ * scalar property names.
+ */
+function flattenFixedArrayState(
+  state: Record<string, unknown>,
+  stateFields: ReadonlyArray<{ name: string; fixedArray?: { syntheticNames: string[] } }> | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...state };
+  if (!stateFields) return out;
+  for (const field of stateFields) {
+    if (!field.fixedArray) continue;
+    const value = state[field.name];
+    if (!Array.isArray(value)) continue;
+    for (let i = 0; i < field.fixedArray.syntheticNames.length; i++) {
+      const synth = field.fixedArray.syntheticNames[i]!;
+      // Do not overwrite an explicit scalar in the original state.
+      if (!(synth in out)) out[synth] = value[i];
+    }
+  }
+  return out;
+}
+
+/**
+ * Re-group a state record's synthetic scalar entries back into arrays
+ * under their grouped names. Non-synthetic scalars are passed through.
+ */
+function regroupFixedArrayState(
+  state: Record<string, unknown>,
+  stateFields: ReadonlyArray<{ name: string; fixedArray?: { length: number; syntheticNames: string[] } }> | undefined,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...state };
+  if (!stateFields) return out;
+  for (const field of stateFields) {
+    if (!field.fixedArray) continue;
+    const arr: unknown[] = new Array(field.fixedArray.length);
+    let sawAny = false;
+    for (let i = 0; i < field.fixedArray.syntheticNames.length; i++) {
+      const synth = field.fixedArray.syntheticNames[i]!;
+      if (synth in out) {
+        arr[i] = out[synth];
+        sawAny = true;
+      }
+    }
+    if (sawAny) {
+      // Fall back to previous group value for any still-missing elements.
+      const prior = state[field.name];
+      if (Array.isArray(prior)) {
+        for (let i = 0; i < arr.length; i++) {
+          if (arr[i] === undefined) arr[i] = prior[i];
+        }
+      }
+      out[field.name] = arr;
+    }
+  }
+  return out;
+}
+
+/**
+ * If a constructor arg list uses the grouped FixedArray form
+ * (`[someArray, ...]`), expand each array-valued arg into N consecutive
+ * positional slots so the ANF interpreter's index-based lookup works.
+ */
+function flattenFixedArrayArgs(
+  args: unknown[],
+  abiParams: ReadonlyArray<{ name: string; fixedArray?: { length: number } }>,
+): unknown[] {
+  const out: unknown[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const param = abiParams[i];
+    const value = args[i];
+    if (param?.fixedArray && Array.isArray(value)) {
+      for (const v of value) out.push(v);
+    } else {
+      out.push(value);
+    }
+  }
+  return out;
+}
+
+/**
+ * Revive a FixedArray initial value from the stringified tuple form
+ * produced by the assembler (e.g. `"[0n,0n,0n]"`). The format is a
+ * subset of JSON with bigint suffixes; parse element-wise.
+ */
+function reviveFixedArrayInit(value: unknown, elementType: string): unknown {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return value;
+  const s = value.trim();
+  if (!s.startsWith('[') || !s.endsWith(']')) return value;
+  const inner = s.slice(1, -1).trim();
+  if (inner.length === 0) return [];
+  // Split on top-level commas (no quoted strings with commas in our format).
+  const parts = inner.split(',').map(p => p.trim()).filter(p => p.length > 0);
+  return parts.map(p => {
+    if (elementType === 'bigint' || elementType === 'int') {
+      if (p.endsWith('n')) return BigInt(p.slice(0, -1));
+      return BigInt(p);
+    }
+    if (elementType === 'boolean' || elementType === 'bool') {
+      return p === 'true';
+    }
+    // Strip surrounding quotes for string-encoded hex types.
+    if (p.startsWith('"') && p.endsWith('"')) return p.slice(1, -1);
+    return p;
+  });
 }
 
 /**

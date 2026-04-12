@@ -18,6 +18,12 @@ import type { StateField, RunarArtifact } from 'runar-ir-schema';
  * section (without the OP_RETURN prefix -- that is handled by the caller).
  *
  * Field order is determined by the `index` property of each StateField.
+ *
+ * Fields with a `fixedArray` annotation are expanded into N element writes
+ * in declaration order; callers may supply either a plain array on the
+ * grouped name (`values.Board = [...]`) or the underlying scalar fields
+ * (`values.Board__0 = ..., values.Board__1 = ..., ...`) — scalars win if
+ * both are present, for backward compatibility.
  */
 export function serializeState(
   fields: StateField[],
@@ -27,8 +33,26 @@ export function serializeState(
   let hex = '';
 
   for (const field of sorted) {
-    const value = values[field.name];
-    hex += encodeStateValue(value, field.type);
+    if (field.fixedArray) {
+      const arr = values[field.name];
+      const elementType = field.fixedArray.elementType;
+      const names = field.fixedArray.syntheticNames;
+      for (let i = 0; i < names.length; i++) {
+        let elem: unknown;
+        const synthName = names[i]!;
+        if (synthName in values) {
+          elem = values[synthName];
+        } else if (Array.isArray(arr)) {
+          elem = arr[i];
+        } else {
+          elem = undefined;
+        }
+        hex += encodeStateValue(elem, elementType);
+      }
+    } else {
+      const value = values[field.name];
+      hex += encodeStateValue(value, field.type);
+    }
   }
 
   return hex;
@@ -39,6 +63,9 @@ export function serializeState(
  *
  * The caller must strip the code prefix and OP_RETURN byte before passing
  * the data section.
+ *
+ * Fields with a `fixedArray` annotation are returned as a plain JS array on
+ * the grouped name, not as N individual scalar fields.
  */
 export function deserializeState(
   fields: StateField[],
@@ -49,9 +76,21 @@ export function deserializeState(
   let offset = 0;
 
   for (const field of sorted) {
-    const { value, bytesRead } = decodeStateValue(scriptHex, offset, field.type);
-    result[field.name] = value;
-    offset += bytesRead;
+    if (field.fixedArray) {
+      const elementType = field.fixedArray.elementType;
+      const length = field.fixedArray.length;
+      const arr: unknown[] = [];
+      for (let i = 0; i < length; i++) {
+        const { value, bytesRead } = decodeStateValue(scriptHex, offset, elementType);
+        arr.push(value);
+        offset += bytesRead;
+      }
+      result[field.name] = arr;
+    } else {
+      const { value, bytesRead } = decodeStateValue(scriptHex, offset, field.type);
+      result[field.name] = value;
+      offset += bytesRead;
+    }
   }
 
   return result;
