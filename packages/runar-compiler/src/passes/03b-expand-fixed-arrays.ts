@@ -451,6 +451,27 @@ class ExpandContext {
   }
 
   private rewriteVariableDecl(stmt: VariableDeclStatement): Statement[] {
+    // Statement-form dispatch: `const v = this.board[i]` where `i` is a
+    // runtime-index expression. Produces a shorter Bitcoin Script because
+    // each branch only materialises one field instead of stacking N-1
+    // nested ternaries.
+    const stmtForm = this.tryRewriteReadAsStatements(
+      stmt.init,
+      { kind: 'identifier', name: stmt.name, sourceLocation: stmt.sourceLocation },
+      stmt.sourceLocation,
+    );
+    if (stmtForm) {
+      // Replace the original `const v = ...` with:
+      //   [ ...prelude (hoisted __idx), let v = board__{N-1}, if-chain... ]
+      // The variable_decl's initializer becomes the fallback slot read; the
+      // subsequent if/else chain reassigns v for every in-range index.
+      return [
+        ...stmtForm.prelude,
+        { ...stmt, mutable: true, init: stmtForm.fallbackInit },
+        ...stmtForm.dispatch,
+      ];
+    }
+
     const prelude: Statement[] = [];
     const newInit = this.rewriteExpression(stmt.init, prelude);
     return [...prelude, { ...stmt, init: newInit }];
@@ -483,6 +504,33 @@ class ExpandContext {
           value: newValue,
         },
       ];
+    }
+
+    // Statement-form dispatch for `target = this.board[i]` where target is
+    // an identifier or a property_access (not an index_access — those are
+    // array writes handled above).
+    if (
+      stmt.target.kind === 'identifier' ||
+      stmt.target.kind === 'property_access'
+    ) {
+      const stmtForm = this.tryRewriteReadAsStatements(
+        stmt.value,
+        stmt.target,
+        stmt.sourceLocation,
+      );
+      if (stmtForm) {
+        // Fallback: first assign `target = board__{N-1}` then let the
+        // dispatch chain overwrite it for each in-range index. Out-of-range
+        // indices fall through to the fallback (the last slot), matching
+        // the ternary-form semantics.
+        const fallbackAssign: AssignmentStatement = {
+          kind: 'assignment',
+          target: stmt.target,
+          value: stmtForm.fallbackInit,
+          sourceLocation: stmt.sourceLocation,
+        };
+        return [...stmtForm.prelude, fallbackAssign, ...stmtForm.dispatch];
+      }
     }
 
     const newTarget = this.rewriteExpression(stmt.target, prelude);
@@ -692,6 +740,123 @@ class ExpandContext {
     }
 
     return this.buildReadDispatchTernary(meta, indexRef, loc);
+  }
+
+  /**
+   * Statement-form rewriter for a runtime-index array read.
+   *
+   * If `initExpr` is a `this.board[expr]` read on a known array property and
+   * `expr` is NOT a literal (literal indices are already handled by the
+   * expression rewriter and fold to a direct property access), return:
+   *
+   *   - `prelude`: any hoisted `const __idx_K = expr` declarations to be
+   *     emitted before the dispatch chain
+   *   - `fallbackInit`: a property_access expression reading the LAST slot
+   *     (`board__{N-1}`). The caller uses this as the initial value of the
+   *     target: either the initializer of a replacement `let v = ...`
+   *     variable_decl, or the first-line assignment to an existing target.
+   *   - `dispatch`: a list of statements — one if/else-if chain — that
+   *     assigns the matching slot to `target` for each in-range index
+   *     `0..N-2`. Out-of-range indices fall through, leaving `target` at
+   *     the fallback last-slot value.
+   *
+   * Deliberately matches the ternary-form behaviour: runtime reads do NOT
+   * bounds-check, callers must `assert(i < N)` if they care. This is
+   * Deviation 2 from the original plan and stands by design so v1 TicTacToe
+   * semantics are preserved. Do not "fix" this without also updating the
+   * ternary fallback path and the grammar spec.
+   *
+   * Returns null if the input expression is not a qualifying runtime-index
+   * read on a known array property. Callers then fall back to the
+   * expression-form (nested ternary) rewriter for any other context.
+   */
+  private tryRewriteReadAsStatements(
+    initExpr: Expression,
+    target: Expression,
+    loc: SourceLocation,
+  ): {
+    prelude: Statement[];
+    fallbackInit: Expression;
+    dispatch: Statement[];
+  } | null {
+    // Must be a direct `this.board[expr]` shape. Anything else (e.g.
+    // `this.board[i] + 1n`) is left to the expression rewriter, which emits
+    // a nested ternary chain nestled inside the surrounding expression.
+    if (initExpr.kind !== 'index_access') return null;
+    const baseName = this.tryResolveArrayBase(initExpr.object);
+    if (baseName === null) return null;
+    const meta = this.arrayMap.get(baseName) ?? this.syntheticArrays.get(baseName);
+    if (!meta) return null;
+
+    // Literal indices are already handled by the expression rewriter — it
+    // folds them to a direct `board__K` property access. Don't hijack.
+    if (this.asLiteralIndex(initExpr.index) !== null) return null;
+
+    // Nested-array runtime indices require an inner dispatch per branch
+    // and fall outside the v1 spike scope. Defer to the expression
+    // rewriter, which will emit a diagnostic.
+    if (meta.slotIsArray) return null;
+
+    // Hoist the index if impure — any sub-expressions inside `initExpr.index`
+    // are also rewritten (for chained array accesses inside the index).
+    const prelude: Statement[] = [];
+    const rewrittenIndex = this.rewriteExpression(initExpr.index, prelude);
+    const indexRef = this.hoistIfImpure(rewrittenIndex, prelude, loc, 'idx');
+
+    const N = meta.slotNames.length;
+    if (N < 2) {
+      // Length-1 arrays: the single slot IS the fallback; no dispatch needed.
+      const fallbackInit: PropertyAccessExpr = {
+        kind: 'property_access',
+        property: meta.slotNames[0]!,
+        sourceLocation: loc,
+      };
+      return { prelude, fallbackInit, dispatch: [] };
+    }
+
+    // Fallback = last slot (matches the ternary's out-of-range branch).
+    const fallbackInit: PropertyAccessExpr = {
+      kind: 'property_access',
+      property: meta.slotNames[N - 1]!,
+      sourceLocation: loc,
+    };
+
+    // Build `if (__idx === 0) target = board__0; else if (...) ... else if (__idx === N-2) target = board__{N-2};`
+    // — the (N-1)th branch is the implicit else: the fallback already
+    // holds `board__{N-1}`, so no explicit else branch is needed.
+    const dispatch: Statement[] = [];
+    let tailElse: Statement[] | undefined = undefined;
+    for (let i = N - 2; i >= 0; i--) {
+      const slot = meta.slotNames[i]!;
+      const cond: BinaryExpr = {
+        kind: 'binary_expr',
+        op: '===',
+        left: cloneExpr(indexRef),
+        right: { kind: 'bigint_literal', value: BigInt(i), sourceLocation: loc },
+        sourceLocation: loc,
+      };
+      const assign: AssignmentStatement = {
+        kind: 'assignment',
+        target: cloneExpr(target),
+        value: {
+          kind: 'property_access',
+          property: slot,
+          sourceLocation: loc,
+        },
+        sourceLocation: loc,
+      };
+      const ifStmt: IfStatement = {
+        kind: 'if_statement',
+        condition: cond,
+        then: [assign],
+        else: tailElse,
+        sourceLocation: loc,
+      };
+      tailElse = [ifStmt];
+    }
+    if (tailElse) dispatch.push(...tailElse);
+
+    return { prelude, fallbackInit, dispatch };
   }
 
   /**

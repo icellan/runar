@@ -226,7 +226,14 @@ describe('expandFixedArrays', () => {
   });
 
   describe('runtime index read', () => {
-    it('rewrites runtime index read to a nested ternary chain', () => {
+    it('rewrites statement-form `const v = this.board[idx]` as fallback-init + if-chain', () => {
+      // Statement-level context: runtime-index read on the RHS of a
+      // `variable_decl`. The pass replaces the original const with a
+      // `let v = board__{N-1}` (the fallback / last-slot read) followed by
+      // an if/else-if chain reassigning `v` to the matching slot for each
+      // in-range index `0..N-2`. Out-of-range falls through to the
+      // fallback, matching the ternary-form semantics — runtime reads do
+      // NOT bounds-check. (Deviation 2.)
       const src = `
         class R extends StatefulSmartContract {
           board: FixedArray<bigint, 3> = [0n, 0n, 0n];
@@ -240,10 +247,60 @@ describe('expandFixedArrays', () => {
       const { contract, errors } = expand(src);
       expect(errors).toEqual([]);
       const body = methodBody(contract, 'm');
+
+      // First stmt: the rewritten variable_decl with a direct property_access
+      // fallback init — NOT a nested ternary chain.
       const decl = body[0] as Extract<Statement, { kind: 'variable_decl' }>;
       expect(decl.kind).toBe('variable_decl');
+      expect(decl.name).toBe('v');
       const init = decl.init as Expression;
-      expect(init.kind).toBe('ternary_expr');
+      expect(init.kind).toBe('property_access');
+      expect((init as { property: string }).property).toBe('board__2');
+
+      // Second stmt: if-chain reassigning `v`. We expect N-1 = 2 branches
+      // (one for idx === 0, one for idx === 1). The last slot is the
+      // fallback so no explicit branch is emitted for it.
+      const ifStmt = body[1] as Extract<Statement, { kind: 'if_statement' }>;
+      expect(ifStmt.kind).toBe('if_statement');
+      let node: Statement | undefined = ifStmt;
+      let branches = 0;
+      while (node && node.kind === 'if_statement') {
+        branches++;
+        // Each branch reassigns `v` to a property_access on a board__ slot.
+        const then0 = node.then[0] as Extract<Statement, { kind: 'assignment' }>;
+        expect(then0.kind).toBe('assignment');
+        expect((then0.target as { name: string }).name).toBe('v');
+        const elseList: Statement[] = node.else ?? [];
+        node = elseList[0];
+      }
+      expect(branches).toBe(2);
+    });
+
+    it('still uses the nested ternary chain for expression-form runtime reads', () => {
+      // Runtime-index read inside a larger expression (here: addition).
+      // The statement-form rewriter cannot apply — it only matches when
+      // the entire RHS of a variable_decl / assignment is a bare
+      // `this.board[idx]`. The fallback path emits a nested ternary chain.
+      const src = `
+        class R extends StatefulSmartContract {
+          board: FixedArray<bigint, 3> = [0n, 0n, 0n];
+          constructor() { super(); }
+          public m(idx: bigint): bigint {
+            return this.board[idx] + 1n;
+          }
+        }
+      `;
+      const { contract, errors } = expand(src);
+      expect(errors).toEqual([]);
+      const body = methodBody(contract, 'm');
+      // The return statement's value should now be a binary_expr whose
+      // left operand is the ternary dispatch chain.
+      const ret = body.find(s => s.kind === 'return_statement') as Extract<Statement, { kind: 'return_statement' }>;
+      expect(ret).toBeTruthy();
+      const val = ret.value as Expression;
+      expect(val.kind).toBe('binary_expr');
+      const bin = val as Extract<Expression, { kind: 'binary_expr' }>;
+      expect(bin.left.kind).toBe('ternary_expr');
     });
   });
 });
