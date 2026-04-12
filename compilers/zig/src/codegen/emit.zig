@@ -574,20 +574,31 @@ pub fn emitArtifact(
         try w.writeAll("],");
     }
 
-    // stateFields — mutable (non-readonly) properties
+    // stateFields — mutable (non-readonly) properties, with synthetic
+    // FixedArray runs re-grouped into a single logical entry via the
+    // iterative marker-driven regrouper (mirrors the TS assembler).
     try w.writeAll("\"stateFields\":[");
     {
-        var state_idx: u32 = 0;
-        for (anf_program.properties) |prop| {
-            if (!prop.readonly) {
-                if (state_idx > 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop.name);
-                try w.writeAll(",\"type\":");
-                try writeJsonString(w, prop.type_name);
-                try w.print(",\"index\":{d}}}", .{state_idx});
-                state_idx += 1;
+        const regrouped = try regroupStateFields(allocator, anf_program.properties);
+        defer freeRegroupedEntries(allocator, regrouped);
+        for (regrouped, 0..) |entry, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, entry.name);
+            try w.writeAll(",\"type\":");
+            try writeJsonString(w, entry.type_str);
+            try w.print(",\"index\":{d}", .{entry.index});
+            if (entry.fixed_array) |fa| {
+                try w.writeAll(",\"fixedArray\":{\"elementType\":");
+                try writeJsonString(w, fa.element_type);
+                try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
+                for (fa.synthetic_names, 0..) |sn, j| {
+                    if (j > 0) try w.writeByte(',');
+                    try writeJsonString(w, sn);
+                }
+                try w.writeAll("]}");
             }
+            try w.writeByte('}');
         }
     }
     try w.writeAll("],");
@@ -1610,6 +1621,142 @@ test "push value encoding — bool false is OP_0" {
 
     try emitStackOp(&ctx, .{ .push = .{ .boolean = false } });
     try std.testing.expectEqualSlices(u8, &.{0x00}, ctx.script_bytes.items);
+}
+
+// ---------------------------------------------------------------------------
+// StateField re-grouping (FixedArray collapse)
+// ---------------------------------------------------------------------------
+//
+// Mirrors packages/runar-compiler/src/artifact/assembler.ts `regroupOnePass`/
+// `regroupSyntheticRuns`. Walks mutable (non-readonly) ANF properties and
+// collapses runs whose innermost `synthetic_array_chain` level forms a
+// contiguous 0..N-1 sequence under the same `base` name. Iterated until no
+// chain has any unconsumed levels, so nested arrays collapse from innermost
+// outward.
+
+const RegroupFA = struct {
+    element_type: []const u8,
+    length: u32,
+    synthetic_names: [][]const u8,
+};
+
+const RegroupEntry = struct {
+    name: []const u8,
+    type_str: []const u8,
+    chain: []const types.SyntheticArrayLevel,
+    index: u32,
+    fixed_array: ?RegroupFA,
+};
+
+fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProperty) ![]RegroupEntry {
+    var flat: std.ArrayListUnmanaged(RegroupEntry) = .empty;
+    var state_idx: u32 = 0;
+    for (props) |p| {
+        if (p.readonly) continue;
+        const chain: []const types.SyntheticArrayLevel = if (p.synthetic_array_chain) |c| c else &.{};
+        try flat.append(allocator, .{
+            .name = p.name,
+            .type_str = p.type_name,
+            .chain = chain,
+            .index = state_idx,
+            .fixed_array = null,
+        });
+        state_idx += 1;
+    }
+
+    var current = try flat.toOwnedSlice(allocator);
+    var iter: usize = 0;
+    while (iter < 1024) : (iter += 1) {
+        const res = try regroupOnePass(allocator, current);
+        allocator.free(current);
+        current = res.out;
+        if (!res.changed) return current;
+    }
+    return current;
+}
+
+fn freeRegroupedEntries(allocator: std.mem.Allocator, entries: []RegroupEntry) void {
+    for (entries) |e| {
+        if (e.fixed_array) |fa| {
+            allocator.free(fa.synthetic_names);
+        }
+    }
+    allocator.free(entries);
+}
+
+const PassResult = struct { out: []RegroupEntry, changed: bool };
+
+fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !PassResult {
+    var out: std.ArrayListUnmanaged(RegroupEntry) = .empty;
+    var changed = false;
+    var i: usize = 0;
+    while (i < entries.len) {
+        const entry = entries[i];
+        const chain_len = entry.chain.len;
+        if (chain_len == 0) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+        const marker = entry.chain[chain_len - 1];
+        if (marker.index != 0) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+
+        // Greedily extend: every follower must share the same innermost
+        // {base, length}, carry the expected index = k, and have identical
+        // current type.
+        var run_count: u32 = 1;
+        var j: usize = i + 1;
+        while (j < entries.len and run_count < marker.length) : (j += 1) {
+            const next = entries[j];
+            if (next.chain.len == 0) break;
+            const m2 = next.chain[next.chain.len - 1];
+            if (!std.mem.eql(u8, m2.base, marker.base)) break;
+            if (m2.length != marker.length) break;
+            if (m2.index != run_count) break;
+            if (!std.mem.eql(u8, next.type_str, entry.type_str)) break;
+            run_count += 1;
+        }
+        if (run_count != marker.length) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+
+        // Collapse the run.
+        const inner_type = entry.type_str;
+        const grouped_type = try std.fmt.allocPrint(allocator, "FixedArray<{s}, {d}>", .{ inner_type, marker.length });
+
+        // Flatten synthetic names.
+        var synth: std.ArrayListUnmanaged([]const u8) = .empty;
+        var k: usize = 0;
+        while (k < run_count) : (k += 1) {
+            const child = entries[i + k];
+            if (child.fixed_array) |fa| {
+                for (fa.synthetic_names) |sn| try synth.append(allocator, sn);
+            } else {
+                try synth.append(allocator, child.name);
+            }
+        }
+
+        try out.append(allocator, .{
+            .name = marker.base,
+            .type_str = grouped_type,
+            .chain = entry.chain[0 .. chain_len - 1],
+            .index = entry.index,
+            .fixed_array = .{
+                .element_type = inner_type,
+                .length = marker.length,
+                .synthetic_names = try synth.toOwnedSlice(allocator),
+            },
+        });
+        i += run_count;
+        changed = true;
+    }
+    return .{ .out = try out.toOwnedSlice(allocator), .changed = changed };
 }
 
 test "byte offset tracking" {

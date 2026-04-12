@@ -116,7 +116,34 @@ pub const ParentClass = enum {
 };
 
 pub const ContractNode = struct { name: []const u8, parent_class: ParentClass, properties: []PropertyNode, constructor: ConstructorNode, methods: []MethodNode };
-pub const PropertyNode = struct { name: []const u8, type_info: RunarType, readonly: bool, initializer: ?Expression = null };
+
+/// Nesting level marker used by `expand_fixed_arrays.zig`. The full chain
+/// records every FixedArray level that produced a synthetic scalar leaf,
+/// outermost first. Consumed by the assembler (ABI re-grouping) and the SDK
+/// (state flatten/regroup).
+pub const SyntheticArrayLevel = struct {
+    base: []const u8,
+    index: u32,
+    length: u32,
+};
+
+pub const PropertyNode = struct {
+    name: []const u8,
+    type_info: RunarType,
+    readonly: bool,
+    initializer: ?Expression = null,
+    /// Non-zero when `type_info == .fixed_array` (set by the parser) or when
+    /// we want to remember the original outer length for post-expansion.
+    fixed_array_length: u32 = 0,
+    /// Element type when `type_info == .fixed_array`. .unknown otherwise.
+    fixed_array_element: RunarType = .unknown,
+    /// Nested element length for `FixedArray<FixedArray<T, M>, N>`. Zero for flat arrays.
+    fixed_array_nested_length: u32 = 0,
+    /// Synthetic-array chain attached by expand_fixed_arrays pass. Populated on
+    /// scalar leaves of an expanded FixedArray property. Null on non-expanded
+    /// properties. The chain is outermost-first.
+    synthetic_array_chain: ?[]const SyntheticArrayLevel = null,
+};
 pub const ConstructorNode = struct { params: []ParamNode, super_args: []Expression, assignments: []AssignmentNode };
 pub const MethodNode = struct { name: []const u8, is_public: bool, params: []ParamNode, body: []Statement, source_loc: ?SourceLocation = null };
 pub const ParamNode = struct { name: []const u8, type_info: RunarType = .unknown, type_name: []const u8 = "" };
@@ -126,7 +153,18 @@ pub const AssignmentNode = struct { target: []const u8, value: Expression };
 pub const Statement = union(enum) { const_decl: ConstDecl, let_decl: LetDecl, assign: Assign, if_stmt: IfStmt, for_stmt: ForStmt, expr_stmt: Expression, assert_stmt: AssertStmt, return_stmt: ?Expression };
 pub const ConstDecl = struct { name: []const u8, type_info: ?RunarType = null, value: Expression, source_loc: ?SourceLocation = null };
 pub const LetDecl = struct { name: []const u8, type_info: ?RunarType = null, value: ?Expression = null, source_loc: ?SourceLocation = null };
-pub const Assign = struct { target: []const u8, value: Expression, source_loc: ?SourceLocation = null };
+pub const Assign = struct {
+    target: []const u8,
+    value: Expression,
+    source_loc: ?SourceLocation = null,
+    /// When non-null, the assignment target is `this.<prop>[index]`, and
+    /// `target` is the base property name. Populated by the parser when it
+    /// sees an index-access LHS; consumed by `expand_fixed_arrays.zig` which
+    /// rewrites the statement into a direct-access (literal index) or
+    /// dispatch (runtime index) form before ANF lowering. Must be null by
+    /// the time ANF lowering runs.
+    index_target: ?*IndexAccess = null,
+};
 pub const IfStmt = struct { condition: Expression, then_body: []Statement, else_body: ?[]Statement = null, source_loc: ?SourceLocation = null };
 pub const ForStmt = struct { var_name: []const u8, init_value: i64, bound: i64, body: []Statement, source_loc: ?SourceLocation = null };
 pub const AssertStmt = struct { condition: Expression, message: ?[]const u8 = null, source_loc: ?SourceLocation = null };
@@ -207,6 +245,9 @@ pub const ANFProperty = struct {
     type_info: RunarType = .unknown,
     readonly: bool,
     initial_value: ?ConstValue = null,
+    /// Synthetic-array chain, threaded through from the AST PropertyNode. Non-null
+    /// only on expanded FixedArray leaves. Consumed by the ABI re-grouper.
+    synthetic_array_chain: ?[]const SyntheticArrayLevel = null,
 };
 pub const ANFConstructor = struct { params: []ParamNode, assertions: []ANFBinding };
 pub const ANFMethod = struct {

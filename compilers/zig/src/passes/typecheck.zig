@@ -420,7 +420,22 @@ const TypeChecker = struct {
                 }
             },
             .assign => |assign| {
+                // Index-target writes (e.g. `this.board[i] = v`) are typed
+                // permissively — the FixedArray element type is resolved later
+                // by the expand_fixed_arrays pass. We still type-check the
+                // value + index sub-expressions.
+                if (assign.index_target != null) {
+                    _ = self.inferExprType(assign.index_target.?.index, env);
+                    _ = self.inferExprType(assign.value, env);
+                    return;
+                }
                 const target_type = if (self.prop_types.get(assign.target)) |t| t else (env.lookup(assign.target) orelse .unknown);
+                // Skip subtype check when the target is a FixedArray — the
+                // expand pass will split it into scalar siblings.
+                if (target_type == .fixed_array) {
+                    _ = self.inferExprType(assign.value, env);
+                    return;
+                }
                 const value_type = self.inferExprType(assign.value, env);
                 if (!isSubtype(value_type, target_type)) {
                     self.addError("type '{s}' is not assignable to type '{s}'", .{

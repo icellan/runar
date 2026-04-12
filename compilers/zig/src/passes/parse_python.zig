@@ -894,11 +894,28 @@ const Parser = struct {
 
         self.skipNewlines();
 
+        // Capture FixedArray shape so expand_fixed_arrays.zig can see the
+        // length + element type after typecheck.
+        var fa_len: u32 = 0;
+        var fa_elem: types.RunarType = .unknown;
+        var fa_nested_len: u32 = 0;
+        if (type_node == .fixed_array_type) {
+            fa_len = type_node.fixed_array_type.length;
+            const inner = type_node.fixed_array_type.element.*;
+            fa_elem = typeNodeToRunarType(inner);
+            if (inner == .fixed_array_type) {
+                fa_nested_len = inner.fixed_array_type.length;
+            }
+        }
+
         return .{
             .name = prop_name,
             .type_info = type_info,
             .readonly = is_readonly,
             .initializer = initializer,
+            .fixed_array_length = fa_len,
+            .fixed_array_element = fa_elem,
+            .fixed_array_nested_length = fa_nested_len,
         };
     }
 
@@ -1410,17 +1427,30 @@ const Parser = struct {
     }
 
     fn buildAssignment(self: *Parser, target: Expression, value: Expression) ?Statement {
+        _ = self;
         switch (target) {
             .property_access => |pa| {
                 return .{ .assign = .{ .target = pa.property, .value = value } };
             },
             .identifier => |id| {
                 // In Python, bare `name = expr` in method body is a variable declaration
-                _ = self;
                 return .{ .let_decl = .{ .name = id, .value = value } };
             },
+            .index_access => |ia| {
+                // self.arr[idx] = value — carry the full target so
+                // expand_fixed_arrays can rewrite it into dispatch form.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                } };
+            },
             else => {
-                _ = self;
                 return .{ .assign = .{ .target = "unknown", .value = value } };
             },
         }

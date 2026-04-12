@@ -137,6 +137,7 @@ fn lowerProperties(allocator: Allocator, contract: ContractNode) LowerError![]AN
             .type_name = types.runarTypeToString(prop.type_info),
             .type_info = prop.type_info,
             .readonly = prop.readonly,
+            .synthetic_array_chain = prop.synthetic_array_chain,
         };
         // Only emit initialValue for properties that have defaults AND are NOT
         // constructor params. This matches the TS compiler: properties with

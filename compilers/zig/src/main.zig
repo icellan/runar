@@ -11,6 +11,7 @@ const parse_python = @import("passes/parse_python.zig");
 const parse_ruby = @import("passes/parse_ruby.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
+const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
 const anf_lower = @import("passes/anf_lower.zig");
 const constant_fold = @import("passes/constant_fold.zig");
 const ec_optimizer = @import("passes/ec_optimizer.zig");
@@ -324,8 +325,17 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         return error.TypeCheckFailed;
     }
 
+    // Pass 3b: Expand FixedArray properties into scalar siblings + dispatch
+    // chains. No-op when the contract has no FixedArray properties.
+    const expanded = try expand_fixed_arrays.expand(work_allocator, contract);
+    if (expanded.errors.len > 0) {
+        for (expanded.errors) |diag| std.debug.print("  fixed-array error: {s}\n", .{diag.message});
+        return error.ValidationFailed;
+    }
+    const expanded_contract = expanded.contract;
+
     // Pass 4: ANF Lower
-    var program = try anf_lower.lowerToANF(work_allocator, contract);
+    var program = try anf_lower.lowerToANF(work_allocator, expanded_contract);
 
     // Pass 4.25: Constant Fold
     if (!opts.disable_constant_folding) {
