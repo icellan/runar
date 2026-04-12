@@ -472,8 +472,17 @@ func (p *goContractParser) convertStatement(stmt ast.Stmt) Statement {
 		thenBlock := p.extractStatements(s.Body)
 		var elseBlock []Statement
 		if s.Else != nil {
-			if block, ok := s.Else.(*ast.BlockStmt); ok {
-				elseBlock = p.extractStatements(block)
+			switch e := s.Else.(type) {
+			case *ast.BlockStmt:
+				elseBlock = p.extractStatements(e)
+			case *ast.IfStmt:
+				// `else if` — Go's parser represents this as an
+				// IfStmt nested directly in the Else field (no
+				// enclosing block). Treat the nested IfStmt as a
+				// single statement in the else block.
+				if inner := p.convertStatement(e); inner != nil {
+					elseBlock = []Statement{inner}
+				}
 			}
 		}
 		return IfStmt{
@@ -634,6 +643,24 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		obj := p.convertExpression(e.X)
 		idx := p.convertExpression(e.Index)
 		return IndexAccessExpr{Object: obj, Index: idx}
+
+	case *ast.CompositeLit:
+		// Array composite literal: `[9]runar.Bigint{0, 0, ...}` or the
+		// elided-length variant `[...]T{...}`. Only array-shaped
+		// composites are supported; struct composites are not valid
+		// Rúnar expressions.
+		if _, ok := e.Type.(*ast.ArrayType); ok || e.Type == nil {
+			elements := make([]Expression, 0, len(e.Elts))
+			for _, elt := range e.Elts {
+				ex := p.convertExpression(elt)
+				if ex == nil {
+					return nil
+				}
+				elements = append(elements, ex)
+			}
+			return ArrayLiteralExpr{Elements: elements}
+		}
+		return nil
 	}
 
 	return nil
