@@ -217,80 +217,106 @@ function typeToString(type: TypeNode): string {
 //
 // Pass 3b (expand-fixed-arrays) expands a property like
 // `Board: FixedArray<bigint, 9>` into 9 scalar siblings `Board__0..Board__8`.
+// For nested arrays `Grid: FixedArray<FixedArray<bigint, 2>, 2>` it expands
+// into 4 scalar leaves `Grid__0__0, Grid__0__1, Grid__1__0, Grid__1__1`.
 // The downstream passes (ANF, stack, emit) see and operate on those scalars.
 //
 // For the user-facing ABI and state-field list we re-group those synthetic
 // siblings back into a single logical entry tagged `fixedArray` so the
-// SDK can present the array-shaped API.
+// SDK can present the array-shaped API — including nested arrays, which
+// the SDK exposes as nested JS arrays (`[[0n,0n],[0n,0n]]`).
 //
 // Grouping is marker-driven, NOT pattern-driven: every participating
-// entry must carry a `__syntheticArrayBase` marker attached at expansion
-// time. This means a user-written contract with hand-named properties
+// entry must carry a `__syntheticArrayChain` attached at expansion time.
+// This means a user-written contract with hand-named properties
 // `user__0`, `user__1`, `user__2` of the same type will NOT be grouped
-// — the marker is missing, so the regrouper leaves them as independent
+// — the chain is missing, so the regrouper leaves them as independent
 // scalars. Without this guard the regrouper would silently miscompile
 // into a bogus `FixedArray<T,3>` ABI entry.
+//
+// The regrouper runs iteratively: each pass collapses one level of the
+// innermost FixedArray (peeling one entry off the end of every chain)
+// and wraps the resulting group's type in one more `FixedArray<...,N>`
+// layer. Repeat until no entry has any remaining chain.
 // ---------------------------------------------------------------------------
 
-interface SyntheticMarker {
+interface ChainEntry {
   base: string;
   index: number;
   length: number;
 }
 
-interface RunDescriptor<T> {
-  baseName: string;
-  elementType: string;
-  length: number;
-  entries: T[]; // contiguous expanded entries, one per in-order slot
+/**
+ * Internal representation of a field going through the iterative
+ * regrouping loop. `name`, `type` and `fixedArray` hold the current
+ * (possibly already partially-grouped) user-facing view; `chain` is
+ * the still-to-be-consumed nesting levels (innermost = last).
+ *
+ * `initialValue` is widened to the recursive `StateFieldInitialValue`
+ * so intermediate groups can nest JS arrays as the regroup climbs
+ * outward.
+ */
+interface RegroupEntry {
+  name: string;
+  type: string;
+  chain: ChainEntry[];
+  initialValue?: StateFieldInitialValue;
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
+  /** Source declaration index (only meaningful for state fields). */
+  index?: number;
 }
 
 /**
- * Walk a list of entries and find maximal runs backed by a matching
- * `__syntheticArrayBase` marker. All entries in a run must share the
- * same `base` and `length` and cover contiguous `index = 0..length-1`,
- * AND share the same element type. Returns a list where each item is
- * either the original entry (ungrouped) or a `RunDescriptor` describing
- * the grouped run.
+ * Run one pass of the iterative regrouper: find maximal runs whose
+ * innermost (last) chain entries match — same `base`, same `length`,
+ * contiguous `index = 0..length-1`, same `type` — and collapse each
+ * into a single entry whose `type` is wrapped in one more FixedArray
+ * layer, whose chain has that innermost level popped off, and whose
+ * `initialValue` is the collapsed JS array (if every child had one).
  *
- * Entries that lack the marker are always emitted ungrouped, even if
- * their names happen to pattern-match `<base>__<i>`. This is the core
- * guard that distinguishes compiler-synthesised siblings from
- * user-written properties.
+ * Entries whose chain is empty or whose innermost marker doesn't
+ * start a run are left alone. Returns `true` if at least one group
+ * was formed, so the caller knows whether to iterate again.
  */
-function detectSyntheticRuns<
-  T extends { name: string; type: string; syntheticMarker?: SyntheticMarker },
->(entries: T[]): Array<T | RunDescriptor<T>> {
-  const result: Array<T | RunDescriptor<T>> = [];
+function regroupOnePass(entries: RegroupEntry[]): { out: RegroupEntry[]; changed: boolean } {
+  const out: RegroupEntry[] = [];
+  let changed = false;
   let i = 0;
   while (i < entries.length) {
     const entry = entries[i]!;
-    const marker = entry.syntheticMarker;
-    if (!marker || marker.index !== 0) {
-      // Not the head of a synthetic run — emit as-is.
-      result.push(entry);
+    const chainLen = entry.chain.length;
+    if (chainLen === 0) {
+      out.push(entry);
       i++;
       continue;
     }
-    const base = marker.base;
-    const length = marker.length;
-    const elementType = entry.type;
+    const marker = entry.chain[chainLen - 1]!;
+    if (marker.index !== 0) {
+      out.push(entry);
+      i++;
+      continue;
+    }
 
-    // Greedily extend the run while the next entry is a synthetic sibling
-    // of the same base/length with the expected `index = k` and the same
-    // element type.
-    const runEntries: T[] = [entry];
+    // Greedily extend: every follower must share the same innermost
+    // {base, length}, carry the expected index = k, and have the
+    // identical current `type` (so runs of mixed-type children cannot
+    // spuriously collapse).
+    const runEntries: RegroupEntry[] = [entry];
     let k = 1;
     let j = i + 1;
-    while (j < entries.length && k < length) {
+    while (j < entries.length && k < marker.length) {
       const next = entries[j]!;
-      const m2 = next.syntheticMarker;
+      if (next.chain.length === 0) break;
+      const m2 = next.chain[next.chain.length - 1]!;
       if (
-        !m2 ||
-        m2.base !== base ||
-        m2.length !== length ||
+        m2.base !== marker.base ||
+        m2.length !== marker.length ||
         m2.index !== k ||
-        next.type !== elementType
+        next.type !== entry.type
       ) {
         break;
       }
@@ -299,23 +325,86 @@ function detectSyntheticRuns<
       j++;
     }
 
-    if (runEntries.length === length && length >= 1) {
-      result.push({
-        baseName: base,
-        elementType,
-        length,
-        entries: runEntries,
-      });
-      i = j;
-    } else {
-      // Partial or broken run — defensive. A well-formed expansion always
-      // emits all N siblings contiguously, so this only fires on
-      // bugs/malformed inputs. Leave them ungrouped.
-      result.push(entry);
+    if (runEntries.length !== marker.length) {
+      // Partial or broken run — defensive. A well-formed expansion
+      // always emits all N siblings contiguously, so this only fires
+      // on bugs/malformed inputs. Leave them ungrouped.
+      out.push(entry);
       i++;
+      continue;
     }
+
+    // Collapse this run into one intermediate entry. The parent chain
+    // (levels still to be consumed above this one) is the shared
+    // `entry.chain.slice(0, -1)`.
+    const innerType = entry.type;
+    const groupedType = `FixedArray<${innerType}, ${marker.length}>`;
+
+    // For leaf-level groups (no prior fixedArray), the synthetic names
+    // are the leaf property names. For higher-level groups collapsing
+    // already-grouped children, we flatten the child synthetic names
+    // in declaration order so the final state-field descriptor has a
+    // flat leaf list the SDK can walk linearly.
+    const syntheticNames: string[] = [];
+    for (const e of runEntries) {
+      if (e.fixedArray) {
+        syntheticNames.push(...e.fixedArray.syntheticNames);
+      } else {
+        syntheticNames.push(e.name);
+      }
+    }
+
+    // Collapse initial values: every child must have one. At leaf
+    // level the child value is a scalar; at higher levels it is
+    // already a (possibly nested) array, produced by the previous
+    // regroup pass.
+    let collapsedInit: StateFieldInitialValue | undefined = undefined;
+    const allHaveInit = runEntries.every(e => e.initialValue !== undefined);
+    if (allHaveInit) {
+      collapsedInit = runEntries.map(e => e.initialValue as StateFieldInitialValue);
+    }
+
+    const grouped: RegroupEntry = {
+      name: marker.base,
+      type: groupedType,
+      chain: entry.chain.slice(0, -1),
+      fixedArray: {
+        elementType: innerType,
+        length: marker.length,
+        syntheticNames,
+      },
+      index: runEntries[0]!.index,
+    };
+    if (collapsedInit !== undefined) {
+      grouped.initialValue = collapsedInit;
+    }
+
+    out.push(grouped);
+    i = j;
+    changed = true;
   }
-  return result;
+  return { out, changed };
+}
+
+/**
+ * Iteratively regroup synthetic FixedArray runs until no entry has any
+ * remaining chain. Each pass consumes one nesting level. Returns the
+ * final entries, which for nested arrays carry `fixedArray` metadata
+ * whose `elementType` is itself a `FixedArray<...>` string and whose
+ * `syntheticNames` is the flat leaf list.
+ */
+function regroupSyntheticRuns(entries: RegroupEntry[]): RegroupEntry[] {
+  let current = entries;
+  // Guard against pathological loops: the deepest legal chain is
+  // bounded by how many FixedArray levels the user nested. Cap at
+  // 1024 just to make runaway bugs surface as a hard error instead
+  // of an infinite loop.
+  for (let iter = 0; iter < 1024; iter++) {
+    const { out, changed } = regroupOnePass(current);
+    current = out;
+    if (!changed) return current;
+  }
+  throw new Error('regroupSyntheticRuns: exceeded iteration cap (pathological chain nesting?)');
 }
 
 // ---------------------------------------------------------------------------
@@ -387,40 +476,33 @@ function paramToABI(param: ParamNode): ABIParam {
 
 /**
  * Re-group contiguous synthetic FixedArray params back into a single
- * FixedArray-typed ABI param. `ParamNode` never carries the synthetic
- * marker (FixedArray is not allowed as a method or constructor
- * parameter), so in practice this is a no-op — but we still run the
- * regrouper so the type signature is consistent with state-field
- * regrouping and so any future auto-generated constructor that does
- * propagate markers Just Works.
+ * (possibly nested) FixedArray-typed ABI param. `ParamNode` never
+ * carries the synthetic chain (FixedArray is not allowed as a method
+ * or constructor parameter), so in practice this is a no-op — but we
+ * still run the regrouper so the type signature is consistent with
+ * state-field regrouping and so any future auto-generated constructor
+ * that does propagate markers Just Works.
  */
-function regroupAbiParams(params: ABIParam[]): ABIParam[] {
-  // Shallow cast: the marker is optional on ABIParam and will be absent
-  // for every param derived from a user-written ParamNode.
-  const runs = detectSyntheticRuns(
-    params as Array<ABIParam & { syntheticMarker?: SyntheticMarker }>,
-  );
-  const out: ABIParam[] = [];
-  for (const entry of runs) {
-    if ('entries' in entry) {
-      const grouped: ABIParam = {
-        name: entry.baseName,
-        type: `FixedArray<${entry.elementType}, ${entry.length}>`,
-        fixedArray: {
-          elementType: entry.elementType,
-          length: entry.length,
-          syntheticNames: entry.entries.map(e => e.name),
-        },
+function regroupAbiParams(
+  params: Array<ABIParam & { __chain?: ChainEntry[] }>,
+): ABIParam[] {
+  const entries: RegroupEntry[] = params.map(p => ({
+    name: p.name,
+    type: p.type,
+    chain: p.__chain ? [...p.__chain] : [],
+  }));
+  const regrouped = regroupSyntheticRuns(entries);
+  return regrouped.map(e => {
+    const out: ABIParam = { name: e.name, type: e.type };
+    if (e.fixedArray) {
+      out.fixedArray = {
+        elementType: e.fixedArray.elementType,
+        length: e.fixedArray.length,
+        syntheticNames: [...e.fixedArray.syntheticNames],
       };
-      out.push(grouped);
-    } else {
-      // Strip the transient `syntheticMarker` helper field before
-      // emitting into the user-facing ABI.
-      const { syntheticMarker: _sm, ...rest } = entry;
-      out.push(rest);
     }
-  }
-  return out;
+    return out;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -434,88 +516,66 @@ function regroupAbiParams(params: ABIParam[]): ABIParam[] {
  * contract execution and must be serialized into the next UTXO's locking
  * script for stateful contracts.
  *
- * If ANF properties are provided, initialValue is read from them.
+ * If ANF properties are provided, initialValue is read from them. For
+ * nested FixedArray properties the expand-fixed-arrays pass attaches a
+ * `__syntheticArrayChain` to each leaf, and the iterative regrouper
+ * collapses the resulting runs back into a nested FixedArray state
+ * field whose `initialValue` is a nested JS array mirroring the
+ * declared shape.
  */
 function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram): StateField[] {
-  // Step 1: build the flat per-property state fields exactly as before,
-  // propagating the `__syntheticArrayBase` marker (if any) attached by
-  // the expand-fixed-arrays pass onto a transient `syntheticMarker`
-  // helper field for the re-grouper to consume.
-  type FlatStateField = StateField & { syntheticMarker?: SyntheticMarker };
-  const flat: FlatStateField[] = [];
+  // Step 1: build the flat per-property regroup entries from mutable
+  // properties, carrying the full synthetic-array chain so the
+  // iterative regrouper can collapse nested arrays level by level.
+  const flat: RegroupEntry[] = [];
   for (let i = 0; i < properties.length; i++) {
     const prop = properties[i]!;
-    if (!prop.readonly) {
-      const field: FlatStateField = {
-        name: prop.name,
-        type: typeToString(prop.type),
-        index: i, // property position = constructor arg index
-      };
+    if (prop.readonly) continue;
 
-      if (prop.__syntheticArrayBase) {
-        field.syntheticMarker = {
-          base: prop.__syntheticArrayBase.base,
-          index: prop.__syntheticArrayBase.index,
-          length: prop.__syntheticArrayBase.length,
-        };
+    const entry: RegroupEntry = {
+      name: prop.name,
+      type: typeToString(prop.type),
+      chain: prop.__syntheticArrayChain ? [...prop.__syntheticArrayChain] : [],
+      index: i, // property position = constructor arg index
+    };
+
+    if (anfProgram) {
+      const anfProp = anfProgram.properties.find(p => p.name === prop.name);
+      if (anfProp?.initialValue !== undefined) {
+        entry.initialValue = anfProp.initialValue as StateFieldInitialValue;
       }
-
-      if (anfProgram) {
-        const anfProp = anfProgram.properties.find(p => p.name === prop.name);
-        if (anfProp?.initialValue !== undefined) {
-          field.initialValue = anfProp.initialValue;
-        }
-      }
-
-      flat.push(field);
     }
+
+    flat.push(entry);
   }
 
-  // Step 2: re-group synthetic runs into a single FixedArray state field
-  // so the SDK presents `state.Board = [...]` instead of 9 separate
-  // scalar fields. Only runs whose every element carries a matching
-  // synthetic marker are grouped — a hand-written contract with
-  // `user__0`, `user__1`, `user__2` of the same type stays as 3
-  // independent scalars.
-  const runs = detectSyntheticRuns(flat);
-  const grouped: StateField[] = [];
-  for (const entry of runs) {
-    if ('entries' in entry) {
-      const first = entry.entries[0]!;
-      const field: StateField = {
-        name: entry.baseName,
-        type: `FixedArray<${entry.elementType}, ${entry.length}>`,
-        index: first.index,
-        fixedArray: {
-          elementType: entry.elementType,
-          length: entry.length,
-          syntheticNames: entry.entries.map(e => e.name),
-        },
-      };
-      // If every element has a compile-time initialValue, surface it as
-      // a real JS array so the SDK can pre-populate `state.<name>`
-      // without parsing a stringified tuple. `StateField.initialValue`
-      // is widened to accept `ReadonlyArray<string|bigint|boolean>`
-      // for exactly this case. Mixed states (some with initializers,
-      // some without) are omitted and left for constructor-arg
-      // resolution.
-      const allHaveInit = entry.entries.every(e => e.initialValue !== undefined);
-      if (allHaveInit) {
-        field.initialValue = entry.entries.map(e => {
-          // We've already filtered on undefined above.
-          return e.initialValue as string | bigint | boolean;
-        });
-      }
-      grouped.push(field);
-    } else {
-      // Strip the transient `syntheticMarker` helper field before
-      // emitting — it is an internal detail of the regrouper.
-      const { syntheticMarker: _sm, ...rest } = entry;
-      grouped.push(rest);
+  // Step 2: iteratively re-group synthetic runs. Each pass collapses
+  // one level of the innermost FixedArray. Runs with empty chains
+  // stay as scalar state fields. Nested arrays collapse bottom-up
+  // into a single entry whose `fixedArray.elementType` is itself a
+  // `FixedArray<...,N>` string and whose `syntheticNames` list is the
+  // flat leaf list.
+  const regrouped = regroupSyntheticRuns(flat);
+  const out: StateField[] = [];
+  for (const e of regrouped) {
+    const field: StateField = {
+      name: e.name,
+      type: e.type,
+      index: e.index ?? 0,
+    };
+    if (e.initialValue !== undefined) {
+      field.initialValue = e.initialValue;
     }
+    if (e.fixedArray) {
+      field.fixedArray = {
+        elementType: e.fixedArray.elementType,
+        length: e.fixedArray.length,
+        syntheticNames: [...e.fixedArray.syntheticNames],
+      };
+    }
+    out.push(field);
   }
-
-  return grouped;
+  return out;
 }
 
 // ---------------------------------------------------------------------------

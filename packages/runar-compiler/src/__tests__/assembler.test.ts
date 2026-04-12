@@ -395,7 +395,7 @@ describe('Assembler', () => {
   // `user__2` of the same type must NOT be re-grouped into a single
   // `FixedArray<bigint, 3>` state field / ABI entry. The pattern matches
   // the shape the expand-fixed-arrays pass produces, but without the
-  // `__syntheticArrayBase` marker the regrouper must leave them alone.
+  // `__syntheticArrayChain` marker the regrouper must leave them alone.
   describe('FixedArray regrouping — marker guard', () => {
     const HAND_NAMED_SOURCE = `
       import { StatefulSmartContract } from 'runar-lang';

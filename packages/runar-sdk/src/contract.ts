@@ -79,15 +79,14 @@ export class RunarContract {
           // FixedArray state field. The assembler stores `initialValue`
           // (when every element has a compile-time default) as a real
           // JS array of element values — no more stringified-tuple
-          // parsing. Array elements may still be bigint-as-string when
-          // the artifact was loaded via a plain JSON import without the
-          // custom reviver, so revive each element by the underlying
-          // element type.
+          // parsing. For nested arrays the stored value is a nested
+          // JS array mirroring the declared shape. Leaf values may
+          // still be bigint-as-string when the artifact was loaded
+          // via a plain JSON import without the custom reviver, so
+          // walk the tree and revive each leaf.
           const rawInit = (field as { initialValue?: unknown }).initialValue;
           if (Array.isArray(rawInit)) {
-            this._state[field.name] = rawInit.map(v =>
-              reviveJsonValue(v, fa.elementType),
-            );
+            this._state[field.name] = reviveNestedValue(rawInit, field.type);
           } else if (rawInit !== undefined) {
             // Defensive: we shouldn't hit this path anymore, but if a
             // third-party producer emits a scalar where we expect an
@@ -1446,9 +1445,124 @@ function reviveJsonValue(value: unknown, type: string): unknown {
 }
 
 /**
+ * Recursively revive a (possibly nested) initialValue tree against its
+ * declared type. For `FixedArray<FixedArray<bigint, 2>, 2>` this walks
+ * 2 levels deep and reviveJsonValues each leaf as `bigint`.
+ */
+function reviveNestedValue(value: unknown, type: string): unknown {
+  if (!type.startsWith('FixedArray<')) {
+    return reviveJsonValue(value, type);
+  }
+  // Peel one FixedArray<inner, N> layer.
+  const inner = type.slice('FixedArray<'.length, -1);
+  let depth = 0;
+  let splitAt = -1;
+  for (let i = inner.length - 1; i >= 0; i--) {
+    const ch = inner[i]!;
+    if (ch === '>') depth++;
+    else if (ch === '<') depth--;
+    else if (ch === ',' && depth === 0) {
+      splitAt = i;
+      break;
+    }
+  }
+  if (splitAt < 0) return value;
+  const elemType = inner.slice(0, splitAt).trim();
+  if (!Array.isArray(value)) return value;
+  return value.map(v => reviveNestedValue(v, elemType));
+}
+
+/**
+ * Parse a nested `FixedArray<...>` type string into its outer dimensions,
+ * returning `[outerLen, innerLen, ...]`. For example:
+ *   "FixedArray<bigint, 9>"                        -> [9]
+ *   "FixedArray<FixedArray<bigint, 2>, 2>"         -> [2, 2]
+ *   "FixedArray<FixedArray<FixedArray<bigint,2>,3>,4>" -> [4, 3, 2]
+ * A non-FixedArray type returns `[]`.
+ */
+function parseFixedArrayDims(type: string): number[] {
+  const dims: number[] = [];
+  let current = type.trim();
+  while (current.startsWith('FixedArray<')) {
+    const inner = current.slice('FixedArray<'.length, -1);
+    // Find the matching comma that separates the element type from
+    // the length — this is the last top-level comma, since the length
+    // is always a bare integer and the element type may contain its
+    // own `FixedArray<T, N>` commas.
+    let depth = 0;
+    let splitAt = -1;
+    for (let i = inner.length - 1; i >= 0; i--) {
+      const ch = inner[i]!;
+      if (ch === '>') depth++;
+      else if (ch === '<') depth--;
+      else if (ch === ',' && depth === 0) {
+        splitAt = i;
+        break;
+      }
+    }
+    if (splitAt < 0) return dims; // malformed
+    const elemType = inner.slice(0, splitAt).trim();
+    const lenStr = inner.slice(splitAt + 1).trim();
+    const len = Number.parseInt(lenStr, 10);
+    if (!Number.isFinite(len) || len <= 0) return dims;
+    dims.push(len);
+    current = elemType;
+  }
+  return dims;
+}
+
+/**
+ * Recursively flatten a nested JS array of depth `dims.length` into a
+ * flat list of leaf values in declaration order.
+ */
+function flattenNested(value: unknown, dims: number[]): unknown[] {
+  if (dims.length === 0) return [value];
+  const out: unknown[] = [];
+  if (!Array.isArray(value)) {
+    // Missing or wrong shape — emit `dims.reduce(*,1)` undefineds so
+    // the caller can still reach the leaves.
+    const total = dims.reduce((a, b) => a * b, 1);
+    for (let i = 0; i < total; i++) out.push(undefined);
+    return out;
+  }
+  const [, ...rest] = dims;
+  for (const v of value) {
+    out.push(...flattenNested(v, rest));
+  }
+  return out;
+}
+
+/**
+ * Recursively rebuild a nested JS array of depth `dims.length` from a
+ * flat list of leaf values in declaration order.
+ */
+function regroupNested(flat: unknown[], dims: number[], offset = 0): { value: unknown[]; consumed: number } {
+  const [outerLen, ...rest] = dims;
+  if (outerLen === undefined) {
+    return { value: [], consumed: 0 };
+  }
+  const value: unknown[] = new Array(outerLen);
+  let consumed = 0;
+  if (rest.length === 0) {
+    for (let i = 0; i < outerLen; i++) {
+      value[i] = flat[offset + i];
+    }
+    consumed = outerLen;
+  } else {
+    for (let i = 0; i < outerLen; i++) {
+      const sub = regroupNested(flat, rest, offset + consumed);
+      value[i] = sub.value;
+      consumed += sub.consumed;
+    }
+  }
+  return { value, consumed };
+}
+
+/**
  * Flatten a state record whose grouped FixedArray entries (`Board`) hold
- * a JS array of length N into a new record where each element is keyed
- * by its underlying synthetic scalar name (`Board__0`..`Board__8`). The
+ * a (possibly nested) JS array of length N into a new record where each
+ * leaf element is keyed by its underlying synthetic scalar name
+ * (`Board__0`..`Board__8`, `Grid__0__0`..`Grid__1__1`, etc.). The
  * grouped entries are also preserved for callers that read them later.
  *
  * Used at the ANF-interpreter boundary, which knows only the expanded
@@ -1456,7 +1570,11 @@ function reviveJsonValue(value: unknown, type: string): unknown {
  */
 function flattenFixedArrayState(
   state: Record<string, unknown>,
-  stateFields: ReadonlyArray<{ name: string; fixedArray?: { syntheticNames: string[] } }> | undefined,
+  stateFields: ReadonlyArray<{
+    name: string;
+    type: string;
+    fixedArray?: { syntheticNames: string[] };
+  }> | undefined,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...state };
   if (!stateFields) return out;
@@ -1464,10 +1582,13 @@ function flattenFixedArrayState(
     if (!field.fixedArray) continue;
     const value = state[field.name];
     if (!Array.isArray(value)) continue;
-    for (let i = 0; i < field.fixedArray.syntheticNames.length; i++) {
-      const synth = field.fixedArray.syntheticNames[i]!;
+    const dims = parseFixedArrayDims(field.type);
+    const flat = flattenNested(value, dims);
+    const syntheticNames = field.fixedArray.syntheticNames;
+    for (let i = 0; i < syntheticNames.length; i++) {
+      const synth = syntheticNames[i]!;
       // Do not overwrite an explicit scalar in the original state.
-      if (!(synth in out)) out[synth] = value[i];
+      if (!(synth in out)) out[synth] = flat[i];
     }
   }
   return out;
@@ -1475,54 +1596,69 @@ function flattenFixedArrayState(
 
 /**
  * Re-group a state record's synthetic scalar entries back into arrays
- * under their grouped names. Non-synthetic scalars are passed through.
+ * (possibly nested) under their grouped names. Non-synthetic scalars
+ * are passed through.
  */
 function regroupFixedArrayState(
   state: Record<string, unknown>,
-  stateFields: ReadonlyArray<{ name: string; fixedArray?: { length: number; syntheticNames: string[] } }> | undefined,
+  stateFields: ReadonlyArray<{
+    name: string;
+    type: string;
+    fixedArray?: { length: number; syntheticNames: string[] };
+  }> | undefined,
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...state };
   if (!stateFields) return out;
   for (const field of stateFields) {
     if (!field.fixedArray) continue;
-    const arr: unknown[] = new Array(field.fixedArray.length);
+    const syntheticNames = field.fixedArray.syntheticNames;
+    const flat: unknown[] = new Array(syntheticNames.length);
     let sawAny = false;
-    for (let i = 0; i < field.fixedArray.syntheticNames.length; i++) {
-      const synth = field.fixedArray.syntheticNames[i]!;
+    for (let i = 0; i < syntheticNames.length; i++) {
+      const synth = syntheticNames[i]!;
       if (synth in out) {
-        arr[i] = out[synth];
+        flat[i] = out[synth];
         sawAny = true;
       }
     }
-    if (sawAny) {
-      // Fall back to previous group value for any still-missing elements.
-      const prior = state[field.name];
-      if (Array.isArray(prior)) {
-        for (let i = 0; i < arr.length; i++) {
-          if (arr[i] === undefined) arr[i] = prior[i];
-        }
+    if (!sawAny) continue;
+    // Fall back to the prior grouped value for still-missing leaves
+    // by re-flattening it alongside the scalar updates.
+    const prior = state[field.name];
+    const dims = parseFixedArrayDims(field.type);
+    if (Array.isArray(prior)) {
+      const priorFlat = flattenNested(prior, dims);
+      for (let i = 0; i < flat.length; i++) {
+        if (flat[i] === undefined) flat[i] = priorFlat[i];
       }
-      out[field.name] = arr;
     }
+    const rebuilt = regroupNested(flat, dims);
+    out[field.name] = rebuilt.value;
   }
   return out;
 }
 
 /**
  * If a constructor arg list uses the grouped FixedArray form
- * (`[someArray, ...]`), expand each array-valued arg into N consecutive
- * positional slots so the ANF interpreter's index-based lookup works.
+ * (`[someArray, ...]`), expand each (possibly nested) array-valued arg
+ * into consecutive positional slots so the ANF interpreter's index-based
+ * lookup works.
  */
 function flattenFixedArrayArgs(
   args: unknown[],
-  abiParams: ReadonlyArray<{ name: string; fixedArray?: { length: number } }>,
+  abiParams: ReadonlyArray<{ name: string; type: string; fixedArray?: { length: number } }>,
 ): unknown[] {
   const out: unknown[] = [];
   for (let i = 0; i < args.length; i++) {
     const param = abiParams[i];
     const value = args[i];
     if (param?.fixedArray && Array.isArray(value)) {
-      for (const v of value) out.push(v);
+      const dims = parseFixedArrayDims(param.type);
+      if (dims.length > 0) {
+        out.push(...flattenNested(value, dims));
+      } else {
+        for (const v of value) out.push(v);
+      }
     } else {
       out.push(value);
     }

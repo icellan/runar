@@ -276,6 +276,82 @@ describe('expandFixedArrays', () => {
       expect(branches).toBe(2);
     });
 
+    it('attaches a single-element __syntheticArrayChain on flat FixedArray leaves', () => {
+      const { contract, errors } = expand(BASIC_ARRAY);
+      expect(errors).toEqual([]);
+      const chains = contract.properties.map(p => p.__syntheticArrayChain);
+      expect(chains).toEqual([
+        [{ base: 'board', index: 0, length: 3 }],
+        [{ base: 'board', index: 1, length: 3 }],
+        [{ base: 'board', index: 2, length: 3 }],
+      ]);
+    });
+
+    it('attaches a two-element __syntheticArrayChain on 2D FixedArray leaves', () => {
+      const { contract, errors } = expand(NESTED_ARRAY);
+      expect(errors).toEqual([]);
+      const chains = contract.properties.map(p => ({
+        name: p.name,
+        chain: p.__syntheticArrayChain,
+      }));
+      // Order: outermost-first, so [0] is the user-declared name's level,
+      // and the last element is the innermost containing sub-array.
+      expect(chains).toEqual([
+        {
+          name: 'g__0__0',
+          chain: [
+            { base: 'g', index: 0, length: 2 },
+            { base: 'g__0', index: 0, length: 2 },
+          ],
+        },
+        {
+          name: 'g__0__1',
+          chain: [
+            { base: 'g', index: 0, length: 2 },
+            { base: 'g__0', index: 1, length: 2 },
+          ],
+        },
+        {
+          name: 'g__1__0',
+          chain: [
+            { base: 'g', index: 1, length: 2 },
+            { base: 'g__1', index: 0, length: 2 },
+          ],
+        },
+        {
+          name: 'g__1__1',
+          chain: [
+            { base: 'g', index: 1, length: 2 },
+            { base: 'g__1', index: 1, length: 2 },
+          ],
+        },
+      ]);
+    });
+
+    it('attaches a three-element __syntheticArrayChain on 3D FixedArray leaves', () => {
+      const src = `
+        class Cube extends StatefulSmartContract {
+          c: FixedArray<FixedArray<FixedArray<bigint, 2>, 2>, 2> = [
+            [[0n, 0n], [0n, 0n]],
+            [[0n, 0n], [0n, 0n]],
+          ];
+          constructor() { super(); }
+          public m() { assert(true); }
+        }
+      `;
+      const { contract, errors } = expand(src);
+      expect(errors).toEqual([]);
+      const leafC101 = contract.properties.find(p => p.name === 'c__1__0__1');
+      expect(leafC101).toBeDefined();
+      expect(leafC101!.__syntheticArrayChain).toEqual([
+        { base: 'c', index: 1, length: 2 },
+        { base: 'c__1', index: 0, length: 2 },
+        { base: 'c__1__0', index: 1, length: 2 },
+      ]);
+      // There should be 2*2*2 = 8 leaves.
+      expect(contract.properties.length).toBe(8);
+    });
+
     it('still uses the nested ternary chain for expression-form runtime reads', () => {
       // Runtime-index read inside a larger expression (here: addition).
       // The statement-form rewriter cannot apply — it only matches when

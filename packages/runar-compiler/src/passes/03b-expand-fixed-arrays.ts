@@ -317,7 +317,7 @@ class ExpandContext {
     const initializerElements = this.extractArrayLiteralElements(prop, meta);
     if (initializerElements === 'error') return [];
 
-    return this.expandArrayMeta(meta, prop.readonly, prop.sourceLocation, initializerElements);
+    return this.expandArrayMeta(meta, prop.readonly, prop.sourceLocation, initializerElements, []);
   }
 
   /**
@@ -359,18 +359,32 @@ class ExpandContext {
    * For nested arrays, each slot expands further. Initializer elements
    * are distributed pairwise; for nested arrays a non-array-literal
    * element is a compile error.
+   *
+   * `parentChain` is the accumulated chain of outer FixedArray levels
+   * already consumed above this call. Each leaf scalar receives a
+   * `__syntheticArrayChain` equal to `parentChain` plus this level's
+   * entry, so by the time we mint `Grid__0__1` its chain is
+   * `[{base:"Grid",index:0,length:2}, {base:"Grid__0",index:1,length:2}]`.
    */
   private expandArrayMeta(
     meta: ArrayMeta,
     readonly: boolean,
     loc: SourceLocation,
     initializer: Expression[] | undefined,
+    parentChain: ReadonlyArray<{ base: string; index: number; length: number }>,
   ): PropertyNode[] {
     const out: PropertyNode[] = [];
 
     for (let i = 0; i < meta.slotNames.length; i++) {
       const slot = meta.slotNames[i]!;
       const slotInit = initializer?.[i];
+
+      const chainEntry = {
+        base: meta.rootName,
+        index: i,
+        length: meta.slotNames.length,
+      };
+      const chainHere = [...parentChain, chainEntry];
 
       if (meta.slotIsArray) {
         const nestedMeta = meta.nested!.get(slot)!;
@@ -394,14 +408,15 @@ class ExpandContext {
           }
           nestedInit = slotInit.elements;
         }
-        out.push(...this.expandArrayMeta(nestedMeta, readonly, loc, nestedInit));
+        out.push(...this.expandArrayMeta(nestedMeta, readonly, loc, nestedInit, chainHere));
       } else {
-        // Attach the synthetic-array marker so `detectSyntheticRuns` can
+        // Attach the synthetic-array chain so `detectSyntheticRuns` can
         // distinguish compiler-generated sibling scalars from a
-        // hand-named `<name>__<i>` property that happens to pattern-match.
-        // The marker carries the immediate parent meta (innermost for
-        // nested arrays); the one-level re-grouper in the assembler
-        // consumes it directly.
+        // hand-named `<name>__<i>` property that happens to pattern-
+        // match. The chain carries the full nesting of FixedArray
+        // levels that produced this leaf, outermost first. The
+        // iterative re-grouper in the assembler consumes one level
+        // at a time, innermost first, until the chain is exhausted.
         out.push({
           kind: 'property',
           name: slot,
@@ -409,11 +424,7 @@ class ExpandContext {
           readonly,
           initializer: slotInit,
           sourceLocation: loc,
-          __syntheticArrayBase: {
-            base: meta.rootName,
-            index: i,
-            length: meta.slotNames.length,
-          },
+          __syntheticArrayChain: chainHere,
         });
       }
     }
@@ -494,6 +505,29 @@ class ExpandContext {
     // Detect writes to `this.Board[...]` — this is the only place index_access
     // appears as an assignment target.
     if (stmt.target.kind === 'index_access') {
+      // Try to resolve a nested literal-index chain
+      // `this.grid[0][1] = v` into a single synthetic leaf
+      // `this.grid__0__1 = v`. Falls back to the single-level
+      // `rewriteArrayWrite` path for top-level runtime indices.
+      const resolved = this.tryResolveLiteralIndexChain(stmt.target);
+      if (resolved !== null) {
+        if (resolved === 'error') return [...prelude];
+        const rewrittenValue = this.rewriteExpression(stmt.value, prelude);
+        return [
+          ...prelude,
+          {
+            kind: 'assignment',
+            target: {
+              kind: 'property_access',
+              property: resolved,
+              sourceLocation: stmt.sourceLocation,
+            },
+            value: rewrittenValue,
+            sourceLocation: stmt.sourceLocation,
+          },
+        ];
+      }
+
       const targetObject = stmt.target.object;
       if (
         targetObject.kind === 'property_access' &&
@@ -692,6 +726,22 @@ class ExpandContext {
    * array property, fall back to sub-expression rewriting.
    */
   private rewriteIndexAccess(expr: IndexAccessExpr, prelude: Statement[]): Expression {
+    // Nested fully-literal chains like `this.grid[0][1]` resolve in a
+    // single hop to `this.grid__0__1`. This is the ONLY way nested
+    // FixedArray reads compile — runtime indices on nested arrays are
+    // rejected as a diagnostic below.
+    const nested = this.tryResolveLiteralIndexChain(expr);
+    if (nested === 'error') {
+      return { kind: 'bigint_literal', value: 0n, sourceLocation: expr.sourceLocation };
+    }
+    if (nested !== null) {
+      return {
+        kind: 'property_access',
+        property: nested,
+        sourceLocation: expr.sourceLocation,
+      };
+    }
+
     // Only rewrite when the object is a known array property.
     const baseName = this.tryResolveArrayBase(expr.object);
     if (baseName === null) {
@@ -1056,6 +1106,75 @@ class ExpandContext {
   // -----------------------------------------------------------------------
   // Helpers
   // -----------------------------------------------------------------------
+
+  /**
+   * Try to resolve a fully-literal-indexed chain
+   * `this.grid[0][1]` (used as either a read or a write target) into
+   * the flat synthetic leaf name `grid__0__1`. Returns:
+   *
+   *  - the leaf name if every level in the chain resolves to a legal
+   *    literal index on a known (top-level or nested) FixedArray
+   *    property
+   *  - `'error'` if the chain targets a known FixedArray property but
+   *    a literal index is out of range; a diagnostic has been pushed
+   *  - `null` if the chain does not target a known FixedArray property,
+   *    or contains a non-literal index at any level — the caller
+   *    should fall back to the generic rewrite path
+   */
+  private tryResolveLiteralIndexChain(expr: IndexAccessExpr): string | 'error' | null {
+    // Collect literal indices from innermost (deepest) to outermost.
+    // The outermost level is the one touching `this.<name>`.
+    const literalIndices: bigint[] = [];
+    let cursor: Expression = expr;
+    while (cursor.kind === 'index_access') {
+      const lit = this.asLiteralIndex(cursor.index);
+      if (lit === null) return null;
+      literalIndices.push(lit);
+      cursor = cursor.object;
+    }
+    // After peeling off all index_accesses, `cursor` must be a
+    // property_access targeting a known top-level array.
+    if (cursor.kind !== 'property_access') return null;
+    const rootName = cursor.property;
+    const rootMeta = this.arrayMap.get(rootName);
+    if (!rootMeta) return null;
+
+    // Reverse so indices go outermost-first — same order as the
+    // synthetic chain attached by the expand pass.
+    literalIndices.reverse();
+
+    // Walk the meta tree level by level, bounds-checking each
+    // literal index and descending into `meta.nested` for nested
+    // arrays. The final level must be a scalar (not `slotIsArray`).
+    let meta: ArrayMeta = rootMeta;
+    for (let level = 0; level < literalIndices.length; level++) {
+      const idx = literalIndices[level]!;
+      if (idx < 0n || idx >= BigInt(meta.type.length)) {
+        this.errors.push(makeDiagnostic(
+          `Index ${idx} is out of range for FixedArray of length ${meta.type.length}`,
+          'error',
+          expr.sourceLocation,
+        ));
+        return 'error';
+      }
+      const slot = meta.slotNames[Number(idx)]!;
+      if (level === literalIndices.length - 1) {
+        // Final level. For a scalar slot this is the leaf. For an
+        // array slot the user is reading/writing an entire sub-array,
+        // which is not legal in Rúnar — bail out and let the generic
+        // path report it.
+        if (meta.slotIsArray) return null;
+        return slot;
+      }
+      if (!meta.slotIsArray) {
+        // Too many index levels for the declared shape.
+        return null;
+      }
+      meta = meta.nested!.get(slot)!;
+    }
+    // Unreachable — the loop always returns on its final iteration.
+    return null;
+  }
 
   /**
    * If `expr.object` is a known array property, return the base name.

@@ -35,19 +35,26 @@ export function serializeState(
   for (const field of sorted) {
     if (field.fixedArray) {
       const arr = values[field.name];
-      const elementType = field.fixedArray.elementType;
       const names = field.fixedArray.syntheticNames;
+      // Derive the leaf scalar type by peeling off every FixedArray
+      // layer from the declared `field.type`. The grouped entry's
+      // `elementType` is only the immediate child — for nested arrays
+      // it is itself another FixedArray<...>, which `encodeStateValue`
+      // does not know how to serialise.
+      const leafType = unwrapFixedArrayLeaf(field.type);
+      const dims = parseFixedArrayDims(field.type);
+      const flatFromArr = Array.isArray(arr) ? flattenNested(arr, dims) : null;
       for (let i = 0; i < names.length; i++) {
         let elem: unknown;
         const synthName = names[i]!;
         if (synthName in values) {
           elem = values[synthName];
-        } else if (Array.isArray(arr)) {
-          elem = arr[i];
+        } else if (flatFromArr) {
+          elem = flatFromArr[i];
         } else {
           elem = undefined;
         }
-        hex += encodeStateValue(elem, elementType);
+        hex += encodeStateValue(elem, leafType);
       }
     } else {
       const value = values[field.name];
@@ -56,6 +63,92 @@ export function serializeState(
   }
 
   return hex;
+}
+
+/**
+ * Parse a nested `FixedArray<...>` type string into its outer
+ * dimensions: `"FixedArray<FixedArray<bigint, 2>, 3>"` → `[3, 2]`.
+ * Non-FixedArray types return `[]`.
+ */
+function parseFixedArrayDims(type: string): number[] {
+  const dims: number[] = [];
+  let current = type.trim();
+  while (current.startsWith('FixedArray<')) {
+    const inner = current.slice('FixedArray<'.length, -1);
+    let depth = 0;
+    let splitAt = -1;
+    for (let i = inner.length - 1; i >= 0; i--) {
+      const ch = inner[i]!;
+      if (ch === '>') depth++;
+      else if (ch === '<') depth--;
+      else if (ch === ',' && depth === 0) {
+        splitAt = i;
+        break;
+      }
+    }
+    if (splitAt < 0) return dims;
+    const elemType = inner.slice(0, splitAt).trim();
+    const lenStr = inner.slice(splitAt + 1).trim();
+    const len = Number.parseInt(lenStr, 10);
+    if (!Number.isFinite(len) || len <= 0) return dims;
+    dims.push(len);
+    current = elemType;
+  }
+  return dims;
+}
+
+/** Return the innermost scalar type of a (possibly nested) FixedArray string. */
+function unwrapFixedArrayLeaf(type: string): string {
+  let current = type.trim();
+  while (current.startsWith('FixedArray<')) {
+    const inner = current.slice('FixedArray<'.length, -1);
+    let depth = 0;
+    let splitAt = -1;
+    for (let i = inner.length - 1; i >= 0; i--) {
+      const ch = inner[i]!;
+      if (ch === '>') depth++;
+      else if (ch === '<') depth--;
+      else if (ch === ',' && depth === 0) {
+        splitAt = i;
+        break;
+      }
+    }
+    if (splitAt < 0) return current;
+    current = inner.slice(0, splitAt).trim();
+  }
+  return current;
+}
+
+/** Flatten a nested JS array of depth `dims.length` to a flat leaf list. */
+function flattenNested(value: unknown, dims: number[]): unknown[] {
+  if (dims.length === 0) return [value];
+  if (!Array.isArray(value)) {
+    const total = dims.reduce((a, b) => a * b, 1);
+    return new Array(total).fill(undefined);
+  }
+  const rest = dims.slice(1);
+  const out: unknown[] = [];
+  for (const v of value) out.push(...flattenNested(v, rest));
+  return out;
+}
+
+/** Rebuild a nested JS array of depth `dims.length` from a flat leaf list. */
+function regroupNested(flat: unknown[], dims: number[], offset = 0): { value: unknown[]; consumed: number } {
+  const [outerLen, ...rest] = dims;
+  if (outerLen === undefined) return { value: [], consumed: 0 };
+  const value: unknown[] = new Array(outerLen);
+  let consumed = 0;
+  if (rest.length === 0) {
+    for (let i = 0; i < outerLen; i++) value[i] = flat[offset + i];
+    consumed = outerLen;
+  } else {
+    for (let i = 0; i < outerLen; i++) {
+      const sub = regroupNested(flat, rest, offset + consumed);
+      value[i] = sub.value;
+      consumed += sub.consumed;
+    }
+  }
+  return { value, consumed };
 }
 
 /**
@@ -77,15 +170,16 @@ export function deserializeState(
 
   for (const field of sorted) {
     if (field.fixedArray) {
-      const elementType = field.fixedArray.elementType;
-      const length = field.fixedArray.length;
-      const arr: unknown[] = [];
-      for (let i = 0; i < length; i++) {
-        const { value, bytesRead } = decodeStateValue(scriptHex, offset, elementType);
-        arr.push(value);
+      const leafType = unwrapFixedArrayLeaf(field.type);
+      const dims = parseFixedArrayDims(field.type);
+      const total = field.fixedArray.syntheticNames.length;
+      const flat: unknown[] = new Array(total);
+      for (let i = 0; i < total; i++) {
+        const { value, bytesRead } = decodeStateValue(scriptHex, offset, leafType);
+        flat[i] = value;
         offset += bytesRead;
       }
-      result[field.name] = arr;
+      result[field.name] = regroupNested(flat, dims).value;
     } else {
       const { value, bytesRead } = decodeStateValue(scriptHex, offset, field.type);
       result[field.name] = value;
