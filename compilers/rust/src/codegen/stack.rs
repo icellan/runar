@@ -4314,6 +4314,7 @@ mod tests {
                 prop_type: "Addr".to_string(),
                 readonly: true,
                 initial_value: None,
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "unlock".to_string(),
@@ -4558,6 +4559,7 @@ mod tests {
                 prop_type: "bigint".to_string(),
                 readonly: false,
                 initial_value: Some(serde_json::Value::Number(serde_json::Number::from(0))),
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "check".to_string(),
@@ -5444,6 +5446,7 @@ mod tests {
                 prop_type: "bigint".to_string(),
                 readonly: true,
                 initial_value: None,
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "verify".to_string(),

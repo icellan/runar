@@ -1047,6 +1047,7 @@ mod tests {
                 prop_type: "bigint".to_string(),
                 readonly: true,
                 initial_value: None,
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "doStuff".to_string(),

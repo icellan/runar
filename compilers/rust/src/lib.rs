@@ -185,6 +185,21 @@ pub fn compile_from_source_str_with_options(
         ));
     }
 
+    // Pass 3b: Expand fixed-size array properties into scalar siblings.
+    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+    if !expand_result.errors.is_empty() {
+        let error_msgs: Vec<String> = expand_result
+            .errors
+            .iter()
+            .map(|e| e.format_message())
+            .collect();
+        return Err(format!(
+            "Expand-fixed-arrays errors:\n  {}",
+            error_msgs.join("\n  ")
+        ));
+    }
+    let contract = expand_result.contract;
+
     // Pass 4: ANF Lower
     let mut anf_program = frontend::anf_lower::lower_to_anf(&contract);
 
@@ -260,6 +275,21 @@ pub fn compile_source_str_to_ir_with_options(
             tc_result.error_strings().join("\n  ")
         ));
     }
+
+    // Pass 3b: Expand fixed-size array properties into scalar siblings.
+    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+    if !expand_result.errors.is_empty() {
+        let error_msgs: Vec<String> = expand_result
+            .errors
+            .iter()
+            .map(|e| e.format_message())
+            .collect();
+        return Err(format!(
+            "Expand-fixed-arrays errors:\n  {}",
+            error_msgs.join("\n  ")
+        ));
+    }
+    let contract = expand_result.contract;
 
     let mut anf_program = frontend::anf_lower::lower_to_anf(&contract);
 
@@ -401,6 +431,21 @@ pub fn compile_from_source_str_with_result(
         result.success = !result.has_errors();
         return result;
     }
+
+    // Pass 3b: Expand fixed-size array properties into scalar siblings.
+    let expand_result = frontend::expand_fixed_arrays::expand_fixed_arrays(contract);
+    if !expand_result.errors.is_empty() {
+        result.diagnostics.extend(expand_result.errors);
+    }
+    if result.has_errors() {
+        return result;
+    }
+    let expanded_contract = expand_result.contract;
+    // Switch the working contract over to the expanded form. Downstream
+    // passes operate on this owned clone; the previously-borrowed `contract`
+    // reference from `result.contract.as_ref()` is no longer used below.
+    let contract = &expanded_contract;
+    // Keep result.contract as the pre-expansion AST (mirrors TS spike).
 
     // Pass 4: ANF lowering
     let mut anf_program = frontend::anf_lower::lower_to_anf(contract);

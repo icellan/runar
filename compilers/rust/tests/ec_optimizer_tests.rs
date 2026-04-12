@@ -500,6 +500,7 @@ fn test_contract_metadata_preserved() {
                 prop_type: "Addr".to_string(),
                 readonly: true,
                 initial_value: None,
+                synthetic_array_chain: None,
             },
         ],
         methods: vec![ANFMethod {

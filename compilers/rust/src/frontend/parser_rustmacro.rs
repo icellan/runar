@@ -335,6 +335,7 @@ impl RustDslParser {
                                     readonly,
                                     initializer: None,
                                     source_location: loc,
+                                    synthetic_array_chain: None,
                                 });
                             }
                         } else {

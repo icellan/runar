@@ -22,7 +22,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::ast::*;
-use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFValue, SourceLocation};
+use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFSyntheticArrayLevel, ANFValue, SourceLocation};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -60,6 +60,16 @@ fn lower_properties(contract: &ContractNode) -> Vec<ANFProperty> {
             prop_type: type_node_to_string(&prop.prop_type),
             readonly: prop.readonly,
             initial_value: prop.initializer.as_ref().and_then(extract_literal_value),
+            synthetic_array_chain: prop.synthetic_array_chain.as_ref().map(|chain| {
+                chain
+                    .iter()
+                    .map(|level| ANFSyntheticArrayLevel {
+                        base: level.base.clone(),
+                        index: level.index,
+                        length: level.length,
+                    })
+                    .collect()
+            }),
         })
         .collect()
 }

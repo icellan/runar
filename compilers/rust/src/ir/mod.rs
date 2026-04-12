@@ -33,6 +33,16 @@ pub struct ANFProgram {
     pub methods: Vec<ANFMethod>,
 }
 
+/// One level of a synthetic-array chain attached to expanded leaf
+/// properties produced by the expand-fixed-arrays pass. Outermost
+/// level first.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ANFSyntheticArrayLevel {
+    pub base: String,
+    pub index: usize,
+    pub length: usize,
+}
+
 /// A contract-level property (constructor parameter).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ANFProperty {
@@ -42,6 +52,12 @@ pub struct ANFProperty {
     pub readonly: bool,
     #[serde(rename = "initialValue", skip_serializing_if = "Option::is_none")]
     pub initial_value: Option<serde_json::Value>,
+    /// Non-empty for synthetic scalar leaves produced by the
+    /// expand-fixed-arrays pass. Outermost level first. Used by the
+    /// assembler to re-group these back into a single (possibly nested)
+    /// FixedArray ABI/state entry.
+    #[serde(rename = "__syntheticArrayChain", skip_serializing_if = "Option::is_none", default)]
+    pub synthetic_array_chain: Option<Vec<ANFSyntheticArrayLevel>>,
 }
 
 /// A single contract method.

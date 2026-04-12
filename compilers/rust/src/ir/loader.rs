@@ -440,6 +440,7 @@ mod tests {
                 prop_type: "bigint".to_string(),
                 readonly: false,
                 initial_value: None,
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "increment".to_string(),
@@ -513,6 +514,7 @@ mod tests {
                 prop_type: "bigint".to_string(),
                 readonly: true,
                 initial_value: Some(serde_json::json!(100)),
+                synthetic_array_chain: None,
             }],
             methods: vec![ANFMethod {
                 name: "check".to_string(),

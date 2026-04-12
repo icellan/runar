@@ -852,6 +852,7 @@ impl<'a> GoParser<'a> {
                 readonly,
                 initializer: None,
                 source_location: loc,
+                synthetic_array_chain: None,
             });
 
             self.skip_semis();

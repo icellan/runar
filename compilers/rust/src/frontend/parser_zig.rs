@@ -669,6 +669,7 @@ impl<'a> ZigParser<'a> {
             readonly: is_readonly,
             initializer,
             source_location: self.loc(),
+            synthetic_array_chain: None,
         })
     }
 
