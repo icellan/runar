@@ -65,11 +65,26 @@ export interface SourceMap {
   mappings: SourceMapping[];
 }
 
+/**
+ * A compile-time default value for a state field.
+ *
+ * For scalar state fields this is a single `string | bigint | boolean`.
+ * For grouped FixedArray state fields the assembler stores a real
+ * JS array of element-typed values so the SDK can consume it without
+ * parsing a stringified tuple. Elements follow the same rules as
+ * scalar initialValues.
+ */
+export type StateFieldInitialValue =
+  | string
+  | bigint
+  | boolean
+  | ReadonlyArray<string | bigint | boolean>;
+
 export interface StateField {
   name: string;
   type: string;
   index: number;
-  initialValue?: string | bigint | boolean;
+  initialValue?: StateFieldInitialValue;
   /**
    * For state fields representing an expanded FixedArray<T, N>:
    * - `type` is the user-facing type string (e.g. `FixedArray<bigint, 9>`)
@@ -477,24 +492,19 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
           syntheticNames: entry.entries.map(e => e.name),
         },
       };
-      // If every element has a compile-time initialValue, surface it as a
-      // literal JSON-serializable array so the SDK can pre-populate
-      // `state.<name>`. Mixed states (some with initializers, some without)
-      // are omitted and left for constructor-arg resolution.
+      // If every element has a compile-time initialValue, surface it as
+      // a real JS array so the SDK can pre-populate `state.<name>`
+      // without parsing a stringified tuple. `StateField.initialValue`
+      // is widened to accept `ReadonlyArray<string|bigint|boolean>`
+      // for exactly this case. Mixed states (some with initializers,
+      // some without) are omitted and left for constructor-arg
+      // resolution.
       const allHaveInit = entry.entries.every(e => e.initialValue !== undefined);
       if (allHaveInit) {
-        // Use a JSON-string representation of the tuple; the SDK decodes it.
-        // We cannot use a JS array directly because the StateField.initialValue
-        // type is `string | bigint | boolean`. Encode as `[v0,v1,...]` with
-        // bigint suffix "n" preserved.
-        const parts = entry.entries.map(e => {
-          const v = e.initialValue;
-          if (typeof v === 'bigint') return `${v}n`;
-          if (typeof v === 'boolean') return String(v);
-          if (typeof v === 'string') return JSON.stringify(v);
-          return 'null';
+        field.initialValue = entry.entries.map(e => {
+          // We've already filtered on undefined above.
+          return e.initialValue as string | bigint | boolean;
         });
-        field.initialValue = `[${parts.join(',')}]`;
       }
       grouped.push(field);
     } else {

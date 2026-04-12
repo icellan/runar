@@ -64,11 +64,26 @@ export interface SourceMap {
 // Stateful contracts
 // ---------------------------------------------------------------------------
 
+/**
+ * A compile-time default value for a state field.
+ *
+ * For scalar state fields this is a single `string | bigint | boolean`.
+ * For grouped FixedArray state fields the assembler stores a real
+ * JS array of element-typed values so the SDK can consume it without
+ * parsing a stringified tuple. Elements follow the same rules as
+ * scalar initialValues.
+ */
+export type StateFieldInitialValue =
+  | string
+  | bigint
+  | boolean
+  | ReadonlyArray<string | bigint | boolean>;
+
 export interface StateField {
   name: string;
   type: string;
   index: number;
-  initialValue?: string | bigint | boolean;
+  initialValue?: StateFieldInitialValue;
   /**
    * For state fields representing an expanded FixedArray<T, N>:
    * - `type` is the user-facing type string (e.g. `FixedArray<bigint, 9>`)

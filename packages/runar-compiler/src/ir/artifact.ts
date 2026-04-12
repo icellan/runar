@@ -15,6 +15,16 @@ import type { StackProgram } from './stack-ir.js';
 export interface ABIParam {
   name: string;
   type: string;
+  /**
+   * Present when this ABI param represents an expanded FixedArray<T, N>.
+   * Callers can pass a plain array of length N; the SDK flattens it
+   * into the underlying positional slots by `syntheticNames` order.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 export interface ABIConstructor {
@@ -53,11 +63,37 @@ export interface SourceMap {
 // Stateful contracts
 // ---------------------------------------------------------------------------
 
+/**
+ * A compile-time default value for a state field.
+ *
+ * Scalar state fields use `string | bigint | boolean`. Grouped
+ * FixedArray state fields use a real JS array of element values; the
+ * SDK consumes it directly without parsing a stringified tuple.
+ */
+export type StateFieldInitialValue =
+  | string
+  | bigint
+  | boolean
+  | ReadonlyArray<string | bigint | boolean>;
+
 export interface StateField {
   name: string;
   type: string;
   index: number;
-  initialValue?: string | bigint | boolean;
+  initialValue?: StateFieldInitialValue;
+  /**
+   * For state fields representing an expanded FixedArray<T, N>:
+   * - `type` is the user-facing type string (e.g. `FixedArray<bigint, 9>`)
+   * - `fixedArray.elementType` is the element primitive type
+   * - `fixedArray.length` is N
+   * - `fixedArray.syntheticNames` is the flat list of underlying scalar
+   *   state-field names, in order.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------

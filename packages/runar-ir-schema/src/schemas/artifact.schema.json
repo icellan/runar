@@ -137,7 +137,38 @@
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "type": { "type": "string", "minLength": 1 },
-        "index": { "type": "integer", "minimum": 0 }
+        "index": { "type": "integer", "minimum": 0 },
+        "initialValue": {
+          "description": "Compile-time default value. Scalar fields use string|integer|boolean; grouped FixedArray fields use an array of element values.",
+          "oneOf": [
+            { "type": "string" },
+            { "type": "integer" },
+            { "type": "boolean" },
+            {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  { "type": "string" },
+                  { "type": "integer" },
+                  { "type": "boolean" }
+                ]
+              }
+            }
+          ]
+        },
+        "fixedArray": {
+          "type": "object",
+          "required": ["elementType", "length", "syntheticNames"],
+          "additionalProperties": false,
+          "properties": {
+            "elementType": { "type": "string", "minLength": 1 },
+            "length": { "type": "integer", "minimum": 1 },
+            "syntheticNames": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
       }
     }
   }

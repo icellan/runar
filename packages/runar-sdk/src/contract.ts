@@ -76,12 +76,23 @@ export class RunarContract {
       for (const field of artifact.stateFields) {
         const fa = (field as { fixedArray?: { elementType: string; length: number; syntheticNames: string[] } }).fixedArray;
         if (fa) {
-          // FixedArray state field — group. The `initialValue` (if present)
-          // is a stringified literal array; the constructor arg (if
-          // present) is a plain JS array.
+          // FixedArray state field. The assembler stores `initialValue`
+          // (when every element has a compile-time default) as a real
+          // JS array of element values — no more stringified-tuple
+          // parsing. Array elements may still be bigint-as-string when
+          // the artifact was loaded via a plain JSON import without the
+          // custom reviver, so revive each element by the underlying
+          // element type.
           const rawInit = (field as { initialValue?: unknown }).initialValue;
-          if (rawInit !== undefined) {
-            this._state[field.name] = reviveFixedArrayInit(rawInit, fa.elementType);
+          if (Array.isArray(rawInit)) {
+            this._state[field.name] = rawInit.map(v =>
+              reviveJsonValue(v, fa.elementType),
+            );
+          } else if (rawInit !== undefined) {
+            // Defensive: we shouldn't hit this path anymore, but if a
+            // third-party producer emits a scalar where we expect an
+            // array, keep the value as-is instead of crashing.
+            this._state[field.name] = rawInit;
           } else {
             const paramIdx = artifact.abi.constructor.params.findIndex(p => p.name === field.name);
             if (paramIdx >= 0 && paramIdx < constructorArgs.length) {
@@ -1517,34 +1528,6 @@ function flattenFixedArrayArgs(
     }
   }
   return out;
-}
-
-/**
- * Revive a FixedArray initial value from the stringified tuple form
- * produced by the assembler (e.g. `"[0n,0n,0n]"`). The format is a
- * subset of JSON with bigint suffixes; parse element-wise.
- */
-function reviveFixedArrayInit(value: unknown, elementType: string): unknown {
-  if (Array.isArray(value)) return value;
-  if (typeof value !== 'string') return value;
-  const s = value.trim();
-  if (!s.startsWith('[') || !s.endsWith(']')) return value;
-  const inner = s.slice(1, -1).trim();
-  if (inner.length === 0) return [];
-  // Split on top-level commas (no quoted strings with commas in our format).
-  const parts = inner.split(',').map(p => p.trim()).filter(p => p.length > 0);
-  return parts.map(p => {
-    if (elementType === 'bigint' || elementType === 'int') {
-      if (p.endsWith('n')) return BigInt(p.slice(0, -1));
-      return BigInt(p);
-    }
-    if (elementType === 'boolean' || elementType === 'bool') {
-      return p === 'true';
-    }
-    // Strip surrounding quotes for string-encoded hex types.
-    if (p.startsWith('"') && p.endsWith('"')) return p.slice(1, -1);
-    return p;
-  });
 }
 
 /**
