@@ -25,6 +25,9 @@ class ABIParam:
 
     name: str = ""
     type: str = ""
+    # Present when this param represents an expanded FixedArray<T, N>.
+    # ``fixed_array`` holds ``{"elementType", "length", "syntheticNames"}``.
+    fixed_array: dict | None = None
 
 
 @dataclass
@@ -59,7 +62,11 @@ class StateField:
     name: str = ""
     type: str = ""
     index: int = 0
-    initial_value: str | int | bool | None = None
+    initial_value: Any = None
+    # Present for grouped FixedArray state fields. Holds
+    # ``{"elementType", "length", "syntheticNames"}`` so the SDK can
+    # flatten/unflatten array values on state read/write.
+    fixed_array: dict | None = None
 
 
 @dataclass
@@ -158,6 +165,17 @@ def _lower_to_anf(contract: Any) -> ANFProgram:
     """Lower a ContractNode to ANF IR."""
     from runar_compiler.frontend.anf_lower import lower_to_anf
     return lower_to_anf(contract)
+
+
+def _expand_fixed_arrays(contract: Any) -> Any:
+    """Pass 3b: Expand FixedArray properties into scalar siblings.
+
+    Returns a tuple ``(rewritten_contract, errors)``. On any error the
+    original contract is returned unchanged.
+    """
+    from runar_compiler.frontend.expand_fixed_arrays import expand_fixed_arrays
+    result = expand_fixed_arrays(contract)
+    return result.contract, result.errors
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +311,14 @@ def compile_from_source(
     if tc_result.errors:
         raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.error_strings()))
 
+    # Pass 3b: Expand FixedArray properties
+    expanded_contract, expand_errors = _expand_fixed_arrays(parse_result.contract)
+    if expand_errors:
+        msgs = [d.format_message() if hasattr(d, "format_message") else str(d) for d in expand_errors]
+        raise CompilationError("expand-fixed-arrays errors:\n  " + "\n  ".join(msgs))
+
     # Pass 4: ANF lowering
-    program = _lower_to_anf(parse_result.contract)
+    program = _lower_to_anf(expanded_contract)
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
@@ -325,7 +349,13 @@ def compile_source_to_ir(
     if tc_result.errors:
         raise CompilationError("type check errors:\n  " + "\n  ".join(tc_result.error_strings()))
 
-    program = _lower_to_anf(parse_result.contract)
+    # Pass 3b: Expand FixedArray properties
+    expanded_contract, expand_errors = _expand_fixed_arrays(parse_result.contract)
+    if expand_errors:
+        msgs = [d.format_message() if hasattr(d, "format_message") else str(d) for d in expand_errors]
+        raise CompilationError("expand-fixed-arrays errors:\n  " + "\n  ".join(msgs))
+
+    program = _lower_to_anf(expanded_contract)
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
@@ -344,6 +374,111 @@ def compile_source_to_ir(
 # Artifact assembly
 # ---------------------------------------------------------------------------
 
+def _entry_to_abi_param(e: dict) -> ABIParam:
+    p = ABIParam(name=e["name"], type=e["type"])
+    if e.get("fixed_array"):
+        p.fixed_array = {
+            "elementType": e["fixed_array"]["elementType"],
+            "length": e["fixed_array"]["length"],
+            "syntheticNames": list(e["fixed_array"]["syntheticNames"]),
+        }
+    return p
+
+
+def _regroup_one_pass(entries: list[dict]) -> tuple[list[dict], bool]:
+    """Collapse contiguous synthetic runs by one nesting level.
+
+    Mirrors ``regroupOnePass`` in
+    ``packages/runar-compiler/src/artifact/assembler.ts``. Each entry has
+    ``name``, ``type``, ``chain`` (innermost last), optional
+    ``initial_value``, optional ``fixed_array``, and ``index``.
+    """
+    out: list[dict] = []
+    changed = False
+    i = 0
+    n = len(entries)
+    while i < n:
+        entry = entries[i]
+        chain = entry["chain"]
+        if not chain:
+            out.append(entry)
+            i += 1
+            continue
+        marker = chain[-1]
+        if marker["index"] != 0:
+            out.append(entry)
+            i += 1
+            continue
+
+        # Greedy extend: collect run of sequential siblings.
+        run_entries = [entry]
+        k = 1
+        j = i + 1
+        marker_base = marker["base"]
+        marker_len = marker["length"]
+        while j < n and k < marker_len:
+            nxt = entries[j]
+            if not nxt["chain"]:
+                break
+            m2 = nxt["chain"][-1]
+            if (
+                m2["base"] != marker_base
+                or m2["length"] != marker_len
+                or m2["index"] != k
+                or nxt["type"] != entry["type"]
+            ):
+                break
+            run_entries.append(nxt)
+            k += 1
+            j += 1
+
+        if len(run_entries) != marker_len:
+            out.append(entry)
+            i += 1
+            continue
+
+        inner_type = entry["type"]
+        grouped_type = f"FixedArray<{inner_type}, {marker_len}>"
+
+        synthetic_names: list[str] = []
+        for e in run_entries:
+            if e.get("fixed_array"):
+                synthetic_names.extend(e["fixed_array"]["syntheticNames"])
+            else:
+                synthetic_names.append(e["name"])
+
+        collapsed_init = None
+        if all("initial_value" in e and e["initial_value"] is not None for e in run_entries):
+            collapsed_init = [e["initial_value"] for e in run_entries]
+
+        grouped: dict = {
+            "name": marker_base,
+            "type": grouped_type,
+            "chain": list(chain[:-1]),
+            "fixed_array": {
+                "elementType": inner_type,
+                "length": marker_len,
+                "syntheticNames": synthetic_names,
+            },
+            "index": run_entries[0]["index"],
+        }
+        if collapsed_init is not None:
+            grouped["initial_value"] = collapsed_init
+        out.append(grouped)
+        i = j
+        changed = True
+    return out, changed
+
+
+def _regroup_synthetic_runs(entries: list[dict]) -> list[dict]:
+    current = entries
+    for _ in range(1024):
+        current, changed = _regroup_one_pass(current)
+        if not changed:
+            return current
+    raise RuntimeError("regroup_synthetic_runs: exceeded iteration cap")
+
+
 def _assemble_artifact(
     program: ANFProgram,
     script_hex: str,
@@ -361,21 +496,49 @@ def _assemble_artifact(
     # Build ABI
     # Initialized properties are excluded from constructor params — they
     # get their values from the initializer, not from the caller.
-    constructor_params = [
-        ABIParam(name=prop.name, type=prop.type)
+    constructor_params_raw = [
+        {"name": prop.name, "type": prop.type, "chain": []}
         for prop in program.properties
         if prop.initial_value is None
     ]
+    constructor_params = [
+        _entry_to_abi_param(e) for e in _regroup_synthetic_runs(constructor_params_raw)
+    ]
 
-    # Build state fields for stateful contracts
-    # index = position in constructor args (not sequential among state fields)
-    state_fields: list[StateField] = []
+    # Build state fields for stateful contracts — stream each mutable
+    # property into a flat entry carrying the full synthetic-array chain,
+    # then iteratively regroup. Scalars with empty chains pass through.
+    flat: list[dict] = []
     for i, prop in enumerate(program.properties):
-        if not prop.readonly:
-            sf = StateField(name=prop.name, type=prop.type, index=i)
-            if prop.initial_value is not None:
-                sf.initial_value = prop.initial_value
-            state_fields.append(sf)
+        if prop.readonly:
+            continue
+        entry: dict = {
+            "name": prop.name,
+            "type": prop.type,
+            "chain": [dict(c) for c in getattr(prop, "synthetic_array_chain", [])],
+            "index": i,
+        }
+        if prop.initial_value is not None:
+            entry["initial_value"] = prop.initial_value
+        flat.append(entry)
+
+    regrouped = _regroup_synthetic_runs(flat)
+    state_fields: list[StateField] = []
+    for e in regrouped:
+        sf = StateField(
+            name=e["name"],
+            type=e["type"],
+            index=e.get("index", 0),
+        )
+        if "initial_value" in e and e["initial_value"] is not None:
+            sf.initial_value = e["initial_value"]
+        if e.get("fixed_array"):
+            sf.fixed_array = {
+                "elementType": e["fixed_array"]["elementType"],
+                "length": e["fixed_array"]["length"],
+                "syntheticNames": list(e["fixed_array"]["syntheticNames"]),
+            }
+        state_fields.append(sf)
 
     is_stateful = len(state_fields) > 0
 
@@ -446,6 +609,17 @@ def _assemble_artifact(
 # JSON serialization
 # ---------------------------------------------------------------------------
 
+def _abi_param_to_dict(p: ABIParam) -> dict[str, Any]:
+    d: dict[str, Any] = {"name": p.name, "type": p.type}
+    if p.fixed_array:
+        d["fixedArray"] = {
+            "elementType": p.fixed_array["elementType"],
+            "length": p.fixed_array["length"],
+            "syntheticNames": list(p.fixed_array["syntheticNames"]),
+        }
+    return d
+
+
 def artifact_to_json(artifact: Artifact) -> str:
     """Serialize an artifact to pretty-printed JSON."""
     d: dict[str, Any] = {
@@ -455,14 +629,14 @@ def artifact_to_json(artifact: Artifact) -> str:
         "abi": {
             "constructor": {
                 "params": [
-                    {"name": p.name, "type": p.type}
+                    _abi_param_to_dict(p)
                     for p in artifact.abi.constructor.params
                 ],
             },
             "methods": [
                 {
                     "name": m.name,
-                    "params": [{"name": p.name, "type": p.type} for p in m.params],
+                    "params": [_abi_param_to_dict(p) for p in m.params],
                     "isPublic": m.is_public,
                     **({"isTerminal": m.is_terminal} if m.is_terminal is not None else {}),
                 }
@@ -496,13 +670,21 @@ def artifact_to_json(artifact: Artifact) -> str:
         if ir_dict:
             d["ir"] = ir_dict
     if artifact.state_fields:
-        d["stateFields"] = [
-            {
+        state_fields_out: list[dict[str, Any]] = []
+        for sf in artifact.state_fields:
+            sf_dict: dict[str, Any] = {
                 "name": sf.name, "type": sf.type, "index": sf.index,
-                **({"initialValue": sf.initial_value} if sf.initial_value is not None else {}),
             }
-            for sf in artifact.state_fields
-        ]
+            if sf.initial_value is not None:
+                sf_dict["initialValue"] = sf.initial_value
+            if sf.fixed_array:
+                sf_dict["fixedArray"] = {
+                    "elementType": sf.fixed_array["elementType"],
+                    "length": sf.fixed_array["length"],
+                    "syntheticNames": list(sf.fixed_array["syntheticNames"]),
+                }
+            state_fields_out.append(sf_dict)
+        d["stateFields"] = state_fields_out
     if artifact.constructor_slots:
         d["constructorSlots"] = [
             {"paramIndex": cs.param_index, "byteOffset": cs.byte_offset}
@@ -826,6 +1008,20 @@ def _compile_from_source_str_with_result(
 
     if typecheck_only:
         result.success = not result.has_errors()
+        return result
+
+    # Pass 3b: Expand FixedArray properties
+    try:
+        expanded_contract, expand_errors = _expand_fixed_arrays(result.contract)
+        result.diagnostics.extend(expand_errors)
+        result.contract = expanded_contract
+    except Exception as e:
+        result.diagnostics.append(
+            Diagnostic(message=f"expand-fixed-arrays error: {e}", severity=Severity.ERROR)
+        )
+        return result
+
+    if result.has_errors():
         return result
 
     # Pass 4: ANF lowering

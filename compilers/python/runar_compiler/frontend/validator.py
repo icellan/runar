@@ -177,6 +177,15 @@ class _ValidationContext:
         ctor = self.contract.constructor
         prop_names: set[str] = {p.name for p in self.contract.properties}
 
+        # FixedArray not allowed as constructor parameter.
+        for param in ctor.params:
+            if isinstance(param.type, FixedArrayType):
+                self._add_error(
+                    f"Constructor parameter '{param.name}' cannot be a FixedArray. "
+                    "Use initialized properties or pass each element as a separate parameter.",
+                    loc=ctor.source_location,
+                )
+
         # Check super() as first statement
         if len(ctor.body) == 0:
             self._add_error("constructor must call super() as its first statement", loc=ctor.source_location)
@@ -217,6 +226,15 @@ class _ValidationContext:
             self._validate_method(method)
 
     def _validate_method(self, method) -> None:
+        # FixedArray not allowed as method parameter.
+        for param in method.params:
+            if isinstance(param.type, FixedArrayType):
+                self._add_error(
+                    f"Parameter '{param.name}' in method '{method.name}' cannot be a FixedArray. "
+                    "Arrays are only allowed as contract properties.",
+                    loc=method.source_location,
+                )
+
         # Public methods must end with assert() (unless StatefulSmartContract,
         # where the compiler auto-injects the final assert)
         if (
@@ -243,6 +261,12 @@ class _ValidationContext:
 
     def _validate_statement(self, stmt: Statement) -> None:
         if isinstance(stmt, VariableDeclStmt):
+            if isinstance(stmt.type, FixedArrayType):
+                self._add_error(
+                    f"Local variable '{stmt.name}' cannot be a FixedArray. "
+                    "Arrays are only allowed as contract properties.",
+                    loc=stmt.source_location,
+                )
             self._validate_expression(stmt.init)
         elif isinstance(stmt, AssignmentStmt):
             self._validate_expression(stmt.target)

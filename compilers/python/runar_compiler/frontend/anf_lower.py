@@ -171,6 +171,14 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
         )
         if prop.initializer is not None:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
+        # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)
+        # so the artifact assembler can iteratively re-group synthetic runs.
+        chain = getattr(prop, "synthetic_array_chain", None)
+        if chain:
+            anf_prop.synthetic_array_chain = [
+                {"base": c.base, "index": c.index, "length": c.length}
+                for c in chain
+            ]
         result.append(anf_prop)
     return result
 
