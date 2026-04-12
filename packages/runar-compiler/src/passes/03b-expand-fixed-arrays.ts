@@ -396,6 +396,12 @@ class ExpandContext {
         }
         out.push(...this.expandArrayMeta(nestedMeta, readonly, loc, nestedInit));
       } else {
+        // Attach the synthetic-array marker so `detectSyntheticRuns` can
+        // distinguish compiler-generated sibling scalars from a
+        // hand-named `<name>__<i>` property that happens to pattern-match.
+        // The marker carries the immediate parent meta (innermost for
+        // nested arrays); the one-level re-grouper in the assembler
+        // consumes it directly.
         out.push({
           kind: 'property',
           name: slot,
@@ -403,6 +409,11 @@ class ExpandContext {
           readonly,
           initializer: slotInit,
           sourceLocation: loc,
+          __syntheticArrayBase: {
+            base: meta.rootName,
+            index: i,
+            length: meta.slotNames.length,
+          },
         });
       }
     }

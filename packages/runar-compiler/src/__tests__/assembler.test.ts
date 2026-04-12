@@ -386,4 +386,50 @@ describe('Assembler', () => {
       expect(date.getTime()).not.toBeNaN();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Synthetic-array marker guard
+  // -------------------------------------------------------------------------
+  //
+  // A contract with hand-written properties named `user__0`, `user__1`,
+  // `user__2` of the same type must NOT be re-grouped into a single
+  // `FixedArray<bigint, 3>` state field / ABI entry. The pattern matches
+  // the shape the expand-fixed-arrays pass produces, but without the
+  // `__syntheticArrayBase` marker the regrouper must leave them alone.
+  describe('FixedArray regrouping — marker guard', () => {
+    const HAND_NAMED_SOURCE = `
+      import { StatefulSmartContract } from 'runar-lang';
+      export class Scores extends StatefulSmartContract {
+        user__0: bigint;
+        user__1: bigint;
+        user__2: bigint;
+        constructor(user__0: bigint, user__1: bigint, user__2: bigint) {
+          super(user__0, user__1, user__2);
+        }
+        public bump(): void {
+          this.user__0 = this.user__0 + 1n;
+          this.user__1 = this.user__1 + 1n;
+          this.user__2 = this.user__2 + 1n;
+        }
+      }`;
+
+    it('keeps hand-named `user__0/1/2` properties as separate state fields', () => {
+      const artifact = assemble(HAND_NAMED_SOURCE);
+      const fields = artifact.stateFields ?? [];
+      expect(fields.map(f => f.name)).toEqual(['user__0', 'user__1', 'user__2']);
+      // None of them should carry a `fixedArray` annotation.
+      for (const f of fields) {
+        expect(f.fixedArray).toBeUndefined();
+      }
+    });
+
+    it('keeps hand-named constructor params as separate ABI params', () => {
+      const artifact = assemble(HAND_NAMED_SOURCE);
+      const params = artifact.abi.constructor.params;
+      expect(params.map(p => p.name)).toEqual(['user__0', 'user__1', 'user__2']);
+      for (const p of params) {
+        expect(p.fixedArray).toBeUndefined();
+      }
+    });
+  });
 });

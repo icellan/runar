@@ -204,52 +204,79 @@ function typeToString(type: TypeNode): string {
 // `Board: FixedArray<bigint, 9>` into 9 scalar siblings `Board__0..Board__8`.
 // The downstream passes (ANF, stack, emit) see and operate on those scalars.
 //
-// For the user-facing ABI and state-field list we re-group contiguous
-// `<base>__<i>` runs (i = 0..N-1, same type) back into a single logical
-// entry tagged `fixedArray` so the SDK can present the array-shaped API.
+// For the user-facing ABI and state-field list we re-group those synthetic
+// siblings back into a single logical entry tagged `fixedArray` so the
+// SDK can present the array-shaped API.
+//
+// Grouping is marker-driven, NOT pattern-driven: every participating
+// entry must carry a `__syntheticArrayBase` marker attached at expansion
+// time. This means a user-written contract with hand-named properties
+// `user__0`, `user__1`, `user__2` of the same type will NOT be grouped
+// — the marker is missing, so the regrouper leaves them as independent
+// scalars. Without this guard the regrouper would silently miscompile
+// into a bogus `FixedArray<T,3>` ABI entry.
 // ---------------------------------------------------------------------------
 
-const SYNTHETIC_ARRAY_SUFFIX_RE = /^(.+?)__(\d+)$/;
+interface SyntheticMarker {
+  base: string;
+  index: number;
+  length: number;
+}
 
 interface RunDescriptor<T> {
   baseName: string;
   elementType: string;
-  entries: T[]; // contiguous expanded entries
+  length: number;
+  entries: T[]; // contiguous expanded entries, one per in-order slot
 }
 
 /**
- * Walk a list of (name, type) entries and find maximal contiguous runs of
- * `<base>__<i>` entries starting from i = 0, where all entries share the
- * same base name and the same element type. Returns a list that either
- * references the original entry (ungrouped) or a run descriptor. Runs
- * shorter than 2 elements are not grouped (a single `Foo__0` is
- * indistinguishable from a normal user-named property).
+ * Walk a list of entries and find maximal runs backed by a matching
+ * `__syntheticArrayBase` marker. All entries in a run must share the
+ * same `base` and `length` and cover contiguous `index = 0..length-1`,
+ * AND share the same element type. Returns a list where each item is
+ * either the original entry (ungrouped) or a `RunDescriptor` describing
+ * the grouped run.
+ *
+ * Entries that lack the marker are always emitted ungrouped, even if
+ * their names happen to pattern-match `<base>__<i>`. This is the core
+ * guard that distinguishes compiler-synthesised siblings from
+ * user-written properties.
  */
-function detectSyntheticRuns<T extends { name: string; type: string }>(
-  entries: T[],
-): Array<T | RunDescriptor<T>> {
+function detectSyntheticRuns<
+  T extends { name: string; type: string; syntheticMarker?: SyntheticMarker },
+>(entries: T[]): Array<T | RunDescriptor<T>> {
   const result: Array<T | RunDescriptor<T>> = [];
   let i = 0;
   while (i < entries.length) {
     const entry = entries[i]!;
-    const match = entry.name.match(SYNTHETIC_ARRAY_SUFFIX_RE);
-    if (!match || match[2] !== '0') {
+    const marker = entry.syntheticMarker;
+    if (!marker || marker.index !== 0) {
+      // Not the head of a synthetic run — emit as-is.
       result.push(entry);
       i++;
       continue;
     }
-    const base = match[1]!;
+    const base = marker.base;
+    const length = marker.length;
     const elementType = entry.type;
 
-    // Extend the run while names are `<base>__<k>` with k = next expected
-    // and type matches the element type.
+    // Greedily extend the run while the next entry is a synthetic sibling
+    // of the same base/length with the expected `index = k` and the same
+    // element type.
     const runEntries: T[] = [entry];
     let k = 1;
     let j = i + 1;
-    while (j < entries.length) {
+    while (j < entries.length && k < length) {
       const next = entries[j]!;
-      const m2 = next.name.match(SYNTHETIC_ARRAY_SUFFIX_RE);
-      if (!m2 || m2[1] !== base || m2[2] !== String(k) || next.type !== elementType) {
+      const m2 = next.syntheticMarker;
+      if (
+        !m2 ||
+        m2.base !== base ||
+        m2.length !== length ||
+        m2.index !== k ||
+        next.type !== elementType
+      ) {
         break;
       }
       runEntries.push(next);
@@ -257,14 +284,18 @@ function detectSyntheticRuns<T extends { name: string; type: string }>(
       j++;
     }
 
-    if (runEntries.length >= 2) {
+    if (runEntries.length === length && length >= 1) {
       result.push({
         baseName: base,
         elementType,
+        length,
         entries: runEntries,
       });
       i = j;
     } else {
+      // Partial or broken run — defensive. A well-formed expansion always
+      // emits all N siblings contiguously, so this only fires on
+      // bugs/malformed inputs. Leave them ungrouped.
       result.push(entry);
       i++;
     }
@@ -340,26 +371,38 @@ function paramToABI(param: ParamNode): ABIParam {
 }
 
 /**
- * Re-group contiguous `<base>__<i>` params that came from FixedArray
- * expansion back into a single FixedArray-typed ABI param.
+ * Re-group contiguous synthetic FixedArray params back into a single
+ * FixedArray-typed ABI param. `ParamNode` never carries the synthetic
+ * marker (FixedArray is not allowed as a method or constructor
+ * parameter), so in practice this is a no-op — but we still run the
+ * regrouper so the type signature is consistent with state-field
+ * regrouping and so any future auto-generated constructor that does
+ * propagate markers Just Works.
  */
 function regroupAbiParams(params: ABIParam[]): ABIParam[] {
-  const runs = detectSyntheticRuns(params);
+  // Shallow cast: the marker is optional on ABIParam and will be absent
+  // for every param derived from a user-written ParamNode.
+  const runs = detectSyntheticRuns(
+    params as Array<ABIParam & { syntheticMarker?: SyntheticMarker }>,
+  );
   const out: ABIParam[] = [];
   for (const entry of runs) {
     if ('entries' in entry) {
       const grouped: ABIParam = {
         name: entry.baseName,
-        type: `FixedArray<${entry.elementType}, ${entry.entries.length}>`,
+        type: `FixedArray<${entry.elementType}, ${entry.length}>`,
         fixedArray: {
           elementType: entry.elementType,
-          length: entry.entries.length,
+          length: entry.length,
           syntheticNames: entry.entries.map(e => e.name),
         },
       };
       out.push(grouped);
     } else {
-      out.push(entry);
+      // Strip the transient `syntheticMarker` helper field before
+      // emitting into the user-facing ABI.
+      const { syntheticMarker: _sm, ...rest } = entry;
+      out.push(rest);
     }
   }
   return out;
@@ -379,16 +422,28 @@ function regroupAbiParams(params: ABIParam[]): ABIParam[] {
  * If ANF properties are provided, initialValue is read from them.
  */
 function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram): StateField[] {
-  // Step 1: build the flat per-property state fields exactly as before.
-  const flat: StateField[] = [];
+  // Step 1: build the flat per-property state fields exactly as before,
+  // propagating the `__syntheticArrayBase` marker (if any) attached by
+  // the expand-fixed-arrays pass onto a transient `syntheticMarker`
+  // helper field for the re-grouper to consume.
+  type FlatStateField = StateField & { syntheticMarker?: SyntheticMarker };
+  const flat: FlatStateField[] = [];
   for (let i = 0; i < properties.length; i++) {
     const prop = properties[i]!;
     if (!prop.readonly) {
-      const field: StateField = {
+      const field: FlatStateField = {
         name: prop.name,
         type: typeToString(prop.type),
         index: i, // property position = constructor arg index
       };
+
+      if (prop.__syntheticArrayBase) {
+        field.syntheticMarker = {
+          base: prop.__syntheticArrayBase.base,
+          index: prop.__syntheticArrayBase.index,
+          length: prop.__syntheticArrayBase.length,
+        };
+      }
 
       if (anfProgram) {
         const anfProp = anfProgram.properties.find(p => p.name === prop.name);
@@ -401,11 +456,12 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
     }
   }
 
-  // Step 2: re-group contiguous `<base>__<i>` runs into a single FixedArray
-  // state field so the SDK presents `state.Board = [...]` instead of 9
-  // separate scalar fields. The grouped field's `index` is the index of
-  // the first element — still positionally meaningful for any fallback
-  // constructor-index lookup in the SDK.
+  // Step 2: re-group synthetic runs into a single FixedArray state field
+  // so the SDK presents `state.Board = [...]` instead of 9 separate
+  // scalar fields. Only runs whose every element carries a matching
+  // synthetic marker are grouped — a hand-written contract with
+  // `user__0`, `user__1`, `user__2` of the same type stays as 3
+  // independent scalars.
   const runs = detectSyntheticRuns(flat);
   const grouped: StateField[] = [];
   for (const entry of runs) {
@@ -413,11 +469,11 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
       const first = entry.entries[0]!;
       const field: StateField = {
         name: entry.baseName,
-        type: `FixedArray<${entry.elementType}, ${entry.entries.length}>`,
+        type: `FixedArray<${entry.elementType}, ${entry.length}>`,
         index: first.index,
         fixedArray: {
           elementType: entry.elementType,
-          length: entry.entries.length,
+          length: entry.length,
           syntheticNames: entry.entries.map(e => e.name),
         },
       };
@@ -442,7 +498,10 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
       }
       grouped.push(field);
     } else {
-      grouped.push(entry);
+      // Strip the transient `syntheticMarker` helper field before
+      // emitting — it is an internal detail of the regrouper.
+      const { syntheticMarker: _sm, ...rest } = entry;
+      grouped.push(rest);
     }
   }
 

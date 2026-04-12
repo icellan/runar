@@ -74,6 +74,24 @@ export interface PropertyNode {
   readonly: boolean;
   initializer?: Expression;
   sourceLocation: SourceLocation;
+  /**
+   * Set by pass 3b (`expand-fixed-arrays`) on every scalar sibling
+   * produced from a `FixedArray<T, N>` property expansion. `base` is the
+   * original array property's name, `index` is this slot's position
+   * (`0..N-1`), and `length` is `N`. Downstream passes use this marker
+   * to re-group the expanded siblings back into a single logical
+   * FixedArray entry on the ABI / state-field list.
+   *
+   * Only compiler-synthesised properties carry this marker — a
+   * hand-written contract with literal `foo__0 / foo__1` property names
+   * will NOT have it set, so the regrouper leaves those as independent
+   * scalars.
+   */
+  __syntheticArrayBase?: {
+    base: string;
+    index: number;
+    length: number;
+  };
 }
 
 export interface MethodNode {
