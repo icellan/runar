@@ -32,7 +32,17 @@ type RunarContract struct {
 
 // NewRunarContract creates a new contract instance from a compiled artifact
 // and constructor arguments.
+//
+// If the constructor ABI contains any grouped `FixedArray` parameters, the
+// caller may pass a nested Go slice on the corresponding position
+// (matching the user-facing ABI); the slice is flattened into its
+// underlying synthetic scalar slots so the rest of the SDK only ever
+// sees a flat positional list matching the compiler's expanded
+// property order.
 func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *RunarContract {
+	// The user passes one arg per grouped ABI parameter; for FixedArray
+	// params the arg is a (possibly nested) Go slice. Validate the
+	// grouped count first so errors are reported in user-facing terms.
 	expected := len(artifact.ABI.Constructor.Params)
 	if len(constructorArgs) != expected {
 		panic(fmt.Sprintf(
@@ -41,30 +51,77 @@ func NewRunarContract(artifact *RunarArtifact, constructorArgs []interface{}) *R
 		))
 	}
 
+	// Flatten any FixedArray constructor args into their underlying
+	// synthetic scalar slots so downstream encoding (which uses the
+	// expanded property positions in `ConstructorSlots`) sees a flat
+	// list matching the compiler's view of the contract.
+	flatArgs := flattenFixedArrayCtorArgs(constructorArgs, artifact.ABI.Constructor.Params)
+
 	c := &RunarContract{
 		Artifact:        artifact,
-		constructorArgs: constructorArgs,
+		constructorArgs: flatArgs,
 		state:           make(map[string]interface{}),
 	}
 
 	// Initialize state from constructor args for stateful contracts.
 	// Properties with InitialValue use their default; others are matched
-	// to constructor args by their declaration index, since the constructor
-	// param name may differ from the state field name (e.g., "initialHash" → "rollingHash").
+	// to constructor args by their declaration index. For grouped
+	// FixedArray state fields, regroup the flat scalar slots back into
+	// a nested slice for the user-facing `state[field.Name]`.
 	if len(artifact.StateFields) > 0 {
 		for _, field := range artifact.StateFields {
 			if field.InitialValue != nil {
-				// Property has a compile-time default value.
-				// Revive BigInt strings ("0n") that occur when artifacts
-				// are loaded via standard JSON parsing (without a custom reviver).
 				c.state[field.Name] = reviveJSONValue(field.InitialValue, field.Type)
-			} else if field.Index < len(constructorArgs) {
-				c.state[field.Name] = constructorArgs[field.Index]
+				continue
+			}
+			if field.FixedArray != nil {
+				names := field.FixedArray.SyntheticNames
+				flat := make([]interface{}, len(names))
+				// syntheticNames is a flat declaration-order list. The
+				// first leaf's flat constructor arg index is
+				// `field.Index` (same invariant as scalar state
+				// fields), and the remaining leaves follow
+				// contiguously in declaration order.
+				for i := range names {
+					idx := field.Index + i
+					if idx < len(flatArgs) {
+						flat[i] = flatArgs[idx]
+					}
+				}
+				dims := parseFixedArrayDims(field.Type)
+				c.state[field.Name] = regroupNestedValue(flat, dims)
+			} else if field.Index < len(flatArgs) {
+				c.state[field.Name] = flatArgs[field.Index]
 			}
 		}
 	}
 
 	return c
+}
+
+// flattenFixedArrayCtorArgs walks the user-facing (grouped) constructor
+// argument list and expands any grouped FixedArray arg (a nested Go
+// slice) into its underlying flat scalar slots. Scalar args pass
+// through unchanged. Mirrors the TS SDK `flattenFixedArrayArgs` helper.
+func flattenFixedArrayCtorArgs(args []interface{}, abiParams []ABIParam) []interface{} {
+	if len(abiParams) == 0 {
+		return args
+	}
+	var out []interface{}
+	for i, param := range abiParams {
+		if i >= len(args) {
+			out = append(out, nil)
+			continue
+		}
+		if param.FixedArray != nil {
+			dims := parseFixedArrayDims(param.Type)
+			flat := flattenNestedValue(args[i], dims)
+			out = append(out, flat...)
+		} else {
+			out = append(out, args[i])
+		}
+	}
+	return out
 }
 
 // Connect stores a provider and signer on this contract so they don't need

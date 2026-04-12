@@ -162,18 +162,30 @@ type ABIMethod struct {
 	IsTerminal *bool      `json:"isTerminal,omitempty"`
 }
 
+// ABIFixedArray describes the fixed-array shape of a grouped ABI
+// parameter or state field. `ElementType` is the immediate child type
+// (possibly itself a nested `FixedArray<...>` string) and
+// `SyntheticNames` is the flat leaf list in declaration order.
+type ABIFixedArray struct {
+	ElementType    string   `json:"elementType"`
+	Length         int      `json:"length"`
+	SyntheticNames []string `json:"syntheticNames"`
+}
+
 // ABIParam describes a single parameter.
 type ABIParam struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name       string         `json:"name"`
+	Type       string         `json:"type"`
+	FixedArray *ABIFixedArray `json:"fixedArray,omitempty"`
 }
 
 // StateField describes a state field in a stateful contract.
 type StateField struct {
-	Name         string      `json:"name"`
-	Type         string      `json:"type"`
-	Index        int         `json:"index"`
-	InitialValue interface{} `json:"initialValue,omitempty"`
+	Name         string         `json:"name"`
+	Type         string         `json:"type"`
+	Index        int            `json:"index"`
+	InitialValue interface{}    `json:"initialValue,omitempty"`
+	FixedArray   *ABIFixedArray `json:"fixedArray,omitempty"`
 }
 
 // ConstructorSlot describes where a constructor parameter placeholder

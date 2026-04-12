@@ -15,6 +15,13 @@ import (
 // SerializeState encodes a set of state values into a hex-encoded Bitcoin
 // Script data section (without the OP_RETURN prefix). Field order is
 // determined by the Index property of each StateField.
+//
+// Fields with a `FixedArray` annotation are expanded into N element
+// writes in declaration order. Callers may supply either a nested
+// (possibly multi-dim) Go slice on the grouped name
+// (`values["board"] = []interface{}{...}`) or the underlying scalar
+// fields (`values["board__0"] = ...`) — scalars win if both are
+// present, for backward compatibility.
 func SerializeState(fields []StateField, values map[string]interface{}) string {
 	sorted := make([]StateField, len(fields))
 	copy(sorted, fields)
@@ -24,8 +31,31 @@ func SerializeState(fields []StateField, values map[string]interface{}) string {
 
 	var hex strings.Builder
 	for _, field := range sorted {
-		value := values[field.Name]
-		hex.WriteString(encodeStateValue(value, field.Type))
+		if field.FixedArray != nil {
+			arr := values[field.Name]
+			names := field.FixedArray.SyntheticNames
+			// Peel off every FixedArray layer from the declared type
+			// to find the leaf scalar type that encodeStateValue knows
+			// how to serialise.
+			leafType := unwrapFixedArrayLeaf(field.Type)
+			dims := parseFixedArrayDims(field.Type)
+			var flatFromArr []interface{}
+			if arr != nil {
+				flatFromArr = flattenNestedValue(arr, dims)
+			}
+			for i := 0; i < len(names); i++ {
+				var elem interface{}
+				if v, ok := values[names[i]]; ok {
+					elem = v
+				} else if flatFromArr != nil && i < len(flatFromArr) {
+					elem = flatFromArr[i]
+				}
+				hex.WriteString(encodeStateValue(elem, leafType))
+			}
+		} else {
+			value := values[field.Name]
+			hex.WriteString(encodeStateValue(value, field.Type))
+		}
 	}
 	return hex.String()
 }
@@ -33,6 +63,10 @@ func SerializeState(fields []StateField, values map[string]interface{}) string {
 // DeserializeState decodes state values from a hex-encoded Bitcoin Script
 // data section. The caller must strip the code prefix and OP_RETURN byte
 // before passing the data section.
+//
+// Fields with a `FixedArray` annotation are returned as a nested Go
+// slice (`[]interface{}`) on the grouped name, not as N individual
+// scalar fields.
 func DeserializeState(fields []StateField, scriptHex string) map[string]interface{} {
 	sorted := make([]StateField, len(fields))
 	copy(sorted, fields)
@@ -44,12 +78,204 @@ func DeserializeState(fields []StateField, scriptHex string) map[string]interfac
 	offset := 0
 
 	for _, field := range sorted {
-		value, bytesRead := decodeStateValue(scriptHex, offset, field.Type)
-		result[field.Name] = value
-		offset += bytesRead
+		if field.FixedArray != nil {
+			leafType := unwrapFixedArrayLeaf(field.Type)
+			dims := parseFixedArrayDims(field.Type)
+			total := len(field.FixedArray.SyntheticNames)
+			flat := make([]interface{}, total)
+			for i := 0; i < total; i++ {
+				value, bytesRead := decodeStateValue(scriptHex, offset, leafType)
+				flat[i] = value
+				offset += bytesRead
+			}
+			result[field.Name] = regroupNestedValue(flat, dims)
+		} else {
+			value, bytesRead := decodeStateValue(scriptHex, offset, field.Type)
+			result[field.Name] = value
+			offset += bytesRead
+		}
 	}
 
 	return result
+}
+
+// ---------------------------------------------------------------------------
+// FixedArray type-string helpers — mirror TS SDK/state.ts parseFixedArrayDims
+// and unwrapFixedArrayLeaf.
+// ---------------------------------------------------------------------------
+
+// parseFixedArrayDims parses a nested `FixedArray<...>` type string
+// into its outer dimensions:
+//
+//	"FixedArray<bigint, 9>"                          -> [9]
+//	"FixedArray<FixedArray<bigint, 2>, 3>"           -> [3, 2]
+//	"FixedArray<FixedArray<FixedArray<bigint,2>,3>,4>" -> [4, 3, 2]
+//
+// Non-FixedArray types return an empty slice.
+func parseFixedArrayDims(t string) []int {
+	var dims []int
+	current := strings.TrimSpace(t)
+	for strings.HasPrefix(current, "FixedArray<") {
+		inner := current[len("FixedArray<") : len(current)-1]
+		splitAt := -1
+		depth := 0
+		for i := len(inner) - 1; i >= 0; i-- {
+			ch := inner[i]
+			if ch == '>' {
+				depth++
+			} else if ch == '<' {
+				depth--
+			} else if ch == ',' && depth == 0 {
+				splitAt = i
+				break
+			}
+		}
+		if splitAt < 0 {
+			return dims
+		}
+		elemType := strings.TrimSpace(inner[:splitAt])
+		lenStr := strings.TrimSpace(inner[splitAt+1:])
+		n, err := strconv.Atoi(lenStr)
+		if err != nil || n <= 0 {
+			return dims
+		}
+		dims = append(dims, n)
+		current = elemType
+	}
+	return dims
+}
+
+// unwrapFixedArrayLeaf returns the innermost scalar type of a
+// (possibly nested) FixedArray type string.
+func unwrapFixedArrayLeaf(t string) string {
+	current := strings.TrimSpace(t)
+	for strings.HasPrefix(current, "FixedArray<") {
+		inner := current[len("FixedArray<") : len(current)-1]
+		splitAt := -1
+		depth := 0
+		for i := len(inner) - 1; i >= 0; i-- {
+			ch := inner[i]
+			if ch == '>' {
+				depth++
+			} else if ch == '<' {
+				depth--
+			} else if ch == ',' && depth == 0 {
+				splitAt = i
+				break
+			}
+		}
+		if splitAt < 0 {
+			return current
+		}
+		current = strings.TrimSpace(inner[:splitAt])
+	}
+	return current
+}
+
+// flattenNestedValue flattens a nested Go slice/array of depth
+// len(dims) into a flat leaf list. Non-slice inputs are treated as
+// absent and return a zero-filled slice of the product of `dims`.
+// Mirrors the TS helper.
+func flattenNestedValue(value interface{}, dims []int) []interface{} {
+	if len(dims) == 0 {
+		return []interface{}{value}
+	}
+	// Normalise `[]interface{}`, `[]int`, `[]int64`, etc.
+	elems := asInterfaceSlice(value)
+	if elems == nil {
+		total := 1
+		for _, d := range dims {
+			total *= d
+		}
+		out := make([]interface{}, total)
+		return out
+	}
+	rest := dims[1:]
+	var out []interface{}
+	for _, v := range elems {
+		out = append(out, flattenNestedValue(v, rest)...)
+	}
+	return out
+}
+
+// regroupNestedValue rebuilds a nested `[]interface{}` of depth
+// len(dims) from a flat leaf list. Mirrors the TS helper.
+func regroupNestedValue(flat []interface{}, dims []int) interface{} {
+	if len(dims) == 0 {
+		if len(flat) > 0 {
+			return flat[0]
+		}
+		return nil
+	}
+	v, _ := regroupNestedInner(flat, dims, 0)
+	return v
+}
+
+func regroupNestedInner(flat []interface{}, dims []int, offset int) (interface{}, int) {
+	if len(dims) == 0 {
+		return nil, 0
+	}
+	outerLen := dims[0]
+	rest := dims[1:]
+	out := make([]interface{}, outerLen)
+	consumed := 0
+	if len(rest) == 0 {
+		for i := 0; i < outerLen; i++ {
+			if offset+i < len(flat) {
+				out[i] = flat[offset+i]
+			}
+		}
+		consumed = outerLen
+	} else {
+		for i := 0; i < outerLen; i++ {
+			sub, used := regroupNestedInner(flat, rest, offset+consumed)
+			out[i] = sub
+			consumed += used
+		}
+	}
+	return out, consumed
+}
+
+// asInterfaceSlice normalises a value into `[]interface{}`. Accepts
+// []interface{}, []int, []int64, []uint, []uint64, []string, and
+// []map[string]interface{}; returns nil for non-slice inputs so the
+// caller can fall back to zero-fill.
+func asInterfaceSlice(value interface{}) []interface{} {
+	switch v := value.(type) {
+	case []interface{}:
+		return v
+	case []int:
+		out := make([]interface{}, len(v))
+		for i, x := range v {
+			out[i] = x
+		}
+		return out
+	case []int64:
+		out := make([]interface{}, len(v))
+		for i, x := range v {
+			out[i] = x
+		}
+		return out
+	case []uint:
+		out := make([]interface{}, len(v))
+		for i, x := range v {
+			out[i] = x
+		}
+		return out
+	case []uint64:
+		out := make([]interface{}, len(v))
+		for i, x := range v {
+			out[i] = x
+		}
+		return out
+	case []string:
+		out := make([]interface{}, len(v))
+		for i, x := range v {
+			out[i] = x
+		}
+		return out
+	}
+	return nil
 }
 
 // ExtractStateFromScript extracts state values from a full locking script
