@@ -228,6 +228,12 @@ module RunarCompiler
               loc: loc
             )
           end
+          if type_node.element.is_a?(PrimitiveType) && type_node.element.name == "void"
+            add_error(
+              "FixedArray element type 'void' is not valid at #{loc.file}:#{loc.line}",
+              loc: loc
+            )
+          end
           validate_property_type(type_node.element, loc)
         elsif type_node.is_a?(CustomType)
           add_error(
@@ -258,6 +264,18 @@ module RunarCompiler
           warn_manual_preimage_usage(method)
         end
 
+        # FixedArray is not allowed as a method parameter type.  The SDK
+        # accepts FixedArray constructor args and flattens them on behalf of
+        # the caller, but method params carry no expansion pass.
+        method.params.each do |param|
+          if param.type.is_a?(FixedArrayType)
+            add_error(
+              "FixedArray is not allowed as a parameter type for method '#{method.name}' (param '#{param.name}')",
+              loc: method.source_location
+            )
+          end
+        end
+
         # Validate statements
         method.body.each { |stmt| validate_statement(stmt) }
       end
@@ -269,6 +287,12 @@ module RunarCompiler
       def validate_statement(stmt)
         case stmt
         when VariableDeclStmt
+          if stmt.type.is_a?(FixedArrayType)
+            add_error(
+              "FixedArray is not allowed as a local variable type (variable '#{stmt.name}')",
+              loc: stmt.source_location
+            )
+          end
           validate_expression(stmt.init)
         when AssignmentStmt
           validate_expression(stmt.target)

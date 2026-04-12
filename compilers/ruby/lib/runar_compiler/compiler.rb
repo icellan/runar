@@ -15,8 +15,12 @@ module RunarCompiler
   # Artifact types -- mirrors the TypeScript RunarArtifact schema
   # -------------------------------------------------------------------------
 
-  ABIParam = Struct.new(:name, :type, keyword_init: true) do
-    def initialize(name: "", type: "")
+  # An ABI parameter.  +fixed_array+, when non-nil, carries the metadata for a
+  # parameter that was re-grouped from expanded FixedArray siblings: element
+  # type string, length, and the flat list of synthetic scalar names the SDK
+  # uses to flatten/unflatten values across the underlying scalar slots.
+  ABIParam = Struct.new(:name, :type, :fixed_array, keyword_init: true) do
+    def initialize(name: "", type: "", fixed_array: nil)
       super
     end
   end
@@ -39,8 +43,14 @@ module RunarCompiler
     end
   end
 
-  StateField = Struct.new(:name, :type, :index, :initial_value, keyword_init: true) do
-    def initialize(name: "", type: "", index: 0, initial_value: nil)
+  # A stateful contract state field.  +fixed_array+, when non-nil, carries
+  # metadata produced by the iterative re-grouper for a state field whose
+  # underlying scalars were created by the FixedArray expansion pass.
+  #   fixed_array[:element_type]     — element type string (may itself be "FixedArray<...>")
+  #   fixed_array[:length]           — N (outer dimension)
+  #   fixed_array[:synthetic_names]  — flat leaf names in declaration order
+  StateField = Struct.new(:name, :type, :index, :initial_value, :fixed_array, keyword_init: true) do
+    def initialize(name: "", type: "", index: 0, initial_value: nil, fixed_array: nil)
       super
     end
   end
@@ -153,6 +163,15 @@ module RunarCompiler
     Frontend.type_check(contract)
   end
   private_class_method :_type_check
+
+  # Pass 3b: Expand FixedArray properties into scalar siblings before ANF
+  # lowering.  Runs between typecheck and ANF-lower; see
+  # +expand_fixed_arrays.rb+ for semantics.
+  def self._expand_fixed_arrays(contract)
+    require_relative "frontend/expand_fixed_arrays"
+    Frontend.expand_fixed_arrays(contract)
+  end
+  private_class_method :_expand_fixed_arrays
 
   # Lower a ContractNode to ANF IR.
   def self._lower_to_anf(contract)
@@ -318,8 +337,15 @@ module RunarCompiler
       raise CompilationError, "type check errors:\n  #{tc_result.error_strings.join("\n  ")}"
     end
 
+    # Pass 3b: Expand FixedArray properties into scalar siblings.
+    expand_result = _expand_fixed_arrays(parse_result.contract)
+    if expand_result.errors.any?
+      raise CompilationError, "fixed-array expansion errors:\n  #{expand_result.error_strings.join("\n  ")}"
+    end
+    expanded_contract = expand_result.contract
+
     # Pass 4: ANF lowering
-    program = _lower_to_anf(parse_result.contract)
+    program = _lower_to_anf(expanded_contract)
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
@@ -355,7 +381,14 @@ module RunarCompiler
       raise CompilationError, "type check errors:\n  #{tc_result.error_strings.join("\n  ")}"
     end
 
-    program = _lower_to_anf(parse_result.contract)
+    # Pass 3b: Expand FixedArray properties before ANF lowering.
+    expand_result = _expand_fixed_arrays(parse_result.contract)
+    if expand_result.errors.any?
+      raise CompilationError, "fixed-array expansion errors:\n  #{expand_result.error_strings.join("\n  ")}"
+    end
+    expanded_contract = expand_result.contract
+
+    program = _lower_to_anf(expanded_contract)
 
     # Bake constructor args into ANF properties.
     _apply_constructor_args(program, constructor_args)
@@ -368,6 +401,158 @@ module RunarCompiler
 
     program
   end
+
+  # -------------------------------------------------------------------------
+  # FixedArray re-grouping
+  # -------------------------------------------------------------------------
+  #
+  # Pass 3b (+expand_fixed_arrays+) expands a property like
+  # +board: FixedArray<bigint, 9>+ into 9 scalar siblings +board__0..board__8+.
+  # For nested arrays +grid: FixedArray<FixedArray<bigint, 2>, 2>+ it expands
+  # into 4 scalar leaves +grid__0__0..grid__1__1+.  The downstream ANF, stack,
+  # and emit passes operate purely on those scalars.
+  #
+  # For the user-facing ABI and state-field list we re-group those synthetic
+  # siblings back into a single logical entry tagged +fixed_array+ so the SDK
+  # can present the array-shaped API — including nested arrays, which it
+  # exposes as nested arrays.
+  #
+  # Grouping is marker-driven, NOT pattern-driven: every participating entry
+  # must carry a +synthetic_array_chain+ attached at expansion time.  A user
+  # contract with hand-named +user__0+, +user__1+, +user__2+ properties of the
+  # same type will NOT be re-grouped because the marker is missing.
+  #
+  # The regrouper runs iteratively: each pass collapses one level of the
+  # innermost FixedArray (peeling one entry off the end of every chain) and
+  # wraps the resulting group's type in one more +FixedArray<...,N>+ layer.
+  # Repeat until no entry has any remaining chain.
+
+  # Internal representation of a field going through the regrouping loop.
+  # All hash values; no external visibility.
+  #   :name           — current user-facing field name
+  #   :type           — current type string (already FixedArray<...> once grouped)
+  #   :chain          — remaining chain entries, outermost first, innermost at -1
+  #   :initial_value  — optional current value (possibly nested array)
+  #   :fixed_array    — current grouping metadata hash or nil
+  #   :index          — source declaration index (state fields only)
+  def self._regroup_one_pass(entries)
+    out = []
+    changed = false
+    i = 0
+    while i < entries.length
+      entry = entries[i]
+      chain = entry[:chain] || []
+      if chain.empty?
+        out << entry
+        i += 1
+        next
+      end
+
+      marker = chain[-1]
+      if marker[:index] != 0
+        out << entry
+        i += 1
+        next
+      end
+
+      # Greedily extend the run: every follower must share innermost
+      # {base, length}, carry the expected index = k, and match the current
+      # type so runs of mixed-type children cannot spuriously collapse.
+      run = [entry]
+      k = 1
+      j = i + 1
+      while j < entries.length && k < marker[:length]
+        nxt = entries[j]
+        nchain = nxt[:chain] || []
+        break if nchain.empty?
+
+        m2 = nchain[-1]
+        break unless m2[:base] == marker[:base] &&
+                     m2[:length] == marker[:length] &&
+                     m2[:index] == k &&
+                     nxt[:type] == entry[:type]
+
+        run << nxt
+        k += 1
+        j += 1
+      end
+
+      if run.length != marker[:length]
+        out << entry
+        i += 1
+        next
+      end
+
+      inner_type = entry[:type]
+      grouped_type = "FixedArray<#{inner_type}, #{marker[:length]}>"
+
+      # Flatten synthetic names so the grouped entry's list is the flat
+      # leaf list (already-grouped children carry their own flat list).
+      synthetic_names = []
+      run.each do |e|
+        if e[:fixed_array]
+          synthetic_names.concat(e[:fixed_array][:synthetic_names])
+        else
+          synthetic_names << e[:name]
+        end
+      end
+
+      collapsed_init = nil
+      all_have_init = run.all? { |e| !e[:initial_value].nil? }
+      collapsed_init = run.map { |e| e[:initial_value] } if all_have_init
+
+      grouped = {
+        name: marker[:base],
+        type: grouped_type,
+        chain: chain[0..-2],
+        fixed_array: {
+          element_type: inner_type,
+          length: marker[:length],
+          synthetic_names: synthetic_names
+        },
+        index: run[0][:index]
+      }
+      grouped[:initial_value] = collapsed_init unless collapsed_init.nil?
+
+      out << grouped
+      i = j
+      changed = true
+    end
+    [out, changed]
+  end
+  private_class_method :_regroup_one_pass
+
+  # Iteratively regroup synthetic FixedArray runs until no entry has any
+  # remaining chain.  Returns the final entries array.
+  def self._regroup_synthetic_runs(entries)
+    current = entries
+    1024.times do
+      new_entries, changed = _regroup_one_pass(current)
+      current = new_entries
+      return current unless changed
+    end
+    raise "regroup_synthetic_runs: exceeded iteration cap (pathological chain nesting?)"
+  end
+  private_class_method :_regroup_synthetic_runs
+
+  # Normalise a chain entry which may be keyed with symbols (when coming from
+  # the Ruby AST/ANF) or strings (when coming from a JSON-loaded ANF IR).
+  def self._normalise_chain(chain)
+    return [] if chain.nil? || chain.empty?
+
+    chain.map do |e|
+      if e.is_a?(Hash)
+        {
+          base: e[:base] || e["base"],
+          index: e[:index] || e["index"] || 0,
+          length: e[:length] || e["length"]
+        }
+      else
+        e
+      end
+    end
+  end
+  private_class_method :_normalise_chain
 
   # -------------------------------------------------------------------------
   # Artifact assembly
@@ -390,19 +575,56 @@ module RunarCompiler
     # Build ABI
     # Initialized properties are excluded from constructor params -- they
     # get their values from the initializer, not from the caller.
-    constructor_params = program.properties
-      .select { |prop| prop.initial_value.nil? }
-      .map { |prop| ABIParam.new(name: prop.name, type: prop.type) }
+    ctor_entries = []
+    program.properties.each do |prop|
+      next unless prop.initial_value.nil?
+
+      ctor_entries << {
+        name: prop.name,
+        type: prop.type,
+        chain: _normalise_chain(prop.synthetic_array_chain)
+      }
+    end
+    regrouped_ctor = _regroup_synthetic_runs(ctor_entries)
+    constructor_params = regrouped_ctor.map do |e|
+      p = ABIParam.new(name: e[:name], type: e[:type])
+      if e[:fixed_array]
+        p.fixed_array = {
+          element_type: e[:fixed_array][:element_type],
+          length: e[:fixed_array][:length],
+          synthetic_names: e[:fixed_array][:synthetic_names]
+        }
+      end
+      p
+    end
 
     # Build state fields for stateful contracts
     # index = position in constructor args (not sequential among state fields)
-    state_fields = []
+    state_entries = []
     program.properties.each_with_index do |prop, i|
       next if prop.readonly
 
-      sf = StateField.new(name: prop.name, type: prop.type, index: i)
-      sf.initial_value = prop.initial_value unless prop.initial_value.nil?
-      state_fields << sf
+      entry = {
+        name: prop.name,
+        type: prop.type,
+        chain: _normalise_chain(prop.synthetic_array_chain),
+        index: i
+      }
+      entry[:initial_value] = prop.initial_value unless prop.initial_value.nil?
+      state_entries << entry
+    end
+    regrouped_state = _regroup_synthetic_runs(state_entries)
+    state_fields = regrouped_state.map do |e|
+      sf = StateField.new(name: e[:name], type: e[:type], index: e[:index] || 0)
+      sf.initial_value = e[:initial_value] unless e[:initial_value].nil?
+      if e[:fixed_array]
+        sf.fixed_array = {
+          element_type: e[:fixed_array][:element_type],
+          length: e[:fixed_array][:length],
+          synthetic_names: e[:fixed_array][:synthetic_names]
+        }
+      end
+      sf
     end
 
     is_stateful = !state_fields.empty?
@@ -482,20 +704,30 @@ module RunarCompiler
   # @param artifact [Artifact]
   # @return [String] JSON string with camelCase keys
   def self.artifact_to_json(artifact)
+    abi_param_to_hash = lambda do |p|
+      h = { "name" => p.name, "type" => p.type }
+      if p.respond_to?(:fixed_array) && !p.fixed_array.nil?
+        h["fixedArray"] = {
+          "elementType" => p.fixed_array[:element_type],
+          "length" => p.fixed_array[:length],
+          "syntheticNames" => p.fixed_array[:synthetic_names],
+        }
+      end
+      h
+    end
+
     d = {
       "version" => artifact.version,
       "compilerVersion" => artifact.compiler_version,
       "contractName" => artifact.contract_name,
       "abi" => {
         "constructor" => {
-          "params" => artifact.abi.constructor.params.map do |p|
-            { "name" => p.name, "type" => p.type }
-          end,
+          "params" => artifact.abi.constructor.params.map(&abi_param_to_hash),
         },
         "methods" => artifact.abi.methods.map do |m|
           md = {
             "name" => m.name,
-            "params" => m.params.map { |p| { "name" => p.name, "type" => p.type } },
+            "params" => m.params.map(&abi_param_to_hash),
             "isPublic" => m.is_public,
           }
           md["isTerminal"] = m.is_terminal unless m.is_terminal.nil?
@@ -539,6 +771,13 @@ module RunarCompiler
       d["stateFields"] = artifact.state_fields.map do |sf|
         sfd = { "name" => sf.name, "type" => sf.type, "index" => sf.index }
         sfd["initialValue"] = sf.initial_value unless sf.initial_value.nil?
+        if sf.respond_to?(:fixed_array) && !sf.fixed_array.nil?
+          sfd["fixedArray"] = {
+            "elementType" => sf.fixed_array[:element_type],
+            "length" => sf.fixed_array[:length],
+            "syntheticNames" => sf.fixed_array[:synthetic_names],
+          }
+        end
         sfd
       end
     end

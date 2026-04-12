@@ -32,9 +32,15 @@ module RunarCompiler
       end
     end
 
-    ANFProperty = Struct.new(:name, :type, :readonly, :initial_value, keyword_init: true) do
-      def initialize(name: "", type: "", readonly: false, initial_value: nil)
-        super(name: name, type: type, readonly: readonly, initial_value: initial_value)
+    # +synthetic_array_chain+ propagates the +PropertyNode#synthetic_array_chain+
+    # marker from the AST into the ANF IR so the artifact assembler can
+    # iteratively re-group expanded +FixedArray<T, N>+ leaves back into a
+    # logical +FixedArray+ state field.  Each entry is a Hash with keys
+    # +:base+, +:index+, +:length+ (outermost first).  +nil+ on user-written
+    # scalar properties.
+    ANFProperty = Struct.new(:name, :type, :readonly, :initial_value, :synthetic_array_chain, keyword_init: true) do
+      def initialize(name: "", type: "", readonly: false, initial_value: nil, synthetic_array_chain: nil)
+        super(name: name, type: type, readonly: readonly, initial_value: initial_value, synthetic_array_chain: synthetic_array_chain)
       end
     end
 

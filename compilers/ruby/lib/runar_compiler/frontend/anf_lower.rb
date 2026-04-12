@@ -118,6 +118,12 @@ module RunarCompiler
         unless prop.initializer.nil?
           anf_prop.initial_value = _extract_literal_value(prop.initializer)
         end
+        # Propagate the FixedArray-expansion marker so the artifact assembler
+        # can re-group the synthetic scalar run back into a logical FixedArray
+        # state field.
+        if prop.respond_to?(:synthetic_array_chain) && !prop.synthetic_array_chain.nil?
+          anf_prop.synthetic_array_chain = prop.synthetic_array_chain
+        end
         anf_prop
       end
     end
