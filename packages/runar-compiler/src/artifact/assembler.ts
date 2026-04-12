@@ -25,6 +25,16 @@ import type {
 export interface ABIParam {
   name: string;
   type: string;
+  /**
+   * Present when this ABI param represents an expanded FixedArray<T, N>.
+   * Callers can pass a plain array of length N; the SDK will flatten it
+   * into the underlying positional slots by `syntheticNames` order.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 export interface ABIConstructor {
@@ -60,6 +70,21 @@ export interface StateField {
   type: string;
   index: number;
   initialValue?: string | bigint | boolean;
+  /**
+   * For state fields representing an expanded FixedArray<T, N>:
+   * - `type` is the user-facing type string (e.g. `FixedArray<bigint, 9>`)
+   * - `fixedArray.elementType` is the element primitive type (e.g. `bigint`)
+   * - `fixedArray.length` is N
+   * - `fixedArray.syntheticNames` is the flat list of underlying scalar
+   *   state-field names (`Board__0`..`Board__8`), in order.
+   *
+   * Runtime SDKs use this to flatten and unflatten arrays on state read/write.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 export interface ConstructorSlot {
@@ -172,6 +197,82 @@ function typeToString(type: TypeNode): string {
 }
 
 // ---------------------------------------------------------------------------
+// FixedArray re-grouping
+// ---------------------------------------------------------------------------
+//
+// Pass 3b (expand-fixed-arrays) expands a property like
+// `Board: FixedArray<bigint, 9>` into 9 scalar siblings `Board__0..Board__8`.
+// The downstream passes (ANF, stack, emit) see and operate on those scalars.
+//
+// For the user-facing ABI and state-field list we re-group contiguous
+// `<base>__<i>` runs (i = 0..N-1, same type) back into a single logical
+// entry tagged `fixedArray` so the SDK can present the array-shaped API.
+// ---------------------------------------------------------------------------
+
+const SYNTHETIC_ARRAY_SUFFIX_RE = /^(.+?)__(\d+)$/;
+
+interface RunDescriptor<T> {
+  baseName: string;
+  elementType: string;
+  entries: T[]; // contiguous expanded entries
+}
+
+/**
+ * Walk a list of (name, type) entries and find maximal contiguous runs of
+ * `<base>__<i>` entries starting from i = 0, where all entries share the
+ * same base name and the same element type. Returns a list that either
+ * references the original entry (ungrouped) or a run descriptor. Runs
+ * shorter than 2 elements are not grouped (a single `Foo__0` is
+ * indistinguishable from a normal user-named property).
+ */
+function detectSyntheticRuns<T extends { name: string; type: string }>(
+  entries: T[],
+): Array<T | RunDescriptor<T>> {
+  const result: Array<T | RunDescriptor<T>> = [];
+  let i = 0;
+  while (i < entries.length) {
+    const entry = entries[i]!;
+    const match = entry.name.match(SYNTHETIC_ARRAY_SUFFIX_RE);
+    if (!match || match[2] !== '0') {
+      result.push(entry);
+      i++;
+      continue;
+    }
+    const base = match[1]!;
+    const elementType = entry.type;
+
+    // Extend the run while names are `<base>__<k>` with k = next expected
+    // and type matches the element type.
+    const runEntries: T[] = [entry];
+    let k = 1;
+    let j = i + 1;
+    while (j < entries.length) {
+      const next = entries[j]!;
+      const m2 = next.name.match(SYNTHETIC_ARRAY_SUFFIX_RE);
+      if (!m2 || m2[1] !== base || m2[2] !== String(k) || next.type !== elementType) {
+        break;
+      }
+      runEntries.push(next);
+      k++;
+      j++;
+    }
+
+    if (runEntries.length >= 2) {
+      result.push({
+        baseName: base,
+        elementType,
+        entries: runEntries,
+      });
+      i = j;
+    } else {
+      result.push(entry);
+      i++;
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // ABI extraction
 // ---------------------------------------------------------------------------
 
@@ -182,8 +283,9 @@ function typeToString(type: TypeNode): string {
  * with their parameter names and types.
  */
 function extractABI(contract: ContractNode): ABI {
-  // Constructor
-  const constructorParams: ABIParam[] = contract.constructor.params.map(paramToABI);
+  // Constructor — map params to raw ABIParams then re-group expanded arrays
+  const rawConstructorParams: ABIParam[] = contract.constructor.params.map(paramToABI);
+  const constructorParams = regroupAbiParams(rawConstructorParams);
 
   const isStateful = contract.parentClass === 'StatefulSmartContract';
   const mutablePropNames = isStateful
@@ -192,7 +294,7 @@ function extractABI(contract: ContractNode): ABI {
 
   // Methods
   const methods: ABIMethod[] = contract.methods.map(method => {
-    const params = method.params.map(paramToABI);
+    const params = regroupAbiParams(method.params.map(paramToABI));
     const isPublic = method.visibility === 'public';
     let needsChange = false;
 
@@ -237,6 +339,32 @@ function paramToABI(param: ParamNode): ABIParam {
   };
 }
 
+/**
+ * Re-group contiguous `<base>__<i>` params that came from FixedArray
+ * expansion back into a single FixedArray-typed ABI param.
+ */
+function regroupAbiParams(params: ABIParam[]): ABIParam[] {
+  const runs = detectSyntheticRuns(params);
+  const out: ABIParam[] = [];
+  for (const entry of runs) {
+    if ('entries' in entry) {
+      const grouped: ABIParam = {
+        name: entry.baseName,
+        type: `FixedArray<${entry.elementType}, ${entry.entries.length}>`,
+        fixedArray: {
+          elementType: entry.elementType,
+          length: entry.entries.length,
+          syntheticNames: entry.entries.map(e => e.name),
+        },
+      };
+      out.push(grouped);
+    } else {
+      out.push(entry);
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // State field extraction
 // ---------------------------------------------------------------------------
@@ -251,8 +379,8 @@ function paramToABI(param: ParamNode): ABIParam {
  * If ANF properties are provided, initialValue is read from them.
  */
 function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram): StateField[] {
-  const stateFields: StateField[] = [];
-
+  // Step 1: build the flat per-property state fields exactly as before.
+  const flat: StateField[] = [];
   for (let i = 0; i < properties.length; i++) {
     const prop = properties[i]!;
     if (!prop.readonly) {
@@ -262,7 +390,6 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
         index: i, // property position = constructor arg index
       };
 
-      // Include initialValue from ANF property if present
       if (anfProgram) {
         const anfProp = anfProgram.properties.find(p => p.name === prop.name);
         if (anfProp?.initialValue !== undefined) {
@@ -270,11 +397,56 @@ function extractStateFields(properties: PropertyNode[], anfProgram?: ANFProgram)
         }
       }
 
-      stateFields.push(field);
+      flat.push(field);
     }
   }
 
-  return stateFields;
+  // Step 2: re-group contiguous `<base>__<i>` runs into a single FixedArray
+  // state field so the SDK presents `state.Board = [...]` instead of 9
+  // separate scalar fields. The grouped field's `index` is the index of
+  // the first element — still positionally meaningful for any fallback
+  // constructor-index lookup in the SDK.
+  const runs = detectSyntheticRuns(flat);
+  const grouped: StateField[] = [];
+  for (const entry of runs) {
+    if ('entries' in entry) {
+      const first = entry.entries[0]!;
+      const field: StateField = {
+        name: entry.baseName,
+        type: `FixedArray<${entry.elementType}, ${entry.entries.length}>`,
+        index: first.index,
+        fixedArray: {
+          elementType: entry.elementType,
+          length: entry.entries.length,
+          syntheticNames: entry.entries.map(e => e.name),
+        },
+      };
+      // If every element has a compile-time initialValue, surface it as a
+      // literal JSON-serializable array so the SDK can pre-populate
+      // `state.<name>`. Mixed states (some with initializers, some without)
+      // are omitted and left for constructor-arg resolution.
+      const allHaveInit = entry.entries.every(e => e.initialValue !== undefined);
+      if (allHaveInit) {
+        // Use a JSON-string representation of the tuple; the SDK decodes it.
+        // We cannot use a JS array directly because the StateField.initialValue
+        // type is `string | bigint | boolean`. Encode as `[v0,v1,...]` with
+        // bigint suffix "n" preserved.
+        const parts = entry.entries.map(e => {
+          const v = e.initialValue;
+          if (typeof v === 'bigint') return `${v}n`;
+          if (typeof v === 'boolean') return String(v);
+          if (typeof v === 'string') return JSON.stringify(v);
+          return 'null';
+        });
+        field.initialValue = `[${parts.join(',')}]`;
+      }
+      grouped.push(field);
+    } else {
+      grouped.push(entry);
+    }
+  }
+
+  return grouped;
 }
 
 // ---------------------------------------------------------------------------

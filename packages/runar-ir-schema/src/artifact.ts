@@ -16,6 +16,16 @@ import type { StackProgram } from './stack-ir.js';
 export interface ABIParam {
   name: string;
   type: string;
+  /**
+   * Present when this ABI param represents an expanded FixedArray<T, N>.
+   * Callers can pass a plain array of length N; the SDK will flatten it
+   * into the underlying positional slots by `syntheticNames` order.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 export interface ABIConstructor {
@@ -59,6 +69,21 @@ export interface StateField {
   type: string;
   index: number;
   initialValue?: string | bigint | boolean;
+  /**
+   * For state fields representing an expanded FixedArray<T, N>:
+   * - `type` is the user-facing type string (e.g. `FixedArray<bigint, 9>`)
+   * - `fixedArray.elementType` is the element primitive type (e.g. `bigint`)
+   * - `fixedArray.length` is N
+   * - `fixedArray.syntheticNames` is the flat list of underlying scalar
+   *   state-field names (`Board__0`..`Board__8`), in order.
+   *
+   * Runtime SDKs use this to flatten and unflatten arrays on state read/write.
+   */
+  fixedArray?: {
+    elementType: string;
+    length: number;
+    syntheticNames: string[];
+  };
 }
 
 // ---------------------------------------------------------------------------
