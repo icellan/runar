@@ -244,6 +244,37 @@ RSpec.describe 'Runar::SDK types' do
           expect(artifact.code_separator_indices).to eq([42])
         end
       end
+
+      context 'with a FixedArray state field' do
+        let(:fa_hash) do
+          MINIMAL_ARTIFACT_HASH.merge(
+            'stateFields' => [
+              {
+                'name' => 'board',
+                'type' => 'FixedArray<bigint, 3>',
+                'index' => 0,
+                'initialValue' => [0, 0, 0],
+                'fixedArray' => {
+                  'elementType' => 'bigint',
+                  'length' => 3,
+                  'syntheticNames' => %w[board__0 board__1 board__2]
+                }
+              }
+            ]
+          )
+        end
+
+        subject(:artifact) { described_class.from_hash(fa_hash) }
+
+        it 'parses the fixedArray annotation into the SDK StateField' do
+          field = artifact.state_fields.first
+          expect(field.type).to eq('FixedArray<bigint, 3>')
+          expect(field.fixed_array).to be_a(Hash)
+          expect(field.fixed_array[:element_type]).to eq('bigint')
+          expect(field.fixed_array[:length]).to eq(3)
+          expect(field.fixed_array[:synthetic_names]).to eq(%w[board__0 board__1 board__2])
+        end
+      end
     end
 
     describe '.from_json' do

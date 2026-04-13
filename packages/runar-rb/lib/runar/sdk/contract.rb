@@ -674,7 +674,7 @@ module Runar
 
         @artifact.state_fields.each do |field|
           if !field.initial_value.nil?
-            @state[field.name] = revive_json_value(field.initial_value, field.type)
+            @state[field.name] = revive_state_value(field.initial_value, field)
           else
             param_idx = @artifact.abi.constructor_params.index { |p| p.name == field.name }
             param_idx = field.index if param_idx.nil? && field.index < @constructor_args.length
@@ -683,6 +683,23 @@ module Runar
         end
       end
       # rubocop:enable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+
+      # Revive a deserialized initial_value — possibly nested — into Ruby
+      # types, peeling every FixedArray wrapper off the field type.
+      def revive_state_value(value, field)
+        if field.respond_to?(:fixed_array) && field.fixed_array
+          leaf_type = SDK::State.unwrap_fixed_array_leaf(field.type)
+          return revive_nested_value(value, leaf_type)
+        end
+
+        revive_json_value(value, field.type)
+      end
+
+      def revive_nested_value(value, leaf_type)
+        return value.map { |v| revive_nested_value(v, leaf_type) } if value.is_a?(Array)
+
+        revive_json_value(value, leaf_type)
+      end
 
       def revive_json_value(value, field_type)
         return value unless value.is_a?(String)

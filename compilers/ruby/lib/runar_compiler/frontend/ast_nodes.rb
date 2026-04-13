@@ -178,8 +178,16 @@ module RunarCompiler
     end
 
     # A contract property declaration.
-    PropertyNode = Struct.new(:name, :type, :readonly, :initializer, :source_location, keyword_init: true) do
-      def initialize(name: "", type: nil, readonly: false, initializer: nil, source_location: SourceLocation.new)
+    #
+    # +synthetic_array_chain+ is attached by the FixedArray expansion pass
+    # (+expand_fixed_arrays.rb+) on each synthetic scalar leaf created when a
+    # +FixedArray<T, N>+ property is desugared into N scalar siblings.  Each
+    # entry is a Hash with +:base+, +:index+, +:length+ keys, outermost first.
+    # The artifact assembler uses this marker to re-group the flat synthetic
+    # runs back into logical +FixedArray+ ABI and state entries.  User-written
+    # scalar properties leave this field as +nil+.
+    PropertyNode = Struct.new(:name, :type, :readonly, :initializer, :source_location, :synthetic_array_chain, keyword_init: true) do
+      def initialize(name: "", type: nil, readonly: false, initializer: nil, source_location: SourceLocation.new, synthetic_array_chain: nil)
         super
       end
     end

@@ -35,7 +35,19 @@ module Runar
     Transaction = TransactionData
 
     # A single ABI parameter.
-    ABIParam = Struct.new(:name, :type, keyword_init: true)
+    #
+    # +fixed_array+ is populated by +RunarArtifact.from_hash+ when the ABI
+    # param represents an expanded +FixedArray<T, N>+ that the compiler's
+    # iterative re-grouper collapsed.  Callers can pass a plain array of
+    # length N and the SDK flattens it into the underlying positional slots.
+    #   fixed_array[:element_type] — element type string (may itself be nested FixedArray)
+    #   fixed_array[:length]       — outer dimension N
+    #   fixed_array[:synthetic_names] — flat leaf names in declaration order
+    ABIParam = Struct.new(:name, :type, :fixed_array, keyword_init: true) do
+      def initialize(name:, type:, fixed_array: nil)
+        super
+      end
+    end
 
     # A contract method descriptor.
     ABIMethod = Struct.new(:name, :params, :is_public, :is_terminal, keyword_init: true) do
@@ -52,8 +64,12 @@ module Runar
     end
 
     # A state field in a stateful contract.
-    StateField = Struct.new(:name, :type, :index, :initial_value, keyword_init: true) do
-      def initialize(name:, type:, index:, initial_value: nil)
+    #
+    # +fixed_array+ mirrors +ABIParam#fixed_array+ — it is set when the field
+    # represents an expanded +FixedArray<T, N>+ so the SDK can flatten/unflatten
+    # values across the underlying scalar slots during state (de)serialisation.
+    StateField = Struct.new(:name, :type, :index, :initial_value, :fixed_array, keyword_init: true) do
+      def initialize(name:, type:, index:, initial_value: nil, fixed_array: nil)
         super
       end
     end
@@ -105,16 +121,41 @@ module Runar
         @anf                    = anf
       end
 
+      # Parse a camelCase FixedArray metadata hash into SDK-native shape.
+      #
+      # The compiler emits +{"elementType" => ..., "length" => N, "syntheticNames" => [...]}+
+      # under +fixedArray+.  We flatten to symbol keys so the SDK can read
+      # +fa[:length]+ without guessing the casing.
+      def self._parse_fixed_array(raw)
+        return nil if raw.nil?
+
+        {
+          element_type: raw['elementType'] || raw[:element_type],
+          length: raw['length'] || raw[:length],
+          synthetic_names: Array(raw['syntheticNames'] || raw[:synthetic_names])
+        }
+      end
+
       # Load an artifact from a JSON-parsed Hash (keys may be camelCase strings).
       def self.from_hash(hash)
         abi_raw = hash.fetch('abi', {})
 
         ctor_params = Array(abi_raw.dig('constructor', 'params')).map do |p|
-          ABIParam.new(name: p['name'], type: p['type'])
+          ABIParam.new(
+            name: p['name'],
+            type: p['type'],
+            fixed_array: _parse_fixed_array(p['fixedArray'])
+          )
         end
 
         methods = Array(abi_raw['methods']).map do |m|
-          params = Array(m['params']).map { |p| ABIParam.new(name: p['name'], type: p['type']) }
+          params = Array(m['params']).map do |p|
+            ABIParam.new(
+              name: p['name'],
+              type: p['type'],
+              fixed_array: _parse_fixed_array(p['fixedArray'])
+            )
+          end
           ABIMethod.new(
             name: m['name'],
             params: params,
@@ -128,7 +169,8 @@ module Runar
             name: sf['name'],
             type: sf['type'],
             index: sf['index'],
-            initial_value: sf['initialValue']
+            initial_value: sf['initialValue'],
+            fixed_array: _parse_fixed_array(sf['fixedArray'])
           )
         end
 

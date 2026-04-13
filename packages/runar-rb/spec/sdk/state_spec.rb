@@ -326,4 +326,52 @@ RSpec.describe 'Runar::SDK::State' do
       expect(result['active']).to be true
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # FixedArray state round-trips
+  # ---------------------------------------------------------------------------
+
+  describe '.serialize_state and .deserialize_state with FixedArray fields' do
+    it 'flattens and regroups a flat FixedArray<bigint, 3>' do
+      fa = { element_type: 'bigint', length: 3, synthetic_names: %w[board__0 board__1 board__2] }
+      field = Runar::SDK::StateField.new(
+        name: 'board',
+        type: 'FixedArray<bigint, 3>',
+        index: 0,
+        fixed_array: fa
+      )
+      values = { 'board' => [1, 2, 3] }
+      hex = Runar::SDK::State.serialize_state([field], values)
+      # 3 × 8 bytes = 48 hex chars.
+      expect(hex.length).to eq(48)
+      result = Runar::SDK::State.deserialize_state([field], hex)
+      expect(result['board']).to eq([1, 2, 3])
+    end
+
+    it 'flattens and regroups a nested FixedArray<FixedArray<bigint, 2>, 2>' do
+      fa = {
+        element_type: 'FixedArray<bigint, 2>',
+        length: 2,
+        synthetic_names: %w[grid__0__0 grid__0__1 grid__1__0 grid__1__1]
+      }
+      field = Runar::SDK::StateField.new(
+        name: 'grid',
+        type: 'FixedArray<FixedArray<bigint, 2>, 2>',
+        index: 0,
+        fixed_array: fa
+      )
+      values = { 'grid' => [[1, 2], [3, 4]] }
+      hex = Runar::SDK::State.serialize_state([field], values)
+      expect(hex.length).to eq(64) # 4 × 8 bytes
+      result = Runar::SDK::State.deserialize_state([field], hex)
+      expect(result['grid']).to eq([[1, 2], [3, 4]])
+    end
+
+    it 'reshapes a flat array into the declared outer dimensions' do
+      expect(Runar::SDK::State.parse_fixed_array_dims('FixedArray<bigint, 9>')).to eq([9])
+      expect(Runar::SDK::State.parse_fixed_array_dims('FixedArray<FixedArray<bigint, 2>, 3>')).to eq([3, 2])
+      expect(Runar::SDK::State.parse_fixed_array_dims('FixedArray<FixedArray<FixedArray<bigint, 2>, 3>, 4>')).to eq([4, 3, 2])
+      expect(Runar::SDK::State.unwrap_fixed_array_leaf('FixedArray<FixedArray<bigint, 2>, 3>')).to eq('bigint')
+    end
+  end
 end
