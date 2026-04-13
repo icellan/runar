@@ -121,6 +121,30 @@ fn validateProperties(
             });
         }
 
+        // FixedArray-specific validation
+        if (prop.type_info == .fixed_array) {
+            if (prop.fixed_array_length == 0) {
+                try errors.append(allocator, .{
+                    .message = "FixedArray length must be a positive integer",
+                    .severity = .@"error",
+                });
+            }
+            if (prop.fixed_array_element == .void) {
+                try errors.append(allocator, .{
+                    .message = "FixedArray element type cannot be 'void'",
+                    .severity = .@"error",
+                });
+            }
+            if (prop.initializer) |init_expr| {
+                if (init_expr != .array_literal) {
+                    try errors.append(allocator, .{
+                        .message = "FixedArray property must use an array-literal initializer",
+                        .severity = .@"error",
+                    });
+                }
+            }
+        }
+
         // V27: txPreimage is implicit in StatefulSmartContract
         if (contract.parent_class == .stateful_smart_contract and
             std.mem.eql(u8, prop.name, "txPreimage"))
@@ -218,6 +242,16 @@ fn validateMethods(
     warnings: *std.ArrayListUnmanaged(CompilerDiagnostic),
 ) !void {
     for (contract.methods) |method| {
+        // FixedArray may not appear as a method parameter.
+        for (method.params) |p| {
+            if (p.type_info == .fixed_array) {
+                try errors.append(allocator, .{
+                    .message = "FixedArray is not allowed as a method parameter",
+                    .severity = .@"error",
+                });
+            }
+        }
+
         // Public methods must end with assert() (unless StatefulSmartContract,
         // where the compiler auto-injects the final assert)
         if (method.is_public and contract.parent_class != .stateful_smart_contract) {

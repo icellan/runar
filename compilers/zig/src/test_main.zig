@@ -15,6 +15,7 @@ test {
     _ = @import("passes/parse_ruby.zig");
     _ = @import("passes/validate.zig");
     _ = @import("passes/typecheck.zig");
+    _ = @import("passes/expand_fixed_arrays.zig");
     _ = @import("passes/anf_lower.zig");
     _ = @import("passes/constant_fold.zig");
     _ = @import("passes/ec_optimizer.zig");

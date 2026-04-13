@@ -53,6 +53,23 @@ pub fn lowerToANF(allocator: Allocator, contract: ContractNode) LowerError!ANFPr
     const properties = try lowerProperties(allocator, contract);
     const methods = try lowerMethods(allocator, contract);
 
+    // Post-pass: lift update_prop from if-else branches into flat conditionals.
+    // This prevents phantom stack entries in stack lowering for patterns like
+    // position dispatch (different properties updated in different branches).
+    // Mirrors the TS reference compiler's liftBranchUpdateProps
+    // (packages/runar-compiler/src/passes/04-anf-lower.ts).
+    for (methods) |*m| {
+        const old_bindings = m.bindings;
+        const lifted = try liftBranchUpdateProps(allocator, old_bindings);
+        // Release the outer slice from `lowerMethods`. Inner ANFBinding entries
+        // that survived (those that did not match the lift pattern) are
+        // copied by value into `lifted`, so the strings/sub-slices they
+        // reference remain valid and are NOT freed here.
+        if (old_bindings.len > 0) allocator.free(old_bindings);
+        m.bindings = lifted;
+        m.body = lifted;
+    }
+
     return ANFProgram{
         .contract_name = contract.name,
         .parent_class = contract.parent_class,
@@ -98,6 +115,23 @@ fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
             }
             // Check local byte vars
             if (ctx.local_byte_vars.get(name) != null) return true;
+            // Mirror TS reference: getParamType walks ALL methods' params
+            // (and the constructor) and returns the first match by name.
+            // This means a param name shared across methods inherits the
+            // type from whichever method declared it first in source order.
+            // See packages/runar-compiler/src/passes/04-anf-lower.ts getParamType.
+            for (ctx.contract.constructor.params) |p| {
+                if (std.mem.eql(u8, p.name, name)) {
+                    return isByteType(p.type_info);
+                }
+            }
+            for (ctx.contract.methods) |m| {
+                for (m.params) |p| {
+                    if (std.mem.eql(u8, p.name, name)) {
+                        return isByteType(p.type_info);
+                    }
+                }
+            }
             return false;
         },
         .property_access => |pa| {
@@ -137,6 +171,7 @@ fn lowerProperties(allocator: Allocator, contract: ContractNode) LowerError![]AN
             .type_name = types.runarTypeToString(prop.type_info),
             .type_info = prop.type_info,
             .readonly = prop.readonly,
+            .synthetic_array_chain = prop.synthetic_array_chain,
         };
         // Only emit initialValue for properties that have defaults AND are NOT
         // constructor params. This matches the TS compiler: properties with
@@ -1248,6 +1283,512 @@ fn branchEndsWithReturn(stmts: []const Statement) bool {
         },
         else => return false,
     }
+}
+
+// ============================================================================
+// liftBranchUpdateProps — flatten if-else chains that write properties
+// ============================================================================
+//
+// Mirrors the TypeScript reference compiler's liftBranchUpdateProps
+// (packages/runar-compiler/src/passes/04-anf-lower.ts) and Go/Rust/Ruby ports.
+//
+// Transforms if-else chains where each branch ends with update_prop into
+// flat conditional assignments. This is critical for stateful contracts
+// because Bitcoin Script requires ALL state fields to be explicitly on the
+// stack after method execution — nested update_props leave phantom stack
+// entries in stack lowering.
+//
+// Before:
+//   if (pos === 0) { this.c0 = turn; }
+//   else if (pos === 1) { this.c1 = turn; }
+//   else { assert(false); }
+//
+// After:
+//   this.c0 = (pos === 0)           ? turn : this.c0;
+//   this.c1 = (!cond0 && pos === 1) ? turn : this.c1;
+
+const UpdateBranch = struct {
+    cond_setup_bindings: []const ANFBinding,
+    cond_ref: ?[]const u8, // null for final else
+    prop_name: []const u8,
+    value_bindings: []const ANFBinding,
+    value_ref: []const u8,
+};
+
+/// Find the max temp index (e.g. "t47" → 47) in a binding tree.
+fn maxTempIndex(bindings: []const ANFBinding) i64 {
+    var max: i64 = -1;
+    for (bindings) |b| {
+        if (b.name.len > 1 and b.name[0] == 't') {
+            var n: i64 = 0;
+            var valid = true;
+            for (b.name[1..]) |ch| {
+                if (ch >= '0' and ch <= '9') {
+                    n = n * 10 + (ch - '0');
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid and n > max) max = n;
+        }
+        switch (b.value) {
+            .@"if" => |ifv| {
+                const t = maxTempIndex(ifv.then);
+                if (t > max) max = t;
+                const e = maxTempIndex(ifv.@"else");
+                if (e > max) max = e;
+            },
+            .loop => |lp| {
+                const t = maxTempIndex(lp.body);
+                if (t > max) max = t;
+            },
+            else => {},
+        }
+    }
+    return max;
+}
+
+/// Check if a binding value is side-effect-free (safe to hoist).
+fn isSideEffectFree(v: ANFValue) bool {
+    return switch (v) {
+        .load_prop, .load_param, .load_const, .bin_op, .unary_op => true,
+        else => false,
+    };
+}
+
+fn allBindingsSideEffectFree(bindings: []const ANFBinding) bool {
+    for (bindings) |b| {
+        if (!isSideEffectFree(b.value)) return false;
+    }
+    return true;
+}
+
+/// Extract the update_prop target from a branch's last binding.
+/// Returns null if the branch doesn't end with a simple update_prop.
+const BranchUpdate = struct {
+    prop_name: []const u8,
+    value_bindings: []const ANFBinding,
+    value_ref: []const u8,
+};
+
+fn extractBranchUpdate(bindings: []const ANFBinding) ?BranchUpdate {
+    if (bindings.len == 0) return null;
+    const last = bindings[bindings.len - 1];
+    switch (last.value) {
+        .update_prop => |up| {
+            const value_bindings = bindings[0 .. bindings.len - 1];
+            if (!allBindingsSideEffectFree(value_bindings)) return null;
+            return .{
+                .prop_name = up.name,
+                .value_bindings = value_bindings,
+                .value_ref = up.value,
+            };
+        },
+        else => return null,
+    }
+}
+
+/// Check if an else branch is just `assert(false)` — unreachable dead code.
+fn isAssertFalseElse(bindings: []const ANFBinding) bool {
+    if (bindings.len == 0) return false;
+    const last = bindings[bindings.len - 1];
+    const assert_ref = switch (last.value) {
+        .assert => |a| a.value,
+        else => return false,
+    };
+    for (bindings) |b| {
+        if (std.mem.eql(u8, b.name, assert_ref)) {
+            switch (b.value) {
+                .load_const => |lc| switch (lc.value) {
+                    .boolean => |bv| return !bv,
+                    else => return false,
+                },
+                else => return false,
+            }
+        }
+    }
+    return false;
+}
+
+/// Recursively collect update branches from a nested if-else chain.
+/// Returns null if the chain cannot be flattened.
+fn collectUpdateBranches(
+    allocator: Allocator,
+    if_cond: []const u8,
+    then_bindings: []const ANFBinding,
+    else_bindings: []const ANFBinding,
+) LowerError!?[]UpdateBranch {
+    const then_update = extractBranchUpdate(then_bindings) orelse return null;
+
+    var branches: std.ArrayListUnmanaged(UpdateBranch) = .empty;
+    try branches.append(allocator, .{
+        .cond_setup_bindings = &.{},
+        .cond_ref = if_cond,
+        .prop_name = then_update.prop_name,
+        .value_bindings = then_update.value_bindings,
+        .value_ref = then_update.value_ref,
+    });
+
+    if (else_bindings.len == 0) {
+        branches.deinit(allocator);
+        return null;
+    }
+
+    // Check if else is another if (else-if chain)
+    const last_else = else_bindings[else_bindings.len - 1];
+    switch (last_else.value) {
+        .@"if" => |inner_if| {
+            const cond_setup = else_bindings[0 .. else_bindings.len - 1];
+            if (!allBindingsSideEffectFree(cond_setup)) {
+                branches.deinit(allocator);
+                return null;
+            }
+
+            const inner_maybe = try collectUpdateBranches(
+                allocator,
+                inner_if.cond,
+                inner_if.then,
+                inner_if.@"else",
+            );
+            const inner = inner_maybe orelse {
+                branches.deinit(allocator);
+                return null;
+            };
+
+            // Prepend condition setup to first inner branch
+            const merged = try allocator.alloc(ANFBinding, cond_setup.len + inner[0].cond_setup_bindings.len);
+            @memcpy(merged[0..cond_setup.len], cond_setup);
+            @memcpy(merged[cond_setup.len..], inner[0].cond_setup_bindings);
+            inner[0].cond_setup_bindings = merged;
+
+            try branches.appendSlice(allocator, inner);
+            return try branches.toOwnedSlice(allocator);
+        },
+        else => {},
+    }
+
+    // Otherwise, else branch should end with update_prop (final else)
+    if (extractBranchUpdate(else_bindings)) |eu| {
+        try branches.append(allocator, .{
+            .cond_setup_bindings = &.{},
+            .cond_ref = null,
+            .prop_name = eu.prop_name,
+            .value_bindings = eu.value_bindings,
+            .value_ref = eu.value_ref,
+        });
+        return try branches.toOwnedSlice(allocator);
+    }
+
+    // Handle unreachable else: assert(false)
+    if (isAssertFalseElse(else_bindings)) {
+        return try branches.toOwnedSlice(allocator);
+    }
+
+    branches.deinit(allocator);
+    return null;
+}
+
+/// Remap temp references in an ANF value according to a name mapping.
+fn remapValueRefs(
+    allocator: Allocator,
+    value: ANFValue,
+    name_map: *const std.StringHashMapUnmanaged([]const u8),
+) LowerError!ANFValue {
+    const r = struct {
+        fn f(nm: *const std.StringHashMapUnmanaged([]const u8), s: []const u8) []const u8 {
+            if (nm.get(s)) |mapped| return mapped;
+            return s;
+        }
+    }.f;
+
+    switch (value) {
+        .load_param, .load_prop, .get_state_script => return value,
+        .load_const => |lc| {
+            switch (lc.value) {
+                .string => |s| {
+                    if (s.len > 5 and std.mem.startsWith(u8, s, "@ref:")) {
+                        const target = s[5..];
+                        if (name_map.get(target)) |mapped| {
+                            const new_s = try std.fmt.allocPrint(allocator, "@ref:{s}", .{mapped});
+                            return .{ .load_const = .{ .value = .{ .string = new_s } } };
+                        }
+                    }
+                },
+                else => {},
+            }
+            return value;
+        },
+        .bin_op => |bop| {
+            return .{ .bin_op = .{
+                .op = bop.op,
+                .left = r(name_map, bop.left),
+                .right = r(name_map, bop.right),
+                .result_type = bop.result_type,
+            } };
+        },
+        .unary_op => |uop| {
+            return .{ .unary_op = .{
+                .op = uop.op,
+                .operand = r(name_map, uop.operand),
+                .result_type = uop.result_type,
+            } };
+        },
+        .call => |c| {
+            const new_args = try allocator.alloc([]const u8, c.args.len);
+            for (c.args, 0..) |a, i| new_args[i] = r(name_map, a);
+            return .{ .call = .{ .func = c.func, .args = new_args } };
+        },
+        .method_call => |mc| {
+            const new_args = try allocator.alloc([]const u8, mc.args.len);
+            for (mc.args, 0..) |a, i| new_args[i] = r(name_map, a);
+            return .{ .method_call = .{
+                .object = r(name_map, mc.object),
+                .method = mc.method,
+                .args = new_args,
+            } };
+        },
+        .assert => |a| {
+            return .{ .assert = .{ .value = r(name_map, a.value) } };
+        },
+        .update_prop => |up| {
+            return .{ .update_prop = .{ .name = up.name, .value = r(name_map, up.value) } };
+        },
+        .check_preimage => |cp| {
+            return .{ .check_preimage = .{ .preimage = r(name_map, cp.preimage) } };
+        },
+        .deserialize_state => |ds| {
+            return .{ .deserialize_state = .{ .preimage = r(name_map, ds.preimage) } };
+        },
+        .add_output => |ao| {
+            const new_sv = try allocator.alloc([]const u8, ao.state_values.len);
+            for (ao.state_values, 0..) |s, i| new_sv[i] = r(name_map, s);
+            const new_sr = try allocator.alloc([]const u8, ao.state_refs.len);
+            for (ao.state_refs, 0..) |s, i| new_sr[i] = r(name_map, s);
+            return .{ .add_output = .{
+                .satoshis = r(name_map, ao.satoshis),
+                .state_values = new_sv,
+                .preimage = if (ao.preimage.len > 0) r(name_map, ao.preimage) else ao.preimage,
+                .state_refs = new_sr,
+            } };
+        },
+        .add_raw_output => |aro| {
+            return .{ .add_raw_output = .{
+                .satoshis = r(name_map, aro.satoshis),
+                .script_bytes = if (aro.script_bytes.len > 0) r(name_map, aro.script_bytes) else aro.script_bytes,
+                .script_ref = if (aro.script_ref.len > 0) r(name_map, aro.script_ref) else aro.script_ref,
+            } };
+        },
+        .@"if" => |ifv| {
+            const new_if = try allocator.create(types.ANFIf);
+            new_if.* = .{
+                .cond = r(name_map, ifv.cond),
+                .then = ifv.then,
+                .@"else" = ifv.@"else",
+            };
+            return .{ .@"if" = new_if };
+        },
+        else => return value,
+    }
+}
+
+/// Transform if-bindings whose branches all end with update_prop into
+/// flat conditional assignments.
+fn liftBranchUpdateProps(
+    allocator: Allocator,
+    bindings: []const ANFBinding,
+) LowerError![]ANFBinding {
+    var next_idx: i64 = maxTempIndex(bindings) + 1;
+    const FreshCtx = struct {
+        allocator: Allocator,
+        next_idx: *i64,
+        fn fresh(self: @This()) LowerError![]const u8 {
+            const name = try std.fmt.allocPrint(self.allocator, "t{d}", .{self.next_idx.*});
+            self.next_idx.* += 1;
+            return name;
+        }
+    };
+    const fctx = FreshCtx{ .allocator = allocator, .next_idx = &next_idx };
+
+    var result: std.ArrayListUnmanaged(ANFBinding) = .empty;
+
+    for (bindings) |binding| {
+        const if_val = switch (binding.value) {
+            .@"if" => |v| v,
+            else => {
+                try result.append(allocator, binding);
+                continue;
+            },
+        };
+
+        const branches_maybe = try collectUpdateBranches(
+            allocator,
+            if_val.cond,
+            if_val.then,
+            if_val.@"else",
+        );
+        const branches = branches_maybe orelse {
+            try result.append(allocator, binding);
+            continue;
+        };
+        if (branches.len < 2) {
+            try result.append(allocator, binding);
+            continue;
+        }
+
+        // --- Transform: flatten into conditional assignments ---
+
+        // 1. Hoist condition setup bindings with fresh names.
+        var name_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+        defer name_map.deinit(allocator);
+
+        var cond_refs: std.ArrayListUnmanaged(?[]const u8) = .empty;
+        defer cond_refs.deinit(allocator);
+
+        for (branches) |branch| {
+            for (branch.cond_setup_bindings) |csb| {
+                const new_name = try fctx.fresh();
+                try name_map.put(allocator, csb.name, new_name);
+                const remapped = try remapValueRefs(allocator, csb.value, &name_map);
+                try result.append(allocator, .{
+                    .name = new_name,
+                    .value = remapped,
+                });
+            }
+            if (branch.cond_ref) |cr| {
+                const mapped: []const u8 = if (name_map.get(cr)) |m| m else cr;
+                try cond_refs.append(allocator, mapped);
+            } else {
+                try cond_refs.append(allocator, null);
+            }
+        }
+
+        // 2. Compute effective condition for each branch.
+        var effective_conds: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer effective_conds.deinit(allocator);
+
+        var negated_conds: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer negated_conds.deinit(allocator);
+
+        for (branches, 0..) |_, i| {
+            if (i == 0) {
+                try effective_conds.append(allocator, cond_refs.items[0].?);
+                continue;
+            }
+
+            // Negate any prior conditions not yet negated.
+            var j: usize = negated_conds.items.len;
+            while (j < i) : (j += 1) {
+                const cr = cond_refs.items[j] orelse continue;
+                const neg_name = try fctx.fresh();
+                try result.append(allocator, .{
+                    .name = neg_name,
+                    .value = .{ .unary_op = .{ .op = "!", .operand = cr } },
+                });
+                try negated_conds.append(allocator, neg_name);
+            }
+
+            // AND all negated conditions together.
+            var and_ref: []const u8 = negated_conds.items[0];
+            const limit = if (negated_conds.items.len < i) negated_conds.items.len else i;
+            var k: usize = 1;
+            while (k < limit) : (k += 1) {
+                const and_name = try fctx.fresh();
+                try result.append(allocator, .{
+                    .name = and_name,
+                    .value = .{ .bin_op = .{
+                        .op = "&&",
+                        .left = and_ref,
+                        .right = negated_conds.items[k],
+                        .result_type = null,
+                    } },
+                });
+                and_ref = and_name;
+            }
+
+            if (cond_refs.items[i]) |cr| {
+                // Middle branch: AND with own condition.
+                const final_name = try fctx.fresh();
+                try result.append(allocator, .{
+                    .name = final_name,
+                    .value = .{ .bin_op = .{
+                        .op = "&&",
+                        .left = and_ref,
+                        .right = cr,
+                        .result_type = null,
+                    } },
+                });
+                try effective_conds.append(allocator, final_name);
+            } else {
+                // Final else: just the AND of negations.
+                try effective_conds.append(allocator, and_ref);
+            }
+        }
+
+        // 3. For each branch, emit: load_old, conditional if-expression, update_prop.
+        for (branches, 0..) |branch, i| {
+            // Load old property value.
+            const old_prop_ref = try fctx.fresh();
+            try result.append(allocator, .{
+                .name = old_prop_ref,
+                .value = .{ .load_prop = .{ .name = branch.prop_name } },
+            });
+
+            // Remap value bindings for the then-branch.
+            var branch_map: std.StringHashMapUnmanaged([]const u8) = .empty;
+            defer branch_map.deinit(allocator);
+            var map_it = name_map.iterator();
+            while (map_it.next()) |entry| {
+                try branch_map.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
+            }
+
+            var then_bindings: std.ArrayListUnmanaged(ANFBinding) = .empty;
+            for (branch.value_bindings) |vb| {
+                const new_name = try fctx.fresh();
+                try branch_map.put(allocator, vb.name, new_name);
+                const remapped = try remapValueRefs(allocator, vb.value, &branch_map);
+                try then_bindings.append(allocator, .{
+                    .name = new_name,
+                    .value = remapped,
+                });
+            }
+
+            // Else branch: keep old property value.
+            const keep_name = try fctx.fresh();
+            var else_bindings_list: std.ArrayListUnmanaged(ANFBinding) = .empty;
+            try else_bindings_list.append(allocator, .{
+                .name = keep_name,
+                .value = .{ .load_const = .{ .value = .{
+                    .string = try std.fmt.allocPrint(allocator, "@ref:{s}", .{old_prop_ref}),
+                } } },
+            });
+
+            // Emit conditional if-expression.
+            const cond_if_ref = try fctx.fresh();
+            const new_if = try allocator.create(types.ANFIf);
+            new_if.* = .{
+                .cond = effective_conds.items[i],
+                .then = try then_bindings.toOwnedSlice(allocator),
+                .@"else" = try else_bindings_list.toOwnedSlice(allocator),
+            };
+            try result.append(allocator, .{
+                .name = cond_if_ref,
+                .value = .{ .@"if" = new_if },
+            });
+
+            // Emit update_prop.
+            const update_name = try fctx.fresh();
+            try result.append(allocator, .{
+                .name = update_name,
+                .value = .{ .update_prop = .{
+                    .name = branch.prop_name,
+                    .value = cond_if_ref,
+                } },
+            });
+        }
+    }
+
+    return try result.toOwnedSlice(allocator);
 }
 
 // ============================================================================

@@ -657,11 +657,28 @@ const Parser = struct {
             // For StatefulSmartContract, readonly depends on the keyword.
             const readonly = if (parent_class == .smart_contract) true else is_readonly;
 
+            // Capture FixedArray length + element type so expand_fixed_arrays
+            // can see the shape after typecheck.
+            var fa_len: u32 = 0;
+            var fa_elem: types.RunarType = .unknown;
+            var fa_nested_len: u32 = 0;
+            if (type_node == .fixed_array_type) {
+                fa_len = type_node.fixed_array_type.length;
+                const inner = type_node.fixed_array_type.element.*;
+                fa_elem = typeNodeToRunarType(inner);
+                if (inner == .fixed_array_type) {
+                    fa_nested_len = inner.fixed_array_type.length;
+                }
+            }
+
             return .{ .property = .{
                 .name = member_name,
                 .type_info = type_info,
                 .readonly = readonly,
                 .initializer = initializer,
+                .fixed_array_length = fa_len,
+                .fixed_array_element = fa_elem,
+                .fixed_array_nested_length = fa_nested_len,
             } };
         }
 
@@ -1146,6 +1163,23 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value } };
+            },
+            .index_access => |ia| {
+                // this.arr[idx] = value — carry the full index-access target on
+                // the Assign so expand_fixed_arrays can rewrite it into
+                // dispatch form. The `target` field stores the base property
+                // name (when the object is `this.<name>`) so downstream
+                // pretty-printing and debug output remains meaningful.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                } };
             },
             else => {
                 // For more complex targets, use identifier name if possible

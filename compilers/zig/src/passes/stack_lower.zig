@@ -159,6 +159,10 @@ const LowerCtx = struct {
     copy_ref_aliases: bool,
     current_idx: usize,
     in_branch: bool,
+    /// Refs from the enclosing scope that must not be consumed inside branches
+    /// (used by lowerIfExpr to protect outer values). Mirrors TS
+    /// `outerProtectedRefs` — a pointer so it can be shared without copying.
+    outer_protected_refs: ?*const std.StringHashMapUnmanaged(void) = null,
     updated_props: std.StringHashMapUnmanaged(void),
     max_depth: u32,
     /// Current ANF binding's source location — set before processing each binding.
@@ -273,7 +277,62 @@ const LowerCtx = struct {
         return dst;
     }
 
+    /// Drop a value from arbitrary stack depth in the bilateral branch
+    /// reconciliation phase of `lowerIf`. Mirrors the TS reference compiler's
+    /// pre-IF reconciliation (`05-stack-lower.ts` ~line 1640), which emits
+    /// `push(depth) + roll(depth=depth) + drop`. TS's peephole folds
+    /// `push(1)+roll(depth=1) → swap` and `push(2)+roll(depth=2) → rot`, so
+    /// the byte output at depth 2 is `rot+drop` (2 bytes) instead of
+    /// `push(2)+roll+drop` (3 bytes). Zig's peephole cannot distinguish
+    /// foldable from non-foldable rolls at the instruction-stream level
+    /// (unlike Go/TS which retain a depth field on typed RollOp), so we
+    /// emit the folded form directly here.
     fn removeBranchValueAtDepth(ctx: *LowerCtx, depth: usize) !void {
+        if (depth == 0) {
+            try ctx.emitOp(.op_drop);
+            _ = ctx.stack.pop();
+            return;
+        }
+
+        if (depth == 1) {
+            // push(1)+roll(1)+drop → swap+drop, and Zig's peephole folds
+            // swap+drop → nip (or directly here).
+            try ctx.emitOp(.op_nip);
+            try ctx.stack.removeAtDepth(ctx.allocator, 1);
+            return;
+        }
+
+        if (depth == 2) {
+            // push(2)+roll(2)+drop → rot+drop (TS peephole fold).
+            try ctx.emitOp(.op_rot);
+            try ctx.stack.removeAtDepth(ctx.allocator, 2);
+            try ctx.stack.push(ctx.allocator, null);
+            try ctx.emitOp(.op_drop);
+            _ = ctx.stack.pop();
+            return;
+        }
+
+        try ctx.emitPushInt(@intCast(depth));
+        try ctx.stack.push(ctx.allocator, null);
+        try ctx.emitOp(.op_roll);
+        _ = ctx.stack.pop();
+        const rolled = ctx.stack.peekAtDepth(depth);
+        try ctx.stack.removeAtDepth(ctx.allocator, depth);
+        try ctx.stack.push(ctx.allocator, rolled);
+        try ctx.emitOp(.op_drop);
+        _ = ctx.stack.pop();
+    }
+
+    /// Drop a stale property entry after an if-else expression that wrote the
+    /// same property in both branches. Mirrors the TS reference compiler's
+    /// `lowerUpdateProp` post-if cleanup (`05-stack-lower.ts` ~line 1909),
+    /// which uses `push d + roll(depth=d+1) + drop`. The push value (`d`) is
+    /// the visible depth from the StackMap, but the runtime roll consumes the
+    /// extra temporary from the push (`d + 1`). The peephole rule
+    /// `push 2n + roll(depth=2) → rot` checks the *IR* depth, not the push
+    /// value, so this case never folds in TS. Keep the literal
+    /// `push d + OP_ROLL + OP_DROP` here for byte equivalence.
+    fn removeStalePropertyAtDepth(ctx: *LowerCtx, depth: usize) !void {
         if (depth == 0) {
             try ctx.emitOp(.op_drop);
             _ = ctx.stack.pop();
@@ -300,6 +359,10 @@ const LowerCtx = struct {
     fn duplicateBranchValueAtDepth(ctx: *LowerCtx, depth: usize, name: ?[]const u8) !void {
         if (depth == 0) {
             try ctx.emitOp(.op_dup);
+        } else if (depth == 1) {
+            // Foldable pick: depth 1 → OP_OVER. Mirrors TS peephole
+            // `push 1n + pick(depth=1) → over`.
+            try ctx.emitOp(.op_over);
         } else {
             try ctx.emitPushInt(@intCast(depth));
             try ctx.stack.push(ctx.allocator, null);
@@ -543,12 +606,40 @@ const LowerCtx = struct {
         }
         try self.computeLastUses(bindings);
 
+        // Protect parent-scope refs from consume inside this scope: extend
+        // their last-use index past the end of the bindings, mirroring TS
+        // `outerProtectedRefs` handling in `lowerBindings`.
+        if (self.outer_protected_refs) |protected| {
+            var it = protected.iterator();
+            while (it.next()) |entry| {
+                try self.last_uses.put(self.allocator, entry.key_ptr.*, bindings.len);
+            }
+        }
+
+        // Terminal-assert propagation mirrors TS reference compiler
+        // (`05-stack-lower.ts` lines 819-832): if the last binding is an
+        // `if`, mark it as the terminal-if point so its branches can
+        // propagate `terminalAssert=true` to their last assert. Otherwise
+        // scan backwards for the last plain assert.
         var terminal_assert_idx: ?usize = null;
+        var terminal_if_idx: ?usize = null;
         if (terminal_assert and bindings.len > 0) {
             const last_idx = bindings.len - 1;
             switch (bindings[last_idx].value) {
-                .assert, .assert_op => terminal_assert_idx = last_idx,
-                else => {},
+                .@"if", .if_expr => terminal_if_idx = last_idx,
+                else => {
+                    var i: usize = bindings.len;
+                    while (i > 0) {
+                        i -= 1;
+                        switch (bindings[i].value) {
+                            .assert, .assert_op => {
+                                terminal_assert_idx = i;
+                                break;
+                            },
+                            else => {},
+                        }
+                    }
+                },
             }
         }
 
@@ -559,6 +650,16 @@ const LowerCtx = struct {
                 switch (binding.value) {
                     .assert => |a| try self.lowerAssertOp(binding.name, .{ .condition = a.value }, true),
                     .assert_op => |a| try self.lowerAssertOp(binding.name, a, true),
+                    else => try self.lowerBinding(binding),
+                }
+            } else if (terminal_if_idx != null and idx == terminal_if_idx.?) {
+                switch (binding.value) {
+                    .if_expr => |ie| try self.lowerIfExprTerminal(binding.name, ie, true),
+                    .@"if" => |ie| {
+                        const legacy = try self.allocator.create(types.ANFIfExpr);
+                        legacy.* = .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null };
+                        try self.lowerIfExprTerminal(binding.name, legacy, true);
+                    },
                     else => try self.lowerBinding(binding),
                 }
             } else {
@@ -844,13 +945,21 @@ const LowerCtx = struct {
             self.trackDepth();
         }
 
+        // Match TS reference compiler: `inlineMethodCall` calls
+        // `this.lowerBindings(method.body)`, which overwrites
+        // `this.localBindings` with the inlined method's body binding names.
+        // TS does NOT restore the caller's localBindings afterwards — this
+        // "bug" is load-bearing: subsequent `@ref:<caller_binding>` lookups
+        // after the inlining miss the caller's scope and fall back to
+        // `consume=false` (PICK/DUP), keeping values alive. Zig previously
+        // restored local_bindings which caused divergent byte output.
+        //
+        // last_uses IS restored because in TS `lastUses` is a local variable
+        // inside each `lowerBindings` call, so the caller's analysis survives.
         const saved_last_uses = self.last_uses;
-        const saved_local_bindings = self.local_bindings;
         var saved_force_copy_bindings = self.force_copy_bindings;
         const saved_copy_ref_aliases = self.copy_ref_aliases;
         defer {
-            self.local_bindings.deinit(self.allocator);
-            self.local_bindings = saved_local_bindings;
             self.force_copy_bindings.deinit(self.allocator);
             self.force_copy_bindings = saved_force_copy_bindings;
             self.last_uses.deinit(self.allocator);
@@ -859,7 +968,6 @@ const LowerCtx = struct {
         }
 
         self.last_uses = .empty;
-        self.local_bindings = .empty;
         self.force_copy_bindings = .empty;
         self.copy_ref_aliases = false;
         try self.lowerBindings(method.body, false);
@@ -897,14 +1005,12 @@ const LowerCtx = struct {
             .string => |s| {
                 if (std.mem.startsWith(u8, s, "@ref:")) {
                     const ref_name = s[5..];
-                    const depends_on_private_result = self.isForceCopyBinding(ref_name);
-                    const forced_copy = depends_on_private_result and (self.futureUseCount(bind_name) > 1 or self.feedsLaterAliasedBinding(bind_name) or self.feedsPrivateMethodCall(bind_name));
-                    const consume = !self.copy_ref_aliases and !forced_copy and self.hasLocalBinding(ref_name) and self.isLastUse(ref_name);
+                    // Match TS reference compiler: consume only if ref target is
+                    // a local binding in the current scope and this is the last
+                    // use. No force-copy tracking — TS does not have it.
+                    const consume = !self.copy_ref_aliases and self.hasLocalBinding(ref_name) and self.isLastUse(ref_name);
                     try self.bringToTop(ref_name, consume);
                     try self.stack.renameAtDepth(self.allocator, 0, bind_name);
-                    if (depends_on_private_result) {
-                        try self.force_copy_bindings.put(self.allocator, bind_name, {});
-                    }
                     return;
                 }
 
@@ -3089,7 +3195,15 @@ const LowerCtx = struct {
     // if_expr
     // ========================================================================
 
+    fn lowerIfExprTerminal(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr, terminal_assert: bool) !void {
+        return self.lowerIfExprImpl(bind_name, ie, terminal_assert);
+    }
+
     fn lowerIfExpr(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr) !void {
+        return self.lowerIfExprImpl(bind_name, ie, false);
+    }
+
+    fn lowerIfExprImpl(self: *LowerCtx, bind_name: []const u8, ie: *const types.ANFIfExpr, terminal_assert: bool) !void {
         try self.bringToTopAuto(ie.condition);
         _ = self.stack.pop();
         var base_stack = try self.stack.clone(self.allocator);
@@ -3114,17 +3228,15 @@ const LowerCtx = struct {
         then_ctx.in_branch = true;
         then_ctx.copy_ref_aliases = self.copy_ref_aliases;
         then_ctx.max_depth = self.max_depth;
-        for (ie.then_bindings) |binding| {
-            try then_ctx.local_bindings.put(self.allocator, binding.name, {});
-        }
-        try then_ctx.computeLastUses(ie.then_bindings);
-        var protected_then = protected_refs.iterator();
-        while (protected_then.next()) |entry| {
-            try then_ctx.last_uses.put(self.allocator, entry.key_ptr.*, ie.then_bindings.len);
-        }
-        for (ie.then_bindings, 0..) |binding, idx| {
-            then_ctx.current_idx = idx;
-            try then_ctx.lowerBinding(binding);
+        then_ctx.outer_protected_refs = &protected_refs;
+        try then_ctx.lowerBindings(ie.then_bindings, terminal_assert);
+        if (terminal_assert and then_ctx.stack.depth() > 1) {
+            const excess = then_ctx.stack.depth() - 1;
+            var i: usize = 0;
+            while (i < excess) : (i += 1) {
+                try then_ctx.emitOp(.op_nip);
+                try then_ctx.stack.removeAtDepth(self.allocator, 1);
+            }
         }
 
         var else_ctx = LowerCtx.init(self.allocator, self.program);
@@ -3135,18 +3247,16 @@ const LowerCtx = struct {
         else_ctx.in_branch = true;
         else_ctx.copy_ref_aliases = self.copy_ref_aliases;
         else_ctx.max_depth = self.max_depth;
+        else_ctx.outer_protected_refs = &protected_refs;
         const else_bindings = ie.else_bindings orelse &.{};
-        for (else_bindings) |binding| {
-            try else_ctx.local_bindings.put(self.allocator, binding.name, {});
-        }
-        try else_ctx.computeLastUses(else_bindings);
-        var protected_else = protected_refs.iterator();
-        while (protected_else.next()) |entry| {
-            try else_ctx.last_uses.put(self.allocator, entry.key_ptr.*, else_bindings.len);
-        }
-        for (else_bindings, 0..) |binding, idx| {
-            else_ctx.current_idx = idx;
-            try else_ctx.lowerBinding(binding);
+        try else_ctx.lowerBindings(else_bindings, terminal_assert);
+        if (terminal_assert and else_ctx.stack.depth() > 1) {
+            const excess = else_ctx.stack.depth() - 1;
+            var i: usize = 0;
+            while (i < excess) : (i += 1) {
+                try else_ctx.emitOp(.op_nip);
+                try else_ctx.stack.removeAtDepth(self.allocator, 1);
+            }
         }
 
         var post_then_names = try then_ctx.stack.namedSlots(self.allocator);
@@ -3218,6 +3328,18 @@ const LowerCtx = struct {
         }
         try self.emitOp(.op_endif);
 
+        // Transfer ownership of push_data buffers allocated by the branch
+        // contexts to self, so the `push_data` slices we just copied into
+        // self.instructions remain valid after then_ctx/else_ctx.deinit()
+        // runs and frees their owned buffers. Without this, branch-allocated
+        // buffers (e.g., hex-decoded ByteString property initial values)
+        // would be freed, and Debug mode fills freed memory with 0xaa,
+        // producing corrupt push_data output.
+        try self.owned_push_data.appendSlice(self.allocator, then_ctx.owned_push_data.items);
+        then_ctx.owned_push_data.clearRetainingCapacity();
+        try self.owned_push_data.appendSlice(self.allocator, else_ctx.owned_push_data.items);
+        else_ctx.owned_push_data.clearRetainingCapacity();
+
         var post_branch_names = try then_ctx.stack.namedSlots(self.allocator);
         defer post_branch_names.deinit(self.allocator);
         pre_it = pre_if_names.iterator();
@@ -3248,7 +3370,7 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |name| {
                         if (std.mem.eql(u8, name, then_top.?)) {
-                            try removeBranchValueAtDepth(self, d);
+                            try removeStalePropertyAtDepth(self, d);
                             break;
                         }
                     }
@@ -3259,7 +3381,7 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |name| {
                         if (std.mem.eql(u8, name, then_top.?)) {
-                            try removeBranchValueAtDepth(self, d);
+                            try removeStalePropertyAtDepth(self, d);
                             break;
                         }
                     }
@@ -3496,25 +3618,43 @@ const generator_point_g = [33]u8{
 // ============================================================================
 
 /// Lower an ANF program to Stack IR.
+///
+/// Each public method is lowered into its own StackMethod. The multi-method
+/// dispatch table is added at emit time (in emit.zig), matching the TS
+/// reference compiler's pipeline. This keeps the dispatch-table opcodes
+/// outside the peephole optimization window so that `OP_DUP, OP_0,
+/// OP_NUMEQUAL, OP_IF, OP_DROP` dispatch entries are not folded into
+/// `OP_DUP, OP_NOT, OP_IF, OP_DROP` (which is semantically equivalent
+/// but byte-divergent from the canonical TS output).
 pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgram {
-    const public_methods = countPublicMethods(program.methods);
-    const needs_dispatch = public_methods > 1;
-
     var methods = std.ArrayListUnmanaged(types.StackMethod).empty;
     defer methods.deinit(allocator);
     var owned_push_data = std.ArrayListUnmanaged([]u8).empty;
     defer owned_push_data.deinit(allocator);
 
-    if (needs_dispatch) {
+    for (program.methods) |method| {
+        if (!method.is_public) continue;
+
         var ctx = LowerCtx.init(allocator, program);
         defer ctx.deinit();
 
-        try emitDispatchTable(&ctx, program);
+        try setupMethodStack(&ctx, program, method);
+        ctx.copy_ref_aliases = false;
+
+        // Use body or bindings (whichever is populated)
+        const bindings = if (method.body.len > 0) method.body else method.bindings;
+        try ctx.lowerBindings(bindings, method.is_public);
+        if (method.is_public and methodUsesDeserializeState(bindings)) {
+            try ctx.cleanupExcessStack();
+        }
+        if (!method.is_public or !endsWithAssert(bindings)) {
+            try ctx.emitOp(.op_1);
+        }
 
         const instructions = try allocator.dupe(types.StackInstruction, ctx.instructions.items);
         const src_locs = try allocator.dupe(?types.SourceLocation, ctx.instruction_source_locs.items);
         try methods.append(allocator, .{
-            .name = "__dispatch",
+            .name = method.name,
             .instructions = instructions,
             .max_stack_depth = ctx.max_depth,
             .instruction_source_locs = src_locs,
@@ -3522,38 +3662,6 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
         ctx.owned_push_data.deinit(allocator);
         ctx.owned_push_data = .empty;
-    } else {
-        for (program.methods) |method| {
-            if (!method.is_public) continue;
-
-            var ctx = LowerCtx.init(allocator, program);
-            defer ctx.deinit();
-
-            try setupMethodStack(&ctx, program, method);
-            ctx.copy_ref_aliases = false;
-
-            // Use body or bindings (whichever is populated)
-            const bindings = if (method.body.len > 0) method.body else method.bindings;
-            try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!method.is_public or !endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-
-            const instructions = try allocator.dupe(types.StackInstruction, ctx.instructions.items);
-            const src_locs = try allocator.dupe(?types.SourceLocation, ctx.instruction_source_locs.items);
-            try methods.append(allocator, .{
-                .name = method.name,
-                .instructions = instructions,
-                .max_stack_depth = ctx.max_depth,
-                .instruction_source_locs = src_locs,
-            });
-            try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
-            ctx.owned_push_data.deinit(allocator);
-            ctx.owned_push_data = .empty;
-        }
     }
 
     return .{
@@ -3616,6 +3724,16 @@ fn endsWithAssert(bindings: []const types.ANFBinding) bool {
     if (bindings.len == 0) return false;
     return switch (bindings[bindings.len - 1].value) {
         .assert, .assert_op => true,
+        // TS reference compiler propagates `terminalAssert=true` into the
+        // last `if` binding, and both branches leave a truthy value on the
+        // stack instead of executing OP_VERIFY. Treat such a terminal `if`
+        // as ending-with-assert so we don't append an extra OP_1 at the
+        // method tail.
+        .@"if" => |ie| endsWithAssert(ie.then) and endsWithAssert(ie.@"else"),
+        .if_expr => |ie| blk: {
+            const else_bindings = ie.else_bindings orelse &[_]types.ANFBinding{};
+            break :blk endsWithAssert(ie.then_bindings) and endsWithAssert(else_bindings);
+        },
         else => false,
     };
 }
@@ -4466,7 +4584,7 @@ test "lower for loop unrolling" {
     try std.testing.expect(push_count >= 6);
 }
 
-test "lower multi-method dispatch" {
+test "lower multi-method produces one StackMethod per public method" {
     const allocator = std.testing.allocator;
 
     const bindings1 = [_]types.ANFBinding{
@@ -4496,22 +4614,12 @@ test "lower multi-method dispatch" {
         allocator.free(result.methods);
     }
 
-    try std.testing.expectEqual(@as(usize, 1), result.methods.len);
-    try std.testing.expectEqualStrings("__dispatch", result.methods[0].name);
-
-    var found_numequal = false;
-    var found_numequalverify = false;
-    for (result.methods[0].instructions) |inst| {
-        switch (inst) {
-            .op => |op| {
-                if (op == .op_numequal) found_numequal = true;
-                if (op == .op_numequalverify) found_numequalverify = true;
-            },
-            else => {},
-        }
-    }
-    try std.testing.expect(found_numequal);
-    try std.testing.expect(found_numequalverify);
+    // Dispatch wrapping is added at emit time, so stack_lower produces one
+    // StackMethod per public method. The dispatch table opcodes (OP_DUP,
+    // OP_NUMEQUAL, OP_IF, OP_ELSE, OP_ENDIF, OP_NUMEQUALVERIFY) live in emit.zig.
+    try std.testing.expectEqual(@as(usize, 2), result.methods.len);
+    try std.testing.expectEqualStrings("methodA", result.methods[0].name);
+    try std.testing.expectEqualStrings("methodB", result.methods[1].name);
 }
 
 test "lower ecOnCurve preserves field prime pushdata" {

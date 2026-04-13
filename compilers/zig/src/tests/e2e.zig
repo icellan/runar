@@ -605,6 +605,81 @@ test "e2e error: empty contract body produces no crash" {
     // Success = no crash. Parse errors are acceptable for an empty contract.
 }
 
+// ============================================================================
+// FixedArray byte-equality acceptance test
+// ============================================================================
+
+const expand_fixed_arrays = @import("../passes/expand_fixed_arrays.zig");
+const peephole = @import("../passes/peephole.zig");
+const constant_fold = @import("../passes/constant_fold.zig");
+const ec_optimizer = @import("../passes/ec_optimizer.zig");
+
+/// Compile a .runar.ts source file through the full pipeline and return the
+/// emitted locking-script hex. Used by the FixedArray v1/v2 byte-equality
+/// acceptance test.
+fn compileTsToHex(alloc: std.mem.Allocator, source: []const u8, path: []const u8) ![]u8 {
+    const parsed = parse_ts.parseTs(alloc, source, path);
+    if (parsed.errors.len > 0) return error.ParseFailed;
+    const contract = parsed.contract orelse return error.ParseFailed;
+    const val = try validate.validate(alloc, contract);
+    if (val.errors.len > 0) return error.ValidateFailed;
+    const tc = try typecheck.typeCheck(alloc, contract);
+    if (tc.errors.len > 0) return error.TypeCheckFailed;
+    const expanded = try expand_fixed_arrays.expand(alloc, contract);
+    if (expanded.errors.len > 0) return error.ExpandFailed;
+    var program = try anf_lower.lowerToANF(alloc, expanded.contract);
+    program = try constant_fold.foldConstants(alloc, program);
+    program = try ec_optimizer.optimize(alloc, program);
+    const stack_program = try stack_lower.lower(alloc, program);
+    const optimized_methods = try peephole.optimize(alloc, stack_program.methods);
+    const optimized = types.StackProgram{
+        .methods = optimized_methods,
+        .contract_name = stack_program.contract_name,
+        .properties = stack_program.properties,
+        .constructor_params = stack_program.constructor_params,
+    };
+    const artifact = try emit.emitArtifact(alloc, optimized, program);
+    const hex = try extractArtifactHex(artifact);
+    return try alloc.dupe(u8, hex);
+}
+
+test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Tests run from compilers/zig; the examples live two levels up.
+    const v1_src = std.fs.cwd().readFileAlloc(
+        alloc,
+        "../../examples/ts/tic-tac-toe/TicTacToe.runar.ts",
+        1 * 1024 * 1024,
+    ) catch return error.SkipZigTest;
+    const v2_src = std.fs.cwd().readFileAlloc(
+        alloc,
+        "../../examples/ts/tic-tac-toe/TicTacToe.v2.runar.ts",
+        1 * 1024 * 1024,
+    ) catch return error.SkipZigTest;
+
+    const v1_hex = try compileTsToHex(alloc, v1_src, "TicTacToe.runar.ts");
+    const v2_hex = try compileTsToHex(alloc, v2_src, "TicTacToe.v2.runar.ts");
+
+    try std.testing.expectEqualStrings(v1_hex, v2_hex);
+
+    // Byte-count lock-in: the canonical TS compiler produces 4951 bytes for
+    // both TicTacToe variants. Any divergence from this length indicates a
+    // regression in Zig's stack lowering or branch-reconciliation logic.
+    const expected_bytes: usize = 4951;
+    const actual_bytes = v1_hex.len / 2;
+    try std.testing.expectEqual(expected_bytes, actual_bytes);
+
+    // Fixture lock-in: the first 128 hex chars (64 bytes) of the canonical
+    // TS output. If Zig drifts at the method-dispatch prologue, this fires
+    // immediately instead of requiring a full cross-compiler conformance run.
+    const expected_prefix =
+        "76009c637576ab577a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f";
+    try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
+}
+
 test "e2e error: pipeline handles malformed contracts without crashing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

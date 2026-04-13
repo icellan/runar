@@ -349,6 +349,17 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
 }
 
 /// Emit dispatch table with source map support (looks up source locs from ANF methods).
+///
+/// Mirrors the TS reference compiler's emitMethodDispatch
+/// (packages/runar-compiler/src/passes/06-emit.ts).
+///
+/// Pattern (N >= 2 public methods):
+///   OP_DUP <0> OP_NUMEQUAL OP_IF OP_DROP <body0> OP_ELSE
+///     OP_DUP <1> OP_NUMEQUAL OP_IF OP_DROP <body1> OP_ELSE
+///       ...
+///       <N-1> OP_NUMEQUALVERIFY <bodyN-1>
+///     OP_ENDIF
+///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
     if (methods.len == 0) return;
 
@@ -359,22 +370,25 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
     }
 
     for (methods, 0..) |method, i| {
-        try ctx.emitOpcode(.op_dup);
-        try ctx.emitScriptNumber(@intCast(i));
-        try ctx.emitOpcode(.op_numequal);
-        try ctx.emitOpcode(.op_if);
-        try ctx.emitOpcode(.op_drop);
+        const is_last = i == methods.len - 1;
+        if (!is_last) {
+            try ctx.emitOpcode(.op_dup);
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequal);
+            try ctx.emitOpcode(.op_if);
+            try ctx.emitOpcode(.op_drop);
+        } else {
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequalverify);
+        }
         ctx.pending_source_loc = findMethodSourceLoc(anf_methods, method.name);
         try emitMethodBody(ctx, method);
-        if (i < methods.len - 1) {
+        if (!is_last) {
             try ctx.emitOpcode(.op_else);
-        } else {
-            try ctx.emitOpcode(.op_else);
-            try ctx.emitOpcode(.op_return);
-            try ctx.emitOpcode(.op_endif);
         }
     }
 
+    // Close all the nested OP_IF / OP_ELSE blocks (one OP_ENDIF per non-last method).
     var closes: usize = methods.len - 1;
     while (closes > 0) : (closes -= 1) {
         try ctx.emitOpcode(.op_endif);
@@ -382,9 +396,8 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
 }
 
 /// Emit the dispatch table for a multi-method contract.
-/// Pattern: OP_DUP <idx> OP_NUMEQUAL OP_IF OP_DROP <body> OP_ELSE ... OP_ENDIF
-/// For a single method, no dispatch table is needed — just emit the body.
-fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
+/// Pattern: see `emitDispatchTableWithSourceMap`.
+pub fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
     if (methods.len == 0) return;
 
     if (methods.len == 1) {
@@ -393,36 +406,28 @@ fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !voi
         return;
     }
 
-    // Multi-method dispatch:
-    // The method index is expected on top of the stack.
-    // OP_DUP <0> OP_NUMEQUAL OP_IF OP_DROP <body0> OP_ELSE
-    //   OP_DUP <1> OP_NUMEQUAL OP_IF OP_DROP <body1> OP_ELSE
-    //     ...
-    //     OP_DUP <N-1> OP_NUMEQUAL OP_IF OP_DROP <bodyN-1> OP_ELSE OP_RETURN OP_ENDIF
-    //   OP_ENDIF
-    // OP_ENDIF
-
     for (methods, 0..) |method, i| {
-        try ctx.emitOpcode(.op_dup);
-        try ctx.emitScriptNumber(@intCast(i));
-        try ctx.emitOpcode(.op_numequal);
-        try ctx.emitOpcode(.op_if);
-        try ctx.emitOpcode(.op_drop); // consume the method index
+        const is_last = i == methods.len - 1;
+        if (!is_last) {
+            try ctx.emitOpcode(.op_dup);
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequal);
+            try ctx.emitOpcode(.op_if);
+            try ctx.emitOpcode(.op_drop); // consume the method index
+        } else {
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequalverify);
+        }
 
         // Emit method body
         try emitMethodBody(ctx, method);
 
-        if (i < methods.len - 1) {
+        if (!is_last) {
             try ctx.emitOpcode(.op_else);
-        } else {
-            // Last method: else branch is OP_RETURN (invalid method index)
-            try ctx.emitOpcode(.op_else);
-            try ctx.emitOpcode(.op_return);
-            try ctx.emitOpcode(.op_endif);
         }
     }
 
-    // Close all the nested if/else blocks (one OP_ENDIF per method except last which already closed)
+    // Close all the nested OP_IF / OP_ELSE blocks.
     var closes: usize = methods.len - 1;
     while (closes > 0) : (closes -= 1) {
         try ctx.emitOpcode(.op_endif);
@@ -574,20 +579,31 @@ pub fn emitArtifact(
         try w.writeAll("],");
     }
 
-    // stateFields — mutable (non-readonly) properties
+    // stateFields — mutable (non-readonly) properties, with synthetic
+    // FixedArray runs re-grouped into a single logical entry via the
+    // iterative marker-driven regrouper (mirrors the TS assembler).
     try w.writeAll("\"stateFields\":[");
     {
-        var state_idx: u32 = 0;
-        for (anf_program.properties) |prop| {
-            if (!prop.readonly) {
-                if (state_idx > 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":");
-                try writeJsonString(w, prop.name);
-                try w.writeAll(",\"type\":");
-                try writeJsonString(w, prop.type_name);
-                try w.print(",\"index\":{d}}}", .{state_idx});
-                state_idx += 1;
+        const regrouped = try regroupStateFields(allocator, anf_program.properties);
+        defer freeRegroupedEntries(allocator, regrouped);
+        for (regrouped, 0..) |entry, i| {
+            if (i > 0) try w.writeByte(',');
+            try w.writeAll("{\"name\":");
+            try writeJsonString(w, entry.name);
+            try w.writeAll(",\"type\":");
+            try writeJsonString(w, entry.type_str);
+            try w.print(",\"index\":{d}", .{entry.index});
+            if (entry.fixed_array) |fa| {
+                try w.writeAll(",\"fixedArray\":{\"elementType\":");
+                try writeJsonString(w, fa.element_type);
+                try w.print(",\"length\":{d},\"syntheticNames\":[", .{fa.length});
+                for (fa.synthetic_names, 0..) |sn, j| {
+                    if (j > 0) try w.writeByte(',');
+                    try writeJsonString(w, sn);
+                }
+                try w.writeAll("]}");
             }
+            try w.writeByte('}');
         }
     }
     try w.writeAll("],");
@@ -1362,17 +1378,16 @@ test "dispatch table — two methods" {
     const hex = try ctx.getHex();
     defer allocator.free(hex);
 
-    // Expected pattern:
-    // OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
-    // OP_DUP(76) OP_1(51) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_SUB(94) OP_ELSE(67) OP_RETURN(6a) OP_ENDIF(68)
-    // OP_ENDIF(68)
-    try std.testing.expectEqualStrings("76009c6375936776519c637594676a6868", hex);
+    // Expected pattern (matches TS reference compiler):
+    // method 0 (non-last): OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
+    // method 1 (last):     OP_1(51) OP_NUMEQUALVERIFY(9d) OP_SUB(94)
+    // close:               OP_ENDIF(68)
+    try std.testing.expectEqualStrings("76009c63759367519d9468", hex);
 
     const asm_text = try ctx.getAsm();
     defer allocator.free(asm_text);
-
     try std.testing.expectEqualStrings(
-        "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_ADD OP_ELSE OP_DUP OP_1 OP_NUMEQUAL OP_IF OP_DROP OP_SUB OP_ELSE OP_RETURN OP_ENDIF OP_ENDIF",
+        "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_ADD OP_ELSE OP_1 OP_NUMEQUALVERIFY OP_SUB OP_ENDIF",
         asm_text,
     );
 }
@@ -1396,11 +1411,12 @@ test "dispatch table — three methods" {
     const hex = try ctx.getHex();
     defer allocator.free(hex);
 
-    // method 0: DUP 0 NUMEQUAL IF DROP ADD ELSE
-    // method 1: DUP 1 NUMEQUAL IF DROP SUB ELSE
-    // method 2: DUP 2 NUMEQUAL IF DROP MUL ELSE RETURN ENDIF
-    // close:    ENDIF ENDIF
-    const expected = "76009c6375936776519c6375946776529c637595676a686868";
+    // Expected pattern (matches TS reference compiler):
+    // method 0 (non-last): OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
+    // method 1 (non-last): OP_DUP(76) OP_1(51) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_SUB(94) OP_ELSE(67)
+    // method 2 (last):     OP_2(52) OP_NUMEQUALVERIFY(9d) OP_MUL(95)
+    // close:               OP_ENDIF(68) OP_ENDIF(68)
+    const expected = "76009c6375936776519c6375946752" ++ "9d" ++ "956868";
     try std.testing.expectEqualStrings(expected, hex);
 }
 
@@ -1610,6 +1626,142 @@ test "push value encoding — bool false is OP_0" {
 
     try emitStackOp(&ctx, .{ .push = .{ .boolean = false } });
     try std.testing.expectEqualSlices(u8, &.{0x00}, ctx.script_bytes.items);
+}
+
+// ---------------------------------------------------------------------------
+// StateField re-grouping (FixedArray collapse)
+// ---------------------------------------------------------------------------
+//
+// Mirrors packages/runar-compiler/src/artifact/assembler.ts `regroupOnePass`/
+// `regroupSyntheticRuns`. Walks mutable (non-readonly) ANF properties and
+// collapses runs whose innermost `synthetic_array_chain` level forms a
+// contiguous 0..N-1 sequence under the same `base` name. Iterated until no
+// chain has any unconsumed levels, so nested arrays collapse from innermost
+// outward.
+
+const RegroupFA = struct {
+    element_type: []const u8,
+    length: u32,
+    synthetic_names: [][]const u8,
+};
+
+const RegroupEntry = struct {
+    name: []const u8,
+    type_str: []const u8,
+    chain: []const types.SyntheticArrayLevel,
+    index: u32,
+    fixed_array: ?RegroupFA,
+};
+
+fn regroupStateFields(allocator: std.mem.Allocator, props: []const types.ANFProperty) ![]RegroupEntry {
+    var flat: std.ArrayListUnmanaged(RegroupEntry) = .empty;
+    var state_idx: u32 = 0;
+    for (props) |p| {
+        if (p.readonly) continue;
+        const chain: []const types.SyntheticArrayLevel = if (p.synthetic_array_chain) |c| c else &.{};
+        try flat.append(allocator, .{
+            .name = p.name,
+            .type_str = p.type_name,
+            .chain = chain,
+            .index = state_idx,
+            .fixed_array = null,
+        });
+        state_idx += 1;
+    }
+
+    var current = try flat.toOwnedSlice(allocator);
+    var iter: usize = 0;
+    while (iter < 1024) : (iter += 1) {
+        const res = try regroupOnePass(allocator, current);
+        allocator.free(current);
+        current = res.out;
+        if (!res.changed) return current;
+    }
+    return current;
+}
+
+fn freeRegroupedEntries(allocator: std.mem.Allocator, entries: []RegroupEntry) void {
+    for (entries) |e| {
+        if (e.fixed_array) |fa| {
+            allocator.free(fa.synthetic_names);
+        }
+    }
+    allocator.free(entries);
+}
+
+const PassResult = struct { out: []RegroupEntry, changed: bool };
+
+fn regroupOnePass(allocator: std.mem.Allocator, entries: []const RegroupEntry) !PassResult {
+    var out: std.ArrayListUnmanaged(RegroupEntry) = .empty;
+    var changed = false;
+    var i: usize = 0;
+    while (i < entries.len) {
+        const entry = entries[i];
+        const chain_len = entry.chain.len;
+        if (chain_len == 0) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+        const marker = entry.chain[chain_len - 1];
+        if (marker.index != 0) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+
+        // Greedily extend: every follower must share the same innermost
+        // {base, length}, carry the expected index = k, and have identical
+        // current type.
+        var run_count: u32 = 1;
+        var j: usize = i + 1;
+        while (j < entries.len and run_count < marker.length) : (j += 1) {
+            const next = entries[j];
+            if (next.chain.len == 0) break;
+            const m2 = next.chain[next.chain.len - 1];
+            if (!std.mem.eql(u8, m2.base, marker.base)) break;
+            if (m2.length != marker.length) break;
+            if (m2.index != run_count) break;
+            if (!std.mem.eql(u8, next.type_str, entry.type_str)) break;
+            run_count += 1;
+        }
+        if (run_count != marker.length) {
+            try out.append(allocator, entry);
+            i += 1;
+            continue;
+        }
+
+        // Collapse the run.
+        const inner_type = entry.type_str;
+        const grouped_type = try std.fmt.allocPrint(allocator, "FixedArray<{s}, {d}>", .{ inner_type, marker.length });
+
+        // Flatten synthetic names.
+        var synth: std.ArrayListUnmanaged([]const u8) = .empty;
+        var k: usize = 0;
+        while (k < run_count) : (k += 1) {
+            const child = entries[i + k];
+            if (child.fixed_array) |fa| {
+                for (fa.synthetic_names) |sn| try synth.append(allocator, sn);
+            } else {
+                try synth.append(allocator, child.name);
+            }
+        }
+
+        try out.append(allocator, .{
+            .name = marker.base,
+            .type_str = grouped_type,
+            .chain = entry.chain[0 .. chain_len - 1],
+            .index = entry.index,
+            .fixed_array = .{
+                .element_type = inner_type,
+                .length = marker.length,
+                .synthetic_names = try synth.toOwnedSlice(allocator),
+            },
+        });
+        i += run_count;
+        changed = true;
+    }
+    return .{ .out = try out.toOwnedSlice(allocator), .changed = changed };
 }
 
 test "byte offset tracking" {

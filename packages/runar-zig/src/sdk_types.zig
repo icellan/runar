@@ -367,17 +367,39 @@ pub const ABIParam = struct {
     }
 };
 
+/// FixedArrayInfo carries the metadata the SDK needs to flatten nested
+/// FixedArray state values into their scalar leaf slots at encode time and
+/// regroup them back at decode time. Populated from the `fixedArray` object
+/// on a StateField JSON entry when the compiler emits one.
+pub const FixedArrayInfo = struct {
+    element_type: []const u8 = &.{},
+    length: u32 = 0,
+    synthetic_names: [][]const u8 = &.{},
+
+    pub fn deinit(self: *FixedArrayInfo, allocator: std.mem.Allocator) void {
+        if (self.element_type.len > 0) allocator.free(self.element_type);
+        for (self.synthetic_names) |n| allocator.free(n);
+        if (self.synthetic_names.len > 0) allocator.free(self.synthetic_names);
+        self.* = .{};
+    }
+};
+
 /// StateField describes a state field in a stateful contract.
 pub const StateField = struct {
     name: []const u8 = &.{},
     type_name: []const u8 = &.{},
     index: i32 = 0,
     initial_value: ?[]const u8 = null, // stored as string representation
+    /// When non-null, this state field is a logical FixedArray that expands
+    /// into `fixed_array.synthetic_names.len` scalar slots. The SDK flattens
+    /// array-typed state values on write and regroups them on read.
+    fixed_array: ?FixedArrayInfo = null,
 
     pub fn deinit(self: *StateField, allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
         if (self.type_name.len > 0) allocator.free(self.type_name);
         if (self.initial_value) |iv| allocator.free(iv);
+        if (self.fixed_array) |*fa| fa.deinit(allocator);
         self.* = .{};
     }
 
@@ -404,6 +426,36 @@ pub const StateField = struct {
                     field.initial_value = try allocator.dupe(u8, if (b) "true" else "false");
                 },
                 else => {},
+            }
+        }
+        if (obj.get("fixedArray")) |v| {
+            if (v == .object) {
+                var fa = FixedArrayInfo{};
+                errdefer fa.deinit(allocator);
+                if (v.object.get("elementType")) |et| {
+                    if (et == .string) fa.element_type = try allocator.dupe(u8, et.string);
+                }
+                if (v.object.get("length")) |ln| {
+                    if (ln == .integer) fa.length = @intCast(ln.integer);
+                }
+                if (v.object.get("syntheticNames")) |sn| {
+                    if (sn == .array) {
+                        var names = try allocator.alloc([]const u8, sn.array.items.len);
+                        var filled: usize = 0;
+                        errdefer {
+                            for (0..filled) |i| allocator.free(names[i]);
+                            allocator.free(names);
+                        }
+                        for (sn.array.items) |it| {
+                            if (it == .string) {
+                                names[filled] = try allocator.dupe(u8, it.string);
+                                filled += 1;
+                            }
+                        }
+                        fa.synthetic_names = names;
+                    }
+                }
+                field.fixed_array = fa;
             }
         }
 
@@ -439,11 +491,20 @@ pub const StateValue = union(enum) {
     big_int: []const u8,
     boolean: bool,
     bytes: []const u8, // hex-encoded
+    /// A (possibly nested) array of scalar StateValues — produced when the
+    /// SDK deserializes a FixedArray state field, or passed by the user when
+    /// constructing such a field. Leaves may only be scalar StateValues; the
+    /// flatten/regroup helpers in `sdk_state.zig` walk the tree linearly.
+    array_value: []const StateValue,
 
     pub fn deinit(self: StateValue, allocator: std.mem.Allocator) void {
         switch (self) {
             .bytes => |b| allocator.free(b),
             .big_int => |s| allocator.free(s),
+            .array_value => |items| {
+                for (items) |it| it.deinit(allocator);
+                allocator.free(items);
+            },
             else => {},
         }
     }
@@ -454,6 +515,11 @@ pub const StateValue = union(enum) {
             .big_int => |s| .{ .big_int = try allocator.dupe(u8, s) },
             .boolean => |b| .{ .boolean = b },
             .bytes => |b| .{ .bytes = try allocator.dupe(u8, b) },
+            .array_value => |items| blk: {
+                var copy = try allocator.alloc(StateValue, items.len);
+                for (items, 0..) |it, i| copy[i] = try it.clone(allocator);
+                break :blk .{ .array_value = copy };
+            },
         };
     }
 };
