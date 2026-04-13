@@ -71,7 +71,7 @@ class TicTacToe < Runar::StatefulSmartContract
     assert check_sig(sig, player)
     assert_correct_player(player)
     assert_cell_empty(position)
-    assert count_occupied == 8
+    assert count_occupied() == 8
     assert !check_win_after_move(position, @turn)
 
     out1 = cat(cat(num2bin(@bet_amount, 8), @p2pkh_prefix), cat(hash160(@player_x), @p2pkh_suffix))
