@@ -1069,18 +1069,18 @@ mod tests {
             "P2PKH",
             vec![AbiParam {
                 name: "pubKeyHash".to_string(),
-                param_type: "ByteString".to_string(),
+                param_type: "ByteString".to_string(), fixed_array: None ,
             }],
             vec![AbiMethod {
                 name: "unlock".to_string(),
                 params: vec![
                     AbiParam {
                         name: "sig".to_string(),
-                        param_type: "Sig".to_string(),
+                        param_type: "Sig".to_string(), fixed_array: None ,
                     },
                     AbiParam {
                         name: "pubKey".to_string(),
-                        param_type: "PubKey".to_string(),
+                        param_type: "PubKey".to_string(), fixed_array: None ,
                     },
                 ],
                 is_public: true,
@@ -1108,22 +1108,22 @@ mod tests {
             "Counter",
             vec![AbiParam {
                 name: "count".to_string(),
-                param_type: "bigint".to_string(),
+                param_type: "bigint".to_string(), fixed_array: None ,
             }],
             vec![AbiMethod {
                 name: "increment".to_string(),
                 params: vec![
                     AbiParam {
                         name: "txPreimage".to_string(),
-                        param_type: "SigHashPreimage".to_string(),
+                        param_type: "SigHashPreimage".to_string(), fixed_array: None ,
                     },
                     AbiParam {
                         name: "_changePKH".to_string(),
-                        param_type: "ByteString".to_string(),
+                        param_type: "ByteString".to_string(), fixed_array: None ,
                     },
                     AbiParam {
                         name: "_changeAmount".to_string(),
-                        param_type: "bigint".to_string(),
+                        param_type: "bigint".to_string(), fixed_array: None ,
                     },
                 ],
                 is_public: true,
@@ -1133,7 +1133,7 @@ mod tests {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: None,
+                initial_value: None, fixed_array: None ,
             }]),
         );
         let output = generate_rust(&artifact);

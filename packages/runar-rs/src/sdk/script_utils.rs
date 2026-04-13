@@ -390,7 +390,7 @@ mod tests {
         // The constructor slot is at byte offset 0 (the push opcode location)
         let artifact = make_artifact(
             "0093", // placeholder + OP_ADD
-            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string() }],
+            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // Actual script has push(1 byte: 42)
@@ -403,7 +403,7 @@ mod tests {
     fn extract_args_reads_bool_true() {
         let artifact = make_artifact(
             "0093",
-            vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string() }],
+            vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string(), fixed_array: None }],
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // OP_1 (0x51) then OP_ADD
@@ -416,7 +416,7 @@ mod tests {
     fn extract_args_reads_op_0_as_zero() {
         let artifact = make_artifact(
             "0093",
-            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string() }],
+            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // OP_0 (0x00) then OP_ADD
@@ -431,7 +431,7 @@ mod tests {
             let opcode = 0x50 + n;
             let artifact = make_artifact(
                 "0093",
-                vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string() }],
+                vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
                 vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
             );
             let script = format!("{:02x}93", opcode);
@@ -444,7 +444,7 @@ mod tests {
     fn extract_args_reads_bytes() {
         let artifact = make_artifact(
             "0093",
-            vec![AbiParam { name: "pk".to_string(), param_type: "PubKey".to_string() }],
+            vec![AbiParam { name: "pk".to_string(), param_type: "PubKey".to_string(), fixed_array: None }],
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         let pubkey_hex = "ab".repeat(33);
@@ -483,7 +483,7 @@ mod tests {
         // Template: placeholder(00) + OP_ADD(93)
         let artifact = make_artifact(
             "0093",
-            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string() }],
+            vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
             vec![ConstructorSlot { param_index: 0, byte_offset: 0 }],
         );
         // Script with different arg (push 1 byte: 42) then OP_ADD
@@ -508,7 +508,7 @@ mod tests {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: None,
+                initial_value: None, fixed_array: None ,
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,

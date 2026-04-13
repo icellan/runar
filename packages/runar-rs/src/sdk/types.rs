@@ -153,15 +153,34 @@ pub struct AbiMethod {
 }
 
 /// A parameter in the ABI.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AbiParam {
     pub name: String,
     #[serde(rename = "type")]
     pub param_type: String,
+    /// Metadata for expanded FixedArray params. Never set today because
+    /// FixedArray is not a legal method/constructor param type, but the
+    /// field exists for forward compatibility with auto-generated
+    /// constructors that may propagate markers.
+    #[serde(default)]
+    pub fixed_array: Option<FixedArrayInfo>,
+}
+
+/// FixedArray metadata on a state field or ABI param. Present only for
+/// state fields that represent an expanded (possibly nested) FixedArray.
+/// `synthetic_names` is the flat leaf list in declaration order; the SDK
+/// uses it to flatten/unflatten nested Vec/array values.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixedArrayInfo {
+    pub element_type: String,
+    pub length: usize,
+    pub synthetic_names: Vec<String>,
 }
 
 /// A state field definition.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct StateField {
     pub name: String,
@@ -174,6 +193,13 @@ pub struct StateField {
     /// (e.g. `"0n"`, `"1000n"`).
     #[serde(default)]
     pub initial_value: Option<serde_json::Value>,
+    /// Metadata for expanded FixedArray state fields. When present, the
+    /// field represents a (possibly nested) array; `fixed_array.length`
+    /// and `fixed_array.element_type` describe the outer shape, and
+    /// `fixed_array.synthetic_names` enumerates the flattened leaf
+    /// property names in declaration order.
+    #[serde(default)]
+    pub fixed_array: Option<FixedArrayInfo>,
 }
 
 /// A constructor slot mapping parameter index to byte offset in the script.
@@ -214,6 +240,10 @@ pub enum SdkValue {
     /// Pass this as an arg to `call()` for params of type `Sig` or `PubKey` —
     /// the SDK will compute the real value from the signer.
     Auto,
+    /// A (possibly nested) array of values. Used for FixedArray state
+    /// fields. The SDK flattens this into positional scalar slots keyed
+    /// by `fixed_array.synthetic_names` when serializing state.
+    Array(Vec<SdkValue>),
 }
 
 impl SdkValue {

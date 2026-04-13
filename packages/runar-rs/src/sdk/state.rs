@@ -21,6 +21,9 @@ use super::types::{StateField, RunarArtifact, SdkValue};
 /// (without the OP_RETURN prefix -- that is handled by the caller).
 ///
 /// Field order is determined by the `index` property of each StateField.
+/// FixedArray state fields are flattened into their synthetic leaves in
+/// declaration order and each leaf is encoded with the innermost element
+/// type.
 pub fn serialize_state(
     fields: &[StateField],
     values: &HashMap<String, SdkValue>,
@@ -31,6 +34,18 @@ pub fn serialize_state(
     let mut hex = String::new();
     for field in sorted {
         if let Some(value) = values.get(&field.name) {
+            if let Some(fa) = &field.fixed_array {
+                // Flatten the (possibly nested) SdkValue::Array to a flat
+                // list of leaves in declaration order.
+                let dims = parse_fixed_array_dims(&field.field_type);
+                let leaf_type = innermost_element_type(&field.field_type, &fa.element_type);
+                let flat = flatten_nested(value, &dims);
+                // Each leaf is encoded with the innermost element type.
+                for leaf in &flat {
+                    hex.push_str(&encode_state_value(leaf, &leaf_type));
+                }
+                continue;
+            }
             hex.push_str(&encode_state_value(value, &field.field_type));
         }
     }
@@ -40,7 +55,8 @@ pub fn serialize_state(
 /// Deserialize state values from a hex-encoded raw byte section.
 ///
 /// The caller must strip the code prefix and OP_RETURN byte before passing
-/// the data section.
+/// the data section. FixedArray state fields are rebuilt into a
+/// (possibly nested) `SdkValue::Array` matching the declared shape.
 pub fn deserialize_state(
     fields: &[StateField],
     script_hex: &str,
@@ -52,12 +68,242 @@ pub fn deserialize_state(
     let mut offset = 0;
 
     for field in sorted {
+        if let Some(fa) = &field.fixed_array {
+            let dims = parse_fixed_array_dims(&field.field_type);
+            let leaf_type = innermost_element_type(&field.field_type, &fa.element_type);
+            let mut flat: Vec<SdkValue> = Vec::with_capacity(fa.synthetic_names.len());
+            for _ in 0..fa.synthetic_names.len() {
+                let (value, bytes_read) = decode_state_value(script_hex, offset, &leaf_type);
+                flat.push(value);
+                offset += bytes_read;
+            }
+            let rebuilt = regroup_nested(&flat, &dims);
+            result.insert(field.name.clone(), rebuilt);
+            continue;
+        }
         let (value, bytes_read) = decode_state_value(script_hex, offset, &field.field_type);
         result.insert(field.name.clone(), value);
         offset += bytes_read;
     }
 
     result
+}
+
+/// Parse a type string like `FixedArray<FixedArray<bigint, 3>, 2>` into the
+/// outer-first dimensions `[2, 3]`. Returns an empty vec for non-array
+/// types.
+fn parse_fixed_array_dims(type_str: &str) -> Vec<usize> {
+    let mut dims: Vec<usize> = Vec::new();
+    let mut cur = type_str;
+    while let Some(start) = cur.find("FixedArray<") {
+        let inner = &cur[start + "FixedArray<".len()..];
+        // Find the matching `>` at depth 0, collecting the inner element
+        // and the length after the last `,`.
+        let mut depth = 1i32;
+        let bytes = inner.as_bytes();
+        let mut i = 0usize;
+        let mut last_comma = None;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => last_comma = Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        let end_angle = i;
+        if let Some(comma) = last_comma {
+            let length_str = inner[comma + 1..end_angle].trim();
+            if let Ok(n) = length_str.parse::<usize>() {
+                dims.push(n);
+            } else {
+                return dims;
+            }
+            cur = &inner[..comma];
+        } else {
+            return dims;
+        }
+    }
+    dims
+}
+
+/// Return the innermost element type string of a (possibly nested)
+/// FixedArray type. For `FixedArray<FixedArray<bigint, 2>, 3>` returns
+/// `"bigint"`.
+fn innermost_element_type(field_type: &str, outer_element_type: &str) -> String {
+    // Peel FixedArray<...> layers off outer_element_type until we find a
+    // non-FixedArray leaf.
+    let mut s = outer_element_type.to_string();
+    while s.starts_with("FixedArray<") {
+        // extract the inner element part: find "FixedArray<" + "...," at
+        // outermost depth, the element is the substring before the last
+        // top-level comma.
+        let inner = &s["FixedArray<".len()..];
+        let bytes = inner.as_bytes();
+        let mut depth = 1i32;
+        let mut i = 0usize;
+        let mut last_comma = None;
+        while i < bytes.len() && depth > 0 {
+            match bytes[i] {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b',' if depth == 1 => last_comma = Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        if let Some(comma) = last_comma {
+            s = inner[..comma].trim().to_string();
+        } else {
+            break;
+        }
+    }
+    if s.is_empty() {
+        field_type.to_string()
+    } else {
+        s
+    }
+}
+
+/// Recursively flatten a nested `SdkValue::Array` (depth = `dims.len()`)
+/// into a flat list of leaf `SdkValue`s in declaration order. Missing /
+/// wrong-shape values produce `Int(0)` placeholders so the caller can
+/// still reach every leaf.
+fn flatten_nested(value: &SdkValue, dims: &[usize]) -> Vec<SdkValue> {
+    if dims.is_empty() {
+        return vec![value.clone()];
+    }
+    let rest = &dims[1..];
+    match value {
+        SdkValue::Array(items) => {
+            let mut out: Vec<SdkValue> = Vec::new();
+            for v in items {
+                out.extend(flatten_nested(v, rest));
+            }
+            out
+        }
+        _ => {
+            let total: usize = dims.iter().product();
+            vec![SdkValue::Int(0); total]
+        }
+    }
+}
+
+/// Flatten a state record whose grouped FixedArray entries hold
+/// `SdkValue::Array` values into a new record where each leaf is keyed
+/// by its underlying synthetic scalar name (`board__0..board__8`,
+/// `grid__0__0..grid__1__1`, etc.). Non-array entries are passed
+/// through unchanged. The grouped entries are also preserved so callers
+/// can still read them.
+///
+/// Used at the ANF-interpreter boundary, which only knows the expanded
+/// scalar property names.
+pub fn flatten_fixed_array_state(
+    state: &HashMap<String, SdkValue>,
+    state_fields: &[StateField],
+) -> HashMap<String, SdkValue> {
+    let mut out = state.clone();
+    for field in state_fields {
+        let fa = match &field.fixed_array {
+            Some(fa) => fa,
+            None => continue,
+        };
+        let value = match state.get(&field.name) {
+            Some(v) => v,
+            None => continue,
+        };
+        let dims = parse_fixed_array_dims(&field.field_type);
+        let flat = flatten_nested(value, &dims);
+        for (i, synth) in fa.synthetic_names.iter().enumerate() {
+            if !out.contains_key(synth) {
+                if let Some(leaf) = flat.get(i) {
+                    out.insert(synth.clone(), leaf.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Regroup a state record's synthetic scalar entries back into
+/// (possibly nested) `SdkValue::Array` values under their grouped
+/// names. Non-synthetic scalars pass through.
+pub fn regroup_fixed_array_state(
+    state: &HashMap<String, SdkValue>,
+    state_fields: &[StateField],
+) -> HashMap<String, SdkValue> {
+    let mut out = state.clone();
+    for field in state_fields {
+        let fa = match &field.fixed_array {
+            Some(fa) => fa,
+            None => continue,
+        };
+        let mut flat: Vec<Option<SdkValue>> =
+            vec![None; fa.synthetic_names.len()];
+        let mut saw_any = false;
+        for (i, synth) in fa.synthetic_names.iter().enumerate() {
+            if let Some(v) = out.get(synth).cloned() {
+                flat[i] = Some(v);
+                saw_any = true;
+            }
+        }
+        if !saw_any {
+            continue;
+        }
+        // Fill still-missing leaves from a prior grouped value by
+        // re-flattening it alongside the scalar updates.
+        let dims = parse_fixed_array_dims(&field.field_type);
+        if let Some(prior) = state.get(&field.name) {
+            let prior_flat = flatten_nested(prior, &dims);
+            for (i, slot) in flat.iter_mut().enumerate() {
+                if slot.is_none() {
+                    if let Some(v) = prior_flat.get(i) {
+                        *slot = Some(v.clone());
+                    }
+                }
+            }
+        }
+        let leaves: Vec<SdkValue> = flat
+            .into_iter()
+            .map(|o| o.unwrap_or(SdkValue::Int(0)))
+            .collect();
+        let rebuilt = regroup_nested(&leaves, &dims);
+        out.insert(field.name.clone(), rebuilt);
+    }
+    out
+}
+
+/// Recursively rebuild a nested `SdkValue::Array` of depth `dims.len()`
+/// from a flat list of leaf values in declaration order.
+fn regroup_nested(flat: &[SdkValue], dims: &[usize]) -> SdkValue {
+    fn go(flat: &[SdkValue], dims: &[usize], offset: usize) -> (SdkValue, usize) {
+        if dims.is_empty() {
+            return (flat[offset].clone(), 1);
+        }
+        let outer = dims[0];
+        let rest = &dims[1..];
+        let mut items: Vec<SdkValue> = Vec::with_capacity(outer);
+        let mut consumed = 0usize;
+        for _ in 0..outer {
+            let (v, c) = go(flat, rest, offset + consumed);
+            items.push(v);
+            consumed += c;
+        }
+        (SdkValue::Array(items), consumed)
+    }
+    let (v, _) = go(flat, dims, 0);
+    v
 }
 
 /// Extract state from a full locking script hex, given the artifact.
@@ -384,12 +630,134 @@ mod tests {
                 field_type: typ.to_string(),
                 index: *index,
                 initial_value: None,
+                fixed_array: None,
             })
             .collect()
     }
 
+    fn make_fa_field(
+        name: &str,
+        field_type: &str,
+        length: usize,
+        element_type: &str,
+        synthetic_names: Vec<&str>,
+        index: usize,
+    ) -> StateField {
+        StateField {
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            index,
+            initial_value: None,
+            fixed_array: Some(super::super::types::FixedArrayInfo {
+                element_type: element_type.to_string(),
+                length,
+                synthetic_names: synthetic_names.into_iter().map(String::from).collect(),
+            }),
+        }
+    }
+
     fn make_values(pairs: &[(&str, SdkValue)]) -> HashMap<String, SdkValue> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    // -----------------------------------------------------------------------
+    // FixedArray roundtrip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn roundtrips_flat_fixed_array_state() {
+        let fields = vec![make_fa_field(
+            "board",
+            "FixedArray<bigint, 3>",
+            3,
+            "bigint",
+            vec!["board__0", "board__1", "board__2"],
+            0,
+        )];
+        let values = make_values(&[(
+            "board",
+            SdkValue::Array(vec![
+                SdkValue::Int(7),
+                SdkValue::Int(11),
+                SdkValue::Int(13),
+            ]),
+        )]);
+        let hex = serialize_state(&fields, &values);
+        let round = deserialize_state(&fields, &hex);
+        assert_eq!(
+            round["board"],
+            SdkValue::Array(vec![
+                SdkValue::Int(7),
+                SdkValue::Int(11),
+                SdkValue::Int(13),
+            ])
+        );
+    }
+
+    #[test]
+    fn roundtrips_nested_fixed_array_state() {
+        let fields = vec![make_fa_field(
+            "grid",
+            "FixedArray<FixedArray<bigint, 2>, 2>",
+            2,
+            "FixedArray<bigint, 2>",
+            vec!["grid__0__0", "grid__0__1", "grid__1__0", "grid__1__1"],
+            0,
+        )];
+        let values = make_values(&[(
+            "grid",
+            SdkValue::Array(vec![
+                SdkValue::Array(vec![SdkValue::Int(1), SdkValue::Int(2)]),
+                SdkValue::Array(vec![SdkValue::Int(3), SdkValue::Int(4)]),
+            ]),
+        )]);
+        let hex = serialize_state(&fields, &values);
+        let round = deserialize_state(&fields, &hex);
+        assert_eq!(
+            round["grid"],
+            SdkValue::Array(vec![
+                SdkValue::Array(vec![SdkValue::Int(1), SdkValue::Int(2)]),
+                SdkValue::Array(vec![SdkValue::Int(3), SdkValue::Int(4)]),
+            ])
+        );
+    }
+
+    #[test]
+    fn flatten_and_regroup_state_round_trip() {
+        let fields = vec![make_fa_field(
+            "board",
+            "FixedArray<bigint, 3>",
+            3,
+            "bigint",
+            vec!["board__0", "board__1", "board__2"],
+            0,
+        )];
+        let state: HashMap<String, SdkValue> = make_values(&[(
+            "board",
+            SdkValue::Array(vec![
+                SdkValue::Int(10),
+                SdkValue::Int(20),
+                SdkValue::Int(30),
+            ]),
+        )]);
+        let flat = flatten_fixed_array_state(&state, &fields);
+        assert_eq!(flat.get("board__0"), Some(&SdkValue::Int(10)));
+        assert_eq!(flat.get("board__1"), Some(&SdkValue::Int(20)));
+        assert_eq!(flat.get("board__2"), Some(&SdkValue::Int(30)));
+        // Regroup drops the flat leaves back into an array.
+        let mut flat_only: HashMap<String, SdkValue> = HashMap::new();
+        flat_only.insert("board__0".to_string(), SdkValue::Int(100));
+        flat_only.insert("board__1".to_string(), SdkValue::Int(200));
+        flat_only.insert("board__2".to_string(), SdkValue::Int(300));
+        let grouped = regroup_fixed_array_state(&flat_only, &fields);
+        assert_eq!(
+            grouped["board"],
+            SdkValue::Array(vec![
+                SdkValue::Int(100),
+                SdkValue::Int(200),
+                SdkValue::Int(300),
+            ])
+        );
     }
 
     // -----------------------------------------------------------------------

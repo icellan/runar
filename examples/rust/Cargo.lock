@@ -910,6 +910,7 @@ dependencies = [
 name = "runar-example-tests"
 version = "0.1.0"
 dependencies = [
+ "runar-compiler-rust",
  "runar-lang",
 ]
 

@@ -1607,6 +1607,9 @@ fn encode_arg(value: &SdkValue) -> String {
         SdkValue::Auto => {
             panic!("encode_arg: SdkValue::Auto should be resolved before encoding")
         }
+        SdkValue::Array(_) => {
+            panic!("encode_arg: SdkValue::Array must be flattened before encoding")
+        }
     }
 }
 
@@ -1857,7 +1860,7 @@ mod tests {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
                         name: "x".to_string(),
-                        param_type: "bigint".to_string(),
+                        param_type: "bigint".to_string(), fixed_array: None ,
                     }],
                 },
                 methods: vec![],
@@ -1887,7 +1890,7 @@ mod tests {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
                         name: "pubKeyHash".to_string(),
-                        param_type: "Addr".to_string(),
+                        param_type: "Addr".to_string(), fixed_array: None ,
                     }],
                 },
                 methods: vec![AbiMethod {
@@ -1928,8 +1931,8 @@ mod tests {
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
-                        AbiParam { name: "pk1".to_string(), param_type: "PubKey".to_string() },
-                        AbiParam { name: "pk2".to_string(), param_type: "PubKey".to_string() },
+                        AbiParam { name: "pk1".to_string(), param_type: "PubKey".to_string(), fixed_array: None },
+                        AbiParam { name: "pk2".to_string(), param_type: "PubKey".to_string(), fixed_array: None },
                     ],
                 },
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None }],
@@ -1966,7 +1969,7 @@ mod tests {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
                         name: "pubKeyHash".to_string(),
-                        param_type: "Addr".to_string(),
+                        param_type: "Addr".to_string(), fixed_array: None ,
                     }],
                 },
                 methods: vec![AbiMethod { name: "unlock".to_string(), params: vec![], is_public: true, is_terminal: None }],
@@ -2001,7 +2004,7 @@ mod tests {
                 constructor: AbiConstructor {
                     params: vec![AbiParam {
                         name: "threshold".to_string(),
-                        param_type: "bigint".to_string(),
+                        param_type: "bigint".to_string(), fixed_array: None ,
                     }],
                 },
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None }],
@@ -2029,7 +2032,7 @@ mod tests {
             contract_name: "Test".to_string(),
             abi: Abi {
                 constructor: AbiConstructor {
-                    params: vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string() }],
+                    params: vec![AbiParam { name: "x".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
                 },
                 methods: vec![AbiMethod { name: "check".to_string(), params: vec![], is_public: true, is_terminal: None }],
             },
@@ -2056,7 +2059,7 @@ mod tests {
     #[test]
     fn no_selector_for_single_public_method() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "unlock".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "unlock".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         let sig = "aa".repeat(72);
@@ -2117,7 +2120,7 @@ mod tests {
     #[test]
     fn encodes_bigint_0_as_op0() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Int(0)]).unwrap(), "00");
@@ -2126,7 +2129,7 @@ mod tests {
     #[test]
     fn encodes_bigint_1_to_16_as_opcodes() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Int(1)]).unwrap(), "51");
@@ -2137,7 +2140,7 @@ mod tests {
     #[test]
     fn encodes_neg1_as_op1negate() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Int(-1)]).unwrap(), "4f");
@@ -2146,7 +2149,7 @@ mod tests {
     #[test]
     fn encodes_1000_as_push_data() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Int(1000)]).unwrap(), "02e803");
@@ -2155,7 +2158,7 @@ mod tests {
     #[test]
     fn encodes_neg42_with_sign_bit() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "n".to_string(), param_type: "bigint".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Int(-42)]).unwrap(), "01aa");
@@ -2164,7 +2167,7 @@ mod tests {
     #[test]
     fn encodes_20_byte_hex_with_14_prefix() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "h".to_string(), param_type: "Addr".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "h".to_string(), param_type: "Addr".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         let addr = "aa".repeat(20);
@@ -2175,7 +2178,7 @@ mod tests {
     #[test]
     fn encodes_33_byte_hex_with_21_prefix() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "pk".to_string(), param_type: "PubKey".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "pk".to_string(), param_type: "PubKey".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         let pubkey = "bb".repeat(33);
@@ -2186,7 +2189,7 @@ mod tests {
     #[test]
     fn encodes_bool_true() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(true)]).unwrap(), "51");
@@ -2195,7 +2198,7 @@ mod tests {
     #[test]
     fn encodes_bool_false() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "check".to_string(), params: vec![AbiParam { name: "flag".to_string(), param_type: "bool".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         assert_eq!(contract.build_unlocking_script("check", &[SdkValue::Bool(false)]).unwrap(), "00");
@@ -2208,8 +2211,8 @@ mod tests {
     #[test]
     fn args_then_selector() {
         let artifact = make_artifact("51", abi_with_methods(vec![
-            AbiMethod { name: "release".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string() }], is_public: true, is_terminal: None },
-            AbiMethod { name: "refund".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string() }], is_public: true, is_terminal: None },
+            AbiMethod { name: "release".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
+            AbiMethod { name: "refund".to_string(), params: vec![AbiParam { name: "sig".to_string(), param_type: "Sig".to_string(), fixed_array: None }], is_public: true, is_terminal: None },
         ]));
         let contract = RunarContract::new(artifact, vec![]);
         let sig = "cc".repeat(71);
@@ -2393,8 +2396,8 @@ mod tests {
             abi_with_methods(vec![AbiMethod {
                 name: "transfer".to_string(),
                 params: vec![
-                    AbiParam { name: "to".to_string(), param_type: "Addr".to_string() },
-                    AbiParam { name: "amount".to_string(), param_type: "bigint".to_string() },
+                    AbiParam { name: "to".to_string(), param_type: "Addr".to_string(), fixed_array: None },
+                    AbiParam { name: "amount".to_string(), param_type: "bigint".to_string(), fixed_array: None },
                 ],
                 is_public: true, is_terminal: None,
             }]),
@@ -2434,8 +2437,8 @@ mod tests {
     #[test]
     fn from_txid_stateful_extracts_state() {
         let state_fields = vec![
-            StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None },
-            StateField { name: "active".to_string(), field_type: "bool".to_string(), index: 1, initial_value: None },
+            StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None, fixed_array: None },
+            StateField { name: "active".to_string(), field_type: "bool".to_string(), index: 1, initial_value: None, fixed_array: None },
         ];
 
         let code_hex = "76a988ac";
@@ -2461,8 +2464,8 @@ mod tests {
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
-                        AbiParam { name: "count".to_string(), param_type: "bigint".to_string() },
-                        AbiParam { name: "active".to_string(), param_type: "bool".to_string() },
+                        AbiParam { name: "count".to_string(), param_type: "bigint".to_string(), fixed_array: None },
+                        AbiParam { name: "active".to_string(), param_type: "bool".to_string(), fixed_array: None },
                     ],
                 },
                 methods: vec![],
@@ -2539,12 +2542,12 @@ mod tests {
             contract_name: "Test".to_string(),
             abi: Abi {
                 constructor: AbiConstructor {
-                    params: vec![AbiParam { name: "count".to_string(), param_type: "bigint".to_string() }],
+                    params: vec![AbiParam { name: "count".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
                 },
                 methods: vec![],
             },
             script: "51".to_string(),
-            state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None }]),
+            state_fields: Some(vec![StateField { name: "count".to_string(), field_type: "bigint".to_string(), index: 0, initial_value: None, fixed_array: None }]),
             constructor_slots: None,
             code_sep_index_slots: None,
             code_separator_index: None,
@@ -2574,18 +2577,18 @@ mod tests {
             abi: Abi {
                 constructor: AbiConstructor {
                     params: vec![
-                        AbiParam { name: "genesisOutpoint".to_string(), param_type: "ByteString".to_string() },
-                        AbiParam { name: "initialHash".to_string(), param_type: "ByteString".to_string() },
-                        AbiParam { name: "metadata".to_string(), param_type: "ByteString".to_string() },
+                        AbiParam { name: "genesisOutpoint".to_string(), param_type: "ByteString".to_string(), fixed_array: None },
+                        AbiParam { name: "initialHash".to_string(), param_type: "ByteString".to_string(), fixed_array: None },
+                        AbiParam { name: "metadata".to_string(), param_type: "ByteString".to_string(), fixed_array: None },
                     ],
                 },
                 methods: vec![],
             },
             script: "51".to_string(),
             state_fields: Some(vec![
-                StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0, initial_value: None },
-                StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1, initial_value: None },
-                StateField { name: "metadata".to_string(), field_type: "ByteString".to_string(), index: 2, initial_value: None },
+                StateField { name: "genesisOutpoint".to_string(), field_type: "ByteString".to_string(), index: 0, initial_value: None, fixed_array: None },
+                StateField { name: "rollingHash".to_string(), field_type: "ByteString".to_string(), index: 1, initial_value: None, fixed_array: None },
+                StateField { name: "metadata".to_string(), field_type: "ByteString".to_string(), index: 2, initial_value: None, fixed_array: None },
             ]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2806,7 +2809,7 @@ mod tests {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: Some(serde_json::Value::String("0n".to_string())),
+                initial_value: Some(serde_json::Value::String("0n".to_string())), fixed_array: None ,
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2833,7 +2836,7 @@ mod tests {
                 name: "amount".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: Some(serde_json::Value::String("1000n".to_string())),
+                initial_value: Some(serde_json::Value::String("1000n".to_string())), fixed_array: None ,
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2860,7 +2863,7 @@ mod tests {
                 name: "offset".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: Some(serde_json::Value::String("-42n".to_string())),
+                initial_value: Some(serde_json::Value::String("-42n".to_string())), fixed_array: None ,
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
@@ -2887,7 +2890,7 @@ mod tests {
                 name: "count".to_string(),
                 field_type: "bigint".to_string(),
                 index: 0,
-                initial_value: Some(serde_json::Value::String("0n".to_string())),
+                initial_value: Some(serde_json::Value::String("0n".to_string())), fixed_array: None ,
             }]),
             constructor_slots: None,
             code_sep_index_slots: None,
