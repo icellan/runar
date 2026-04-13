@@ -773,8 +773,10 @@ const Parser = struct {
             const field_name_tok = self.bump();
             const field_name = goToCamelCase(self.allocator, field_name_tok.text);
 
-            // Parse type
-            const type_info = self.parseGoType();
+            // Parse type — captures FixedArray shape so `expand_fixed_arrays.zig`
+            // can see the property after typecheck. Mirrors parse_zig.zig and
+            // parse_python.zig.
+            const parsed_type = self.parseGoFieldType();
 
             // Check for struct tag
             var is_readonly = false;
@@ -790,8 +792,11 @@ const Parser = struct {
 
             properties.append(self.allocator, .{
                 .name = field_name,
-                .type_info = type_info,
+                .type_info = parsed_type.type_info,
                 .readonly = readonly,
+                .fixed_array_length = parsed_type.fixed_array_length,
+                .fixed_array_element = parsed_type.fixed_array_element,
+                .fixed_array_nested_length = parsed_type.fixed_array_nested_length,
             }) catch {};
         }
 
@@ -829,6 +834,63 @@ const Parser = struct {
 
     // ---- Go Type parsing ----
 
+    const ParsedGoType = struct {
+        type_info: RunarType,
+        fixed_array_length: u32 = 0,
+        fixed_array_element: RunarType = .unknown,
+        fixed_array_nested_length: u32 = 0,
+    };
+
+    /// Parse a Go field type, capturing FixedArray shape on outer + nested
+    /// `[N]T` arrays. Mirrors `parseFieldTypeNode` in parse_zig.zig.
+    fn parseGoFieldType(self: *Parser) ParsedGoType {
+        // Fixed-length array: [N]T (recursive for [M][N]T)
+        if (self.current.kind == .lbracket) {
+            _ = self.bump(); // consume '['
+            if (self.current.kind == .rbracket) {
+                // []byte -> ByteString
+                _ = self.bump(); // consume ']'
+                if (self.checkIdent("byte")) {
+                    _ = self.bump();
+                    return .{ .type_info = .byte_string };
+                }
+                return .{ .type_info = .unknown };
+            }
+            if (self.current.kind != .number) {
+                self.addError("FixedArray length must be a positive integer literal");
+                while (self.current.kind != .rbracket and self.current.kind != .eof) _ = self.bump();
+                if (self.current.kind == .rbracket) _ = self.bump();
+                return .{ .type_info = .unknown };
+            }
+            const size_tok = self.bump();
+            const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
+            _ = self.expect(.rbracket);
+            const inner = self.parseGoFieldType();
+            // Outer FixedArray: track its length and element type. If the
+            // element is itself a FixedArray, fold its length into
+            // fixed_array_nested_length so expand_fixed_arrays sees the full
+            // shape (matches parse_zig / parse_python behaviour).
+            //
+            // Note: when the element is a nested FixedArray, fixed_array_element
+            // stays as `.fixed_array` (NOT the inner element type), matching
+            // parse_zig.zig's `typeNodeToRunarType` behaviour. expand_fixed_arrays
+            // checks `element == .fixed_array && nested_length > 0` to know it
+            // needs to recursively expand into a 2-D synthetic grid.
+            var nested: u32 = 0;
+            if (inner.type_info == .fixed_array) {
+                nested = inner.fixed_array_length;
+            }
+            return .{
+                .type_info = .fixed_array,
+                .fixed_array_length = size,
+                .fixed_array_element = inner.type_info,
+                .fixed_array_nested_length = nested,
+            };
+        }
+
+        return .{ .type_info = self.parseGoType() };
+    }
+
     fn parseGoType(self: *Parser) RunarType {
         // runar.TypeName
         if (self.checkIdent("runar") and self.tokenizer.peek() == '.') {
@@ -851,7 +913,7 @@ const Parser = struct {
                     return .byte_string;
                 }
             } else {
-                // Fixed-length array: [N]Type -- skip for now
+                // Fixed-length array nested via parseGoType (legacy path) -- skip
                 while (self.current.kind != .rbracket and self.current.kind != .eof) _ = self.bump();
                 if (self.current.kind == .rbracket) _ = self.bump();
                 if (self.current.kind == .ident) _ = self.bump();
@@ -1294,6 +1356,19 @@ const Parser = struct {
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value } };
             },
+            .index_access => |ia| {
+                // `c.Board[i] = v` — extract the base property name and
+                // attach the IndexAccess so `expand_fixed_arrays.zig` can
+                // rewrite it into direct (literal index) or dispatch
+                // (runtime index) form. Mirrors parse_zig.zig's
+                // `extractAssignTarget` + `index_target` handling.
+                const base = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{ .target = base, .value = value, .index_target = ia } };
+            },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value } };
             },
@@ -1638,6 +1713,18 @@ const Parser = struct {
 
     fn parseArrayLiteral(self: *Parser) ?Expression {
         _ = self.expect(.lbracket);
+        // Go composite literal form: `[N]T{a, b, c}` or `[N][M]T{...}`.
+        // The `[N]T` shape is parsed and discarded — the array literal AST node
+        // tracks elements only; the field's type already records the FixedArray
+        // shape, so expand_fixed_arrays has everything it needs.
+        if (self.current.kind == .number) {
+            _ = self.bump(); // consume N
+            _ = self.expect(.rbracket);
+            // Element type: `[M]T`, `runar.X`, or plain ident
+            self.skipCompositeLiteralType();
+            return self.parseCompositeLiteralBody();
+        }
+        // Fallback: legacy JS-style `[a, b, c]` literal.
         var elements: std.ArrayListUnmanaged(Expression) = .empty;
         while (self.current.kind != .rbracket and self.current.kind != .eof) {
             const elem = self.parseExpression() orelse break;
@@ -1648,6 +1735,51 @@ const Parser = struct {
         }
         _ = self.expect(.rbracket);
         return .{ .array_literal = elements.items };
+    }
+
+    /// Parse the `{...}` body of a Go composite literal. Each element may be
+    /// a regular expression OR a nested implicit composite literal `{ ... }`
+    /// when the outer element type is itself a composite type (e.g. the inner
+    /// `{0, 0}` of `[2][2]int{{0,0}, {0,0}}`).
+    fn parseCompositeLiteralBody(self: *Parser) ?Expression {
+        _ = self.expect(.lbrace);
+        var elements: std.ArrayListUnmanaged(Expression) = .empty;
+        while (self.current.kind != .rbrace and self.current.kind != .eof) {
+            const elem: ?Expression = if (self.current.kind == .lbrace)
+                self.parseCompositeLiteralBody()
+            else
+                self.parseExpression();
+            if (elem) |e| {
+                elements.append(self.allocator, e) catch {};
+            } else break;
+            if (self.current.kind == .comma) {
+                _ = self.bump();
+            } else break;
+        }
+        _ = self.expect(.rbrace);
+        return .{ .array_literal = elements.items };
+    }
+
+    /// Skip the element type in a Go composite literal: `[M]T` (recursive),
+    /// `runar.X`, or plain ident. Stops just before `{`.
+    fn skipCompositeLiteralType(self: *Parser) void {
+        while (true) {
+            if (self.current.kind == .lbracket) {
+                _ = self.bump();
+                if (self.current.kind == .number) _ = self.bump();
+                _ = self.expect(.rbracket);
+                continue;
+            }
+            if (self.current.kind == .ident) {
+                _ = self.bump();
+                if (self.current.kind == .dot) {
+                    _ = self.bump();
+                    if (self.current.kind == .ident) _ = self.bump();
+                }
+                return;
+            }
+            return;
+        }
     }
 
     // ---- Helpers ----
