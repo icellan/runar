@@ -1500,17 +1500,29 @@ impl<'a> RbParser<'a> {
     }
 
     fn parse_ivar_statement(&mut self) -> Statement {
-        // @var = expr or @var += expr or @var as expression
+        // @var = expr | @var[i] = expr | @var += expr | @var as expression
         let raw_name = match self.advance() {
             Token::Ivar(name) => name,
             _ => "_error".to_string(),
         };
         let prop_name = snake_to_camel(&raw_name);
-        let target = Expression::PropertyAccess {
+        let mut target = Expression::PropertyAccess {
             property: prop_name,
         };
 
-        // Simple assignment: @var = expr
+        // Consume index-access postfixes on the LHS so `@var[i] = expr`
+        // is recognised as an assignment statement.
+        while *self.peek() == Token::LBracket {
+            self.advance();
+            let index = self.parse_expression();
+            self.expect(&Token::RBracket);
+            target = Expression::IndexAccess {
+                object: Box::new(target),
+                index: Box::new(index),
+            };
+        }
+
+        // Simple assignment: @var = expr  |  @var[i] = expr
         if self.match_tok(&Token::Eq) {
             let value = self.parse_expression();
             return Statement::Assignment {

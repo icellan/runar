@@ -1309,13 +1309,27 @@ module RunarCompiler
       end
 
       def parse_ivar_statement(current_loc)
-        # Parse +@var = expr+, +@var += expr+, or +@var+ as expression.
+        # Parse +@var = expr+, +@var[i] = expr+, +@var += expr+, or
+        # +@var+ as expression.
         ivar_tok = advance # ivar token
         raw_name = ivar_tok.value
         prop_name = Frontend.snake_to_camel(raw_name)
         target = PropertyAccessExpr.new(property: prop_name)
 
-        # Simple assignment: @var = expr
+        # Consume +[index]+ postfixes so that +@var[i] = expr+ is
+        # recognised as an assignment statement rather than being
+        # split into an orphan read and a rogue rhs.
+        while peek.kind == TOK_LBRACKET
+          advance # '['
+          index = parse_expression
+          unless match_tok(TOK_RBRACKET)
+            # Recover gracefully; parser will emit a diagnostic.
+            break
+          end
+          target = IndexAccessExpr.new(object: target, index: index)
+        end
+
+        # Simple assignment: @var = expr | @var[i] = expr
         if match_tok(TOK_ASSIGN)
           value = parse_expression
           return AssignmentStmt.new(target: target, value: value, source_location: current_loc)

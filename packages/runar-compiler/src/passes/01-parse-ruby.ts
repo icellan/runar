@@ -1297,13 +1297,30 @@ class RbParser {
   }
 
   private parseIvarStatement(loc: SourceLocation): Statement {
-    // @var = expr or @var += expr or @var as expression
+    // @var = expr | @var += expr | @var[idx] = expr | @var.field = expr | @var as expression
     const ivarTok = this.advance(); // ivar token
     const rawName = ivarTok.value;
     const propName = snakeToCamel(rawName);
-    const target: Expression = { kind: 'property_access', property: propName };
+    let target: Expression = { kind: 'property_access', property: propName };
 
-    // Simple assignment: @var = expr
+    // Consume any postfix chain that can appear on the LHS of an
+    // assignment (index access, member access). We stop on `(` / method
+    // calls because a call cannot be an assignment target.
+    while (this.peek().type === '[' || this.peek().type === '.') {
+      if (this.peek().type === '[') {
+        this.advance();
+        const index = this.parseExpression();
+        this.expect(']');
+        target = { kind: 'index_access', object: target, index };
+      } else {
+        this.advance(); // .
+        const name = this.expect('ident').value;
+        const camel = snakeToCamel(name);
+        target = { kind: 'property_access', object: target, property: camel } as Expression;
+      }
+    }
+
+    // Simple assignment: @var = expr  |  @var[i] = expr  |  @var.field = expr
     if (this.match('=')) {
       const value = this.parseExpression();
       return { kind: 'assignment', target, value, sourceLocation: loc };
@@ -1324,8 +1341,8 @@ class RbParser {
     }
 
     // Expression statement (rare: just @var on its own line, or @var.method(...))
-    // Re-parse from ivar as an expression — but we already consumed the ivar token,
-    // so build the expression and parse any postfix operations
+    // Continue parsing any remaining postfix operations (e.g. method calls)
+    // that are not valid on the LHS of an assignment.
     let expr: Expression = target;
     expr = this.parsePostfixFrom(expr);
 

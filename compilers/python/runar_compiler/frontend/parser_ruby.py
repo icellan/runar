@@ -1282,13 +1282,21 @@ class _RbParser:
         )
 
     def _parse_ivar_statement(self, loc: SourceLocation) -> Statement:
-        """Parse ``@var = expr``, ``@var += expr``, or ``@var`` as expression."""
+        """Parse ``@var = expr``, ``@var[i] = expr``, ``@var += expr``, or ``@var`` as expression."""
         ivar_tok = self._advance()  # ivar token
         raw_name = ivar_tok.value
         prop_name = _snake_to_camel(raw_name)
         target: Expression = PropertyAccessExpr(property=prop_name)
 
-        # Simple assignment: @var = expr
+        # Consume index-access postfixes on the LHS so
+        # ``@var[i] = expr`` is recognised as an assignment statement.
+        while self._peek().kind == TOK_LBRACKET:
+            self._advance()  # '['
+            index = self._parse_expression()
+            self._expect(TOK_RBRACKET, "]")
+            target = IndexAccessExpr(object=target, index=index)
+
+        # Simple assignment: @var = expr | @var[i] = expr
         if self._match(TOK_ASSIGN):
             value = self._parse_expression()
             return AssignmentStmt(target=target, value=value, source_location=loc)

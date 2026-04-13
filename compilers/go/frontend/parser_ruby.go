@@ -1391,9 +1391,21 @@ func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
 	ivarTok := p.advance() // ivar token
 	rawName := ivarTok.value
 	propName := rbConvertName(rawName)
-	target := PropertyAccessExpr{Property: propName}
+	var target Expression = PropertyAccessExpr{Property: propName}
 
-	// Simple assignment: @var = expr
+	// Consume index-access postfixes on the LHS of an assignment, so
+	// that `@var[i] = expr` is recognised as an assignment rather than
+	// being split into an orphaned index read and a rogue rhs.
+	for p.check(rbTokLBracket) {
+		p.advance()
+		index := p.parseExpression()
+		if !p.match(rbTokRBracket) {
+			break
+		}
+		target = IndexAccessExpr{Object: target, Index: index}
+	}
+
+	// Simple assignment: @var = expr | @var[i] = expr
 	if p.match(rbTokAssign) {
 		value := p.parseExpression()
 		return AssignmentStmt{Target: target, Value: value, SourceLocation: loc}
@@ -1417,8 +1429,7 @@ func (p *rbParser) parseIvarStatement(loc SourceLocation) Statement {
 	}
 
 	// Expression statement (e.g. @var.method(...))
-	var expr Expression = target
-	expr = p.parsePostfixFrom(expr)
+	expr := p.parsePostfixFrom(target)
 
 	return ExpressionStmt{Expr: expr, SourceLocation: loc}
 }

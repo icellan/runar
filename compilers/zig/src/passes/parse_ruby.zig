@@ -1460,10 +1460,26 @@ const Parser = struct {
         const ivar_tok = self.bump(); // ivar token
         const prop_name = rbConvertName(self.allocator, ivar_tok.text);
 
-        // Simple assignment: @var = expr
+        // Build the LHS target, consuming `[index]` postfixes so that
+        // `@var[i] = expr` lands on the assignment path rather than being
+        // split into an orphan read and a rogue rhs.
+        var target_expr: Expression = .{ .property_access = .{ .object = "this", .property = prop_name } };
+        while (self.check(.lbracket)) {
+            _ = self.bump();
+            const index = self.parseExpression() orelse return null;
+            if (!self.match(.rbracket)) {
+                self.addError("expected ']'");
+                return null;
+            }
+            const ia = self.allocator.create(IndexAccess) catch return null;
+            ia.* = .{ .object = target_expr, .index = index };
+            target_expr = .{ .index_access = ia };
+        }
+
+        // Simple assignment: @var = expr  |  @var[i] = expr
         if (self.match(.assign)) {
             const value = self.parseExpression() orelse return null;
-            return .{ .assign = .{ .target = prop_name, .value = value } };
+            return self.buildAssignment(target_expr, value);
         }
 
         // Compound assignments: @var += expr, etc.
@@ -1472,14 +1488,12 @@ const Parser = struct {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
             const bin_op = binOpFromCompoundAssign(op_kind);
-            const target_expr: Expression = .{ .property_access = .{ .object = "this", .property = prop_name } };
             const compound_rhs = self.makeBinaryExpr(bin_op, target_expr, rhs) orelse return null;
-            return .{ .assign = .{ .target = prop_name, .value = compound_rhs } };
+            return self.buildAssignment(target_expr, compound_rhs);
         }
 
         // Expression statement (e.g. @var.method(...))
-        var expr: Expression = .{ .property_access = .{ .object = "this", .property = prop_name } };
-        expr = self.parsePostfixFrom(expr);
+        const expr = self.parsePostfixFrom(target_expr);
         return .{ .expr_stmt = expr };
     }
 
