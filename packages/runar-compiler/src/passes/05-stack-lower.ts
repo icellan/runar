@@ -32,6 +32,11 @@ import {
   emitBBExt4Mul0, emitBBExt4Mul1, emitBBExt4Mul2, emitBBExt4Mul3,
   emitBBExt4Inv0, emitBBExt4Inv1, emitBBExt4Inv2, emitBBExt4Inv3,
 } from './babybear-codegen.js';
+import {
+  emitKBFieldAdd, emitKBFieldSub, emitKBFieldMul, emitKBFieldInv,
+  emitKBExt4Mul0, emitKBExt4Mul1, emitKBExt4Mul2, emitKBExt4Mul3,
+  emitKBExt4Inv0, emitKBExt4Inv1, emitKBExt4Inv2, emitKBExt4Inv3,
+} from './koalabear-codegen.js';
 import { emitMerkleRootSha256, emitMerkleRootHash256 } from './merkle-codegen.js';
 
 // ---------------------------------------------------------------------------
@@ -387,80 +392,111 @@ class LoweringContext {
    * Leaves stack:  [..., script, varint_bytes]
    *
    * Bitcoin varint format:
-   *   - len < 253:    1 byte (unsigned)
-   *   - len >= 253:   0xfd + 2 bytes unsigned LE
+   *   - len < 0xfd:        1 byte (len itself)
+   *   - len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+   *   - len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+   *   - otherwise:         0xff + 8 bytes LE                (9 bytes)
    *
-   * OP_NUM2BIN uses sign-magnitude encoding, so values 128-255 need 2 bytes
-   * to avoid the sign bit ambiguity. To produce a correct 1-byte unsigned
-   * varint, we use OP_NUM2BIN 2 to get a 2-byte sign-magnitude result and
-   * then SPLIT to extract only the low byte.
+   * We must support all four shapes; emitting a 3-byte varint for a script
+   * whose length exceeds 0xffff produces a truncated value that no longer
+   * matches what the BSV node uses for hashOutputs, breaking the
+   * state-continuation hash equality assertion downstream.
    *
-   * Similarly, for 2-byte unsigned LE varints, values >= 32768 would need
-   * 3 bytes in sign-magnitude. We use OP_NUM2BIN 4 and SPLIT to extract
-   * the low 2 bytes.
+   * OP_NUM2BIN uses sign-magnitude encoding so the high-bit values need an
+   * extra sign byte; we generate one extra byte and then SPLIT off the
+   * unsigned low bytes.
    */
   private emitVarintEncoding(): void {
     // Stack: [..., script, len]
-    this.emitOp({ op: 'dup' }); // [script, len, len]
-    this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 253n }); // [script, len, len, 253]
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [script, len, isSmall]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null);
 
+    // [..., len] -> [..., low_n_bytes]: NUM2BIN(n+1) then SPLIT(n) DROP.
+    const emitNumToLowBytes = (nBytes: bigint): void => {
+      this.emitOp({ op: 'push', value: nBytes + 1n });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
+      this.stackMap.pop();
+      this.stackMap.pop();
+      this.stackMap.push(null);
+      this.emitOp({ op: 'push', value: nBytes });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+      this.stackMap.pop();
+      this.stackMap.pop();
+      this.stackMap.push(null);
+      this.stackMap.push(null);
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+    };
+
+    // [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+    const emitPrefix = (prefixByte: number): void => {
+      this.emitOp({ op: 'push', value: new Uint8Array([prefixByte]) });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'swap' });
+      this.stackMap.swap();
+      this.stackMap.pop();
+      this.stackMap.pop();
+      this.emitOp({ op: 'opcode', code: 'OP_CAT' });
+      this.stackMap.push(null);
+    };
+
+    // IF len < 253: 1-byte varint.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 253n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
     this.emitOp({ op: 'opcode', code: 'OP_IF' });
-    this.stackMap.pop(); // pop condition
-
-    // Then: 1-byte varint (len < 253)
-    // Use NUM2BIN 2 to avoid sign-magnitude issue for values 128-252,
-    // then take only the first (low) byte via SPLIT.
-    this.emitOp({ op: 'push', value: 2n });
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [script, len_2bytes]
     this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 1n }); // [script, len_2bytes, 1]
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [script, lowByte, highByte]
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // lowByte
-    this.stackMap.push(null); // highByte
-    this.emitOp({ op: 'drop' }); // [script, lowByte]
-    this.stackMap.pop();
-
+    const smAt1Byte = this.stackMap.clone();
+    emitNumToLowBytes(1n);
     this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAt1Byte.clone();
 
-    // Else: 0xfd + 2-byte LE varint (len >= 253)
-    // Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-    // then take only the first 2 (low) bytes via SPLIT.
-    this.emitOp({ op: 'push', value: 4n });
+    // ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+    this.emitOp({ op: 'dup' });
     this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' }); // [script, len_4bytes]
+    this.emitOp({ op: 'push', value: 0x10000n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
     this.stackMap.pop();
     this.stackMap.pop();
     this.stackMap.push(null);
-    this.emitOp({ op: 'push', value: 2n }); // [script, len_4bytes, 2]
-    this.stackMap.push(null);
-    this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [script, low2bytes, high2bytes]
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
     this.stackMap.pop();
-    this.stackMap.pop();
-    this.stackMap.push(null); // low2bytes
-    this.stackMap.push(null); // high2bytes
-    this.emitOp({ op: 'drop' }); // [script, low2bytes]
-    this.stackMap.pop();
-    this.emitOp({ op: 'push', value: new Uint8Array([0xfd]) });
-    this.stackMap.push(null);
-    this.emitOp({ op: 'swap' });
-    this.stackMap.swap();
-    this.stackMap.pop();
-    this.stackMap.pop();
-    this.emitOp({ op: 'opcode', code: 'OP_CAT' });
-    this.stackMap.push(null);
+    const smAt3Byte = this.stackMap.clone();
+    emitNumToLowBytes(2n);
+    emitPrefix(0xfd);
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAt3Byte.clone();
 
+    // ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+    this.emitOp({ op: 'dup' });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'push', value: 0x100000000n });
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
+    this.stackMap.pop();
+    this.stackMap.pop();
+    this.stackMap.push(null);
+    this.emitOp({ op: 'opcode', code: 'OP_IF' });
+    this.stackMap.pop();
+    const smAt5Byte = this.stackMap.clone();
+    emitNumToLowBytes(4n);
+    emitPrefix(0xfe);
+    this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+    this.stackMap = smAt5Byte.clone();
+
+    // ELSE: 0xff + 8-byte LE. (Practically unreachable on BSV but kept for
+    // spec completeness so we never silently truncate.)
+    emitNumToLowBytes(8n);
+    emitPrefix(0xff);
+
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+    this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
     // --- Stack: [..., script, varint] ---
   }
@@ -1211,6 +1247,17 @@ class LoweringContext {
         func === 'bbExt4Inv0' || func === 'bbExt4Inv1' ||
         func === 'bbExt4Inv2' || func === 'bbExt4Inv3') {
       this.lowerBBFieldBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // KoalaBear field arithmetic builtins
+    if (func === 'kbFieldAdd' || func === 'kbFieldSub' ||
+        func === 'kbFieldMul' || func === 'kbFieldInv' ||
+        func === 'kbExt4Mul0' || func === 'kbExt4Mul1' ||
+        func === 'kbExt4Mul2' || func === 'kbExt4Mul3' ||
+        func === 'kbExt4Inv0' || func === 'kbExt4Inv1' ||
+        func === 'kbExt4Inv2' || func === 'kbExt4Inv3') {
+      this.lowerKBFieldBuiltin(bindingName, func, args, bindingIndex, lastUses);
       return;
     }
 
@@ -2509,61 +2556,106 @@ class LoweringContext {
       this.emitOp({ op: 'drop' });
       this.stackMap.pop();
     } else {
-      // Variable-length path: ByteString fields present.
-      // We need _codePart to compute the state offset at runtime.
+      // Variable-length path: ByteString fields present. We need _codePart
+      // to compute the state offset at runtime.
       //
-      // After steps 1-3, we have varint+scriptCode on the stack.
-      // Strip the varint prefix:
-      //   Read first byte; if < 0xfd, varint was 1 byte (already consumed).
-      //   Otherwise strip 2 more bytes for 0xfd case.
-      // Stack: [varint+scriptCode]
+      // After steps 1-3 we have [varint || scriptCode] on the stack and
+      // need to strip the BIP-143 scriptCode varint prefix:
+      //   length < 0xfd:        1 byte
+      //   length <= 0xffff:     0xfd + 2 bytes LE  (3 bytes)
+      //   length <= 0xffffffff: 0xfe + 4 bytes LE  (5 bytes)
+      //   otherwise:            0xff + 8 bytes LE  (9 bytes)
+      //
+      // We must support all four shapes; stripping only 1- and 3-byte
+      // varints corrupts state extraction for scripts whose scriptCode
+      // exceeds 65,535 bytes (e.g. embedded BN254 verifiers) and
+      // surfaces as `Invalid OP_SPLIT range` on regtest.
       this.emitOp({ op: 'push', value: 1n });
       this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [firstByte, rest]
+      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
       this.stackMap.pop(); this.stackMap.pop();
       this.stackMap.push(null); // firstByte
       this.stackMap.push(null); // rest
       this.emitOp({ op: 'swap' }); // [rest, firstByte]
       this.stackMap.swap();
-      this.emitOp({ op: 'dup' }); // [rest, firstByte, firstByte]
-      this.stackMap.dup();
-      // Zero-pad before BIN2NUM to prevent sign-bit misinterpretation.
-      // Without padding, 0xfd (253) has bit 7 set → BIN2NUM gives -125.
+      // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+      // as negative script numbers.
       this.emitOp({ op: 'push', value: new Uint8Array([0]) });
       this.stackMap.push(null);
       this.emitOp({ op: 'opcode', code: 'OP_CAT' });
       this.stackMap.pop(); this.stackMap.pop();
       this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' }); // [rest, firstByte, firstByteNum]
-      this.emitOp({ op: 'push', value: 253n }); // [rest, firstByte, firstByteNum, 253]
+      this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
+      // Stack: [..., rest, fb_num]
+
+      // emitDropMoreVarintBytes drops `n` more varint bytes from the top
+      // of stack `rest`. [..., rest] -> [..., rest_minus_n].
+      const emitDropMoreVarintBytes = (n: bigint): void => {
+        this.emitOp({ op: 'push', value: n });
+        this.stackMap.push(null);
+        this.emitOp({ op: 'opcode', code: 'OP_SPLIT' });
+        this.stackMap.pop(); this.stackMap.pop();
+        this.stackMap.push(null); this.stackMap.push(null);
+        this.emitOp({ op: 'nip' });
+        this.stackMap.pop(); this.stackMap.pop();
+        this.stackMap.push(null);
+      };
+
+      // IF fb_num < 253: 1-byte varint, drop fb_num.
+      this.emitOp({ op: 'dup' });
+      this.stackMap.dup();
+      this.emitOp({ op: 'push', value: 253n });
       this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' }); // [rest, firstByte, isSmall]
+      this.emitOp({ op: 'opcode', code: 'OP_LESSTHAN' });
       this.stackMap.pop(); this.stackMap.pop();
       this.stackMap.push(null);
-
       this.emitOp({ op: 'opcode', code: 'OP_IF' });
-      this.stackMap.pop(); // pop condition
-      const smAtVarintIf = this.stackMap.clone();
-
-      // Then: varint was 1 byte, already consumed. Drop the firstByte.
-      this.emitOp({ op: 'drop' }); // [rest=scriptCode]
       this.stackMap.pop();
-
+      const smAt1ByteIf = this.stackMap.clone();
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
       this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
-      this.stackMap = smAtVarintIf.clone();
-
-      // Else: varint starts with 0xfd, need to strip 2 more bytes from rest.
-      this.emitOp({ op: 'drop' }); // [rest] — drop firstByte
+      this.stackMap = smAt1ByteIf.clone();
+      // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+      this.emitOp({ op: 'dup' });
+      this.stackMap.dup();
+      this.emitOp({ op: 'push', value: 254n });
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
+      this.stackMap.pop(); this.stackMap.pop();
+      this.stackMap.push(null);
+      this.emitOp({ op: 'opcode', code: 'OP_IF' });
       this.stackMap.pop();
-      this.emitOp({ op: 'push', value: 2n });
+      const smAtFEIf = this.stackMap.clone();
+      // THEN: 5-byte varint (0xfe + 4 bytes LE).
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+      emitDropMoreVarintBytes(4n);
+      this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+      this.stackMap = smAtFEIf.clone();
+      // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+      this.emitOp({ op: 'dup' });
+      this.stackMap.dup();
+      this.emitOp({ op: 'push', value: 255n });
       this.stackMap.push(null);
-      this.emitOp({ op: 'opcode', code: 'OP_SPLIT' }); // [2bytesLen, scriptCode]
-      this.stackMap.pop(); this.stackMap.pop();
-      this.stackMap.push(null); this.stackMap.push(null);
-      this.emitOp({ op: 'nip' }); // [scriptCode]
+      this.emitOp({ op: 'opcode', code: 'OP_NUMEQUAL' });
       this.stackMap.pop(); this.stackMap.pop();
       this.stackMap.push(null);
-
+      this.emitOp({ op: 'opcode', code: 'OP_IF' });
+      this.stackMap.pop();
+      const smAtFFIf = this.stackMap.clone();
+      // THEN: 9-byte varint (0xff + 8 bytes LE).
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+      emitDropMoreVarintBytes(8n);
+      this.emitOp({ op: 'opcode', code: 'OP_ELSE' });
+      this.stackMap = smAtFFIf.clone();
+      // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+      emitDropMoreVarintBytes(2n);
+      this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
+      this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
       this.emitOp({ op: 'opcode', code: 'OP_ENDIF' });
       // --- Stack: [..., scriptCode] ---
 
@@ -4195,6 +4287,45 @@ class LoweringContext {
       case 'bbExt4Inv2': emitBBExt4Inv2(emitFn); break;
       case 'bbExt4Inv3': emitBBExt4Inv3(emitFn); break;
       default: throw new Error(`Unknown Baby Bear builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // KoalaBear field arithmetic — delegates to koalabear-codegen.ts
+  // =========================================================================
+
+  private lowerKBFieldBuiltin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring all args to stack top
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'kbFieldAdd': emitKBFieldAdd(emitFn); break;
+      case 'kbFieldSub': emitKBFieldSub(emitFn); break;
+      case 'kbFieldMul': emitKBFieldMul(emitFn); break;
+      case 'kbFieldInv': emitKBFieldInv(emitFn); break;
+      case 'kbExt4Mul0': emitKBExt4Mul0(emitFn); break;
+      case 'kbExt4Mul1': emitKBExt4Mul1(emitFn); break;
+      case 'kbExt4Mul2': emitKBExt4Mul2(emitFn); break;
+      case 'kbExt4Mul3': emitKBExt4Mul3(emitFn); break;
+      case 'kbExt4Inv0': emitKBExt4Inv0(emitFn); break;
+      case 'kbExt4Inv1': emitKBExt4Inv1(emitFn); break;
+      case 'kbExt4Inv2': emitKBExt4Inv2(emitFn); break;
+      case 'kbExt4Inv3': emitKBExt4Inv3(emitFn); break;
+      default: throw new Error(`Unknown KoalaBear builtin: ${func}`);
     }
 
     this.stackMap.push(bindingName);

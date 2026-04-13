@@ -51,6 +51,7 @@ maxscriptnumlengthpolicy=0
 maxstackmemoryusagepolicy=100000000
 maxtxsizepolicy=0
 genesisactivationheight=1
+chronicleactivationheight=1
 minminingtxfee=0.00000001
 zmqpubhashblock=tcp://*:28332
 zmqpubhashtx=tcp://*:28332

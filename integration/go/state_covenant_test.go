@@ -120,7 +120,8 @@ func deployStateCovenant(t *testing.T) (*runar.RunarContract, *helpers.Wallet) {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -173,7 +174,8 @@ func TestStateCovenant_Deploy(t *testing.T) {
 func TestStateCovenant_AdvanceState(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -190,7 +192,8 @@ func TestStateCovenant_AdvanceState(t *testing.T) {
 func TestStateCovenant_ChainAdvances(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -212,7 +215,8 @@ func TestStateCovenant_ChainAdvances(t *testing.T) {
 func TestStateCovenant_WrongPreStateRoot_Rejected(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -232,7 +236,8 @@ func TestStateCovenant_WrongPreStateRoot_Rejected(t *testing.T) {
 func TestStateCovenant_InvalidBlockNumber_Rejected(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -260,7 +265,8 @@ func TestStateCovenant_InvalidBlockNumber_Rejected(t *testing.T) {
 func TestStateCovenant_InvalidBabyBearProof_Rejected(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -279,7 +285,8 @@ func TestStateCovenant_InvalidBabyBearProof_Rejected(t *testing.T) {
 func TestStateCovenant_InvalidMerkleProof_Rejected(t *testing.T) {
 	contract, wallet := deployStateCovenant(t)
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

@@ -248,6 +248,14 @@ func matchWindow3(a, b, c StackOp) ([]StackOp, bool) {
 		}
 	}
 
+	// OVER + OVER + OP_ADD -> DUP + OP_2MUL (2x of TOS-1)
+	// Wait, OVER OVER gives copies of TOS-1 and TOS-1, not TOS and TOS-1.
+	// Actually OVER OVER = [a, b, a, b] which is OP_2DUP (already handled).
+
+	// ROT + ROT + DROP -> NIP + SWAP
+	// [a, b, c] -> ROT -> [b, c, a] -> ROT -> [c, a, b] -> DROP -> [c, a]
+	// = NIP -> [a, c] -> SWAP -> [c, a]  -- same 2 ops, no savings.
+
 	return nil, false
 }
 

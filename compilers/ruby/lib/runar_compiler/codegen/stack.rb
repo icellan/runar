@@ -465,51 +465,103 @@ module RunarCompiler::Codegen
     #
     # Expects stack: [..., script, len]
     # Leaves stack:  [..., script, varint_bytes]
+    #
+    # Bitcoin varint format:
+    #   len < 0xfd:        1 byte (len itself)
+    #   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+    #   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+    #   otherwise:         0xff + 8 bytes LE                (9 bytes — never
+    #                                                        used in practice
+    #                                                        for BSV scripts)
+    #
+    # We must support all four shapes; emitting a 3-byte varint for a script
+    # whose length exceeds 0xffff produces a truncated value that no longer
+    # matches what the BSV node uses for hashOutputs, breaking the
+    # state-continuation hash equality assertion downstream.
+    #
+    # OP_NUM2BIN uses sign-magnitude encoding so high-bit values need an
+    # extra sign byte; we generate one extra byte and then SPLIT off the
+    # unsigned low bytes to get the correct unsigned varint payload.
     def emit_varint_encoding
       # Stack: [..., script, len]
+
+      # emit_num_to_low_bytes: [..., len] -> [..., low_n_bytes]. Uses
+      # NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+      emit_num_to_low_bytes = lambda do |n_bytes|
+        emit_push_int(n_bytes + 1)
+        @sm.push("")
+        emit_opcode("OP_NUM2BIN")
+        @sm.pop; @sm.pop; @sm.push("")
+        emit_push_int(n_bytes)
+        @sm.push("")
+        emit_opcode("OP_SPLIT")
+        @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+        emit_op({ op: "drop" })
+        @sm.pop
+      end
+
+      # emit_prefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+      emit_prefix = lambda do |prefix_byte|
+        emit_push_bytes([prefix_byte].pack("C"))
+        @sm.push("")
+        emit_op({ op: "swap" })
+        @sm.swap
+        @sm.pop; @sm.pop
+        emit_opcode("OP_CAT")
+        @sm.push("")
+      end
+
+      # IF len < 253: 1-byte varint.
       emit_op({ op: "dup" })
       @sm.dup
       emit_push_int(253)
       @sm.push("")
       emit_opcode("OP_LESSTHAN")
       @sm.pop; @sm.pop; @sm.push("")
-
       emit_opcode("OP_IF")
-      @sm.pop # pop condition
-
-      # Then: 1-byte varint (len < 253)
-      emit_push_int(2)
-      @sm.push("")
-      emit_opcode("OP_NUM2BIN")
-      @sm.pop; @sm.pop; @sm.push("")
-      emit_push_int(1)
-      @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "drop" })
       @sm.pop
-
+      sm_at_1byte = @sm.clone
+      emit_num_to_low_bytes.call(1)
       emit_opcode("OP_ELSE")
+      @sm = sm_at_1byte.clone
 
-      # Else: 0xfd + 2-byte LE varint (len >= 253)
-      emit_push_int(4)
+      # ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+      emit_op({ op: "dup" })
+      @sm.dup
+      emit_push_int(0x10000)
       @sm.push("")
-      emit_opcode("OP_NUM2BIN")
+      emit_opcode("OP_LESSTHAN")
       @sm.pop; @sm.pop; @sm.push("")
-      emit_push_int(2)
-      @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "drop" })
+      emit_opcode("OP_IF")
       @sm.pop
-      emit_push_bytes([0xFD].pack("C"))
-      @sm.push("")
-      emit_op({ op: "swap" })
-      @sm.swap
-      @sm.pop; @sm.pop
-      emit_opcode("OP_CAT")
-      @sm.push("")
+      sm_at_3byte = @sm.clone
+      emit_num_to_low_bytes.call(2)
+      emit_prefix.call(0xfd)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_3byte.clone
 
+      # ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+      emit_op({ op: "dup" })
+      @sm.dup
+      emit_push_int(0x100000000)
+      @sm.push("")
+      emit_opcode("OP_LESSTHAN")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_at_5byte = @sm.clone
+      emit_num_to_low_bytes.call(4)
+      emit_prefix.call(0xfe)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_5byte.clone
+
+      # ELSE: 0xff + 8-byte LE. (>= 4 GiB script — practically unreachable on
+      # BSV but kept for spec completeness so we never silently truncate.)
+      emit_num_to_low_bytes.call(8)
+      emit_prefix.call(0xff)
+
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       # --- Stack: [..., script, varint] ---
     end
@@ -2595,30 +2647,75 @@ module RunarCompiler::Codegen
         # Variable-length state but _codePart not available (terminal method)
         emit_op({ op: "drop" }); @sm.pop
       else
-        # Variable-length path: strip varint, use _codePart
+        # Variable-length path: strip varint, use _codePart to find state.
+        #
+        # BIP-143 scriptCode is prefixed by a Bitcoin varint:
+        #   length < 0xfd:        1 byte (length itself)
+        #   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+        #   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+        #   otherwise:            0xff + 8 bytes LE                (9 bytes)
+        #
+        # We must support all four shapes, otherwise scripts whose
+        # scriptCode exceeds 65,535 bytes (e.g. embedded BN254 verifiers)
+        # silently strip too few varint bytes and corrupt the subsequent
+        # state-extraction OP_SPLITs — this surfaces as
+        # `Invalid OP_SPLIT range` on regtest.
         emit_push_int(1); @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "swap" }); @sm.swap
-        emit_op({ op: "dup" }); @sm.push(@sm.peek_at_depth(0))
-        # Zero-pad before BIN2NUM
+        # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        # as negative script numbers.
         emit_push_bytes([0].pack("C"))
         @sm.push("")
         emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
         emit_opcode("OP_BIN2NUM")
+        # Stack: [..., rest, fb_num]
+
+        # emit_drop_more_varint_bytes drops `n` additional varint bytes
+        # from the top of stack `rest`. [..., rest] -> [..., rest_minus_n].
+        emit_drop_more_varint_bytes = lambda do |n|
+          emit_push_int(n); @sm.push("")
+          emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+          emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
+        end
+
+        # IF fb_num < 253: 1-byte varint, drop fb_num.
+        emit_op({ op: "dup" }); @sm.dup
         emit_push_int(253); @sm.push("")
         emit_opcode("OP_LESSTHAN"); @sm.pop; @sm.pop; @sm.push("")
-
         emit_opcode("OP_IF"); @sm.pop
-        sm_at_varint_if = @sm.clone
+        sm_at_1byte_if = @sm.clone
+        # THEN: 1-byte varint
         emit_op({ op: "drop" }); @sm.pop
-
         emit_opcode("OP_ELSE")
-        @sm = sm_at_varint_if.clone
+        @sm = sm_at_1byte_if.clone
+        # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        emit_op({ op: "dup" }); @sm.dup
+        emit_push_int(254); @sm.push("")
+        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+        emit_opcode("OP_IF"); @sm.pop
+        sm_at_fe_if = @sm.clone
+        # THEN: 5-byte varint (0xfe + 4 bytes LE).
         emit_op({ op: "drop" }); @sm.pop
-        emit_push_int(2); @sm.push("")
-        emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-        emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
-
+        emit_drop_more_varint_bytes.call(4)
+        emit_opcode("OP_ELSE")
+        @sm = sm_at_fe_if.clone
+        # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        emit_op({ op: "dup" }); @sm.dup
+        emit_push_int(255); @sm.push("")
+        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+        emit_opcode("OP_IF"); @sm.pop
+        sm_at_ff_if = @sm.clone
+        # THEN: 9-byte varint (0xff + 8 bytes LE).
+        emit_op({ op: "drop" }); @sm.pop
+        emit_drop_more_varint_bytes.call(8)
+        emit_opcode("OP_ELSE")
+        @sm = sm_at_ff_if.clone
+        # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        emit_op({ op: "drop" }); @sm.pop
+        emit_drop_more_varint_bytes.call(2)
+        emit_opcode("OP_ENDIF")
+        emit_opcode("OP_ENDIF")
         emit_opcode("OP_ENDIF")
 
         # Compute skip = SIZE(_codePart) - codeSepIdx

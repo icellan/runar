@@ -27,6 +27,20 @@ type CompileOptions struct {
 
 	// IncludeIR includes ANF and Stack IR snapshots in the artifact for debugging.
 	IncludeIR bool
+
+	// Groth16WAVKey is the path to a SP1-format Groth16 vk.json file. When
+	// non-empty, any method that calls runar.AssertGroth16WitnessAssisted is
+	// lowered with a witness-assisted BN254 Groth16 verifier preamble whose
+	// verifying key is loaded from this file. The VK becomes baked-in
+	// pushdata in the resulting locking script.
+	//
+	// When empty, calls to runar.AssertGroth16WitnessAssisted are rejected
+	// at stack-lowering time with an error pointing back at this option.
+	//
+	// See compilers/go/codegen/bn254_groth16.go for the underlying emitter
+	// (EmitGroth16VerifierWitnessAssisted) and packages/runar-go/bn254witness
+	// for the matching prover-side witness generator.
+	Groth16WAVKey string
 }
 
 func mergeOptions(opts []CompileOptions) CompileOptions {

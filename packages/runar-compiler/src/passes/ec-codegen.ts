@@ -200,6 +200,20 @@ function fieldMul(t: ECTracker, aName: string, bName: string, resultName: string
   fieldMod(t, '_fmul_prod', resultName);
 }
 
+/** fieldMulConst: (a * c) mod p where c is a small constant. Uses OP_2MUL for c=2. */
+function fieldMulConst(t: ECTracker, aName: string, c: bigint, resultName: string): void {
+  t.toTop(aName);
+  t.rawBlock([aName], '_fmc_prod', (e) => {
+    if (c === 2n) {
+      e({ op: 'opcode', code: 'OP_2MUL' });
+    } else {
+      e({ op: 'push', value: c });
+      e({ op: 'opcode', code: 'OP_MUL' });
+    }
+  });
+  fieldMod(t, '_fmc_prod', resultName);
+}
+
 /** fieldSqr: (a * a) mod p */
 function fieldSqr(t: ECTracker, aName: string, resultName: string): void {
   t.copyToTop(aName, '_fsqr_copy');
@@ -437,8 +451,7 @@ function jacobianDouble(t: ECTracker): void {
   t.copyToTop('_B', '_B_save');
   fieldSqr(t, '_D', '_D2');
   t.copyToTop('_B', '_B1');
-  t.pushInt('_two1', 2n);
-  fieldMul(t, '_B1', '_two1', '_2B');
+  fieldMulConst(t, '_B1', 2n, '_2B');
   fieldSub(t, '_D2', '_2B', '_nx');
 
   // ny = D*(B - nx) - C
@@ -449,8 +462,7 @@ function jacobianDouble(t: ECTracker): void {
 
   // nz = 2 * Y * Z
   fieldMul(t, '_jy_save', '_jz_save', '_yz');
-  t.pushInt('_two2', 2n);
-  fieldMul(t, '_yz', '_two2', '_nz');
+  fieldMulConst(t, '_yz', 2n, '_nz');
 
   // Clean up leftovers: _B (used via _B_save/_B1) and old jz (only copied, never consumed)
   t.toTop('_B'); t.drop();
@@ -540,8 +552,7 @@ function buildJacobianAddAffineInline(e: (op: StackOp) => void, t: ECTracker): v
   // X3 = R² - H3 - 2*U1H2
   fieldSqr(it, '_R', '_R2');
   fieldSub(it, '_R2', '_H3', '_x3_tmp');
-  it.pushInt('_two', 2n);
-  fieldMul(it, '_U1H2', '_two', '_2U1H2');
+  fieldMulConst(it, '_U1H2', 2n, '_2U1H2');
   fieldSub(it, '_x3_tmp', '_2U1H2', '_X3');
 
   // Y3 = R_for_y3*(U1H2_for_y3 - X3) - jy_for_y3*H3_for_y3
@@ -619,13 +630,18 @@ export function emitEcMul(emit: (op: StackOp) => void): void {
   for (let bit = 256; bit >= 0; bit--) {
     jacobianDouble(t);
 
-    // Extract bit: (k >> bit) % 2
+    // Extract bit: (k >> bit) & 1, using OP_RSHIFTNUM / OP_2DIV
     t.copyToTop('_k', '_k_copy');
-    if (bit > 0) {
-      const divisor = 1n << BigInt(bit);
-      t.pushInt('_div', divisor);
-      t.rawBlock(['_k_copy', '_div'], '_shifted', (e) => {
-        e({ op: 'opcode', code: 'OP_DIV' });
+    if (bit === 1) {
+      // Single-bit shift: OP_2DIV (no push needed)
+      t.rawBlock(['_k_copy'], '_shifted', (e) => {
+        e({ op: 'opcode', code: 'OP_2DIV' });
+      });
+    } else if (bit > 1) {
+      // Multi-bit shift: push shift amount, OP_RSHIFTNUM
+      t.pushInt('_shift', BigInt(bit));
+      t.rawBlock(['_k_copy', '_shift'], '_shifted', (e) => {
+        e({ op: 'opcode', code: 'OP_RSHIFTNUM' });
       });
     } else {
       t.rename('_shifted');

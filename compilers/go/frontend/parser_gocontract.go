@@ -717,6 +717,14 @@ func mapGoBuiltin(name string) string {
 		"Divmod":            "divmod",
 		"Log2":              "log2",
 		"ToBool":            "bool",
+		// BN254 contract-compatible wrappers (Point/Bigint types)
+		"Bn254G1AddP":       "bn254G1Add",
+		"Bn254G1ScalarMulP": "bn254G1ScalarMul",
+		"Bn254G1NegateP":    "bn254G1Negate",
+		"Bn254G1OnCurveP":   "bn254G1OnCurve",
+		"Bn254FieldNegP":    "bn254FieldNeg",
+		// Poseidon2 Merkle variadic wrapper (individual args instead of arrays)
+		"MerkleRootPoseidon2KBv": "merkleRootPoseidon2KB",
 	}
 	if mapped, ok := builtinMap[name]; ok {
 		return mapped

@@ -125,6 +125,31 @@ export {
   bbExt4Inv1,
   bbExt4Inv2,
   bbExt4Inv3,
+  // KoalaBear field arithmetic
+  kbFieldAdd,
+  kbFieldSub,
+  kbFieldMul,
+  kbFieldInv,
+  // KoalaBear quartic extension field
+  kbExt4Mul0,
+  kbExt4Mul1,
+  kbExt4Mul2,
+  kbExt4Mul3,
+  kbExt4Inv0,
+  kbExt4Inv1,
+  kbExt4Inv2,
+  kbExt4Inv3,
+  // BN254 field arithmetic
+  bn254FieldAdd,
+  bn254FieldSub,
+  bn254FieldMul,
+  bn254FieldInv,
+  bn254FieldNeg,
+  // BN254 G1 curve operations
+  bn254G1Add,
+  bn254G1ScalarMul,
+  bn254G1Negate,
+  bn254G1OnCurve,
   // Merkle proof verification
   merkleRootSha256,
   merkleRootHash256,

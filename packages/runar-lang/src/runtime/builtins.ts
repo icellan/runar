@@ -500,6 +500,36 @@ export function bbFieldInv(a: bigint): bigint {
 }
 
 // ---------------------------------------------------------------------------
+// KoalaBear field arithmetic (p = 2^31 - 2^24 + 1 = 2,130,706,433)
+// ---------------------------------------------------------------------------
+
+const KB_P = 2130706433n;
+
+export function kbFieldAdd(a: bigint, b: bigint): bigint {
+  return (a + b) % KB_P;
+}
+
+export function kbFieldSub(a: bigint, b: bigint): bigint {
+  return ((a - b) % KB_P + KB_P) % KB_P;
+}
+
+export function kbFieldMul(a: bigint, b: bigint): bigint {
+  return (a * b) % KB_P;
+}
+
+export function kbFieldInv(a: bigint): bigint {
+  let result = 1n;
+  let base = ((a % KB_P) + KB_P) % KB_P;
+  let exp = KB_P - 2n;
+  while (exp > 0n) {
+    if (exp & 1n) result = (result * base) % KB_P;
+    base = (base * base) % KB_P;
+    exp >>= 1n;
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Merkle proof verification
 // ---------------------------------------------------------------------------
 

@@ -79,6 +79,8 @@ export const OPCODES: Record<string, number> = {
   'OP_EQUALVERIFY': 0x88,
   'OP_1ADD': 0x8b,
   'OP_1SUB': 0x8c,
+  'OP_2MUL': 0x8d, // Chronicle: multiply by 2
+  'OP_2DIV': 0x8e, // Chronicle: divide by 2
   'OP_NEGATE': 0x8f,
   'OP_ABS': 0x90,
   'OP_NOT': 0x91,
@@ -112,6 +114,11 @@ export const OPCODES: Record<string, number> = {
   'OP_CHECKSIGVERIFY': 0xad,
   'OP_CHECKMULTISIG': 0xae,
   'OP_CHECKMULTISIGVERIFY': 0xaf,
+  'OP_SUBSTR': 0xb3, // Chronicle: substring
+  'OP_LEFT': 0xb4,   // Chronicle: left N chars
+  'OP_RIGHT': 0xb5,  // Chronicle: right N chars
+  'OP_LSHIFTNUM': 0xb6, // Chronicle: numeric left-shift
+  'OP_RSHIFTNUM': 0xb7, // Chronicle: numeric right-shift
   'OP_INVERT': 0x83,
 };
 

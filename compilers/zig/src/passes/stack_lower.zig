@@ -516,8 +516,8 @@ const LowerCtx = struct {
                 if (aro.satoshis.len > 0) {
                     self.last_uses.put(self.allocator, aro.satoshis, idx) catch return;
                 }
-                if (aro.script_ref.len > 0) {
-                    self.last_uses.put(self.allocator, aro.script_ref, idx) catch return;
+                if (aro.script_bytes.len > 0) {
+                    self.last_uses.put(self.allocator, aro.script_bytes, idx) catch return;
                 }
             },
             .array_literal => |al| {
@@ -625,7 +625,7 @@ const LowerCtx = struct {
             },
             .add_raw_output => |aro| {
                 if (aro.satoshis.len > 0 and std.mem.eql(u8, aro.satoshis, name)) return true;
-                return aro.script_ref.len > 0 and std.mem.eql(u8, aro.script_ref, name);
+                return aro.script_bytes.len > 0 and std.mem.eql(u8, aro.script_bytes, name);
             },
             .array_literal => |al| {
                 for (al.elements) |elem| {
@@ -2093,9 +2093,19 @@ const LowerCtx = struct {
             try self.emitOp(.op_drop);
             _ = self.stack.pop();
         } else {
-            // Variable-length path: strip varint, use _codePart to find state
+            // Variable-length path: strip varint, use _codePart to find state.
+            //
+            // BIP-143 scriptCode is prefixed by a Bitcoin varint:
+            //   length < 0xfd:        1 byte (length itself)
+            //   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+            //   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+            //   otherwise:            0xff + 8 bytes LE                (9 bytes)
+            //
+            // We must support all four shapes, otherwise scripts whose
+            // scriptCode exceeds 65,535 bytes (e.g. embedded BN254 verifiers)
+            // silently strip too few varint bytes and corrupt the subsequent
+            // state-extraction OP_SPLITs.
 
-            // Strip varint prefix from varint+scriptCode
             // SPLIT 1 -> [..., firstByte, rest]
             try self.emitPushInt(1);
             try self.stack.push(self.allocator, null);
@@ -2110,65 +2120,86 @@ const LowerCtx = struct {
             const vt_next = self.stack.pop();
             try self.stack.push(self.allocator, vt_top);
             try self.stack.push(self.allocator, vt_next);
-            // DUP -> [..., rest, firstByte, firstByte]
-            try self.emitOp(.op_dup);
-            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
-            // Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd -> -125 without pad)
-            // push 0x00
+            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+            // as negative script numbers.
             try self.emitPushData(&.{0x00});
             try self.stack.push(self.allocator, null);
-            // CAT -> [..., rest, firstByte, firstByte||0x00]
+            // CAT -> [..., rest, firstByte||0x00]
             try self.emitOp(.op_cat);
             _ = self.stack.pop();
             _ = self.stack.pop();
             try self.stack.push(self.allocator, null);
-            // BIN2NUM -> [..., rest, firstByte, fb_num]
+            // BIN2NUM -> [..., rest, fb_num]
             try self.emitOp(.op_bin2num);
-            // push 253
+
+            // IF fb_num < 253: 1-byte varint, drop fb_num.
+            try self.emitOp(.op_dup);
+            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
             try self.emitPushInt(253);
             try self.stack.push(self.allocator, null);
-            // OP_LESSTHAN -> [..., rest, firstByte, (fb<253)]
             try self.emitOp(.op_lessthan);
             _ = self.stack.pop();
             _ = self.stack.pop();
             try self.stack.push(self.allocator, null);
-
-            // OP_IF
             try self.emitOp(.op_if);
             _ = self.stack.pop();
-            var sm_at_varint_if = try self.stack.clone(self.allocator);
-
-            // THEN: fb < 253 -> 1-byte varint, already consumed by the SPLIT 1
-            // DROP firstByte (not needed anymore)
+            var sm_at_1byte_if = try self.stack.clone(self.allocator);
+            // THEN: 1-byte varint
             try self.emitOp(.op_drop);
             _ = self.stack.pop();
-
-            // OP_ELSE
             try self.emitOp(.op_else);
             self.stack.deinit(self.allocator);
-            self.stack = sm_at_varint_if;
-            sm_at_varint_if = .{};
+            self.stack = sm_at_1byte_if;
+            sm_at_1byte_if = .{};
 
-            // ELSE: fb >= 253 -> 2-byte varint follows, skip 2 more bytes
-            // DROP firstByte
+            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            try self.emitOp(.op_dup);
+            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+            try self.emitPushInt(254);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_numequal);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_if);
+            _ = self.stack.pop();
+            var sm_at_fe_if = try self.stack.clone(self.allocator);
+            // THEN: 5-byte varint (0xfe + 4 bytes LE).
             try self.emitOp(.op_drop);
             _ = self.stack.pop();
-            // push 2
-            try self.emitPushInt(2);
-            try self.stack.push(self.allocator, null);
-            // SPLIT -> [..., 2bytes, rest2]
-            try self.emitOp(.op_split);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
-            try self.stack.push(self.allocator, null);
-            // NIP -> [..., rest2]
-            try self.emitOp(.op_nip);
-            _ = self.stack.pop();
-            _ = self.stack.pop();
-            try self.stack.push(self.allocator, null);
+            try self.emitDropMoreVarintBytes(4);
+            try self.emitOp(.op_else);
+            self.stack.deinit(self.allocator);
+            self.stack = sm_at_fe_if;
+            sm_at_fe_if = .{};
 
-            // OP_ENDIF
+            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            try self.emitOp(.op_dup);
+            try self.stack.push(self.allocator, self.stack.peekAtDepth(0));
+            try self.emitPushInt(255);
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_numequal);
+            _ = self.stack.pop();
+            _ = self.stack.pop();
+            try self.stack.push(self.allocator, null);
+            try self.emitOp(.op_if);
+            _ = self.stack.pop();
+            var sm_at_ff_if = try self.stack.clone(self.allocator);
+            // THEN: 9-byte varint (0xff + 8 bytes LE).
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+            try self.emitDropMoreVarintBytes(8);
+            try self.emitOp(.op_else);
+            self.stack.deinit(self.allocator);
+            self.stack = sm_at_ff_if;
+            sm_at_ff_if = .{};
+
+            // ELSE: fb_num must be 253 (0xfd) -- 3-byte varint.
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+            try self.emitDropMoreVarintBytes(2);
+            try self.emitOp(.op_endif);
+            try self.emitOp(.op_endif);
             try self.emitOp(.op_endif);
 
             // Compute skip = SIZE(_codePart) - codeSepIdx
@@ -3011,7 +3042,30 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    // emitVarintEncoding encodes a script number length on top of the stack
+    // as a Bitcoin varint byte sequence.
+    //
+    // Expects stack: [..., script, len]
+    // Leaves stack:  [..., script, varint_bytes]
+    //
+    // Bitcoin varint format:
+    //   len < 0xfd:        1 byte (len itself)
+    //   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+    //   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+    //   otherwise:         0xff + 8 bytes LE                (9 bytes)
+    //
+    // We must support all four shapes; emitting a 3-byte varint for a script
+    // whose length exceeds 0xffff produces a truncated value that no longer
+    // matches what the BSV node uses for hashOutputs, breaking the
+    // state-continuation hash equality assertion downstream.
+    //
+    // OP_NUM2BIN uses sign-magnitude encoding where high-bit values need an
+    // extra sign byte; we generate one extra byte and then SPLIT off the
+    // unsigned low bytes.
     fn emitVarintEncoding(self: *LowerCtx) !void {
+        // Stack: [..., script, len]
+
+        // IF len < 253: 1-byte varint.
         try self.emitOp(.op_dup);
         try self.stack.push(self.allocator, null);
         try self.emitPushInt(253);
@@ -3020,35 +3074,74 @@ const LowerCtx = struct {
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null);
-
         try self.emitOp(.op_if);
         _ = self.stack.pop();
-
-        try self.emitPushInt(2);
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_num2bin);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
-        try self.emitPushInt(1);
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_split);
-        _ = self.stack.pop();
-        _ = self.stack.pop();
-        try self.stack.push(self.allocator, null);
-        try self.stack.push(self.allocator, null);
-        try self.emitOp(.op_drop);
-        _ = self.stack.pop();
-
+        var sm_at_1byte = try self.stack.clone(self.allocator);
+        try self.emitNumToLowBytes(1);
         try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_1byte;
+        sm_at_1byte = .{};
 
-        try self.emitPushInt(4);
+        // ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(0x10000);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_lessthan);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_3byte = try self.stack.clone(self.allocator);
+        try self.emitNumToLowBytes(2);
+        try self.emitVarintPrefix(0xfd);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_3byte;
+        sm_at_3byte = .{};
+
+        // ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+        try self.emitOp(.op_dup);
+        try self.stack.push(self.allocator, null);
+        try self.emitPushInt(0x100000000);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_lessthan);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_if);
+        _ = self.stack.pop();
+        var sm_at_5byte = try self.stack.clone(self.allocator);
+        try self.emitNumToLowBytes(4);
+        try self.emitVarintPrefix(0xfe);
+        try self.emitOp(.op_else);
+        self.stack.deinit(self.allocator);
+        self.stack = sm_at_5byte;
+        sm_at_5byte = .{};
+
+        // ELSE: 0xff + 8-byte LE. (Practically unreachable on BSV but kept
+        // for spec completeness so we never silently truncate.)
+        try self.emitNumToLowBytes(8);
+        try self.emitVarintPrefix(0xff);
+
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+        try self.emitOp(.op_endif);
+        // --- Stack: [..., script, varint] ---
+    }
+
+    // emitNumToLowBytes: [..., len] -> [..., low_n_bytes]. Uses
+    // NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+    fn emitNumToLowBytes(self: *LowerCtx, n_bytes: i64) !void {
+        try self.emitPushInt(n_bytes + 1);
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_num2bin);
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.stack.push(self.allocator, null);
-        try self.emitPushInt(2);
+        try self.emitPushInt(n_bytes);
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_split);
         _ = self.stack.pop();
@@ -3057,19 +3150,55 @@ const LowerCtx = struct {
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_drop);
         _ = self.stack.pop();
-        try self.emitPushData(&.{0xfd});
+    }
+
+    // emitVarintPrefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+    //
+    // The prefix slice MUST live in static memory (not the heap) because Zig's
+    // GeneralPurposeAllocator overwrites freed memory with the 0xaa debug
+    // pattern, and earlier attempts to heap-allocate the prefix byte caused
+    // every emitted varint prefix to read back as 0xaa after the lowering ctx
+    // was deinit'd. Static `&.{0xfd}` literals live in the binary's data
+    // segment forever, so we hard-code the three call sites instead of
+    // taking the byte as a runtime parameter.
+    const VARINT_PREFIX_FD: []const u8 = &.{0xfd};
+    const VARINT_PREFIX_FE: []const u8 = &.{0xfe};
+    const VARINT_PREFIX_FF: []const u8 = &.{0xff};
+
+    fn emitVarintPrefix(self: *LowerCtx, prefix_byte: u8) !void {
+        const data: []const u8 = switch (prefix_byte) {
+            0xfd => VARINT_PREFIX_FD,
+            0xfe => VARINT_PREFIX_FE,
+            0xff => VARINT_PREFIX_FF,
+            else => unreachable,
+        };
+        try self.emitPushData(data);
         try self.stack.push(self.allocator, null);
         try self.emitOp(.op_swap);
-        const top = self.stack.pop();
-        const next = self.stack.pop();
-        try self.stack.push(self.allocator, top);
-        try self.stack.push(self.allocator, next);
+        const vp_top = self.stack.pop();
+        const vp_next = self.stack.pop();
+        try self.stack.push(self.allocator, vp_top);
+        try self.stack.push(self.allocator, vp_next);
         _ = self.stack.pop();
         _ = self.stack.pop();
         try self.emitOp(.op_cat);
         try self.stack.push(self.allocator, null);
+    }
 
-        try self.emitOp(.op_endif);
+    // emitDropMoreVarintBytes drops `n` additional varint bytes from the
+    // top of stack `rest`. Stack in: [..., rest], stack out: [..., rest_minus_n].
+    fn emitDropMoreVarintBytes(self: *LowerCtx, n: i64) !void {
+        try self.emitPushInt(n);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_split);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
+        try self.stack.push(self.allocator, null);
+        try self.emitOp(.op_nip);
+        _ = self.stack.pop();
+        _ = self.stack.pop();
+        try self.stack.push(self.allocator, null);
     }
 
     // ========================================================================
@@ -3446,7 +3575,7 @@ const LowerCtx = struct {
     }
 
     fn lowerAddRawOutput(self: *LowerCtx, bind_name: []const u8, aro: types.ANFAddRawOutput) !void {
-        try self.bringToTopAuto(aro.script_ref);
+        try self.bringToTopAuto(aro.script_bytes);
         try self.emitOp(.op_size);
         try self.stack.push(self.allocator, null);
         try self.emitVarintEncoding();

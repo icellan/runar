@@ -395,72 +395,115 @@ impl LoweringContext {
     /// Expects stack: `[..., script, len]`
     /// Leaves stack:  `[..., script, varint_bytes]`
     ///
-    /// OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need 2 bytes
-    /// (sign bit). To produce a correct 1-byte unsigned varint, we use
-    /// OP_NUM2BIN 2 then SPLIT to extract only the low byte.
-    /// Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+    /// Bitcoin varint format:
+    ///   len < 0xfd:        1 byte (len itself)
+    ///   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+    ///   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+    ///   otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
+    ///                                                        practice for BSV scripts)
+    ///
+    /// We must support all four shapes; emitting a 3-byte varint for a script whose
+    /// length exceeds 0xffff produces a truncated value that no longer matches what
+    /// the BSV node uses for hashOutputs, breaking the state-continuation hash
+    /// equality assertion downstream. (This is the second of the two bugs fixed
+    /// alongside `parse_variable_length_state_fields`'s varint stripping — see
+    /// `integration/go/contracts/RollupBug.runar.go`.)
+    ///
+    /// OP_NUM2BIN uses sign-magnitude encoding where high-bit values need an extra
+    /// sign byte; we generate one extra byte and then SPLIT off the unsigned low
+    /// bytes to get the correct unsigned varint payload.
     fn emit_varint_encoding(&mut self) {
         // Stack: [..., script, len]
-        self.emit_op(StackOp::Dup); // [script, len, len]
+
+        // emit_num_to_low_bytes: [..., len] -> [..., low_n_bytes]. Uses
+        // NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+        fn emit_num_to_low_bytes(ctx: &mut LoweringContext, n_bytes: i128) {
+            ctx.emit_op(StackOp::Push(PushValue::Int(n_bytes + 1)));
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Opcode("OP_NUM2BIN".into()));
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Push(PushValue::Int(n_bytes)));
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.sm.push("");
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Drop);
+            ctx.sm.pop();
+        }
+
+        // emit_prefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+        fn emit_prefix(ctx: &mut LoweringContext, prefix_byte: u8) {
+            ctx.emit_op(StackOp::Push(PushValue::Bytes(vec![prefix_byte])));
+            ctx.sm.push("");
+            ctx.emit_op(StackOp::Swap);
+            ctx.sm.swap();
+            ctx.sm.pop();
+            ctx.sm.pop();
+            ctx.emit_op(StackOp::Opcode("OP_CAT".into()));
+            ctx.sm.push("");
+        }
+
+        // IF len < 253: 1-byte varint.
+        self.emit_op(StackOp::Dup);
         self.sm.dup();
-        self.emit_op(StackOp::Push(PushValue::Int(253))); // [script, len, len, 253]
+        self.emit_op(StackOp::Push(PushValue::Int(253)));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into())); // [script, len, isSmall]
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
-
         self.emit_op(StackOp::Opcode("OP_IF".into()));
-        self.sm.pop(); // pop condition
-
-        // Then: 1-byte varint (len < 253)
-        // Use NUM2BIN 2 to avoid sign-magnitude issue for values 128-252,
-        // then take only the first (low) byte via SPLIT.
-        self.emit_op(StackOp::Push(PushValue::Int(2))); // [script, len, 2]
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_2bytes]
         self.sm.pop();
-        self.sm.pop();
-        self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(1))); // [script, len_2bytes, 1]
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [script, lowByte, highByte]
-        self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // lowByte
-        self.sm.push(""); // highByte
-        self.emit_op(StackOp::Drop); // [script, lowByte]
-        self.sm.pop();
-
+        let sm_at_1_byte = self.sm.clone();
+        emit_num_to_low_bytes(self, 1);
         self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_1_byte.clone();
 
-        // Else: 0xfd + 2-byte LE varint (len >= 253)
-        // Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-        // then take only the first 2 (low) bytes via SPLIT.
-        self.emit_op(StackOp::Push(PushValue::Int(4))); // [script, len, 4]
+        // ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+        self.emit_op(StackOp::Push(PushValue::Int(0x10000)));
         self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_NUM2BIN".into())); // [script, len_4bytes]
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
         self.sm.pop();
         self.sm.pop();
         self.sm.push("");
-        self.emit_op(StackOp::Push(PushValue::Int(2))); // [script, len_4bytes, 2]
-        self.sm.push("");
-        self.emit_op(StackOp::Opcode("OP_SPLIT".into())); // [script, low2bytes, high2bytes]
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
         self.sm.pop();
-        self.sm.pop();
-        self.sm.push(""); // low2bytes
-        self.sm.push(""); // high2bytes
-        self.emit_op(StackOp::Drop); // [script, low2bytes]
-        self.sm.pop();
-        self.emit_op(StackOp::Push(PushValue::Bytes(vec![0xfd])));
-        self.sm.push("");
-        self.emit_op(StackOp::Swap);
-        self.sm.swap();
-        self.sm.pop();
-        self.sm.pop();
-        self.emit_op(StackOp::Opcode("OP_CAT".into()));
-        self.sm.push("");
+        let sm_at_3_byte = self.sm.clone();
+        emit_num_to_low_bytes(self, 2);
+        emit_prefix(self, 0xfd);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_3_byte.clone();
 
+        // ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+        self.emit_op(StackOp::Dup);
+        self.sm.dup();
+        self.emit_op(StackOp::Push(PushValue::Int(0x100000000)));
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
+        self.sm.pop();
+        self.sm.pop();
+        self.sm.push("");
+        self.emit_op(StackOp::Opcode("OP_IF".into()));
+        self.sm.pop();
+        let sm_at_5_byte = self.sm.clone();
+        emit_num_to_low_bytes(self, 4);
+        emit_prefix(self, 0xfe);
+        self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+        self.sm = sm_at_5_byte.clone();
+
+        // ELSE: 0xff + 8-byte LE. (>= 4 GiB script — practically unreachable on
+        // BSV but kept for spec completeness so we never silently truncate.)
+        emit_num_to_low_bytes(self, 8);
+        emit_prefix(self, 0xff);
+
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+        self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
         // --- Stack: [..., script, varint] ---
     }
@@ -2498,47 +2541,113 @@ impl LoweringContext {
             self.sm.pop();
         } else {
             // Variable-length path: strip varint, use _codePart to find state
+            // Strip varint prefix from varint+scriptCode.
+            //
+            // BIP-143 scriptCode is prefixed by a Bitcoin varint:
+            //   length < 0xfd:        1 byte (length itself)
+            //   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+            //   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+            //   otherwise:            0xff + 8 bytes LE                (9 bytes)
+            //
+            // We must support all four shapes, otherwise scripts whose scriptCode
+            // exceeds 65,535 bytes (e.g. embedded BN254 verifiers) silently
+            // strip too few varint bytes and corrupt the subsequent
+            // state-extraction OP_SPLITs (this is the bug fixed here — see
+            // `integration/go/contracts/RollupBug.runar.go`).
             self.emit_op(StackOp::Push(PushValue::Int(1)));
             self.sm.push("");
             self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
             self.sm.pop(); self.sm.pop();
-            self.sm.push(""); self.sm.push("");
+            self.sm.push(""); // firstByte
+            self.sm.push(""); // rest
             self.emit_op(StackOp::Swap);
             self.sm.swap();
-            self.emit_op(StackOp::Dup);
-            self.sm.push("");
-            // Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+            // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+            // as negative script numbers.
             self.emit_op(StackOp::Push(PushValue::Bytes(vec![0])));
             self.sm.push("");
             self.emit_op(StackOp::Opcode("OP_CAT".into()));
             self.sm.pop(); self.sm.pop();
             self.sm.push("");
             self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
+            // Stack: [..., rest, fb_num]
+
+            // emit_drop_more_varint_bytes drops `n` additional varint bytes
+            // from the top-of-stack `rest`. Stack in: [..., rest], stack out:
+            // [..., rest_minus_n].
+            fn emit_drop_more_varint_bytes(ctx: &mut LoweringContext, n: i128) {
+                ctx.emit_op(StackOp::Push(PushValue::Int(n)));
+                ctx.sm.push("");
+                ctx.emit_op(StackOp::Opcode("OP_SPLIT".into()));
+                ctx.sm.pop();
+                ctx.sm.pop();
+                ctx.sm.push("");
+                ctx.sm.push("");
+                ctx.emit_op(StackOp::Nip);
+                ctx.sm.pop();
+                ctx.sm.pop();
+                ctx.sm.push("");
+            }
+
+            // IF fb_num < 253: 1-byte varint, drop fb_num.
+            self.emit_op(StackOp::Dup);
+            let top0 = self.sm.peek_at_depth(0).to_string();
+            self.sm.push(&top0);
             self.emit_op(StackOp::Push(PushValue::Int(253)));
             self.sm.push("");
             self.emit_op(StackOp::Opcode("OP_LESSTHAN".into()));
             self.sm.pop(); self.sm.pop();
             self.sm.push("");
-
             self.emit_op(StackOp::Opcode("OP_IF".into()));
             self.sm.pop();
-            let sm_at_varint_if = self.sm.clone();
+            let sm_at_1_byte_if = self.sm.clone();
+            // THEN: 1-byte varint
             self.emit_op(StackOp::Drop);
             self.sm.pop();
-
             self.emit_op(StackOp::Opcode("OP_ELSE".into()));
-            self.sm = sm_at_varint_if.clone();
+            self.sm = sm_at_1_byte_if.clone();
+            // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            self.emit_op(StackOp::Dup);
+            let top1 = self.sm.peek_at_depth(0).to_string();
+            self.sm.push(&top1);
+            self.emit_op(StackOp::Push(PushValue::Int(254)));
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
+            self.sm.pop(); self.sm.pop();
+            self.sm.push("");
+            self.emit_op(StackOp::Opcode("OP_IF".into()));
+            self.sm.pop();
+            let sm_at_fe_if = self.sm.clone();
+            // THEN: 5-byte varint (0xfe + 4 bytes LE).
             self.emit_op(StackOp::Drop);
             self.sm.pop();
-            self.emit_op(StackOp::Push(PushValue::Int(2)));
+            emit_drop_more_varint_bytes(self, 4);
+            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+            self.sm = sm_at_fe_if.clone();
+            // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            self.emit_op(StackOp::Dup);
+            let top2 = self.sm.peek_at_depth(0).to_string();
+            self.sm.push(&top2);
+            self.emit_op(StackOp::Push(PushValue::Int(255)));
             self.sm.push("");
-            self.emit_op(StackOp::Opcode("OP_SPLIT".into()));
-            self.sm.pop(); self.sm.pop();
-            self.sm.push(""); self.sm.push("");
-            self.emit_op(StackOp::Nip);
+            self.emit_op(StackOp::Opcode("OP_NUMEQUAL".into()));
             self.sm.pop(); self.sm.pop();
             self.sm.push("");
-
+            self.emit_op(StackOp::Opcode("OP_IF".into()));
+            self.sm.pop();
+            let sm_at_ff_if = self.sm.clone();
+            // THEN: 9-byte varint (0xff + 8 bytes LE).
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+            emit_drop_more_varint_bytes(self, 8);
+            self.emit_op(StackOp::Opcode("OP_ELSE".into()));
+            self.sm = sm_at_ff_if.clone();
+            // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+            self.emit_op(StackOp::Drop);
+            self.sm.pop();
+            emit_drop_more_varint_bytes(self, 2);
+            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
+            self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
             self.emit_op(StackOp::Opcode("OP_ENDIF".into()));
 
             // Compute skip = SIZE(_codePart) - codeSepIdx

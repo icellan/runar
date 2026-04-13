@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -13,14 +14,25 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 )
 
+var nftArtifact *runar.RunarArtifact
+var nftOnce sync.Once
+
+func getNFTArtifact(t *testing.T) *runar.RunarArtifact {
+	nftOnce.Do(func() {
+		var err error
+		nftArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/token-nft/NFTExample.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile SimpleNFT: %v", err)
+		}
+	})
+	return nftArtifact
+}
+
 func TestNFT_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 	if artifact.ContractName != "SimpleNFT" {
 		t.Fatalf("expected contract name SimpleNFT, got %s", artifact.ContractName)
 	}
@@ -32,13 +44,7 @@ func TestNFT_Deploy(t *testing.T) {
 	tokenIdHex := hex.EncodeToString([]byte("NFT-DEPLOY-001"))
 	metadataHex := hex.EncodeToString([]byte("Deploy test"))
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		owner.PubKeyHex(), tokenIdHex, metadataHex,
@@ -46,12 +52,13 @@ func TestNFT_Deploy(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 0.01)
+	_, err := helpers.FundWallet(funder, 0.01)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -71,16 +78,13 @@ func TestNFT_DeployDifferentOwners(t *testing.T) {
 	owner1 := helpers.NewWallet()
 	owner2 := helpers.NewWallet()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 
 	tokenIdHex := hex.EncodeToString([]byte("NFT-DIFF-001"))
 	metadataHex := hex.EncodeToString([]byte("Diff owners test"))
+
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 
 	// Deploy first NFT
 	contract1 := runar.NewRunarContract(artifact, []interface{}{
@@ -88,13 +92,12 @@ func TestNFT_DeployDifferentOwners(t *testing.T) {
 	})
 	funder1 := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder1.Address, "", false)
-	_, err = helpers.FundWallet(funder1, 0.01)
+	_, err := helpers.FundWallet(funder1, 0.01)
 	if err != nil {
 		t.Fatalf("fund1: %v", err)
 	}
-	provider1 := helpers.NewRPCProvider()
 	signer1, _ := helpers.SDKSignerFromWallet(funder1)
-	txid1, _, err := contract1.Deploy(provider1, signer1, runar.DeployOptions{Satoshis: 5000})
+	txid1, _, err := contract1.Deploy(provider, signer1, runar.DeployOptions{Satoshis: 5000})
 	if err != nil {
 		t.Fatalf("deploy1: %v", err)
 	}
@@ -109,9 +112,8 @@ func TestNFT_DeployDifferentOwners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fund2: %v", err)
 	}
-	provider2 := helpers.NewRPCProvider()
 	signer2, _ := helpers.SDKSignerFromWallet(funder2)
-	txid2, _, err := contract2.Deploy(provider2, signer2, runar.DeployOptions{Satoshis: 5000})
+	txid2, _, err := contract2.Deploy(provider, signer2, runar.DeployOptions{Satoshis: 5000})
 	if err != nil {
 		t.Fatalf("deploy2: %v", err)
 	}
@@ -132,13 +134,7 @@ func TestNFT_DeployLongMetadata(t *testing.T) {
 	}
 	metadataHex := hex.EncodeToString(longMeta)
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		owner.PubKeyHex(), tokenIdHex, metadataHex,
@@ -146,12 +142,13 @@ func TestNFT_DeployLongMetadata(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 0.01)
+	_, err := helpers.FundWallet(funder, 0.01)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -172,13 +169,7 @@ func TestNFT_Transfer(t *testing.T) {
 	tokenIdHex := hex.EncodeToString([]byte("NFT-001"))
 	metadataHex := hex.EncodeToString([]byte("My First NFT"))
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 	t.Logf("SimpleNFT script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
@@ -188,12 +179,13 @@ func TestNFT_Transfer(t *testing.T) {
 	})
 
 	helpers.RPCCall("importaddress", owner.Address, "", false)
-	_, err = helpers.FundWallet(owner, 0.01)
+	_, err := helpers.FundWallet(owner, 0.01)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -236,14 +228,7 @@ func TestNFT_Burn(t *testing.T) {
 	tokenIdHex := hex.EncodeToString([]byte("NFT-BURN-001"))
 	metadataHex := hex.EncodeToString([]byte("Burnable NFT"))
 
-	// Compile using SDK artifact path
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 
 	// Create contract with constructor args: owner, tokenId, metadata
 	contract := runar.NewRunarContract(artifact, []interface{}{
@@ -254,12 +239,13 @@ func TestNFT_Burn(t *testing.T) {
 
 	// Fund wallet and deploy via SDK
 	helpers.RPCCall("importaddress", owner.Address, "", false)
-	_, err = helpers.FundWallet(owner, 0.01)
+	_, err := helpers.FundWallet(owner, 0.01)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -296,14 +282,7 @@ func TestNFT_WrongOwner_Rejected(t *testing.T) {
 	tokenIdHex := hex.EncodeToString([]byte("NFT-STEAL-001"))
 	metadataHex := hex.EncodeToString([]byte("Steal attempt"))
 
-	// Compile using SDK artifact path
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/token-nft/NFTExample.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFTArtifact(t)
 
 	// Create contract with constructor args: owner, tokenId, metadata
 	contract := runar.NewRunarContract(artifact, []interface{}{
@@ -314,12 +293,13 @@ func TestNFT_WrongOwner_Rejected(t *testing.T) {
 
 	// Fund the owner wallet and deploy via SDK
 	helpers.RPCCall("importaddress", owner.Address, "", false)
-	_, err = helpers.FundWallet(owner, 0.01)
+	_, err := helpers.FundWallet(owner, 0.01)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

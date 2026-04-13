@@ -110,7 +110,8 @@ func TestMerkle_Vectors_Inclusion(t *testing.T) {
 					t.Fatalf("fund: %v", err)
 				}
 
-				provider := helpers.NewRPCProvider()
+				provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 				signer, errS := helpers.SDKSignerFromWallet(wallet)
 				if errS != nil {
 					t.Fatalf("signer: %v", errS)

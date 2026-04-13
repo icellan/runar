@@ -96,8 +96,51 @@ var builtinFunctions = map[string]funcSig{
 	"bbExt4Inv1":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
 	"bbExt4Inv2":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
 	"bbExt4Inv3":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
-	"merkleRootSha256":  {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
-	"merkleRootHash256": {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
+	"kbFieldAdd":        {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"kbFieldSub":        {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"kbFieldMul":        {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"kbFieldInv":        {params: []string{"bigint"}, returnType: "bigint"},
+	"kbExt4Mul0":        {params: []string{"bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Mul1":        {params: []string{"bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Mul2":        {params: []string{"bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Mul3":        {params: []string{"bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Inv0":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Inv1":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Inv2":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"kbExt4Inv3":        {params: []string{"bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"bn254FieldAdd":     {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"bn254FieldSub":     {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"bn254FieldMul":     {params: []string{"bigint", "bigint"}, returnType: "bigint"},
+	"bn254FieldInv":     {params: []string{"bigint"}, returnType: "bigint"},
+	"bn254FieldNeg":     {params: []string{"bigint"}, returnType: "bigint"},
+	"bn254G1Add":        {params: []string{"Point", "Point"}, returnType: "Point"},
+	"bn254G1ScalarMul":  {params: []string{"Point", "bigint"}, returnType: "Point"},
+	"bn254G1Negate":     {params: []string{"Point"}, returnType: "Point"},
+	"bn254G1OnCurve":    {params: []string{"Point"}, returnType: "boolean"},
+	"bn254Pairing":        {params: []string{"Point", "bigint", "bigint", "bigint", "bigint"}, returnType: "bigint"},
+	"bn254MultiPairing4": {params: []string{"Point", "bigint", "bigint", "bigint", "bigint", "Point", "bigint", "bigint", "bigint", "bigint", "Point", "bigint", "bigint", "bigint", "bigint", "Point", "bigint", "bigint", "bigint", "bigint"}, returnType: "boolean"},
+	"bn254MultiPairing3": {params: []string{
+		"Point", "bigint", "bigint", "bigint", "bigint",
+		"Point", "bigint", "bigint", "bigint", "bigint",
+		"Point", "bigint", "bigint", "bigint", "bigint",
+		"bigint", "bigint", "bigint", "bigint", "bigint", "bigint",
+		"bigint", "bigint", "bigint", "bigint", "bigint", "bigint",
+	}, returnType: "boolean"},
+	// groth16Verify is intentionally omitted — it cannot be lowered to stack ops
+	// directly. Contracts must use bn254MultiPairing4 with explicit proof
+	// preparation (see Groth16Verifier.runar.go for the correct pattern).
+	//
+	// assertGroth16WitnessAssisted is the Mode 3 entry: it takes no Rúnar
+	// args and returns void. The codegen recognises a method body containing
+	// this call as needing the witness-assisted Groth16 verifier as a
+	// method-entry preamble. The verifying key is supplied at compile time
+	// via CompileOptions.Groth16WAVKey, and the prover-side witness bundle
+	// is pushed onto the stack at spend time by the SDK helper before the
+	// regular ABI argument pushes.
+	"assertGroth16WitnessAssisted": {params: []string{}, returnType: "void"},
+	"merkleRootSha256":      {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
+	"merkleRootHash256":     {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
+	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"}, // variable arity: 8 leaf + depth*8 proof + index + depth; validated in checkCallArgs
 	"abs":               {params: []string{"bigint"}, returnType: "bigint"},
 	"min":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
 	"max":               {params: []string{"bigint", "bigint"}, returnType: "bigint"},
@@ -678,6 +721,18 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			}
 			return "<unknown>"
 		}
+		// Give a targeted hint for the deliberately-omitted groth16Verify
+		// orchestrator so users who try it don't get a bare "unknown
+		// function" error.
+		if id.Name == "groth16Verify" {
+			tc.addError("groth16Verify() is not a lowerable builtin — use bn254MultiPairing4() with explicit proof preparation, " +
+				"or declare the method body as assertGroth16WitnessAssisted() and compile with CompileOptions.Groth16WAVKey set. " +
+				"See integration/go/contracts/Groth16Verifier.runar.go and RollupGroth16WA.runar.go for reference patterns.")
+			for _, arg := range e.Args {
+				tc.inferExprType(arg, env)
+			}
+			return "<unknown>"
+		}
 		tc.addError(fmt.Sprintf(
 			"unknown function '%s' — only Rúnar built-in functions and contract methods are allowed", id.Name))
 		for _, arg := range e.Args {
@@ -775,6 +830,26 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 			tc.inferExprType(arg, env)
 		}
 		tc.checkAffineConsumption(funcName, args, env)
+		return sig.returnType
+	}
+
+	// merkleRootPoseidon2KB special case — variable arity:
+	//   8 leaf elems + depth*8 proof elems + index + depth = depth*8 + 10
+	// All arguments must be bigint. The last argument (depth) must be a
+	// literal integer so that the codegen can unroll the loop.
+	if funcName == "merkleRootPoseidon2KB" {
+		for _, arg := range args {
+			argType := tc.inferExprType(arg, env)
+			if argType != "bigint" && argType != "<unknown>" {
+				tc.addError(fmt.Sprintf("merkleRootPoseidon2KB() arguments must be bigint, got '%s'", argType))
+			}
+		}
+		nArgs := len(args)
+		if nArgs < 10 {
+			tc.addError(fmt.Sprintf("merkleRootPoseidon2KB() requires at least 10 arguments (8 leaf + index + depth), got %d", nArgs))
+		} else if (nArgs-10)%8 != 0 {
+			tc.addError(fmt.Sprintf("merkleRootPoseidon2KB() argument count must be 8*depth + 10, got %d (remainder %d)", nArgs, (nArgs-10)%8))
+		}
 		return sig.returnType
 	}
 

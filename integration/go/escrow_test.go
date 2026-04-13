@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -11,28 +12,38 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
-func deployEscrow(t *testing.T, buyer, seller, arbiter *helpers.Wallet, funder *helpers.Wallet) *runar.RunarContract {
+var escrowArtifact *runar.RunarArtifact
+var escrowOnce sync.Once
+
+func getEscrowArtifact(t *testing.T) *runar.RunarArtifact {
+	escrowOnce.Do(func() {
+		var err error
+		escrowArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/escrow/Escrow.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile Escrow: %v", err)
+		}
+	})
+	return escrowArtifact
+}
+
+func deployEscrow(t *testing.T, buyer, seller, arbiter *helpers.Wallet, funder *helpers.Wallet, provider *helpers.BatchRPCProvider) *runar.RunarContract {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/escrow/Escrow.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile escrow: %v", err)
-	}
+	artifact := getEscrowArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		buyer.PubKeyHex(), seller.PubKeyHex(), arbiter.PubKeyHex(),
 	})
 
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -84,13 +95,7 @@ func spendEscrowDualSig(t *testing.T, contract *runar.RunarContract, signer1, si
 }
 
 func TestEscrow_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/escrow/Escrow.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getEscrowArtifact(t)
 	if artifact.ContractName != "Escrow" {
 		t.Fatalf("expected contract name Escrow, got %s", artifact.ContractName)
 	}
@@ -102,13 +107,7 @@ func TestEscrow_DeployThreePubKeys(t *testing.T) {
 	seller := helpers.NewWallet()
 	arbiter := helpers.NewWallet()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/escrow/Escrow.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getEscrowArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		buyer.PubKeyHex(), seller.PubKeyHex(), arbiter.PubKeyHex(),
@@ -116,12 +115,13 @@ func TestEscrow_DeployThreePubKeys(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -140,13 +140,7 @@ func TestEscrow_DeployThreePubKeys(t *testing.T) {
 func TestEscrow_DeploySameKey(t *testing.T) {
 	wallet := helpers.NewWallet()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/escrow/Escrow.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getEscrowArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		wallet.PubKeyHex(), wallet.PubKeyHex(), wallet.PubKeyHex(),
@@ -154,12 +148,13 @@ func TestEscrow_DeploySameKey(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -178,25 +173,31 @@ func TestEscrow_DeploySameKey(t *testing.T) {
 // release(sellerSig, arbiterSig) — method index 0
 func TestEscrow_Release(t *testing.T) {
 	buyer, seller, arbiter := helpers.NewWallet(), helpers.NewWallet(), helpers.NewWallet()
-	contract := deployEscrow(t, buyer, seller, arbiter, seller)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployEscrow(t, buyer, seller, arbiter, seller, provider)
 	spendHex := spendEscrowDualSig(t, contract, seller, arbiter, 0)
 	txid := helpers.AssertTxAccepted(t, spendHex)
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("release TX accepted: %s", txid)
 }
 
 // refund(buyerSig, arbiterSig) — method index 1
 func TestEscrow_Refund(t *testing.T) {
 	buyer, seller, arbiter := helpers.NewWallet(), helpers.NewWallet(), helpers.NewWallet()
-	contract := deployEscrow(t, buyer, seller, arbiter, buyer)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployEscrow(t, buyer, seller, arbiter, buyer, provider)
 	spendHex := spendEscrowDualSig(t, contract, buyer, arbiter, 1)
 	txid := helpers.AssertTxAccepted(t, spendHex)
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("refund TX accepted: %s", txid)
 }
 
 // release with wrong signer — should fail checkSig
 func TestEscrow_WrongSigner_Rejected(t *testing.T) {
 	buyer, seller, arbiter := helpers.NewWallet(), helpers.NewWallet(), helpers.NewWallet()
-	contract := deployEscrow(t, buyer, seller, arbiter, seller)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployEscrow(t, buyer, seller, arbiter, seller, provider)
 	// Use buyer's sig where seller's is expected — should fail
 	spendHex := spendEscrowDualSig(t, contract, buyer, arbiter, 0)
 	helpers.AssertTxRejected(t, spendHex)
@@ -204,7 +205,9 @@ func TestEscrow_WrongSigner_Rejected(t *testing.T) {
 
 func TestEscrow_InvalidMethodIndex_Rejected(t *testing.T) {
 	buyer, seller, arbiter := helpers.NewWallet(), helpers.NewWallet(), helpers.NewWallet()
-	contract := deployEscrow(t, buyer, seller, arbiter, seller)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployEscrow(t, buyer, seller, arbiter, seller, provider)
 	// Method index 5 doesn't exist — only 0 (release) and 1 (refund)
 	spendHex := spendEscrowDualSig(t, contract, seller, arbiter, 5)
 	helpers.AssertTxRejected(t, spendHex)

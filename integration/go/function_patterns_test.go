@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -14,16 +15,27 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+var fpArtifact *runar.RunarArtifact
+var fpOnce sync.Once
+
+func getFPArtifact(t *testing.T) *runar.RunarArtifact {
+	fpOnce.Do(func() {
+		var err error
+		fpArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/function-patterns/FunctionPatterns.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile FunctionPatterns: %v", err)
+		}
+	})
+	return fpArtifact
+}
+
 func deployFunctionPatterns(t *testing.T, owner *helpers.Wallet, initialBalance int64) (*runar.RunarContract, runar.Provider, runar.Signer) {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/function-patterns/FunctionPatterns.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getFPArtifact(t)
 	t.Logf("FunctionPatterns script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
@@ -32,12 +44,13 @@ func deployFunctionPatterns(t *testing.T, owner *helpers.Wallet, initialBalance 
 	})
 
 	helpers.RPCCall("importaddress", owner.Address, "", false)
-	_, err = helpers.FundWallet(owner, 1.0)
+	_, err := helpers.FundWallet(owner, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -110,13 +123,7 @@ func sdkCallFunctionPatterns(t *testing.T, contract *runar.RunarContract, provid
 }
 
 func TestFunctionPatterns_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/function-patterns/FunctionPatterns.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getFPArtifact(t)
 	if artifact.ContractName != "FunctionPatterns" {
 		t.Fatalf("expected contract name FunctionPatterns, got %s", artifact.ContractName)
 	}
@@ -157,23 +164,18 @@ func TestFunctionPatterns_DistinctTxids(t *testing.T) {
 	owner1 := helpers.NewWallet()
 	owner2 := helpers.NewWallet()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/function-patterns/FunctionPatterns.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getFPArtifact(t)
 
 	// Deploy first instance
 	contract1 := runar.NewRunarContract(artifact, []interface{}{owner1.PubKeyHex(), int64(100)})
 	funder1 := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder1.Address, "", false)
-	_, err = helpers.FundWallet(funder1, 1.0)
+	_, err := helpers.FundWallet(funder1, 1.0)
 	if err != nil {
 		t.Fatalf("fund1: %v", err)
 	}
-	provider1 := helpers.NewRPCProvider()
+	provider1 := helpers.NewBatchRPCProvider()
+	defer provider1.MineAll()
 	signer1, _ := helpers.SDKSignerFromWallet(funder1)
 	txid1, _, err := contract1.Deploy(provider1, signer1, runar.DeployOptions{Satoshis: 10000})
 	if err != nil {
@@ -188,7 +190,8 @@ func TestFunctionPatterns_DistinctTxids(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fund2: %v", err)
 	}
-	provider2 := helpers.NewRPCProvider()
+	provider2 := helpers.NewBatchRPCProvider()
+	defer provider2.MineAll()
 	signer2, _ := helpers.SDKSignerFromWallet(funder2)
 	txid2, _, err := contract2.Deploy(provider2, signer2, runar.DeployOptions{Satoshis: 10000})
 	if err != nil {

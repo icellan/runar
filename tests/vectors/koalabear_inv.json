@@ -1,0 +1,984 @@
+{
+  "field": "koalabear",
+  "prime": 2130706433,
+  "vectors": [
+    {
+      "op": "inv",
+      "a": 1,
+      "expected": 1,
+      "description": "inv(1) = 1"
+    },
+    {
+      "op": "inv",
+      "a": 2130706432,
+      "expected": 2130706432,
+      "description": "inv(p-1) = p-1 (inv(-1) = -1)"
+    },
+    {
+      "op": "inv",
+      "a": 2,
+      "expected": 1065353217,
+      "description": "inv(2)"
+    },
+    {
+      "op": "inv",
+      "a": 1,
+      "expected": 1,
+      "description": "inv(1)"
+    },
+    {
+      "op": "inv",
+      "a": 2,
+      "expected": 1065353217,
+      "description": "inv(2)"
+    },
+    {
+      "op": "inv",
+      "a": 3,
+      "expected": 710235478,
+      "description": "inv(3)"
+    },
+    {
+      "op": "inv",
+      "a": 4,
+      "expected": 1598029825,
+      "description": "inv(4)"
+    },
+    {
+      "op": "inv",
+      "a": 5,
+      "expected": 1278423860,
+      "description": "inv(5)"
+    },
+    {
+      "op": "inv",
+      "a": 6,
+      "expected": 355117739,
+      "description": "inv(6)"
+    },
+    {
+      "op": "inv",
+      "a": 7,
+      "expected": 913159900,
+      "description": "inv(7)"
+    },
+    {
+      "op": "inv",
+      "a": 8,
+      "expected": 1864368129,
+      "description": "inv(8)"
+    },
+    {
+      "op": "inv",
+      "a": 9,
+      "expected": 946980637,
+      "description": "inv(9)"
+    },
+    {
+      "op": "inv",
+      "a": 10,
+      "expected": 639211930,
+      "description": "inv(10)"
+    },
+    {
+      "op": "inv",
+      "a": 11,
+      "expected": 1162203509,
+      "description": "inv(11)"
+    },
+    {
+      "op": "inv",
+      "a": 12,
+      "expected": 1242912086,
+      "description": "inv(12)"
+    },
+    {
+      "op": "inv",
+      "a": 13,
+      "expected": 1147303464,
+      "description": "inv(13)"
+    },
+    {
+      "op": "inv",
+      "a": 14,
+      "expected": 456579950,
+      "description": "inv(14)"
+    },
+    {
+      "op": "inv",
+      "a": 15,
+      "expected": 1846612242,
+      "description": "inv(15)"
+    },
+    {
+      "op": "inv",
+      "a": 16,
+      "expected": 1997537281,
+      "description": "inv(16)"
+    },
+    {
+      "op": "inv",
+      "a": 17,
+      "expected": 1880035088,
+      "description": "inv(17)"
+    },
+    {
+      "op": "inv",
+      "a": 18,
+      "expected": 1538843535,
+      "description": "inv(18)"
+    },
+    {
+      "op": "inv",
+      "a": 19,
+      "expected": 1457851770,
+      "description": "inv(19)"
+    },
+    {
+      "op": "inv",
+      "a": 20,
+      "expected": 319605965,
+      "description": "inv(20)"
+    },
+    {
+      "op": "inv",
+      "a": 21,
+      "expected": 1014622111,
+      "description": "inv(21)"
+    },
+    {
+      "op": "inv",
+      "a": 22,
+      "expected": 1646454971,
+      "description": "inv(22)"
+    },
+    {
+      "op": "inv",
+      "a": 23,
+      "expected": 1389591152,
+      "description": "inv(23)"
+    },
+    {
+      "op": "inv",
+      "a": 24,
+      "expected": 621456043,
+      "description": "inv(24)"
+    },
+    {
+      "op": "inv",
+      "a": 25,
+      "expected": 255684772,
+      "description": "inv(25)"
+    },
+    {
+      "op": "inv",
+      "a": 26,
+      "expected": 573651732,
+      "description": "inv(26)"
+    },
+    {
+      "op": "inv",
+      "a": 27,
+      "expected": 1025895690,
+      "description": "inv(27)"
+    },
+    {
+      "op": "inv",
+      "a": 28,
+      "expected": 228289975,
+      "description": "inv(28)"
+    },
+    {
+      "op": "inv",
+      "a": 29,
+      "expected": 587781085,
+      "description": "inv(29)"
+    },
+    {
+      "op": "inv",
+      "a": 30,
+      "expected": 923306121,
+      "description": "inv(30)"
+    },
+    {
+      "op": "inv",
+      "a": 31,
+      "expected": 824789587,
+      "description": "inv(31)"
+    },
+    {
+      "op": "inv",
+      "a": 32,
+      "expected": 2064121857,
+      "description": "inv(32)"
+    },
+    {
+      "op": "inv",
+      "a": 33,
+      "expected": 1807872125,
+      "description": "inv(33)"
+    },
+    {
+      "op": "inv",
+      "a": 34,
+      "expected": 940017544,
+      "description": "inv(34)"
+    },
+    {
+      "op": "inv",
+      "a": 35,
+      "expected": 182631980,
+      "description": "inv(35)"
+    },
+    {
+      "op": "inv",
+      "a": 36,
+      "expected": 1834774984,
+      "description": "inv(36)"
+    },
+    {
+      "op": "inv",
+      "a": 37,
+      "expected": 978973226,
+      "description": "inv(37)"
+    },
+    {
+      "op": "inv",
+      "a": 38,
+      "expected": 728925885,
+      "description": "inv(38)"
+    },
+    {
+      "op": "inv",
+      "a": 39,
+      "expected": 382434488,
+      "description": "inv(39)"
+    },
+    {
+      "op": "inv",
+      "a": 40,
+      "expected": 1225156199,
+      "description": "inv(40)"
+    },
+    {
+      "op": "inv",
+      "a": 41,
+      "expected": 1507085038,
+      "description": "inv(41)"
+    },
+    {
+      "op": "inv",
+      "a": 42,
+      "expected": 1572664272,
+      "description": "inv(42)"
+    },
+    {
+      "op": "inv",
+      "a": 43,
+      "expected": 247756562,
+      "description": "inv(43)"
+    },
+    {
+      "op": "inv",
+      "a": 44,
+      "expected": 1888580702,
+      "description": "inv(44)"
+    },
+    {
+      "op": "inv",
+      "a": 45,
+      "expected": 615537414,
+      "description": "inv(45)"
+    },
+    {
+      "op": "inv",
+      "a": 46,
+      "expected": 694795576,
+      "description": "inv(46)"
+    },
+    {
+      "op": "inv",
+      "a": 47,
+      "expected": 317339256,
+      "description": "inv(47)"
+    },
+    {
+      "op": "inv",
+      "a": 48,
+      "expected": 1376081238,
+      "description": "inv(48)"
+    },
+    {
+      "op": "inv",
+      "a": 49,
+      "expected": 1956771214,
+      "description": "inv(49)"
+    },
+    {
+      "op": "inv",
+      "a": 50,
+      "expected": 127842386,
+      "description": "inv(50)"
+    },
+    {
+      "op": "inv",
+      "a": 2,
+      "expected": 1065353217,
+      "description": "inv(2^1)"
+    },
+    {
+      "op": "inv",
+      "a": 4,
+      "expected": 1598029825,
+      "description": "inv(2^2)"
+    },
+    {
+      "op": "inv",
+      "a": 8,
+      "expected": 1864368129,
+      "description": "inv(2^3)"
+    },
+    {
+      "op": "inv",
+      "a": 16,
+      "expected": 1997537281,
+      "description": "inv(2^4)"
+    },
+    {
+      "op": "inv",
+      "a": 32,
+      "expected": 2064121857,
+      "description": "inv(2^5)"
+    },
+    {
+      "op": "inv",
+      "a": 64,
+      "expected": 2097414145,
+      "description": "inv(2^6)"
+    },
+    {
+      "op": "inv",
+      "a": 128,
+      "expected": 2114060289,
+      "description": "inv(2^7)"
+    },
+    {
+      "op": "inv",
+      "a": 256,
+      "expected": 2122383361,
+      "description": "inv(2^8)"
+    },
+    {
+      "op": "inv",
+      "a": 512,
+      "expected": 2126544897,
+      "description": "inv(2^9)"
+    },
+    {
+      "op": "inv",
+      "a": 1024,
+      "expected": 2128625665,
+      "description": "inv(2^10)"
+    },
+    {
+      "op": "inv",
+      "a": 2048,
+      "expected": 2129666049,
+      "description": "inv(2^11)"
+    },
+    {
+      "op": "inv",
+      "a": 4096,
+      "expected": 2130186241,
+      "description": "inv(2^12)"
+    },
+    {
+      "op": "inv",
+      "a": 8192,
+      "expected": 2130446337,
+      "description": "inv(2^13)"
+    },
+    {
+      "op": "inv",
+      "a": 16384,
+      "expected": 2130576385,
+      "description": "inv(2^14)"
+    },
+    {
+      "op": "inv",
+      "a": 32768,
+      "expected": 2130641409,
+      "description": "inv(2^15)"
+    },
+    {
+      "op": "inv",
+      "a": 65536,
+      "expected": 2130673921,
+      "description": "inv(2^16)"
+    },
+    {
+      "op": "inv",
+      "a": 131072,
+      "expected": 2130690177,
+      "description": "inv(2^17)"
+    },
+    {
+      "op": "inv",
+      "a": 262144,
+      "expected": 2130698305,
+      "description": "inv(2^18)"
+    },
+    {
+      "op": "inv",
+      "a": 524288,
+      "expected": 2130702369,
+      "description": "inv(2^19)"
+    },
+    {
+      "op": "inv",
+      "a": 1048576,
+      "expected": 2130704401,
+      "description": "inv(2^20)"
+    },
+    {
+      "op": "inv",
+      "a": 2097152,
+      "expected": 2130705417,
+      "description": "inv(2^21)"
+    },
+    {
+      "op": "inv",
+      "a": 4194304,
+      "expected": 2130705925,
+      "description": "inv(2^22)"
+    },
+    {
+      "op": "inv",
+      "a": 8388608,
+      "expected": 2130706179,
+      "description": "inv(2^23)"
+    },
+    {
+      "op": "inv",
+      "a": 16777216,
+      "expected": 2130706306,
+      "description": "inv(2^24)"
+    },
+    {
+      "op": "inv",
+      "a": 33554432,
+      "expected": 1065353153,
+      "description": "inv(2^25)"
+    },
+    {
+      "op": "inv",
+      "a": 67108864,
+      "expected": 1598029793,
+      "description": "inv(2^26)"
+    },
+    {
+      "op": "inv",
+      "a": 134217728,
+      "expected": 1864368113,
+      "description": "inv(2^27)"
+    },
+    {
+      "op": "inv",
+      "a": 268435456,
+      "expected": 1997537273,
+      "description": "inv(2^28)"
+    },
+    {
+      "op": "inv",
+      "a": 536870912,
+      "expected": 2064121853,
+      "description": "inv(2^29)"
+    },
+    {
+      "op": "inv",
+      "a": 1073741824,
+      "expected": 2097414143,
+      "description": "inv(2^30)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706432,
+      "expected": 2130706432,
+      "description": "inv(p-1)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706431,
+      "expected": 1065353216,
+      "description": "inv(p-2)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706430,
+      "expected": 1420470955,
+      "description": "inv(p-3)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706429,
+      "expected": 532676608,
+      "description": "inv(p-4)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706428,
+      "expected": 852282573,
+      "description": "inv(p-5)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706427,
+      "expected": 1775588694,
+      "description": "inv(p-6)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706426,
+      "expected": 1217546533,
+      "description": "inv(p-7)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706425,
+      "expected": 266338304,
+      "description": "inv(p-8)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706424,
+      "expected": 1183725796,
+      "description": "inv(p-9)"
+    },
+    {
+      "op": "inv",
+      "a": 2130706423,
+      "expected": 1491494503,
+      "description": "inv(p-10)"
+    },
+    {
+      "op": "inv",
+      "a": 3,
+      "expected": 710235478,
+      "description": "inv(g^1) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 9,
+      "expected": 946980637,
+      "description": "inv(g^2) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 27,
+      "expected": 1025895690,
+      "description": "inv(g^3) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 81,
+      "expected": 341965230,
+      "description": "inv(g^4) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 243,
+      "expected": 113988410,
+      "description": "inv(g^5) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 729,
+      "expected": 1458467092,
+      "description": "inv(g^6) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 2187,
+      "expected": 1196391175,
+      "description": "inv(g^7) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 6561,
+      "expected": 1109032536,
+      "description": "inv(g^8) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 19683,
+      "expected": 369677512,
+      "description": "inv(g^9) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 59049,
+      "expected": 833461315,
+      "description": "inv(g^10) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 177147,
+      "expected": 988055916,
+      "description": "inv(g^11) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 531441,
+      "expected": 329351972,
+      "description": "inv(g^12) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 1594323,
+      "expected": 1530254946,
+      "description": "inv(g^13) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 4782969,
+      "expected": 510084982,
+      "description": "inv(g^14) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 14348907,
+      "expected": 880263805,
+      "description": "inv(g^15) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 43046721,
+      "expected": 1003656746,
+      "description": "inv(g^16) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 129140163,
+      "expected": 1755023204,
+      "description": "inv(g^17) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 387420489,
+      "expected": 2005478690,
+      "description": "inv(g^18) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 1162261467,
+      "expected": 2088963852,
+      "description": "inv(g^19) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 1356077968,
+      "expected": 696321284,
+      "description": "inv(g^20) where g=3"
+    },
+    {
+      "op": "inv",
+      "a": 658532056,
+      "expected": 1674339676,
+      "description": "random: inv(658532056)"
+    },
+    {
+      "op": "inv",
+      "a": 111332913,
+      "expected": 90867936,
+      "description": "random: inv(111332913)"
+    },
+    {
+      "op": "inv",
+      "a": 1904152524,
+      "expected": 268419141,
+      "description": "random: inv(1904152524)"
+    },
+    {
+      "op": "inv",
+      "a": 630683815,
+      "expected": 2127519136,
+      "description": "random: inv(630683815)"
+    },
+    {
+      "op": "inv",
+      "a": 1130310365,
+      "expected": 1519619047,
+      "description": "random: inv(1130310365)"
+    },
+    {
+      "op": "inv",
+      "a": 982605470,
+      "expected": 2061470879,
+      "description": "random: inv(982605470)"
+    },
+    {
+      "op": "inv",
+      "a": 351123561,
+      "expected": 1087379805,
+      "description": "random: inv(351123561)"
+    },
+    {
+      "op": "inv",
+      "a": 1059449840,
+      "expected": 1893028891,
+      "description": "random: inv(1059449840)"
+    },
+    {
+      "op": "inv",
+      "a": 312738711,
+      "expected": 1674818547,
+      "description": "random: inv(312738711)"
+    },
+    {
+      "op": "inv",
+      "a": 1220732484,
+      "expected": 1053320205,
+      "description": "random: inv(1220732484)"
+    },
+    {
+      "op": "inv",
+      "a": 1923642993,
+      "expected": 2030881799,
+      "description": "random: inv(1923642993)"
+    },
+    {
+      "op": "inv",
+      "a": 840876093,
+      "expected": 629223574,
+      "description": "random: inv(840876093)"
+    },
+    {
+      "op": "inv",
+      "a": 1279423720,
+      "expected": 429690176,
+      "description": "random: inv(1279423720)"
+    },
+    {
+      "op": "inv",
+      "a": 932432917,
+      "expected": 432424173,
+      "description": "random: inv(932432917)"
+    },
+    {
+      "op": "inv",
+      "a": 871888522,
+      "expected": 1207902457,
+      "description": "random: inv(871888522)"
+    },
+    {
+      "op": "inv",
+      "a": 1318201837,
+      "expected": 1808030701,
+      "description": "random: inv(1318201837)"
+    },
+    {
+      "op": "inv",
+      "a": 677112286,
+      "expected": 837197120,
+      "description": "random: inv(677112286)"
+    },
+    {
+      "op": "inv",
+      "a": 1671461324,
+      "expected": 52402542,
+      "description": "random: inv(1671461324)"
+    },
+    {
+      "op": "inv",
+      "a": 1741727880,
+      "expected": 907993900,
+      "description": "random: inv(1741727880)"
+    },
+    {
+      "op": "inv",
+      "a": 195602440,
+      "expected": 1163058210,
+      "description": "random: inv(195602440)"
+    },
+    {
+      "op": "inv",
+      "a": 841999730,
+      "expected": 2125889094,
+      "description": "random: inv(841999730)"
+    },
+    {
+      "op": "inv",
+      "a": 699091585,
+      "expected": 1034257681,
+      "description": "random: inv(699091585)"
+    },
+    {
+      "op": "inv",
+      "a": 13165096,
+      "expected": 136870307,
+      "description": "random: inv(13165096)"
+    },
+    {
+      "op": "inv",
+      "a": 393789716,
+      "expected": 1455235933,
+      "description": "random: inv(393789716)"
+    },
+    {
+      "op": "inv",
+      "a": 800809040,
+      "expected": 1786763592,
+      "description": "random: inv(800809040)"
+    },
+    {
+      "op": "inv",
+      "a": 59418305,
+      "expected": 925140002,
+      "description": "random: inv(59418305)"
+    },
+    {
+      "op": "inv",
+      "a": 1857617322,
+      "expected": 536828119,
+      "description": "random: inv(1857617322)"
+    },
+    {
+      "op": "inv",
+      "a": 1533008261,
+      "expected": 1584231004,
+      "description": "random: inv(1533008261)"
+    },
+    {
+      "op": "inv",
+      "a": 1845897874,
+      "expected": 260766548,
+      "description": "random: inv(1845897874)"
+    },
+    {
+      "op": "inv",
+      "a": 29512435,
+      "expected": 1516277426,
+      "description": "random: inv(29512435)"
+    },
+    {
+      "op": "inv",
+      "a": 1323659084,
+      "expected": 682294819,
+      "description": "random: inv(1323659084)"
+    },
+    {
+      "op": "inv",
+      "a": 1920034419,
+      "expected": 1594310439,
+      "description": "random: inv(1920034419)"
+    },
+    {
+      "op": "inv",
+      "a": 319720136,
+      "expected": 1561100890,
+      "description": "random: inv(319720136)"
+    },
+    {
+      "op": "inv",
+      "a": 1999848219,
+      "expected": 1041853187,
+      "description": "random: inv(1999848219)"
+    },
+    {
+      "op": "inv",
+      "a": 352874452,
+      "expected": 63342023,
+      "description": "random: inv(352874452)"
+    },
+    {
+      "op": "inv",
+      "a": 324367586,
+      "expected": 1605637532,
+      "description": "random: inv(324367586)"
+    },
+    {
+      "op": "inv",
+      "a": 1100164510,
+      "expected": 1763445144,
+      "description": "random: inv(1100164510)"
+    },
+    {
+      "op": "inv",
+      "a": 1495557823,
+      "expected": 945017712,
+      "description": "random: inv(1495557823)"
+    },
+    {
+      "op": "inv",
+      "a": 61454838,
+      "expected": 1695927419,
+      "description": "random: inv(61454838)"
+    },
+    {
+      "op": "inv",
+      "a": 1174109706,
+      "expected": 554278226,
+      "description": "random: inv(1174109706)"
+    },
+    {
+      "op": "inv",
+      "a": 1658705441,
+      "expected": 225038389,
+      "description": "random: inv(1658705441)"
+    },
+    {
+      "op": "inv",
+      "a": 288453441,
+      "expected": 1069612935,
+      "description": "random: inv(288453441)"
+    },
+    {
+      "op": "inv",
+      "a": 578757358,
+      "expected": 2020930980,
+      "description": "random: inv(578757358)"
+    },
+    {
+      "op": "inv",
+      "a": 841605320,
+      "expected": 336791424,
+      "description": "random: inv(841605320)"
+    },
+    {
+      "op": "inv",
+      "a": 1881671803,
+      "expected": 2007203879,
+      "description": "random: inv(1881671803)"
+    },
+    {
+      "op": "inv",
+      "a": 1055143391,
+      "expected": 44131420,
+      "description": "random: inv(1055143391)"
+    },
+    {
+      "op": "inv",
+      "a": 1683862928,
+      "expected": 1018073708,
+      "description": "random: inv(1683862928)"
+    },
+    {
+      "op": "inv",
+      "a": 1618276215,
+      "expected": 191684216,
+      "description": "random: inv(1618276215)"
+    },
+    {
+      "op": "inv",
+      "a": 1151432245,
+      "expected": 1264463934,
+      "description": "random: inv(1151432245)"
+    },
+    {
+      "op": "inv",
+      "a": 782190463,
+      "expected": 452968835,
+      "description": "random: inv(782190463)"
+    }
+  ]
+}

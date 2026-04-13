@@ -9,7 +9,7 @@
 import { PrivateKey, Hash } from '@bsv/sdk';
 import { LocalSigner, ExternalSigner, RPCProvider } from 'runar-sdk';
 import type { Signer } from 'runar-sdk';
-import { fundAddress, rpcCall } from './node.js';
+import { fundAddress, mine, rpcCall } from './node.js';
 import { createHash } from 'crypto';
 
 export interface TestWallet {
@@ -80,6 +80,40 @@ function base58Encode(buffer: Buffer): string {
     else break;
   }
   return result;
+}
+
+/**
+ * Pre-fund N separate wallets. Each gets its own funded UTXO via sendtoaddress.
+ * Mines once at the end. Safe for parallel use without contention.
+ */
+export async function splitFundParallel(
+  n: number,
+  satoshisPerOutput: number = 100_000,
+): Promise<TestWallet[]> {
+  const btcPerWallet = satoshisPerOutput / 1e8;
+  const wallets: { privKeyHex: string; pubKeyHex: string; pubKeyHash: string; address: string }[] = [];
+
+  for (let i = 0; i < n; i++) {
+    const w = createWallet();
+    const addr = regtestAddress(w.pubKeyHash);
+    wallets.push({ ...w, address: addr });
+    await rpcCall('importaddress', addr, '', false);
+    await rpcCall('sendtoaddress', addr, btcPerWallet);
+  }
+
+  await mine(1);
+
+  return wallets.map(w => {
+    const localSigner = new LocalSigner(w.privKeyHex);
+    const signer = new ExternalSigner(
+      w.pubKeyHex,
+      w.address,
+      async (txHex: string, inputIndex: number, subscript: string, satoshis: number, sigHashType?: number) => {
+        return localSigner.sign(txHex, inputIndex, subscript, satoshis, sigHashType ?? 0x41);
+      },
+    );
+    return { ...w, signer };
+  });
 }
 
 /**

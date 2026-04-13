@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -10,22 +11,27 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
-func compileTicTacToe(t *testing.T) *runar.RunarArtifact {
-	t.Helper()
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/tic-tac-toe/TicTacToe.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
-	return artifact
+var tttArtifact *runar.RunarArtifact
+var tttOnce sync.Once
+
+func getTTTArtifact(t *testing.T) *runar.RunarArtifact {
+	tttOnce.Do(func() {
+		var err error
+		tttArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/tic-tac-toe/TicTacToe.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile TicTacToe: %v", err)
+		}
+	})
+	return tttArtifact
 }
 
-func deployTicTacToe(t *testing.T, playerXWallet *helpers.Wallet, betAmount int64) (*runar.RunarContract, runar.Provider, runar.Signer) {
+func deployTicTacToe(t *testing.T, playerXWallet *helpers.Wallet, betAmount int64, provider *helpers.BatchRPCProvider) (*runar.RunarContract, *helpers.BatchRPCProvider, runar.Signer) {
 	t.Helper()
 
-	artifact := compileTicTacToe(t)
+	artifact := getTTTArtifact(t)
 	t.Logf("TicTacToe script: %d bytes", len(artifact.Script)/2)
 
 	// Constructor params: playerX (PubKey), betAmount (Bigint)
@@ -39,7 +45,6 @@ func deployTicTacToe(t *testing.T, playerXWallet *helpers.Wallet, betAmount int6
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
 	signer, err := helpers.SDKSignerFromWallet(playerXWallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -54,7 +59,7 @@ func deployTicTacToe(t *testing.T, playerXWallet *helpers.Wallet, betAmount int6
 }
 
 func TestTicTacToe_Compile(t *testing.T) {
-	artifact := compileTicTacToe(t)
+	artifact := getTTTArtifact(t)
 	if artifact.ContractName != "TicTacToe" {
 		t.Fatalf("expected contract name TicTacToe, got %s", artifact.ContractName)
 	}
@@ -63,7 +68,9 @@ func TestTicTacToe_Compile(t *testing.T) {
 
 func TestTicTacToe_Deploy(t *testing.T) {
 	playerX := helpers.NewWallet()
-	contract, _, _ := deployTicTacToe(t, playerX, 5000)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract, _, _ := deployTicTacToe(t, playerX, 5000, provider)
 	utxo := contract.GetCurrentUtxo()
 	if utxo == nil {
 		t.Fatalf("no UTXO after deploy")
@@ -75,7 +82,10 @@ func TestTicTacToe_Join(t *testing.T) {
 	playerX := helpers.NewWallet()
 	playerO := helpers.NewWallet()
 
-	contract, provider, _ := deployTicTacToe(t, playerX, 5000)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
+	contract, _, _ := deployTicTacToe(t, playerX, 5000, provider)
 
 	// Fund playerO wallet so they can pay fees
 	helpers.RPCCall("importaddress", playerO.Address, "", false)
@@ -103,7 +113,10 @@ func TestTicTacToe_Move(t *testing.T) {
 	playerX := helpers.NewWallet()
 	playerO := helpers.NewWallet()
 
-	contract, provider, signerX := deployTicTacToe(t, playerX, 5000)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
+	contract, _, signerX := deployTicTacToe(t, playerX, 5000, provider)
 
 	// Fund playerO
 	helpers.RPCCall("importaddress", playerO.Address, "", false)
@@ -142,7 +155,10 @@ func TestTicTacToe_FullGame(t *testing.T) {
 	playerO := helpers.NewWallet()
 
 	betAmount := int64(1000)
-	contract, provider, signerX := deployTicTacToe(t, playerX, betAmount)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
+	contract, _, signerX := deployTicTacToe(t, playerX, betAmount, provider)
 
 	// Fund playerO
 	helpers.RPCCall("importaddress", playerO.Address, "", false)
@@ -222,7 +238,10 @@ func TestTicTacToe_WrongPlayerRejected(t *testing.T) {
 	playerX := helpers.NewWallet()
 	playerO := helpers.NewWallet()
 
-	contract, provider, _ := deployTicTacToe(t, playerX, 5000)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
+	contract, _, _ := deployTicTacToe(t, playerX, 5000, provider)
 
 	// Fund playerO
 	helpers.RPCCall("importaddress", playerO.Address, "", false)
@@ -258,7 +277,10 @@ func TestTicTacToe_JoinAfterPlayingRejected(t *testing.T) {
 	playerX := helpers.NewWallet()
 	playerO := helpers.NewWallet()
 
-	contract, provider, _ := deployTicTacToe(t, playerX, 5000)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
+	contract, _, _ := deployTicTacToe(t, playerX, 5000, provider)
 
 	// Fund playerO
 	helpers.RPCCall("importaddress", playerO.Address, "", false)

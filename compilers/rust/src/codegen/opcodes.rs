@@ -84,6 +84,8 @@ pub static OPCODES: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(|| {
     // Arithmetic
     m.insert("OP_1ADD", 0x8b);
     m.insert("OP_1SUB", 0x8c);
+    m.insert("OP_2MUL", 0x8d);
+    m.insert("OP_2DIV", 0x8e);
     m.insert("OP_NEGATE", 0x8f);
     m.insert("OP_ABS", 0x90);
     m.insert("OP_NOT", 0x91);
@@ -119,6 +121,13 @@ pub static OPCODES: LazyLock<HashMap<&'static str, u8>> = LazyLock::new(|| {
     m.insert("OP_CHECKSIGVERIFY", 0xad);
     m.insert("OP_CHECKMULTISIG", 0xae);
     m.insert("OP_CHECKMULTISIGVERIFY", 0xaf);
+
+    // Chronicle opcodes
+    m.insert("OP_SUBSTR", 0xb3);
+    m.insert("OP_LEFT", 0xb4);
+    m.insert("OP_RIGHT", 0xb5);
+    m.insert("OP_LSHIFTNUM", 0xb6);
+    m.insert("OP_RSHIFTNUM", 0xb7);
 
     m
 });

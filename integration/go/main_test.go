@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	targetHeight := 101 // SV Node: genesis at height 1
+	targetHeight := 501 // SV Node: genesis at height 1, extra headroom for parallel tests
 	if helpers.IsTeranode() {
 		targetHeight = 10_101 // regtest genesis at 10000 + 101 for coinbase maturity
 	}

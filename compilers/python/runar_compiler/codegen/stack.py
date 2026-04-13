@@ -322,13 +322,59 @@ class _LoweringContext:
         Expects stack: [..., script, len]
         Leaves stack:  [..., script, varint_bytes]
 
-        OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need
-        2 bytes (sign bit). To produce a correct 1-byte unsigned varint,
-        we use OP_NUM2BIN 2 then SPLIT to extract only the low byte.
-        Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+        Bitcoin varint format:
+          len < 0xfd:        1 byte (len itself)
+          len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+          len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+          otherwise:         0xff + 8 bytes LE                (9 bytes — never
+                                                               used in practice
+                                                               for BSV scripts)
+
+        We must support all four shapes; emitting a 3-byte varint for a script
+        whose length exceeds 0xffff produces a truncated value that no longer
+        matches what the BSV node uses for hashOutputs, breaking the
+        state-continuation hash equality assertion downstream. (This is the
+        second of the two bugs fixed alongside the variable-length state
+        varint stripping — see `integration/go/contracts/RollupBug.runar.go`.)
+
+        OP_NUM2BIN uses sign-magnitude encoding where high-bit values need an
+        extra sign byte; we generate one extra byte and then SPLIT off the
+        unsigned low bytes to get the correct unsigned varint payload.
         """
         # Stack: [..., script, len]
-        self.emit_op(StackOp(op="dup"))  # [script, len, len]
+
+        # emit_num_to_low_bytes: [..., len] -> [..., low_n_bytes]. Uses
+        # NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+        def emit_num_to_low_bytes(n_bytes: int) -> None:
+            self.emit_op(StackOp(op="push", value=big_int_push(n_bytes + 1)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+            self.sm.pop()
+            self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="push", value=big_int_push(n_bytes)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop()
+            self.sm.pop()
+            self.sm.push("")
+            self.sm.push("")
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # emit_prefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+        def emit_prefix(prefix_byte: int) -> None:
+            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([prefix_byte]))))
+            self.sm.push("")
+            self.emit_op(StackOp(op="swap"))
+            self.sm.swap()
+            self.sm.pop()
+            self.sm.pop()
+            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+            self.sm.push("")
+
+        # IF len < 253: 1-byte varint.
+        self.emit_op(StackOp(op="dup"))
         self.sm.dup()
         self.emit_op(StackOp(op="push", value=big_int_push(253)))
         self.sm.push("")
@@ -336,54 +382,54 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
-
         self.emit_op(StackOp(op="opcode", code="OP_IF"))
-        self.sm.pop()  # pop condition
-
-        # Then: 1-byte varint (len < 253)
-        self.emit_op(StackOp(op="push", value=big_int_push(2)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
         self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(1)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # lowByte
-        self.sm.push("")  # highByte
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
+        sm_at_1_byte = self.sm.clone()
+        emit_num_to_low_bytes(1)
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_1_byte.clone()
 
-        # Else: 0xfd + 2-byte LE varint (len >= 253)
-        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        # ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(0x10000)))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(2)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
         self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # low2bytes
-        self.sm.push("")  # high2bytes
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0xFD]))))
-        self.sm.push("")
-        self.emit_op(StackOp(op="swap"))
-        self.sm.swap()
-        self.sm.pop()
-        self.sm.pop()
-        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-        self.sm.push("")
+        sm_at_3_byte = self.sm.clone()
+        emit_num_to_low_bytes(2)
+        emit_prefix(0xFD)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_3_byte.clone()
 
+        # ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(0x100000000)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_5_byte = self.sm.clone()
+        emit_num_to_low_bytes(4)
+        emit_prefix(0xFE)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_5_byte.clone()
+
+        # ELSE: 0xff + 8-byte LE. (>= 4 GiB script — practically unreachable
+        # on BSV but kept for spec completeness so we never silently truncate.)
+        emit_num_to_low_bytes(8)
+        emit_prefix(0xFF)
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         # --- Stack: [..., script, varint] ---
 
@@ -1850,48 +1896,105 @@ class _LoweringContext:
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
         else:
-            # Variable-length path: strip varint, use _codePart
+            # Variable-length path: strip varint, use _codePart to find state.
+            #
+            # BIP-143 scriptCode is prefixed by a Bitcoin varint:
+            #   length < 0xfd:        1 byte (length itself)
+            #   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+            #   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+            #   otherwise:            0xff + 8 bytes LE                (9 bytes)
+            #
+            # We must support all four shapes, otherwise scripts whose scriptCode
+            # exceeds 65,535 bytes (e.g. embedded BN254 verifiers) silently
+            # strip too few varint bytes and corrupt the subsequent
+            # state-extraction OP_SPLITs (this is the bug fixed here — see
+            # `integration/go/contracts/RollupBug.runar.go`).
             self.emit_op(StackOp(op="push", value=big_int_push(1)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
             self.sm.pop(); self.sm.pop()
-            self.sm.push(""); self.sm.push("")
+            self.sm.push("")  # firstByte
+            self.sm.push("")  # rest
             self.emit_op(StackOp(op="swap"))
             self.sm.swap()
-            self.emit_op(StackOp(op="dup"))
-            self.sm.push(self.sm.peek_at_depth(0))
-            # Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+            # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+            # as negative script numbers.
             self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_CAT"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            # Stack: [..., rest, fb_num]
+
+            # emit_drop_more_varint_bytes drops `n` additional varint bytes
+            # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
+            def emit_drop_more_varint_bytes(n: int) -> None:
+                self.emit_op(StackOp(op="push", value=big_int_push(n)))
+                self.sm.push("")
+                self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+                self.sm.pop(); self.sm.pop()
+                self.sm.push(""); self.sm.push("")
+                self.emit_op(StackOp(op="nip"))
+                self.sm.pop(); self.sm.pop()
+                self.sm.push("")
+
+            # IF fb_num < 253: 1-byte varint, drop fb_num.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
             self.emit_op(StackOp(op="push", value=big_int_push(253)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
-
             self.emit_op(StackOp(op="opcode", code="OP_IF"))
             self.sm.pop()
-            sm_at_varint_if = self.sm.clone()
+            sm_at_1_byte_if = self.sm.clone()
+            # THEN: 1-byte varint.
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-
             self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_varint_if.clone()
+            self.sm = sm_at_1_byte_if.clone()
+            # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
+            self.emit_op(StackOp(op="push", value=big_int_push(254)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_IF"))
+            self.sm.pop()
+            sm_at_fe_if = self.sm.clone()
+            # THEN: 5-byte varint (0xfe + 4 bytes LE).
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="push", value=big_int_push(2)))
+            emit_drop_more_varint_bytes(4)
+            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+            self.sm = sm_at_fe_if.clone()
+            # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
+            self.emit_op(StackOp(op="push", value=big_int_push(255)))
             self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push(""); self.sm.push("")
-            self.emit_op(StackOp(op="nip"))
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
-
+            self.emit_op(StackOp(op="opcode", code="OP_IF"))
+            self.sm.pop()
+            sm_at_ff_if = self.sm.clone()
+            # THEN: 9-byte varint (0xff + 8 bytes LE).
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            emit_drop_more_varint_bytes(8)
+            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+            self.sm = sm_at_ff_if.clone()
+            # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            emit_drop_more_varint_bytes(2)
+            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
             self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
 
             # Compute skip = SIZE(_codePart) - codeSepIdx

@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -13,16 +14,27 @@ import (
 	"github.com/bsv-blockchain/go-sdk/script"
 )
 
+var auctionArtifact *runar.RunarArtifact
+var auctionOnce sync.Once
+
+func getAuctionArtifact(t *testing.T) *runar.RunarArtifact {
+	auctionOnce.Do(func() {
+		var err error
+		auctionArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/auction/Auction.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile Auction: %v", err)
+		}
+	})
+	return auctionArtifact
+}
+
 func deployAuction(t *testing.T, auctioneer, bidder *helpers.Wallet, highestBid, deadline int64) (*runar.RunarContract, *helpers.Wallet) {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/auction/Auction.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile auction: %v", err)
-	}
+	artifact := getAuctionArtifact(t)
 	t.Logf("Auction script: %d bytes", len(artifact.Script)/2)
 
 	// Constructor params: auctioneer, highestBidder, highestBid, deadline
@@ -32,12 +44,13 @@ func deployAuction(t *testing.T, auctioneer, bidder *helpers.Wallet, highestBid,
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
-	if err != nil {
-		t.Fatalf("fund: %v", err)
+	_, errF := helpers.FundWallet(funder, 1.0)
+	if errF != nil {
+		t.Fatalf("fund: %v", errF)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -62,7 +75,8 @@ func TestAuction_Close(t *testing.T) {
 
 	// close(sig) via SDK terminal call — method 1. The close method verifies
 	// checkSig but doesn't addOutput, so we use TerminalOutputs.
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(auctioneer)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -85,13 +99,7 @@ func TestAuction_Close(t *testing.T) {
 }
 
 func TestAuction_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/auction/Auction.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getAuctionArtifact(t)
 	if artifact.ContractName != "Auction" {
 		t.Fatalf("expected contract name Auction, got %s", artifact.ContractName)
 	}
@@ -102,13 +110,7 @@ func TestAuction_Deploy(t *testing.T) {
 	auctioneer := helpers.NewWallet()
 	bidder := helpers.NewWallet()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/auction/Auction.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getAuctionArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
 		auctioneer.PubKeyHex(), bidder.PubKeyHex(), int64(1000), int64(1000000),
@@ -116,12 +118,13 @@ func TestAuction_Deploy(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
-	if err != nil {
-		t.Fatalf("fund: %v", err)
+	_, errF := helpers.FundWallet(funder, 1.0)
+	if errF != nil {
+		t.Fatalf("fund: %v", errF)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

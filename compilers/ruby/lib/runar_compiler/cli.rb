@@ -26,6 +26,7 @@ module RunarCompiler
       "iter_var" => "iterVar",
       "state_values" => "stateValues",
       "initial_value" => "initialValue",
+      "script_bytes" => "scriptBytes",
       "else_" => "else",
       # These stay as snake_case to match Go/TS IR format
       "result_type" => "result_type",

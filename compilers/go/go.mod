@@ -2,4 +2,12 @@ module github.com/icellan/runar/compilers/go
 
 go 1.26
 
-require github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+require (
+	github.com/bsv-blockchain/go-sdk v1.2.21
+	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+)
+
+require (
+	github.com/pkg/errors v0.9.1 // indirect
+	golang.org/x/crypto v0.48.0 // indirect
+)

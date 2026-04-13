@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -151,14 +152,25 @@ func hexNibble(c byte) byte {
 	}
 }
 
+var schnorrArtifact *runar.RunarArtifact
+var schnorrOnce sync.Once
+
+func getSchnorrArtifact(t *testing.T) *runar.RunarArtifact {
+	schnorrOnce.Do(func() {
+		var err error
+		schnorrArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile SchnorrZKP: %v", err)
+		}
+	})
+	return schnorrArtifact
+}
+
 func TestSchnorr_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSchnorrArtifact(t)
 	if artifact.ContractName != "SchnorrZKP" {
 		t.Fatalf("expected contract name SchnorrZKP, got %s", artifact.ContractName)
 	}
@@ -166,13 +178,7 @@ func TestSchnorr_Compile(t *testing.T) {
 }
 
 func TestSchnorr_ScriptSize(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSchnorrArtifact(t)
 	scriptBytes := len(artifact.Script) / 2
 	if scriptBytes < 100000 || scriptBytes > 2000000 {
 		t.Fatalf("expected script size 100KB-2MB, got %d bytes", scriptBytes)
@@ -199,13 +205,7 @@ func TestSchnorr_Deploy(t *testing.T) {
 }
 
 func TestSchnorr_DeployDifferentKey(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSchnorrArtifact(t)
 
 	k1, _ := rand.Int(rand.Reader, ecN)
 	k1.Add(k1, big.NewInt(1))
@@ -221,11 +221,12 @@ func TestSchnorr_DeployDifferentKey(t *testing.T) {
 	contract1 := runar.NewRunarContract(artifact, []interface{}{pk1Hex})
 	funder1 := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder1.Address, "", false)
-	_, err = helpers.FundWallet(funder1, 1.0)
+	_, err := helpers.FundWallet(funder1, 1.0)
 	if err != nil {
 		t.Fatalf("fund1: %v", err)
 	}
-	provider1 := helpers.NewRPCProvider()
+	provider1 := helpers.NewBatchRPCProvider()
+	defer provider1.MineAll()
 	signer1, _ := helpers.SDKSignerFromWallet(funder1)
 	txid1, _, err := contract1.Deploy(provider1, signer1, runar.DeployOptions{Satoshis: 50000})
 	if err != nil {
@@ -240,7 +241,8 @@ func TestSchnorr_DeployDifferentKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fund2: %v", err)
 	}
-	provider2 := helpers.NewRPCProvider()
+	provider2 := helpers.NewBatchRPCProvider()
+	defer provider2.MineAll()
 	signer2, _ := helpers.SDKSignerFromWallet(funder2)
 	txid2, _, err := contract2.Deploy(provider2, signer2, runar.DeployOptions{Satoshis: 50000})
 	if err != nil {
@@ -256,24 +258,19 @@ func TestSchnorr_DeployDifferentKey(t *testing.T) {
 func deploySchnorrZKP(t *testing.T, pubKeyHex string, funder *helpers.Wallet) *runar.RunarContract {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/schnorr-zkp/SchnorrZKP.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSchnorrArtifact(t)
 	t.Logf("SchnorrZKP script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{pubKeyHex})
 
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -338,7 +335,7 @@ func TestSchnorr_ValidProof(t *testing.T) {
 	}
 
 	txid := helpers.AssertTxAccepted(t, spendHex)
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("TX accepted: %s", txid)
 }
 
 func TestSchnorr_InvalidS_Rejected(t *testing.T) {

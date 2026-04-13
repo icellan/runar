@@ -279,7 +279,7 @@ pub const UpdateProp = struct { name: []const u8, value: []const u8 };
 pub const CheckPreimage = struct { preimage: []const u8 };
 pub const DeserializeState = struct { preimage: []const u8 };
 pub const ANFAddOutput = struct { satoshis: []const u8, state_values: []const []const u8 = &.{}, preimage: []const u8 = "", state_refs: []const []const u8 = &.{} };
-pub const ANFAddRawOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "", script_ref: []const u8 = "" };
+pub const ANFAddRawOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "" };
 pub const ANFArrayLiteral = struct { elements: []const []const u8 };
 
 // -- Legacy value structs (used by json.zig parser) --

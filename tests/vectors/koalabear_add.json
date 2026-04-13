@@ -1,0 +1,1315 @@
+{
+  "field": "koalabear",
+  "prime": 2130706433,
+  "vectors": [
+    {
+      "op": "add",
+      "a": 0,
+      "b": 0,
+      "expected": 0,
+      "description": "0 + 0 = 0"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 0,
+      "expected": 1,
+      "description": "1 + 0 = 1 (additive identity)"
+    },
+    {
+      "op": "add",
+      "a": 0,
+      "b": 1,
+      "expected": 1,
+      "description": "0 + 1 = 1 (additive identity)"
+    },
+    {
+      "op": "add",
+      "a": 2130706432,
+      "b": 1,
+      "expected": 0,
+      "description": "(p-1) + 1 = 0 (wrap around)"
+    },
+    {
+      "op": "add",
+      "a": 2130706432,
+      "b": 2130706432,
+      "expected": 2130706431,
+      "description": "(p-1) + (p-1) = p-2 (double wrap)"
+    },
+    {
+      "op": "add",
+      "a": 2130706431,
+      "b": 2,
+      "expected": 0,
+      "description": "(p-2) + 2 = 0"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 1,
+      "expected": 2,
+      "description": "1 + 1"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 2,
+      "expected": 3,
+      "description": "1 + 2"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 3,
+      "expected": 4,
+      "description": "1 + 3"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 4,
+      "expected": 5,
+      "description": "1 + 4"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 5,
+      "expected": 6,
+      "description": "1 + 5"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 6,
+      "expected": 7,
+      "description": "1 + 6"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 7,
+      "expected": 8,
+      "description": "1 + 7"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 8,
+      "expected": 9,
+      "description": "1 + 8"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 9,
+      "expected": 10,
+      "description": "1 + 9"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 10,
+      "expected": 11,
+      "description": "1 + 10"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 1,
+      "expected": 3,
+      "description": "2 + 1"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 2,
+      "expected": 4,
+      "description": "2 + 2"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 3,
+      "expected": 5,
+      "description": "2 + 3"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 4,
+      "expected": 6,
+      "description": "2 + 4"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 5,
+      "expected": 7,
+      "description": "2 + 5"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 6,
+      "expected": 8,
+      "description": "2 + 6"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 7,
+      "expected": 9,
+      "description": "2 + 7"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 8,
+      "expected": 10,
+      "description": "2 + 8"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 9,
+      "expected": 11,
+      "description": "2 + 9"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 10,
+      "expected": 12,
+      "description": "2 + 10"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 1,
+      "expected": 4,
+      "description": "3 + 1"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 2,
+      "expected": 5,
+      "description": "3 + 2"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 3,
+      "expected": 6,
+      "description": "3 + 3"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 4,
+      "expected": 7,
+      "description": "3 + 4"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 5,
+      "expected": 8,
+      "description": "3 + 5"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 6,
+      "expected": 9,
+      "description": "3 + 6"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 7,
+      "expected": 10,
+      "description": "3 + 7"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 8,
+      "expected": 11,
+      "description": "3 + 8"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 9,
+      "expected": 12,
+      "description": "3 + 9"
+    },
+    {
+      "op": "add",
+      "a": 3,
+      "b": 10,
+      "expected": 13,
+      "description": "3 + 10"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 1,
+      "expected": 5,
+      "description": "4 + 1"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 2,
+      "expected": 6,
+      "description": "4 + 2"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 3,
+      "expected": 7,
+      "description": "4 + 3"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 4,
+      "expected": 8,
+      "description": "4 + 4"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 5,
+      "expected": 9,
+      "description": "4 + 5"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 6,
+      "expected": 10,
+      "description": "4 + 6"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 7,
+      "expected": 11,
+      "description": "4 + 7"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 8,
+      "expected": 12,
+      "description": "4 + 8"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 9,
+      "expected": 13,
+      "description": "4 + 9"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 10,
+      "expected": 14,
+      "description": "4 + 10"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 1,
+      "expected": 6,
+      "description": "5 + 1"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 2,
+      "expected": 7,
+      "description": "5 + 2"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 3,
+      "expected": 8,
+      "description": "5 + 3"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 4,
+      "expected": 9,
+      "description": "5 + 4"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 5,
+      "expected": 10,
+      "description": "5 + 5"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 6,
+      "expected": 11,
+      "description": "5 + 6"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 7,
+      "expected": 12,
+      "description": "5 + 7"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 8,
+      "expected": 13,
+      "description": "5 + 8"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 9,
+      "expected": 14,
+      "description": "5 + 9"
+    },
+    {
+      "op": "add",
+      "a": 5,
+      "b": 10,
+      "expected": 15,
+      "description": "5 + 10"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 1,
+      "expected": 7,
+      "description": "6 + 1"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 2,
+      "expected": 8,
+      "description": "6 + 2"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 3,
+      "expected": 9,
+      "description": "6 + 3"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 4,
+      "expected": 10,
+      "description": "6 + 4"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 5,
+      "expected": 11,
+      "description": "6 + 5"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 6,
+      "expected": 12,
+      "description": "6 + 6"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 7,
+      "expected": 13,
+      "description": "6 + 7"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 8,
+      "expected": 14,
+      "description": "6 + 8"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 9,
+      "expected": 15,
+      "description": "6 + 9"
+    },
+    {
+      "op": "add",
+      "a": 6,
+      "b": 10,
+      "expected": 16,
+      "description": "6 + 10"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 1,
+      "expected": 8,
+      "description": "7 + 1"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 2,
+      "expected": 9,
+      "description": "7 + 2"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 3,
+      "expected": 10,
+      "description": "7 + 3"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 4,
+      "expected": 11,
+      "description": "7 + 4"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 5,
+      "expected": 12,
+      "description": "7 + 5"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 6,
+      "expected": 13,
+      "description": "7 + 6"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 7,
+      "expected": 14,
+      "description": "7 + 7"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 8,
+      "expected": 15,
+      "description": "7 + 8"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 9,
+      "expected": 16,
+      "description": "7 + 9"
+    },
+    {
+      "op": "add",
+      "a": 7,
+      "b": 10,
+      "expected": 17,
+      "description": "7 + 10"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 1,
+      "expected": 9,
+      "description": "8 + 1"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 2,
+      "expected": 10,
+      "description": "8 + 2"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 3,
+      "expected": 11,
+      "description": "8 + 3"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 4,
+      "expected": 12,
+      "description": "8 + 4"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 5,
+      "expected": 13,
+      "description": "8 + 5"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 6,
+      "expected": 14,
+      "description": "8 + 6"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 7,
+      "expected": 15,
+      "description": "8 + 7"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 8,
+      "expected": 16,
+      "description": "8 + 8"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 9,
+      "expected": 17,
+      "description": "8 + 9"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 10,
+      "expected": 18,
+      "description": "8 + 10"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 1,
+      "expected": 10,
+      "description": "9 + 1"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 2,
+      "expected": 11,
+      "description": "9 + 2"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 3,
+      "expected": 12,
+      "description": "9 + 3"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 4,
+      "expected": 13,
+      "description": "9 + 4"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 5,
+      "expected": 14,
+      "description": "9 + 5"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 6,
+      "expected": 15,
+      "description": "9 + 6"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 7,
+      "expected": 16,
+      "description": "9 + 7"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 8,
+      "expected": 17,
+      "description": "9 + 8"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 9,
+      "expected": 18,
+      "description": "9 + 9"
+    },
+    {
+      "op": "add",
+      "a": 9,
+      "b": 10,
+      "expected": 19,
+      "description": "9 + 10"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 1,
+      "expected": 11,
+      "description": "10 + 1"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 2,
+      "expected": 12,
+      "description": "10 + 2"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 3,
+      "expected": 13,
+      "description": "10 + 3"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 4,
+      "expected": 14,
+      "description": "10 + 4"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 5,
+      "expected": 15,
+      "description": "10 + 5"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 6,
+      "expected": 16,
+      "description": "10 + 6"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 7,
+      "expected": 17,
+      "description": "10 + 7"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 8,
+      "expected": 18,
+      "description": "10 + 8"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 9,
+      "expected": 19,
+      "description": "10 + 9"
+    },
+    {
+      "op": "add",
+      "a": 10,
+      "b": 10,
+      "expected": 20,
+      "description": "10 + 10"
+    },
+    {
+      "op": "add",
+      "a": 1,
+      "b": 1,
+      "expected": 2,
+      "description": "2^0 + 1"
+    },
+    {
+      "op": "add",
+      "a": 2,
+      "b": 1,
+      "expected": 3,
+      "description": "2^1 + 1"
+    },
+    {
+      "op": "add",
+      "a": 4,
+      "b": 1,
+      "expected": 5,
+      "description": "2^2 + 1"
+    },
+    {
+      "op": "add",
+      "a": 8,
+      "b": 1,
+      "expected": 9,
+      "description": "2^3 + 1"
+    },
+    {
+      "op": "add",
+      "a": 16,
+      "b": 1,
+      "expected": 17,
+      "description": "2^4 + 1"
+    },
+    {
+      "op": "add",
+      "a": 32,
+      "b": 1,
+      "expected": 33,
+      "description": "2^5 + 1"
+    },
+    {
+      "op": "add",
+      "a": 64,
+      "b": 1,
+      "expected": 65,
+      "description": "2^6 + 1"
+    },
+    {
+      "op": "add",
+      "a": 128,
+      "b": 1,
+      "expected": 129,
+      "description": "2^7 + 1"
+    },
+    {
+      "op": "add",
+      "a": 256,
+      "b": 1,
+      "expected": 257,
+      "description": "2^8 + 1"
+    },
+    {
+      "op": "add",
+      "a": 512,
+      "b": 1,
+      "expected": 513,
+      "description": "2^9 + 1"
+    },
+    {
+      "op": "add",
+      "a": 1024,
+      "b": 1,
+      "expected": 1025,
+      "description": "2^10 + 1"
+    },
+    {
+      "op": "add",
+      "a": 2048,
+      "b": 1,
+      "expected": 2049,
+      "description": "2^11 + 1"
+    },
+    {
+      "op": "add",
+      "a": 4096,
+      "b": 1,
+      "expected": 4097,
+      "description": "2^12 + 1"
+    },
+    {
+      "op": "add",
+      "a": 8192,
+      "b": 1,
+      "expected": 8193,
+      "description": "2^13 + 1"
+    },
+    {
+      "op": "add",
+      "a": 16384,
+      "b": 1,
+      "expected": 16385,
+      "description": "2^14 + 1"
+    },
+    {
+      "op": "add",
+      "a": 32768,
+      "b": 1,
+      "expected": 32769,
+      "description": "2^15 + 1"
+    },
+    {
+      "op": "add",
+      "a": 65536,
+      "b": 1,
+      "expected": 65537,
+      "description": "2^16 + 1"
+    },
+    {
+      "op": "add",
+      "a": 131072,
+      "b": 1,
+      "expected": 131073,
+      "description": "2^17 + 1"
+    },
+    {
+      "op": "add",
+      "a": 262144,
+      "b": 1,
+      "expected": 262145,
+      "description": "2^18 + 1"
+    },
+    {
+      "op": "add",
+      "a": 524288,
+      "b": 1,
+      "expected": 524289,
+      "description": "2^19 + 1"
+    },
+    {
+      "op": "add",
+      "a": 1048576,
+      "b": 1,
+      "expected": 1048577,
+      "description": "2^20 + 1"
+    },
+    {
+      "op": "add",
+      "a": 2097152,
+      "b": 1,
+      "expected": 2097153,
+      "description": "2^21 + 1"
+    },
+    {
+      "op": "add",
+      "a": 4194304,
+      "b": 1,
+      "expected": 4194305,
+      "description": "2^22 + 1"
+    },
+    {
+      "op": "add",
+      "a": 8388608,
+      "b": 1,
+      "expected": 8388609,
+      "description": "2^23 + 1"
+    },
+    {
+      "op": "add",
+      "a": 16777216,
+      "b": 1,
+      "expected": 16777217,
+      "description": "2^24 + 1"
+    },
+    {
+      "op": "add",
+      "a": 33554432,
+      "b": 1,
+      "expected": 33554433,
+      "description": "2^25 + 1"
+    },
+    {
+      "op": "add",
+      "a": 67108864,
+      "b": 1,
+      "expected": 67108865,
+      "description": "2^26 + 1"
+    },
+    {
+      "op": "add",
+      "a": 134217728,
+      "b": 1,
+      "expected": 134217729,
+      "description": "2^27 + 1"
+    },
+    {
+      "op": "add",
+      "a": 268435456,
+      "b": 1,
+      "expected": 268435457,
+      "description": "2^28 + 1"
+    },
+    {
+      "op": "add",
+      "a": 536870912,
+      "b": 1,
+      "expected": 536870913,
+      "description": "2^29 + 1"
+    },
+    {
+      "op": "add",
+      "a": 1073741824,
+      "b": 1,
+      "expected": 1073741825,
+      "description": "2^30 + 1"
+    },
+    {
+      "op": "add",
+      "a": 1121939258,
+      "b": 1156388096,
+      "expected": 147620921,
+      "description": "random: 1121939258 + 1156388096"
+    },
+    {
+      "op": "add",
+      "a": 1356120281,
+      "b": 864857487,
+      "expected": 90271335,
+      "description": "random: 1356120281 + 864857487"
+    },
+    {
+      "op": "add",
+      "a": 73174463,
+      "b": 884151221,
+      "expected": 957325684,
+      "description": "random: 73174463 + 884151221"
+    },
+    {
+      "op": "add",
+      "a": 1571234972,
+      "b": 1809505856,
+      "expected": 1250034395,
+      "description": "random: 1571234972 + 1809505856"
+    },
+    {
+      "op": "add",
+      "a": 279716773,
+      "b": 6929262,
+      "expected": 286646035,
+      "description": "random: 279716773 + 6929262"
+    },
+    {
+      "op": "add",
+      "a": 1986127629,
+      "b": 1078455702,
+      "expected": 933876898,
+      "description": "random: 1986127629 + 1078455702"
+    },
+    {
+      "op": "add",
+      "a": 832358923,
+      "b": 300173909,
+      "expected": 1132532832,
+      "description": "random: 832358923 + 300173909"
+    },
+    {
+      "op": "add",
+      "a": 1114442844,
+      "b": 465997407,
+      "expected": 1580440251,
+      "description": "random: 1114442844 + 465997407"
+    },
+    {
+      "op": "add",
+      "a": 26831986,
+      "b": 1106366612,
+      "expected": 1133198598,
+      "description": "random: 26831986 + 1106366612"
+    },
+    {
+      "op": "add",
+      "a": 107118464,
+      "b": 1377396253,
+      "expected": 1484514717,
+      "description": "random: 107118464 + 1377396253"
+    },
+    {
+      "op": "add",
+      "a": 1802131247,
+      "b": 1060509648,
+      "expected": 731934462,
+      "description": "random: 1802131247 + 1060509648"
+    },
+    {
+      "op": "add",
+      "a": 1078089806,
+      "b": 124635164,
+      "expected": 1202724970,
+      "description": "random: 1078089806 + 124635164"
+    },
+    {
+      "op": "add",
+      "a": 747901017,
+      "b": 953617869,
+      "expected": 1701518886,
+      "description": "random: 747901017 + 953617869"
+    },
+    {
+      "op": "add",
+      "a": 1692600972,
+      "b": 433673274,
+      "expected": 2126274246,
+      "description": "random: 1692600972 + 433673274"
+    },
+    {
+      "op": "add",
+      "a": 855933239,
+      "b": 1394761751,
+      "expected": 119988557,
+      "description": "random: 855933239 + 1394761751"
+    },
+    {
+      "op": "add",
+      "a": 903391222,
+      "b": 1893100227,
+      "expected": 665785016,
+      "description": "random: 903391222 + 1893100227"
+    },
+    {
+      "op": "add",
+      "a": 1964443327,
+      "b": 1852230156,
+      "expected": 1685967050,
+      "description": "random: 1964443327 + 1852230156"
+    },
+    {
+      "op": "add",
+      "a": 1382597399,
+      "b": 470400749,
+      "expected": 1852998148,
+      "description": "random: 1382597399 + 470400749"
+    },
+    {
+      "op": "add",
+      "a": 1229489450,
+      "b": 831203182,
+      "expected": 2060692632,
+      "description": "random: 1229489450 + 831203182"
+    },
+    {
+      "op": "add",
+      "a": 142187697,
+      "b": 2102270975,
+      "expected": 113752239,
+      "description": "random: 142187697 + 2102270975"
+    },
+    {
+      "op": "add",
+      "a": 1294184024,
+      "b": 964406283,
+      "expected": 127883874,
+      "description": "random: 1294184024 + 964406283"
+    },
+    {
+      "op": "add",
+      "a": 60156710,
+      "b": 328549409,
+      "expected": 388706119,
+      "description": "random: 60156710 + 328549409"
+    },
+    {
+      "op": "add",
+      "a": 819407164,
+      "b": 1047056051,
+      "expected": 1866463215,
+      "description": "random: 819407164 + 1047056051"
+    },
+    {
+      "op": "add",
+      "a": 2063992529,
+      "b": 1813861836,
+      "expected": 1747147932,
+      "description": "random: 2063992529 + 1813861836"
+    },
+    {
+      "op": "add",
+      "a": 1162905865,
+      "b": 1638199204,
+      "expected": 670398636,
+      "description": "random: 1162905865 + 1638199204"
+    },
+    {
+      "op": "add",
+      "a": 1727701340,
+      "b": 1224984598,
+      "expected": 821979505,
+      "description": "random: 1727701340 + 1224984598"
+    },
+    {
+      "op": "add",
+      "a": 500435517,
+      "b": 816458871,
+      "expected": 1316894388,
+      "description": "random: 500435517 + 816458871"
+    },
+    {
+      "op": "add",
+      "a": 839003301,
+      "b": 488000766,
+      "expected": 1327004067,
+      "description": "random: 839003301 + 488000766"
+    },
+    {
+      "op": "add",
+      "a": 523560477,
+      "b": 1351844659,
+      "expected": 1875405136,
+      "description": "random: 523560477 + 1351844659"
+    },
+    {
+      "op": "add",
+      "a": 1018458493,
+      "b": 2060443850,
+      "expected": 948195910,
+      "description": "random: 1018458493 + 2060443850"
+    },
+    {
+      "op": "add",
+      "a": 359257696,
+      "b": 991176574,
+      "expected": 1350434270,
+      "description": "random: 359257696 + 991176574"
+    },
+    {
+      "op": "add",
+      "a": 1138366379,
+      "b": 236168593,
+      "expected": 1374534972,
+      "description": "random: 1138366379 + 236168593"
+    },
+    {
+      "op": "add",
+      "a": 700345917,
+      "b": 521247609,
+      "expected": 1221593526,
+      "description": "random: 700345917 + 521247609"
+    },
+    {
+      "op": "add",
+      "a": 1210995438,
+      "b": 1456079137,
+      "expected": 536368142,
+      "description": "random: 1210995438 + 1456079137"
+    },
+    {
+      "op": "add",
+      "a": 126441973,
+      "b": 1018458210,
+      "expected": 1144900183,
+      "description": "random: 126441973 + 1018458210"
+    },
+    {
+      "op": "add",
+      "a": 1306623913,
+      "b": 1854015975,
+      "expected": 1029933455,
+      "description": "random: 1306623913 + 1854015975"
+    },
+    {
+      "op": "add",
+      "a": 1209910812,
+      "b": 1035138140,
+      "expected": 114342519,
+      "description": "random: 1209910812 + 1035138140"
+    },
+    {
+      "op": "add",
+      "a": 953593180,
+      "b": 1981407119,
+      "expected": 804293866,
+      "description": "random: 953593180 + 1981407119"
+    },
+    {
+      "op": "add",
+      "a": 86668327,
+      "b": 1038832459,
+      "expected": 1125500786,
+      "description": "random: 86668327 + 1038832459"
+    },
+    {
+      "op": "add",
+      "a": 1612335714,
+      "b": 682223579,
+      "expected": 163852860,
+      "description": "random: 1612335714 + 682223579"
+    },
+    {
+      "op": "add",
+      "a": 729861365,
+      "b": 815997888,
+      "expected": 1545859253,
+      "description": "random: 729861365 + 815997888"
+    },
+    {
+      "op": "add",
+      "a": 1539657702,
+      "b": 1458597034,
+      "expected": 867548303,
+      "description": "random: 1539657702 + 1458597034"
+    },
+    {
+      "op": "add",
+      "a": 1227743800,
+      "b": 169446509,
+      "expected": 1397190309,
+      "description": "random: 1227743800 + 169446509"
+    },
+    {
+      "op": "add",
+      "a": 834840852,
+      "b": 1519937063,
+      "expected": 224071482,
+      "description": "random: 834840852 + 1519937063"
+    },
+    {
+      "op": "add",
+      "a": 1987806567,
+      "b": 187097465,
+      "expected": 44197599,
+      "description": "random: 1987806567 + 187097465"
+    },
+    {
+      "op": "add",
+      "a": 1801415485,
+      "b": 1220595292,
+      "expected": 891304344,
+      "description": "random: 1801415485 + 1220595292"
+    },
+    {
+      "op": "add",
+      "a": 1667633779,
+      "b": 1627617461,
+      "expected": 1164544807,
+      "description": "random: 1667633779 + 1627617461"
+    },
+    {
+      "op": "add",
+      "a": 687235427,
+      "b": 1688537337,
+      "expected": 245066331,
+      "description": "random: 687235427 + 1688537337"
+    },
+    {
+      "op": "add",
+      "a": 1865008891,
+      "b": 676541838,
+      "expected": 410844296,
+      "description": "random: 1865008891 + 676541838"
+    },
+    {
+      "op": "add",
+      "a": 306285310,
+      "b": 614462292,
+      "expected": 920747602,
+      "description": "random: 306285310 + 614462292"
+    }
+  ]
+}

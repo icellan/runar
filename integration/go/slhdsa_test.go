@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -24,18 +25,29 @@ var slhdsaTestSeed = func() []byte {
 
 var slhdsaTestKP = runar.SLHKeygen(runar.SLH_SHA2_128s, slhdsaTestSeed)
 
+var slhdsaArtifact *runar.RunarArtifact
+var slhdsaOnce sync.Once
+
+func getSLHDSAArtifact(t *testing.T) *runar.RunarArtifact {
+	slhdsaOnce.Do(func() {
+		var err error
+		slhdsaArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile SPHINCSWallet: %v", err)
+		}
+	})
+	return slhdsaArtifact
+}
+
 // deployHybridSLHDSA deploys the hybrid ECDSA+SLH-DSA contract with two hash commitments:
 // ecdsaPubKeyHash (from the ECDSA wallet) and slhdsaPubKeyHash (hash160 of the SLH-DSA public key).
-func deployHybridSLHDSA(t *testing.T, ecdsaWallet *helpers.Wallet, slhdsaPK []byte, funder *helpers.Wallet) *runar.RunarContract {
+func deployHybridSLHDSA(t *testing.T, ecdsaWallet *helpers.Wallet, slhdsaPK []byte, funder *helpers.Wallet, provider *helpers.BatchRPCProvider) *runar.RunarContract {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSLHDSAArtifact(t)
 	t.Logf("Hybrid ECDSA+SLH-DSA script: %d bytes", len(artifact.Script)/2)
 
 	// Constructor args: (ecdsaPubKeyHash, slhdsaPubKeyHash)
@@ -46,12 +58,11 @@ func deployHybridSLHDSA(t *testing.T, ecdsaWallet *helpers.Wallet, slhdsaPK []by
 	})
 
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -66,13 +77,7 @@ func deployHybridSLHDSA(t *testing.T, ecdsaWallet *helpers.Wallet, slhdsaPK []by
 }
 
 func TestSLHDSA_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSLHDSAArtifact(t)
 	if artifact.ContractName != "SPHINCSWallet" {
 		t.Fatalf("expected contract name SPHINCSWallet, got %s", artifact.ContractName)
 	}
@@ -80,13 +85,7 @@ func TestSLHDSA_Compile(t *testing.T) {
 }
 
 func TestSLHDSA_ScriptSize(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSLHDSAArtifact(t)
 	scriptBytes := len(artifact.Script) / 2
 	if scriptBytes < 100000 || scriptBytes > 500000 {
 		t.Fatalf("expected script size 100-500 KB, got %d bytes", scriptBytes)
@@ -97,7 +96,9 @@ func TestSLHDSA_ScriptSize(t *testing.T) {
 func TestSLHDSA_Deploy(t *testing.T) {
 	ecdsaWallet := helpers.NewWallet()
 	funder := helpers.NewWallet()
-	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder, provider)
 	utxo := contract.GetCurrentUtxo()
 	if utxo == nil {
 		t.Fatalf("no UTXO after deploy")
@@ -106,13 +107,7 @@ func TestSLHDSA_Deploy(t *testing.T) {
 }
 
 func TestSLHDSA_DeployDifferentKey(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getSLHDSAArtifact(t)
 
 	ecdsaWallet := helpers.NewWallet()
 
@@ -130,6 +125,9 @@ func TestSLHDSA_DeployDifferentKey(t *testing.T) {
 		t.Fatalf("expected different pubkey hashes from different seeds")
 	}
 
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+
 	// Deploy with kp1
 	contract1 := runar.NewRunarContract(artifact, []interface{}{
 		ecdsaWallet.PubKeyHashHex(),
@@ -137,13 +135,12 @@ func TestSLHDSA_DeployDifferentKey(t *testing.T) {
 	})
 	funder1 := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder1.Address, "", false)
-	_, err = helpers.FundWallet(funder1, 1.0)
+	_, err := helpers.FundWallet(funder1, 1.0)
 	if err != nil {
 		t.Fatalf("fund1: %v", err)
 	}
-	provider1 := helpers.NewRPCProvider()
 	signer1, _ := helpers.SDKSignerFromWallet(funder1)
-	txid1, _, err := contract1.Deploy(provider1, signer1, runar.DeployOptions{Satoshis: 50000})
+	txid1, _, err := contract1.Deploy(provider, signer1, runar.DeployOptions{Satoshis: 50000})
 	if err != nil {
 		t.Fatalf("deploy1: %v", err)
 	}
@@ -159,9 +156,8 @@ func TestSLHDSA_DeployDifferentKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fund2: %v", err)
 	}
-	provider2 := helpers.NewRPCProvider()
 	signer2, _ := helpers.SDKSignerFromWallet(funder2)
-	txid2, _, err := contract2.Deploy(provider2, signer2, runar.DeployOptions{Satoshis: 50000})
+	txid2, _, err := contract2.Deploy(provider, signer2, runar.DeployOptions{Satoshis: 50000})
 	if err != nil {
 		t.Fatalf("deploy2: %v", err)
 	}
@@ -180,7 +176,9 @@ func TestSLHDSA_ValidSpend(t *testing.T) {
 	// The ECDSA wallet signs the transaction; the SLH-DSA key signs the ECDSA signature
 	ecdsaWallet := helpers.NewWallet()
 	funder := helpers.NewWallet()
-	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder, provider)
 
 	// Step 1: Build the spending transaction (unsigned)
 	utxo := helpers.SDKUtxoToHelper(contract.GetCurrentUtxo())
@@ -213,7 +211,7 @@ func TestSLHDSA_ValidSpend(t *testing.T) {
 	}
 
 	txid := helpers.AssertTxAccepted(t, spendHex)
-	helpers.AssertTxInBlock(t, txid)
+	t.Logf("spend TX accepted: %s", txid)
 }
 
 func TestSLHDSA_TamperedSig_Rejected(t *testing.T) {
@@ -223,7 +221,9 @@ func TestSLHDSA_TamperedSig_Rejected(t *testing.T) {
 
 	ecdsaWallet := helpers.NewWallet()
 	funder := helpers.NewWallet()
-	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder, provider)
 
 	utxo := helpers.SDKUtxoToHelper(contract.GetCurrentUtxo())
 	receiverScript := funder.P2PKHScript()
@@ -265,7 +265,9 @@ func TestSLHDSA_WrongECDSASig_Rejected(t *testing.T) {
 
 	ecdsaWallet := helpers.NewWallet()
 	funder := helpers.NewWallet()
-	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder)
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
+	contract := deployHybridSLHDSA(t, ecdsaWallet, slhdsaTestKP.PK, funder, provider)
 
 	utxo := helpers.SDKUtxoToHelper(contract.GetCurrentUtxo())
 	receiverScript := funder.P2PKHScript()

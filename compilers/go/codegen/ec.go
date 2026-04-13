@@ -284,6 +284,21 @@ func ecFieldMul(t *ECTracker, aName, bName, resultName string) {
 	ecFieldMod(t, "_fmul_prod", resultName)
 }
 
+// ecFieldMulConst computes (a * c) mod p where c is a small constant.
+func ecFieldMulConst(t *ECTracker, aName string, c int64, resultName string) {
+	t.toTop(aName)
+	t.rawBlock([]string{aName}, "_fmc_prod", func(e func(StackOp)) {
+		if c == 2 {
+			// Use OP_2MUL (single opcode, no push needed)
+			e(StackOp{Op: "opcode", Code: "OP_2MUL"})
+		} else {
+			e(StackOp{Op: "push", Value: bigIntPush(c)})
+			e(StackOp{Op: "opcode", Code: "OP_MUL"})
+		}
+	})
+	ecFieldMod(t, "_fmc_prod", resultName)
+}
+
 // ecFieldSqr computes (a * a) mod p.
 func ecFieldSqr(t *ECTracker, aName, resultName string) {
 	t.copyToTop(aName, "_fsqr_copy")
@@ -512,8 +527,7 @@ func ecJacobianDouble(t *ECTracker) {
 	t.copyToTop("_B", "_B_save")
 	ecFieldSqr(t, "_D", "_D2")
 	t.copyToTop("_B", "_B1")
-	t.pushInt("_two1", 2)
-	ecFieldMul(t, "_B1", "_two1", "_2B")
+	ecFieldMulConst(t, "_B1", 2, "_2B")
 	ecFieldSub(t, "_D2", "_2B", "_nx")
 
 	// ny = D*(B - nx) - C
@@ -524,8 +538,7 @@ func ecJacobianDouble(t *ECTracker) {
 
 	// nz = 2 * Y * Z
 	ecFieldMul(t, "_jy_save", "_jz_save", "_yz")
-	t.pushInt("_two2", 2)
-	ecFieldMul(t, "_yz", "_two2", "_nz")
+	ecFieldMulConst(t, "_yz", 2, "_nz")
 
 	// Clean up leftovers: _B and old jz (only copied, never consumed)
 	t.toTop("_B")
@@ -618,8 +631,7 @@ func ecBuildJacobianAddAffineInline(e func(StackOp), t *ECTracker) {
 	// X3 = R^2 - H3 - 2*U1H2
 	ecFieldSqr(it, "_R", "_R2")
 	ecFieldSub(it, "_R2", "_H3", "_x3_tmp")
-	it.pushInt("_two", 2)
-	ecFieldMul(it, "_U1H2", "_two", "_2U1H2")
+	ecFieldMulConst(it, "_U1H2", 2, "_2U1H2")
 	ecFieldSub(it, "_x3_tmp", "_2U1H2", "_X3")
 
 	// Y3 = R_for_y3*(U1H2_for_y3 - X3) - jy_for_y3*H3_for_y3
@@ -695,13 +707,18 @@ func EmitEcMul(emit func(StackOp)) {
 		// Double accumulator
 		ecJacobianDouble(t)
 
-		// Extract bit: (k >> bit) & 1, using OP_DIV for right-shift
+		// Extract bit: (k >> bit) & 1, using OP_RSHIFTNUM / OP_2DIV
 		t.copyToTop("_k", "_k_copy")
-		if bit > 0 {
-			divisor := new(big.Int).Lsh(big.NewInt(1), uint(bit))
-			t.pushBigInt("_div", divisor)
-			t.rawBlock([]string{"_k_copy", "_div"}, "_shifted", func(e func(StackOp)) {
-				e(StackOp{Op: "opcode", Code: "OP_DIV"})
+		if bit == 1 {
+			// Single-bit shift: OP_2DIV (no push needed)
+			t.rawBlock([]string{"_k_copy"}, "_shifted", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_2DIV"})
+			})
+		} else if bit > 1 {
+			// Multi-bit shift: push shift amount, OP_RSHIFTNUM
+			t.pushInt("_shift", int64(bit))
+			t.rawBlock([]string{"_k_copy", "_shift"}, "_shifted", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_RSHIFTNUM"})
 			})
 		} else {
 			t.rename("_shifted")

@@ -17,12 +17,16 @@ __pycache__/
 *.egg-info/
 .venv/
 compilers/go/runar*-go
+compilers/go/go
+tests/generate-vectors/bn254/runar-bn254-vectors
 
 # runar-rb
 /packages/runar-rb/tmp/
 
 # Local Claude settings (user-specific, not shared)
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/worktrees/
 .zig-cache/
 .zig-global-cache/
 .zig-local-cache/

@@ -69,6 +69,23 @@ type IRDebug struct {
 	Stack []codegen.StackMethod `json:"stack,omitempty"`
 }
 
+// Groth16WAMeta records metadata about a witness-assisted Groth16 verifier
+// artifact produced by `runarc groth16-wa`. It lets downstream consumers
+// sanity-check that the baked-in VK matches what they expect without having
+// to re-derive anything from the script bytes.
+type Groth16WAMeta struct {
+	// NumPubInputs is the number of public inputs the Groth16 circuit was
+	// parameterised with. Matches `vk.numPubInputs` from the input JSON.
+	NumPubInputs int `json:"numPubInputs"`
+
+	// VKDigest is the SHA-256 hex of the RAW bytes of the source VK JSON
+	// file (not a canonical form). It is a pure reproducibility marker:
+	// if two artifacts have the same VKDigest, they were compiled from
+	// byte-identical VK files. It is NOT a cryptographic commitment to
+	// the VK semantics and should not be used for anything load-bearing.
+	VKDigest string `json:"vkDigest"`
+}
+
 // Artifact is the final compiled output of a Rúnar compiler.
 type Artifact struct {
 	Version                string            `json:"version"`
@@ -86,6 +103,11 @@ type Artifact struct {
 	ANF                    *ir.ANFProgram    `json:"anf,omitempty"`
 	SourceMapData          *SourceMap        `json:"sourceMap,omitempty"`
 	IR                     *IRDebug          `json:"ir,omitempty"`
+
+	// Groth16WA is populated only for artifacts produced by the
+	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
+	// compilations. See Groth16WAMeta for field semantics.
+	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
 }
 
 const (
@@ -132,8 +154,22 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 	// EC optimization — algebraic simplification of EC calls
 	program = frontend.OptimizeEC(program)
 
+	// Mode 3: when CompileOptions.Groth16WAVKey is set, load the SP1
+	// vk.json and build the codegen.Groth16Config that the stack-lowering
+	// preamble emitter will consume. The compiler package can import
+	// bn254witness (which already imports codegen for the NAF table); the
+	// codegen package cannot, so the loading happens here.
+	var lowerOpts codegen.LowerToStackOptions
+	if o.Groth16WAVKey != "" {
+		cfg, err := loadGroth16WAConfig(o.Groth16WAVKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading Groth16WAVKey %q: %w", o.Groth16WAVKey, err)
+		}
+		lowerOpts.Groth16WAConfig = &cfg
+	}
+
 	// Pass 5: Stack lowering
-	stackMethods, err := codegen.LowerToStack(program)
+	stackMethods, err := codegen.LowerToStack(program, lowerOpts)
 	if err != nil {
 		return nil, fmt.Errorf("stack lowering: %w", err)
 	}

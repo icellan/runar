@@ -117,12 +117,15 @@ def _emit_merkle_root(
         emit(_make_stack_op(op="swap"))
         # Stack: [current, sibling, index]
 
-        # Compute direction bit: (index / 2^i) % 2
+        # Compute direction bit: (index >> i) & 1
         emit(_make_stack_op(op="opcode", code="OP_DUP"))
         # Stack: [current, sibling, index, index]
-        if i > 0:
-            emit(_make_stack_op(op="push", value=_big_int_push(1 << i)))
-            emit(_make_stack_op(op="opcode", code="OP_DIV"))
+        # Extract bit i: Chronicle opcodes: OP_2DIV (i=1), OP_RSHIFTNUM (i>1)
+        if i == 1:
+            emit(_make_stack_op(op="opcode", code="OP_2DIV"))
+        elif i > 1:
+            emit(_make_stack_op(op="push", value=_big_int_push(i)))
+            emit(_make_stack_op(op="opcode", code="OP_RSHIFTNUM"))
         emit(_make_stack_op(op="push", value=_big_int_push(2)))
         emit(_make_stack_op(op="opcode", code="OP_MOD"))
         # Stack: [current, sibling, index, direction_bit]
