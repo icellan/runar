@@ -1120,6 +1120,24 @@ class ZigParser extends ParserCore<ZigToken> {
           this.expect(')');
           return { kind: 'binary_expr', op: '===', left, right };
         }
+        // runar.hexToBytes("deadbeef") → bytestring literal "deadbeef".
+        // The native Zig runtime exposes this as a comptime helper that
+        // returns a fixed-byte array, so the same source compiles natively.
+        // Mirrors parse_zig.zig and parse_python.zig's bytes.fromhex(...).
+        if (builtin === 'hexToBytes' && this.current().type === '(') {
+          this.advance();
+          const arg = this.parseExpression();
+          this.expect(')');
+          if (arg.kind === 'bytestring_literal') {
+            return { kind: 'bytestring_literal', value: arg.value };
+          }
+          this.errors.push(makeDiagnostic(
+            "runar.hexToBytes expects a string literal argument",
+            'error',
+            { file: this.file, line: token.line, column: token.column },
+          ));
+          return { kind: 'bytestring_literal', value: '' };
+        }
         return { kind: 'identifier', name: builtin };
       }
 
