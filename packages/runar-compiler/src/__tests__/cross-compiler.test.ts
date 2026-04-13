@@ -401,10 +401,6 @@ function findExampleContracts(): { name: string; source: string }[] {
       const files = readdirSync(dirPath);
       for (const file of files) {
         if (file.endsWith('.runar.ts')) {
-          // Feature-gated contracts (e.g., TicTacToe.v2.runar.ts for the
-          // FixedArray spike) are excluded from cross-compiler runs until
-          // the feature lands in the other 5 compilers.
-          if (file.endsWith('.v2.runar.ts')) continue;
           const source = readFileSync(join(dirPath, file), 'utf-8');
           contracts.push({ name: file.replace('.runar.ts', ''), source });
         }

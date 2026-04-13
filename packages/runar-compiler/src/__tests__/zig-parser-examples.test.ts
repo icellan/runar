@@ -33,11 +33,7 @@ function findExampleFiles(baseDir: string, extension: string): string[] {
 }
 
 const ZIG_EXAMPLES = findExampleFiles(EXAMPLES_ZIG_DIR, '.runar.zig');
-// TS-only feature-gated contracts (e.g., FixedArray spike) are excluded
-// from the cross-language example inventory until their feature ports
-// land in the other compilers. Gate by the `.v2` filename suffix.
 const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
-  .filter((file) => !file.endsWith('.v2.runar.ts'))
   .map((file) => file.replace(/\.runar\.ts$/, '.runar.zig'))
   .sort();
 
