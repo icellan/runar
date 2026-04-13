@@ -917,14 +917,19 @@ const Parser = struct {
             const target_name = extractAssignTarget(expr);
             const bin = self.allocator.create(BinaryOp) catch return null;
             bin.* = .{ .op = bo, .left = expr, .right = rhs };
-            return Statement{ .assign = .{ .target = target_name, .value = .{ .binary_op = bin }, .source_loc = loc } };
+            const index_tgt: ?*IndexAccess = if (expr == .index_access) expr.index_access else null;
+            return Statement{ .assign = .{ .target = target_name, .value = .{ .binary_op = bin }, .source_loc = loc, .index_target = index_tgt } };
         }
         if (self.current.kind == .assign) {
             _ = self.bump();
             const rhs = self.parseExpression() orelse return null;
             _ = self.expect(.semicolon);
             const target_name = extractAssignTarget(expr);
-            return Statement{ .assign = .{ .target = target_name, .value = rhs, .source_loc = loc } };
+            // `self.arr[idx] = value` — carry the index-access target on
+            // the Assign so `expand_fixed_arrays.zig` can rewrite it into
+            // dispatch form.
+            const index_tgt: ?*IndexAccess = if (expr == .index_access) expr.index_access else null;
+            return Statement{ .assign = .{ .target = target_name, .value = rhs, .source_loc = loc, .index_target = index_tgt } };
         }
         _ = self.expect(.semicolon);
         // Expression statements (including assert calls) — attach source location
@@ -933,11 +938,18 @@ const Parser = struct {
     }
 
     /// Extract a string target name from an expression for Assign.target.
-    /// For identifiers: returns the name. For property_access: returns the property name.
+    /// For identifiers: returns the name. For property_access: returns the
+    /// property name. For index_access, returns the base property name when
+    /// the object is `self.<name>`.
     fn extractAssignTarget(expr: Expression) []const u8 {
         return switch (expr) {
             .identifier => |id| id,
             .property_access => |pa| pa.property,
+            .index_access => |ia| switch (ia.object) {
+                .property_access => |pa| pa.property,
+                .identifier => |id| id,
+                else => "unknown",
+            },
             else => "unknown",
         };
     }
