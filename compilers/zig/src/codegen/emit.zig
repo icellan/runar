@@ -349,6 +349,17 @@ fn findMethodSourceLoc(anf_methods: []const types.ANFMethod, method_name: []cons
 }
 
 /// Emit dispatch table with source map support (looks up source locs from ANF methods).
+///
+/// Mirrors the TS reference compiler's emitMethodDispatch
+/// (packages/runar-compiler/src/passes/06-emit.ts).
+///
+/// Pattern (N >= 2 public methods):
+///   OP_DUP <0> OP_NUMEQUAL OP_IF OP_DROP <body0> OP_ELSE
+///     OP_DUP <1> OP_NUMEQUAL OP_IF OP_DROP <body1> OP_ELSE
+///       ...
+///       <N-1> OP_NUMEQUALVERIFY <bodyN-1>
+///     OP_ENDIF
+///   OP_ENDIF (×(N-1) total ENDIFs)
 fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.StackMethod, anf_methods: []const types.ANFMethod) !void {
     if (methods.len == 0) return;
 
@@ -359,22 +370,25 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
     }
 
     for (methods, 0..) |method, i| {
-        try ctx.emitOpcode(.op_dup);
-        try ctx.emitScriptNumber(@intCast(i));
-        try ctx.emitOpcode(.op_numequal);
-        try ctx.emitOpcode(.op_if);
-        try ctx.emitOpcode(.op_drop);
+        const is_last = i == methods.len - 1;
+        if (!is_last) {
+            try ctx.emitOpcode(.op_dup);
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequal);
+            try ctx.emitOpcode(.op_if);
+            try ctx.emitOpcode(.op_drop);
+        } else {
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequalverify);
+        }
         ctx.pending_source_loc = findMethodSourceLoc(anf_methods, method.name);
         try emitMethodBody(ctx, method);
-        if (i < methods.len - 1) {
+        if (!is_last) {
             try ctx.emitOpcode(.op_else);
-        } else {
-            try ctx.emitOpcode(.op_else);
-            try ctx.emitOpcode(.op_return);
-            try ctx.emitOpcode(.op_endif);
         }
     }
 
+    // Close all the nested OP_IF / OP_ELSE blocks (one OP_ENDIF per non-last method).
     var closes: usize = methods.len - 1;
     while (closes > 0) : (closes -= 1) {
         try ctx.emitOpcode(.op_endif);
@@ -382,9 +396,8 @@ fn emitDispatchTableWithSourceMap(ctx: *EmitContext, methods: []const types.Stac
 }
 
 /// Emit the dispatch table for a multi-method contract.
-/// Pattern: OP_DUP <idx> OP_NUMEQUAL OP_IF OP_DROP <body> OP_ELSE ... OP_ENDIF
-/// For a single method, no dispatch table is needed — just emit the body.
-fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
+/// Pattern: see `emitDispatchTableWithSourceMap`.
+pub fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !void {
     if (methods.len == 0) return;
 
     if (methods.len == 1) {
@@ -393,36 +406,28 @@ fn emitDispatchTable(ctx: *EmitContext, methods: []const types.StackMethod) !voi
         return;
     }
 
-    // Multi-method dispatch:
-    // The method index is expected on top of the stack.
-    // OP_DUP <0> OP_NUMEQUAL OP_IF OP_DROP <body0> OP_ELSE
-    //   OP_DUP <1> OP_NUMEQUAL OP_IF OP_DROP <body1> OP_ELSE
-    //     ...
-    //     OP_DUP <N-1> OP_NUMEQUAL OP_IF OP_DROP <bodyN-1> OP_ELSE OP_RETURN OP_ENDIF
-    //   OP_ENDIF
-    // OP_ENDIF
-
     for (methods, 0..) |method, i| {
-        try ctx.emitOpcode(.op_dup);
-        try ctx.emitScriptNumber(@intCast(i));
-        try ctx.emitOpcode(.op_numequal);
-        try ctx.emitOpcode(.op_if);
-        try ctx.emitOpcode(.op_drop); // consume the method index
+        const is_last = i == methods.len - 1;
+        if (!is_last) {
+            try ctx.emitOpcode(.op_dup);
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequal);
+            try ctx.emitOpcode(.op_if);
+            try ctx.emitOpcode(.op_drop); // consume the method index
+        } else {
+            try ctx.emitScriptNumber(@intCast(i));
+            try ctx.emitOpcode(.op_numequalverify);
+        }
 
         // Emit method body
         try emitMethodBody(ctx, method);
 
-        if (i < methods.len - 1) {
+        if (!is_last) {
             try ctx.emitOpcode(.op_else);
-        } else {
-            // Last method: else branch is OP_RETURN (invalid method index)
-            try ctx.emitOpcode(.op_else);
-            try ctx.emitOpcode(.op_return);
-            try ctx.emitOpcode(.op_endif);
         }
     }
 
-    // Close all the nested if/else blocks (one OP_ENDIF per method except last which already closed)
+    // Close all the nested OP_IF / OP_ELSE blocks.
     var closes: usize = methods.len - 1;
     while (closes > 0) : (closes -= 1) {
         try ctx.emitOpcode(.op_endif);
@@ -1373,17 +1378,16 @@ test "dispatch table — two methods" {
     const hex = try ctx.getHex();
     defer allocator.free(hex);
 
-    // Expected pattern:
-    // OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
-    // OP_DUP(76) OP_1(51) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_SUB(94) OP_ELSE(67) OP_RETURN(6a) OP_ENDIF(68)
-    // OP_ENDIF(68)
-    try std.testing.expectEqualStrings("76009c6375936776519c637594676a6868", hex);
+    // Expected pattern (matches TS reference compiler):
+    // method 0 (non-last): OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
+    // method 1 (last):     OP_1(51) OP_NUMEQUALVERIFY(9d) OP_SUB(94)
+    // close:               OP_ENDIF(68)
+    try std.testing.expectEqualStrings("76009c63759367519d9468", hex);
 
     const asm_text = try ctx.getAsm();
     defer allocator.free(asm_text);
-
     try std.testing.expectEqualStrings(
-        "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_ADD OP_ELSE OP_DUP OP_1 OP_NUMEQUAL OP_IF OP_DROP OP_SUB OP_ELSE OP_RETURN OP_ENDIF OP_ENDIF",
+        "OP_DUP OP_0 OP_NUMEQUAL OP_IF OP_DROP OP_ADD OP_ELSE OP_1 OP_NUMEQUALVERIFY OP_SUB OP_ENDIF",
         asm_text,
     );
 }
@@ -1407,11 +1411,12 @@ test "dispatch table — three methods" {
     const hex = try ctx.getHex();
     defer allocator.free(hex);
 
-    // method 0: DUP 0 NUMEQUAL IF DROP ADD ELSE
-    // method 1: DUP 1 NUMEQUAL IF DROP SUB ELSE
-    // method 2: DUP 2 NUMEQUAL IF DROP MUL ELSE RETURN ENDIF
-    // close:    ENDIF ENDIF
-    const expected = "76009c6375936776519c6375946776529c637595676a686868";
+    // Expected pattern (matches TS reference compiler):
+    // method 0 (non-last): OP_DUP(76) OP_0(00) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_ADD(93) OP_ELSE(67)
+    // method 1 (non-last): OP_DUP(76) OP_1(51) OP_NUMEQUAL(9c) OP_IF(63) OP_DROP(75) OP_SUB(94) OP_ELSE(67)
+    // method 2 (last):     OP_2(52) OP_NUMEQUALVERIFY(9d) OP_MUL(95)
+    // close:               OP_ENDIF(68) OP_ENDIF(68)
+    const expected = "76009c6375936776519c6375946752" ++ "9d" ++ "956868";
     try std.testing.expectEqualStrings(expected, hex);
 }
 

@@ -548,19 +548,14 @@ fn countBindingsDeep(bindings: []const IRBinding) usize {
     return total;
 }
 
-/// Emit all methods' flat instructions to a single hex string via EmitContext.
-/// For multi-method contracts, lower() produces a single __dispatch method containing
-/// the full dispatch table; for single-method contracts, it produces one method.
-/// The result matches the expected-script.hex format (no OP_CODESEPARATOR prefix).
+/// Emit a stack program to a single hex string via EmitContext, wrapping
+/// multi-method contracts in the dispatch table. Matches the byte layout
+/// the TS reference compiler produces in `compile().artifact.script`.
 fn emitPipelineHex(allocator: std.mem.Allocator, stack_program: ir_types.StackProgram) ![]const u8 {
-    var out: std.ArrayListUnmanaged(u8) = .empty;
-    defer out.deinit(allocator);
-    for (stack_program.methods) |method| {
-        const method_hex = try emit_mod.emitMethodScript(allocator, method.instructions);
-        defer allocator.free(method_hex);
-        try out.appendSlice(allocator, method_hex);
-    }
-    return try out.toOwnedSlice(allocator);
+    var ctx = emit_mod.EmitContext.init(allocator);
+    defer ctx.deinit();
+    try emit_mod.emitDispatchTable(&ctx, stack_program.methods);
+    return try ctx.getHex();
 }
 
 /// Run a single conformance test: read expected-ir.json, parse it,

@@ -273,7 +273,44 @@ const LowerCtx = struct {
         return dst;
     }
 
+    /// Drop a value from arbitrary stack depth in the bilateral branch
+    /// reconciliation phase of `lowerIf`. Mirrors the TS reference compiler's
+    /// pre-IF reconciliation (`05-stack-lower.ts` ~line 1640), which uses
+    /// `push depth + roll(depth=depth) + drop`.
     fn removeBranchValueAtDepth(ctx: *LowerCtx, depth: usize) !void {
+        if (depth == 0) {
+            try ctx.emitOp(.op_drop);
+            _ = ctx.stack.pop();
+            return;
+        }
+
+        if (depth == 1) {
+            try ctx.emitOp(.op_nip);
+            try ctx.stack.removeAtDepth(ctx.allocator, 1);
+            return;
+        }
+
+        try ctx.emitPushInt(@intCast(depth));
+        try ctx.stack.push(ctx.allocator, null);
+        try ctx.emitOp(.op_roll);
+        _ = ctx.stack.pop();
+        const rolled = ctx.stack.peekAtDepth(depth);
+        try ctx.stack.removeAtDepth(ctx.allocator, depth);
+        try ctx.stack.push(ctx.allocator, rolled);
+        try ctx.emitOp(.op_drop);
+        _ = ctx.stack.pop();
+    }
+
+    /// Drop a stale property entry after an if-else expression that wrote the
+    /// same property in both branches. Mirrors the TS reference compiler's
+    /// `lowerUpdateProp` post-if cleanup (`05-stack-lower.ts` ~line 1909),
+    /// which uses `push d + roll(depth=d+1) + drop`. The push value (`d`) is
+    /// the visible depth from the StackMap, but the runtime roll consumes the
+    /// extra temporary from the push (`d + 1`). The peephole rule
+    /// `push 2n + roll(depth=2) → rot` checks the *IR* depth, not the push
+    /// value, so this case never folds in TS. Keep the literal
+    /// `push d + OP_ROLL + OP_DROP` here for byte equivalence.
+    fn removeStalePropertyAtDepth(ctx: *LowerCtx, depth: usize) !void {
         if (depth == 0) {
             try ctx.emitOp(.op_drop);
             _ = ctx.stack.pop();
@@ -300,6 +337,10 @@ const LowerCtx = struct {
     fn duplicateBranchValueAtDepth(ctx: *LowerCtx, depth: usize, name: ?[]const u8) !void {
         if (depth == 0) {
             try ctx.emitOp(.op_dup);
+        } else if (depth == 1) {
+            // Foldable pick: depth 1 → OP_OVER. Mirrors TS peephole
+            // `push 1n + pick(depth=1) → over`.
+            try ctx.emitOp(.op_over);
         } else {
             try ctx.emitPushInt(@intCast(depth));
             try ctx.stack.push(ctx.allocator, null);
@@ -3248,7 +3289,7 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |name| {
                         if (std.mem.eql(u8, name, then_top.?)) {
-                            try removeBranchValueAtDepth(self, d);
+                            try removeStalePropertyAtDepth(self, d);
                             break;
                         }
                     }
@@ -3259,7 +3300,7 @@ const LowerCtx = struct {
                 while (d < self.stack.depth()) : (d += 1) {
                     if (self.stack.peekAtDepth(d)) |name| {
                         if (std.mem.eql(u8, name, then_top.?)) {
-                            try removeBranchValueAtDepth(self, d);
+                            try removeStalePropertyAtDepth(self, d);
                             break;
                         }
                     }
@@ -3496,25 +3537,43 @@ const generator_point_g = [33]u8{
 // ============================================================================
 
 /// Lower an ANF program to Stack IR.
+///
+/// Each public method is lowered into its own StackMethod. The multi-method
+/// dispatch table is added at emit time (in emit.zig), matching the TS
+/// reference compiler's pipeline. This keeps the dispatch-table opcodes
+/// outside the peephole optimization window so that `OP_DUP, OP_0,
+/// OP_NUMEQUAL, OP_IF, OP_DROP` dispatch entries are not folded into
+/// `OP_DUP, OP_NOT, OP_IF, OP_DROP` (which is semantically equivalent
+/// but byte-divergent from the canonical TS output).
 pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgram {
-    const public_methods = countPublicMethods(program.methods);
-    const needs_dispatch = public_methods > 1;
-
     var methods = std.ArrayListUnmanaged(types.StackMethod).empty;
     defer methods.deinit(allocator);
     var owned_push_data = std.ArrayListUnmanaged([]u8).empty;
     defer owned_push_data.deinit(allocator);
 
-    if (needs_dispatch) {
+    for (program.methods) |method| {
+        if (!method.is_public) continue;
+
         var ctx = LowerCtx.init(allocator, program);
         defer ctx.deinit();
 
-        try emitDispatchTable(&ctx, program);
+        try setupMethodStack(&ctx, program, method);
+        ctx.copy_ref_aliases = false;
+
+        // Use body or bindings (whichever is populated)
+        const bindings = if (method.body.len > 0) method.body else method.bindings;
+        try ctx.lowerBindings(bindings, method.is_public);
+        if (method.is_public and methodUsesDeserializeState(bindings)) {
+            try ctx.cleanupExcessStack();
+        }
+        if (!method.is_public or !endsWithAssert(bindings)) {
+            try ctx.emitOp(.op_1);
+        }
 
         const instructions = try allocator.dupe(types.StackInstruction, ctx.instructions.items);
         const src_locs = try allocator.dupe(?types.SourceLocation, ctx.instruction_source_locs.items);
         try methods.append(allocator, .{
-            .name = "__dispatch",
+            .name = method.name,
             .instructions = instructions,
             .max_stack_depth = ctx.max_depth,
             .instruction_source_locs = src_locs,
@@ -3522,38 +3581,6 @@ pub fn lower(allocator: Allocator, program: types.ANFProgram) !types.StackProgra
         try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
         ctx.owned_push_data.deinit(allocator);
         ctx.owned_push_data = .empty;
-    } else {
-        for (program.methods) |method| {
-            if (!method.is_public) continue;
-
-            var ctx = LowerCtx.init(allocator, program);
-            defer ctx.deinit();
-
-            try setupMethodStack(&ctx, program, method);
-            ctx.copy_ref_aliases = false;
-
-            // Use body or bindings (whichever is populated)
-            const bindings = if (method.body.len > 0) method.body else method.bindings;
-            try ctx.lowerBindings(bindings, method.is_public);
-            if (method.is_public and methodUsesDeserializeState(bindings)) {
-                try ctx.cleanupExcessStack();
-            }
-            if (!method.is_public or !endsWithAssert(bindings)) {
-                try ctx.emitOp(.op_1);
-            }
-
-            const instructions = try allocator.dupe(types.StackInstruction, ctx.instructions.items);
-            const src_locs = try allocator.dupe(?types.SourceLocation, ctx.instruction_source_locs.items);
-            try methods.append(allocator, .{
-                .name = method.name,
-                .instructions = instructions,
-                .max_stack_depth = ctx.max_depth,
-                .instruction_source_locs = src_locs,
-            });
-            try owned_push_data.appendSlice(allocator, ctx.owned_push_data.items);
-            ctx.owned_push_data.deinit(allocator);
-            ctx.owned_push_data = .empty;
-        }
     }
 
     return .{
@@ -4466,7 +4493,7 @@ test "lower for loop unrolling" {
     try std.testing.expect(push_count >= 6);
 }
 
-test "lower multi-method dispatch" {
+test "lower multi-method produces one StackMethod per public method" {
     const allocator = std.testing.allocator;
 
     const bindings1 = [_]types.ANFBinding{
@@ -4496,22 +4523,12 @@ test "lower multi-method dispatch" {
         allocator.free(result.methods);
     }
 
-    try std.testing.expectEqual(@as(usize, 1), result.methods.len);
-    try std.testing.expectEqualStrings("__dispatch", result.methods[0].name);
-
-    var found_numequal = false;
-    var found_numequalverify = false;
-    for (result.methods[0].instructions) |inst| {
-        switch (inst) {
-            .op => |op| {
-                if (op == .op_numequal) found_numequal = true;
-                if (op == .op_numequalverify) found_numequalverify = true;
-            },
-            else => {},
-        }
-    }
-    try std.testing.expect(found_numequal);
-    try std.testing.expect(found_numequalverify);
+    // Dispatch wrapping is added at emit time, so stack_lower produces one
+    // StackMethod per public method. The dispatch table opcodes (OP_DUP,
+    // OP_NUMEQUAL, OP_IF, OP_ELSE, OP_ENDIF, OP_NUMEQUALVERIFY) live in emit.zig.
+    try std.testing.expectEqual(@as(usize, 2), result.methods.len);
+    try std.testing.expectEqualStrings("methodA", result.methods[0].name);
+    try std.testing.expectEqualStrings("methodB", result.methods[1].name);
 }
 
 test "lower ecOnCurve preserves field prime pushdata" {

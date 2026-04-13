@@ -236,6 +236,15 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
     // Rule 17: PUSH(0) + ROLL -> (removed, roll 0 = no-op)
     if (isPushInt(a, 0) and isOp(b, .op_roll)) return .{ null, null };
 
+    // NOTE: PUSH(1) + ROLL -> SWAP and PUSH(2) + ROLL -> ROT are intentionally
+    // NOT folded as 2-window peephole rules. The TS reference compiler
+    // distinguishes typed `RollOp` (which carries a depth field and IS folded
+    // by peephole) from untyped post-if reconciliation rolls (`push d +
+    // roll(depth=d+1) + drop`, which are NOT folded). The Zig instruction
+    // stream collapses both into `op_roll`, so we cannot tell them apart at
+    // the peephole level. To preserve byte-equivalence with the canonical TS
+    // output, we leave these rolls unfolded.
+
     // Rule 20: PUSH(0) + PICK -> DUP
     if (isPushInt(a, 0) and isOp(b, .op_pick)) return .{ Inst{ .op = .op_dup }, null };
 
@@ -244,6 +253,11 @@ fn tryWindow2(w: *const [2]Inst) ?Replacement2 {
 
     // Rule 22: OP_SHA256 + OP_SHA256 -> OP_HASH256
     if (isOp(a, .op_sha256) and isOp(b, .op_sha256)) return .{ Inst{ .op = .op_hash256 }, null };
+
+    // Rule 23: PUSH(0) + OP_NUMEQUAL -> OP_NOT
+    // Mirrors the TS reference compiler's peephole rule
+    // (packages/runar-compiler/src/optimizer/peephole.ts).
+    if (isPushInt(a, 0) and isOp(b, .op_numequal)) return .{ Inst{ .op = .op_not }, null };
 
     return null;
 }
