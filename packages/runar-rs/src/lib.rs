@@ -52,5 +52,13 @@ pub fn compile_check(source: &str, file_name: &str) -> Result<(), String> {
         return Err(format!("type check errors: {}", tc.error_strings().join("; ")));
     }
 
+    // Pass 3b: expand fixed arrays (also runs in compile pipeline).
+    let expand =
+        runar_compiler_rust::frontend::expand_fixed_arrays::expand_fixed_arrays(&contract);
+    if !expand.errors.is_empty() {
+        let msgs: Vec<String> = expand.errors.iter().map(|e| e.format_message()).collect();
+        return Err(format!("expand-fixed-arrays errors: {}", msgs.join("; ")));
+    }
+
     Ok(())
 }

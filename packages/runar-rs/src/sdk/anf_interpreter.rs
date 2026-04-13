@@ -89,6 +89,10 @@ impl Val {
             SdkValue::Bool(b) => Val::Bool(*b),
             SdkValue::Bytes(s) => Val::Bytes(s.clone()),
             SdkValue::Auto => Val::Undefined,
+            // Array values must be flattened into scalar slots by the
+            // caller before reaching the ANF interpreter. Treat any
+            // leaked Array as Undefined so downstream code fails loudly.
+            SdkValue::Array(_) => Val::Undefined,
         }
     }
 

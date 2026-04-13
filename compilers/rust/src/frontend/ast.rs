@@ -104,6 +104,15 @@ pub struct ContractNode {
     pub source_file: String,
 }
 
+/// One level of the synthetic-array chain attached to expanded leaf
+/// properties. Mirrors the TS `__syntheticArrayChain` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntheticArrayLevel {
+    pub base: String,
+    pub index: usize,
+    pub length: usize,
+}
+
 /// A contract property declaration.
 #[derive(Debug, Clone)]
 pub struct PropertyNode {
@@ -112,6 +121,11 @@ pub struct PropertyNode {
     pub readonly: bool,
     pub initializer: Option<Expression>,
     pub source_location: SourceLocation,
+    /// Non-empty for synthetic scalar leaves produced by the
+    /// expand-fixed-arrays pass. Outermost level first. Used by the
+    /// assembler to re-group these back into a single (possibly nested)
+    /// FixedArray ABI/state entry.
+    pub synthetic_array_chain: Option<Vec<SyntheticArrayLevel>>,
 }
 
 /// A method (constructor or named method).

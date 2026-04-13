@@ -180,6 +180,15 @@ fn validate_constructor(contract: &ContractNode, errors: &mut Vec<Diagnostic>) {
                 ), Some(ctor.source_location.clone())));
             }
         }
+        if matches!(param.param_type, TypeNode::FixedArray { .. }) {
+            errors.push(Diagnostic::error(
+                format!(
+                    "Constructor parameter '{}' cannot be a FixedArray. Use initialized properties or pass each element as a separate parameter.",
+                    param.name
+                ),
+                Some(ctor.source_location.clone()),
+            ));
+        }
     }
 
     // Validate statements in constructor body
@@ -224,6 +233,15 @@ fn validate_method(method: &MethodNode, contract: &ContractNode, errors: &mut Ve
                     param.name, method.name
                 ), Some(method.source_location.clone())));
             }
+        }
+        if matches!(param.param_type, TypeNode::FixedArray { .. }) {
+            errors.push(Diagnostic::error(
+                format!(
+                    "Parameter '{}' in method '{}' cannot be a FixedArray. Arrays are only allowed as contract properties.",
+                    param.name, method.name
+                ),
+                Some(method.source_location.clone()),
+            ));
         }
     }
 
@@ -290,7 +308,16 @@ fn is_assert_call(expr: &Expression) -> bool {
 
 fn validate_statement(stmt: &Statement, errors: &mut Vec<Diagnostic>) {
     match stmt {
-        Statement::VariableDecl { init, .. } => {
+        Statement::VariableDecl { name, var_type, init, .. } => {
+            if let Some(TypeNode::FixedArray { .. }) = var_type {
+                errors.push(Diagnostic::error(
+                    format!(
+                        "Local variable '{}' cannot be a FixedArray. Arrays are only allowed as contract properties.",
+                        name
+                    ),
+                    None,
+                ));
+            }
             validate_expression(init, errors);
         }
         Statement::Assignment { target, value, .. } => {

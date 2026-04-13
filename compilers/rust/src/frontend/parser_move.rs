@@ -718,6 +718,7 @@ impl<'a> MoveParser<'a> {
             readonly,
             initializer,
             source_location: self.loc(),
+            synthetic_array_chain: None,
         }
     }
 

@@ -526,6 +526,7 @@ impl<'a> SolParser<'a> {
             readonly: is_immutable,
             initializer,
             source_location: self.loc(),
+            synthetic_array_chain: None,
         }
     }
 

@@ -267,8 +267,8 @@ mod tests {
                     AbiMethod {
                         name: "transfer".to_string(),
                         params: vec![
-                            AbiParam { name: "sig".to_string(), param_type: "Sig".to_string() },
-                            AbiParam { name: "to".to_string(), param_type: "Addr".to_string() },
+                            AbiParam { name: "sig".to_string(), param_type: "Sig".to_string(), fixed_array: None  },
+                            AbiParam { name: "to".to_string(), param_type: "Addr".to_string(), fixed_array: None  },
                         ],
                         is_public: true,
                         is_terminal: None,
@@ -276,9 +276,9 @@ mod tests {
                     AbiMethod {
                         name: "merge".to_string(),
                         params: vec![
-                            AbiParam { name: "sig".to_string(), param_type: "Sig".to_string() },
-                            AbiParam { name: "otherSupply".to_string(), param_type: "bigint".to_string() },
-                            AbiParam { name: "otherHolder".to_string(), param_type: "PubKey".to_string() },
+                            AbiParam { name: "sig".to_string(), param_type: "Sig".to_string(), fixed_array: None  },
+                            AbiParam { name: "otherSupply".to_string(), param_type: "bigint".to_string(), fixed_array: None  },
+                            AbiParam { name: "otherHolder".to_string(), param_type: "PubKey".to_string(), fixed_array: None  },
                         ],
                         is_public: true,
                         is_terminal: None,

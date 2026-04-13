@@ -335,6 +335,7 @@ impl RustDslParser {
                                     readonly,
                                     initializer: None,
                                     source_location: loc,
+                                    synthetic_array_chain: None,
                                 });
                             }
                         } else {
@@ -481,6 +482,25 @@ impl RustDslParser {
     }
 
     fn parse_rust_type(&mut self) -> TypeNode {
+        // Fixed-size array: `[T; N]` — maps to TypeNode::FixedArray.
+        if matches!(self.current().typ, TokenType::LBracket) {
+            self.advance_clone(); // consume [
+            let element = self.parse_rust_type();
+            // Expect `;`
+            self.match_tok(&TokenType::Semi);
+            // Length must be a numeric literal.
+            let length = if let TokenType::Number(val) = self.current().typ.clone() {
+                self.advance_clone();
+                val.parse::<usize>().unwrap_or(0)
+            } else {
+                0
+            };
+            self.match_tok(&TokenType::RBracket);
+            return TypeNode::FixedArray {
+                element: Box::new(element),
+                length,
+            };
+        }
         if let TokenType::Ident(name) = self.current().typ.clone() {
             self.advance_clone();
             let mapped = map_rust_type(&name);
@@ -646,13 +666,23 @@ impl RustDslParser {
             self.expect(&TokenType::RBrace);
             let else_branch = if matches!(self.current().typ, TokenType::Else) {
                 self.advance_clone();
-                self.expect(&TokenType::LBrace);
-                let mut eb = Vec::new();
-                while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
-                    if let Some(s) = self.parse_statement() { eb.push(s); }
+                // `else if <cond> { ... }` -> treat the `if` as a nested
+                // statement so else chains compose correctly.
+                if matches!(self.current().typ, TokenType::If) {
+                    if let Some(nested) = self.parse_statement() {
+                        Some(vec![nested])
+                    } else {
+                        Some(Vec::new())
+                    }
+                } else {
+                    self.expect(&TokenType::LBrace);
+                    let mut eb = Vec::new();
+                    while !matches!(self.current().typ, TokenType::RBrace | TokenType::Eof) {
+                        if let Some(s) = self.parse_statement() { eb.push(s); }
+                    }
+                    self.expect(&TokenType::RBrace);
+                    Some(eb)
                 }
-                self.expect(&TokenType::RBrace);
-                Some(eb)
             } else {
                 None
             };
@@ -775,6 +805,16 @@ impl RustDslParser {
                     return Expression::PropertyAccess { property: snake_to_camel(property) };
                 }
             }
+        }
+        // Recurse into `self.board[idx]` so the inner MemberExpr becomes a
+        // PropertyAccess. The expand-fixed-arrays pass matches on
+        // `PropertyAccess` inside `IndexAccess.object`.
+        if let Expression::IndexAccess { object, index } = expr {
+            let new_obj = self.convert_self_access(*object);
+            return Expression::IndexAccess {
+                object: Box::new(new_obj),
+                index,
+            };
         }
         expr
     }
@@ -913,6 +953,19 @@ impl RustDslParser {
                     if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                 }
                 self.expect(&TokenType::RParen);
+                // `.clone()` is a Rust borrow-checker artifact — in Rúnar,
+                // values are copied by default, so strip it and keep the
+                // receiver. Without this the IR emits a spurious
+                // method_call(clone) followed by a general-call fallback,
+                // which lowers to OP_DROP OP_0 padding.
+                if args.is_empty() {
+                    if let Expression::MemberExpr { object, property } = &expr {
+                        if property == "clone" {
+                            expr = (**object).clone();
+                            continue;
+                        }
+                    }
+                }
                 expr = Expression::CallExpr { callee: Box::new(expr), args };
             } else if matches!(self.current().typ, TokenType::Dot) {
                 self.advance_clone();
@@ -971,6 +1024,24 @@ impl RustDslParser {
                 let expr = self.parse_expression();
                 self.expect(&TokenType::RParen);
                 expr
+            }
+            TokenType::LBracket => {
+                // Array literal: `[e0, e1, ...]` — used for FixedArray
+                // property initializers in init(). Also supports nested
+                // array literals for nested FixedArrays.
+                self.advance_clone(); // consume [
+                let mut elements: Vec<Expression> = Vec::new();
+                while !matches!(self.current().typ, TokenType::RBracket | TokenType::Eof) {
+                    let e = self.parse_expression();
+                    elements.push(e);
+                    if matches!(self.current().typ, TokenType::Comma) {
+                        self.advance_clone();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenType::RBracket);
+                Expression::ArrayLiteral { elements }
             }
             TokenType::Ident(name) => {
                 self.advance_clone();

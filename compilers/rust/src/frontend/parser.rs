@@ -220,6 +220,7 @@ fn parse_properties(class: &Class, file: &str, errors: &mut Vec<Diagnostic>) -> 
                 readonly,
                 initializer,
                 source_location: default_loc(file),
+                synthetic_array_chain: None,
             });
         }
     }
@@ -941,6 +942,32 @@ fn parse_expression(expr: &Expr, file: &str, errors: &mut Vec<Diagnostic>) -> Ex
             errors.push(Diagnostic::error("Assignment expressions in expression context are not recommended", None));
             let value = parse_expression(&assign.right, file, errors);
             value
+        }
+
+        Expr::Array(arr) => {
+            // Array literal: `[e0, e1, ...]`. Used as a FixedArray property
+            // initializer. Sparse/spread elements are rejected.
+            let mut elements: Vec<Expression> = Vec::new();
+            for el in &arr.elems {
+                match el {
+                    Some(swc::ExprOrSpread { spread: None, expr }) => {
+                        elements.push(parse_expression(expr, file, errors));
+                    }
+                    Some(_) => {
+                        errors.push(Diagnostic::error(
+                            "Spread elements are not supported in array literals",
+                            None,
+                        ));
+                    }
+                    None => {
+                        errors.push(Diagnostic::error(
+                            "Sparse array literals are not supported",
+                            None,
+                        ));
+                    }
+                }
+            }
+            Expression::ArrayLiteral { elements }
         }
 
         _ => {
