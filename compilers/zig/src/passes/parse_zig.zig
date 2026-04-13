@@ -466,7 +466,30 @@ const Parser = struct {
         if (parsed_type.explicit_readonly) explicit_readonly_fields.append(self.allocator, name_tok.text) catch {};
         if (self.current.kind == .comma) { _ = self.bump(); } else if (self.current.kind == .semicolon) { _ = self.bump(); }
         const expr_val: ?Expression = if (initializer) |init_ptr| init_ptr.* else null;
-        return PropertyNode{ .name = name_tok.text, .type_info = typeNodeToRunarType(parsed_type.type_node), .readonly = false, .initializer = expr_val };
+
+        // Capture FixedArray shape (outer + optional nested length) so
+        // `expand_fixed_arrays.zig` can see the property after typecheck.
+        var fa_len: u32 = 0;
+        var fa_elem: RunarType = .unknown;
+        var fa_nested_len: u32 = 0;
+        if (parsed_type.type_node == .fixed_array_type) {
+            fa_len = parsed_type.type_node.fixed_array_type.length;
+            const inner = parsed_type.type_node.fixed_array_type.element.*;
+            fa_elem = typeNodeToRunarType(inner);
+            if (inner == .fixed_array_type) {
+                fa_nested_len = inner.fixed_array_type.length;
+            }
+        }
+
+        return PropertyNode{
+            .name = name_tok.text,
+            .type_info = typeNodeToRunarType(parsed_type.type_node),
+            .readonly = false,
+            .initializer = expr_val,
+            .fixed_array_length = fa_len,
+            .fixed_array_element = fa_elem,
+            .fixed_array_nested_length = fa_nested_len,
+        };
     }
 
     fn parseFieldTypeNode(self: *Parser) ParsedFieldType {
@@ -498,6 +521,26 @@ const Parser = struct {
     }
 
     fn parseTypeNode(self: *Parser) TypeNode {
+        // Zig-style fixed array: `[N]T` (recursive for `[M][N]T`). The
+        // `[_]T` unsized form is rejected — Rúnar requires a concrete
+        // length.
+        if (self.current.kind == .lbracket) {
+            _ = self.bump(); // '['
+            if (self.current.kind != .number) {
+                self.addError("FixedArray length must be a positive integer literal");
+                // Recover: eat until ']' to keep the parser afloat.
+                while (self.current.kind != .rbracket and self.current.kind != .eof) _ = self.bump();
+                if (self.current.kind == .rbracket) _ = self.bump();
+                return .{ .custom_type = "unknown" };
+            }
+            const size_tok = self.bump();
+            const size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
+            _ = self.expect(.rbracket);
+            const inner = self.parseTypeNode();
+            const inner_ptr = self.allocator.create(TypeNode) catch return .{ .custom_type = "unknown" };
+            inner_ptr.* = inner;
+            return .{ .fixed_array_type = .{ .element = inner_ptr, .length = size } };
+        }
         if (self.current.kind == .ident) {
             if (std.mem.eql(u8, self.current.text, "i64")) { _ = self.bump(); return .{ .primitive_type = .bigint }; }
             if (std.mem.eql(u8, self.current.text, "bool")) { _ = self.bump(); return .{ .primitive_type = .boolean }; }
@@ -1043,6 +1086,7 @@ const Parser = struct {
             } else if (self.current.kind == .lbracket) {
                 _ = self.bump();
                 const idx = self.parseExpression() orelse return null;
+                _ = self.expect(.rbracket);
                 const ia = self.allocator.create(IndexAccess) catch return null;
                 ia.* = .{ .object = expr, .index = idx };
                 expr = .{ .index_access = ia };
