@@ -7,6 +7,7 @@ Hand-written tokenizer + recursive descent parser for TypeScript-like syntax.
 from __future__ import annotations
 
 from runar_compiler.frontend.ast_nodes import (
+    ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
@@ -1310,7 +1311,7 @@ class _TsParser:
             if not self.match(TOK_COMMA):
                 break
         self.expect(TOK_RBRACKET)
-        return CallExpr(callee=Identifier(name="FixedArray"), args=elements)
+        return ArrayLiteralExpr(elements=elements)
 
 
 def _parse_number(s: str) -> Expression:
