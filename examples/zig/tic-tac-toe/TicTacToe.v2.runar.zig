@@ -169,27 +169,7 @@ pub const TicTacToe = struct {
 
     fn placeMove(self: *TicTacToe, position: i64) void {
         self.assertCellEmpty(position);
-        if (position == 0) {
-            self.board[0] = self.turn;
-        } else if (position == 1) {
-            self.board[1] = self.turn;
-        } else if (position == 2) {
-            self.board[2] = self.turn;
-        } else if (position == 3) {
-            self.board[3] = self.turn;
-        } else if (position == 4) {
-            self.board[4] = self.turn;
-        } else if (position == 5) {
-            self.board[5] = self.turn;
-        } else if (position == 6) {
-            self.board[6] = self.turn;
-        } else if (position == 7) {
-            self.board[7] = self.turn;
-        } else if (position == 8) {
-            self.board[8] = self.turn;
-        } else {
-            runar.assert(false);
-        }
+        self.board[position] = self.turn;
     }
 
     fn getCellOrOverride(self: *const TicTacToe, cellIndex: i64, overridePos: i64, overrideVal: i64) i64 {
@@ -234,15 +214,31 @@ pub const TicTacToe = struct {
         const c7 = self.getCellOrOverride(7, position, player);
         const c8 = self.getCellOrOverride(8, position, player);
 
-        return
-            (c0 == player and c1 == player and c2 == player) or
-            (c3 == player and c4 == player and c5 == player) or
-            (c6 == player and c7 == player and c8 == player) or
-            (c0 == player and c3 == player and c6 == player) or
-            (c1 == player and c4 == player and c7 == player) or
-            (c2 == player and c5 == player and c8 == player) or
-            (c0 == player and c4 == player and c8 == player) or
-            (c2 == player and c4 == player and c6 == player);
+        if (c0 == player and c1 == player and c2 == player) {
+            return true;
+        }
+        if (c3 == player and c4 == player and c5 == player) {
+            return true;
+        }
+        if (c6 == player and c7 == player and c8 == player) {
+            return true;
+        }
+        if (c0 == player and c3 == player and c6 == player) {
+            return true;
+        }
+        if (c1 == player and c4 == player and c7 == player) {
+            return true;
+        }
+        if (c2 == player and c5 == player and c8 == player) {
+            return true;
+        }
+        if (c0 == player and c4 == player and c8 == player) {
+            return true;
+        }
+        if (c2 == player and c4 == player and c6 == player) {
+            return true;
+        }
+        return false;
     }
 
     fn countOccupied(self: *const TicTacToe) i64 {

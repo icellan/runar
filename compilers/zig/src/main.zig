@@ -369,14 +369,20 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         .constructor_params = stack_program.constructor_params,
     };
 
-    // --hex: output hex script only
+    // --hex: output hex script only. Produces the full dispatch-table
+    // locking script (same bytes that appear in the artifact's "script"
+    // field), so downstream tools can compare byte-for-byte across
+    // compilers without parsing JSON.
     if (opts.hex_only) {
+        const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
+        const marker = "\"script\":\"";
+        const idx = std.mem.indexOf(u8, artifact, marker) orelse return error.MissingHex;
+        const after = idx + marker.len;
+        const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
+        const hex = artifact[after..end];
         const stdout = std.fs.File.stdout();
-        for (optimized_stack_program.methods) |method| {
-            const hex = try emit.emitMethodScript(work_allocator, method.instructions);
-            try stdout.writeAll(hex);
-            try stdout.writeAll("\n");
-        }
+        try stdout.writeAll(hex);
+        try stdout.writeAll("\n");
         return;
     }
 
