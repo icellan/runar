@@ -664,6 +664,20 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     const v2_hex = try compileTsToHex(alloc, v2_src, "TicTacToe.v2.runar.ts");
 
     try std.testing.expectEqualStrings(v1_hex, v2_hex);
+
+    // Byte-count lock-in: the canonical TS compiler produces 4951 bytes for
+    // both TicTacToe variants. Any divergence from this length indicates a
+    // regression in Zig's stack lowering or branch-reconciliation logic.
+    const expected_bytes: usize = 4951;
+    const actual_bytes = v1_hex.len / 2;
+    try std.testing.expectEqual(expected_bytes, actual_bytes);
+
+    // Fixture lock-in: the first 128 hex chars (64 bytes) of the canonical
+    // TS output. If Zig drifts at the method-dispatch prologue, this fires
+    // immediately instead of requiring a full cross-compiler conformance run.
+    const expected_prefix =
+        "76009c637576ab577a210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ad697601687f7782012c947f758258947f";
+    try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
 }
 
 test "e2e error: pipeline handles malformed contracts without crashing" {
