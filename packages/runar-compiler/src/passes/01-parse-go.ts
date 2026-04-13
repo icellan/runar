@@ -1074,9 +1074,48 @@ class GoParser extends ParserCore<GoToken> {
       return expr;
     }
 
-    // Array literal: [expr, expr, ...]
+    // Go composite literal for arrays: [N]Type{elements} or [N][M]Type{{...},{...}}
+    // Also accept plain `[expr, expr, ...]` form for compatibility with earlier
+    // Go example contracts that used TS-style bracket literal syntax.
     if (t.type === '[') {
-      this.advance();
+      // Look ahead to decide between Go composite literal (`[N]...{...}`)
+      // and the legacy bracket-list form (`[a, b, c]`).
+      const saved = this.pos;
+      this.advance(); // skip '['
+      const isCompositeDims: number[] = [];
+      // Collect all leading `[N]` dimensions.
+      if (this.current().type === 'number') {
+        const maybeLen = parseInt(this.current().value, 10);
+        // Peek one more token to see if it's ']'.
+        if (this.tokens[this.pos + 1]?.type === ']') {
+          // Composite path: consume `N]` plus any additional `[M]` dims.
+          this.advance(); // skip number
+          this.advance(); // skip ']'
+          isCompositeDims.push(maybeLen);
+          while (this.current().type === '[' && this.tokens[this.pos + 1]?.type === 'number' && this.tokens[this.pos + 2]?.type === ']') {
+            this.advance(); // '['
+            isCompositeDims.push(parseInt(this.advance().value, 10));
+            this.advance(); // ']'
+          }
+          // Consume the element type: `runar.Bigint`, `bool`, etc.
+          if (this.current().type === 'ident' && this.current().value === 'runar' && this.tokens[this.pos + 1]?.type === '.') {
+            this.advance(); // runar
+            this.advance(); // .
+            this.advance(); // type name
+          } else if (this.current().type === 'ident') {
+            this.advance();
+          }
+          // Now expect `{` — composite literal body.
+          if (this.current().type === '{') {
+            return this.parseGoBraceLiteral();
+          }
+          // Not a composite literal after all — roll back.
+          this.pos = saved;
+        }
+      }
+      if (this.pos === saved) {
+        this.advance(); // skip '['
+      }
       const elements: Expression[] = [];
       while (this.current().type !== ']' && this.current().type !== 'eof') {
         elements.push(this.parseExpression());
@@ -1084,6 +1123,11 @@ class GoParser extends ParserCore<GoToken> {
       }
       this.expect(']');
       return { kind: 'array_literal', elements };
+    }
+
+    // Nested composite literal body: `{elem, elem, ...}` or `{ {..}, {..} }`.
+    if (t.type === '{') {
+      return this.parseGoBraceLiteral();
     }
 
     // Identifier — handles runar.X, receiver.Field, plain idents
@@ -1120,6 +1164,25 @@ class GoParser extends ParserCore<GoToken> {
     // Fallback
     this.advance();
     return { kind: 'identifier', name: t.value };
+  }
+
+  /**
+   * Parse a Go composite literal body: `{elem, elem, ...}`. Each element may
+   * itself be a nested `{ ... }` for multi-dimensional arrays.
+   */
+  private parseGoBraceLiteral(): Expression {
+    this.expect('{');
+    const elements: Expression[] = [];
+    while (this.current().type !== '}' && this.current().type !== 'eof') {
+      if (this.current().type === '{') {
+        elements.push(this.parseGoBraceLiteral());
+      } else {
+        elements.push(this.parseExpression());
+      }
+      if (this.current().type === ',') this.advance();
+    }
+    this.expect('}');
+    return { kind: 'array_literal', elements };
   }
 }
 
