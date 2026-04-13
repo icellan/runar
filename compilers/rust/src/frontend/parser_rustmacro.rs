@@ -953,6 +953,19 @@ impl RustDslParser {
                     if matches!(self.current().typ, TokenType::Comma) { self.advance_clone(); }
                 }
                 self.expect(&TokenType::RParen);
+                // `.clone()` is a Rust borrow-checker artifact — in Rúnar,
+                // values are copied by default, so strip it and keep the
+                // receiver. Without this the IR emits a spurious
+                // method_call(clone) followed by a general-call fallback,
+                // which lowers to OP_DROP OP_0 padding.
+                if args.is_empty() {
+                    if let Expression::MemberExpr { object, property } = &expr {
+                        if property == "clone" {
+                            expr = (**object).clone();
+                            continue;
+                        }
+                    }
+                }
                 expr = Expression::CallExpr { callee: Box::new(expr), args };
             } else if matches!(self.current().typ, TokenType::Dot) {
                 self.advance_clone();
