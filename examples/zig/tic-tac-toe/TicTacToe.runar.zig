@@ -5,6 +5,8 @@ pub const TicTacToe = struct {
 
     playerX: runar.PubKey,
     betAmount: i64,
+    p2pkhPrefix: runar.Readonly(runar.ByteString) = runar.hexToBytes("1976a914"),
+    p2pkhSuffix: runar.Readonly(runar.ByteString) = runar.hexToBytes("88ac"),
     playerO: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
     c0: i64 = 0,
     c1: i64 = 0,
@@ -61,9 +63,10 @@ pub const TicTacToe = struct {
         self.assertCellEmpty(position);
         runar.assert(self.checkWinAfterMove(position, self.turn));
 
-        const payout = runar.buildChangeOutput(runar.hash160(player), self.betAmount * 2);
+        const totalPayout = self.betAmount * 2;
+        const payout = runar.cat(runar.cat(runar.num2bin(totalPayout, 8), self.p2pkhPrefix), runar.cat(runar.hash160(player), self.p2pkhSuffix));
         if (changeAmount > 0) {
-            const change = runar.buildChangeOutput(changePKH, changeAmount);
+            const change = runar.cat(runar.cat(runar.num2bin(changeAmount, 8), self.p2pkhPrefix), runar.cat(changePKH, self.p2pkhSuffix));
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(payout, change)), runar.extractOutputHash(ctx.txPreimage)));
         } else {
             runar.assert(runar.bytesEq(runar.hash256(payout), runar.extractOutputHash(ctx.txPreimage)));
@@ -86,10 +89,10 @@ pub const TicTacToe = struct {
         runar.assert(self.countOccupied() == 8);
         runar.assert(!self.checkWinAfterMove(position, self.turn));
 
-        const out1 = runar.buildChangeOutput(runar.hash160(self.playerX), self.betAmount);
-        const out2 = runar.buildChangeOutput(runar.hash160(self.playerO), self.betAmount);
+        const out1 = runar.cat(runar.cat(runar.num2bin(self.betAmount, 8), self.p2pkhPrefix), runar.cat(runar.hash160(self.playerX), self.p2pkhSuffix));
+        const out2 = runar.cat(runar.cat(runar.num2bin(self.betAmount, 8), self.p2pkhPrefix), runar.cat(runar.hash160(self.playerO), self.p2pkhSuffix));
         if (changeAmount > 0) {
-            const change = runar.buildChangeOutput(changePKH, changeAmount);
+            const change = runar.cat(runar.cat(runar.num2bin(changeAmount, 8), self.p2pkhPrefix), runar.cat(changePKH, self.p2pkhSuffix));
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(runar.cat(out1, out2), change)), runar.extractOutputHash(ctx.txPreimage)));
         } else {
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(out1, out2)), runar.extractOutputHash(ctx.txPreimage)));
@@ -106,9 +109,9 @@ pub const TicTacToe = struct {
         runar.assert(self.status == 0);
         runar.assert(runar.checkSig(sig, self.playerX));
 
-        const payout = runar.buildChangeOutput(runar.hash160(self.playerX), self.betAmount);
+        const payout = runar.cat(runar.cat(runar.num2bin(self.betAmount, 8), self.p2pkhPrefix), runar.cat(runar.hash160(self.playerX), self.p2pkhSuffix));
         if (changeAmount > 0) {
-            const change = runar.buildChangeOutput(changePKH, changeAmount);
+            const change = runar.cat(runar.cat(runar.num2bin(changeAmount, 8), self.p2pkhPrefix), runar.cat(changePKH, self.p2pkhSuffix));
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(payout, change)), runar.extractOutputHash(ctx.txPreimage)));
         } else {
             runar.assert(runar.bytesEq(runar.hash256(payout), runar.extractOutputHash(ctx.txPreimage)));
@@ -123,10 +126,10 @@ pub const TicTacToe = struct {
         changePKH: runar.ByteString,
         changeAmount: i64,
     ) void {
-        const out1 = runar.buildChangeOutput(runar.hash160(self.playerX), self.betAmount);
-        const out2 = runar.buildChangeOutput(runar.hash160(self.playerO), self.betAmount);
+        const out1 = runar.cat(runar.cat(runar.num2bin(self.betAmount, 8), self.p2pkhPrefix), runar.cat(runar.hash160(self.playerX), self.p2pkhSuffix));
+        const out2 = runar.cat(runar.cat(runar.num2bin(self.betAmount, 8), self.p2pkhPrefix), runar.cat(runar.hash160(self.playerO), self.p2pkhSuffix));
         if (changeAmount > 0) {
-            const change = runar.buildChangeOutput(changePKH, changeAmount);
+            const change = runar.cat(runar.cat(runar.num2bin(changeAmount, 8), self.p2pkhPrefix), runar.cat(changePKH, self.p2pkhSuffix));
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(runar.cat(out1, out2), change)), runar.extractOutputHash(ctx.txPreimage)));
         } else {
             runar.assert(runar.bytesEq(runar.hash256(runar.cat(out1, out2)), runar.extractOutputHash(ctx.txPreimage)));
@@ -225,25 +228,41 @@ pub const TicTacToe = struct {
     }
 
     fn checkWinAfterMove(self: *const TicTacToe, position: i64, player: i64) bool {
-        const c0 = self.getCellOrOverride(0, position, player);
-        const c1 = self.getCellOrOverride(1, position, player);
-        const c2 = self.getCellOrOverride(2, position, player);
-        const c3 = self.getCellOrOverride(3, position, player);
-        const c4 = self.getCellOrOverride(4, position, player);
-        const c5 = self.getCellOrOverride(5, position, player);
-        const c6 = self.getCellOrOverride(6, position, player);
-        const c7 = self.getCellOrOverride(7, position, player);
-        const c8 = self.getCellOrOverride(8, position, player);
+        const v0 = self.getCellOrOverride(0, position, player);
+        const v1 = self.getCellOrOverride(1, position, player);
+        const v2 = self.getCellOrOverride(2, position, player);
+        const v3 = self.getCellOrOverride(3, position, player);
+        const v4 = self.getCellOrOverride(4, position, player);
+        const v5 = self.getCellOrOverride(5, position, player);
+        const v6 = self.getCellOrOverride(6, position, player);
+        const v7 = self.getCellOrOverride(7, position, player);
+        const v8 = self.getCellOrOverride(8, position, player);
 
-        return
-            (c0 == player and c1 == player and c2 == player) or
-            (c3 == player and c4 == player and c5 == player) or
-            (c6 == player and c7 == player and c8 == player) or
-            (c0 == player and c3 == player and c6 == player) or
-            (c1 == player and c4 == player and c7 == player) or
-            (c2 == player and c5 == player and c8 == player) or
-            (c0 == player and c4 == player and c8 == player) or
-            (c2 == player and c4 == player and c6 == player);
+        if (v0 == player and v1 == player and v2 == player) {
+            return true;
+        }
+        if (v3 == player and v4 == player and v5 == player) {
+            return true;
+        }
+        if (v6 == player and v7 == player and v8 == player) {
+            return true;
+        }
+        if (v0 == player and v3 == player and v6 == player) {
+            return true;
+        }
+        if (v1 == player and v4 == player and v7 == player) {
+            return true;
+        }
+        if (v2 == player and v5 == player and v8 == player) {
+            return true;
+        }
+        if (v0 == player and v4 == player and v8 == player) {
+            return true;
+        }
+        if (v2 == player and v4 == player and v6 == player) {
+            return true;
+        }
+        return false;
     }
 
     fn countOccupied(self: *const TicTacToe) i64 {

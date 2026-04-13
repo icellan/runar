@@ -306,6 +306,25 @@ const Parser = struct {
             }
             return self.makeBinOp(.eq, args[0], args[1]);
         }
+        // runar.hexToBytes("deadbeef") -> literal_bytes "deadbeef" (compile-time hex decode).
+        // Mirrors the Python parser's bytes.fromhex(...) handling — produces a
+        // ByteString literal that downstream emit decodes as 4-byte hex, not
+        // an 8-byte ASCII string. Allows the Zig DSL source to also compile
+        // as a native Zig file, where runar.hexToBytes is a comptime helper
+        // returning `*const [N]u8` (which coerces to ByteString).
+        if (std.mem.eql(u8, member, "hexToBytes")) {
+            if (args.len != 1) {
+                self.addError("runar.hexToBytes expects exactly 1 argument");
+                return null;
+            }
+            switch (args[0]) {
+                .literal_bytes => |s| return Expression{ .literal_bytes = s },
+                else => {
+                    self.addError("runar.hexToBytes expects a string literal argument");
+                    return null;
+                },
+            }
+        }
         return self.makeCall(member, args);
     }
 
