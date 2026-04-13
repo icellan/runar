@@ -944,6 +944,56 @@ const Parser = struct {
 
     // ==== Property parsing ====
 
+    /// Type descriptor used during `prop` parsing. Captures either a scalar
+    /// Rúnar type or a (possibly nested) FixedArray shape.
+    const RbType = struct {
+        info: RunarType,
+        /// Outer length when `info == .fixed_array`. Zero otherwise.
+        length: u32 = 0,
+        /// Element type when `info == .fixed_array`. `.unknown` otherwise.
+        element: RunarType = .unknown,
+        /// Inner length when the element is itself a FixedArray. Zero otherwise.
+        nested_length: u32 = 0,
+    };
+
+    /// Parse a Ruby type, mirroring `parser_ruby.rb` / `parser_ruby.go` /
+    /// `parser_ruby.py`. Recognises `FixedArray[T, N]` (and the nested
+    /// `FixedArray[FixedArray[T, M], N]` form) so the rest of the pipeline
+    /// sees the length + element type.
+    fn parseRbType(self: *Parser) RbType {
+        if (!self.check(.ident)) {
+            self.addError("expected type name");
+            return .{ .info = .unknown };
+        }
+        const tok = self.bump();
+        const info = rbMapType(tok.text);
+
+        // FixedArray[ElemType, N]
+        if (std.mem.eql(u8, tok.text, "FixedArray") and self.check(.lbracket)) {
+            _ = self.bump(); // '['
+            const inner = self.parseRbType();
+            _ = self.expect(.comma);
+            var size: u32 = 0;
+            if (self.check(.number)) {
+                const size_tok = self.bump();
+                size = std.fmt.parseInt(u32, size_tok.text, 10) catch 0;
+            } else {
+                self.addError("FixedArray length must be a positive integer literal");
+            }
+            _ = self.expect(.rbracket);
+
+            const element_info = if (inner.info == .fixed_array) RunarType.fixed_array else inner.info;
+            return .{
+                .info = .fixed_array,
+                .length = size,
+                .element = element_info,
+                .nested_length = if (inner.info == .fixed_array) inner.length else 0,
+            };
+        }
+
+        return .{ .info = info };
+    }
+
     fn parseProp(self: *Parser, parent_class: ParentClass) ?PropertyNode {
         _ = self.bump(); // 'prop'
 
@@ -957,28 +1007,8 @@ const Parser = struct {
         const raw_name = self.bump().text; // symbol value (without colon)
         if (self.expect(.comma) == null) return null;
 
-        // Parse type
-        if (!self.check(.ident)) {
-            self.addError("expected type name after comma in prop");
-            return null;
-        }
-        const type_tok = self.bump();
-        var type_info = rbMapType(type_tok.text);
-
-        // Check for FixedArray[T, N]
-        if (std.mem.eql(u8, type_tok.text, "FixedArray") and self.check(.lbracket)) {
-            _ = self.bump(); // '['
-            // Element type
-            if (self.check(.ident)) {
-                const elem_tok = self.bump();
-                _ = rbMapType(elem_tok.text);
-            }
-            _ = self.match(.comma);
-            // Size
-            if (self.check(.number)) _ = self.bump();
-            _ = self.match(.rbracket);
-            type_info = .fixed_array;
-        }
+        // Parse type (supports FixedArray[T, N] and nested forms).
+        const rb_type = self.parseRbType();
 
         // Check for optional trailing options: readonly: true/false, default: <literal>
         var is_readonly = false;
@@ -1016,9 +1046,12 @@ const Parser = struct {
 
         return PropertyNode{
             .name = rbConvertName(self.allocator, raw_name),
-            .type_info = type_info,
+            .type_info = rb_type.info,
             .readonly = is_readonly,
             .initializer = initializer,
+            .fixed_array_length = rb_type.length,
+            .fixed_array_element = rb_type.element,
+            .fixed_array_nested_length = rb_type.nested_length,
         };
     }
 
@@ -1592,6 +1625,23 @@ const Parser = struct {
             },
             .identifier => |id| {
                 return .{ .assign = .{ .target = id, .value = value } };
+            },
+            .index_access => |ia| {
+                // @arr[idx] = value — carry the full index-access target on
+                // the Assign so `expand_fixed_arrays` can rewrite it into
+                // dispatch form. `target` stores the base property name (when
+                // the object is `this.<name>`) so downstream pretty-printing
+                // and debug output remain meaningful.
+                const base_name: []const u8 = switch (ia.object) {
+                    .property_access => |pa| pa.property,
+                    .identifier => |id| id,
+                    else => "unknown",
+                };
+                return .{ .assign = .{
+                    .target = base_name,
+                    .value = value,
+                    .index_target = ia,
+                } };
             },
             else => {
                 return .{ .assign = .{ .target = "unknown", .value = value } };
