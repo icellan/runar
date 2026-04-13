@@ -4,25 +4,160 @@ from __future__ import annotations
 from runar.sdk.types import RunarArtifact, StateField
 
 
+def _parse_fixed_array_dims(type_str: str) -> list[int]:
+    """Parse outer dimensions from a nested FixedArray type string.
+
+    ``"FixedArray<FixedArray<bigint, 2>, 3>"`` -> ``[3, 2]``.
+    Non-FixedArray types return ``[]``.
+    """
+    dims: list[int] = []
+    current = type_str.strip()
+    while current.startswith("FixedArray<"):
+        inner = current[len("FixedArray<"):-1]
+        depth = 0
+        split_at = -1
+        for i in range(len(inner) - 1, -1, -1):
+            ch = inner[i]
+            if ch == ">":
+                depth += 1
+            elif ch == "<":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                split_at = i
+                break
+        if split_at < 0:
+            return dims
+        elem_type = inner[:split_at].strip()
+        len_str = inner[split_at + 1:].strip()
+        try:
+            n = int(len_str)
+        except ValueError:
+            return dims
+        if n <= 0:
+            return dims
+        dims.append(n)
+        current = elem_type
+    return dims
+
+
+def _unwrap_fixed_array_leaf(type_str: str) -> str:
+    """Return the innermost scalar type of a nested FixedArray string."""
+    current = type_str.strip()
+    while current.startswith("FixedArray<"):
+        inner = current[len("FixedArray<"):-1]
+        depth = 0
+        split_at = -1
+        for i in range(len(inner) - 1, -1, -1):
+            ch = inner[i]
+            if ch == ">":
+                depth += 1
+            elif ch == "<":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                split_at = i
+                break
+        if split_at < 0:
+            return current
+        current = inner[:split_at].strip()
+    return current
+
+
+def _flatten_nested(value, dims: list[int]) -> list:
+    """Flatten a nested Python list of depth ``len(dims)`` to a flat leaf list."""
+    if not dims:
+        return [value]
+    if not isinstance(value, (list, tuple)):
+        total = 1
+        for d in dims:
+            total *= d
+        return [None] * total
+    rest = dims[1:]
+    out: list = []
+    for v in value:
+        out.extend(_flatten_nested(v, rest))
+    return out
+
+
+def _regroup_nested(flat: list, dims: list[int], offset: int = 0):
+    """Rebuild a nested list of depth ``len(dims)`` from ``flat``.
+
+    Returns ``(value, consumed)``.
+    """
+    if not dims:
+        return [], 0
+    outer_len = dims[0]
+    rest = dims[1:]
+    value: list = [None] * outer_len
+    consumed = 0
+    if not rest:
+        for i in range(outer_len):
+            value[i] = flat[offset + i]
+        consumed = outer_len
+    else:
+        for i in range(outer_len):
+            sub, sub_consumed = _regroup_nested(flat, rest, offset + consumed)
+            value[i] = sub
+            consumed += sub_consumed
+    return value, consumed
+
+
 def serialize_state(fields: list[StateField], values: dict) -> str:
-    """Encode state values into hex-encoded raw byte section (no push opcodes)."""
+    """Encode state values into hex-encoded raw byte section (no push opcodes).
+
+    Fields with a ``fixed_array`` annotation may be supplied either as a plain
+    Python list on the grouped name (``values['board'] = [0, 0, ...]``) or as
+    underlying scalar entries (``values['board__0'] = ...``). Scalars win if
+    both are present.
+    """
     sorted_fields = sorted(fields, key=lambda f: f.index)
     hex_str = ''
     for field in sorted_fields:
-        value = values.get(field.name)
-        hex_str += _encode_state_value(value, field.type)
+        fa = getattr(field, 'fixed_array', None)
+        if fa:
+            arr = values.get(field.name)
+            names = fa['syntheticNames']
+            leaf_type = _unwrap_fixed_array_leaf(field.type)
+            dims = _parse_fixed_array_dims(field.type)
+            flat_from_arr = _flatten_nested(arr, dims) if isinstance(arr, (list, tuple)) else None
+            for i, synth_name in enumerate(names):
+                if synth_name in values:
+                    elem = values[synth_name]
+                elif flat_from_arr is not None:
+                    elem = flat_from_arr[i]
+                else:
+                    elem = None
+                hex_str += _encode_state_value(elem, leaf_type)
+        else:
+            value = values.get(field.name)
+            hex_str += _encode_state_value(value, field.type)
     return hex_str
 
 
 def deserialize_state(fields: list[StateField], script_hex: str) -> dict:
-    """Decode state values from a hex-encoded raw byte section."""
+    """Decode state values from a hex-encoded raw byte section.
+
+    Fields with a ``fixed_array`` annotation are returned as a plain Python
+    list (possibly nested) on the grouped name, not as N individual scalars.
+    """
     sorted_fields = sorted(fields, key=lambda f: f.index)
-    result = {}
+    result: dict = {}
     offset = 0
     for field in sorted_fields:
-        value, bytes_read = _decode_state_value(script_hex, offset, field.type)
-        result[field.name] = value
-        offset += bytes_read
+        fa = getattr(field, 'fixed_array', None)
+        if fa:
+            leaf_type = _unwrap_fixed_array_leaf(field.type)
+            dims = _parse_fixed_array_dims(field.type)
+            total = len(fa['syntheticNames'])
+            flat: list = [None] * total
+            for i in range(total):
+                value, bytes_read = _decode_state_value(script_hex, offset, leaf_type)
+                flat[i] = value
+                offset += bytes_read
+            result[field.name], _ = _regroup_nested(flat, dims)
+        else:
+            value, bytes_read = _decode_state_value(script_hex, offset, field.type)
+            result[field.name] = value
+            offset += bytes_read
     return result
 
 

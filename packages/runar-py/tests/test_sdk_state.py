@@ -283,3 +283,105 @@ class TestEncodeStateValue:
         """bigint 0 → 8 zero bytes LE (row 369)."""
         result = _encode_state_value(0, 'bigint')
         assert result == '0000000000000000'
+
+
+# ---------------------------------------------------------------------------
+# FixedArray state serialization
+# ---------------------------------------------------------------------------
+
+class TestFixedArrayState:
+    def test_flat_fixed_array_roundtrip(self):
+        """A flat FixedArray state field round-trips as a Python list."""
+        fields = [
+            StateField(
+                name='board',
+                type='FixedArray<bigint, 3>',
+                index=0,
+                fixed_array={
+                    'elementType': 'bigint',
+                    'length': 3,
+                    'syntheticNames': ['board__0', 'board__1', 'board__2'],
+                },
+            )
+        ]
+        hex_out = serialize_state(fields, {'board': [1, 2, 3]})
+        # Should equal the concatenation of three 8-byte bigints
+        assert hex_out == (
+            _encode_state_value(1, 'bigint')
+            + _encode_state_value(2, 'bigint')
+            + _encode_state_value(3, 'bigint')
+        )
+        result = deserialize_state(fields, hex_out)
+        assert result == {'board': [1, 2, 3]}
+
+    def test_flat_fixed_array_scalar_override(self):
+        """Underlying scalar names take precedence over the grouped list."""
+        fields = [
+            StateField(
+                name='board',
+                type='FixedArray<bigint, 3>',
+                index=0,
+                fixed_array={
+                    'elementType': 'bigint',
+                    'length': 3,
+                    'syntheticNames': ['board__0', 'board__1', 'board__2'],
+                },
+            )
+        ]
+        hex_out = serialize_state(
+            fields, {'board': [10, 20, 30], 'board__1': 99}
+        )
+        expected = (
+            _encode_state_value(10, 'bigint')
+            + _encode_state_value(99, 'bigint')
+            + _encode_state_value(30, 'bigint')
+        )
+        assert hex_out == expected
+
+    def test_nested_fixed_array_roundtrip(self):
+        """A 2D FixedArray state field round-trips as a nested list."""
+        fields = [
+            StateField(
+                name='grid',
+                type='FixedArray<FixedArray<bigint, 2>, 2>',
+                index=0,
+                fixed_array={
+                    'elementType': 'FixedArray<bigint, 2>',
+                    'length': 2,
+                    'syntheticNames': [
+                        'grid__0__0', 'grid__0__1',
+                        'grid__1__0', 'grid__1__1',
+                    ],
+                },
+            )
+        ]
+        hex_out = serialize_state(fields, {'grid': [[1, 2], [3, 4]]})
+        result = deserialize_state(fields, hex_out)
+        assert result == {'grid': [[1, 2], [3, 4]]}
+
+    def test_nested_fixed_array_flat_underlying(self):
+        """Nested FixedArray can also be written via flat underlying names."""
+        fields = [
+            StateField(
+                name='grid',
+                type='FixedArray<FixedArray<bigint, 2>, 2>',
+                index=0,
+                fixed_array={
+                    'elementType': 'FixedArray<bigint, 2>',
+                    'length': 2,
+                    'syntheticNames': [
+                        'grid__0__0', 'grid__0__1',
+                        'grid__1__0', 'grid__1__1',
+                    ],
+                },
+            )
+        ]
+        hex_out = serialize_state(
+            fields,
+            {
+                'grid__0__0': 5, 'grid__0__1': 6,
+                'grid__1__0': 7, 'grid__1__1': 8,
+            },
+        )
+        result = deserialize_state(fields, hex_out)
+        assert result == {'grid': [[5, 6], [7, 8]]}

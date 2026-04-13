@@ -16,6 +16,7 @@ from runar.sdk.calling import build_call_transaction, insert_unlocking_script
 from runar.sdk.state import (
     serialize_state, extract_state_from_script, find_last_op_return,
     encode_push_data,
+    _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
 from runar.sdk.anf_interpreter import compute_new_state
@@ -52,9 +53,16 @@ class RunarContract:
                     # Property has a compile-time default value.
                     # Revive BigInt strings ("0n") that occur when artifacts
                     # are loaded via plain JSON import (without a reviver).
-                    self._state[field.name] = _revive_json_value(
-                        field.initial_value, field.type,
-                    )
+                    fa = getattr(field, 'fixed_array', None)
+                    if fa:
+                        leaf_type = _unwrap_fixed_array_leaf_type(field.type)
+                        self._state[field.name] = _deep_revive(
+                            field.initial_value, leaf_type,
+                        )
+                    else:
+                        self._state[field.name] = _revive_json_value(
+                            field.initial_value, field.type,
+                        )
                 else:
                     # Match by name to constructor params
                     param_idx = next(
@@ -437,11 +445,26 @@ class RunarContract:
                     self._state[k] = v
             elif method_needs_change and self.artifact.anf:
                 named_args = _build_named_args(user_params, resolved_args)
-                computed = compute_new_state(
-                    self.artifact.anf, method_name, self._state, named_args,
-                    self._constructor_args,
+                # Flatten FixedArray grouped state entries into their
+                # underlying synthetic scalar keys so the ANF interpreter
+                # (which only sees expanded scalars) can read them by name.
+                flat_state = _flatten_fixed_array_state(
+                    self._state, self.artifact.state_fields,
                 )
-                self._state.update(computed)
+                flat_ctor_args = _flatten_fixed_array_args(
+                    self._constructor_args,
+                    self.artifact.abi.constructor_params,
+                )
+                computed = compute_new_state(
+                    self.artifact.anf, method_name, flat_state, named_args,
+                    flat_ctor_args,
+                )
+                merged = {**flat_state, **computed}
+                # Re-group synthetic scalars back into array values.
+                regrouped = _regroup_fixed_array_state(
+                    merged, self.artifact.state_fields,
+                )
+                self._state = {**self._state, **regrouped}
             new_locking_script = self.get_locking_script()
 
         # Fetch fee rate and funding UTXOs for all contract types.
@@ -1162,6 +1185,111 @@ def _revive_json_value(value, field_type: str):
             return int(value[:-1])
         return int(value)
     return value
+
+
+def _unwrap_fixed_array_leaf_type(type_str: str) -> str:
+    """Return the innermost scalar type of a nested FixedArray string."""
+    current = type_str.strip()
+    while current.startswith("FixedArray<"):
+        inner = current[len("FixedArray<"):-1]
+        depth = 0
+        split_at = -1
+        for i in range(len(inner) - 1, -1, -1):
+            ch = inner[i]
+            if ch == ">":
+                depth += 1
+            elif ch == "<":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                split_at = i
+                break
+        if split_at < 0:
+            return current
+        current = inner[:split_at].strip()
+    return current
+
+
+def _deep_revive(value, leaf_type: str):
+    """Revive nested arrays of bigint strings to Python ints."""
+    if isinstance(value, list):
+        return [_deep_revive(v, leaf_type) for v in value]
+    return _revive_json_value(value, leaf_type)
+
+
+def _flatten_fixed_array_state(state: dict, state_fields: list) -> dict:
+    """Expand grouped FixedArray state into synthetic scalar leaves.
+
+    The ANF interpreter only knows the expanded scalar property names
+    (``board__0..board__8``). Callers keep the user-facing grouped form
+    (``board = [...]``) so we have to flatten on the way in.
+    """
+    out = dict(state)
+    if not state_fields:
+        return out
+    for field in state_fields:
+        fa = getattr(field, 'fixed_array', None)
+        if not fa:
+            continue
+        value = state.get(field.name)
+        if not isinstance(value, (list, tuple)):
+            continue
+        dims = _parse_fixed_array_dims(field.type)
+        flat = _flatten_nested(value, dims)
+        synthetic_names = fa['syntheticNames']
+        for i, synth in enumerate(synthetic_names):
+            if synth not in out:
+                out[synth] = flat[i]
+    return out
+
+
+def _regroup_fixed_array_state(state: dict, state_fields: list) -> dict:
+    """Rebuild grouped FixedArray entries from synthetic scalar leaves."""
+    out = dict(state)
+    if not state_fields:
+        return out
+    for field in state_fields:
+        fa = getattr(field, 'fixed_array', None)
+        if not fa:
+            continue
+        synthetic_names = fa['syntheticNames']
+        flat: list = [None] * len(synthetic_names)
+        saw_any = False
+        for i, synth in enumerate(synthetic_names):
+            if synth in out:
+                flat[i] = out[synth]
+                saw_any = True
+        if not saw_any:
+            continue
+        prior = state.get(field.name)
+        dims = _parse_fixed_array_dims(field.type)
+        if isinstance(prior, (list, tuple)):
+            prior_flat = _flatten_nested(prior, dims)
+            for i in range(len(flat)):
+                if flat[i] is None:
+                    flat[i] = prior_flat[i]
+        rebuilt, _ = _regroup_nested(flat, dims)
+        out[field.name] = rebuilt
+    return out
+
+
+def _flatten_fixed_array_args(args: list, abi_params: list) -> list:
+    """Expand grouped FixedArray constructor args to positional leaves."""
+    out: list = []
+    for i, value in enumerate(args):
+        param = abi_params[i] if i < len(abi_params) else None
+        if (
+            param is not None
+            and getattr(param, 'fixed_array', None)
+            and isinstance(value, (list, tuple))
+        ):
+            dims = _parse_fixed_array_dims(param.type)
+            if dims:
+                out.extend(_flatten_nested(value, dims))
+            else:
+                out.extend(list(value))
+        else:
+            out.append(value)
+    return out
 
 
 def _encode_arg(value) -> str:

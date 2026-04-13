@@ -7,6 +7,7 @@ Hand-written tokenizer with INDENT/DEDENT + recursive descent parser.
 from __future__ import annotations
 
 from runar_compiler.frontend.ast_nodes import (
+    ArrayLiteralExpr,
     ContractNode, PropertyNode, MethodNode, ParamNode, SourceLocation,
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
@@ -1359,7 +1360,7 @@ class _PyParser:
             if not self.match(TOK_COMMA):
                 break
         self.expect(TOK_RBRACKET)
-        return CallExpr(callee=Identifier(name="FixedArray"), args=elements)
+        return ArrayLiteralExpr(elements=elements)
 
     def _parse_call_args(self) -> list[Expression]:
         self.expect(TOK_LPAREN)

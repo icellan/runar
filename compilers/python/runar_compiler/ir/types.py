@@ -47,7 +47,10 @@ class ANFProperty:
     name: str = ""
     type: str = ""
     readonly: bool = False
-    initial_value: str | int | bool | None = None  # string | number | bool
+    initial_value: Any = None  # string | number | bool | list (nested for arrays)
+    # Flat list of {base, index, length} dicts, outermost first.
+    # Populated for synthetic scalar leaves minted by ``expand_fixed_arrays``.
+    synthetic_array_chain: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -297,6 +300,7 @@ def _anf_property_from_dict(d: dict[str, Any]) -> ANFProperty:
         type=d.get("type", ""),
         readonly=d.get("readonly", False),
         initial_value=d.get("initialValue"),
+        synthetic_array_chain=list(d.get("__syntheticArrayChain", [])),
     )
 
 

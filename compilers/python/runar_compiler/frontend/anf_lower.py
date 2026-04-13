@@ -11,6 +11,7 @@ names (``t0``, ``t1``, ...).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from runar_compiler.frontend.ast_nodes import (
     ArrayLiteralExpr,
@@ -64,6 +65,14 @@ def lower_to_anf(contract: ContractNode) -> ANFProgram:
     """
     properties = _lower_properties(contract)
     methods = _lower_methods(contract)
+
+    # Post-pass: lift update_prop from if-else branches into flat conditionals.
+    # Mirrors the TS reference compiler's liftBranchUpdateProps
+    # (04-anf-lower.ts) and the Go port (anf_lower.go). This prevents phantom
+    # stack entries in stack lowering for patterns like position dispatch,
+    # where different properties get updated in different branches.
+    for method in methods:
+        method.body = _lift_branch_update_props(method.body)
 
     return ANFProgram(
         contract_name=contract.name,
@@ -171,6 +180,14 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
         )
         if prop.initializer is not None:
             anf_prop.initial_value = _extract_literal_value(prop.initializer)
+        # Propagate synthetic FixedArray chain (set by expand_fixed_arrays)
+        # so the artifact assembler can iteratively re-group synthetic runs.
+        chain = getattr(prop, "synthetic_array_chain", None)
+        if chain:
+            anf_prop.synthetic_array_chain = [
+                {"base": c.base, "index": c.index, "length": c.length}
+                for c in chain
+            ]
         result.append(anf_prop)
     return result
 
@@ -1089,3 +1106,412 @@ def _type_node_to_string(node: TypeNode | None) -> str:
     if isinstance(node, CustomType):
         return node.name
     return "<unknown>"
+
+
+# ---------------------------------------------------------------------------
+# Post-ANF pass: lift update_prop from if-else branches
+# ---------------------------------------------------------------------------
+#
+# Mirrors the TypeScript reference compiler's ``liftBranchUpdateProps`` (see
+# packages/runar-compiler/src/passes/04-anf-lower.ts) and the Go port
+# (compilers/go/frontend/anf_lower.go).
+#
+# Transforms if-else chains where each branch ends with ``update_prop`` into
+# flat conditional assignments. This prevents phantom stack entries in stack
+# lowering for patterns like position dispatch where each branch updates a
+# different property.
+#
+# Before:
+#   if (pos === 0) { this.c0 = turn; }
+#   else if (pos === 1) { this.c1 = turn; }
+#   else { this.c4 = turn; }
+#
+# After:
+#   this.c0 = (pos === 0) ? turn : this.c0;
+#   this.c1 = (!cond0 && pos === 1) ? turn : this.c1;
+#   this.c4 = (!cond0 && !cond1) ? turn : this.c4;
+
+
+@dataclass
+class _UpdateBranch:
+    """A single branch of a flattened if-else update-prop chain."""
+
+    cond_setup_bindings: list[ANFBinding]
+    cond_ref: str | None  # None for the final else
+    prop_name: str
+    value_bindings: list[ANFBinding]
+    value_ref: str
+
+
+def _max_temp_index(bindings: list[ANFBinding]) -> int:
+    """Find the maximum temp index (e.g. t47 -> 47) in a binding tree."""
+    max_idx = -1
+    for b in bindings:
+        if b.name.startswith("t") and len(b.name) > 1 and b.name[1:].isdigit():
+            n = int(b.name[1:])
+            if n > max_idx:
+                max_idx = n
+        if b.value.kind == "if":
+            if b.value.then is not None:
+                t = _max_temp_index(b.value.then)
+                if t > max_idx:
+                    max_idx = t
+            if b.value.else_ is not None:
+                e = _max_temp_index(b.value.else_)
+                if e > max_idx:
+                    max_idx = e
+        elif b.value.kind == "loop":
+            if b.value.body is not None:
+                l = _max_temp_index(b.value.body)
+                if l > max_idx:
+                    max_idx = l
+    return max_idx
+
+
+def _is_side_effect_free(v: ANFValue) -> bool:
+    return v.kind in ("load_prop", "load_param", "load_const", "bin_op", "unary_op")
+
+
+def _all_bindings_side_effect_free(bindings: list[ANFBinding]) -> bool:
+    return all(_is_side_effect_free(b.value) for b in bindings)
+
+
+def _extract_branch_update(
+    bindings: list[ANFBinding],
+) -> tuple[str, list[ANFBinding], str] | None:
+    """If *bindings* ends with ``update_prop``, return (prop_name, value_bindings, value_ref)."""
+    if not bindings:
+        return None
+    last = bindings[-1]
+    if last.value.kind != "update_prop":
+        return None
+    value_bindings = bindings[:-1]
+    if not _all_bindings_side_effect_free(value_bindings):
+        return None
+    return last.value.name or "", value_bindings, last.value.value_ref or ""
+
+
+def _is_assert_false_else(bindings: list[ANFBinding]) -> bool:
+    """Check if an else branch is just ``assert(false)`` -- unreachable dead code."""
+    if not bindings:
+        return False
+    last = bindings[-1]
+    if last.value.kind != "assert":
+        return False
+    assert_ref = last.value.value_ref
+    for b in bindings:
+        if (
+            b.name == assert_ref
+            and b.value.kind == "load_const"
+            and b.value.const_bool is False
+        ):
+            return True
+    return False
+
+
+def _collect_update_branches(
+    if_cond: str,
+    then_bindings: list[ANFBinding],
+    else_bindings: list[ANFBinding],
+) -> list[_UpdateBranch] | None:
+    """Recursively collect branches from a nested if-else chain where every
+    branch ends with exactly one ``update_prop``."""
+    then_update = _extract_branch_update(then_bindings)
+    if then_update is None:
+        return None
+    prop_name, val_bindings, val_ref = then_update
+
+    branches: list[_UpdateBranch] = [
+        _UpdateBranch(
+            cond_setup_bindings=[],
+            cond_ref=if_cond,
+            prop_name=prop_name,
+            value_bindings=val_bindings,
+            value_ref=val_ref,
+        )
+    ]
+
+    if not else_bindings:
+        return None
+
+    # Check if else is another if (else-if chain)
+    last_else = else_bindings[-1]
+    if last_else.value.kind == "if":
+        cond_setup = else_bindings[:-1]
+        if not _all_bindings_side_effect_free(cond_setup):
+            return None
+
+        inner_branches = _collect_update_branches(
+            last_else.value.cond or "",
+            last_else.value.then or [],
+            last_else.value.else_ or [],
+        )
+        if inner_branches is None:
+            return None
+
+        # Prepend condition setup to first inner branch
+        inner_branches[0].cond_setup_bindings = (
+            list(cond_setup) + inner_branches[0].cond_setup_bindings
+        )
+        branches.extend(inner_branches)
+        return branches
+
+    # Otherwise, else branch should end with update_prop (final else)
+    else_update = _extract_branch_update(else_bindings)
+    if else_update is not None:
+        e_prop_name, e_val_bindings, e_val_ref = else_update
+        branches.append(
+            _UpdateBranch(
+                cond_setup_bindings=[],
+                cond_ref=None,
+                prop_name=e_prop_name,
+                value_bindings=e_val_bindings,
+                value_ref=e_val_ref,
+            )
+        )
+        return branches
+
+    # Handle unreachable else: assert(false) as the final else is dead code.
+    # Each preceding branch's condition fully guards its update; the else
+    # path never executes.
+    if _is_assert_false_else(else_bindings):
+        return branches
+
+    return None
+
+
+def _remap_value_refs(value: ANFValue, name_map: dict[str, str]) -> ANFValue:
+    """Return a copy of *value* with temp references remapped via *name_map*."""
+    def r(s: str | None) -> str | None:
+        if s is None:
+            return None
+        return name_map.get(s, s)
+
+    new_v = ANFValue(kind=value.kind)
+    new_v.name = value.name
+    new_v.raw_value = value.raw_value
+    new_v.const_string = value.const_string
+    new_v.const_big_int = value.const_big_int
+    new_v.const_bool = value.const_bool
+    new_v.const_int = value.const_int
+    new_v.op = value.op
+    new_v.left = r(value.left)
+    new_v.right = r(value.right)
+    new_v.result_type = value.result_type
+    new_v.operand = r(value.operand)
+    new_v.func = value.func
+    new_v.args = [r(a) or "" for a in value.args] if value.args is not None else None
+    new_v.object = r(value.object)
+    new_v.method = value.method
+    new_v.cond = r(value.cond)
+    new_v.then = value.then
+    new_v.else_ = value.else_
+    new_v.count = value.count
+    new_v.iter_var = value.iter_var
+    new_v.body = value.body
+    new_v.value_ref = r(value.value_ref)
+    new_v.preimage = r(value.preimage)
+    new_v.satoshis = r(value.satoshis)
+    new_v.state_values = (
+        [r(s) or "" for s in value.state_values] if value.state_values is not None else None
+    )
+    new_v.script_bytes = r(value.script_bytes)
+    new_v.elements = (
+        [r(e) or "" for e in value.elements] if value.elements is not None else None
+    )
+
+    # Special-case load_const "@ref:..." strings: also remap and refresh raw_value
+    if value.kind == "load_const" and value.const_string is not None:
+        s = value.const_string
+        if s.startswith("@ref:"):
+            target = s[5:]
+            mapped = name_map.get(target)
+            if mapped is not None:
+                new_ref = "@ref:" + mapped
+                new_v.const_string = new_ref
+                new_v.raw_value = json.dumps(new_ref)
+
+    # Refresh raw_value for kinds that store the value reference there
+    if value.kind in ("assert", "update_prop") and new_v.value_ref is not None:
+        new_v.raw_value = json.dumps(new_v.value_ref)
+
+    return new_v
+
+
+def _lift_branch_update_props(bindings: list[ANFBinding]) -> list[ANFBinding]:
+    """Transform if-bindings whose branches all end with ``update_prop`` into
+    flat conditional assignments."""
+    next_idx = _max_temp_index(bindings) + 1
+
+    def fresh() -> str:
+        nonlocal next_idx
+        name = f"t{next_idx}"
+        next_idx += 1
+        return name
+
+    result: list[ANFBinding] = []
+
+    for binding in bindings:
+        if binding.value.kind != "if":
+            # Recurse into nested if-bindings (loops etc. are not transformed)
+            result.append(binding)
+            continue
+
+        if_val = binding.value
+        branches = _collect_update_branches(
+            if_val.cond or "",
+            if_val.then or [],
+            if_val.else_ or [],
+        )
+
+        if branches is None or len(branches) < 2:
+            result.append(binding)
+            continue
+
+        # --- Transform: flatten into conditional assignments ---
+
+        # 1. Hoist condition setup bindings with fresh names
+        name_map: dict[str, str] = {}
+        cond_refs: list[str | None] = []
+
+        for branch in branches:
+            for csb in branch.cond_setup_bindings:
+                new_name = fresh()
+                name_map[csb.name] = new_name
+                result.append(ANFBinding(
+                    name=new_name,
+                    value=_remap_value_refs(csb.value, name_map),
+                ))
+            if branch.cond_ref is not None:
+                cond_refs.append(name_map.get(branch.cond_ref, branch.cond_ref))
+            else:
+                cond_refs.append(None)
+
+        # 2. Compute effective condition for each branch
+        #    Branch 0: cond0
+        #    Branch k>0: !cond0 && !cond1 && ... && !cond(k-1) && cond_k
+        #    Final else: !cond0 && !cond1 && ... && !cond(N-2)
+        effective_conds: list[str] = []
+        negated_conds: list[str] = []
+
+        for i in range(len(branches)):
+            if i == 0:
+                assert cond_refs[0] is not None
+                effective_conds.append(cond_refs[0])
+                continue
+
+            # Negate any prior conditions not yet negated
+            for j in range(len(negated_conds), i):
+                if cond_refs[j] is None:
+                    continue
+                neg_name = fresh()
+                result.append(ANFBinding(
+                    name=neg_name,
+                    value=ANFValue(
+                        kind="unary_op",
+                        op="!",
+                        operand=cond_refs[j],
+                    ),
+                ))
+                negated_conds.append(neg_name)
+
+            # AND all negated conditions together
+            and_ref = negated_conds[0]
+            limit = min(i, len(negated_conds))
+            for j in range(1, limit):
+                and_name = fresh()
+                result.append(ANFBinding(
+                    name=and_name,
+                    value=ANFValue(
+                        kind="bin_op",
+                        op="&&",
+                        left=and_ref,
+                        right=negated_conds[j],
+                    ),
+                ))
+                and_ref = and_name
+
+            if cond_refs[i] is not None:
+                # Middle branch: AND with own condition
+                final_name = fresh()
+                result.append(ANFBinding(
+                    name=final_name,
+                    value=ANFValue(
+                        kind="bin_op",
+                        op="&&",
+                        left=and_ref,
+                        right=cond_refs[i],
+                    ),
+                ))
+                effective_conds.append(final_name)
+            else:
+                # Final else: just the AND of negations
+                effective_conds.append(and_ref)
+
+        # 3. For each branch, emit: load_old, conditional if-expression, update_prop
+        for i, branch in enumerate(branches):
+            # Load old property value
+            old_prop_ref = fresh()
+            result.append(ANFBinding(
+                name=old_prop_ref,
+                value=ANFValue(kind="load_prop", name=branch.prop_name),
+            ))
+
+            # Remap value bindings for the then-branch
+            branch_map = dict(name_map)
+            then_bindings: list[ANFBinding] = []
+            for vb in branch.value_bindings:
+                new_name = fresh()
+                branch_map[vb.name] = new_name
+                then_bindings.append(ANFBinding(
+                    name=new_name,
+                    value=_remap_value_refs(vb.value, branch_map),
+                ))
+
+            # The branch's value_ref also needs remapping (it points into value_bindings)
+            mapped_value_ref = branch_map.get(branch.value_ref, branch.value_ref)
+
+            # Else branch: keep old property value
+            keep_name = fresh()
+            ref_str = "@ref:" + old_prop_ref
+            else_bindings: list[ANFBinding] = [
+                ANFBinding(
+                    name=keep_name,
+                    value=ANFValue(
+                        kind="load_const",
+                        raw_value=json.dumps(ref_str),
+                        const_string=ref_str,
+                    ),
+                ),
+            ]
+
+            # Emit conditional if-expression
+            # Note: mapped_value_ref is computed above for symmetry with TS/Go,
+            # but the standard ANF invariant is that the last binding in
+            # value_bindings produces the value the original update_prop
+            # referenced, so it is already the last binding in then_bindings.
+            _ = mapped_value_ref  # reserved for invariant checks in tests
+            cond_if_ref = fresh()
+            result.append(ANFBinding(
+                name=cond_if_ref,
+                value=ANFValue(
+                    kind="if",
+                    cond=effective_conds[i],
+                    then=then_bindings,
+                    else_=else_bindings,
+                ),
+            ))
+
+            # Emit update_prop pointing at the if-expression
+            update_name = fresh()
+            result.append(ANFBinding(
+                name=update_name,
+                value=ANFValue(
+                    kind="update_prop",
+                    name=branch.prop_name,
+                    raw_value=json.dumps(cond_if_ref),
+                    value_ref=cond_if_ref,
+                ),
+            ))
+
+    return result

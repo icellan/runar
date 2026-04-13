@@ -271,6 +271,20 @@ class ParamNode:
 
 
 @dataclass
+class SyntheticArrayChainEntry:
+    """One level of a FixedArray expansion chain.
+
+    Attached to synthetic scalar properties minted by ``expand_fixed_arrays``
+    so the artifact assembler can iteratively re-group them back into one
+    (possibly nested) FixedArray state field. Outermost level first.
+    """
+
+    base: str = ""
+    index: int = 0
+    length: int = 0
+
+
+@dataclass
 class PropertyNode:
     """A contract property declaration."""
 
@@ -279,6 +293,9 @@ class PropertyNode:
     readonly: bool = False
     initializer: Expression | None = None
     source_location: SourceLocation = field(default_factory=SourceLocation)
+    # Populated by ``expand_fixed_arrays`` on synthetic scalar leaves.
+    # Empty for user-declared non-FixedArray properties.
+    synthetic_array_chain: list[SyntheticArrayChainEntry] = field(default_factory=list)
 
 
 @dataclass
