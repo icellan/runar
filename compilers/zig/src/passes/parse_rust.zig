@@ -1350,6 +1350,12 @@ const Parser = struct {
                     // Method call: expr.method(args)
                     _ = self.bump();
                     const args = self.parseArgList();
+                    // `.clone()` is a Rust borrow-checker artifact — in Runar
+                    // values are copied by default, so strip it and keep the
+                    // receiver expression unchanged.
+                    if (args.len == 0 and std.mem.eql(u8, member, "clone")) {
+                        continue;
+                    }
                     switch (expr) {
                         .identifier => |id| {
                             if (std.mem.eql(u8, id, "self")) {

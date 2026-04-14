@@ -781,12 +781,32 @@ impl<'a> MoveParser<'a> {
         self.expect(&Token::RParen);
 
         // Optional return type
+        let mut has_return_type = false;
         if *self.peek() == Token::Colon {
             self.advance();
             let _ret_type = self.parse_type();
+            has_return_type = true;
         }
 
-        let body = self.parse_block();
+        let mut body = self.parse_block();
+
+        // Move allows an implicit return of the final expression when the
+        // function declares a return type. Convert the trailing expression
+        // statement into an explicit return statement so the type checker
+        // can infer the method's return type.
+        if has_return_type {
+            if let Some(last) = body.pop() {
+                match last {
+                    Statement::ExpressionStatement { expression, source_location } => {
+                        body.push(Statement::ReturnStatement {
+                            value: Some(expression),
+                            source_location,
+                        });
+                    }
+                    other => body.push(other),
+                }
+            }
+        }
 
         MethodNode {
             name,
@@ -843,7 +863,7 @@ impl<'a> MoveParser<'a> {
             }
         }
         self.expect(&Token::RBrace);
-        stmts
+        fold_move_while_as_for(stmts)
     }
 
     fn parse_statement(&mut self) -> Option<Statement> {
@@ -1512,6 +1532,19 @@ impl<'a> MoveParser<'a> {
                     }
                     self.expect(&Token::RParen);
 
+                    // Free helper functions in Move take `contract: &Self` as
+                    // the first argument. The parser drops `contract` from
+                    // parameter lists on the definition side, so strip a
+                    // matching `contract`/`self` identifier as the first
+                    // argument at call sites too.
+                    if let Expression::Identifier { .. } = &expr {
+                        if let Some(Expression::Identifier { name }) = args.first() {
+                            if name == "contract" || name == "self" {
+                                args.remove(0);
+                            }
+                        }
+                    }
+
                     expr = Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
@@ -1638,6 +1671,86 @@ fn build_constructor(properties: &[PropertyNode], file: &str) -> MethodNode {
             column: 0,
         },
     }
+}
+
+// ---------------------------------------------------------------------------
+// Pattern folding: `let i = K; while (i < N) { ...; i = i + S; }` → ForStatement
+// ---------------------------------------------------------------------------
+
+/// Fold the canonical Move bounded-loop pattern
+/// ```ignore
+/// let i: Int = K;
+/// while (i < N) { ...; i = i + S; }
+/// ```
+/// into a single ForStatement whose init/condition/update match TypeScript's
+/// native `for (let i = 0n; i < N; i++)`, so downstream ANF lowering produces
+/// identical bounded-loop IR across all formats.
+fn fold_move_while_as_for(stmts: Vec<Statement>) -> Vec<Statement> {
+    let mut out: Vec<Statement> = Vec::with_capacity(stmts.len());
+    let mut i = 0;
+    while i < stmts.len() {
+        if i + 1 < stmts.len() {
+            if let (Statement::VariableDecl { name: decl_name, var_type, init: decl_init, source_location: decl_loc, .. },
+                    Statement::ForStatement { init, condition, body, source_location: for_loc, .. }) =
+                (&stmts[i], &stmts[i + 1])
+            {
+                // The while→for stub uses `_w` as init name.
+                let is_while_stub = matches!(
+                    init.as_ref(),
+                    Statement::VariableDecl { name, .. } if name == "_w"
+                );
+                if is_while_stub {
+                    let iter_name = decl_name.clone();
+                    // Condition: iter_name <cmp> bound
+                    if let Expression::BinaryExpr { left, .. } = condition {
+                        if let Expression::Identifier { name: left_name } = left.as_ref() {
+                            if left_name == &iter_name && !body.is_empty() {
+                                // Last body stmt: iter_name = iter_name + K
+                                if let Statement::Assignment { target, value, .. } = &body[body.len() - 1] {
+                                    if let Expression::Identifier { name: tgt_name } = target {
+                                        if let Expression::BinaryExpr { op: BinaryOp::Add, left: bl, .. } = value {
+                                            if let Expression::Identifier { name: bl_name } = bl.as_ref() {
+                                                if tgt_name == &iter_name && bl_name == &iter_name {
+                                                    let trimmed: Vec<Statement> = body[..body.len() - 1].to_vec();
+                                                    let new_for = Statement::ForStatement {
+                                                        init: Box::new(Statement::VariableDecl {
+                                                            name: iter_name.clone(),
+                                                            var_type: var_type.clone(),
+                                                            mutable: true,
+                                                            init: decl_init.clone(),
+                                                            source_location: decl_loc.clone(),
+                                                        }),
+                                                        condition: condition.clone(),
+                                                        update: Box::new(Statement::ExpressionStatement {
+                                                            expression: Expression::IncrementExpr {
+                                                                operand: Box::new(Expression::Identifier {
+                                                                    name: iter_name.clone(),
+                                                                }),
+                                                                prefix: false,
+                                                            },
+                                                            source_location: for_loc.clone(),
+                                                        }),
+                                                        body: trimmed,
+                                                        source_location: for_loc.clone(),
+                                                    };
+                                                    out.push(new_for);
+                                                    i += 2;
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.push(stmts[i].clone());
+        i += 1;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------

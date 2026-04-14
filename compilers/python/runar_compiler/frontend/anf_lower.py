@@ -404,6 +404,16 @@ class _LowerCtx:
     def is_property(self, name: str) -> bool:
         return any(p.name == name for p in self._contract.properties)
 
+    def _is_private_method(self, name: str) -> bool:
+        """Whether ``name`` is a private (non-public) method on the contract.
+        Used to route bare-identifier calls through the method_call inlining
+        path so Move's free-function helpers match TypeScript's ``this.foo()``
+        lowering."""
+        for m in self._contract.methods:
+            if m.name == name and m.name != "constructor" and m.visibility != "public":
+                return True
+        return False
+
     def get_param_type(self, name: str) -> str | None:
         for p in self._contract.constructor.params:
             if p.name == name:
@@ -815,6 +825,18 @@ class _LowerCtx:
         # Direct function call: sha256(x), checkSig(sig, pk), etc.
         if isinstance(callee, Identifier):
             arg_refs = self._lower_args(e.args)
+            # Bare identifier calls that match a private method on the contract
+            # (e.g. Move's `require_owner(contract, sig)` which the parser
+            # strips to `requireOwner(sig)`) must be routed through the same
+            # inlining path as `this.requireOwner(sig)` so downstream stack
+            # lowering can inline the body. Keeps .runar.move in sync with
+            # .runar.ts across all formats.
+            if self._is_private_method(callee.name):
+                this_ref = self.emit(_make_load_const_string("@this"))
+                return self.emit(ANFValue(
+                    kind="method_call", object=this_ref,
+                    method=callee.name, args=arg_refs,
+                ))
             return self.emit(_make_call(callee.name, arg_refs))
 
         # General call

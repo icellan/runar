@@ -1035,23 +1035,70 @@ impl<'a> GoParser<'a> {
         let mut params = Vec::new();
 
         while !matches!(self.current().typ, TokenType::RParen | TokenType::Eof) {
-            // Could be `name runar.Type` or just `,`
+            // Could be `name runar.Type`, `name1, name2 runar.Type` or just `,`
             if matches!(self.current().typ, TokenType::Comma) {
                 self.advance();
                 continue;
             }
 
-            let name_raw = if let TokenType::Ident(n) = self.current().typ.clone() {
+            // Collect one or more grouped names sharing a single type.
+            // In Go: `(a, b, expected runar.Bigint)` means all three params
+            // have type `runar.Bigint`.
+            let mut param_names: Vec<String> = Vec::new();
+
+            let first = if let TokenType::Ident(n) = self.current().typ.clone() {
                 self.advance();
                 n
             } else {
                 break;
             };
+            param_names.push(first);
+
+            // While the next tokens look like another grouped name followed
+            // by either more names or a type, keep collecting.
+            // Pattern is: `, <ident>` where <ident> is NOT the start of the
+            // shared type (i.e. not followed by `.` for `runar.Type`, not
+            // followed by `[` for array types).
+            while matches!(self.current().typ, TokenType::Comma) {
+                // Peek the two tokens after the comma.
+                let next_typ = self.tokens.get(self.pos + 1).map(|t| t.typ.clone());
+                let after_next_typ = self.tokens.get(self.pos + 2).map(|t| t.typ.clone());
+
+                // Must have `, <ident>` to continue the group.
+                if !matches!(next_typ, Some(TokenType::Ident(_))) {
+                    break;
+                }
+
+                // If the ident is followed by `.` or `[`, it is the start of
+                // the shared type (e.g. `runar.Bigint`, `[N]T`) — stop so
+                // parse_type() can consume it as the type.
+                let ident_starts_type = matches!(
+                    after_next_typ,
+                    Some(TokenType::Dot) | Some(TokenType::LBracket)
+                );
+                if ident_starts_type {
+                    break;
+                }
+
+                // Otherwise, the ident is another grouped name. Consume the
+                // comma and the ident, then loop to check for more.
+                self.advance(); // `,`
+                if let TokenType::Ident(n) = self.current().typ.clone() {
+                    self.advance();
+                    param_names.push(n);
+                } else {
+                    break;
+                }
+            }
 
             let param_type = self.parse_type();
-            let param_name = go_to_camel(&name_raw);
-
-            params.push(ParamNode { name: param_name, param_type });
+            for raw in param_names {
+                let name = go_to_camel(&raw);
+                params.push(ParamNode {
+                    name,
+                    param_type: param_type.clone(),
+                });
+            }
 
             self.match_tok(&TokenType::Comma);
         }

@@ -1,6 +1,6 @@
 module MathDemo {
     resource struct MathDemo {
-        value: bigint,
+        value: &mut bigint,
     }
 
     public fun divide_by(contract: &mut MathDemo, divisor: bigint) {

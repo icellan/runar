@@ -11,7 +11,7 @@ contract OraclePriceFeed is SmartContract {
 
     function settle(bigint price, RabinSig rabinSig, ByteString padding, Sig sig) public {
         // Verify oracle signed this price
-        let ByteString msg = num2bin(price, 8);
+        ByteString msg = num2bin(price, 8);
         require(verifyRabinSig(msg, rabinSig, padding, this.oraclePubKey));
 
         // Price must be above threshold for payout

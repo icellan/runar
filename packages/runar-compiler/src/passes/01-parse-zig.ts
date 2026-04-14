@@ -395,8 +395,16 @@ class ZigParser extends ParserCore<ZigToken> {
     this.expect('}');
     if (this.current().type === ';') this.advance();
 
+    // Strip property initializers for properties that are also explicit
+    // constructor params: the constructor argument overrides any default,
+    // and the Zig compiler reference implementation omits `initialValue`
+    // in this case so every compiler must do the same to keep IR identical.
+    const ctorParamNames = new Set(
+      this.constructorNode?.params.map(p => p.name) ?? [],
+    );
     this.properties = this.properties.map((property) => ({
       ...property,
+      initializer: ctorParamNames.has(property.name) ? undefined : property.initializer,
       readonly: this.parentClass === 'SmartContract' || property.readonly || (this.parentClass === 'StatefulSmartContract' && !property.readonly && property.initializer === undefined && !this.methodsMutateProperty(property.name)),
     }));
 

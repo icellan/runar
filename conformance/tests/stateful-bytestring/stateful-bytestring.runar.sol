@@ -2,9 +2,9 @@ pragma runar ^0.1.0;
 
 contract MessageBoard is StatefulSmartContract {
     bytes message;
-    address immutable owner;
+    PubKey immutable owner;
 
-    constructor(bytes _message, address _owner) {
+    constructor(bytes _message, PubKey _owner) {
         message = _message;
         owner = _owner;
     }
@@ -14,7 +14,7 @@ contract MessageBoard is StatefulSmartContract {
         require(true);
     }
 
-    function burn(bytes sig) public {
+    function burn(Sig sig) public {
         require(checkSig(sig, owner));
     }
 }

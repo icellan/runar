@@ -27,10 +27,10 @@ module Auction {
     use runar::crypto::{check_sig, extract_locktime};
 
     resource struct Auction {
-        auctioneer: PubKey,         // Auction creator's public key. Immutable — baked into script.
-        highest_bidder: PubKey,     // Current highest bidder. Mutable state across transactions.
-        highest_bid: bigint,        // Current highest bid in satoshis. Mutable state.
-        deadline: bigint,           // Block height cutoff. Immutable.
+        auctioneer: PubKey,             // Auction creator's public key. Immutable — baked into script.
+        highest_bidder: &mut PubKey,    // Current highest bidder. Mutable state across transactions.
+        highest_bid: &mut bigint,       // Current highest bid in satoshis. Mutable state.
+        deadline: bigint,               // Block height cutoff. Immutable.
     }
 
     // Submit a new bid that outbids the current highest.

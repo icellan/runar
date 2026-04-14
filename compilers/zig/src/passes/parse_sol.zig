@@ -599,12 +599,17 @@ const Parser = struct {
             super_args.append(self.allocator, .{ .identifier = param.name }) catch {};
         }
 
-        // Extract assignments from body (name = _name patterns)
+        // Extract assignments from body (name = _name patterns).
+        // Constructor params are stored without the leading underscore, but the
+        // body may still reference `_name` — rewrite those references back to
+        // the stripped param name so the ANF lowerer treats them consistently
+        // with the other compilers (TS/Go/Rust/Python/Ruby).
         var assignments: std.ArrayListUnmanaged(AssignmentNode) = .empty;
         for (body) |stmt| {
             switch (stmt) {
                 .assign => |assign| {
-                    assignments.append(self.allocator, .{ .target = assign.target, .value = assign.value }) catch {};
+                    const renamed_value = self.solRenameUnderscoreIdents(assign.value, params);
+                    assignments.append(self.allocator, .{ .target = assign.target, .value = renamed_value }) catch {};
                 },
                 .expr_stmt => |expr| {
                     // Check if it's a call to assert/require (skip)
@@ -1060,6 +1065,58 @@ const Parser = struct {
         const bop = self.allocator.create(BinaryOp) catch return null;
         bop.* = .{ .op = op, .left = left, .right = right };
         return .{ .binary_op = bop };
+    }
+
+    /// Recursively rewrite identifiers `_name` -> `name` whenever `name` is the
+    /// stripped form of a constructor parameter. Used to clean constructor body
+    /// expressions so that the ANF lowerer doesn't see stale `_xxx` references.
+    fn solRenameUnderscoreIdents(self: *Parser, expr: Expression, params: []const ParamNode) Expression {
+        switch (expr) {
+            .identifier => |name| {
+                if (name.len > 1 and name[0] == '_') {
+                    const stripped = name[1..];
+                    for (params) |p| {
+                        if (std.mem.eql(u8, p.name, stripped)) {
+                            return .{ .identifier = stripped };
+                        }
+                    }
+                }
+                return expr;
+            },
+            .binary_op => |bop| {
+                bop.left = self.solRenameUnderscoreIdents(bop.left, params);
+                bop.right = self.solRenameUnderscoreIdents(bop.right, params);
+                return expr;
+            },
+            .unary_op => |uop| {
+                uop.operand = self.solRenameUnderscoreIdents(uop.operand, params);
+                return expr;
+            },
+            .call => |c| {
+                for (c.args, 0..) |arg, i| {
+                    c.args[i] = self.solRenameUnderscoreIdents(arg, params);
+                }
+                return expr;
+            },
+            .method_call => |mc| {
+                for (mc.args, 0..) |arg, i| {
+                    mc.args[i] = self.solRenameUnderscoreIdents(arg, params);
+                }
+                return expr;
+            },
+            .ternary => |t| {
+                t.condition = self.solRenameUnderscoreIdents(t.condition, params);
+                t.then_expr = self.solRenameUnderscoreIdents(t.then_expr, params);
+                t.else_expr = self.solRenameUnderscoreIdents(t.else_expr, params);
+                return expr;
+            },
+            .index_access => |ia| {
+                ia.object = self.solRenameUnderscoreIdents(ia.object, params);
+                ia.index = self.solRenameUnderscoreIdents(ia.index, params);
+                return expr;
+            },
+            else => return expr,
+        }
     }
 
     // ---- Expressions ----

@@ -58,10 +58,8 @@ impl CovenantVault {
         assert!(check_preimage(tx_preimage));
 
         // Construct expected P2PKH output and verify against hashOutputs
-        let script_prefix = cat("1976a914", &self.recipient);
-        let p2pkh_script = cat(&script_prefix, "88ac");
-        let amount_bytes = num2bin(&self.min_amount, 8);
-        let expected_output = cat(&amount_bytes, &p2pkh_script);
+        let p2pkh_script = cat(&cat("1976a914", &self.recipient), "88ac");
+        let expected_output = cat(&num2bin(&self.min_amount, 8), &p2pkh_script);
         assert!(hash256(&expected_output) == extract_output_hash(tx_preimage));
     }
 }

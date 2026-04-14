@@ -66,6 +66,7 @@ TOK_PERCENTEQ = 39
 TOK_QUESTION = 40
 TOK_LSHIFT = 41
 TOK_RSHIFT = 42
+TOK_HEXSTRING = 43
 
 
 class Token:
@@ -200,19 +201,21 @@ def _tokenize(source: str) -> list[Token]:
             tokens.append(Token(TOK_STRING, val, line, start_col))
             continue
 
-        # Numbers
+        # Numbers (and hex byte string literals: 0x... -> ByteString)
         if "0" <= ch <= "9":
-            start = i
             if ch == "0" and i + 1 < n and source[i + 1] in ("x", "X"):
                 i += 2
                 col += 2
+                hex_start = i
                 while i < n and _is_hex_digit(source[i]):
                     i += 1
                     col += 1
-            else:
-                while i < n and "0" <= source[i] <= "9":
-                    i += 1
-                    col += 1
+                tokens.append(Token(TOK_HEXSTRING, source[hex_start:i], line, start_col))
+                continue
+            start = i
+            while i < n and "0" <= source[i] <= "9":
+                i += 1
+                col += 1
             # Skip trailing 'n' for bigint literals (from TS syntax)
             if i < n and source[i] == "n":
                 i += 1
@@ -637,6 +640,11 @@ class _SolParser:
         if self.check_ident("return"):
             return self._parse_return(location)
 
+        # let Type name = expr; (TypeScript-style local declaration)
+        if self.check_ident("let"):
+            self.advance()  # consume 'let'
+            return self._parse_var_decl(location)
+
         # Variable declarations: Type name = expr;
         if self.peek().kind == TOK_IDENT and self._is_type_start():
             return self._parse_var_decl(location)
@@ -1005,6 +1013,10 @@ class _SolParser:
             self.advance()
             return _parse_sol_number(tok.value)
 
+        if tok.kind == TOK_HEXSTRING:
+            self.advance()
+            return ByteStringLiteral(value=tok.value)
+
         if tok.kind == TOK_STRING:
             self.advance()
             return ByteStringLiteral(value=tok.value)
@@ -1177,16 +1189,20 @@ def _rewrite_bare_props(
 def _rewrite_stmt_props(
     stmt: Statement, prop_names: set[str], param_names: set[str], method_names: set[str],
 ) -> Statement:
-    """Rewrite bare property references and method calls in a statement."""
+    """Rewrite bare property references and method calls in a statement.
+
+    Local variable declarations introduce shadow names that hide properties of
+    the same name for the remainder of the enclosing block. Callers should
+    invoke ``_rewrite_stmt_block`` when rewriting a list of statements so that
+    shadows propagate across statements.
+    """
     rw = lambda e: _rewrite_bare_props(e, prop_names, param_names, method_names)
-    rs = lambda s: _rewrite_stmt_props(s, prop_names, param_names, method_names)
     if isinstance(stmt, ExpressionStmt):
         return ExpressionStmt(expr=rw(stmt.expr), source_location=stmt.source_location)
     if isinstance(stmt, VariableDeclStmt):
-        new_params = param_names | {stmt.name}
         return VariableDeclStmt(
             name=stmt.name, type=stmt.type, mutable=stmt.mutable,
-            init=_rewrite_bare_props(stmt.init, prop_names, new_params, method_names) if stmt.init else None,
+            init=rw(stmt.init) if stmt.init else None,
             source_location=stmt.source_location,
         )
     if isinstance(stmt, AssignmentStmt):
@@ -1196,19 +1212,40 @@ def _rewrite_stmt_props(
     if isinstance(stmt, IfStmt):
         return IfStmt(
             condition=rw(stmt.condition),
-            then=[rs(s) for s in stmt.then],
-            else_=[rs(s) for s in stmt.else_] if stmt.else_ else [],
+            then=_rewrite_stmt_block(stmt.then, prop_names, set(param_names), method_names),
+            else_=_rewrite_stmt_block(stmt.else_, prop_names, set(param_names), method_names) if stmt.else_ else [],
             source_location=stmt.source_location,
         )
     if isinstance(stmt, ForStmt):
+        for_params = set(param_names)
+        new_init = None
+        if stmt.init is not None:
+            new_init = _rewrite_stmt_props(stmt.init, prop_names, for_params, method_names)
+            if isinstance(stmt.init, VariableDeclStmt):
+                for_params.add(stmt.init.name)
+        new_cond = _rewrite_bare_props(stmt.condition, prop_names, for_params, method_names) if stmt.condition else None
+        new_update = _rewrite_stmt_props(stmt.update, prop_names, for_params, method_names) if stmt.update else None
         return ForStmt(
-            init=rs(stmt.init) if stmt.init else None,
-            condition=rw(stmt.condition) if stmt.condition else None,
-            update=rs(stmt.update) if stmt.update else None,
-            body=[rs(s) for s in stmt.body],
+            init=new_init,
+            condition=new_cond,
+            update=new_update,
+            body=_rewrite_stmt_block(stmt.body, prop_names, set(for_params), method_names),
             source_location=stmt.source_location,
         )
     return stmt
+
+
+def _rewrite_stmt_block(
+    stmts: list[Statement], prop_names: set[str], param_names: set[str], method_names: set[str],
+) -> list[Statement]:
+    """Rewrite a block of statements, propagating local-variable shadows."""
+    result: list[Statement] = []
+    for s in stmts:
+        rewritten = _rewrite_stmt_props(s, prop_names, param_names, method_names)
+        result.append(rewritten)
+        if isinstance(s, VariableDeclStmt):
+            param_names.add(s.name)
+    return result
 
 
 def _rewrite_contract_props(contract: ContractNode) -> None:
@@ -1219,7 +1256,7 @@ def _rewrite_contract_props(contract: ContractNode) -> None:
         return
     for method in contract.methods:
         param_names = {p.name for p in method.params}
-        method.body[:] = [_rewrite_stmt_props(s, prop_names, param_names, method_names) for s in method.body]
+        method.body[:] = _rewrite_stmt_block(method.body, prop_names, param_names, method_names)
 
 
 def parse_sol(source: str, file_name: str) -> ParseResult:

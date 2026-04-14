@@ -15,10 +15,10 @@ pub const SimpleNFT = struct {
         };
     }
 
-    pub fn transfer(self: *SimpleNFT, ctx: runar.StatefulContext, sig: runar.Sig, newOwner: runar.PubKey, outputSatoshis: i64) void {
+    pub fn transfer(self: *SimpleNFT, sig: runar.Sig, newOwner: runar.PubKey, outputSatoshis: i64) void {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(outputSatoshis >= 1);
-        ctx.addOutput(outputSatoshis, .{ newOwner });
+        self.addOutput(outputSatoshis, newOwner);
     }
 
     pub fn burn(self: *const SimpleNFT, sig: runar.Sig) void {

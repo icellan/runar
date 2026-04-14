@@ -1,6 +1,6 @@
 module Counter {
     resource struct Counter {
-        count: bigint,
+        count: &mut bigint,
     }
 
     public fun increment(contract: &mut Counter) {

@@ -21,7 +21,7 @@ module Escrow {
     use runar::types::{PubKey, Sig};
     use runar::crypto::{check_sig};
 
-    resource struct Escrow {
+    struct Escrow {
         // Buyer's compressed public key (33 bytes).
         buyer: PubKey,
         // Seller's compressed public key (33 bytes).

@@ -677,17 +677,38 @@ module RunarCompiler
         expect(TOK_RPAREN)
 
         # Optional return type
+        has_return_type = false
         if check(TOK_COLON)
           advance
           parse_move_type
+          has_return_type = true
         end
 
         expect(TOK_LBRACE)
         body = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          # Skip stray semicolons (e.g. `};` after an if/while block).
+          if check(TOK_SEMICOLON)
+            advance
+            next
+          end
           body << parse_statement
         end
         expect(TOK_RBRACE)
+
+        body = fold_while_as_for(body)
+
+        # Move allows an implicit return of the final expression when the
+        # function declares a return type. Convert the trailing expression
+        # statement into an explicit return statement so the type checker
+        # can infer the method's return type.
+        if has_return_type && !body.empty? && body.last.is_a?(ExpressionStmt)
+          last = body.last
+          body[-1] = ReturnStmt.new(
+            value: last.expr,
+            source_location: last.source_location
+          )
+        end
 
         method = MethodNode.new(
           name: name,
@@ -772,6 +793,16 @@ module RunarCompiler
           return parse_if_statement(location)
         end
 
+        # while (cond) { ... }
+        if check_ident("while")
+          return parse_while_statement(location)
+        end
+
+        # loop { ... }
+        if check_ident("loop")
+          return parse_loop_statement(location)
+        end
+
         # return
         if check_ident("return")
           advance
@@ -839,6 +870,10 @@ module RunarCompiler
 
         then_block = []
         while !check(TOK_RBRACE) && !check(TOK_EOF)
+          if check(TOK_SEMICOLON)
+            advance
+            next
+          end
           then_block << parse_statement
         end
         expect(TOK_RBRACE)
@@ -848,6 +883,10 @@ module RunarCompiler
           advance
           expect(TOK_LBRACE)
           while !check(TOK_RBRACE) && !check(TOK_EOF)
+            if check(TOK_SEMICOLON)
+              advance
+              next
+            end
             else_block << parse_statement
           end
           expect(TOK_RBRACE)
@@ -857,6 +896,131 @@ module RunarCompiler
           condition: condition,
           then: then_block,
           else_: else_block,
+          source_location: location
+        )
+      end
+
+      def parse_while_statement(location)
+        expect_ident("while")
+        has_paren = match_tok(TOK_LPAREN)
+        condition = parse_expression
+        if has_paren
+          expect(TOK_RPAREN)
+        end
+        expect(TOK_LBRACE)
+        body = []
+        while !check(TOK_RBRACE) && !check(TOK_EOF)
+          if check(TOK_SEMICOLON)
+            advance
+            next
+          end
+          body << parse_statement
+        end
+        expect(TOK_RBRACE)
+        ForStmt.new(
+          init: VariableDeclStmt.new(
+            name: "_w",
+            type: nil,
+            mutable: true,
+            init: BigIntLiteral.new(value: 0),
+            source_location: location
+          ),
+          condition: condition,
+          update: ExpressionStmt.new(
+            expr: BigIntLiteral.new(value: 0),
+            source_location: location
+          ),
+          body: body,
+          source_location: location
+        )
+      end
+
+      # Fold the canonical Move bounded-loop pattern
+      #
+      #   let i: Int = K;
+      #   while (i < N) { ...; i = i + S; }
+      #
+      # into a single ForStmt whose init/condition/update match TypeScript's
+      # native `for (let i = 0n; i < N; i++)`, so downstream ANF lowering emits
+      # identical bounded-loop IR across all formats.
+      def fold_while_as_for(stmts)
+        out = []
+        i = 0
+        while i < stmts.length
+          s = stmts[i]
+          nxt = stmts[i + 1]
+          if s.is_a?(VariableDeclStmt) && nxt.is_a?(ForStmt) &&
+             nxt.init.is_a?(VariableDeclStmt) && nxt.init.name == "_w"
+            iter_name = s.name
+            cond = nxt.condition
+            matched = false
+            if cond.is_a?(BinaryExpr) && cond.left.is_a?(Identifier) && cond.left.name == iter_name
+              if !nxt.body.empty?
+                last = nxt.body.last
+                if last.is_a?(AssignmentStmt) &&
+                   last.target.is_a?(Identifier) && last.target.name == iter_name &&
+                   last.value.is_a?(BinaryExpr) && last.value.op == "+" &&
+                   last.value.left.is_a?(Identifier) && last.value.left.name == iter_name
+                  trimmed = nxt.body[0...-1]
+                  new_for = ForStmt.new(
+                    init: VariableDeclStmt.new(
+                      name: iter_name,
+                      type: s.type,
+                      mutable: true,
+                      init: s.init,
+                      source_location: s.source_location
+                    ),
+                    condition: cond,
+                    update: ExpressionStmt.new(
+                      expr: IncrementExpr.new(
+                        operand: Identifier.new(name: iter_name),
+                        prefix: false
+                      ),
+                      source_location: nxt.source_location
+                    ),
+                    body: trimmed,
+                    source_location: nxt.source_location
+                  )
+                  out << new_for
+                  i += 2
+                  matched = true
+                end
+              end
+            end
+            next if matched
+          end
+          out << s
+          i += 1
+        end
+        out
+      end
+
+      def parse_loop_statement(location)
+        expect_ident("loop")
+        expect(TOK_LBRACE)
+        body = []
+        while !check(TOK_RBRACE) && !check(TOK_EOF)
+          if check(TOK_SEMICOLON)
+            advance
+            next
+          end
+          body << parse_statement
+        end
+        expect(TOK_RBRACE)
+        ForStmt.new(
+          init: VariableDeclStmt.new(
+            name: "_l",
+            type: nil,
+            mutable: true,
+            init: BigIntLiteral.new(value: 0),
+            source_location: location
+          ),
+          condition: BoolLiteral.new(value: true),
+          update: ExpressionStmt.new(
+            expr: BigIntLiteral.new(value: 0),
+            source_location: location
+          ),
+          body: body,
           source_location: location
         )
       end
@@ -1003,6 +1167,14 @@ module RunarCompiler
               match_tok(TOK_COMMA)
             end
             expect(TOK_RPAREN)
+            # Free helper functions in Move take `contract: &Self` as the first
+            # argument. The parser drops `contract` from parameter lists on the
+            # definition side, so strip a matching `contract`/`self` identifier
+            # as the first argument at call sites too.
+            if expr.is_a?(Identifier) && !args.empty? && args.first.is_a?(Identifier) &&
+               (args.first.name == "contract" || args.first.name == "self")
+              args = args[1..]
+            end
             expr = CallExpr.new(callee: expr, args: args)
           elsif match_tok(TOK_DOT)
             prop = Frontend.move_snake_to_camel(expect(TOK_IDENT).value)

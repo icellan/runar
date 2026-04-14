@@ -637,15 +637,41 @@ module RunarCompiler
         expect(TOK_RBRACE)
         match_tok(TOK_SEMICOLON)
 
+        # Collect set of property names mutated in any method body so we can
+        # determine readonly flags in stateful contracts (matches TS rule).
+        mutated = Set.new
+        @methods.each do |m|
+          _collect_mutated_properties(m.body, mutated)
+        end
+
+        # Constructor param names (used to strip initializer overrides so the
+        # AST matches the Zig compiler reference which omits `initialValue`
+        # when the field is also an explicit constructor parameter).
+        ctor_param_names = Set.new
+        if @constructor_node
+          @constructor_node.params.each { |p| ctor_param_names.add(p.name) }
+        end
+
         # For SmartContract, all properties are readonly.
-        # For StatefulSmartContract, properties without initializers are readonly.
+        # For StatefulSmartContract: readonly iff explicitly marked OR has
+        # no initializer AND is not mutated in any method body.
         @properties = @properties.map do |prop|
-          readonly = @parent_class == "SmartContract" || prop.readonly || prop.initializer.nil?
+          had_initializer = !prop.initializer.nil?
+          stripped_initializer = ctor_param_names.include?(prop.name) ? nil : prop.initializer
+          readonly = if @parent_class == "SmartContract"
+                       true
+                     elsif prop.readonly
+                       true
+                     elsif !had_initializer && !mutated.include?(prop.name)
+                       true
+                     else
+                       false
+                     end
           PropertyNode.new(
             name: prop.name,
             type: prop.type,
             readonly: readonly,
-            initializer: prop.initializer,
+            initializer: stripped_initializer,
             source_location: prop.source_location
           )
         end
@@ -1720,6 +1746,70 @@ module RunarCompiler
           )
         else
           expr
+        end
+      end
+
+      # -- Mutation detection ---------------------------------------------
+      # Walks method bodies to find `self.<prop> = …` writes so we can
+      # correctly mark stateful contract fields as mutable.
+
+      def _collect_mutated_properties(body, out)
+        (body || []).each { |stmt| _collect_mutated_in_stmt(stmt, out) }
+      end
+
+      def _collect_mutated_in_stmt(stmt, out)
+        case stmt
+        when AssignmentStmt
+          if stmt.target.is_a?(PropertyAccessExpr)
+            out.add(stmt.target.property)
+          end
+          _collect_mutated_in_expr(stmt.target, out)
+          _collect_mutated_in_expr(stmt.value, out)
+        when VariableDeclStmt
+          _collect_mutated_in_expr(stmt.init, out)
+        when ExpressionStmt
+          _collect_mutated_in_expr(stmt.expr, out)
+        when ReturnStmt
+          _collect_mutated_in_expr(stmt.value, out)
+        when IfStmt
+          _collect_mutated_in_expr(stmt.condition, out)
+          _collect_mutated_properties(stmt.then, out)
+          _collect_mutated_properties(stmt.else_, out)
+        when ForStmt
+          _collect_mutated_in_expr(stmt.init&.init, out)
+          _collect_mutated_in_expr(stmt.condition, out)
+          _collect_mutated_in_stmt(stmt.update, out)
+          _collect_mutated_properties(stmt.body, out)
+        end
+      end
+
+      def _collect_mutated_in_expr(expr, out)
+        return if expr.nil?
+        case expr
+        when BinaryExpr
+          _collect_mutated_in_expr(expr.left, out)
+          _collect_mutated_in_expr(expr.right, out)
+        when UnaryExpr
+          _collect_mutated_in_expr(expr.operand, out)
+        when CallExpr
+          _collect_mutated_in_expr(expr.callee, out)
+          expr.args.each { |a| _collect_mutated_in_expr(a, out) }
+        when MemberExpr
+          _collect_mutated_in_expr(expr.object, out)
+        when TernaryExpr
+          _collect_mutated_in_expr(expr.condition, out)
+          _collect_mutated_in_expr(expr.consequent, out)
+          _collect_mutated_in_expr(expr.alternate, out)
+        when IndexAccessExpr
+          _collect_mutated_in_expr(expr.object, out)
+          _collect_mutated_in_expr(expr.index, out)
+        when IncrementExpr, DecrementExpr
+          if expr.operand.is_a?(PropertyAccessExpr)
+            out.add(expr.operand.property)
+          end
+          _collect_mutated_in_expr(expr.operand, out)
+        when ArrayLiteralExpr
+          expr.elements.each { |e| _collect_mutated_in_expr(e, out) }
         end
       end
     end

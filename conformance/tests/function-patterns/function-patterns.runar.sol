@@ -10,29 +10,29 @@ contract FunctionPatterns is StatefulSmartContract {
     }
 
     function deposit(Sig sig, bigint amount) public {
-        requireOwner(sig);
+        this.requireOwner(sig);
         require(amount > 0);
         balance = balance + amount;
     }
 
     function withdraw(Sig sig, bigint amount, bigint feeBps) public {
-        requireOwner(sig);
+        this.requireOwner(sig);
         require(amount > 0);
-        bigint fee = computeFee(amount, feeBps);
+        bigint fee = this.computeFee(amount, feeBps);
         bigint total = amount + fee;
         require(total <= balance);
         balance = balance - total;
     }
 
     function scale(Sig sig, bigint numerator, bigint denominator) public {
-        requireOwner(sig);
-        balance = scaleValue(balance, numerator, denominator);
+        this.requireOwner(sig);
+        balance = this.scaleValue(balance, numerator, denominator);
     }
 
     function normalize(Sig sig, bigint lo, bigint hi, bigint step) public {
-        requireOwner(sig);
-        bigint clamped = clampValue(balance, lo, hi);
-        balance = roundDown(clamped, step);
+        this.requireOwner(sig);
+        bigint clamped = this.clampValue(balance, lo, hi);
+        balance = this.roundDown(clamped, step);
     }
 
     function requireOwner(Sig sig) private {

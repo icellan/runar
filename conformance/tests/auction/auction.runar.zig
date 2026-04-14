@@ -22,16 +22,16 @@ pub const Auction = struct {
         };
     }
 
-    pub fn bid(self: *Auction, ctx: runar.StatefulContext, sig: runar.Sig, bidder: runar.PubKey, bidAmount: i64) void {
+    pub fn bid(self: *Auction, sig: runar.Sig, bidder: runar.PubKey, bidAmount: i64) void {
         runar.assert(runar.checkSig(sig, bidder));
         runar.assert(bidAmount > self.highestBid);
-        runar.assert(runar.extractLocktime(ctx.txPreimage) < self.deadline);
+        runar.assert(runar.extractLocktime(self.txPreimage) < self.deadline);
         self.highestBidder = bidder;
         self.highestBid = bidAmount;
     }
 
-    pub fn close(self: *const Auction, ctx: runar.StatefulContext, sig: runar.Sig) void {
+    pub fn close(self: *const Auction, sig: runar.Sig) void {
         runar.assert(runar.checkSig(sig, self.auctioneer));
-        runar.assert(runar.extractLocktime(ctx.txPreimage) >= self.deadline);
+        runar.assert(runar.extractLocktime(self.txPreimage) >= self.deadline);
     }
 };

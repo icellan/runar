@@ -7,6 +7,6 @@
     ".runar.rs": "../../../examples/rust/merkle-proof/MerkleProofDemo.runar.rs",
     ".runar.py": "../../../examples/python/merkle-proof/MerkleProofDemo.runar.py",
     ".runar.rb": "../../../examples/ruby/merkle-proof/MerkleProofDemo.runar.rb",
-    ".runar.zig": "../../../examples/zig/merkle-proof/MerkleProofDemo.runar.zig"
+    ".runar.zig": "MerkleProofDemo.runar.zig"
   }
 }

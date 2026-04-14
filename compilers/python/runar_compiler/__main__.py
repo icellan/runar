@@ -157,6 +157,9 @@ _SNAKE_TO_CAMEL = {
 _IR_EXCLUDED_FIELDS = frozenset({
     "const_string", "const_big_int", "const_bool", "const_int",
     "source_loc",  # debug-only, not part of conformance
+    # Python-only metadata used internally by expand_fixed_arrays.
+    # Other compilers don't emit this field in --emit-ir output.
+    "synthetic_array_chain",
 })
 
 

@@ -17,36 +17,36 @@ type BabyBearDemo struct {
 }
 
 // CheckAdd verifies field addition.
-func (c *BabyBearDemo) CheckAdd(a, b, expected runar.Bigint) {
+func (bb *BabyBearDemo) CheckAdd(a, b, expected runar.Bigint) {
 	runar.Assert(runar.BbFieldAdd(a, b) == expected)
 }
 
 // CheckSub verifies field subtraction.
-func (c *BabyBearDemo) CheckSub(a, b, expected runar.Bigint) {
+func (bb *BabyBearDemo) CheckSub(a, b, expected runar.Bigint) {
 	runar.Assert(runar.BbFieldSub(a, b) == expected)
 }
 
 // CheckMul verifies field multiplication.
-func (c *BabyBearDemo) CheckMul(a, b, expected runar.Bigint) {
+func (bb *BabyBearDemo) CheckMul(a, b, expected runar.Bigint) {
 	runar.Assert(runar.BbFieldMul(a, b) == expected)
 }
 
 // CheckInv verifies field inversion: a * inv(a) === 1.
-func (c *BabyBearDemo) CheckInv(a runar.Bigint) {
+func (bb *BabyBearDemo) CheckInv(a runar.Bigint) {
 	inv := runar.BbFieldInv(a)
 	runar.Assert(runar.BbFieldMul(a, inv) == 1)
 }
 
 // CheckAddSubRoundtrip verifies that (a + b) - b === a.
-func (c *BabyBearDemo) CheckAddSubRoundtrip(a, b runar.Bigint) {
+func (bb *BabyBearDemo) CheckAddSubRoundtrip(a, b runar.Bigint) {
 	sum := runar.BbFieldAdd(a, b)
 	result := runar.BbFieldSub(sum, b)
 	runar.Assert(result == a)
 }
 
 // CheckDistributive verifies the distributive law: a * (b + c) === a*b + a*c.
-func (c *BabyBearDemo) CheckDistributive(a, b, cc runar.Bigint) {
-	lhs := runar.BbFieldMul(a, runar.BbFieldAdd(b, cc))
-	rhs := runar.BbFieldAdd(runar.BbFieldMul(a, b), runar.BbFieldMul(a, cc))
+func (bb *BabyBearDemo) CheckDistributive(a, b, c runar.Bigint) {
+	lhs := runar.BbFieldMul(a, runar.BbFieldAdd(b, c))
+	rhs := runar.BbFieldAdd(runar.BbFieldMul(a, b), runar.BbFieldMul(a, c))
 	runar.Assert(lhs == rhs)
 }

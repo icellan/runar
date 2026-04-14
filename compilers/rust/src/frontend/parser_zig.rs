@@ -590,16 +590,39 @@ impl<'a> ZigParser<'a> {
         self.expect(&Token::RBrace); // }
         self.match_tok(&Token::Semicolon); // optional ;
 
-        // Post-process: set readonly for SmartContract properties and
-        // properties without initializers.
-        for prop in &mut properties {
-            if parent_class == "SmartContract" || prop.initializer.is_none() {
-                prop.readonly = true;
-            }
+        // Collect set of property names mutated in any method body so we can
+        // mark them as non-readonly in stateful contracts (matches TS rule).
+        let mut mutated: HashSet<String> = HashSet::new();
+        for m in &methods {
+            collect_mutated_properties(&m.body, &mut mutated);
         }
 
         // Auto-generate constructor if not provided
         let constructor = constructor.unwrap_or_else(|| build_constructor(&properties, self.file));
+
+        // Post-process:
+        // - SmartContract: all properties readonly.
+        // - StatefulSmartContract: readonly iff explicitly marked, OR has no
+        //   initializer AND is not mutated in any method body.
+        // - Strip `initializer` for properties that are also constructor
+        //   params (the constructor param overrides the default; the Zig
+        //   compiler reference omits `initialValue` in this case).
+        let ctor_param_names: HashSet<String> = constructor
+            .params
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        for prop in &mut properties {
+            let had_initializer = prop.initializer.is_some();
+            if ctor_param_names.contains(&prop.name) {
+                prop.initializer = None;
+            }
+            if parent_class == "SmartContract" {
+                prop.readonly = true;
+            } else if !prop.readonly && !had_initializer && !mutated.contains(&prop.name) {
+                prop.readonly = true;
+            }
+        }
 
         // Rewrite bare method calls to this.method() style
         let mut method_names: HashSet<String> =
@@ -2019,6 +2042,109 @@ fn rewrite_stmt(stmt: &mut Statement, method_names: &HashSet<String>) {
             rewrite_stmt(update.as_mut(), method_names);
             rewrite_bare_method_calls(body, method_names);
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mutation detection: walk method bodies to find `this.<prop> = …` writes.
+// ---------------------------------------------------------------------------
+
+fn collect_mutated_properties(body: &[Statement], out: &mut HashSet<String>) {
+    for stmt in body {
+        collect_mutated_in_stmt(stmt, out);
+    }
+}
+
+fn collect_mutated_in_stmt(stmt: &Statement, out: &mut HashSet<String>) {
+    match stmt {
+        Statement::Assignment { target, value, .. } => {
+            if let Expression::PropertyAccess { property } = target {
+                out.insert(property.clone());
+            }
+            collect_mutated_in_expr(target, out);
+            collect_mutated_in_expr(value, out);
+        }
+        Statement::VariableDecl { init, .. } => {
+            collect_mutated_in_expr(init, out);
+        }
+        Statement::ExpressionStatement { expression, .. } => {
+            collect_mutated_in_expr(expression, out);
+        }
+        Statement::ReturnStatement { value, .. } => {
+            if let Some(v) = value {
+                collect_mutated_in_expr(v, out);
+            }
+        }
+        Statement::IfStatement {
+            condition,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_mutated_in_expr(condition, out);
+            collect_mutated_properties(then_branch, out);
+            if let Some(els) = else_branch {
+                collect_mutated_properties(els, out);
+            }
+        }
+        Statement::ForStatement {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            collect_mutated_in_stmt(init, out);
+            collect_mutated_in_expr(condition, out);
+            collect_mutated_in_stmt(update, out);
+            collect_mutated_properties(body, out);
+        }
+    }
+}
+
+fn collect_mutated_in_expr(expr: &Expression, out: &mut HashSet<String>) {
+    match expr {
+        Expression::BinaryExpr { left, right, .. } => {
+            collect_mutated_in_expr(left, out);
+            collect_mutated_in_expr(right, out);
+        }
+        Expression::UnaryExpr { operand, .. } => {
+            collect_mutated_in_expr(operand, out);
+        }
+        Expression::CallExpr { callee, args } => {
+            collect_mutated_in_expr(callee, out);
+            for a in args {
+                collect_mutated_in_expr(a, out);
+            }
+        }
+        Expression::MemberExpr { object, .. } => {
+            collect_mutated_in_expr(object, out);
+        }
+        Expression::TernaryExpr {
+            condition,
+            consequent,
+            alternate,
+        } => {
+            collect_mutated_in_expr(condition, out);
+            collect_mutated_in_expr(consequent, out);
+            collect_mutated_in_expr(alternate, out);
+        }
+        Expression::IndexAccess { object, index } => {
+            collect_mutated_in_expr(object, out);
+            collect_mutated_in_expr(index, out);
+        }
+        Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
+            if let Expression::PropertyAccess { property } = operand.as_ref() {
+                out.insert(property.clone());
+            }
+            collect_mutated_in_expr(operand, out);
+        }
+        Expression::ArrayLiteral { elements } => {
+            for e in elements {
+                collect_mutated_in_expr(e, out);
+            }
+        }
+        _ => {}
     }
 }
 

@@ -19,7 +19,6 @@ pub const FungibleToken = struct {
 
     pub fn transfer(
         self: *FungibleToken,
-        ctx: runar.StatefulContext,
         sig: runar.Sig,
         to: runar.PubKey,
         amount: i64,
@@ -31,21 +30,20 @@ pub const FungibleToken = struct {
         runar.assert(amount > 0);
         runar.assert(amount <= totalBalance);
 
-        ctx.addOutput(outputSatoshis, .{ to, amount, 0 });
+        self.addOutput(outputSatoshis, to, amount, 0);
         if (amount < totalBalance) {
-            ctx.addOutput(outputSatoshis, .{ self.owner, totalBalance - amount, 0 });
+            self.addOutput(outputSatoshis, self.owner, totalBalance - amount, 0);
         }
     }
 
-    pub fn send(self: *FungibleToken, ctx: runar.StatefulContext, sig: runar.Sig, to: runar.PubKey, outputSatoshis: i64) void {
+    pub fn send(self: *FungibleToken, sig: runar.Sig, to: runar.PubKey, outputSatoshis: i64) void {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(outputSatoshis >= 1);
-        ctx.addOutput(outputSatoshis, .{ to, self.balance + self.mergeBalance, 0 });
+        self.addOutput(outputSatoshis, to, self.balance + self.mergeBalance, 0);
     }
 
     pub fn merge(
         self: *FungibleToken,
-        ctx: runar.StatefulContext,
         sig: runar.Sig,
         otherBalance: i64,
         allPrevouts: runar.ByteString,
@@ -54,16 +52,16 @@ pub const FungibleToken = struct {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(outputSatoshis >= 1);
         runar.assert(otherBalance >= 0);
-        runar.assert(runar.bytesEq(runar.hash256(allPrevouts), runar.extractHashPrevouts(ctx.txPreimage)));
+        runar.assert(runar.bytesEq(runar.hash256(allPrevouts), runar.extractHashPrevouts(self.txPreimage)));
 
-        const myOutpoint = runar.extractOutpoint(ctx.txPreimage);
+        const myOutpoint = runar.extractOutpoint(self.txPreimage);
         const firstOutpoint = runar.substr(allPrevouts, 0, 36);
         const myBalance = self.balance + self.mergeBalance;
 
         if (runar.bytesEq(myOutpoint, firstOutpoint)) {
-            ctx.addOutput(outputSatoshis, .{ self.owner, myBalance, otherBalance });
+            self.addOutput(outputSatoshis, self.owner, myBalance, otherBalance);
         } else {
-            ctx.addOutput(outputSatoshis, .{ self.owner, otherBalance, myBalance });
+            self.addOutput(outputSatoshis, self.owner, otherBalance, myBalance);
         }
     }
 };

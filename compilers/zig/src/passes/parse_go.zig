@@ -488,6 +488,21 @@ fn mapGoBuiltin(name: []const u8) []const u8 {
     return map.get(name) orelse name;
 }
 
+/// Map a Go builtin name, falling back to camelCase conversion for names
+/// without an explicit override. This mirrors the TS/Go/Rust/Python Go parsers
+/// which all fall back to camelCase (e.g. `BbFieldAdd` -> `bbFieldAdd`,
+/// `MerkleRootSha256` -> `merkleRootSha256`).
+fn mapGoBuiltinCamel(allocator: Allocator, name: []const u8) []const u8 {
+    const mapped = mapGoBuiltin(name);
+    // If the static map had no override it returns the input unchanged. In
+    // that case, apply the default camelCase conversion so unknown runar.*
+    // builtins match the Runar naming convention used by other compilers.
+    if (std.mem.eql(u8, mapped, name)) {
+        return goToCamelCase(allocator, name);
+    }
+    return mapped;
+}
+
 /// Check if a Go type name is a type conversion (not a function call).
 /// e.g., runar.Int(0), runar.Bigint(x), runar.Bool(true) are type casts.
 fn isTypeConversion(name: []const u8) bool {
@@ -1044,10 +1059,23 @@ const Parser = struct {
 
                         _ = self.bump(); // consume the next ident
 
-                        // If the token after is a type indicator (runar., another ident for type, [, *)
-                        // then the first ident was a name
-                        if (self.current.kind == .ident or
-                            (self.current.kind == .ident and std.mem.eql(u8, self.current.text, "runar")) or
+                        // After consuming `, name`, decide whether `name` is a fresh
+                        // parameter name (more names follow before the type) or actually
+                        // the parameter type (e.g. `a, T` shorthand is invalid Go but the
+                        // common shape is `name1, name2, ..., nameN Type`).
+                        //
+                        // Cases that mean `name` was another *parameter name*:
+                        //   - next is `,`     → another `, name` group follows
+                        //   - next is `ident` → a type token (runar/T/...) — name had
+                        //     no inline type, and the type for this whole run is what we
+                        //     are looking at right now. So `name` was a name.
+                        //   - next is `[` `*` `.` → array/pointer/qualified type
+                        //
+                        // Case that means `name` was actually the type (we should stop):
+                        //   - next is `)` → end of params, and the previous name's type
+                        //     was inlined as `name1 Type`. Restore.
+                        if (self.current.kind == .comma or
+                            self.current.kind == .ident or
                             self.current.kind == .lbracket or
                             self.current.kind == .star or
                             self.current.kind == .dot)
@@ -1578,7 +1606,7 @@ const Parser = struct {
                                     expr = args[0];
                                 } else {
                                     // Builtin call: runar.CheckSig(sig, pk) -> checkSig(sig, pk)
-                                    const builtin_name = mapGoBuiltin(member);
+                                    const builtin_name = mapGoBuiltinCamel(self.allocator, member);
                                     const call = self.allocator.create(CallExpr) catch return null;
                                     call.* = .{ .callee = builtin_name, .args = args };
                                     expr = .{ .call = call };
@@ -1611,7 +1639,7 @@ const Parser = struct {
                                 expr = .{ .property_access = .{ .object = "this", .property = goToCamelCase(self.allocator, member) } };
                             } else if (std.mem.eql(u8, id, "runar")) {
                                 // runar.SomeConstant -> identifier
-                                expr = .{ .identifier = mapGoBuiltin(member) };
+                                expr = .{ .identifier = mapGoBuiltinCamel(self.allocator, member) };
                             } else {
                                 expr = .{ .property_access = .{ .object = id, .property = goToCamelCase(self.allocator, member) } };
                             }

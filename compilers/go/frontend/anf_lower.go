@@ -413,6 +413,18 @@ func (ctx *lowerCtx) getAddOutputRefs() []string {
 }
 
 // isProperty checks if a name is a contract property.
+// isPrivateMethod reports whether `name` is a private (non-public) method
+// on the contract — matching the TypeScript compiler's check used for
+// routing bare-identifier calls through the method_call inlining path.
+func (ctx *lowerCtx) isPrivateMethod(name string) bool {
+	for _, m := range ctx.contract.Methods {
+		if m.Name == name && m.Visibility != "public" && m.Name != "constructor" {
+			return true
+		}
+	}
+	return false
+}
+
 func (ctx *lowerCtx) isProperty(name string) bool {
 	for _, p := range ctx.contract.Properties {
 		if p.Name == name {
@@ -997,6 +1009,16 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	// Direct function call: sha256(x), checkSig(sig, pk), etc.
 	if id, ok := callee.(Identifier); ok {
 		argRefs := ctx.lowerArgs(e.Args)
+		// Bare identifier calls that match a private method on the contract
+		// (e.g. Move's `require_owner(contract, sig)` which the parser strips
+		// to `requireOwner(sig)`) must be routed through the same inlining
+		// path as `this.requireOwner(sig)` so downstream stack lowering can
+		// inline the body. This keeps .runar.move, .runar.go, and .runar.ts
+		// lowering in sync.
+		if ctx.isPrivateMethod(id.Name) {
+			thisRef := ctx.emit(makeLoadConstString("@this"))
+			return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: id.Name, Args: argRefs})
+		}
 		return ctx.emit(makeCall(id.Name, argRefs))
 	}
 

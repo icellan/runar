@@ -964,7 +964,35 @@ const Parser = struct {
         while (self.current.kind != .rbrace and self.current.kind != .eof) {
             self.skipSemicolons();
             if (self.current.kind == .rbrace or self.current.kind == .eof) break;
-            if (self.parseStatement()) |s| stmts.append(self.allocator, s) catch {};
+            if (self.parseStatement()) |s| {
+                // Fold `let i: Int = K; while (i < N) { ...; i = i + 1; }`
+                // into a single for_stmt by patching init_value from a
+                // preceding let/const decl whose name matches the loop variable.
+                if (s == .for_stmt and stmts.items.len > 0) {
+                    const last = &stmts.items[stmts.items.len - 1];
+                    var decl_name: ?[]const u8 = null;
+                    var decl_value: ?Expression = null;
+                    switch (last.*) {
+                        .let_decl => |ld| { decl_name = ld.name; decl_value = ld.value; },
+                        .const_decl => |cd| { decl_name = cd.name; decl_value = cd.value; },
+                        else => {},
+                    }
+                    if (decl_name) |dn| {
+                        if (std.mem.eql(u8, dn, s.for_stmt.var_name)) {
+                            const init_val: i64 = if (decl_value) |v| switch (v) {
+                                .literal_int => |n| n,
+                                else => 0,
+                            } else 0;
+                            stmts.items.len -= 1; // pop the decl
+                            var merged = s.for_stmt;
+                            merged.init_value = init_val;
+                            stmts.append(self.allocator, .{ .for_stmt = merged }) catch {};
+                            continue;
+                        }
+                    }
+                }
+                stmts.append(self.allocator, s) catch {};
+            }
         }
         _ = self.expect(.rbrace);
         return stmts.items;
@@ -1126,11 +1154,13 @@ const Parser = struct {
         const body = self.parseMoveBlock();
         self.skipSemicolons();
 
-        // Extract bound from condition if it's a simple comparison: var < N
+        // Extract var_name and bound from condition if it's a simple comparison: var < N
+        var var_name: []const u8 = "_w";
         var bound: i64 = 0;
         if (_cond) |cond| {
             switch (cond) {
                 .binary_op => |bop| {
+                    if (bop.left == .identifier) var_name = bop.left.identifier;
                     switch (bop.right) {
                         .literal_int => |v| {
                             bound = v;
@@ -1142,7 +1172,27 @@ const Parser = struct {
             }
         }
 
-        return .{ .for_stmt = .{ .var_name = "_w", .init_value = 0, .bound = bound, .body = body } };
+        // Drop a trailing `var_name = var_name + K` so the for_stmt's implicit
+        // iteration matches TypeScript's native `for (let i = 0n; i < N; i++)`.
+        var trimmed_body = body;
+        if (body.len > 0) {
+            const last = body[body.len - 1];
+            if (last == .assign) {
+                const a = last.assign;
+                if (std.mem.eql(u8, a.target, var_name)) {
+                    if (a.value == .binary_op) {
+                        const bop = a.value.binary_op;
+                        if (bop.op == .add and bop.left == .identifier and
+                            std.mem.eql(u8, bop.left.identifier, var_name))
+                        {
+                            trimmed_body = body[0 .. body.len - 1];
+                        }
+                    }
+                }
+            }
+        }
+
+        return .{ .for_stmt = .{ .var_name = var_name, .init_value = 0, .bound = bound, .body = trimmed_body } };
     }
 
     fn parseMoveLoop(self: *Parser) ?Statement {
@@ -1990,10 +2040,15 @@ test "parse BoundedLoop contract (Move)" {
     try std.testing.expectEqual(@as(usize, 0), r.errors.len);
     const c = r.contract.?;
     try std.testing.expectEqual(@as(usize, 1), c.methods.len);
-    // body: let sum, let i, while, assert_eq
-    try std.testing.expectEqual(@as(usize, 4), c.methods[0].body.len);
-    // while is mapped to for_stmt
-    try std.testing.expectEqual(std.meta.Tag(Statement).for_stmt, std.meta.activeTag(c.methods[0].body[2]));
+    // body: let sum, for_stmt (folded from `let i` + `while`), assert_eq.
+    // The parser folds the canonical `let i = 0; while (i < N) { ...; i = i + 1; }`
+    // pattern into a single for_stmt so ANF lowering matches TypeScript's native
+    // `for (let i = 0n; i < N; i++)` bounded-loop IR.
+    try std.testing.expectEqual(@as(usize, 3), c.methods[0].body.len);
+    // Second statement is the folded for_stmt
+    try std.testing.expectEqual(std.meta.Tag(Statement).for_stmt, std.meta.activeTag(c.methods[0].body[1]));
+    // Iter var should be `i`, not `_w`
+    try std.testing.expectEqualStrings("i", c.methods[0].body[1].for_stmt.var_name);
 }
 
 test "parse error: no module found" {

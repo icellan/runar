@@ -81,6 +81,7 @@ TOK_ASSERT_MACRO = 65
 TOK_ASSERT_EQ_MACRO = 66
 TOK_LSHIFT = 67
 TOK_RSHIFT = 68
+TOK_DOTDOT = 69
 
 
 class Token:
@@ -286,6 +287,7 @@ def _tokenize(source: str) -> list[Token]:
                 "-=": TOK_MINUSEQ,
                 "<<": TOK_LSHIFT,
                 ">>": TOK_RSHIFT,
+                "..": TOK_DOTDOT,
             }.get(two)
             if two_kind is not None:
                 tokens.append(Token(two_kind, two, l, c))
@@ -335,6 +337,25 @@ def _tokenize(source: str) -> list[Token]:
                 pos += 1
                 col += 1
             val = chars[start:pos]
+            tokens.append(Token(TOK_HEX_STRING, val, l, c))
+            continue
+
+        # Double-quoted string literal — treated as hex ByteString like in TS/Sol/Move
+        if ch == '"':
+            pos += 1
+            col += 1
+            start = pos
+            while pos < n and chars[pos] != '"':
+                if chars[pos] == "\n":
+                    line += 1
+                    col = 1
+                else:
+                    col += 1
+                pos += 1
+            val = chars[start:pos]
+            if pos < n:
+                pos += 1  # skip closing quote
+                col += 1
             tokens.append(Token(TOK_HEX_STRING, val, l, c))
             continue
 
@@ -548,6 +569,10 @@ class _RustParser:
                             field_attr = self.parse_attribute()
                             if field_attr == "readonly":
                                 readonly = True
+
+                        # Skip optional `pub` visibility modifier
+                        if self.check(TOK_PUB):
+                            self.advance()
 
                         field_loc = self.loc()
                         field_tok = self.peek()
@@ -873,11 +898,8 @@ class _RustParser:
             self.expect(TOK_IN)
             start_expr = self.parse_expression()
 
-            # Expect .. range operator (two dots)
-            if self.check(TOK_DOT):
-                self.advance()
-                if self.check(TOK_DOT):
-                    self.advance()
+            # Expect .. range operator (single DotDot token)
+            self.expect(TOK_DOTDOT)
 
             end_expr = self.parse_expression()
 
@@ -1114,6 +1136,16 @@ class _RustParser:
                     if self.check(TOK_COMMA):
                         self.advance()
                 self.expect(TOK_RPAREN)
+                # `.clone()` is a Rust borrow-checker artifact — in Runar,
+                # values are copied by default, so strip it and keep the
+                # receiver expression unchanged.
+                if (
+                    not args
+                    and isinstance(expr, MemberExpr)
+                    and expr.property == "clone"
+                ):
+                    expr = expr.object
+                    continue
                 expr = CallExpr(callee=expr, args=args)
 
             # Member access: expr.field

@@ -381,8 +381,19 @@ function tokenize(source: string): Token[] {
 
 /** Convert snake_case to camelCase. Single words pass through unchanged. */
 function snakeToCamel(name: string): string {
+  // Preserve dunder names (__init__, __foo__) unchanged
+  if (name.startsWith('__') && name.endsWith('__') && name.length >= 4) {
+    return name;
+  }
+
   // Strip trailing underscore (e.g. assert_ -> assert)
   let n = name.endsWith('_') && name !== '_' ? name.slice(0, -1) : name;
+
+  // Strip leading single underscore for private methods (Python convention:
+  // _helper -> helper). Matches Go/Python/Zig/Ruby parser behavior.
+  if (n.startsWith('_') && !n.startsWith('__')) {
+    n = n.slice(1);
+  }
 
   return n.replace(/_([a-z0-9])/g, (_, ch: string) => ch.toUpperCase());
 }
@@ -452,8 +463,8 @@ function mapBuiltinName(name: string): string {
 /** Map Python type names to Rúnar AST types. */
 function mapPyType(name: string): string {
   switch (name) {
-    case 'Bigint': case 'int': return 'bigint';
-    case 'bool': return 'boolean';
+    case 'Bigint': case 'int': case 'Int': return 'bigint';
+    case 'bool': case 'Bool': return 'boolean';
     case 'ByteString': case 'bytes': return 'ByteString';
     case 'PubKey': return 'PubKey';
     case 'Sig': return 'Sig';

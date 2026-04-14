@@ -405,6 +405,16 @@ module RunarCompiler
         @contract.properties.any? { |p| p.name == name }
       end
 
+      # Whether `name` is a private (non-public) method on the contract.
+      # Used to route bare-identifier calls through the method_call inlining
+      # path so Move's free-function helpers match TypeScript's `this.foo()`.
+      # @return [Boolean]
+      def _is_private_method(name)
+        @contract.methods.any? do |m|
+          m.name == name && m.name != "constructor" && m.visibility != "public"
+        end
+      end
+
       # Look up a parameter type by name across constructor and methods.
       # @return [String, nil]
       def get_param_type(name)
@@ -880,6 +890,19 @@ module RunarCompiler
         # Direct function call: sha256(x), checkSig(sig, pk), etc.
         if callee.is_a?(Identifier)
           arg_refs = _lower_args(e.args)
+          # Bare identifier calls that match a private method on the contract
+          # (e.g. Move's `require_owner(contract, sig)` which the parser strips
+          # to `requireOwner(sig)`) must be routed through the same inlining
+          # path as `this.requireOwner(sig)` so downstream stack lowering can
+          # inline the body. Keeps .runar.move in sync with .runar.ts.
+          if _is_private_method(callee.name)
+            this_ref = emit(Frontend._make_load_const_string("@this"))
+            return emit(IR::ANFValue.new(kind: "method_call").tap do |v|
+              v.object = this_ref
+              v.method = callee.name
+              v.args = arg_refs
+            end)
+          end
           return emit(Frontend._make_call(callee.name, arg_refs))
         end
 

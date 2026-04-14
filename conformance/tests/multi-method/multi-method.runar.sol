@@ -14,7 +14,7 @@ contract MultiMethod is SmartContract {
     }
 
     function spendWithOwner(Sig sig, int amount) public {
-        int threshold = computeThreshold(amount, 2);
+        int threshold = this.computeThreshold(amount, 2);
         require(threshold > 10);
         require(checkSig(sig, owner));
     }

@@ -195,10 +195,10 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 			quote := ch
 			// Check for triple-quote
 			if i+2 < len(source) && source[i+1] == quote && source[i+2] == quote {
-				// Triple-quoted string
+				// Triple-quoted string — always a docstring in Rúnar.
+				// Skip it without emitting a token.
 				i += 3
 				col += 3
-				start := i
 				for i+2 < len(source) {
 					if source[i] == quote && source[i+1] == quote && source[i+2] == quote {
 						break
@@ -211,12 +211,10 @@ func (p *pyParser) tokenizeRaw(source string) []pyToken {
 					}
 					i++
 				}
-				val := source[start:i]
 				if i+2 < len(source) {
 					i += 3
 					col += 3
 				}
-				tokens = append(tokens, pyToken{kind: pyTokString, value: val, line: line, col: startCol})
 				continue
 			}
 			i++
@@ -717,6 +715,8 @@ func parsePyType(name string) TypeNode {
 	case "Bigint":
 		return PrimitiveType{Name: "bigint"}
 	case "bool":
+		return PrimitiveType{Name: "boolean"}
+	case "Bool":
 		return PrimitiveType{Name: "boolean"}
 	case "bytes":
 		return PrimitiveType{Name: "ByteString"}

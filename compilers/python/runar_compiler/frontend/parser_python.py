@@ -215,6 +215,7 @@ _TYPE_MAP: dict[str, str] = {
     "Bigint": "bigint",
     "bigint": "bigint",
     "bool": "boolean",
+    "Bool": "boolean",
     "boolean": "boolean",
     "bytes": "ByteString",
     "ByteString": "ByteString",
@@ -317,11 +318,10 @@ def _tokenize_raw(source: str) -> list[Token]:
         # String literals
         if ch in ("'", '"'):
             quote = ch
-            # Triple-quote
+            # Triple-quote — always a docstring in Rúnar. Skip without emitting a token.
             if i + 2 < n and source[i + 1] == quote and source[i + 2] == quote:
                 i += 3
                 col += 3
-                start = i
                 while i + 2 < n:
                     if source[i] == quote and source[i + 1] == quote and source[i + 2] == quote:
                         break
@@ -331,11 +331,9 @@ def _tokenize_raw(source: str) -> list[Token]:
                     else:
                         col += 1
                     i += 1
-                val = source[start:i]
                 if i + 2 < n:
                     i += 3
                     col += 3
-                tokens.append(Token(TOK_STRING, val, line, start_col))
                 continue
             i += 1
             col += 1

@@ -195,7 +195,9 @@ func (p *moveParser) tokenize(source string) []moveToken {
 		// Numbers
 		if ch >= '0' && ch <= '9' {
 			start := i
+			isHex := false
 			if ch == '0' && i+1 < len(source) && (source[i+1] == 'x' || source[i+1] == 'X') {
+				isHex = true
 				i += 2
 				col += 2
 				for i < len(source) && moveIsHexDigit(source[i]) {
@@ -209,12 +211,20 @@ func (p *moveParser) tokenize(source string) []moveToken {
 				}
 			}
 			// Skip trailing 'u8', 'u64', etc.
-			if i < len(source) && source[i] == 'u' {
+			if !isHex && i < len(source) && source[i] == 'u' {
 				i++
 				col++
 				for i < len(source) && source[i] >= '0' && source[i] <= '9' {
 					i++
 					col++
+				}
+			}
+			// Hex literals with even digit count → ByteString; otherwise a numeric literal.
+			if isHex {
+				hexDigits := source[start+2 : i]
+				if len(hexDigits) > 0 && len(hexDigits)%2 == 0 {
+					tokens = append(tokens, moveToken{kind: moveTokString, value: hexDigits, line: line, col: startCol})
+					continue
 				}
 			}
 			tokens = append(tokens, moveToken{kind: moveTokNumber, value: source[start:i], line: line, col: startCol})
@@ -478,6 +488,35 @@ var moveBuiltinMap = map[string]string{
 	"len":             "len",
 	"pack":            "pack",
 	"unpack":          "unpack",
+	// Post-quantum signature verification (FIPS 205 SLH-DSA parameter sets).
+	// Both snake_case and pre-camelCased forms are accepted.
+	"verify_wots":              "verifyWOTS",
+	"verifyWots":               "verifyWOTS",
+	"verifyWOTS":               "verifyWOTS",
+	"verify_slhdsa_sha2_128s":  "verifySLHDSA_SHA2_128s",
+	"verify_slh_dsa_sha2_128s": "verifySLHDSA_SHA2_128s",
+	"verifySlhdsaSha2128s":     "verifySLHDSA_SHA2_128s",
+	"verifySlhDsaSha2128s":     "verifySLHDSA_SHA2_128s",
+	"verify_slhdsa_sha2_128f":  "verifySLHDSA_SHA2_128f",
+	"verify_slh_dsa_sha2_128f": "verifySLHDSA_SHA2_128f",
+	"verifySlhdsaSha2128f":     "verifySLHDSA_SHA2_128f",
+	"verifySlhDsaSha2128f":     "verifySLHDSA_SHA2_128f",
+	"verify_slhdsa_sha2_192s":  "verifySLHDSA_SHA2_192s",
+	"verify_slh_dsa_sha2_192s": "verifySLHDSA_SHA2_192s",
+	"verifySlhdsaSha2192s":     "verifySLHDSA_SHA2_192s",
+	"verifySlhDsaSha2192s":     "verifySLHDSA_SHA2_192s",
+	"verify_slhdsa_sha2_192f":  "verifySLHDSA_SHA2_192f",
+	"verify_slh_dsa_sha2_192f": "verifySLHDSA_SHA2_192f",
+	"verifySlhdsaSha2192f":     "verifySLHDSA_SHA2_192f",
+	"verifySlhDsaSha2192f":     "verifySLHDSA_SHA2_192f",
+	"verify_slhdsa_sha2_256s":  "verifySLHDSA_SHA2_256s",
+	"verify_slh_dsa_sha2_256s": "verifySLHDSA_SHA2_256s",
+	"verifySlhdsaSha2256s":     "verifySLHDSA_SHA2_256s",
+	"verifySlhDsaSha2256s":     "verifySLHDSA_SHA2_256s",
+	"verify_slhdsa_sha2_256f":  "verifySLHDSA_SHA2_256f",
+	"verify_slh_dsa_sha2_256f": "verifySLHDSA_SHA2_256f",
+	"verifySlhdsaSha2256f":     "verifySLHDSA_SHA2_256f",
+	"verifySlhDsaSha2256f":     "verifySLHDSA_SHA2_256f",
 }
 
 func moveMapBuiltin(name string) string {
@@ -618,12 +657,18 @@ func (p *moveParser) parseMoveStruct() []PropertyNode {
 
 		p.expect(moveTokColon)
 
+		// Fields marked `&mut T` become mutable properties on the contract.
+		// Plain `T` or `&T` are readonly.
+		readonly := true
+		if p.check(moveTokAmp) {
+			p.advance()
+			if p.matchIdent("mut") {
+				readonly = false
+			}
+		}
+
 		typeName := p.parseMoveTypeName()
 		typeNode := moveMapType(typeName)
-
-		// Determine readonly: by default all fields in a Move resource are mutable
-		// But if the module uses SmartContract parent, fields should be readonly
-		readonly := true // default to readonly; will be overridden for StatefulSmartContract later
 
 		// Optional initializer: = value
 		var initializer Expression
@@ -709,11 +754,25 @@ func (p *moveParser) parseMoveFunction() (MethodNode, bool) {
 	params, hasMutRecv := p.parseMoveParams()
 
 	// Optional return type: : Type
+	hasReturnType := false
 	if p.match(moveTokColon) {
-		p.parseMoveTypeName() // skip return type
+		p.parseMoveTypeName() // skip return type name
+		hasReturnType = true
 	}
 
 	body := p.parseMoveBlock()
+
+	// Move allows an implicit return of the final expression when the function
+	// declares a return type. Convert the trailing expression statement into
+	// an explicit return so downstream type inference can see it.
+	if hasReturnType && len(body) > 0 {
+		if last, ok := body[len(body)-1].(ExpressionStmt); ok {
+			body[len(body)-1] = ReturnStmt{
+				Value:          last.Expr,
+				SourceLocation: last.SourceLocation,
+			}
+		}
+	}
 
 	return MethodNode{
 		Name:           name,
@@ -798,13 +857,84 @@ func (p *moveParser) parseMoveBlock() []Statement {
 	p.expect(moveTokLBrace)
 	var stmts []Statement
 	for !p.check(moveTokRBrace) && !p.check(moveTokEOF) {
+		// Move permits stray semicolons as empty-statement terminators after a
+		// block-valued expression (e.g. `};` after an if/while body). Skip them
+		// so they don't break parsing.
+		if p.match(moveTokSemicolon) {
+			continue
+		}
 		stmt := p.parseMoveStatement()
 		if stmt != nil {
 			stmts = append(stmts, stmt)
 		}
 	}
 	p.expect(moveTokRBrace)
-	return stmts
+	return foldMoveWhileAsFor(stmts)
+}
+
+// foldMoveWhileAsFor folds the canonical Move bounded-loop pattern
+//
+//	let i: Int = K;
+//	while (i < N) { ...; i = i + S; }
+//
+// into a single ForStmt whose init/condition/update match what TypeScript's
+// native for-loop would produce, so downstream ANF lowering emits identical
+// bounded-loop IR across all formats.
+func foldMoveWhileAsFor(stmts []Statement) []Statement {
+	if len(stmts) == 0 {
+		return stmts
+	}
+	out := make([]Statement, 0, len(stmts))
+	for i := 0; i < len(stmts); i++ {
+		s := stmts[i]
+		if i+1 < len(stmts) {
+			if decl, ok := s.(VariableDeclStmt); ok {
+				if forStmt, ok2 := stmts[i+1].(ForStmt); ok2 {
+					if initDecl, ok3 := interface{}(forStmt.Init).(VariableDeclStmt); ok3 && initDecl.Name == "_w" {
+						iterName := decl.Name
+						cond, condOk := forStmt.Condition.(BinaryExpr)
+						if condOk {
+							if leftId, lok := cond.Left.(Identifier); lok && leftId.Name == iterName {
+								if len(forStmt.Body) > 0 {
+									last := forStmt.Body[len(forStmt.Body)-1]
+									if assign, aok := last.(AssignmentStmt); aok {
+										if tgtId, tok := assign.Target.(Identifier); tok && tgtId.Name == iterName {
+											if rhs, rok := assign.Value.(BinaryExpr); rok && rhs.Op == "+" {
+												if lId, lidOk := rhs.Left.(Identifier); lidOk && lId.Name == iterName {
+													trimmed := forStmt.Body[:len(forStmt.Body)-1]
+													newFor := ForStmt{
+														Init: VariableDeclStmt{
+															Name:           iterName,
+															Type:           decl.Type,
+															Mutable:        true,
+															Init:           decl.Init,
+															SourceLocation: decl.SourceLocation,
+														},
+														Condition: cond,
+														Update: ExpressionStmt{
+															Expr:           IncrementExpr{Operand: Identifier{Name: iterName}, Prefix: false},
+															SourceLocation: forStmt.SourceLocation,
+														},
+														Body:           trimmed,
+														SourceLocation: forStmt.SourceLocation,
+													}
+													out = append(out, newFor)
+													i++ // skip consumed while
+													continue
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,6 +1418,16 @@ func (p *moveParser) parseMovePrimary() Expression {
 		// Function call
 		if p.check(moveTokLParen) {
 			args := p.parseMoveCallArgs()
+			// Free helper functions in Move take `contract: &Self` as the first
+			// argument. The parser drops `contract` from helper parameter lists
+			// on the definition side, so strip a matching `contract`/`self` at
+			// call sites as well. The anf lowering pass then routes the resulting
+			// bare-identifier call through the private-method inlining path.
+			if len(args) > 0 {
+				if id, ok := args[0].(Identifier); ok && (id.Name == "contract" || id.Name == "self") {
+					args = args[1:]
+				}
+			}
 			return CallExpr{Callee: Identifier{Name: mappedName}, Args: args}
 		}
 

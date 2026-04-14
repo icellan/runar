@@ -22,8 +22,8 @@ module StateCovenant {
     use runar::crypto::{merkleRootSha256, hash256, cat};
 
     resource struct StateCovenant {
-        state_root: ByteString,
-        block_number: bigint,
+        state_root: &mut ByteString,
+        block_number: &mut bigint,
         verifying_key_hash: ByteString,  // readonly -- baked into script at deploy time
     }
 

@@ -423,17 +423,40 @@ class MoveParser {
     this.expect(')');
 
     // Optional return type
+    let hasReturnType = false;
     if (this.current().type === ':') {
       this.advance();
       this.parseMoveType();
+      hasReturnType = true;
     }
 
     this.expect('{');
-    const body: Statement[] = [];
+    const rawBody: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
-      body.push(this.parseStatement());
+      // Skip stray semicolons (e.g. `};` after an if/while block).
+      if (this.current().type === ';') { this.advance(); continue; }
+      rawBody.push(this.parseStatement());
     }
     this.expect('}');
+
+    // Fold canonical `let i = K; while (i < N) { ... ; i = i + 1; }` pattern
+    // into a single for_statement so the ANF lowering produces the same bounded
+    // loop IR as TypeScript's native `for (let i = 0n; i < N; i++) { ... }`.
+    const body = foldWhileAsFor(rawBody);
+
+    // Move allows an implicit return of the final expression when the function
+    // declares a return type. Convert the trailing expression statement into
+    // an explicit return statement so the type checker can infer it.
+    if (hasReturnType && body.length > 0) {
+      const last = body[body.length - 1];
+      if (last && last.kind === 'expression_statement') {
+        body[body.length - 1] = {
+          kind: 'return_statement',
+          value: last.expression,
+          sourceLocation: last.sourceLocation,
+        };
+      }
+    }
 
     return {
       method: { kind: 'method', name, params, body, visibility, sourceLocation: location },
@@ -517,6 +540,16 @@ class MoveParser {
       return this.parseIfStatement();
     }
 
+    // while (cond) { ... }
+    if (this.current().type === 'while') {
+      return this.parseWhileStatement();
+    }
+
+    // loop { ... }
+    if (this.current().type === 'loop') {
+      return this.parseLoopStatement();
+    }
+
     // return
     if (this.current().type === 'return') {
       this.advance();
@@ -564,6 +597,73 @@ class MoveParser {
     return expr;
   }
 
+  private parseWhileStatement(): Statement {
+    const location = this.loc();
+    this.expect('while');
+    // Optional parentheses around condition
+    const hasParen = this.current().type === '(';
+    if (hasParen) this.advance();
+    const condition = this.parseExpression();
+    if (hasParen) this.expect(')');
+    this.expect('{');
+    const body: Statement[] = [];
+    while (this.current().type !== '}' && this.current().type !== 'eof') {
+      if (this.current().type === ';') { this.advance(); continue; }
+      body.push(this.parseStatement());
+    }
+    this.expect('}');
+    // Move while → for_statement with dummy init/update so downstream IR passes
+    // treat it as a bounded loop.
+    return {
+      kind: 'for_statement',
+      init: {
+        kind: 'variable_decl',
+        name: '_w',
+        mutable: true,
+        init: { kind: 'bigint_literal', value: 0n },
+        sourceLocation: location,
+      },
+      condition,
+      update: {
+        kind: 'expression_statement',
+        expression: { kind: 'bigint_literal', value: 0n },
+        sourceLocation: location,
+      },
+      body,
+      sourceLocation: location,
+    };
+  }
+
+  private parseLoopStatement(): Statement {
+    const location = this.loc();
+    this.expect('loop');
+    this.expect('{');
+    const body: Statement[] = [];
+    while (this.current().type !== '}' && this.current().type !== 'eof') {
+      if (this.current().type === ';') { this.advance(); continue; }
+      body.push(this.parseStatement());
+    }
+    this.expect('}');
+    return {
+      kind: 'for_statement',
+      init: {
+        kind: 'variable_decl',
+        name: '_l',
+        mutable: true,
+        init: { kind: 'bigint_literal', value: 0n },
+        sourceLocation: location,
+      },
+      condition: { kind: 'bool_literal', value: true },
+      update: {
+        kind: 'expression_statement',
+        expression: { kind: 'bigint_literal', value: 0n },
+        sourceLocation: location,
+      },
+      body,
+      sourceLocation: location,
+    };
+  }
+
   private parseIfStatement(): Statement {
     const location = this.loc();
     this.expect('if');
@@ -573,6 +673,7 @@ class MoveParser {
     this.expect('{');
     const thenBranch: Statement[] = [];
     while (this.current().type !== '}' && this.current().type !== 'eof') {
+      if (this.current().type === ';') { this.advance(); continue; }
       thenBranch.push(this.parseStatement());
     }
     this.expect('}');
@@ -583,6 +684,7 @@ class MoveParser {
       this.expect('{');
       elseBranch = [];
       while (this.current().type !== '}' && this.current().type !== 'eof') {
+        if (this.current().type === ';') { this.advance(); continue; }
         elseBranch.push(this.parseStatement());
       }
       this.expect('}');
@@ -676,7 +778,20 @@ class MoveParser {
           if (this.current().type === ',') this.advance();
         }
         this.expect(')');
-        expr = { kind: 'call_expr', callee: expr, args };
+        // Free helper functions in Move take `contract: &Self` as the first
+        // argument. The parser drops `contract` from helper parameter lists on
+        // the definition side, so strip a matching `contract`/`self` identifier
+        // as the first argument at call sites too.
+        let callArgs = args;
+        if (
+          expr.kind === 'identifier' &&
+          callArgs.length > 0 &&
+          callArgs[0]?.kind === 'identifier' &&
+          (callArgs[0].name === 'contract' || callArgs[0].name === 'self')
+        ) {
+          callArgs = callArgs.slice(1);
+        }
+        expr = { kind: 'call_expr', callee: expr, args: callArgs };
       } else if (this.current().type === '.') {
         this.advance();
         const prop = snakeToCamel(this.expect('ident').value);
@@ -794,6 +909,91 @@ class MoveParser {
     this.advance();
     return { kind: 'identifier', name: t.value };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Pattern folding: `let i = K; while (i < N) { ...; i = i + S; }` → for_statement
+// ---------------------------------------------------------------------------
+
+/**
+ * Move lacks a native C-style `for` loop, so developers express bounded
+ * iteration with:
+ *
+ *   let i: Int = 0;
+ *   while (i < 5) {
+ *     ...
+ *     i = i + 1;
+ *   }
+ *
+ * This helper walks a statement list and folds that canonical pattern into a
+ * single for_statement whose init/condition/update match what TypeScript's
+ * native for-loop would produce, so downstream ANF lowering emits the same
+ * bounded-loop IR across all formats.
+ */
+function foldWhileAsFor(stmts: Statement[]): Statement[] {
+  const out: Statement[] = [];
+  for (let i = 0; i < stmts.length; i++) {
+    const s = stmts[i]!;
+    const next = stmts[i + 1];
+    if (
+      s.kind === 'variable_decl' &&
+      next && next.kind === 'for_statement' &&
+      next.init.kind === 'variable_decl' &&
+      next.init.name === '_w'
+    ) {
+      const iterName = s.name;
+      const cond = next.condition;
+      // Condition must reference the loop variable on the left.
+      const condMatches =
+        cond.kind === 'binary_expr' &&
+        cond.left.kind === 'identifier' &&
+        cond.left.name === iterName;
+      if (!condMatches) { out.push(s); continue; }
+
+      // Find the increment assignment at the end of the while body.
+      const whileBody = next.body;
+      if (whileBody.length === 0) { out.push(s); continue; }
+      const last = whileBody[whileBody.length - 1]!;
+      const incMatches =
+        last.kind === 'assignment' &&
+        last.target.kind === 'identifier' && last.target.name === iterName &&
+        last.value.kind === 'binary_expr' &&
+        last.value.op === '+' &&
+        last.value.left.kind === 'identifier' && last.value.left.name === iterName;
+      if (!incMatches) { out.push(s); continue; }
+
+      // Drop the trailing increment and build a for_statement with real init/update.
+      const trimmedBody = whileBody.slice(0, -1);
+      const forStmt: Statement = {
+        kind: 'for_statement',
+        init: {
+          kind: 'variable_decl',
+          name: iterName,
+          type: s.type,
+          mutable: true,
+          init: s.init,
+          sourceLocation: s.sourceLocation,
+        },
+        condition: cond,
+        update: {
+          kind: 'expression_statement',
+          expression: {
+            kind: 'increment_expr',
+            operand: { kind: 'identifier', name: iterName },
+            prefix: false,
+          },
+          sourceLocation: next.sourceLocation,
+        },
+        body: trimmedBody,
+        sourceLocation: next.sourceLocation,
+      };
+      out.push(forStmt);
+      i++; // skip the consumed while
+      continue;
+    }
+    out.push(s);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

@@ -925,7 +925,7 @@ function lowerCallExpr(
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
     const isPrivateMethod = ctx.isPrivateMethod(callee.name);
     if (isPrivateMethod) {
-      const thisRef = ctx.emit({ kind: 'load_const', value: 'this' });
+      const thisRef = ctx.emit({ kind: 'load_const', value: '@this' });
       return ctx.emit({ kind: 'method_call', object: thisRef, method: callee.name, args: argRefs });
     }
     return ctx.emit({ kind: 'call', func: callee.name, args: argRefs });

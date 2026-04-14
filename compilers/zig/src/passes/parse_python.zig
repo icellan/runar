@@ -232,9 +232,10 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
             const quote = ch;
             // Check for triple-quote
             if (i + 2 < source.len and source[i + 1] == quote and source[i + 2] == quote) {
+                // Triple-quoted string — always a docstring in Rúnar.
+                // Skip it without emitting a token.
                 i += 3;
                 col += 3;
-                const start = i;
                 while (i + 2 < source.len) {
                     if (source[i] == quote and source[i + 1] == quote and source[i + 2] == quote) break;
                     if (source[i] == '\n') {
@@ -245,12 +246,10 @@ fn tokenizeRaw(allocator: Allocator, source: []const u8) []Token {
                     }
                     i += 1;
                 }
-                const val = source[start..i];
                 if (i + 2 < source.len) {
                     i += 3;
                     col += 3;
                 }
-                tokens.append(allocator, .{ .kind = .string_literal, .text = val, .line = line, .col = start_col }) catch {};
                 continue;
             }
 

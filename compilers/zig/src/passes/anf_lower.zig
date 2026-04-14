@@ -1246,7 +1246,7 @@ fn stmtHasAddOutput(stmt: Statement, params: []const ParamNode) bool {
 fn exprHasAddOutput(expr: Expression, params: []const ParamNode) bool {
     switch (expr) {
         .method_call => |mc| {
-            if (std.mem.eql(u8, mc.object, "this") or paramIsStatefulContext(params, mc.object)) {
+            if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or paramIsStatefulContext(params, mc.object)) {
                 if (std.mem.eql(u8, mc.method, "addOutput") or std.mem.eql(u8, mc.method, "addRawOutput")) {
                     return true;
                 }

@@ -7,6 +7,6 @@
     ".runar.rs": "../../../examples/rust/cross-covenant/CrossCovenantRef.runar.rs",
     ".runar.py": "../../../examples/python/cross-covenant/CrossCovenantRef.runar.py",
     ".runar.rb": "../../../examples/ruby/cross-covenant/CrossCovenantRef.runar.rb",
-    ".runar.zig": "../../../examples/zig/cross-covenant/CrossCovenantRef.runar.zig"
+    ".runar.zig": "CrossCovenantRef.runar.zig"
   }
 }

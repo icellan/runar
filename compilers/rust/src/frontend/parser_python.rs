@@ -65,12 +65,23 @@ pub fn parse_python(source: &str, file_name: Option<&str>) -> ParseResult {
 /// Convert snake_case to camelCase. Single words pass through unchanged.
 /// Strips trailing underscore (e.g. `sum_` -> `sum`, `assert_` -> `assert`).
 fn snake_to_camel(name: &str) -> String {
+    // Preserve dunder names (__init__, __foo__) unchanged
+    if name.len() >= 4 && name.starts_with("__") && name.ends_with("__") {
+        return name.to_string();
+    }
+
     // Strip trailing underscore (e.g. assert_ -> assert)
-    let n = if name.ends_with('_') && name != "_" {
+    let mut n: &str = if name.ends_with('_') && name != "_" {
         &name[..name.len() - 1]
     } else {
         name
     };
+
+    // Strip leading single underscore for private methods (Python convention:
+    // _helper -> helper). Matches Go/Python/Zig/Ruby parser behavior.
+    if n.starts_with('_') && !n.starts_with("__") {
+        n = &n[1..];
+    }
 
     let mut result = String::new();
     let mut capitalize_next = false;
@@ -150,7 +161,7 @@ fn map_builtin_name(name: &str) -> String {
 fn map_py_type(name: &str) -> &str {
     match name {
         "Bigint" | "int" | "Int" => "bigint",
-        "bool" => "boolean",
+        "bool" | "Bool" => "boolean",
         "ByteString" | "bytes" => "ByteString",
         "PubKey" => "PubKey",
         "Sig" => "Sig",
@@ -256,6 +267,10 @@ fn tokenize(source: &str) -> Vec<Token> {
     let lines: Vec<&str> = source.split('\n').collect();
     let mut indent_stack: Vec<usize> = vec![0];
     let mut paren_depth: usize = 0;
+    // When Some(c), we're inside a multi-line triple-quoted string and c is
+    // the quote character (' or ").  Each line is skipped until we find the
+    // closing triple-quote.
+    let mut in_triple_quote: Option<char> = None;
 
     for raw_line in &lines {
         // Strip trailing \r
@@ -265,9 +280,34 @@ fn tokenize(source: &str) -> Vec<Token> {
             raw_line
         };
 
+        // If we're inside a multi-line triple-quoted docstring, skip lines
+        // until we find the closing triple-quote.
+        if let Some(q) = in_triple_quote {
+            let needle: String = std::iter::repeat(q).take(3).collect();
+            if line.contains(&needle) {
+                in_triple_quote = None;
+            }
+            continue;
+        }
+
         // Skip blank lines and comment-only lines (they don't affect indentation)
         let stripped = line.trim_start();
         if stripped.is_empty() || stripped.starts_with('#') {
+            continue;
+        }
+
+        // Skip lines that start with a triple-quoted docstring
+        if stripped.starts_with("\"\"\"") || stripped.starts_with("'''") {
+            let q = stripped.chars().next().unwrap();
+            let needle: String = std::iter::repeat(q).take(3).collect();
+            // Check for closing triple-quote on the same line (after the opener)
+            let after_open = &stripped[3..];
+            if after_open.contains(&needle) {
+                // Single-line docstring
+            } else {
+                // Multi-line docstring
+                in_triple_quote = Some(q);
+            }
             continue;
         }
 
@@ -553,9 +593,29 @@ fn tokenize(source: &str) -> Vec<Token> {
                 continue;
             }
 
-            // String literals (single or double quoted)
+            // String literals (single or double quoted, including triple-quoted)
             if ch == '\'' || ch == '"' {
                 let quote = ch;
+                // Triple-quoted string — always a docstring in Rúnar.
+                // Skip it without emitting a token.
+                if pos + 2 < chars.len() && chars[pos + 1] == quote && chars[pos + 2] == quote {
+                    pos += 3;
+                    while pos + 2 < chars.len() {
+                        if chars[pos] == quote
+                            && chars[pos + 1] == quote
+                            && chars[pos + 2] == quote
+                        {
+                            break;
+                        }
+                        pos += 1;
+                    }
+                    if pos + 2 < chars.len() {
+                        pos += 3;
+                    } else {
+                        pos = chars.len();
+                    }
+                    continue;
+                }
                 pos += 1;
                 let mut val = String::new();
                 while pos < chars.len() && chars[pos] != quote {

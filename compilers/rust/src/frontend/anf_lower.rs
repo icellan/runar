@@ -419,6 +419,17 @@ impl<'a> LoweringContext<'a> {
         self.contract.properties.iter().any(|p| p.name == name)
     }
 
+    /// Report whether `name` is a private (non-public) method on the contract.
+    /// Used to route bare-identifier calls (e.g. Move's `require_owner(sig)`
+    /// after `contract` stripping) through the method_call inlining path.
+    fn is_private_method(&self, name: &str) -> bool {
+        self.contract.methods.iter().any(|m| {
+            m.name == name
+                && m.name != "constructor"
+                && !matches!(m.visibility, Visibility::Public)
+        })
+    }
+
     /// Create a sub-context for nested blocks (if/else, loops).
     /// The counter continues from the parent. Local names, param names, and aliases are shared.
     fn sub_context(&self) -> LoweringContext<'a> {
@@ -1100,6 +1111,22 @@ fn lower_call_expr(
     // Direct function call: sha256(x), checkSig(sig, pk), etc.
     if let Expression::Identifier { name } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+        // Bare identifier calls that match a private method on the contract
+        // (e.g. Move's `require_owner(contract, sig)` which the parser strips
+        // to `requireOwner(sig)`) must be routed through the same inlining path
+        // as `this.requireOwner(sig)` so downstream stack lowering can inline
+        // the body. This keeps .runar.move, .runar.go, and .runar.ts lowering
+        // in sync.
+        if ctx.is_private_method(name) {
+            let this_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::String("@this".to_string()),
+            });
+            return ctx.emit(ANFValue::MethodCall {
+                object: this_ref,
+                method: name.clone(),
+                args: arg_refs,
+            });
+        }
         return ctx.emit(ANFValue::Call {
             func: name.clone(),
             args: arg_refs,

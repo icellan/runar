@@ -27,7 +27,7 @@ from runar_compiler.frontend.ast_nodes import (
     PrimitiveType, FixedArrayType, CustomType, TypeNode,
     BigIntLiteral, BoolLiteral, ByteStringLiteral, Identifier,
     PropertyAccessExpr, MemberExpr, BinaryExpr, UnaryExpr, CallExpr,
-    TernaryExpr, IndexAccessExpr, IncrementExpr,
+    TernaryExpr, IndexAccessExpr, IncrementExpr, DecrementExpr,
     VariableDeclStmt, AssignmentStmt, ExpressionStmt, IfStmt, ForStmt,
     ReturnStmt, Expression, Statement, is_primitive_type,
 )
@@ -659,14 +659,30 @@ class _ZigParser:
         self._expect(TOK_RBRACE, "}")
         self._match(TOK_SEMICOLON)
 
-        # Mark readonly: SmartContract → all readonly; StatefulSmartContract →
-        # only those with no initializer (set as readonly) or explicitly marked.
+        # Collect property names mutated in any method body so we can
+        # determine readonly flags in stateful contracts.
+        mutated: set[str] = set()
+        for method in self._methods:
+            _collect_mutated_properties(method.body, mutated)
+
+        # Constructor param names (used to strip property initializers whose
+        # value is overridden by an explicit ctor param — matches the Zig
+        # compiler reference behaviour of omitting `initialValue`).
+        ctor_param_names: set[str] = set()
+        if self._constructor is not None:
+            ctor_param_names = {p.name for p in self._constructor.params}
+
         for prop in self._properties:
+            had_initializer = prop.initializer is not None
+            if prop.name in ctor_param_names:
+                prop.initializer = None
             if self._parent_class == "SmartContract":
                 prop.readonly = True
-            elif prop.initializer is None and not prop.readonly:
-                # Mutable by default in stateful contracts
-                prop.readonly = False
+            elif (not prop.readonly
+                  and not had_initializer
+                  and prop.name not in mutated):
+                # Stateful fields with no default and no mutation are readonly.
+                prop.readonly = True
 
         # Rewrite bare method calls
         _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "getStateScript"}
@@ -1544,6 +1560,71 @@ class _ZigParser:
             visibility="public",
             source_location=loc,
         )
+
+
+# ---------------------------------------------------------------------------
+# Mutation detection helpers
+# ---------------------------------------------------------------------------
+
+def _collect_mutated_properties(body, out):
+    """Walk a list of statements, adding the names of any properties that
+    are assigned or incremented/decremented to ``out`` (a set[str])."""
+    for stmt in body or []:
+        _collect_mutated_in_stmt(stmt, out)
+
+
+def _collect_mutated_in_stmt(stmt, out):
+    if isinstance(stmt, AssignmentStmt):
+        if isinstance(stmt.target, PropertyAccessExpr):
+            out.add(stmt.target.property)
+        _collect_mutated_in_expr(stmt.target, out)
+        _collect_mutated_in_expr(stmt.value, out)
+    elif isinstance(stmt, VariableDeclStmt):
+        _collect_mutated_in_expr(stmt.init, out)
+    elif isinstance(stmt, ExpressionStmt):
+        _collect_mutated_in_expr(stmt.expr, out)
+    elif isinstance(stmt, ReturnStmt):
+        _collect_mutated_in_expr(stmt.value, out)
+    elif isinstance(stmt, IfStmt):
+        _collect_mutated_in_expr(stmt.condition, out)
+        _collect_mutated_properties(stmt.then, out)
+        _collect_mutated_properties(stmt.else_, out)
+    elif isinstance(stmt, ForStmt):
+        if stmt.init is not None:
+            _collect_mutated_in_expr(stmt.init.init, out)
+        _collect_mutated_in_expr(stmt.condition, out)
+        _collect_mutated_in_stmt(stmt.update, out)
+        _collect_mutated_properties(stmt.body, out)
+
+
+def _collect_mutated_in_expr(expr, out):
+    if expr is None:
+        return
+    if isinstance(expr, BinaryExpr):
+        _collect_mutated_in_expr(expr.left, out)
+        _collect_mutated_in_expr(expr.right, out)
+    elif isinstance(expr, UnaryExpr):
+        _collect_mutated_in_expr(expr.operand, out)
+    elif isinstance(expr, CallExpr):
+        _collect_mutated_in_expr(expr.callee, out)
+        for a in expr.args:
+            _collect_mutated_in_expr(a, out)
+    elif isinstance(expr, MemberExpr):
+        _collect_mutated_in_expr(expr.object, out)
+    elif isinstance(expr, TernaryExpr):
+        _collect_mutated_in_expr(expr.condition, out)
+        _collect_mutated_in_expr(expr.consequent, out)
+        _collect_mutated_in_expr(expr.alternate, out)
+    elif isinstance(expr, IndexAccessExpr):
+        _collect_mutated_in_expr(expr.object, out)
+        _collect_mutated_in_expr(expr.index, out)
+    elif isinstance(expr, IncrementExpr) or isinstance(expr, DecrementExpr):
+        if isinstance(expr.operand, PropertyAccessExpr):
+            out.add(expr.operand.property)
+        _collect_mutated_in_expr(expr.operand, out)
+    elif isinstance(expr, ArrayLiteralExpr):
+        for e in expr.elements:
+            _collect_mutated_in_expr(e, out)
 
 
 # ---------------------------------------------------------------------------

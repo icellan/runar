@@ -703,23 +703,37 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 	p.expect(zigTokRBrace)
 	p.match(zigTokSemicolon)
 
-	// Fix readonly flags: SmartContract -> all readonly; StatefulSmartContract -> readonly only if explicitly marked or has initializer
-	for i := range properties {
-		if p.parentClass == "SmartContract" {
-			properties[i].Readonly = true
-		} else {
-			// In stateful, readonly if explicitly marked or has initializer but no explicit readonly marker
-			// The field parser already sets readonly from runar.Readonly
-			if properties[i].Initializer != nil && !properties[i].Readonly {
-				// Properties with initializers in StatefulSmartContract remain as parsed
-			}
-		}
+	// Collect set of property names that are mutated in any method body.
+	mutatedProps := make(map[string]bool)
+	for _, m := range methods {
+		collectZigMutatedProperties(m.Body, mutatedProps)
 	}
 
 	// Auto-generate constructor if none provided
 	if constructor == nil {
 		ctor := p.autoGenerateConstructor(properties)
 		constructor = &ctor
+	}
+
+	// Strip initializers for properties that are also constructor params
+	// (the constructor param overrides the default; the Zig compiler reference
+	// omits `initialValue` in this case) and finalize readonly flags.
+	ctorParamSet := make(map[string]bool)
+	if constructor != nil {
+		for _, param := range constructor.Params {
+			ctorParamSet[param.Name] = true
+		}
+	}
+	for i := range properties {
+		hadInitializer := properties[i].Initializer != nil
+		if ctorParamSet[properties[i].Name] {
+			properties[i].Initializer = nil
+		}
+		if p.parentClass == "SmartContract" {
+			properties[i].Readonly = true
+		} else if !properties[i].Readonly && !hadInitializer && !mutatedProps[properties[i].Name] {
+			properties[i].Readonly = true
+		}
 	}
 
 	// Rewrite bare method calls to this.method() calls
@@ -1693,3 +1707,101 @@ func (p *zigParser) parseZigNumber(s string) Expression {
 
 // Ensure the strings import is used
 var _ = strings.HasPrefix
+
+// collectZigMutatedProperties walks a list of statements and records the
+// names of contract properties that are the target of an assignment or
+// increment/decrement. Used to determine which StatefulSmartContract fields
+// are mutable.
+func collectZigMutatedProperties(body []Statement, out map[string]bool) {
+	for _, stmt := range body {
+		collectZigMutatedInStmt(stmt, out)
+	}
+}
+
+func collectZigMutatedInStmt(stmt Statement, out map[string]bool) {
+	switch s := stmt.(type) {
+	case AssignmentStmt:
+		if pa, ok := s.Target.(PropertyAccessExpr); ok {
+			out[pa.Property] = true
+		}
+		collectZigMutatedInExpr(s.Target, out)
+		collectZigMutatedInExpr(s.Value, out)
+	case *AssignmentStmt:
+		if pa, ok := s.Target.(PropertyAccessExpr); ok {
+			out[pa.Property] = true
+		}
+		collectZigMutatedInExpr(s.Target, out)
+		collectZigMutatedInExpr(s.Value, out)
+	case VariableDeclStmt:
+		collectZigMutatedInExpr(s.Init, out)
+	case *VariableDeclStmt:
+		collectZigMutatedInExpr(s.Init, out)
+	case ExpressionStmt:
+		collectZigMutatedInExpr(s.Expr, out)
+	case *ExpressionStmt:
+		collectZigMutatedInExpr(s.Expr, out)
+	case ReturnStmt:
+		if s.Value != nil {
+			collectZigMutatedInExpr(s.Value, out)
+		}
+	case *ReturnStmt:
+		if s.Value != nil {
+			collectZigMutatedInExpr(s.Value, out)
+		}
+	case IfStmt:
+		collectZigMutatedInExpr(s.Condition, out)
+		collectZigMutatedProperties(s.Then, out)
+		collectZigMutatedProperties(s.Else, out)
+	case *IfStmt:
+		collectZigMutatedInExpr(s.Condition, out)
+		collectZigMutatedProperties(s.Then, out)
+		collectZigMutatedProperties(s.Else, out)
+	case ForStmt:
+		collectZigMutatedInExpr(s.Init.Init, out)
+		collectZigMutatedInExpr(s.Condition, out)
+		collectZigMutatedInStmt(s.Update, out)
+		collectZigMutatedProperties(s.Body, out)
+	case *ForStmt:
+		collectZigMutatedInExpr(s.Init.Init, out)
+		collectZigMutatedInExpr(s.Condition, out)
+		collectZigMutatedInStmt(s.Update, out)
+		collectZigMutatedProperties(s.Body, out)
+	}
+}
+
+func collectZigMutatedInExpr(expr Expression, out map[string]bool) {
+	if expr == nil {
+		return
+	}
+	switch e := expr.(type) {
+	case BinaryExpr:
+		collectZigMutatedInExpr(e.Left, out)
+		collectZigMutatedInExpr(e.Right, out)
+	case UnaryExpr:
+		collectZigMutatedInExpr(e.Operand, out)
+	case CallExpr:
+		collectZigMutatedInExpr(e.Callee, out)
+		for _, a := range e.Args {
+			collectZigMutatedInExpr(a, out)
+		}
+	case MemberExpr:
+		collectZigMutatedInExpr(e.Object, out)
+	case TernaryExpr:
+		collectZigMutatedInExpr(e.Condition, out)
+		collectZigMutatedInExpr(e.Consequent, out)
+		collectZigMutatedInExpr(e.Alternate, out)
+	case IndexAccessExpr:
+		collectZigMutatedInExpr(e.Object, out)
+		collectZigMutatedInExpr(e.Index, out)
+	case IncrementExpr:
+		if pa, ok := e.Operand.(PropertyAccessExpr); ok {
+			out[pa.Property] = true
+		}
+		collectZigMutatedInExpr(e.Operand, out)
+	case DecrementExpr:
+		if pa, ok := e.Operand.(PropertyAccessExpr); ok {
+			out[pa.Property] = true
+		}
+		collectZigMutatedInExpr(e.Operand, out)
+	}
+}

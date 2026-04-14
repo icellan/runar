@@ -91,6 +91,7 @@ const (
 	rustTokEq
 	rustTokPlusEq
 	rustTokMinusEq
+	rustTokDotDot
 )
 
 type rustToken struct {
@@ -192,6 +193,8 @@ func rustTokenize(source string) []rustToken {
 				kind = rustTokPlusEq
 			case "-=":
 				kind = rustTokMinusEq
+			case "..":
+				kind = rustTokDotDot
 			default:
 				matched = false
 			}
@@ -905,7 +908,9 @@ func (p *rustMacroParser) parseStatement() Statement {
 			p.advance()
 		}
 		p.match(rustTokIn)
-		rangeExpr := p.parseExpression()
+		startExpr := p.parseExpression()
+		p.expect(rustTokDotDot)
+		endExpr := p.parseExpression()
 		p.expect(rustTokLBrace)
 		var body []Statement
 		for p.current().kind != rustTokRBrace && p.current().kind != rustTokEOF {
@@ -914,17 +919,17 @@ func (p *rustMacroParser) parseStatement() Statement {
 			}
 		}
 		p.expect(rustTokRBrace)
-		// Desugar: for i in 0..n { body } → for (let i = 0; i < n; i++) { body }
+		// Desugar: for i in start..end { body } → for (let i = start; i < end; i++) { body }
 		initStmt := VariableDeclStmt{
 			Name:           varName,
 			Mutable:        true,
-			Init:           BigIntLiteral{Value: big.NewInt(0)},
+			Init:           startExpr,
 			SourceLocation: loc,
 		}
 		cond := BinaryExpr{
 			Op:    "<",
 			Left:  Identifier{Name: varName},
-			Right: rangeExpr,
+			Right: endExpr,
 		}
 		update := ExpressionStmt{
 			Expr:           IncrementExpr{Operand: Identifier{Name: varName}, Prefix: false},
@@ -1168,6 +1173,14 @@ func (p *rustMacroParser) parsePostfix() Expression {
 				p.match(rustTokComma)
 			}
 			p.expect(rustTokRParen)
+			// `.clone()` is a Rust borrow-checker artifact — in Rúnar, values
+			// are copied by default, so strip it and keep the receiver.
+			if len(args) == 0 {
+				if me, ok := expr.(MemberExpr); ok && me.Property == "clone" {
+					expr = me.Object
+					continue
+				}
+			}
 			expr = CallExpr{Callee: expr, Args: args}
 
 		case rustTokDot:
