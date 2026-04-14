@@ -10,6 +10,12 @@
 //! The sponge position is tracked at codegen time (in Rust), not at runtime (in Bitcoin Script).
 //! Because the verifier's transcript structure is fully deterministic, we always know exactly
 //! when to permute without runtime conditionals.
+//!
+//! Many of the emit_* and state-name helpers here are port-for-port mirrors of the Go
+//! reference and are not yet wired into the Rust compiler's public codegen entry points;
+//! they are kept intentionally available for the upcoming Groth16 / SP1 verifier port.
+
+#![allow(dead_code)]
 
 use super::koalabear::KBTracker;
 use super::poseidon2_koalabear::{p2kb_permute, p2kb_state_name, p2kb_state_names};

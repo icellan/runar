@@ -372,6 +372,7 @@ pub(crate) fn bn254_field_add(
 }
 
 /// bn254_field_add_unreduced: a + b WITHOUT modular reduction.
+#[allow(dead_code)]
 pub(crate) fn bn254_field_add_unreduced(
     t: &mut BN254Tracker,
     a_name: &str,
@@ -386,6 +387,7 @@ pub(crate) fn bn254_field_add_unreduced(
 }
 
 /// bn254_field_sub_unreduced: a - b WITHOUT modular reduction.
+#[allow(dead_code)]
 pub(crate) fn bn254_field_sub_unreduced(
     t: &mut BN254Tracker,
     a_name: &str,
@@ -400,6 +402,7 @@ pub(crate) fn bn254_field_sub_unreduced(
 }
 
 /// bn254_field_mul_unreduced: a * b WITHOUT modular reduction.
+#[allow(dead_code)]
 pub(crate) fn bn254_field_mul_unreduced(
     t: &mut BN254Tracker,
     a_name: &str,
