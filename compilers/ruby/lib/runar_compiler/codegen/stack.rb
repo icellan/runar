@@ -84,6 +84,19 @@ module RunarCompiler::Codegen
     bbExt4Inv0 bbExt4Inv1 bbExt4Inv2 bbExt4Inv3
   ]).freeze
 
+  # KoalaBear field arithmetic builtin function names
+  KB_BUILTIN_NAMES = Set.new(%w[
+    kbFieldAdd kbFieldSub kbFieldMul kbFieldInv
+    kbExt4Mul0 kbExt4Mul1 kbExt4Mul2 kbExt4Mul3
+    kbExt4Inv0 kbExt4Inv1 kbExt4Inv2 kbExt4Inv3
+  ]).freeze
+
+  # BN254 field arithmetic and G1 curve builtin function names
+  BN254_BUILTIN_NAMES = Set.new(%w[
+    bn254FieldAdd bn254FieldSub bn254FieldMul bn254FieldInv bn254FieldNeg
+    bn254G1Add bn254G1ScalarMul bn254G1Negate bn254G1OnCurve
+  ]).freeze
+
   # Merkle proof verification builtin function names
   MERKLE_BUILTIN_NAMES = Set.new(%w[
     merkleRootSha256 merkleRootHash256
@@ -298,6 +311,18 @@ module RunarCompiler::Codegen
   # @return [Boolean]
   def self.bb_builtin?(name)
     BB_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.kb_builtin?(name)
+    KB_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.bn254_builtin?(name)
+    BN254_BUILTIN_NAMES.include?(name)
   end
 
   # @param name [String]
@@ -1230,6 +1255,24 @@ module RunarCompiler::Codegen
         return
       end
 
+      # KoalaBear field arithmetic builtins
+      if RunarCompiler::Codegen.kb_builtin?(func_name)
+        _lower_kb_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # BN254 field arithmetic and G1 curve builtins
+      if RunarCompiler::Codegen.bn254_builtin?(func_name)
+        _lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # Poseidon2 KoalaBear Merkle root
+      if func_name == "merkleRootPoseidon2KB"
+        _lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses)
+        return
+      end
+
       # Merkle proof verification builtins
       if RunarCompiler::Codegen.merkle_builtin?(func_name)
         _lower_merkle_root(binding_name, func_name, args, binding_index, last_uses)
@@ -2039,6 +2082,91 @@ module RunarCompiler::Codegen
 
       emit_fn = ->(op) { emit_op(op) }
       BabyBear.dispatch_bb_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_kb_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "koalabear"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      KoalaBear.dispatch_kb_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "bn254"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      BN254.dispatch_bn254_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses)
+      require_relative "poseidon2_merkle"
+      # args: [leaf_0..leaf_7, sib0_0..sib0_7, ..., sib(D-1)_0..sib(D-1)_7, index, depth]
+      # depth must be a compile-time constant (last argument)
+      n_args = args.length
+      raise "merkleRootPoseidon2KB requires at least 10 arguments, got #{n_args}" if n_args < 10
+
+      # Extract depth constant from ANF binding (last arg)
+      depth_arg = args[n_args - 1]
+      depth_value = get_constant_value(depth_arg)
+      if depth_value.nil? || !depth_value.is_a?(Integer)
+        raise "merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant " \
+              "integer literal. Got a runtime value for '#{depth_arg}'."
+      end
+      depth = depth_value
+      if depth < 1 || depth > 64
+        raise "merkleRootPoseidon2KB: depth must be between 1 and 64, got #{depth}"
+      end
+
+      # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
+      expected_args = 8 + depth * 8 + 1 + 1
+      unless n_args == expected_args
+        raise "merkleRootPoseidon2KB: expected #{expected_args} arguments " \
+              "(8 leaf + #{depth}*8 proof + index + depth), got #{n_args}"
+      end
+
+      # Remove depth from the real stack FIRST (compile-time constant, not runtime)
+      if @sm.has?(depth_arg)
+        bring_to_top(depth_arg, true)
+        emit_op({ op: "drop" })
+        @sm.pop
+      end
+
+      # Bring all runtime args (leaf*8 + proof*depth*8 + index) to stack top in order
+      runtime_arg_count = n_args - 1 # all except depth
+      runtime_arg_count.times do |i|
+        arg = args[i]
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      # Pop all runtime args — the codegen consumes them and produces 8 results
+      runtime_arg_count.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      Poseidon2Merkle.emit_poseidon2_merkle_root(emit_fn, depth)
+
+      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
+      # The type system returns a single bigint, so only root_7 (top) is accessible.
+      # Drop the lower 7 elements with OP_NIP to keep the stack clean.
+      7.times { emit_op({ op: "nip" }) }
 
       @sm.push(binding_name)
       _track_depth

@@ -99,8 +99,32 @@ fn is_bb_builtin(name: &str) -> bool {
     )
 }
 
+fn is_kb_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "kbFieldAdd" | "kbFieldSub" | "kbFieldMul" | "kbFieldInv"
+            | "kbExt4Mul0" | "kbExt4Mul1" | "kbExt4Mul2" | "kbExt4Mul3"
+            | "kbExt4Inv0" | "kbExt4Inv1" | "kbExt4Inv2" | "kbExt4Inv3"
+    )
+}
+
+fn is_bn254_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "bn254FieldAdd"
+            | "bn254FieldSub"
+            | "bn254FieldMul"
+            | "bn254FieldInv"
+            | "bn254FieldNeg"
+            | "bn254G1Add"
+            | "bn254G1ScalarMul"
+            | "bn254G1Negate"
+            | "bn254G1OnCurve"
+    )
+}
+
 fn is_merkle_builtin(name: &str) -> bool {
-    matches!(name, "merkleRootSha256" | "merkleRootHash256")
+    matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
 }
 
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
@@ -1198,6 +1222,16 @@ impl LoweringContext {
 
         if is_bb_builtin(func_name) {
             self.lower_bb_field_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_kb_builtin(func_name) {
+            self.lower_kb_field_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_bn254_builtin(func_name) {
+            self.lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses);
             return;
         }
 
@@ -3797,6 +3831,89 @@ impl LoweringContext {
     }
 
     // -----------------------------------------------------------------------
+    // KoalaBear field arithmetic -- delegates to koalabear.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_kb_field_builtin(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // Bring all args to stack top
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in args {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "kbFieldAdd" => super::koalabear::emit_kb_field_add(emit),
+            "kbFieldSub" => super::koalabear::emit_kb_field_sub(emit),
+            "kbFieldMul" => super::koalabear::emit_kb_field_mul(emit),
+            "kbFieldInv" => super::koalabear::emit_kb_field_inv(emit),
+            "kbExt4Mul0" => super::koalabear::emit_kb_ext4_mul_0(emit),
+            "kbExt4Mul1" => super::koalabear::emit_kb_ext4_mul_1(emit),
+            "kbExt4Mul2" => super::koalabear::emit_kb_ext4_mul_2(emit),
+            "kbExt4Mul3" => super::koalabear::emit_kb_ext4_mul_3(emit),
+            "kbExt4Inv0" => super::koalabear::emit_kb_ext4_inv_0(emit),
+            "kbExt4Inv1" => super::koalabear::emit_kb_ext4_inv_1(emit),
+            "kbExt4Inv2" => super::koalabear::emit_kb_ext4_inv_2(emit),
+            "kbExt4Inv3" => super::koalabear::emit_kb_ext4_inv_3(emit),
+            _ => panic!("unknown KoalaBear builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
+    // BN254 field + G1 operations -- delegates to bn254.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_bn254_builtin(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // Bring all args to stack top in order
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in args {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "bn254FieldAdd" => super::bn254::emit_bn254_field_add(emit),
+            "bn254FieldSub" => super::bn254::emit_bn254_field_sub(emit),
+            "bn254FieldMul" => super::bn254::emit_bn254_field_mul(emit),
+            "bn254FieldInv" => super::bn254::emit_bn254_field_inv(emit),
+            "bn254FieldNeg" => super::bn254::emit_bn254_field_neg(emit),
+            "bn254G1Add" => super::bn254::emit_bn254_g1_add(emit),
+            "bn254G1ScalarMul" => super::bn254::emit_bn254_g1_scalar_mul(emit),
+            "bn254G1Negate" => super::bn254::emit_bn254_g1_negate(emit),
+            "bn254G1OnCurve" => super::bn254::emit_bn254_g1_on_curve(emit),
+            _ => panic!("unknown BN254 builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
     // Merkle proof verification -- delegates to merkle.rs
     // -----------------------------------------------------------------------
 
@@ -3856,6 +3973,7 @@ impl LoweringContext {
         match func_name {
             "merkleRootSha256" => super::merkle::emit_merkle_root_sha256(emit, depth),
             "merkleRootHash256" => super::merkle::emit_merkle_root_hash256(emit, depth),
+            "merkleRootPoseidon2KB" => super::poseidon2_merkle::emit_poseidon2_merkle_root(emit, depth),
             _ => panic!("unknown Merkle builtin: {}", func_name),
         }
 

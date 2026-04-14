@@ -26,9 +26,10 @@ const KB_P_MINUS_2 = KB_P - 2n;
 // KBTracker — named stack state tracker (mirrors ECTracker)
 // ===========================================================================
 
-class KBTracker {
+export class KBTracker {
   nm: (string | null)[];
   _e: (op: StackOp) => void;
+  _primeCacheActive: boolean = false;
 
   constructor(init: (string | null)[], emit: (op: StackOp) => void) {
     this.nm = [...init];
@@ -122,6 +123,39 @@ class KBTracker {
     for (let i = 0; i < consume.length; i++) this.nm.pop();
     if (produce !== null) this.nm.push(produce);
   }
+
+  /**
+   * pushPrimeCache: push the KoalaBear prime to the alt-stack for caching.
+   * All subsequent field operations will use the cached prime instead of pushing fresh literals.
+   * This significantly reduces script size during long operations like Poseidon2.
+   */
+  pushPrimeCache(): void {
+    this._e({ op: 'push', value: KB_P });
+    this._e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    this._primeCacheActive = true;
+  }
+
+  /**
+   * popPrimeCache: remove the cached prime from the alt-stack.
+   */
+  popPrimeCache(): void {
+    this._e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+    this._e({ op: 'drop' });
+    this._primeCacheActive = false;
+  }
+
+  /**
+   * emitPrime: emit the field prime onto the stack — either from cache (alt-stack) or fresh push.
+   */
+  emitPrime(e: (op: StackOp) => void): void {
+    if (this._primeCacheActive) {
+      e({ op: 'opcode', code: 'OP_FROMALTSTACK' });
+      e({ op: 'dup' });
+      e({ op: 'opcode', code: 'OP_TOALTSTACK' });
+    } else {
+      e({ op: 'push', value: KB_P });
+    }
+  }
 }
 
 // ===========================================================================
@@ -133,21 +167,30 @@ class KBTracker {
  * For Koala Bear, inputs from add/mul are already non-negative, but sub can produce negatives.
  * Pattern: (a % p + p) % p
  */
-function fieldMod(t: KBTracker, aName: string, resultName: string): void {
+export function kbFieldMod(t: KBTracker, aName: string, resultName: string): void {
   t.toTop(aName);
   t.rawBlock([aName], resultName, (e) => {
     // (a % p + p) % p — handles negative values from sub
-    e({ op: 'push', value: KB_P });
+    t.emitPrime(e);
     e({ op: 'opcode', code: 'OP_MOD' });
-    e({ op: 'push', value: KB_P });
+    t.emitPrime(e);
     e({ op: 'opcode', code: 'OP_ADD' });
-    e({ op: 'push', value: KB_P });
+    t.emitPrime(e);
     e({ op: 'opcode', code: 'OP_MOD' });
   });
 }
 
-/** fieldAdd: (a + b) mod p */
-function fieldAdd(t: KBTracker, aName: string, bName: string, resultName: string): void {
+/** kbFieldAddUnreduced: a + b WITHOUT modular reduction. Result in [0, 2p-2]. */
+export function kbFieldAddUnreduced(t: KBTracker, aName: string, bName: string, resultName: string): void {
+  t.toTop(aName);
+  t.toTop(bName);
+  t.rawBlock([aName, bName], resultName, (e) => {
+    e({ op: 'opcode', code: 'OP_ADD' });
+  });
+}
+
+/** kbFieldAdd: (a + b) mod p */
+export function kbFieldAdd(t: KBTracker, aName: string, bName: string, resultName: string): void {
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_kb_add', (e) => {
@@ -156,24 +199,37 @@ function fieldAdd(t: KBTracker, aName: string, bName: string, resultName: string
   // Sum of two values in [0, p-1] is always non-negative, so simple OP_MOD suffices
   t.toTop('_kb_add');
   t.rawBlock(['_kb_add'], resultName, (e) => {
-    e({ op: 'push', value: KB_P });
+    t.emitPrime(e);
     e({ op: 'opcode', code: 'OP_MOD' });
   });
 }
 
-/** fieldSub: (a - b) mod p (non-negative) */
-function fieldSub(t: KBTracker, aName: string, bName: string, resultName: string): void {
+// Legacy alias kept for internal use
+function fieldMod(t: KBTracker, aName: string, resultName: string): void {
+  kbFieldMod(t, aName, resultName);
+}
+function fieldAdd(t: KBTracker, aName: string, bName: string, resultName: string): void {
+  kbFieldAdd(t, aName, bName, resultName);
+}
+
+/** kbFieldSub: (a - b) mod p (non-negative) */
+export function kbFieldSub(t: KBTracker, aName: string, bName: string, resultName: string): void {
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_kb_diff', (e) => {
     e({ op: 'opcode', code: 'OP_SUB' });
   });
   // Difference can be negative, need full mod-reduce
-  fieldMod(t, '_kb_diff', resultName);
+  kbFieldMod(t, '_kb_diff', resultName);
 }
 
-/** fieldMul: (a * b) mod p */
-function fieldMul(t: KBTracker, aName: string, bName: string, resultName: string): void {
+// Legacy alias
+function fieldSub(t: KBTracker, aName: string, bName: string, resultName: string): void {
+  kbFieldSub(t, aName, bName, resultName);
+}
+
+/** kbFieldMul: (a * b) mod p */
+export function kbFieldMul(t: KBTracker, aName: string, bName: string, resultName: string): void {
   t.toTop(aName);
   t.toTop(bName);
   t.rawBlock([aName, bName], '_kb_prod', (e) => {
@@ -182,24 +238,66 @@ function fieldMul(t: KBTracker, aName: string, bName: string, resultName: string
   // Product of two non-negative values is non-negative, simple OP_MOD
   t.toTop('_kb_prod');
   t.rawBlock(['_kb_prod'], resultName, (e) => {
-    e({ op: 'push', value: KB_P });
+    t.emitPrime(e);
     e({ op: 'opcode', code: 'OP_MOD' });
   });
 }
 
-/** fieldSqr: (a * a) mod p */
-function fieldSqr(t: KBTracker, aName: string, resultName: string): void {
+// Legacy alias
+function fieldMul(t: KBTracker, aName: string, bName: string, resultName: string): void {
+  kbFieldMul(t, aName, bName, resultName);
+}
+
+/** kbFieldSqr: (a * a) mod p */
+export function kbFieldSqr(t: KBTracker, aName: string, resultName: string): void {
   t.copyToTop(aName, '_kb_sqr_copy');
-  fieldMul(t, aName, '_kb_sqr_copy', resultName);
+  kbFieldMul(t, aName, '_kb_sqr_copy', resultName);
+}
+
+// Legacy alias
+function fieldSqr(t: KBTracker, aName: string, resultName: string): void {
+  kbFieldSqr(t, aName, resultName);
 }
 
 /**
- * fieldInv: a^(p-2) mod p via square-and-multiply (Fermat's little theorem).
+ * kbFieldMulConst: (a * c) mod p where c is a small constant.
+ * Uses OP_2MUL when c==2 and OP_LSHIFTNUM when c is a power of 2 > 2.
+ */
+export function kbFieldMulConst(t: KBTracker, aName: string, c: bigint, resultName: string): void {
+  t.toTop(aName);
+  if (c === 2n) {
+    t.rawBlock([aName], '_kb_mc', (e) => {
+      e({ op: 'opcode', code: 'OP_2MUL' });
+    });
+  } else if (c > 2n && (c & (c - 1n)) === 0n) {
+    // power of 2 > 2: use OP_LSHIFTNUM
+    let shift = 0;
+    let tmp = c;
+    while (tmp > 1n) { tmp >>= 1n; shift++; }
+    t.rawBlock([aName], '_kb_mc', (e) => {
+      e({ op: 'push', value: BigInt(shift) });
+      e({ op: 'opcode', code: 'OP_LSHIFTNUM' });
+    });
+  } else {
+    t.rawBlock([aName], '_kb_mc', (e) => {
+      e({ op: 'push', value: c });
+      e({ op: 'opcode', code: 'OP_MUL' });
+    });
+  }
+  t.toTop('_kb_mc');
+  t.rawBlock(['_kb_mc'], resultName, (e) => {
+    t.emitPrime(e);
+    e({ op: 'opcode', code: 'OP_MOD' });
+  });
+}
+
+/**
+ * kbFieldInv: a^(p-2) mod p via square-and-multiply (Fermat's little theorem).
  * p-2 = 2130706431 = 0x7eFFFFFF = 0b0111_1110_1111_1111_1111_1111_1111_1111
  * 31 bits, popcount 30.
  * 30 squarings + 29 conditional multiplies (for each set bit except MSB).
  */
-function fieldInv(t: KBTracker, aName: string, resultName: string): void {
+export function kbFieldInv(t: KBTracker, aName: string, resultName: string): void {
   // Start: result = a (for MSB bit 30 = 1)
   t.copyToTop(aName, '_inv_r');
 
@@ -223,6 +321,14 @@ function fieldInv(t: KBTracker, aName: string, resultName: string): void {
   t.drop();
   t.toTop('_inv_r');
   t.rename(resultName);
+}
+
+// Legacy aliases
+function fieldInv(t: KBTracker, aName: string, resultName: string): void {
+  kbFieldInv(t, aName, resultName);
+}
+function fieldMulConst(t: KBTracker, aName: string, c: bigint, resultName: string): void {
+  kbFieldMulConst(t, aName, c, resultName);
 }
 
 // ===========================================================================
@@ -282,20 +388,6 @@ export function emitKBFieldInv(emit: (op: StackOp) => void): void {
 // ===========================================================================
 
 const KB_W = 3n;
-
-/** fieldMulConst: (a * c) mod p where c is a constant */
-function fieldMulConst(t: KBTracker, aName: string, c: bigint, resultName: string): void {
-  t.toTop(aName);
-  t.rawBlock([aName], '_kb_mc', (e) => {
-    e({ op: 'push', value: c });
-    e({ op: 'opcode', code: 'OP_MUL' });
-  });
-  t.toTop('_kb_mc');
-  t.rawBlock(['_kb_mc'], resultName, (e) => {
-    e({ op: 'push', value: KB_P });
-    e({ op: 'opcode', code: 'OP_MOD' });
-  });
-}
 
 /**
  * Emit ext4 mul component 0: a0*b0 + W*(a1*b3 + a2*b2 + a3*b1)

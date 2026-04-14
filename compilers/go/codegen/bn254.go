@@ -712,16 +712,38 @@ func bn254ComposePoint(t *BN254Tracker, xName, yName, resultName string) {
 
 // bn254G1AffineAdd performs affine point addition on BN254 G1.
 // Expects px, py, qx, qy on tracker. Produces rx, ry. Consumes all four inputs.
+//
+// Uses the unified slope formula
+//
+//	s = (px^2 + px*qx + qx^2) / (py + qy)
+//
+// which works for both the addition case (P != Q) and the doubling case
+// (P == Q) on y^2 = x^3 + b. The standard chord formula s = (qy-py)/(qx-px)
+// divides by zero when P == Q; the unified form is mathematically equivalent
+// for distinct points (multiply numerator and denominator by (qx-px) and use
+// the curve equation y^2 = x^3 + b), and collapses to 3*px^2/(2*py) when
+// P == Q, which is the correct doubling slope.
+//
+// The only input that still fails is P == -Q (py + qy == 0, group identity),
+// which is out of scope for Groth16 verifier usage: witness-assisted paths
+// never add a point to its inverse, and scalar mul of prepared inputs by
+// Groth16 public inputs does not encounter this case in practice.
 func bn254G1AffineAdd(t *BN254Tracker) {
-	// s_num = qy - py
-	t.copyToTop("qy", "_qy1")
-	t.copyToTop("py", "_py1")
-	bn254FieldSub(t, "_qy1", "_py1", "_s_num")
+	// s_num = px^2 + px*qx + qx^2
+	t.copyToTop("px", "_px_sq_in")
+	bn254FieldSqr(t, "_px_sq_in", "_px_sq")
+	t.copyToTop("px", "_px_m")
+	t.copyToTop("qx", "_qx_m")
+	bn254FieldMul(t, "_px_m", "_qx_m", "_px_qx")
+	t.copyToTop("qx", "_qx_sq_in")
+	bn254FieldSqr(t, "_qx_sq_in", "_qx_sq")
+	bn254FieldAdd(t, "_px_sq", "_px_qx", "_s_num_tmp")
+	bn254FieldAdd(t, "_s_num_tmp", "_qx_sq", "_s_num")
 
-	// s_den = qx - px
-	t.copyToTop("qx", "_qx1")
-	t.copyToTop("px", "_px1")
-	bn254FieldSub(t, "_qx1", "_px1", "_s_den")
+	// s_den = py + qy
+	t.copyToTop("py", "_py_a")
+	t.copyToTop("qy", "_qy_a")
+	bn254FieldAdd(t, "_py_a", "_qy_a", "_s_den")
 
 	// s = s_num / s_den mod p
 	bn254FieldInv(t, "_s_den", "_s_den_inv")
@@ -841,26 +863,22 @@ func bn254G1JacobianToAffine(t *BN254Tracker, rxName, ryName string) {
 // Jacobian mixed addition (P_jacobian + Q_affine)
 // ===========================================================================
 
-// bn254BuildJacobianAddAffineInline builds Jacobian mixed-add ops for use inside OP_IF.
-// Uses an inner BN254Tracker to leverage field arithmetic helpers.
+// bn254BuildJacobianAddAffineStandard emits the standard Jacobian mixed-add
+// sequence assuming the doubling case has already been excluded by the caller.
 //
-// Stack layout: [..., ax, ay, _k, jx, jy, jz]
-// After:        [..., ax, ay, _k, jx', jy', jz']
-func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
-	// Create inner tracker with cloned stack state
-	initNm := make([]string, len(t.nm))
-	copy(initNm, t.nm)
-	it := NewBN254Tracker(initNm, e)
-	// Propagate prime cache state: the cached prime on the alt-stack is
-	// accessible within OP_IF branches since alt-stack persists across
-	// IF/ELSE/ENDIF boundaries.
-	it.primeCacheActive = t.primeCacheActive
-
+// Consumes jx, jy, jz on the tracker (the affine base point ax, ay is read
+// via copy-to-top) and produces replacement jx, jy, jz.
+//
+// WARNING: this function fails (H = 0 in the chord formula) when the
+// Jacobian accumulator equals the affine base point in affine form. Callers
+// must guard against that case; see bn254BuildJacobianAddAffineInline for the
+// complete doubling-safe wrapper used by scalar multiplication.
+func bn254BuildJacobianAddAffineStandard(it *BN254Tracker) {
 	// Save copies of values that get consumed but are needed later
-	it.copyToTop("jz", "_jz_for_z1cu")  // consumed by Z1sq, needed for Z1cu
-	it.copyToTop("jz", "_jz_for_z3")    // needed for Z3
-	it.copyToTop("jy", "_jy_for_y3")    // consumed by R, needed for Y3
-	it.copyToTop("jx", "_jx_for_u1h2")  // consumed by H, needed for U1H2
+	it.copyToTop("jz", "_jz_for_z1cu") // consumed by Z1sq, needed for Z1cu
+	it.copyToTop("jz", "_jz_for_z3")   // needed for Z3
+	it.copyToTop("jy", "_jy_for_y3")   // consumed by R, needed for Y3
+	it.copyToTop("jx", "_jx_for_u1h2") // consumed by H, needed for U1H2
 
 	// Z1sq = jz^2
 	bn254FieldSqr(it, "jz", "_Z1sq")
@@ -927,6 +945,74 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
 	it.rename("jy")
 	it.toTop("_Z3")
 	it.rename("jz")
+}
+
+// bn254BuildJacobianAddAffineInline builds doubling-safe Jacobian mixed-add
+// ops for use inside OP_IF. Uses an inner BN254Tracker to leverage the field
+// arithmetic helpers.
+//
+// Stack layout: [..., ax, ay, _k, jx, jy, jz]
+// After:        [..., ax, ay, _k, jx', jy', jz']
+//
+// The standard Jacobian mixed-add formula divides by H = ax*jz^2 - jx, which
+// is 0 when the accumulator's affine image equals the base point — a
+// deterministic trajectory for certain scalars (k=2, etc.). To handle the
+// doubling case, we check H == 0 at runtime and delegate to Jacobian doubling
+// of (jx, jy, jz) when it fires. The standard mixed-add runs otherwise.
+//
+// The negation case (H == 0 with R != 0, i.e., acc = -base) produces incorrect
+// results, but is cryptographically unreachable for valid Groth16 public
+// inputs and is therefore not guarded separately.
+func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
+	// Create inner tracker with cloned stack state
+	initNm := make([]string, len(t.nm))
+	copy(initNm, t.nm)
+	it := NewBN254Tracker(initNm, e)
+	// Propagate prime cache state: the cached prime on the alt-stack is
+	// accessible within OP_IF branches since alt-stack persists across
+	// IF/ELSE/ENDIF boundaries.
+	it.primeCacheActive = t.primeCacheActive
+
+	// ------------------------------------------------------------------
+	// Doubling-case detection: H = ax*jz^2 - jx == 0 ?
+	// ------------------------------------------------------------------
+	// Compute U2 = ax * jz^2 without consuming jx, jy, or jz, then
+	// compare against a fresh copy of jx. Consumes only the copies.
+	it.copyToTop("jz", "_jz_chk_in")
+	bn254FieldSqr(it, "_jz_chk_in", "_jz_chk_sq")
+	it.copyToTop("ax", "_ax_chk_copy")
+	bn254FieldMul(it, "_ax_chk_copy", "_jz_chk_sq", "_u2_chk")
+	it.copyToTop("jx", "_jx_chk_copy")
+	it.rawBlock([]string{"_u2_chk", "_jx_chk_copy"}, "_h_is_zero", func(e func(StackOp)) {
+		e(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+	})
+
+	// Move _h_is_zero to top so OP_IF can consume it.
+	it.toTop("_h_is_zero")
+	it.nm = it.nm[:len(it.nm)-1] // consumed by IF
+
+	// ------------------------------------------------------------------
+	// Gather doubling-branch ops
+	// ------------------------------------------------------------------
+	var doublingOps []StackOp
+	doublingEmit := func(op StackOp) { doublingOps = append(doublingOps, op) }
+	doublingTracker := NewBN254Tracker(append([]string{}, it.nm...), doublingEmit)
+	doublingTracker.primeCacheActive = it.primeCacheActive
+	bn254G1JacobianDouble(doublingTracker)
+
+	// ------------------------------------------------------------------
+	// Gather standard-add-branch ops
+	// ------------------------------------------------------------------
+	var addOps []StackOp
+	addEmit := func(op StackOp) { addOps = append(addOps, op) }
+	addTracker := NewBN254Tracker(append([]string{}, it.nm...), addEmit)
+	addTracker.primeCacheActive = it.primeCacheActive
+	bn254BuildJacobianAddAffineStandard(addTracker)
+
+	// Both branches leave (jx, jy, jz) replacing the originals with the
+	// same stack layout.
+	it.e(StackOp{Op: "if", Then: doublingOps, Else: addOps})
+	it.nm = doublingTracker.nm
 }
 
 // ===========================================================================

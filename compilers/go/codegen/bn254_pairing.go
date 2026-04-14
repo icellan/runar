@@ -19,7 +19,10 @@
 // All loops are unrolled at codegen time.
 package codegen
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+)
 
 // ===========================================================================
 // BN254 pairing constants
@@ -447,6 +450,13 @@ func bn254LineEvalDoubleSparse(t *BN254Tracker, tPrefix, pxName, pyName, rTPrefi
 
 // bn254LineEvalAddSparse computes the chord line through T and Q,
 // evaluated at P, and computes T + Q. Produces sparse output (6 Fp slots).
+//
+// Consumes both tPrefix (4 Fp slots of T) AND qPrefix (4 Fp slots of Q).
+// Callers must pass a fresh Q copy (e.g. `_addQ<k>` or `_subQ<k>`) that they
+// don't need afterwards; the original Q stored at `q<k>*` or `_nQ<k>*` is
+// not touched. Failing to consume qPrefix used to leak 4 Fp slots per call
+// — see the v2 bug report where that caused incorrect multi-pairing
+// results for 4 distinct G2 inputs.
 func bn254LineEvalAddSparse(t *BN254Tracker, tPrefix, qPrefix, pxName, pyName, rTPrefix, linePrefix, uniqueSfx string) {
 	pfx := "_leas" + uniqueSfx + "_"
 	// lambda = (Qy - Ty) / (Qx - Tx)
@@ -525,9 +535,13 @@ func bn254LineEvalAddSparse(t *BN254Tracker, tPrefix, qPrefix, pxName, pyName, r
 	t.toTop(pfx + "c4out_1")
 	t.rename(linePrefix + "_c4_1")
 
-	// Clean up
+	// Clean up: drop lambda, tPrefix (the source T_k point), and qPrefix
+	// (the Q copy passed in — the original Q at qN* is preserved because
+	// callers copyToTop into a fresh _addQ/_subQ/_Q1/_Q2 prefix before
+	// calling this function).
 	bn254DropNames(t, []string{pfx + "lam_0", pfx + "lam_1"})
 	bn254DropNames(t, []string{tPrefix + "_x_0", tPrefix + "_x_1", tPrefix + "_y_0", tPrefix + "_y_1"})
+	bn254DropNames(t, []string{qPrefix + "_x_0", qPrefix + "_x_1", qPrefix + "_y_0", qPrefix + "_y_1"})
 }
 
 // ===========================================================================
@@ -599,6 +613,22 @@ func bn254G2FrobeniusP2(t *BN254Tracker, prefix, rPrefix string) {
 //
 // All iterations are unrolled at codegen time.
 func bn254MillerLoop(t *BN254Tracker) {
+	bn254MillerLoopNamed(t, "px", "py", "qx0", "qx1", "qy0", "qy1", "_f", "")
+}
+
+// bn254MillerLoopNamed is the parameterized version of bn254MillerLoop. It
+// runs a single-pair optimal Ate Miller loop using the caller-supplied input
+// slot names and writes its 12-Fp output under outPrefix. The slotSfx
+// parameter is appended to all INTERNAL temporary slot names so multiple
+// calls to this function can be stacked safely without internal-name
+// collisions.
+//
+// Inputs (all 1 Fp slot each): pxName, pyName, qx0Name, qx1Name, qy0Name,
+// qy1Name. These slots must exist on the tracker and are preserved (not
+// consumed) across the call.
+//
+// Output: 12 Fp slots named outPrefix + "_a_0_0" .. outPrefix + "_b_2_1".
+func bn254MillerLoopNamed(t *BN254Tracker, pxName, pyName, qx0Name, qx1Name, qy0Name, qy1Name, outPrefix, slotSfx string) {
 	naf := bn254SixXPlus2NAF
 
 	// Find MSB (highest non-zero NAF digit)
@@ -607,92 +637,135 @@ func bn254MillerLoop(t *BN254Tracker) {
 		msbIdx--
 	}
 
+	// All internal slot names are suffixed with slotSfx so multiple
+	// concurrent Miller loops don't clash.
+	tN := "_T" + slotSfx
+	fN := "_f" + slotSfx
+	negQN := "_negQ" + slotSfx
+	nQN := "_nQ" + slotSfx
+	addQN := "_addQ" + slotSfx
+	subQN := "_subQ" + slotSfx
+	fQN := "_fQ" + slotSfx
+	fQ2N := "_fQ2" + slotSfx
+	Q1N := "_Q1" + slotSfx
+	Q2preN := "_Q2pre" + slotSfx
+	Q2N := "_Q2" + slotSfx
+	ldN := "_ld" + slotSfx
+	laN := "_la" + slotSfx
+	lsN := "_ls" + slotSfx
+	lq1N := "_lq1" + slotSfx
+	lq2N := "_lq2" + slotSfx
+	T2N := "_T2m" + slotSfx
+	T3N := "_T3m" + slotSfx
+	T4N := "_T4m" + slotSfx
+	T5N := "_T5m" + slotSfx
+	T6N := "_T6m" + slotSfx
+	fSqN := "_f_sq" + slotSfx
+	fMulN := "_f_mul" + slotSfx
+	fMul2N := "_f_mul2" + slotSfx
+	fMul3N := "_f_mul3" + slotSfx
+	fC1N := "_f_c1" + slotSfx
+	fC2N := "_f_c2" + slotSfx
+
+	// Line-eval uniqueSfx values. They must be unique both ACROSS iterations
+	// (different NAF bit index) AND across concurrent Miller loops (slotSfx).
+	mkLineSfx := func(kind string, iter int) string {
+		return kind + slotSfx + "_" + fmt.Sprintf("%d", iter)
+	}
+
 	// Initialize T = Q (copy Q)
-	t.copyToTop("qx0", "_T_x_0")
-	t.copyToTop("qx1", "_T_x_1")
-	t.copyToTop("qy0", "_T_y_0")
-	t.copyToTop("qy1", "_T_y_1")
+	t.copyToTop(qx0Name, tN+"_x_0")
+	t.copyToTop(qx1Name, tN+"_x_1")
+	t.copyToTop(qy0Name, tN+"_y_0")
+	t.copyToTop(qy1Name, tN+"_y_1")
 
 	// Initialize f = 1
-	bn254Fp12SetOne(t, "_f")
+	bn254Fp12SetOne(t, fN)
 
 	// Also prepare -Q for NAF digit = -1
-	t.copyToTop("qx0", "_negQ_x_0")
-	t.copyToTop("qx1", "_negQ_x_1")
-	t.copyToTop("qy0", "_negQ_y_0")
-	t.copyToTop("qy1", "_negQ_y_1")
-	bn254G2Negate(t, "_negQ", "_nQ")
+	t.copyToTop(qx0Name, negQN+"_x_0")
+	t.copyToTop(qx1Name, negQN+"_x_1")
+	t.copyToTop(qy0Name, negQN+"_y_0")
+	t.copyToTop(qy1Name, negQN+"_y_1")
+	bn254G2Negate(t, negQN, nQN)
 
 	// Iterate from MSB-1 down to 0
+	iter := 0
 	for i := msbIdx - 1; i >= 0; i-- {
 		// f = f^2
-		bn254Fp12Sqr(t, "_f", "_f_sq")
-		bn254Fp12RenamePrefix(t, "_f_sq", "_f")
+		bn254Fp12Sqr(t, fN, fSqN)
+		bn254Fp12RenamePrefix(t, fSqN, fN)
 
 		// Line evaluation at doubling: doubles T, produces sparse line
-		bn254LineEvalDoubleSparse(t, "_T", "px", "py", "_T2", "_ld", "")
-		bn254RenameG2(t, "_T2", "_T")
+		bn254LineEvalDoubleSparse(t, tN, pxName, pyName, T2N, ldN, mkLineSfx("d", iter))
+		bn254RenameG2(t, T2N, tN)
 
 		// f *= line (sparse multiply)
-		bn254Fp12MulSparse(t, "_f", "_ld", "_f_mul")
-		bn254Fp12RenamePrefix(t, "_f_mul", "_f")
+		bn254Fp12MulSparse(t, fN, ldN, fMulN)
+		bn254Fp12RenamePrefix(t, fMulN, fN)
 
 		switch naf[i] {
 		case 1:
 			// f *= line_add(T, Q, P); T = T + Q
-			t.copyToTop("qx0", "_addQ_x_0")
-			t.copyToTop("qx1", "_addQ_x_1")
-			t.copyToTop("qy0", "_addQ_y_0")
-			t.copyToTop("qy1", "_addQ_y_1")
-			bn254LineEvalAddSparse(t, "_T", "_addQ", "px", "py", "_T3", "_la", "")
-			bn254RenameG2(t, "_T3", "_T")
-			bn254Fp12MulSparse(t, "_f", "_la", "_f_mul2")
-			bn254Fp12RenamePrefix(t, "_f_mul2", "_f")
+			t.copyToTop(qx0Name, addQN+"_x_0")
+			t.copyToTop(qx1Name, addQN+"_x_1")
+			t.copyToTop(qy0Name, addQN+"_y_0")
+			t.copyToTop(qy1Name, addQN+"_y_1")
+			bn254LineEvalAddSparse(t, tN, addQN, pxName, pyName, T3N, laN, mkLineSfx("a", iter))
+			bn254RenameG2(t, T3N, tN)
+			bn254Fp12MulSparse(t, fN, laN, fMul2N)
+			bn254Fp12RenamePrefix(t, fMul2N, fN)
 		case -1:
 			// f *= line_add(T, -Q, P); T = T - Q
-			t.copyToTop("_nQ_x_0", "_subQ_x_0")
-			t.copyToTop("_nQ_x_1", "_subQ_x_1")
-			t.copyToTop("_nQ_y_0", "_subQ_y_0")
-			t.copyToTop("_nQ_y_1", "_subQ_y_1")
-			bn254LineEvalAddSparse(t, "_T", "_subQ", "px", "py", "_T4", "_ls", "")
-			bn254RenameG2(t, "_T4", "_T")
-			bn254Fp12MulSparse(t, "_f", "_ls", "_f_mul3")
-			bn254Fp12RenamePrefix(t, "_f_mul3", "_f")
+			t.copyToTop(nQN+"_x_0", subQN+"_x_0")
+			t.copyToTop(nQN+"_x_1", subQN+"_x_1")
+			t.copyToTop(nQN+"_y_0", subQN+"_y_0")
+			t.copyToTop(nQN+"_y_1", subQN+"_y_1")
+			bn254LineEvalAddSparse(t, tN, subQN, pxName, pyName, T4N, lsN, mkLineSfx("s", iter))
+			bn254RenameG2(t, T4N, tN)
+			bn254Fp12MulSparse(t, fN, lsN, fMul3N)
+			bn254Fp12RenamePrefix(t, fMul3N, fN)
 		}
+		iter++
 	}
 
 	// Clean up -Q
-	bn254DropNames(t, []string{"_nQ_x_0", "_nQ_x_1", "_nQ_y_0", "_nQ_y_1"})
+	bn254DropNames(t, []string{nQN + "_x_0", nQN + "_x_1", nQN + "_y_0", nQN + "_y_1"})
 
 	// BN254 corrections: Q1 = π(Q), Q2 = -π²(Q)
 	// Q1 = frobenius(Q)
-	t.copyToTop("qx0", "_fQ_x_0")
-	t.copyToTop("qx1", "_fQ_x_1")
-	t.copyToTop("qy0", "_fQ_y_0")
-	t.copyToTop("qy1", "_fQ_y_1")
-	bn254G2FrobeniusP(t, "_fQ", "_Q1")
+	t.copyToTop(qx0Name, fQN+"_x_0")
+	t.copyToTop(qx1Name, fQN+"_x_1")
+	t.copyToTop(qy0Name, fQN+"_y_0")
+	t.copyToTop(qy1Name, fQN+"_y_1")
+	bn254G2FrobeniusP(t, fQN, Q1N)
 
 	// Q2 = -frobenius²(Q)
-	t.copyToTop("qx0", "_fQ2_x_0")
-	t.copyToTop("qx1", "_fQ2_x_1")
-	t.copyToTop("qy0", "_fQ2_y_0")
-	t.copyToTop("qy1", "_fQ2_y_1")
-	bn254G2FrobeniusP2(t, "_fQ2", "_Q2pre")
-	bn254G2Negate(t, "_Q2pre", "_Q2")
+	t.copyToTop(qx0Name, fQ2N+"_x_0")
+	t.copyToTop(qx1Name, fQ2N+"_x_1")
+	t.copyToTop(qy0Name, fQ2N+"_y_0")
+	t.copyToTop(qy1Name, fQ2N+"_y_1")
+	bn254G2FrobeniusP2(t, fQ2N, Q2preN)
+	bn254G2Negate(t, Q2preN, Q2N)
 
 	// Correction lines also use sparse multiply
-	bn254LineEvalAddSparse(t, "_T", "_Q1", "px", "py", "_T5", "_lq1", "c1")
-	bn254RenameG2(t, "_T5", "_T")
-	bn254Fp12MulSparse(t, "_f", "_lq1", "_f_c1")
-	bn254Fp12RenamePrefix(t, "_f_c1", "_f")
+	bn254LineEvalAddSparse(t, tN, Q1N, pxName, pyName, T5N, lq1N, "c1"+slotSfx)
+	bn254RenameG2(t, T5N, tN)
+	bn254Fp12MulSparse(t, fN, lq1N, fC1N)
+	bn254Fp12RenamePrefix(t, fC1N, fN)
 
-	bn254LineEvalAddSparse(t, "_T", "_Q2", "px", "py", "_T6", "_lq2", "c2")
-	bn254RenameG2(t, "_T6", "_T")
-	bn254Fp12MulSparse(t, "_f", "_lq2", "_f_c2")
-	bn254Fp12RenamePrefix(t, "_f_c2", "_f")
+	bn254LineEvalAddSparse(t, tN, Q2N, pxName, pyName, T6N, lq2N, "c2"+slotSfx)
+	bn254RenameG2(t, T6N, tN)
+	bn254Fp12MulSparse(t, fN, lq2N, fC2N)
+	bn254Fp12RenamePrefix(t, fC2N, fN)
 
 	// Drop final T (not needed after Miller loop)
-	bn254DropNames(t, []string{"_T_x_0", "_T_x_1", "_T_y_0", "_T_y_1"})
+	bn254DropNames(t, []string{tN + "_x_0", tN + "_x_1", tN + "_y_0", tN + "_y_1"})
+
+	// Rename fN -> outPrefix (if different)
+	if fN != outPrefix {
+		bn254Fp12RenamePrefix(t, fN, outPrefix)
+	}
 }
 
 // bn254RenameG2 renames a G2 point's 4 Fp slots from one prefix to another.
@@ -723,8 +796,34 @@ func bn254RenameG2(t *BN254Tracker, srcPrefix, dstPrefix string) {
 //   Uses several exponentiations by x and Frobenius maps.
 //   f^((p^4 - p^2 + 1) / r) via Devegili et al. decomposition.
 
-// bn254FinalExp computes the final exponentiation.
+// bn254FinalExp computes the BN254 final exponentiation.
 // Consumes 12 Fp slots (Miller loop result); produces 12 Fp slots.
+//
+// Uses the Fuentes-Castañeda / Duquesne-Ghammam decomposition of the hard
+// part of the final exponent — the same formula that emitWAFinalExp uses
+// (with witness-supplied a, b, c) but computes a = f2^x, b = f2^(x^2),
+// c = f2^(x^3) on-chain via three ExpByX calls.
+//
+// An earlier version of this function used an incorrect Devegili-style
+// decomposition whose exponent differed from the correct BN254 hard part;
+// it happened to produce 1 for inputs that were already in the GT kernel
+// (e.g., pairing products of inverse (P,Q)/(−P,Q) pair patterns) but
+// produced the WRONG GT element for any input whose pairing value was
+// not already mapped to 1 by the remaining kernel. That caused
+// multi-pair correctness failures for 3+ distinct G2 inputs — the
+// intermediate Fp12 product landed outside the Devegili kernel.
+//
+// Easy part:
+//   f1 = f_conj * f_inv         (= f^(p^6 - 1))
+//   f2 = f1 * frob_p2(f1)       (= f1^(p^2 + 1))
+//
+// Hard part (FC exponent, reusing emitWAFinalExp formula):
+//   a = f2^x, b = f2^x², c = f2^x³
+//   P0 = f2 · a^6 · b^12 · c^12
+//   P1 = a^4 · b^6 · c^12
+//   P2 = a^6 · b^6 · c^12
+//   P3 = conj(f2) · a^4 · b^6 · c^12
+//   result = P0 · Frob(P1) · FrobSq(P2) · FrobCube(P3)
 func bn254FinalExp(t *BN254Tracker, fPrefix, rPrefix string) {
 	// === Easy part ===
 
@@ -744,15 +843,8 @@ func bn254FinalExp(t *BN254Tracker, fPrefix, rPrefix string) {
 	bn254Fp12FrobeniusP2(t, "_fe_f1_frob", "_fe_f1p2")
 	bn254Fp12Mul(t, "_fe_f1", "_fe_f1p2", "_fe_f2")
 
-	// === Hard part ===
-	// BN-specific hard part: f2^((p^4 - p^2 + 1)/r)
-	// Using the decomposition from Devegili et al.:
-	//   result = f2^(p^3) * (f2^(p^2))^(x^2) * ... (simplified)
-	// The standard approach uses:
-	//   a = f2^x
-	//   b = a^x = f2^(x^2)
-	//   c = b^x = f2^(x^3)
-	// Then combines with Frobenius maps.
+	// === Hard part — Fuentes-Castañeda / Duquesne-Ghammam ===
+	// Compute witnesses a = f2^x, b = f2^x², c = f2^x³ on-chain via ExpByX.
 
 	// a = f2^x
 	bn254Fp12CopyPrefix(t, "_fe_f2", "_fe_f2a")
@@ -766,76 +858,85 @@ func bn254FinalExp(t *BN254Tracker, fPrefix, rPrefix string) {
 	bn254Fp12CopyPrefix(t, "_fe_b", "_fe_b2")
 	bn254Fp12ExpByX(t, "_fe_b2", "_fe_c")
 
-	// y0 = f2^(p) (Frobenius)
-	bn254Fp12CopyPrefix(t, "_fe_f2", "_fe_f2fp")
-	bn254Fp12FrobeniusP(t, "_fe_f2fp", "_fe_y0")
+	// ---- Prepare a^4 and a^6 (need 2 copies of each). ----
+	bn254Fp12CopyPrefix(t, "_fe_a", "_fe_a_w1")
+	bn254Fp12Sqr(t, "_fe_a_w1", "_fe_a2sq") // a² (consumes _fe_a_w1)
+	bn254Fp12CopyPrefix(t, "_fe_a2sq", "_fe_a2_for_a6")
+	bn254Fp12Sqr(t, "_fe_a2sq", "_fe_a4_core") // a⁴ (consumes _fe_a2sq)
+	bn254Fp12CopyPrefix(t, "_fe_a4_core", "_fe_a4_p1")
+	bn254Fp12CopyPrefix(t, "_fe_a4_core", "_fe_a4_p3")
+	bn254Fp12Mul(t, "_fe_a4_core", "_fe_a2_for_a6", "_fe_a6_core")
+	bn254Fp12CopyPrefix(t, "_fe_a6_core", "_fe_a6_p2")
+	bn254Fp12RenamePrefix(t, "_fe_a6_core", "_fe_a6_p0")
 
-	// y1 = conj(f2)
-	bn254Fp12CopyPrefix(t, "_fe_f2", "_fe_f2c")
-	bn254Fp12Conjugate(t, "_fe_f2c", "_fe_y1")
+	// ---- Prepare b^6 and b^12. ----
+	bn254Fp12CopyPrefix(t, "_fe_b", "_fe_b_w1")
+	bn254Fp12Sqr(t, "_fe_b_w1", "_fe_b2sq")
+	bn254Fp12CopyPrefix(t, "_fe_b2sq", "_fe_b2_for_b6")
+	bn254Fp12Sqr(t, "_fe_b2sq", "_fe_b4")
+	bn254Fp12Mul(t, "_fe_b4", "_fe_b2_for_b6", "_fe_b6_core")
+	bn254Fp12CopyPrefix(t, "_fe_b6_core", "_fe_b6_p1")
+	bn254Fp12CopyPrefix(t, "_fe_b6_core", "_fe_b6_p2")
+	bn254Fp12CopyPrefix(t, "_fe_b6_core", "_fe_b6_p3")
+	bn254Fp12Sqr(t, "_fe_b6_core", "_fe_b12_p0")
 
-	// y2 = f2^(p^2)
-	bn254Fp12CopyPrefix(t, "_fe_f2", "_fe_f2fp2")
-	bn254Fp12FrobeniusP2(t, "_fe_f2fp2", "_fe_y2")
+	// ---- Prepare c^12 (need 4 copies). ----
+	bn254Fp12CopyPrefix(t, "_fe_c", "_fe_c_w1")
+	bn254Fp12Sqr(t, "_fe_c_w1", "_fe_c2sq")
+	bn254Fp12CopyPrefix(t, "_fe_c2sq", "_fe_c2_for_c6")
+	bn254Fp12Sqr(t, "_fe_c2sq", "_fe_c4")
+	bn254Fp12Mul(t, "_fe_c4", "_fe_c2_for_c6", "_fe_c6")
+	bn254Fp12Sqr(t, "_fe_c6", "_fe_c12_core")
+	bn254Fp12CopyPrefix(t, "_fe_c12_core", "_fe_c12_p0")
+	bn254Fp12CopyPrefix(t, "_fe_c12_core", "_fe_c12_p1")
+	bn254Fp12CopyPrefix(t, "_fe_c12_core", "_fe_c12_p2")
+	bn254Fp12RenamePrefix(t, "_fe_c12_core", "_fe_c12_p3")
 
-	// y3 = conj(a) (= a^(-1) when |a|=1, but here we use conjugate for unitary elements)
-	bn254Fp12CopyPrefix(t, "_fe_a", "_fe_ac")
-	bn254Fp12Conjugate(t, "_fe_ac", "_fe_y3")
+	// ---- Prepare f2 for P0 and conj(f2) for P3. ----
+	bn254Fp12CopyPrefix(t, "_fe_f2", "_fe_f2_for_P3_src")
+	bn254Fp12RenamePrefix(t, "_fe_f2", "_fe_f2_for_P0")
 
-	// y4 = conj(b) * c
-	bn254Fp12CopyPrefix(t, "_fe_b", "_fe_bc")
-	bn254Fp12Conjugate(t, "_fe_bc", "_fe_y4a")
-	bn254Fp12CopyPrefix(t, "_fe_c", "_fe_cc")
-	bn254Fp12Mul(t, "_fe_y4a", "_fe_cc", "_fe_y4")
+	// ---- P0 = f2 · a^6 · b^12 · c^12 ----
+	bn254Fp12Mul(t, "_fe_f2_for_P0", "_fe_a6_p0", "_fe_P0_s1")
+	bn254Fp12Mul(t, "_fe_P0_s1", "_fe_b12_p0", "_fe_P0_s2")
+	bn254Fp12Mul(t, "_fe_P0_s2", "_fe_c12_p0", "_fe_P0")
 
-	// y5 = conj(c)
-	bn254Fp12CopyPrefix(t, "_fe_c", "_fe_cc2")
-	bn254Fp12Conjugate(t, "_fe_cc2", "_fe_y5")
+	// ---- P1 = a^4 · b^6 · c^12 ----
+	bn254Fp12Mul(t, "_fe_a4_p1", "_fe_b6_p1", "_fe_P1_s1")
+	bn254Fp12Mul(t, "_fe_P1_s1", "_fe_c12_p1", "_fe_P1")
 
-	// Combine using the BN-specific formula (Devegili et al. 2010):
-	// result = y0 * y1 * y2^2 * y3^(p) * y4^(p^2) * y5^(p^3)
-	// Reference vectors from gnark-crypto in tests/vectors/bn254_pairing.json
-	// validate end-to-end pairing correctness including this step.
+	// ---- P2 = a^6 · b^6 · c^12 ----
+	bn254Fp12Mul(t, "_fe_a6_p2", "_fe_b6_p2", "_fe_P2_s1")
+	bn254Fp12Mul(t, "_fe_P2_s1", "_fe_c12_p2", "_fe_P2")
 
-	// t0 = y3^p * y5^p^3  (uses Frobenius)
-	bn254Fp12FrobeniusP(t, "_fe_y3", "_fe_y3p")
-	bn254Fp12CopyPrefix(t, "_fe_y5", "_fe_y5f")
-	bn254Fp12FrobeniusP(t, "_fe_y5f", "_fe_y5p")
-	bn254Fp12CopyPrefix(t, "_fe_y5p", "_fe_y5p2f")
-	bn254Fp12FrobeniusP(t, "_fe_y5p2f", "_fe_y5p2")
-	bn254Fp12CopyPrefix(t, "_fe_y5p2", "_fe_y5p3f")
-	bn254Fp12FrobeniusP(t, "_fe_y5p3f", "_fe_y5p3")
-	bn254Fp12Mul(t, "_fe_y3p", "_fe_y5p3", "_fe_t0")
+	// ---- P3 = conj(f2) · a^4 · b^6 · c^12 ----
+	bn254Fp12Conjugate(t, "_fe_f2_for_P3_src", "_fe_f2conj")
+	bn254Fp12Mul(t, "_fe_f2conj", "_fe_a4_p3", "_fe_P3_s1")
+	bn254Fp12Mul(t, "_fe_P3_s1", "_fe_b6_p3", "_fe_P3_s2")
+	bn254Fp12Mul(t, "_fe_P3_s2", "_fe_c12_p3", "_fe_P3")
 
-	// t1 = y4^(p^2)
-	bn254Fp12CopyPrefix(t, "_fe_y4", "_fe_y4f")
-	bn254Fp12FrobeniusP2(t, "_fe_y4f", "_fe_t1")
+	// ---- Frobenius powers ----
+	bn254Fp12FrobeniusP(t, "_fe_P1", "_fe_P1f")
+	bn254Fp12FrobeniusP2(t, "_fe_P2", "_fe_P2f")
+	bn254Fp12FrobeniusP2(t, "_fe_P3", "_fe_P3f_tmp")
+	bn254Fp12FrobeniusP(t, "_fe_P3f_tmp", "_fe_P3f")
 
-	// t2 = y2^2
-	bn254Fp12Sqr(t, "_fe_y2", "_fe_t2")
-
-	// result = y0 * y1 * t2 * t0 * t1
-	bn254Fp12Mul(t, "_fe_y0", "_fe_y1", "_fe_r1")
-	bn254Fp12Mul(t, "_fe_r1", "_fe_t2", "_fe_r2")
-	bn254Fp12Mul(t, "_fe_r2", "_fe_t0", "_fe_r3")
-	bn254Fp12Mul(t, "_fe_r3", "_fe_t1", "_fe_result")
-
-	// Clean up intermediates
-	bn254Fp12DropInputs(t, "_fe_a")
-	bn254Fp12DropInputs(t, "_fe_b")
-	bn254Fp12DropInputs(t, "_fe_c")
-	bn254Fp12DropInputs(t, "_fe_y4")
-	bn254Fp12DropInputs(t, "_fe_y5")
-	bn254Fp12DropInputs(t, "_fe_y5p")
-	bn254Fp12DropInputs(t, "_fe_y5p2")
+	// ---- Final product: result = P0 · P1f · P2f · P3f ----
+	bn254Fp12Mul(t, "_fe_P0", "_fe_P1f", "_fe_r1")
+	bn254Fp12Mul(t, "_fe_r1", "_fe_P2f", "_fe_r2")
+	bn254Fp12Mul(t, "_fe_r2", "_fe_P3f", "_fe_result")
 
 	// Rename result
 	bn254Fp12RenamePrefix(t, "_fe_result", rPrefix)
 
-	// Drop original f
+	// Drop intermediates that were only used via copies:
+	//   _fe_a, _fe_b, _fe_c — a, b, c witnesses. Consumed only via Copy,
+	//     so the originals remain on the stack and must be dropped here.
+	bn254Fp12DropInputs(t, "_fe_a")
+	bn254Fp12DropInputs(t, "_fe_b")
+	bn254Fp12DropInputs(t, "_fe_c")
+	// Drop original f. f2 was consumed by the rename into _fe_f2_for_P0.
 	bn254Fp12DropInputs(t, fPrefix)
-	// Drop f2
-	bn254Fp12DropInputs(t, "_fe_f2")
 }
 
 // ===========================================================================
@@ -875,6 +976,43 @@ func EmitBN254Pairing(emit func(StackOp)) {
 	t.PopPrimeCache()
 }
 
+// EmitBN254PairingRaw is a debug helper identical to EmitBN254Pairing but
+// exposes the 12 Fp slots of the post-finalExp result at the top of the
+// stack in gnark's canonical E12 order (C0.B0.A0 .. C1.B2.A1), fully mod
+// reduced. Used to compare single-pair output byte-for-byte against
+// gnark's Pair output.
+func EmitBN254PairingRaw(emit func(StackOp)) {
+	t := NewBN254Tracker([]string{"_P", "qx0", "qx1", "qy0", "qy1"}, emit)
+	t.PushPrimeCache()
+
+	bn254DecomposePoint(t, "_P", "px", "py")
+	bn254MillerLoop(t)
+	bn254DropNames(t, []string{"px", "py", "qx0", "qx1", "qy0", "qy1"})
+	bn254FinalExp(t, "_f", "_result")
+
+	// Bring the 12 Fp slots of _result to the top in canonical order,
+	// fully reduced mod p.
+	suffixes := []string{
+		"_a_0_0", "_a_0_1",
+		"_a_1_0", "_a_1_1",
+		"_a_2_0", "_a_2_1",
+		"_b_0_0", "_b_0_1",
+		"_b_1_0", "_b_1_1",
+		"_b_2_0", "_b_2_1",
+	}
+	reduced := make([]string, 12)
+	for i, suf := range suffixes {
+		orig := "_result" + suf
+		rn := "_result" + suf + "_r"
+		bn254FieldMod(t, orig, rn)
+		reduced[i] = rn
+	}
+	for _, n := range reduced {
+		t.toTop(n)
+	}
+	t.PopPrimeCache()
+}
+
 // ===========================================================================
 // Multi-pairing: shared Miller loop for 4 pairings
 // ===========================================================================
@@ -896,6 +1034,11 @@ func EmitBN254Pairing(emit func(StackOp)) {
 // NOTE: MultiMillerLoop3 and MultiMillerLoop4 share ~95% of their code.
 // They are kept separate intentionally: parameterizing on pair count would
 // add runtime branching in a performance-critical codegen hot path.
+//
+// Uses shared Fp12 squaring: `f = f^2` is computed once per NAF iteration
+// and all 4 pairs' sparse lines are multiplied into the same accumulator
+// in sequence. This saves ~3 Fp12 squarings per iteration × ~64
+// iterations compared with the naive sequential variant.
 func bn254MultiMillerLoop4(t *BN254Tracker) {
 	naf := bn254SixXPlus2NAF
 	msbIdx := len(naf) - 1
@@ -928,11 +1071,15 @@ func bn254MultiMillerLoop4(t *BN254Tracker) {
 		bn254G2Negate(t, "_negQ"+ks, "_nQ"+ks)
 	}
 
+	iterNum := 0
+
 	// Main Miller loop
 	for i := msbIdx - 1; i >= 0; i-- {
 		// SHARED: f = f^2 (one squaring instead of four)
 		bn254Fp12Sqr(t, "_f", "_f_sq")
 		bn254Fp12RenamePrefix(t, "_f_sq", "_f")
+
+		iterSfx := fmt.Sprintf("%d", iterNum)
 
 		// Doubling step for all 4 pairs
 		for k := 1; k <= 4; k++ {
@@ -940,7 +1087,9 @@ func bn254MultiMillerLoop4(t *BN254Tracker) {
 			tpfx := "_T" + ks
 			ppfx := "p" + ks
 
-			bn254LineEvalDoubleSparse(t, tpfx, ppfx+"x", ppfx+"y", tpfx+"d", "_ld"+ks, "d"+ks)
+			// Use iteration-specific uniqueSfx to avoid any potential state
+			// reuse issues between iterations.
+			bn254LineEvalDoubleSparse(t, tpfx, ppfx+"x", ppfx+"y", tpfx+"d", "_ld"+ks, "d"+ks+iterSfx)
 			bn254RenameG2(t, tpfx+"d", tpfx)
 
 			bn254Fp12MulSparse(t, "_f", "_ld"+ks, "_f_dbl"+ks)
@@ -960,7 +1109,7 @@ func bn254MultiMillerLoop4(t *BN254Tracker) {
 				t.copyToTop(qpfx+"x1", "_addQ"+ks+"_x_1")
 				t.copyToTop(qpfx+"y0", "_addQ"+ks+"_y_0")
 				t.copyToTop(qpfx+"y1", "_addQ"+ks+"_y_1")
-				bn254LineEvalAddSparse(t, tpfx, "_addQ"+ks, ppfx+"x", ppfx+"y", tpfx+"a", "_la"+ks, "a"+ks)
+				bn254LineEvalAddSparse(t, tpfx, "_addQ"+ks, ppfx+"x", ppfx+"y", tpfx+"a", "_la"+ks, "a"+ks+iterSfx)
 				bn254RenameG2(t, tpfx+"a", tpfx)
 
 				bn254Fp12MulSparse(t, "_f", "_la"+ks, "_f_add"+ks)
@@ -976,13 +1125,15 @@ func bn254MultiMillerLoop4(t *BN254Tracker) {
 				t.copyToTop("_nQ"+ks+"_x_1", "_subQ"+ks+"_x_1")
 				t.copyToTop("_nQ"+ks+"_y_0", "_subQ"+ks+"_y_0")
 				t.copyToTop("_nQ"+ks+"_y_1", "_subQ"+ks+"_y_1")
-				bn254LineEvalAddSparse(t, tpfx, "_subQ"+ks, ppfx+"x", ppfx+"y", tpfx+"s", "_ls"+ks, "s"+ks)
+				bn254LineEvalAddSparse(t, tpfx, "_subQ"+ks, ppfx+"x", ppfx+"y", tpfx+"s", "_ls"+ks, "s"+ks+iterSfx)
 				bn254RenameG2(t, tpfx+"s", tpfx)
 
 				bn254Fp12MulSparse(t, "_f", "_ls"+ks, "_f_sub"+ks)
 				bn254Fp12RenamePrefix(t, "_f_sub"+ks, "_f")
 			}
 		}
+
+		iterNum++
 	}
 
 	// Clean up -Q_i
@@ -1095,6 +1246,150 @@ func EmitBN254MultiPairing4(emit func(StackOp)) {
 	t.PopPrimeCache()
 }
 
+// EmitBN254MultiMillerLoop4Raw is a test helper that runs bn254MultiMillerLoop4
+// and leaves its 12-Fp output on the stack, WITHOUT the final exponentiation.
+// Used to bisect whether the bug in EmitBN254MultiPairing4 lives in the
+// multi-Miller-loop routine or in the final exponentiation.
+//
+// Stack in:  [A1(64B), B1x0, B1x1, B1y0, B1y1, A2(64B), ..., A4(64B), B4x0..B4y1]
+// Stack out: [..., f_a_0_0, f_a_0_1, f_a_1_0, f_a_1_1, f_a_2_0, f_a_2_1,
+//
+//	f_b_0_0, f_b_0_1, f_b_1_0, f_b_1_1, f_b_2_0, f_b_2_1]
+//
+// (12 Fp slots in gnark E12 order: C0.B0.A0..C1.B2.A1)
+func EmitBN254MultiMillerLoop4Raw(emit func(StackOp)) {
+	t := NewBN254Tracker([]string{
+		"_P1", "q1x0", "q1x1", "q1y0", "q1y1",
+		"_P2", "q2x0", "q2x1", "q2y0", "q2y1",
+		"_P3", "q3x0", "q3x1", "q3y0", "q3y1",
+		"_P4", "q4x0", "q4x1", "q4y0", "q4y1",
+	}, emit)
+	t.PushPrimeCache()
+	bn254DecomposePoint(t, "_P1", "p1x", "p1y")
+	bn254DecomposePoint(t, "_P2", "p2x", "p2y")
+	bn254DecomposePoint(t, "_P3", "p3x", "p3y")
+	bn254DecomposePoint(t, "_P4", "p4x", "p4y")
+	bn254MultiMillerLoop4(t)
+	for k := 1; k <= 4; k++ {
+		ks := string(rune('0' + k))
+		bn254DropNames(t, []string{
+			"p" + ks + "x", "p" + ks + "y",
+			"q" + ks + "x0", "q" + ks + "x1",
+			"q" + ks + "y0", "q" + ks + "y1",
+		})
+	}
+	// Bring the 12 Fp slots of _f to the top in canonical order.
+	suffixes := []string{
+		"_a_0_0", "_a_0_1",
+		"_a_1_0", "_a_1_1",
+		"_a_2_0", "_a_2_1",
+		"_b_0_0", "_b_0_1",
+		"_b_1_0", "_b_1_1",
+		"_b_2_0", "_b_2_1",
+	}
+	// Fully reduce each component so the result is directly comparable to
+	// a reference encoding (gnark returns values in [0, p)).
+	reduced := make([]string, 12)
+	for i, suf := range suffixes {
+		orig := "_f" + suf
+		rn := "_f" + suf + "_r"
+		bn254FieldMod(t, orig, rn)
+		reduced[i] = rn
+	}
+	for _, n := range reduced {
+		t.toTop(n)
+	}
+	t.PopPrimeCache()
+}
+
+// EmitBN254MultiPairing4Raw is a test helper that runs the full multi-pairing
+// for 4 pairs (Miller loop + final exponentiation) and leaves the 12 Fp slots
+// of the resulting GT element on the stack, WITHOUT the IsOne equality check.
+// Used to compare Rúnar's output to a reference Fp12 value (e.g. from gnark).
+//
+// Stack in: same as EmitBN254MultiPairing4 (4 pairs of (A, B))
+// Stack out: [..., f_a_0_0, f_a_0_1, ..., f_b_2_1]  (12 Fp values, fully mod-reduced)
+func EmitBN254MultiPairing4Raw(emit func(StackOp)) {
+	t := NewBN254Tracker([]string{
+		"_P1", "q1x0", "q1x1", "q1y0", "q1y1",
+		"_P2", "q2x0", "q2x1", "q2y0", "q2y1",
+		"_P3", "q3x0", "q3x1", "q3y0", "q3y1",
+		"_P4", "q4x0", "q4x1", "q4y0", "q4y1",
+	}, emit)
+	t.PushPrimeCache()
+
+	bn254DecomposePoint(t, "_P1", "p1x", "p1y")
+	bn254DecomposePoint(t, "_P2", "p2x", "p2y")
+	bn254DecomposePoint(t, "_P3", "p3x", "p3y")
+	bn254DecomposePoint(t, "_P4", "p4x", "p4y")
+
+	bn254MultiMillerLoop4(t)
+
+	for k := 1; k <= 4; k++ {
+		ks := string(rune('0' + k))
+		bn254DropNames(t, []string{
+			"p" + ks + "x", "p" + ks + "y",
+			"q" + ks + "x0", "q" + ks + "x1",
+			"q" + ks + "y0", "q" + ks + "y1",
+		})
+	}
+
+	bn254FinalExp(t, "_f", "_result")
+
+	// Fully reduce each component mod p before exposing.
+	suffixes := []string{
+		"_a_0_0", "_a_0_1",
+		"_a_1_0", "_a_1_1",
+		"_a_2_0", "_a_2_1",
+		"_b_0_0", "_b_0_1",
+		"_b_1_0", "_b_1_1",
+		"_b_2_0", "_b_2_1",
+	}
+	reduced := make([]string, 12)
+	for i, suf := range suffixes {
+		orig := "_result" + suf
+		rn := "_result" + suf + "_r"
+		bn254FieldMod(t, orig, rn)
+		reduced[i] = rn
+	}
+	for _, n := range reduced {
+		t.toTop(n)
+	}
+	t.PopPrimeCache()
+}
+
+// EmitBN254FinalExpIsOne is a test helper that exposes the final-exponentiation
+// + Fp12-equals-one check without going through the Miller loop. Used to
+// bisect Miller-loop bugs from final-exp bugs: push 12 Fp slots representing a
+// Miller-loop output, then call this, and inspect whether the resulting
+// boolean is 1.
+//
+// The 12 Fp slots must be pushed in this order (matching gnark's E12 layout):
+//
+//	C0.B0.A0, C0.B0.A1,
+//	C0.B1.A0, C0.B1.A1,
+//	C0.B2.A0, C0.B2.A1,
+//	C1.B0.A0, C1.B0.A1,
+//	C1.B1.A0, C1.B1.A1,
+//	C1.B2.A0, C1.B2.A1
+//
+// Stack in:  [..., f_a_0_0, f_a_0_1, ..., f_b_2_1]  (12 Fp values)
+// Stack out: [..., boolean]  (1 if finalExp(f) == 1 in Fp12, else 0)
+func EmitBN254FinalExpIsOne(emit func(StackOp)) {
+	t := NewBN254Tracker([]string{
+		"_f_a_0_0", "_f_a_0_1",
+		"_f_a_1_0", "_f_a_1_1",
+		"_f_a_2_0", "_f_a_2_1",
+		"_f_b_0_0", "_f_b_0_1",
+		"_f_b_1_0", "_f_b_1_1",
+		"_f_b_2_0", "_f_b_2_1",
+	}, emit)
+	t.PushPrimeCache()
+	bn254FinalExp(t, "_f", "_result")
+	bn254Fp12IsOne(t, "_result", "_is_one")
+	t.PopPrimeCache()
+}
+
 // bn254Fp12IsOne checks if an Fp12 element equals 1.
 // 1 in Fp12 = a_0_0 == 1, all other 11 components == 0.
 // Consumes 12 Fp slots; produces 1 boolean.
@@ -1148,8 +1443,8 @@ func bn254Fp12IsOne(t *BN254Tracker, prefix, resultName string) {
 // Multi-pairing with 3 pairs + precomputed Fp12 constant
 // ===========================================================================
 
-// bn254MultiMillerLoop3 computes the product of 3 Miller loops simultaneously,
-// sharing the Fp12 squaring across all 3 pairs.
+// bn254MultiMillerLoop3 computes the product of 3 Miller loops
+// simultaneously, sharing the Fp12 squaring across all 3 pairs.
 //
 // Input on tracker:
 //   P1: p1x, p1y  (G1 affine)
@@ -1192,11 +1487,15 @@ func bn254MultiMillerLoop3(t *BN254Tracker) {
 		bn254G2Negate(t, "_negQ"+ks, "_nQ"+ks)
 	}
 
+	iterNum := 0
+
 	// Main Miller loop
 	for i := msbIdx - 1; i >= 0; i-- {
 		// SHARED: f = f^2 (one squaring instead of three)
 		bn254Fp12Sqr(t, "_f", "_f_sq")
 		bn254Fp12RenamePrefix(t, "_f_sq", "_f")
+
+		iterSfx := fmt.Sprintf("%d", iterNum)
 
 		// Doubling step for all 3 pairs
 		for k := 1; k <= 3; k++ {
@@ -1204,7 +1503,7 @@ func bn254MultiMillerLoop3(t *BN254Tracker) {
 			tpfx := "_T" + ks
 			ppfx := "p" + ks
 
-			bn254LineEvalDoubleSparse(t, tpfx, ppfx+"x", ppfx+"y", tpfx+"d", "_ld"+ks, "d"+ks)
+			bn254LineEvalDoubleSparse(t, tpfx, ppfx+"x", ppfx+"y", tpfx+"d", "_ld"+ks, "d"+ks+iterSfx)
 			bn254RenameG2(t, tpfx+"d", tpfx)
 
 			bn254Fp12MulSparse(t, "_f", "_ld"+ks, "_f_dbl"+ks)
@@ -1224,7 +1523,7 @@ func bn254MultiMillerLoop3(t *BN254Tracker) {
 				t.copyToTop(qpfx+"x1", "_addQ"+ks+"_x_1")
 				t.copyToTop(qpfx+"y0", "_addQ"+ks+"_y_0")
 				t.copyToTop(qpfx+"y1", "_addQ"+ks+"_y_1")
-				bn254LineEvalAddSparse(t, tpfx, "_addQ"+ks, ppfx+"x", ppfx+"y", tpfx+"a", "_la"+ks, "a"+ks)
+				bn254LineEvalAddSparse(t, tpfx, "_addQ"+ks, ppfx+"x", ppfx+"y", tpfx+"a", "_la"+ks, "a"+ks+iterSfx)
 				bn254RenameG2(t, tpfx+"a", tpfx)
 
 				bn254Fp12MulSparse(t, "_f", "_la"+ks, "_f_add"+ks)
@@ -1240,13 +1539,15 @@ func bn254MultiMillerLoop3(t *BN254Tracker) {
 				t.copyToTop("_nQ"+ks+"_x_1", "_subQ"+ks+"_x_1")
 				t.copyToTop("_nQ"+ks+"_y_0", "_subQ"+ks+"_y_0")
 				t.copyToTop("_nQ"+ks+"_y_1", "_subQ"+ks+"_y_1")
-				bn254LineEvalAddSparse(t, tpfx, "_subQ"+ks, ppfx+"x", ppfx+"y", tpfx+"s", "_ls"+ks, "s"+ks)
+				bn254LineEvalAddSparse(t, tpfx, "_subQ"+ks, ppfx+"x", ppfx+"y", tpfx+"s", "_ls"+ks, "s"+ks+iterSfx)
 				bn254RenameG2(t, tpfx+"s", tpfx)
 
 				bn254Fp12MulSparse(t, "_f", "_ls"+ks, "_f_sub"+ks)
 				bn254Fp12RenamePrefix(t, "_f_sub"+ks, "_f")
 			}
 		}
+
+		iterNum++
 	}
 
 	// Clean up -Q_i

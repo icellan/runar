@@ -19,6 +19,9 @@ const ec_emitters = @import("helpers/ec_emitters.zig");
 const pq_emitters = @import("helpers/pq_emitters.zig");
 const sha256_emitters = @import("helpers/sha256_emitters.zig");
 const babybear_emitters = @import("helpers/babybear_emitters.zig");
+const koalabear_emitters = @import("helpers/koalabear_emitters.zig");
+const bn254_emitters = @import("helpers/bn254_emitters.zig");
+const poseidon2_merkle = @import("helpers/poseidon2_merkle.zig");
 const merkle_emitters = @import("helpers/merkle_emitters.zig");
 const Allocator = std.mem.Allocator;
 const Opcode = types.Opcode;
@@ -1136,6 +1139,33 @@ const LowerCtx = struct {
         bbExt4Inv1,
         bbExt4Inv2,
         bbExt4Inv3,
+        // KoalaBear field arithmetic
+        kbFieldAdd,
+        kbFieldSub,
+        kbFieldMul,
+        kbFieldInv,
+        // KoalaBear quartic extension field arithmetic
+        kbExt4Mul0,
+        kbExt4Mul1,
+        kbExt4Mul2,
+        kbExt4Mul3,
+        kbExt4Inv0,
+        kbExt4Inv1,
+        kbExt4Inv2,
+        kbExt4Inv3,
+        // BN254 field arithmetic
+        bn254FieldAdd,
+        bn254FieldSub,
+        bn254FieldMul,
+        bn254FieldInv,
+        bn254FieldNeg,
+        // BN254 G1 point operations
+        bn254G1Add,
+        bn254G1ScalarMul,
+        bn254G1Negate,
+        bn254G1OnCurve,
+        // Poseidon2 KoalaBear Merkle
+        poseidon2MerkleRoot,
         // Merkle proof verification
         merkleRootSha256,
         merkleRootHash256,
@@ -1226,6 +1256,28 @@ const LowerCtx = struct {
         .{ "bbExt4Inv1", .bbExt4Inv1 },
         .{ "bbExt4Inv2", .bbExt4Inv2 },
         .{ "bbExt4Inv3", .bbExt4Inv3 },
+        .{ "kbFieldAdd", .kbFieldAdd },
+        .{ "kbFieldSub", .kbFieldSub },
+        .{ "kbFieldMul", .kbFieldMul },
+        .{ "kbFieldInv", .kbFieldInv },
+        .{ "kbExt4Mul0", .kbExt4Mul0 },
+        .{ "kbExt4Mul1", .kbExt4Mul1 },
+        .{ "kbExt4Mul2", .kbExt4Mul2 },
+        .{ "kbExt4Mul3", .kbExt4Mul3 },
+        .{ "kbExt4Inv0", .kbExt4Inv0 },
+        .{ "kbExt4Inv1", .kbExt4Inv1 },
+        .{ "kbExt4Inv2", .kbExt4Inv2 },
+        .{ "kbExt4Inv3", .kbExt4Inv3 },
+        .{ "bn254FieldAdd", .bn254FieldAdd },
+        .{ "bn254FieldSub", .bn254FieldSub },
+        .{ "bn254FieldMul", .bn254FieldMul },
+        .{ "bn254FieldInv", .bn254FieldInv },
+        .{ "bn254FieldNeg", .bn254FieldNeg },
+        .{ "bn254G1Add", .bn254G1Add },
+        .{ "bn254G1ScalarMul", .bn254G1ScalarMul },
+        .{ "bn254G1Negate", .bn254G1Negate },
+        .{ "bn254G1OnCurve", .bn254G1OnCurve },
+        .{ "poseidon2MerkleRoot", .poseidon2MerkleRoot },
         .{ "merkleRootSha256", .merkleRootSha256 },
         .{ "merkleRootHash256", .merkleRootHash256 },
         .{ "super", .super_call },
@@ -1316,6 +1368,33 @@ const LowerCtx = struct {
             .bbExt4Inv1 => try self.lowerBBBuiltin(bind_name, args, .bb_ext4_inv1),
             .bbExt4Inv2 => try self.lowerBBBuiltin(bind_name, args, .bb_ext4_inv2),
             .bbExt4Inv3 => try self.lowerBBBuiltin(bind_name, args, .bb_ext4_inv3),
+            // KoalaBear field arithmetic
+            .kbFieldAdd => try self.lowerKBBuiltin(bind_name, args, .kb_field_add),
+            .kbFieldSub => try self.lowerKBBuiltin(bind_name, args, .kb_field_sub),
+            .kbFieldMul => try self.lowerKBBuiltin(bind_name, args, .kb_field_mul),
+            .kbFieldInv => try self.lowerKBBuiltin(bind_name, args, .kb_field_inv),
+            // KoalaBear quartic extension field arithmetic
+            .kbExt4Mul0 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_mul0),
+            .kbExt4Mul1 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_mul1),
+            .kbExt4Mul2 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_mul2),
+            .kbExt4Mul3 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_mul3),
+            .kbExt4Inv0 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_inv0),
+            .kbExt4Inv1 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_inv1),
+            .kbExt4Inv2 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_inv2),
+            .kbExt4Inv3 => try self.lowerKBBuiltin(bind_name, args, .kb_ext4_inv3),
+            // BN254 field arithmetic
+            .bn254FieldAdd => try self.lowerBN254Builtin(bind_name, args, .bn254_field_add),
+            .bn254FieldSub => try self.lowerBN254Builtin(bind_name, args, .bn254_field_sub),
+            .bn254FieldMul => try self.lowerBN254Builtin(bind_name, args, .bn254_field_mul),
+            .bn254FieldInv => try self.lowerBN254Builtin(bind_name, args, .bn254_field_inv),
+            .bn254FieldNeg => try self.lowerBN254Builtin(bind_name, args, .bn254_field_neg),
+            // BN254 G1 point operations
+            .bn254G1Add => try self.lowerBN254Builtin(bind_name, args, .bn254_g1_add),
+            .bn254G1ScalarMul => try self.lowerBN254Builtin(bind_name, args, .bn254_g1_scalar_mul),
+            .bn254G1Negate => try self.lowerBN254Builtin(bind_name, args, .bn254_g1_negate),
+            .bn254G1OnCurve => try self.lowerBN254Builtin(bind_name, args, .bn254_g1_on_curve),
+            // Poseidon2 KoalaBear Merkle
+            .poseidon2MerkleRoot => try self.lowerPoseidon2MerkleBuiltin(bind_name, args),
             // Merkle proof verification
             .merkleRootSha256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_sha256),
             .merkleRootHash256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_hash256),
@@ -1558,6 +1637,108 @@ const LowerCtx = struct {
         }
 
         var bundle = babybear_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerKBBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, builtin: koalabear_emitters.KBBuiltin) LowerError!void {
+        const required: usize = switch (builtin) {
+            .kb_field_add, .kb_field_sub, .kb_field_mul => 2,
+            .kb_field_inv => 1,
+            .kb_ext4_mul0, .kb_ext4_mul1, .kb_ext4_mul2, .kb_ext4_mul3 => 8,
+            .kb_ext4_inv0, .kb_ext4_inv1, .kb_ext4_inv2, .kb_ext4_inv3 => 4,
+        };
+        if (args.len < required) return LowerError.InvalidBuiltin;
+
+        for (args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var bundle = koalabear_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerBN254Builtin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, builtin: bn254_emitters.BN254Builtin) LowerError!void {
+        const required: usize = switch (builtin) {
+            .bn254_field_add, .bn254_field_sub, .bn254_field_mul, .bn254_g1_add, .bn254_g1_scalar_mul => 2,
+            .bn254_field_inv, .bn254_field_neg, .bn254_g1_negate, .bn254_g1_on_curve => 1,
+        };
+        if (args.len < required) return LowerError.InvalidBuiltin;
+
+        for (args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var bundle = bn254_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerPoseidon2MerkleBuiltin(
+        self: *LowerCtx,
+        bind_name: []const u8,
+        args: []const []const u8,
+    ) LowerError!void {
+        // args: [leaf_0..leaf_7(8), proof(depth*8 elems), index, depth]
+        // depth must be a compile-time constant
+        // The depth arg is always last.
+        if (args.len < 3) return LowerError.InvalidBuiltin;
+
+        const depth_arg = args[args.len - 1];
+        const depth_value = self.findConstantInt(depth_arg) orelse return LowerError.InvalidBuiltin;
+        if (depth_value < 1 or depth_value > 32) return LowerError.InvalidBuiltin;
+
+        // Remove depth from the real stack (compile-time constant, not runtime).
+        if (self.stack.findDepth(depth_arg) != null) {
+            try self.bringToTopAuto(depth_arg);
+            try self.emitOp(.op_drop);
+            _ = self.stack.pop();
+        }
+
+        // Bring remaining args to the stack top.
+        const runtime_args = args[0 .. args.len - 1];
+        for (runtime_args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (runtime_args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var bundle = poseidon2_merkle.buildPoseidon2MerkleRootOps(self.allocator, @intCast(depth_value)) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.UnsupportedOperation,
         };

@@ -216,10 +216,19 @@ func bn254Fp2Conjugate(t *BN254Tracker, a0, a1, r0, r1 string) {
 // bn254Fp2MulByNonResidue multiplies Fp2 element by ξ = 9+u.
 // (a0 + a1*u)(9 + u) = (9*a0 - a1) + (a0 + 9*a1)*u.
 //
-// Optimization: skips mod after 9*a0 and 9*a1. The unreduced values (up to 9p)
-// are safe because FieldSub's (diff+p)%p and FieldAdd's single-mod both handle
-// multi-p-range inputs correctly via OP_MOD.
-// This reduces from 4 mod reductions to 2.
+// CORRECTNESS NOTE: Callers may pass unreduced inputs (e.g. a0, a1 each up
+// to 2p-2 from a preceding Fp2AddUnreduced inside Fp6Mul). The subtraction
+// (9*a0 - a1) must therefore use the double-mod path (FieldSubUnreduced +
+// FieldMod) because bn254FieldSub's (diff+p) % p single-OP_MOD only
+// produces the correct result when b - a <= p; with unreduced a1 up to
+// 2p-2 and a0 potentially zero, the intermediate (-p + 2) underflows and
+// BSV's sign-preserving OP_MOD propagates a negative residue. The 9*a
+// terms themselves are non-negative so FieldAdd's single mod remains
+// valid on the positive branch. This was the root cause of the v2
+// multi-pairing correctness bug for 3+ distinct G2 inputs — certain Fp6
+// cross-terms triggered the underflow exactly when the accumulated
+// Miller-loop state hit the boundary.
+//
 // Consumes a0,a1; produces r0,r1.
 func bn254Fp2MulByNonResidue(t *BN254Tracker, a0, a1, r0, r1 string) {
 	if t.qAtBottom {
@@ -230,11 +239,22 @@ func bn254Fp2MulByNonResidue(t *BN254Tracker, a0, a1, r0, r1 string) {
 	t.copyToTop(a0, "_fp2nr_a0a")
 	bn254FieldMulConstUnreduced(t, "_fp2nr_a0a", 9, "_fp2nr_9a0")
 	t.copyToTop(a1, "_fp2nr_a1a")
-	bn254FieldSub(t, "_fp2nr_9a0", "_fp2nr_a1a", r0)
+	// Use the safe double-mod subtract: the input a1 may be unreduced
+	// (up to 2p-2) and bn254FieldSub's single-mod path cannot recover
+	// from (9*a0 + p - a1) < 0 when a1 >= p. FieldSubUnreduced +
+	// FieldMod handles arbitrary non-negative integer inputs.
+	bn254FieldSubUnreduced(t, "_fp2nr_9a0", "_fp2nr_a1a", "_fp2nr_r0raw")
+	bn254FieldMod(t, "_fp2nr_r0raw", r0)
 	t.copyToTop(a1, "_fp2nr_a1b")
 	bn254FieldMulConstUnreduced(t, "_fp2nr_a1b", 9, "_fp2nr_9a1")
 	t.copyToTop(a0, "_fp2nr_a0b")
-	bn254FieldAdd(t, "_fp2nr_a0b", "_fp2nr_9a1", r1)
+	// 9*a1 + a0 is always non-negative so FieldAdd's single-mod
+	// (sum + p) % p path works as long as sum is non-negative. Both
+	// operands here are non-negative unreduced, so the sum is
+	// non-negative; use FieldAddUnreduced + FieldModPositive to avoid
+	// the needless +p -MOD chain, preserving the non-negative guarantee.
+	bn254FieldAddUnreduced(t, "_fp2nr_a0b", "_fp2nr_9a1", "_fp2nr_r1raw")
+	bn254FieldModPositive(t, "_fp2nr_r1raw", r1)
 	bn254DropNames(t, []string{a0, a1})
 }
 
@@ -1075,10 +1095,12 @@ func bn254Fp2MulByFrobCoeff(t *BN254Tracker, aPrefix string, coeff [2]*big.Int, 
 	}
 	// Original tracker-based implementation
 	if coeff[1].Sign() == 0 {
+		// (a0 + a1·u) · c0 = (a0·c0) + (a1·c0)·u
+		// Consume BOTH aPrefix_0 and aPrefix_1 (the previous implementation
+		// leaked aPrefix_0 because only a COPY was consumed).
 		t.pushBigInt("_fcoeff_0", coeff[0])
-		t.copyToTop(aPrefix+"_0", "_fcoeff_a0")
 		t.copyToTop("_fcoeff_0", "_fcoeff_0c")
-		bn254FieldMul(t, "_fcoeff_a0", "_fcoeff_0c", rPrefix+"_0")
+		bn254FieldMul(t, aPrefix+"_0", "_fcoeff_0c", rPrefix+"_0")
 		bn254FieldMul(t, aPrefix+"_1", "_fcoeff_0", rPrefix+"_1")
 		return
 	}

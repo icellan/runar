@@ -25,6 +25,11 @@ import {
   emitEcOnCurve, emitEcModReduce, emitEcEncodeCompressed,
   emitEcMakePoint, emitEcPointX, emitEcPointY,
 } from './ec-codegen.js';
+import {
+  emitBn254FieldAdd, emitBn254FieldSub, emitBn254FieldMul,
+  emitBn254FieldInv, emitBn254FieldNeg,
+  emitBn254G1Add, emitBn254G1ScalarMul, emitBn254G1Negate, emitBn254G1OnCurve,
+} from './bn254-codegen.js';
 import { emitSha256Compress, emitSha256Finalize } from './sha256-codegen.js';
 import { emitBlake3Compress, emitBlake3Hash } from './blake3-codegen.js';
 import {
@@ -38,6 +43,8 @@ import {
   emitKBExt4Inv0, emitKBExt4Inv1, emitKBExt4Inv2, emitKBExt4Inv3,
 } from './koalabear-codegen.js';
 import { emitMerkleRootSha256, emitMerkleRootHash256 } from './merkle-codegen.js';
+import { emitPoseidon2KBPermute, emitPoseidon2KBCompress } from './poseidon2-koalabear-codegen.js';
+import { emitPoseidon2MerkleRoot } from './poseidon2-merkle-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1239,6 +1246,16 @@ class LoweringContext {
       return;
     }
 
+    // BN254 builtins
+    if (func === 'bn254FieldAdd' || func === 'bn254FieldSub' ||
+        func === 'bn254FieldMul' || func === 'bn254FieldInv' ||
+        func === 'bn254FieldNeg' || func === 'bn254G1Add' ||
+        func === 'bn254G1ScalarMul' || func === 'bn254G1Negate' ||
+        func === 'bn254G1OnCurve') {
+      this.lowerBN254Builtin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
     // Baby Bear field arithmetic builtins
     if (func === 'bbFieldAdd' || func === 'bbFieldSub' ||
         func === 'bbFieldMul' || func === 'bbFieldInv' ||
@@ -1258,6 +1275,18 @@ class LoweringContext {
         func === 'kbExt4Inv0' || func === 'kbExt4Inv1' ||
         func === 'kbExt4Inv2' || func === 'kbExt4Inv3') {
       this.lowerKBFieldBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // KoalaBear Poseidon2 builtins
+    if (func === 'poseidon2KBPermute' || func === 'poseidon2KBCompress') {
+      this.lowerKBPoseidon2Builtin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // KoalaBear Poseidon2 Merkle proof verification
+    if (func === 'poseidon2MerkleRoot') {
+      this.lowerPoseidon2MerkleRoot(bindingName, args, bindingIndex, lastUses);
       return;
     }
 
@@ -4255,6 +4284,42 @@ class LoweringContext {
   }
 
   // =========================================================================
+  // BN254 field + G1 — delegates to bn254-codegen.ts
+  // =========================================================================
+
+  private lowerBN254Builtin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring all args to stack top
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'bn254FieldAdd':    emitBn254FieldAdd(emitFn); break;
+      case 'bn254FieldSub':    emitBn254FieldSub(emitFn); break;
+      case 'bn254FieldMul':    emitBn254FieldMul(emitFn); break;
+      case 'bn254FieldInv':    emitBn254FieldInv(emitFn); break;
+      case 'bn254FieldNeg':    emitBn254FieldNeg(emitFn); break;
+      case 'bn254G1Add':       emitBn254G1Add(emitFn); break;
+      case 'bn254G1ScalarMul': emitBn254G1ScalarMul(emitFn); break;
+      case 'bn254G1Negate':    emitBn254G1Negate(emitFn); break;
+      case 'bn254G1OnCurve':   emitBn254G1OnCurve(emitFn); break;
+      default: throw new Error(`Unknown BN254 builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
   // Baby Bear field arithmetic — delegates to babybear-codegen.ts
   // =========================================================================
 
@@ -4327,6 +4392,97 @@ class LoweringContext {
       case 'kbExt4Inv3': emitKBExt4Inv3(emitFn); break;
       default: throw new Error(`Unknown KoalaBear builtin: ${func}`);
     }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // KoalaBear Poseidon2 builtins — delegates to poseidon2-koalabear-codegen.ts
+  // =========================================================================
+
+  private lowerKBPoseidon2Builtin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // poseidon2KBPermute(s0, s1, ..., s15): 16 args → 16-element result
+    // poseidon2KBCompress(s0, s1, ..., s15): 16 args → 8-element result
+    // For our stack lowering purposes the codegen functions handle the
+    // internal stack manipulation; we just bring all args to top then call.
+    const expectedArgs = 16;
+    if (args.length !== expectedArgs) {
+      throw new Error(`${func} requires exactly ${expectedArgs} arguments, got ${args.length}`);
+    }
+
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'poseidon2KBPermute': emitPoseidon2KBPermute(emitFn); break;
+      case 'poseidon2KBCompress': emitPoseidon2KBCompress(emitFn); break;
+      default: throw new Error(`Unknown KoalaBear Poseidon2 builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // Poseidon2 Merkle proof verification — delegates to poseidon2-merkle-codegen.ts
+  // =========================================================================
+
+  private lowerPoseidon2MerkleRoot(
+    bindingName: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // poseidon2MerkleRoot(leaf0..7, proof, index, depth)
+    // args: [leaf0..leaf7 (8 elems), proof (8*depth elems), index, depth]
+    // For simplicity we model this as: args = [leaf, proof, index, depth]
+    // where leaf is a conceptual name for all 8 leaf elements.
+    // The actual calling convention expects exactly 4 args at the ANF level.
+    if (args.length !== 4) {
+      throw new Error(`poseidon2MerkleRoot requires exactly 4 arguments (leaf, proof, index, depth)`);
+    }
+
+    // Extract depth constant from ANF binding
+    const depthArg = args[3]!;
+    const depthValue = this.getConstantValue(depthArg);
+    if (depthValue === null || typeof depthValue !== 'bigint') {
+      throw new Error(
+        `poseidon2MerkleRoot: depth (4th argument) must be a compile-time constant integer literal. ` +
+        `Got a runtime value for '${depthArg}'.`,
+      );
+    }
+    const depth = Number(depthValue);
+    if (depth < 1 || depth > 32) {
+      throw new Error(`poseidon2MerkleRoot: depth must be between 1 and 32, got ${depth}`);
+    }
+
+    // Remove depth value from the real stack FIRST (consumed at compile time).
+    if (this.stackMap.has(depthArg)) {
+      this.bringToTop(depthArg, true);
+      this.emitOp({ op: 'drop' });
+      this.stackMap.pop();
+    }
+
+    // Bring leaf, proof, index to stack top
+    for (let i = 0; i < 3; i++) {
+      const arg = args[i]!;
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < 3; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+    emitPoseidon2MerkleRoot(emitFn, depth);
 
     this.stackMap.push(bindingName);
     this.trackDepth();
