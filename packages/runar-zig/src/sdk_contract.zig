@@ -1158,6 +1158,12 @@ fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
         },
         .boolean => |b| .{ .boolean = b },
         .bytes => |hex| .{ .bytes = hex },
+        // FixedArray state fields are expanded into per-index scalar
+        // properties before they reach this path, so a raw .array_value
+        // here has no representation in the ANF interpreter's scalar
+        // value type. Fall through to .none so auto-state computation
+        // skips the field instead of trapping the switch.
+        .array_value => .{ .none = {} },
     };
 }
 
