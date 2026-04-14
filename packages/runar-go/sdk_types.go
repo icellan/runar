@@ -1,5 +1,9 @@
 package runar
 
+import (
+	"github.com/icellan/runar/packages/runar-go/bn254witness"
+)
+
 // ---------------------------------------------------------------------------
 // SDK types for deploying and interacting with compiled Runar contracts on BSV
 // ---------------------------------------------------------------------------
@@ -76,6 +80,20 @@ type CallOptions struct {
 	// method calls. Enables terminal methods to receive additional funds
 	// when the contract's own balance is insufficient for outputs + fees.
 	FundingUtxos []UTXO `json:"fundingUtxos,omitempty"`
+
+	// Groth16WAWitness is the prover-supplied witness bundle for a Mode 3
+	// stateful contract whose method begins with a call to
+	// runar.AssertGroth16WitnessAssisted. When set, the SDK splices the
+	// witness's stack pushes into the unlocking script ON TOP of the
+	// regular ABI argument pushes (i.e., immediately before the method
+	// selector), so the verifier preamble in the locking script consumes
+	// them before the method body sees its declared parameters.
+	//
+	// nil for normal Rúnar contract calls. The witness is generated
+	// off-chain via bn254witness.GenerateWitness from a real Groth16
+	// proof + the same VK that was baked into the contract at compile
+	// time via CompileOptions.Groth16WAVKey.
+	Groth16WAWitness *bn254witness.Witness `json:"-"`
 }
 
 // TerminalOutput specifies an exact output for a terminal method call.
@@ -120,11 +138,38 @@ type PreparedCall struct {
 	hasMultiOutput    bool
 	contractOutputs   []ContractOutput
 	codeSepIdx        int // adjusted OP_CODESEPARATOR byte offset, -1 if none
+
+	// Mode 3: pre-encoded witness-assisted Groth16 prover bundle hex,
+	// spliced into the unlock script BEFORE the stateful prefix so the
+	// witness items end up at the deepest stack positions (with q at
+	// the bottom). FinalizeCall must replay the same splice when it
+	// rebuilds the primary unlock from this PreparedCall, otherwise
+	// the witness ends up missing and the verifier preamble fails.
+	groth16WAWitnessHex string
 }
 
 // ---------------------------------------------------------------------------
 // Artifact types (compiled contract output)
 // ---------------------------------------------------------------------------
+
+// Groth16WAMeta records metadata about a witness-assisted Groth16 verifier
+// artifact produced by the `runarc groth16-wa` compiler backend. Downstream
+// consumers can sanity-check NumPubInputs and VKDigest to confirm which VK
+// was baked into the script without having to re-derive anything from the
+// raw script bytes.
+type Groth16WAMeta struct {
+	// NumPubInputs is the number of public inputs the Groth16 circuit
+	// was parameterised with. Matches `vk.numPubInputs` from the input
+	// VK JSON.
+	NumPubInputs int `json:"numPubInputs"`
+
+	// VKDigest is the SHA-256 hex of the RAW bytes of the source VK JSON
+	// file (not a canonical form). It is a pure reproducibility marker:
+	// if two artifacts share a VKDigest, they were compiled from
+	// byte-identical VK files. It is NOT a cryptographic commitment to
+	// the VK semantics and should not be used for anything load-bearing.
+	VKDigest string `json:"vkDigest"`
+}
 
 // RunarArtifact is the compiled output of a Runar compiler.
 type RunarArtifact struct {
@@ -141,6 +186,11 @@ type RunarArtifact struct {
 	CodeSeparatorIndex     *int               `json:"codeSeparatorIndex,omitempty"`
 	CodeSeparatorIndices   []int              `json:"codeSeparatorIndices,omitempty"`
 	ANF                    *ANFProgram        `json:"anf,omitempty"`
+
+	// Groth16WA is populated only for artifacts produced by the
+	// `runarc groth16-wa` backend. Nil for normal Rúnar contract
+	// compilations.
+	Groth16WA *Groth16WAMeta `json:"groth16WA,omitempty"`
 }
 
 // ABI describes the contract's public interface.

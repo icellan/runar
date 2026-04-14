@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -14,14 +15,25 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+var cpArtifact *runar.RunarArtifact
+var cpOnce sync.Once
+
+func getCPArtifact(t *testing.T) *runar.RunarArtifact {
+	cpOnce.Do(func() {
+		var err error
+		cpArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/convergence-proof/ConvergenceProof.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile ConvergenceProof: %v", err)
+		}
+	})
+	return cpArtifact
+}
+
 func TestConvergenceProof_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/convergence-proof/ConvergenceProof.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCPArtifact(t)
 	if artifact.ContractName != "ConvergenceProof" {
 		t.Fatalf("expected contract name ConvergenceProof, got %s", artifact.ContractName)
 	}
@@ -38,24 +50,19 @@ func TestConvergenceProof_Deploy(t *testing.T) {
 	rAHex := fmt.Sprintf("%064x%064x", rAx, rAy)
 	rBHex := fmt.Sprintf("%064x%064x", rBx, rBy)
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/convergence-proof/ConvergenceProof.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCPArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{rAHex, rBHex})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
-	if err != nil {
-		t.Fatalf("fund: %v", err)
+	_, errF := helpers.FundWallet(wallet, 1.0)
+	if errF != nil {
+		t.Fatalf("fund: %v", errF)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -87,13 +94,7 @@ func TestConvergenceProof_ValidProof(t *testing.T) {
 	rAHex := fmt.Sprintf("%064x%064x", rAx, rAy)
 	rBHex := fmt.Sprintf("%064x%064x", rBx, rBy)
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/convergence-proof/ConvergenceProof.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCPArtifact(t)
 	t.Logf("ConvergenceProof script: %d bytes", len(artifact.Script)/2)
 
 	// Constructor args in declaration order: rA, rB
@@ -101,12 +102,13 @@ func TestConvergenceProof_ValidProof(t *testing.T) {
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
-	if err != nil {
-		t.Fatalf("fund: %v", err)
+	_, errF := helpers.FundWallet(wallet, 1.0)
+	if errF != nil {
+		t.Fatalf("fund: %v", errF)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -135,24 +137,19 @@ func TestConvergenceProof_WrongDelta_Rejected(t *testing.T) {
 	rAHex := fmt.Sprintf("%064x%064x", rAx, rAy)
 	rBHex := fmt.Sprintf("%064x%064x", rBx, rBy)
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/convergence-proof/ConvergenceProof.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCPArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{rAHex, rBHex})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
-	if err != nil {
-		t.Fatalf("fund: %v", err)
+	_, errF := helpers.FundWallet(wallet, 1.0)
+	if errF != nil {
+		t.Fatalf("fund: %v", errF)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

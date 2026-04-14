@@ -79,10 +79,13 @@ pub fn buildBuiltinOps(allocator: Allocator, builtin: MerkleBuiltin, depth: u32)
         // Compute direction bit: (index / 2^i) % 2
         try ops.append(allocator, .{ .dup = {} });
         // Stack: [current, sibling, index, index]
-        if (i > 0) {
-            const shift: u6 = @intCast(i);
-            try ops.append(allocator, .{ .push = .{ .integer = @as(i64, 1) << shift } });
-            try ops.append(allocator, .{ .opcode = "OP_DIV" });
+        if (i == 1) {
+            // Single-bit shift: OP_2DIV (no push needed)
+            try ops.append(allocator, .{ .opcode = "OP_2DIV" });
+        } else if (i > 1) {
+            // Multi-bit shift: push shift amount, OP_RSHIFTNUM
+            try ops.append(allocator, .{ .push = .{ .integer = @as(i64, @intCast(i)) } });
+            try ops.append(allocator, .{ .opcode = "OP_RSHIFTNUM" });
         }
         try ops.append(allocator, .{ .push = .{ .integer = 2 } });
         try ops.append(allocator, .{ .opcode = "OP_MOD" });

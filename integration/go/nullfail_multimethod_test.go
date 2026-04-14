@@ -5,6 +5,7 @@ package integration
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -78,13 +79,24 @@ func nfStateRoot(n int) string {
 // a 4-method contract where 3 methods use checkSig. This reproduces a
 // NULLFAIL bug where float64→int64 truncation in UTXO satoshi conversion
 // caused the P2PKH funding input's BIP-143 sighash to be wrong by 1 sat.
+var nfArtifact *runar.RunarArtifact
+var nfOnce sync.Once
+
+func getNFArtifact(t *testing.T) *runar.RunarArtifact {
+	nfOnce.Do(func() {
+		var err error
+		nfArtifact, err = helpers.CompileSourceStringToSDKArtifact(
+			fourMethodSource, "RollupContract.runar.ts", nil,
+		)
+		if err != nil {
+			t.Fatalf("compile RollupContract: %v", err)
+		}
+	})
+	return nfArtifact
+}
+
 func TestNullFailMultiMethod_Chain10Advances(t *testing.T) {
-	artifact, err := helpers.CompileSourceStringToSDKArtifact(
-		fourMethodSource, "RollupContract.runar.ts", nil,
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFArtifact(t)
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
@@ -92,7 +104,8 @@ func TestNullFailMultiMethod_Chain10Advances(t *testing.T) {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -128,12 +141,7 @@ func TestNullFailMultiMethod_Chain10Advances(t *testing.T) {
 // TestNullFailMultiMethod_Freeze tests calling a checkSig method (freeze)
 // after an advanceState call.
 func TestNullFailMultiMethod_Freeze(t *testing.T) {
-	artifact, err := helpers.CompileSourceStringToSDKArtifact(
-		fourMethodSource, "RollupContract.runar.ts", nil,
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getNFArtifact(t)
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
@@ -141,7 +149,8 @@ func TestNullFailMultiMethod_Freeze(t *testing.T) {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

@@ -1,0 +1,1588 @@
+{
+  "field": "koalabear",
+  "prime": 2130706433,
+  "vectors": [
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 0,
+      "expected": 0,
+      "description": "0 - 0 = 0"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 0,
+      "expected": 1,
+      "description": "1 - 0 = 1"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 1,
+      "expected": 2130706432,
+      "description": "0 - 1 = p-1 (underflow wrap)"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 2130706432,
+      "expected": 2,
+      "description": "1 - (p-1) = 2 (underflow wrap)"
+    },
+    {
+      "op": "sub",
+      "a": 2130706432,
+      "b": 2130706432,
+      "expected": 0,
+      "description": "(p-1) - (p-1) = 0"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 0,
+      "expected": 0,
+      "description": "0 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 1,
+      "expected": 2130706432,
+      "description": "0 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 2,
+      "expected": 2130706431,
+      "description": "0 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 3,
+      "expected": 2130706430,
+      "description": "0 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 4,
+      "expected": 2130706429,
+      "description": "0 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 5,
+      "expected": 2130706428,
+      "description": "0 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 6,
+      "expected": 2130706427,
+      "description": "0 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 7,
+      "expected": 2130706426,
+      "description": "0 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 8,
+      "expected": 2130706425,
+      "description": "0 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 9,
+      "expected": 2130706424,
+      "description": "0 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 0,
+      "b": 10,
+      "expected": 2130706423,
+      "description": "0 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 0,
+      "expected": 1,
+      "description": "1 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 1,
+      "expected": 0,
+      "description": "1 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 2,
+      "expected": 2130706432,
+      "description": "1 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 3,
+      "expected": 2130706431,
+      "description": "1 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 4,
+      "expected": 2130706430,
+      "description": "1 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 5,
+      "expected": 2130706429,
+      "description": "1 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 6,
+      "expected": 2130706428,
+      "description": "1 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 7,
+      "expected": 2130706427,
+      "description": "1 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 8,
+      "expected": 2130706426,
+      "description": "1 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 9,
+      "expected": 2130706425,
+      "description": "1 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 1,
+      "b": 10,
+      "expected": 2130706424,
+      "description": "1 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 0,
+      "expected": 2,
+      "description": "2 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 1,
+      "expected": 1,
+      "description": "2 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 2,
+      "expected": 0,
+      "description": "2 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 3,
+      "expected": 2130706432,
+      "description": "2 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 4,
+      "expected": 2130706431,
+      "description": "2 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 5,
+      "expected": 2130706430,
+      "description": "2 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 6,
+      "expected": 2130706429,
+      "description": "2 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 7,
+      "expected": 2130706428,
+      "description": "2 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 8,
+      "expected": 2130706427,
+      "description": "2 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 9,
+      "expected": 2130706426,
+      "description": "2 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 2,
+      "b": 10,
+      "expected": 2130706425,
+      "description": "2 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 0,
+      "expected": 3,
+      "description": "3 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 1,
+      "expected": 2,
+      "description": "3 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 2,
+      "expected": 1,
+      "description": "3 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 3,
+      "expected": 0,
+      "description": "3 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 4,
+      "expected": 2130706432,
+      "description": "3 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 5,
+      "expected": 2130706431,
+      "description": "3 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 6,
+      "expected": 2130706430,
+      "description": "3 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 7,
+      "expected": 2130706429,
+      "description": "3 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 8,
+      "expected": 2130706428,
+      "description": "3 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 9,
+      "expected": 2130706427,
+      "description": "3 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 3,
+      "b": 10,
+      "expected": 2130706426,
+      "description": "3 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 0,
+      "expected": 4,
+      "description": "4 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 1,
+      "expected": 3,
+      "description": "4 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 2,
+      "expected": 2,
+      "description": "4 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 3,
+      "expected": 1,
+      "description": "4 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 4,
+      "expected": 0,
+      "description": "4 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 5,
+      "expected": 2130706432,
+      "description": "4 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 6,
+      "expected": 2130706431,
+      "description": "4 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 7,
+      "expected": 2130706430,
+      "description": "4 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 8,
+      "expected": 2130706429,
+      "description": "4 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 9,
+      "expected": 2130706428,
+      "description": "4 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 4,
+      "b": 10,
+      "expected": 2130706427,
+      "description": "4 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 0,
+      "expected": 5,
+      "description": "5 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 1,
+      "expected": 4,
+      "description": "5 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 2,
+      "expected": 3,
+      "description": "5 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 3,
+      "expected": 2,
+      "description": "5 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 4,
+      "expected": 1,
+      "description": "5 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 5,
+      "expected": 0,
+      "description": "5 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 6,
+      "expected": 2130706432,
+      "description": "5 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 7,
+      "expected": 2130706431,
+      "description": "5 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 8,
+      "expected": 2130706430,
+      "description": "5 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 9,
+      "expected": 2130706429,
+      "description": "5 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 5,
+      "b": 10,
+      "expected": 2130706428,
+      "description": "5 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 0,
+      "expected": 6,
+      "description": "6 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 1,
+      "expected": 5,
+      "description": "6 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 2,
+      "expected": 4,
+      "description": "6 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 3,
+      "expected": 3,
+      "description": "6 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 4,
+      "expected": 2,
+      "description": "6 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 5,
+      "expected": 1,
+      "description": "6 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 6,
+      "expected": 0,
+      "description": "6 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 7,
+      "expected": 2130706432,
+      "description": "6 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 8,
+      "expected": 2130706431,
+      "description": "6 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 9,
+      "expected": 2130706430,
+      "description": "6 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 6,
+      "b": 10,
+      "expected": 2130706429,
+      "description": "6 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 0,
+      "expected": 7,
+      "description": "7 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 1,
+      "expected": 6,
+      "description": "7 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 2,
+      "expected": 5,
+      "description": "7 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 3,
+      "expected": 4,
+      "description": "7 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 4,
+      "expected": 3,
+      "description": "7 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 5,
+      "expected": 2,
+      "description": "7 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 6,
+      "expected": 1,
+      "description": "7 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 7,
+      "expected": 0,
+      "description": "7 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 8,
+      "expected": 2130706432,
+      "description": "7 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 9,
+      "expected": 2130706431,
+      "description": "7 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 7,
+      "b": 10,
+      "expected": 2130706430,
+      "description": "7 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 0,
+      "expected": 8,
+      "description": "8 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 1,
+      "expected": 7,
+      "description": "8 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 2,
+      "expected": 6,
+      "description": "8 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 3,
+      "expected": 5,
+      "description": "8 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 4,
+      "expected": 4,
+      "description": "8 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 5,
+      "expected": 3,
+      "description": "8 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 6,
+      "expected": 2,
+      "description": "8 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 7,
+      "expected": 1,
+      "description": "8 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 8,
+      "expected": 0,
+      "description": "8 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 9,
+      "expected": 2130706432,
+      "description": "8 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 8,
+      "b": 10,
+      "expected": 2130706431,
+      "description": "8 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 0,
+      "expected": 9,
+      "description": "9 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 1,
+      "expected": 8,
+      "description": "9 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 2,
+      "expected": 7,
+      "description": "9 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 3,
+      "expected": 6,
+      "description": "9 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 4,
+      "expected": 5,
+      "description": "9 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 5,
+      "expected": 4,
+      "description": "9 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 6,
+      "expected": 3,
+      "description": "9 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 7,
+      "expected": 2,
+      "description": "9 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 8,
+      "expected": 1,
+      "description": "9 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 9,
+      "expected": 0,
+      "description": "9 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 9,
+      "b": 10,
+      "expected": 2130706432,
+      "description": "9 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 0,
+      "expected": 10,
+      "description": "10 - 0"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 1,
+      "expected": 9,
+      "description": "10 - 1"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 2,
+      "expected": 8,
+      "description": "10 - 2"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 3,
+      "expected": 7,
+      "description": "10 - 3"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 4,
+      "expected": 6,
+      "description": "10 - 4"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 5,
+      "expected": 5,
+      "description": "10 - 5"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 6,
+      "expected": 4,
+      "description": "10 - 6"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 7,
+      "expected": 3,
+      "description": "10 - 7"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 8,
+      "expected": 2,
+      "description": "10 - 8"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 9,
+      "expected": 1,
+      "description": "10 - 9"
+    },
+    {
+      "op": "sub",
+      "a": 10,
+      "b": 10,
+      "expected": 0,
+      "description": "10 - 10"
+    },
+    {
+      "op": "sub",
+      "a": 1604220769,
+      "b": 894988223,
+      "expected": 709232546,
+      "description": "random: 1604220769 - 894988223"
+    },
+    {
+      "op": "sub",
+      "a": 841090587,
+      "b": 802260419,
+      "expected": 38830168,
+      "description": "random: 841090587 - 802260419"
+    },
+    {
+      "op": "sub",
+      "a": 176419314,
+      "b": 2124077375,
+      "expected": 183048372,
+      "description": "random: 176419314 - 2124077375"
+    },
+    {
+      "op": "sub",
+      "a": 333288704,
+      "b": 65198987,
+      "expected": 268089717,
+      "description": "random: 333288704 - 65198987"
+    },
+    {
+      "op": "sub",
+      "a": 1012194208,
+      "b": 1000170562,
+      "expected": 12023646,
+      "description": "random: 1012194208 - 1000170562"
+    },
+    {
+      "op": "sub",
+      "a": 47671766,
+      "b": 650300910,
+      "expected": 1528077289,
+      "description": "random: 47671766 - 650300910"
+    },
+    {
+      "op": "sub",
+      "a": 1064595465,
+      "b": 1730398615,
+      "expected": 1464903283,
+      "description": "random: 1064595465 - 1730398615"
+    },
+    {
+      "op": "sub",
+      "a": 1792080382,
+      "b": 400048271,
+      "expected": 1392032111,
+      "description": "random: 1792080382 - 400048271"
+    },
+    {
+      "op": "sub",
+      "a": 641224456,
+      "b": 2085012992,
+      "expected": 686917897,
+      "description": "random: 641224456 - 2085012992"
+    },
+    {
+      "op": "sub",
+      "a": 33346898,
+      "b": 701555247,
+      "expected": 1462498084,
+      "description": "random: 33346898 - 701555247"
+    },
+    {
+      "op": "sub",
+      "a": 740572446,
+      "b": 1812864080,
+      "expected": 1058414799,
+      "description": "random: 740572446 - 1812864080"
+    },
+    {
+      "op": "sub",
+      "a": 33229408,
+      "b": 2122239311,
+      "expected": 41696530,
+      "description": "random: 33229408 - 2122239311"
+    },
+    {
+      "op": "sub",
+      "a": 572935509,
+      "b": 1109928385,
+      "expected": 1593713557,
+      "description": "random: 572935509 - 1109928385"
+    },
+    {
+      "op": "sub",
+      "a": 516588609,
+      "b": 1714966977,
+      "expected": 932328065,
+      "description": "random: 516588609 - 1714966977"
+    },
+    {
+      "op": "sub",
+      "a": 468625105,
+      "b": 893604586,
+      "expected": 1705726952,
+      "description": "random: 468625105 - 893604586"
+    },
+    {
+      "op": "sub",
+      "a": 1521992771,
+      "b": 123519105,
+      "expected": 1398473666,
+      "description": "random: 1521992771 - 123519105"
+    },
+    {
+      "op": "sub",
+      "a": 1211980123,
+      "b": 843783024,
+      "expected": 368197099,
+      "description": "random: 1211980123 - 843783024"
+    },
+    {
+      "op": "sub",
+      "a": 1731274854,
+      "b": 837744619,
+      "expected": 893530235,
+      "description": "random: 1731274854 - 837744619"
+    },
+    {
+      "op": "sub",
+      "a": 306320548,
+      "b": 210688232,
+      "expected": 95632316,
+      "description": "random: 306320548 - 210688232"
+    },
+    {
+      "op": "sub",
+      "a": 739968306,
+      "b": 1089991020,
+      "expected": 1780683719,
+      "description": "random: 739968306 - 1089991020"
+    },
+    {
+      "op": "sub",
+      "a": 684360776,
+      "b": 1696489680,
+      "expected": 1118577529,
+      "description": "random: 684360776 - 1696489680"
+    },
+    {
+      "op": "sub",
+      "a": 250939917,
+      "b": 1991799828,
+      "expected": 389846522,
+      "description": "random: 250939917 - 1991799828"
+    },
+    {
+      "op": "sub",
+      "a": 1049482753,
+      "b": 844936131,
+      "expected": 204546622,
+      "description": "random: 1049482753 - 844936131"
+    },
+    {
+      "op": "sub",
+      "a": 1189323412,
+      "b": 139307818,
+      "expected": 1050015594,
+      "description": "random: 1189323412 - 139307818"
+    },
+    {
+      "op": "sub",
+      "a": 610602475,
+      "b": 996132760,
+      "expected": 1745176148,
+      "description": "random: 610602475 - 996132760"
+    },
+    {
+      "op": "sub",
+      "a": 361137722,
+      "b": 1594399092,
+      "expected": 897445063,
+      "description": "random: 361137722 - 1594399092"
+    },
+    {
+      "op": "sub",
+      "a": 450063311,
+      "b": 764979520,
+      "expected": 1815790224,
+      "description": "random: 450063311 - 764979520"
+    },
+    {
+      "op": "sub",
+      "a": 476509107,
+      "b": 274999342,
+      "expected": 201509765,
+      "description": "random: 476509107 - 274999342"
+    },
+    {
+      "op": "sub",
+      "a": 1300766853,
+      "b": 1282482313,
+      "expected": 18284540,
+      "description": "random: 1300766853 - 1282482313"
+    },
+    {
+      "op": "sub",
+      "a": 806916245,
+      "b": 190003973,
+      "expected": 616912272,
+      "description": "random: 806916245 - 190003973"
+    },
+    {
+      "op": "sub",
+      "a": 807227231,
+      "b": 2042123544,
+      "expected": 895810120,
+      "description": "random: 807227231 - 2042123544"
+    },
+    {
+      "op": "sub",
+      "a": 737156388,
+      "b": 1650096295,
+      "expected": 1217766526,
+      "description": "random: 737156388 - 1650096295"
+    },
+    {
+      "op": "sub",
+      "a": 1305370138,
+      "b": 1632136792,
+      "expected": 1803939779,
+      "description": "random: 1305370138 - 1632136792"
+    },
+    {
+      "op": "sub",
+      "a": 1378625014,
+      "b": 797159617,
+      "expected": 581465397,
+      "description": "random: 1378625014 - 797159617"
+    },
+    {
+      "op": "sub",
+      "a": 148039713,
+      "b": 1579333891,
+      "expected": 699412255,
+      "description": "random: 148039713 - 1579333891"
+    },
+    {
+      "op": "sub",
+      "a": 65693901,
+      "b": 1009489874,
+      "expected": 1186910460,
+      "description": "random: 65693901 - 1009489874"
+    },
+    {
+      "op": "sub",
+      "a": 714628084,
+      "b": 1376934140,
+      "expected": 1468400377,
+      "description": "random: 714628084 - 1376934140"
+    },
+    {
+      "op": "sub",
+      "a": 1254440426,
+      "b": 1361214613,
+      "expected": 2023932246,
+      "description": "random: 1254440426 - 1361214613"
+    },
+    {
+      "op": "sub",
+      "a": 1868399757,
+      "b": 1507547244,
+      "expected": 360852513,
+      "description": "random: 1868399757 - 1507547244"
+    },
+    {
+      "op": "sub",
+      "a": 593514009,
+      "b": 1047689378,
+      "expected": 1676531064,
+      "description": "random: 593514009 - 1047689378"
+    },
+    {
+      "op": "sub",
+      "a": 1066035565,
+      "b": 1161939133,
+      "expected": 2034802865,
+      "description": "random: 1066035565 - 1161939133"
+    },
+    {
+      "op": "sub",
+      "a": 489757480,
+      "b": 614831087,
+      "expected": 2005632826,
+      "description": "random: 489757480 - 614831087"
+    },
+    {
+      "op": "sub",
+      "a": 1381834637,
+      "b": 2001817924,
+      "expected": 1510723146,
+      "description": "random: 1381834637 - 2001817924"
+    },
+    {
+      "op": "sub",
+      "a": 644137000,
+      "b": 1818306034,
+      "expected": 956537399,
+      "description": "random: 644137000 - 1818306034"
+    },
+    {
+      "op": "sub",
+      "a": 1882240129,
+      "b": 263395297,
+      "expected": 1618844832,
+      "description": "random: 1882240129 - 263395297"
+    },
+    {
+      "op": "sub",
+      "a": 194244840,
+      "b": 136038058,
+      "expected": 58206782,
+      "description": "random: 194244840 - 136038058"
+    },
+    {
+      "op": "sub",
+      "a": 669739592,
+      "b": 117998664,
+      "expected": 551740928,
+      "description": "random: 669739592 - 117998664"
+    },
+    {
+      "op": "sub",
+      "a": 607599882,
+      "b": 2063571914,
+      "expected": 674734401,
+      "description": "random: 607599882 - 2063571914"
+    },
+    {
+      "op": "sub",
+      "a": 85864759,
+      "b": 525192865,
+      "expected": 1691378327,
+      "description": "random: 85864759 - 525192865"
+    },
+    {
+      "op": "sub",
+      "a": 1024254837,
+      "b": 1179136194,
+      "expected": 1975825076,
+      "description": "random: 1024254837 - 1179136194"
+    },
+    {
+      "op": "sub",
+      "a": 1360122580,
+      "b": 643728419,
+      "expected": 716394161,
+      "description": "random: 1360122580 - 643728419"
+    },
+    {
+      "op": "sub",
+      "a": 1076527585,
+      "b": 1845791547,
+      "expected": 1361442471,
+      "description": "random: 1076527585 - 1845791547"
+    },
+    {
+      "op": "sub",
+      "a": 28755735,
+      "b": 607842070,
+      "expected": 1551620098,
+      "description": "random: 28755735 - 607842070"
+    },
+    {
+      "op": "sub",
+      "a": 1793850244,
+      "b": 724362854,
+      "expected": 1069487390,
+      "description": "random: 1793850244 - 724362854"
+    },
+    {
+      "op": "sub",
+      "a": 443682171,
+      "b": 979009519,
+      "expected": 1595379085,
+      "description": "random: 443682171 - 979009519"
+    },
+    {
+      "op": "sub",
+      "a": 864561804,
+      "b": 991527226,
+      "expected": 2003741011,
+      "description": "random: 864561804 - 991527226"
+    },
+    {
+      "op": "sub",
+      "a": 230468398,
+      "b": 1287392520,
+      "expected": 1073782311,
+      "description": "random: 230468398 - 1287392520"
+    },
+    {
+      "op": "sub",
+      "a": 944659136,
+      "b": 1642146039,
+      "expected": 1433219530,
+      "description": "random: 944659136 - 1642146039"
+    },
+    {
+      "op": "sub",
+      "a": 1048254068,
+      "b": 1985523963,
+      "expected": 1193436538,
+      "description": "random: 1048254068 - 1985523963"
+    },
+    {
+      "op": "sub",
+      "a": 1878498135,
+      "b": 1838374457,
+      "expected": 40123678,
+      "description": "random: 1878498135 - 1838374457"
+    },
+    {
+      "op": "sub",
+      "a": 185549583,
+      "b": 1202583221,
+      "expected": 1113672795,
+      "description": "random: 185549583 - 1202583221"
+    },
+    {
+      "op": "sub",
+      "a": 395933476,
+      "b": 731921177,
+      "expected": 1794718732,
+      "description": "random: 395933476 - 731921177"
+    },
+    {
+      "op": "sub",
+      "a": 664375507,
+      "b": 384127773,
+      "expected": 280247734,
+      "description": "random: 664375507 - 384127773"
+    },
+    {
+      "op": "sub",
+      "a": 572189655,
+      "b": 773317372,
+      "expected": 1929578716,
+      "description": "random: 572189655 - 773317372"
+    },
+    {
+      "op": "sub",
+      "a": 905071815,
+      "b": 1664384251,
+      "expected": 1371393997,
+      "description": "random: 905071815 - 1664384251"
+    },
+    {
+      "op": "sub",
+      "a": 1323279599,
+      "b": 1272135494,
+      "expected": 51144105,
+      "description": "random: 1323279599 - 1272135494"
+    },
+    {
+      "op": "sub",
+      "a": 784842788,
+      "b": 1349885900,
+      "expected": 1565663321,
+      "description": "random: 784842788 - 1349885900"
+    },
+    {
+      "op": "sub",
+      "a": 194171566,
+      "b": 1086564293,
+      "expected": 1238313706,
+      "description": "random: 194171566 - 1086564293"
+    },
+    {
+      "op": "sub",
+      "a": 1659863006,
+      "b": 141986307,
+      "expected": 1517876699,
+      "description": "random: 1659863006 - 141986307"
+    },
+    {
+      "op": "sub",
+      "a": 21604199,
+      "b": 693212729,
+      "expected": 1459097903,
+      "description": "random: 21604199 - 693212729"
+    },
+    {
+      "op": "sub",
+      "a": 1217007986,
+      "b": 274972979,
+      "expected": 942035007,
+      "description": "random: 1217007986 - 274972979"
+    },
+    {
+      "op": "sub",
+      "a": 1486569765,
+      "b": 604462166,
+      "expected": 882107599,
+      "description": "random: 1486569765 - 604462166"
+    },
+    {
+      "op": "sub",
+      "a": 1873707489,
+      "b": 1891950391,
+      "expected": 2112463531,
+      "description": "random: 1873707489 - 1891950391"
+    },
+    {
+      "op": "sub",
+      "a": 1898886585,
+      "b": 1382905919,
+      "expected": 515980666,
+      "description": "random: 1898886585 - 1382905919"
+    },
+    {
+      "op": "sub",
+      "a": 654140659,
+      "b": 1362603171,
+      "expected": 1422243921,
+      "description": "random: 654140659 - 1362603171"
+    },
+    {
+      "op": "sub",
+      "a": 1956243641,
+      "b": 801181839,
+      "expected": 1155061802,
+      "description": "random: 1956243641 - 801181839"
+    },
+    {
+      "op": "sub",
+      "a": 521593144,
+      "b": 1099364984,
+      "expected": 1552934593,
+      "description": "random: 521593144 - 1099364984"
+    },
+    {
+      "op": "sub",
+      "a": 357353847,
+      "b": 2080786348,
+      "expected": 407273932,
+      "description": "random: 357353847 - 2080786348"
+    },
+    {
+      "op": "sub",
+      "a": 662669637,
+      "b": 815325356,
+      "expected": 1978050714,
+      "description": "random: 662669637 - 815325356"
+    },
+    {
+      "op": "sub",
+      "a": 370451183,
+      "b": 1216688673,
+      "expected": 1284468943,
+      "description": "random: 370451183 - 1216688673"
+    },
+    {
+      "op": "sub",
+      "a": 1147855033,
+      "b": 577005537,
+      "expected": 570849496,
+      "description": "random: 1147855033 - 577005537"
+    },
+    {
+      "op": "sub",
+      "a": 615374562,
+      "b": 1873899682,
+      "expected": 872181313,
+      "description": "random: 615374562 - 1873899682"
+    },
+    {
+      "op": "sub",
+      "a": 425182271,
+      "b": 937705339,
+      "expected": 1618183365,
+      "description": "random: 425182271 - 937705339"
+    },
+    {
+      "op": "sub",
+      "a": 1560897041,
+      "b": 1124558943,
+      "expected": 436338098,
+      "description": "random: 1560897041 - 1124558943"
+    },
+    {
+      "op": "sub",
+      "a": 288083231,
+      "b": 1213745259,
+      "expected": 1205044405,
+      "description": "random: 288083231 - 1213745259"
+    },
+    {
+      "op": "sub",
+      "a": 843467968,
+      "b": 598775910,
+      "expected": 244692058,
+      "description": "random: 843467968 - 598775910"
+    },
+    {
+      "op": "sub",
+      "a": 23149151,
+      "b": 1153513805,
+      "expected": 1000341779,
+      "description": "random: 23149151 - 1153513805"
+    },
+    {
+      "op": "sub",
+      "a": 1934955016,
+      "b": 483076636,
+      "expected": 1451878380,
+      "description": "random: 1934955016 - 483076636"
+    },
+    {
+      "op": "sub",
+      "a": 230134383,
+      "b": 1251403884,
+      "expected": 1109436932,
+      "description": "random: 230134383 - 1251403884"
+    },
+    {
+      "op": "sub",
+      "a": 1835623503,
+      "b": 1457424870,
+      "expected": 378198633,
+      "description": "random: 1835623503 - 1457424870"
+    },
+    {
+      "op": "sub",
+      "a": 130976082,
+      "b": 1592167310,
+      "expected": 669515205,
+      "description": "random: 130976082 - 1592167310"
+    },
+    {
+      "op": "sub",
+      "a": 746301512,
+      "b": 805317876,
+      "expected": 2071690069,
+      "description": "random: 746301512 - 805317876"
+    },
+    {
+      "op": "sub",
+      "a": 1638518317,
+      "b": 989992936,
+      "expected": 648525381,
+      "description": "random: 1638518317 - 989992936"
+    },
+    {
+      "op": "sub",
+      "a": 953487849,
+      "b": 1994700264,
+      "expected": 1089494018,
+      "description": "random: 953487849 - 1994700264"
+    },
+    {
+      "op": "sub",
+      "a": 762439509,
+      "b": 383859353,
+      "expected": 378580156,
+      "description": "random: 762439509 - 383859353"
+    },
+    {
+      "op": "sub",
+      "a": 635799104,
+      "b": 1867180667,
+      "expected": 899324870,
+      "description": "random: 635799104 - 1867180667"
+    },
+    {
+      "op": "sub",
+      "a": 1215970527,
+      "b": 1359416588,
+      "expected": 1987260372,
+      "description": "random: 1215970527 - 1359416588"
+    },
+    {
+      "op": "sub",
+      "a": 1774726416,
+      "b": 807952831,
+      "expected": 966773585,
+      "description": "random: 1774726416 - 807952831"
+    },
+    {
+      "op": "sub",
+      "a": 2109250466,
+      "b": 1619164046,
+      "expected": 490086420,
+      "description": "random: 2109250466 - 1619164046"
+    },
+    {
+      "op": "sub",
+      "a": 224238674,
+      "b": 603832435,
+      "expected": 1751112672,
+      "description": "random: 224238674 - 603832435"
+    }
+  ]
+}

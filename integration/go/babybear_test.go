@@ -77,7 +77,8 @@ func TestBB_FieldInv_Identity(t *testing.T) {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -115,7 +116,8 @@ func TestBB_FieldAdd_WrongResult_Rejected(t *testing.T) {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

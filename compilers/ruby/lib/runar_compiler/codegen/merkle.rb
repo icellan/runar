@@ -114,9 +114,13 @@ module RunarCompiler
           # Compute direction bit: (index / 2^i) % 2
           emit.call(make_stack_op(op: "opcode", code: "OP_DUP"))
           # Stack: [current, sibling, index, index]
-          if i > 0
-            emit.call(make_stack_op(op: "push", value: big_int_push(1 << i)))
-            emit.call(make_stack_op(op: "opcode", code: "OP_DIV"))
+          # Extract bit i: (index >> i) & 1
+          # Chronicle opcodes: OP_2DIV (i=1), OP_RSHIFTNUM (i>1)
+          if i == 1
+            emit.call(make_stack_op(op: "opcode", code: "OP_2DIV"))
+          elsif i > 1
+            emit.call(make_stack_op(op: "push", value: big_int_push(i)))
+            emit.call(make_stack_op(op: "opcode", code: "OP_RSHIFTNUM"))
           end
           emit.call(make_stack_op(op: "push", value: big_int_push(2)))
           emit.call(make_stack_op(op: "opcode", code: "OP_MOD"))

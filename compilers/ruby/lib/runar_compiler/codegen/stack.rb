@@ -84,6 +84,19 @@ module RunarCompiler::Codegen
     bbExt4Inv0 bbExt4Inv1 bbExt4Inv2 bbExt4Inv3
   ]).freeze
 
+  # KoalaBear field arithmetic builtin function names
+  KB_BUILTIN_NAMES = Set.new(%w[
+    kbFieldAdd kbFieldSub kbFieldMul kbFieldInv
+    kbExt4Mul0 kbExt4Mul1 kbExt4Mul2 kbExt4Mul3
+    kbExt4Inv0 kbExt4Inv1 kbExt4Inv2 kbExt4Inv3
+  ]).freeze
+
+  # BN254 field arithmetic and G1 curve builtin function names
+  BN254_BUILTIN_NAMES = Set.new(%w[
+    bn254FieldAdd bn254FieldSub bn254FieldMul bn254FieldInv bn254FieldNeg
+    bn254G1Add bn254G1ScalarMul bn254G1Negate bn254G1OnCurve
+  ]).freeze
+
   # Merkle proof verification builtin function names
   MERKLE_BUILTIN_NAMES = Set.new(%w[
     merkleRootSha256 merkleRootHash256
@@ -302,6 +315,18 @@ module RunarCompiler::Codegen
 
   # @param name [String]
   # @return [Boolean]
+  def self.kb_builtin?(name)
+    KB_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.bn254_builtin?(name)
+    BN254_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
   def self.merkle_builtin?(name)
     MERKLE_BUILTIN_NAMES.include?(name)
   end
@@ -465,51 +490,103 @@ module RunarCompiler::Codegen
     #
     # Expects stack: [..., script, len]
     # Leaves stack:  [..., script, varint_bytes]
+    #
+    # Bitcoin varint format:
+    #   len < 0xfd:        1 byte (len itself)
+    #   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+    #   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+    #   otherwise:         0xff + 8 bytes LE                (9 bytes — never
+    #                                                        used in practice
+    #                                                        for BSV scripts)
+    #
+    # We must support all four shapes; emitting a 3-byte varint for a script
+    # whose length exceeds 0xffff produces a truncated value that no longer
+    # matches what the BSV node uses for hashOutputs, breaking the
+    # state-continuation hash equality assertion downstream.
+    #
+    # OP_NUM2BIN uses sign-magnitude encoding so high-bit values need an
+    # extra sign byte; we generate one extra byte and then SPLIT off the
+    # unsigned low bytes to get the correct unsigned varint payload.
     def emit_varint_encoding
       # Stack: [..., script, len]
+
+      # emit_num_to_low_bytes: [..., len] -> [..., low_n_bytes]. Uses
+      # NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+      emit_num_to_low_bytes = lambda do |n_bytes|
+        emit_push_int(n_bytes + 1)
+        @sm.push("")
+        emit_opcode("OP_NUM2BIN")
+        @sm.pop; @sm.pop; @sm.push("")
+        emit_push_int(n_bytes)
+        @sm.push("")
+        emit_opcode("OP_SPLIT")
+        @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+        emit_op({ op: "drop" })
+        @sm.pop
+      end
+
+      # emit_prefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+      emit_prefix = lambda do |prefix_byte|
+        emit_push_bytes([prefix_byte].pack("C"))
+        @sm.push("")
+        emit_op({ op: "swap" })
+        @sm.swap
+        @sm.pop; @sm.pop
+        emit_opcode("OP_CAT")
+        @sm.push("")
+      end
+
+      # IF len < 253: 1-byte varint.
       emit_op({ op: "dup" })
       @sm.dup
       emit_push_int(253)
       @sm.push("")
       emit_opcode("OP_LESSTHAN")
       @sm.pop; @sm.pop; @sm.push("")
-
       emit_opcode("OP_IF")
-      @sm.pop # pop condition
-
-      # Then: 1-byte varint (len < 253)
-      emit_push_int(2)
-      @sm.push("")
-      emit_opcode("OP_NUM2BIN")
-      @sm.pop; @sm.pop; @sm.push("")
-      emit_push_int(1)
-      @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "drop" })
       @sm.pop
-
+      sm_at_1byte = @sm.clone
+      emit_num_to_low_bytes.call(1)
       emit_opcode("OP_ELSE")
+      @sm = sm_at_1byte.clone
 
-      # Else: 0xfd + 2-byte LE varint (len >= 253)
-      emit_push_int(4)
+      # ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+      emit_op({ op: "dup" })
+      @sm.dup
+      emit_push_int(0x10000)
       @sm.push("")
-      emit_opcode("OP_NUM2BIN")
+      emit_opcode("OP_LESSTHAN")
       @sm.pop; @sm.pop; @sm.push("")
-      emit_push_int(2)
-      @sm.push("")
-      emit_opcode("OP_SPLIT")
-      @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-      emit_op({ op: "drop" })
+      emit_opcode("OP_IF")
       @sm.pop
-      emit_push_bytes([0xFD].pack("C"))
-      @sm.push("")
-      emit_op({ op: "swap" })
-      @sm.swap
-      @sm.pop; @sm.pop
-      emit_opcode("OP_CAT")
-      @sm.push("")
+      sm_at_3byte = @sm.clone
+      emit_num_to_low_bytes.call(2)
+      emit_prefix.call(0xfd)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_3byte.clone
 
+      # ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+      emit_op({ op: "dup" })
+      @sm.dup
+      emit_push_int(0x100000000)
+      @sm.push("")
+      emit_opcode("OP_LESSTHAN")
+      @sm.pop; @sm.pop; @sm.push("")
+      emit_opcode("OP_IF")
+      @sm.pop
+      sm_at_5byte = @sm.clone
+      emit_num_to_low_bytes.call(4)
+      emit_prefix.call(0xfe)
+      emit_opcode("OP_ELSE")
+      @sm = sm_at_5byte.clone
+
+      # ELSE: 0xff + 8-byte LE. (>= 4 GiB script — practically unreachable on
+      # BSV but kept for spec completeness so we never silently truncate.)
+      emit_num_to_low_bytes.call(8)
+      emit_prefix.call(0xff)
+
+      emit_opcode("OP_ENDIF")
+      emit_opcode("OP_ENDIF")
       emit_opcode("OP_ENDIF")
       # --- Stack: [..., script, varint] ---
     end
@@ -1175,6 +1252,24 @@ module RunarCompiler::Codegen
       # Baby Bear field arithmetic builtins
       if RunarCompiler::Codegen.bb_builtin?(func_name)
         _lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # KoalaBear field arithmetic builtins
+      if RunarCompiler::Codegen.kb_builtin?(func_name)
+        _lower_kb_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # BN254 field arithmetic and G1 curve builtins
+      if RunarCompiler::Codegen.bn254_builtin?(func_name)
+        _lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # Poseidon2 KoalaBear Merkle root
+      if func_name == "merkleRootPoseidon2KB"
+        _lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses)
         return
       end
 
@@ -1992,6 +2087,91 @@ module RunarCompiler::Codegen
       _track_depth
     end
 
+    def _lower_kb_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "koalabear"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      KoalaBear.dispatch_kb_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "bn254"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      BN254.dispatch_bn254_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses)
+      require_relative "poseidon2_merkle"
+      # args: [leaf_0..leaf_7, sib0_0..sib0_7, ..., sib(D-1)_0..sib(D-1)_7, index, depth]
+      # depth must be a compile-time constant (last argument)
+      n_args = args.length
+      raise "merkleRootPoseidon2KB requires at least 10 arguments, got #{n_args}" if n_args < 10
+
+      # Extract depth constant from ANF binding (last arg)
+      depth_arg = args[n_args - 1]
+      depth_value = get_constant_value(depth_arg)
+      if depth_value.nil? || !depth_value.is_a?(Integer)
+        raise "merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant " \
+              "integer literal. Got a runtime value for '#{depth_arg}'."
+      end
+      depth = depth_value
+      if depth < 1 || depth > 64
+        raise "merkleRootPoseidon2KB: depth must be between 1 and 64, got #{depth}"
+      end
+
+      # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
+      expected_args = 8 + depth * 8 + 1 + 1
+      unless n_args == expected_args
+        raise "merkleRootPoseidon2KB: expected #{expected_args} arguments " \
+              "(8 leaf + #{depth}*8 proof + index + depth), got #{n_args}"
+      end
+
+      # Remove depth from the real stack FIRST (compile-time constant, not runtime)
+      if @sm.has?(depth_arg)
+        bring_to_top(depth_arg, true)
+        emit_op({ op: "drop" })
+        @sm.pop
+      end
+
+      # Bring all runtime args (leaf*8 + proof*depth*8 + index) to stack top in order
+      runtime_arg_count = n_args - 1 # all except depth
+      runtime_arg_count.times do |i|
+        arg = args[i]
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      # Pop all runtime args — the codegen consumes them and produces 8 results
+      runtime_arg_count.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      Poseidon2Merkle.emit_poseidon2_merkle_root(emit_fn, depth)
+
+      # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
+      # The type system returns a single bigint, so only root_7 (top) is accessible.
+      # Drop the lower 7 elements with OP_NIP to keep the stack clean.
+      7.times { emit_op({ op: "nip" }) }
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
     def _lower_merkle_root(binding_name, func_name, args, binding_index, last_uses)
       require_relative "merkle"
       # args: [leaf, proof, index, depth]
@@ -2595,30 +2775,75 @@ module RunarCompiler::Codegen
         # Variable-length state but _codePart not available (terminal method)
         emit_op({ op: "drop" }); @sm.pop
       else
-        # Variable-length path: strip varint, use _codePart
+        # Variable-length path: strip varint, use _codePart to find state.
+        #
+        # BIP-143 scriptCode is prefixed by a Bitcoin varint:
+        #   length < 0xfd:        1 byte (length itself)
+        #   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+        #   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+        #   otherwise:            0xff + 8 bytes LE                (9 bytes)
+        #
+        # We must support all four shapes, otherwise scripts whose
+        # scriptCode exceeds 65,535 bytes (e.g. embedded BN254 verifiers)
+        # silently strip too few varint bytes and corrupt the subsequent
+        # state-extraction OP_SPLITs — this surfaces as
+        # `Invalid OP_SPLIT range` on regtest.
         emit_push_int(1); @sm.push("")
         emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
         emit_op({ op: "swap" }); @sm.swap
-        emit_op({ op: "dup" }); @sm.push(@sm.peek_at_depth(0))
-        # Zero-pad before BIN2NUM
+        # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+        # as negative script numbers.
         emit_push_bytes([0].pack("C"))
         @sm.push("")
         emit_opcode("OP_CAT"); @sm.pop; @sm.pop; @sm.push("")
         emit_opcode("OP_BIN2NUM")
+        # Stack: [..., rest, fb_num]
+
+        # emit_drop_more_varint_bytes drops `n` additional varint bytes
+        # from the top of stack `rest`. [..., rest] -> [..., rest_minus_n].
+        emit_drop_more_varint_bytes = lambda do |n|
+          emit_push_int(n); @sm.push("")
+          emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
+          emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
+        end
+
+        # IF fb_num < 253: 1-byte varint, drop fb_num.
+        emit_op({ op: "dup" }); @sm.dup
         emit_push_int(253); @sm.push("")
         emit_opcode("OP_LESSTHAN"); @sm.pop; @sm.pop; @sm.push("")
-
         emit_opcode("OP_IF"); @sm.pop
-        sm_at_varint_if = @sm.clone
+        sm_at_1byte_if = @sm.clone
+        # THEN: 1-byte varint
         emit_op({ op: "drop" }); @sm.pop
-
         emit_opcode("OP_ELSE")
-        @sm = sm_at_varint_if.clone
+        @sm = sm_at_1byte_if.clone
+        # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+        emit_op({ op: "dup" }); @sm.dup
+        emit_push_int(254); @sm.push("")
+        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+        emit_opcode("OP_IF"); @sm.pop
+        sm_at_fe_if = @sm.clone
+        # THEN: 5-byte varint (0xfe + 4 bytes LE).
         emit_op({ op: "drop" }); @sm.pop
-        emit_push_int(2); @sm.push("")
-        emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
-        emit_op({ op: "nip" }); @sm.pop; @sm.pop; @sm.push("")
-
+        emit_drop_more_varint_bytes.call(4)
+        emit_opcode("OP_ELSE")
+        @sm = sm_at_fe_if.clone
+        # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+        emit_op({ op: "dup" }); @sm.dup
+        emit_push_int(255); @sm.push("")
+        emit_opcode("OP_NUMEQUAL"); @sm.pop; @sm.pop; @sm.push("")
+        emit_opcode("OP_IF"); @sm.pop
+        sm_at_ff_if = @sm.clone
+        # THEN: 9-byte varint (0xff + 8 bytes LE).
+        emit_op({ op: "drop" }); @sm.pop
+        emit_drop_more_varint_bytes.call(8)
+        emit_opcode("OP_ELSE")
+        @sm = sm_at_ff_if.clone
+        # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+        emit_op({ op: "drop" }); @sm.pop
+        emit_drop_more_varint_bytes.call(2)
+        emit_opcode("OP_ENDIF")
+        emit_opcode("OP_ENDIF")
         emit_opcode("OP_ENDIF")
 
         # Compute skip = SIZE(_codePart) - codeSepIdx

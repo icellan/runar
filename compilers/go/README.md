@@ -107,6 +107,32 @@ runar-compiler-go --source MyContract.runar.ts --emit-ir
 runar-compiler-go --source MyContract.runar.ts --output artifacts/MyContract.json
 ```
 
+### `groth16-wa` subcommand: BN254 Groth16 verifier with baked-in VK
+
+The `groth16-wa` subcommand is a dedicated compiler backend that does not
+go through the Rúnar DSL pipeline. It consumes a `.groth16.vk.json`
+verifying key (see `spec/groth16_wa_vk.schema.json` for the schema) and
+emits a Rúnar artifact whose locking script is a witness-assisted BN254
+Groth16 verifier with that VK pre-baked in. Changing the VK requires
+regenerating the artifact.
+
+```bash
+runar-compiler-go groth16-wa \
+  --vk examples/go/SP1Verifier.groth16.vk.json \
+  --out examples/go/SP1Verifier.runar.json
+```
+
+Options:
+
+- `--vk <path>`: path to the input VK JSON (required).
+- `--out <path>`: path for the generated artifact JSON (required).
+- `--name <ContractName>`: contract name to record in the artifact (default: `Groth16Verifier`).
+- `--modulo-threshold <int>`: bytes threshold for deferred mod reduction. Default `0` produces a ~703 KB script (strict mod reduction — recommended). The 2048-byte value from the nChain paper is not recommended on today's go-sdk interpreter.
+
+The emitted artifact has `groth16WA.numPubInputs` and `groth16WA.vkDigest`
+fields so downstream consumers can sanity-check which VK was baked in
+without having to re-derive it from the script bytes.
+
 ---
 
 ## Conformance Testing

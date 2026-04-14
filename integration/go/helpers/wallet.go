@@ -8,6 +8,7 @@ import (
 	ec "github.com/bsv-blockchain/go-sdk/primitives/ec"
 	crypto "github.com/bsv-blockchain/go-sdk/primitives/hash"
 	"github.com/bsv-blockchain/go-sdk/script"
+	"github.com/bsv-blockchain/go-sdk/transaction"
 )
 
 // Wallet holds a secp256k1 keypair with derived address and scripts.
@@ -84,6 +85,125 @@ func fundWalletSVNode(w *Wallet, btcAmount float64) (*UTXO, error) {
 	return FindUTXO(txid, w.P2PKHScript())
 }
 
+// SplitFund funds a wallet with a single RPC call, then creates a splitting
+// transaction with `n` equal P2PKH outputs. Returns all UTXOs. Only 1 block
+// is mined for the split, regardless of n. This is much faster than calling
+// FundWallet n times (which mines a block per call).
+func SplitFund(w *Wallet, n int, satoshisPerOutput int64) ([]*UTXO, error) {
+	// Calculate total needed: n outputs + fee
+	feeBudget := int64(n*34 + 200) // ~34 bytes per output + overhead
+	totalBTC := float64(int64(n)*satoshisPerOutput+feeBudget) / 1e8
+
+	funding, err := FundWallet(w, totalBTC)
+	if err != nil {
+		return nil, fmt.Errorf("initial fund: %w", err)
+	}
+
+	// Build splitting transaction
+	tx := buildSplitTx(funding, w, n, satoshisPerOutput)
+
+	// Sign the single P2PKH input
+	if err := signP2PKHInputHelper(tx, 0, w); err != nil {
+		return nil, fmt.Errorf("sign split tx: %w", err)
+	}
+
+	txid, err := SendRawTransaction(tx.Hex())
+	if err != nil {
+		return nil, fmt.Errorf("broadcast split: %w", err)
+	}
+	if err := Mine(1); err != nil {
+		return nil, fmt.Errorf("mine split: %w", err)
+	}
+
+	// Collect all UTXOs
+	utxos := make([]*UTXO, n)
+	for i := 0; i < n; i++ {
+		utxos[i] = &UTXO{
+			Txid:     txid,
+			Vout:     i,
+			Satoshis: satoshisPerOutput,
+			Script:   w.P2PKHScript(),
+		}
+	}
+	return utxos, nil
+}
+
+// FundedWallet pairs a wallet with its pre-funded UTXO for parallel test execution.
+type FundedWallet struct {
+	Wallet *Wallet
+	UTXO   *UTXO
+}
+
+// SplitFundParallel creates n separate wallets, each with its own funded UTXO.
+// Uses a single funding+split transaction. Each wallet can be used independently
+// in parallel goroutines without UTXO contention.
+func SplitFundParallel(n int, satoshisPerOutput int64) ([]*FundedWallet, error) {
+	// Create n wallets
+	wallets := make([]*Wallet, n)
+	for i := 0; i < n; i++ {
+		wallets[i] = NewWallet()
+	}
+
+	// Fund a master wallet
+	master := NewWallet()
+	RPCCall("importaddress", master.Address, "", false)
+	feeBudget := int64(n*34 + 200)
+	totalBTC := float64(int64(n)*satoshisPerOutput+feeBudget) / 1e8
+
+	funding, err := FundWallet(master, totalBTC)
+	if err != nil {
+		return nil, fmt.Errorf("fund master: %w", err)
+	}
+
+	// Build split tx with one output per wallet
+	tx := transaction.NewTransaction()
+	fundScript, _ := script.NewFromHex(funding.Script)
+	tx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       TxidToChainHash(funding.Txid),
+		SourceTxOutIndex: uint32(funding.Vout),
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, &transaction.TransactionOutput{
+		Satoshis:      uint64(funding.Satoshis),
+		LockingScript: fundScript,
+	})
+
+	for i := 0; i < n; i++ {
+		outScript, _ := script.NewFromHex(wallets[i].P2PKHScript())
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(satoshisPerOutput),
+			LockingScript: outScript,
+		})
+	}
+
+	if err := signP2PKHInputHelper(tx, 0, master); err != nil {
+		return nil, fmt.Errorf("sign split: %w", err)
+	}
+
+	txid, err := SendRawTransaction(tx.Hex())
+	if err != nil {
+		return nil, fmt.Errorf("broadcast split: %w", err)
+	}
+	if err := Mine(1); err != nil {
+		return nil, fmt.Errorf("mine split: %w", err)
+	}
+
+	// Import all wallet addresses and build results
+	result := make([]*FundedWallet, n)
+	for i := 0; i < n; i++ {
+		RPCCall("importaddress", wallets[i].Address, "", false)
+		result[i] = &FundedWallet{
+			Wallet: wallets[i],
+			UTXO: &UTXO{
+				Txid:     txid,
+				Vout:     i,
+				Satoshis: satoshisPerOutput,
+				Script:   wallets[i].P2PKHScript(),
+			},
+		}
+	}
+	return result, nil
+}
+
 // FindUTXO scans a transaction's outputs for one matching the given script hex.
 func FindUTXO(txid, scriptHex string) (*UTXO, error) {
 	tx, err := GetRawTransaction(txid)
@@ -123,4 +243,33 @@ func FindUTXOByIndex(txid string, vout int) (*UTXO, error) {
 	sp := v["scriptPubKey"].(map[string]interface{})
 	outHex := sp["hex"].(string)
 	return &UTXO{Txid: txid, Vout: vout, Satoshis: sats, Script: outHex}, nil
+}
+
+// buildSplitTx creates a transaction with n equal P2PKH outputs to the same wallet.
+func buildSplitTx(funding *UTXO, w *Wallet, n int, satoshisPerOutput int64) *transaction.Transaction {
+	tx := transaction.NewTransaction()
+
+	fundScript, _ := script.NewFromHex(funding.Script)
+	tx.AddInputWithOutput(&transaction.TransactionInput{
+		SourceTXID:       TxidToChainHash(funding.Txid),
+		SourceTxOutIndex: uint32(funding.Vout),
+		SequenceNumber:   transaction.DefaultSequenceNumber,
+	}, &transaction.TransactionOutput{
+		Satoshis:      uint64(funding.Satoshis),
+		LockingScript: fundScript,
+	})
+
+	outScript, _ := script.NewFromHex(w.P2PKHScript())
+	for i := 0; i < n; i++ {
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(satoshisPerOutput),
+			LockingScript: outScript,
+		})
+	}
+	return tx
+}
+
+// signP2PKHInputHelper wraps signP2PKHInput from tx.go.
+func signP2PKHInputHelper(tx *transaction.Transaction, inputIdx int, w *Wallet) error {
+	return signP2PKHInput(tx, inputIdx, w)
 }

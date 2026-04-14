@@ -144,6 +144,35 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['bbExt4Inv2',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
   ['bbExt4Inv3',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
 
+  // KoalaBear field arithmetic (p = 2130706433)
+  ['kbFieldAdd',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbFieldSub',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbFieldMul',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbFieldInv',         { params: ['bigint'], returnType: 'bigint' }],
+
+  // KoalaBear quartic extension field (W = 3)
+  ['kbExt4Mul0',         { params: ['bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Mul1',         { params: ['bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Mul2',         { params: ['bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Mul3',         { params: ['bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Inv0',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Inv1',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Inv2',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+  ['kbExt4Inv3',         { params: ['bigint', 'bigint', 'bigint', 'bigint'], returnType: 'bigint' }],
+
+  // BN254 field arithmetic (p = 21888...8583)
+  ['bn254FieldAdd',      { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bn254FieldSub',      { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bn254FieldMul',      { params: ['bigint', 'bigint'], returnType: 'bigint' }],
+  ['bn254FieldInv',      { params: ['bigint'], returnType: 'bigint' }],
+  ['bn254FieldNeg',      { params: ['bigint'], returnType: 'bigint' }],
+
+  // BN254 G1 curve operations
+  ['bn254G1Add',         { params: ['Point', 'Point'], returnType: 'Point' }],
+  ['bn254G1ScalarMul',   { params: ['Point', 'bigint'], returnType: 'Point' }],
+  ['bn254G1Negate',      { params: ['Point'], returnType: 'Point' }],
+  ['bn254G1OnCurve',     { params: ['Point'], returnType: 'boolean' }],
+
   // Merkle proof verification
   ['merkleRootSha256',   { params: ['ByteString', 'ByteString', 'bigint', 'bigint'], returnType: 'ByteString' }],
   ['merkleRootHash256',  { params: ['ByteString', 'ByteString', 'bigint', 'bigint'], returnType: 'ByteString' }],

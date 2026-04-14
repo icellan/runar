@@ -214,9 +214,13 @@ func parseSatoshis(value float64) int64 {
 		// Teranode returns satoshis directly
 		return int64(value)
 	}
-	// SV Node returns BTC — convert to satoshis
+	// SV Node returns BTC — convert to satoshis.
+	// Add 0.5 before truncating to round correctly and avoid off-by-one
+	// errors from float64 imprecision (e.g., 0.01000540 BTC → 1000539.9999...
+	// which truncates to 1000539 instead of the correct 1000540).
 	btc := new(big.Float).SetFloat64(value)
 	sats := new(big.Float).Mul(btc, new(big.Float).SetFloat64(1e8))
+	sats.Add(sats, new(big.Float).SetFloat64(0.5))
 	result, _ := sats.Int64()
 	return result
 }

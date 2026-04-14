@@ -137,7 +137,6 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
         .add_raw_output => |aro| {
             try used.put(aro.satoshis, {});
             if (aro.script_bytes.len > 0) try used.put(aro.script_bytes, {});
-            if (aro.script_ref.len > 0) try used.put(aro.script_ref, {});
         },
         .array_literal => |al| {
             for (al.elements) |e| try used.put(e, {});

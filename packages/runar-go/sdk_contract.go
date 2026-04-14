@@ -617,6 +617,18 @@ func (c *RunarContract) PrepareCall(
 	finalPreimage := ""
 	codeSepIdx := c.getCodeSepIndex(methodIndex)
 
+	// Mode 3: pre-encode the witness-assisted Groth16 prover bundle into a
+	// flat hex push sequence so each pass of buildStatefulUnlock can splice
+	// it in at a fixed position (immediately before the method selector).
+	groth16WAWitnessHex := ""
+	if options != nil && options.Groth16WAWitness != nil {
+		var encErr error
+		groth16WAWitnessHex, encErr = serializeWitnessToUnlock(options.Groth16WAWitness)
+		if encErr != nil {
+			return nil, fmt.Errorf("RunarContract.PrepareCall: serialize Groth16 WA witness: %w", encErr)
+		}
+	}
+
 	if isStateful {
 		// Helper: build a stateful unlock. For inputIdx==0 (primary), keeps
 		// placeholder Sig params. For inputIdx>0 (extra), signs with signer.
@@ -662,7 +674,15 @@ func (c *RunarContract) PrepareCall(
 			}
 			opSigHexStr := hex.EncodeToString(opSig)
 			preimageHexStr := hex.EncodeToString(preimage)
-			unlockStr := c.buildStatefulPrefix(opSigHexStr, methodNeedsChange) +
+			// Mode 3: the witness pushes go BEFORE the stateful prefix
+			// so the witness items end up at the deepest stack positions
+			// (with q at the bottom). The named params (_codePart,
+			// _opPushTxSig, user args, preimage) sit on top and are
+			// moved to the alt stack by the verifier preamble before
+			// the verifier consumes its witness inputs. See
+			// emitGroth16WAPreamble in compilers/go/codegen/stack.go.
+			unlockStr := groth16WAWitnessHex +
+				c.buildStatefulPrefix(opSigHexStr, methodNeedsChange) +
 				argsHex +
 				changeHex +
 				newAmountHex +
@@ -768,9 +788,9 @@ func (c *RunarContract) PrepareCall(
 			resolvedArgs[preimageIndex] = hex.EncodeToString(preimage)
 		}
 		// Don't sign Sig params — keep placeholders
-		realUnlockingScript := c.BuildUnlockingScript(methodName, resolvedArgs)
+		realUnlockingScript := groth16WAWitnessHex + c.BuildUnlockingScript(methodName, resolvedArgs)
 		if needsOpPushTx && finalOpPushTxSig != "" {
-			realUnlockingScript = c.buildStatefulPrefix(finalOpPushTxSig, false) + realUnlockingScript
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) + c.BuildUnlockingScript(methodName, resolvedArgs)
 			tmpTx := InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 			finalSig, finalPre, ptxErr := ComputeOpPushTxWithCodeSep(tmpTx, 0,
 				contractUtxo.Script, contractUtxo.Satoshis, codeSepIdx)
@@ -780,7 +800,7 @@ func (c *RunarContract) PrepareCall(
 			resolvedArgs[preimageIndex] = hex.EncodeToString(finalPre)
 			finalOpPushTxSig = hex.EncodeToString(finalSig)
 			finalPreimage = hex.EncodeToString(finalPre)
-			realUnlockingScript = c.buildStatefulPrefix(finalOpPushTxSig, false) +
+			realUnlockingScript = groth16WAWitnessHex + c.buildStatefulPrefix(finalOpPushTxSig, false) +
 				c.BuildUnlockingScript(methodName, resolvedArgs)
 		}
 		signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
@@ -789,6 +809,12 @@ func (c *RunarContract) PrepareCall(
 				finalPreimage = s
 			}
 		}
+	} else if groth16WAWitnessHex != "" {
+		// Pure stateless contract with witness preamble: no OP_PUSH_TX, no
+		// Sig params, no special handling — just splice the witness pushes
+		// in front of the standard unlock script and reinsert.
+		realUnlockingScript := groth16WAWitnessHex + c.BuildUnlockingScript(methodName, resolvedArgs)
+		signedTx = InsertUnlockingScript(signedTx, 0, realUnlockingScript)
 	}
 
 	// Compute sighash from preimage
@@ -824,6 +850,7 @@ func (c *RunarContract) PrepareCall(
 		newSatoshis:       newSatoshis,
 		hasMultiOutput:    hasMultiOutput,
 		contractOutputs:   contractOutputs,
+		groth16WAWitnessHex: groth16WAWitnessHex,
 		codeSepIdx:        codeSepIdx,
 	}, nil
 }
@@ -866,7 +893,15 @@ func (c *RunarContract) FinalizeCall(
 		if prepared.methodNeedsNewAmount {
 			newAmountHex = encodeArg(prepared.newAmount)
 		}
-		primaryUnlock = c.buildStatefulPrefix(prepared.OpPushTxSig, prepared.methodNeedsChange) +
+		// Mode 3: witness pushes go BEFORE the stateful prefix so the
+		// witness items end up at the deepest stack positions (q at the
+		// bottom). The verifier preamble in the locking script moves the
+		// named params to the alt stack, runs the verifier, drops the
+		// success marker, then restores the named params before the
+		// regular method body executes. See emitGroth16WAPreamble in
+		// compilers/go/codegen/stack.go.
+		primaryUnlock = prepared.groth16WAWitnessHex +
+			c.buildStatefulPrefix(prepared.OpPushTxSig, prepared.methodNeedsChange) +
 			argsHex +
 			changeHex +
 			newAmountHex +
@@ -876,10 +911,12 @@ func (c *RunarContract) FinalizeCall(
 		if prepared.preimageIndex >= 0 {
 			resolvedArgs[prepared.preimageIndex] = prepared.Preimage
 		}
-		primaryUnlock = c.buildStatefulPrefix(prepared.OpPushTxSig, false) +
+		primaryUnlock = prepared.groth16WAWitnessHex +
+			c.buildStatefulPrefix(prepared.OpPushTxSig, false) +
 			c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
 	} else {
-		primaryUnlock = c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
+		primaryUnlock = prepared.groth16WAWitnessHex +
+			c.BuildUnlockingScript(prepared.methodName, resolvedArgs)
 	}
 
 	finalTxHex := InsertUnlockingScript(prepared.TxHex, 0, primaryUnlock)

@@ -38,6 +38,7 @@ package integration
 //   (TestWOTS_ValidSpend) which uses raw transaction construction.
 
 import (
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -45,14 +46,25 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+var pqwArtifact *runar.RunarArtifact
+var pqwOnce sync.Once
+
+func getPQWArtifact(t *testing.T) *runar.RunarArtifact {
+	pqwOnce.Do(func() {
+		var err error
+		pqwArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile PostQuantumWallet: %v", err)
+		}
+	})
+	return pqwArtifact
+}
+
 func TestPostQuantumWallet_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getPQWArtifact(t)
 	if artifact.ContractName != "PostQuantumWallet" {
 		t.Fatalf("expected contract name PostQuantumWallet, got %s", artifact.ContractName)
 	}
@@ -63,13 +75,7 @@ func TestPostQuantumWallet_Compile(t *testing.T) {
 }
 
 func TestPostQuantumWallet_ScriptSize(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getPQWArtifact(t)
 	scriptBytes := len(artifact.Script) / 2
 	// Hybrid ECDSA+WOTS+ scripts should be approximately 10 KB
 	if scriptBytes < 5000 || scriptBytes > 50000 {
@@ -79,13 +85,7 @@ func TestPostQuantumWallet_ScriptSize(t *testing.T) {
 }
 
 func TestPostQuantumWallet_Deploy(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getPQWArtifact(t)
 
 	// Generate WOTS+ keypair from a deterministic seed
 	seed := make([]byte, 32)
@@ -104,12 +104,13 @@ func TestPostQuantumWallet_Deploy(t *testing.T) {
 	})
 
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -129,13 +130,7 @@ func TestPostQuantumWallet_Deploy(t *testing.T) {
 }
 
 func TestPostQuantumWallet_DeployDifferentSeed(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getPQWArtifact(t)
 
 	ecdsaWallet := helpers.NewWallet()
 
@@ -154,12 +149,13 @@ func TestPostQuantumWallet_DeployDifferentSeed(t *testing.T) {
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -186,13 +182,7 @@ func TestPostQuantumWallet_DeployDifferentSeed(t *testing.T) {
 // This two-pass signing pattern is fully tested in wots_test.go
 // (TestWOTS_ValidSpend) which uses raw transaction construction.
 func TestPostQuantumWallet_DeployAndVerifyUTXO(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getPQWArtifact(t)
 
 	seed := make([]byte, 32)
 	seed[0] = 0x42
@@ -209,12 +199,13 @@ func TestPostQuantumWallet_DeployAndVerifyUTXO(t *testing.T) {
 	})
 
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

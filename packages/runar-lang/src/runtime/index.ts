@@ -97,6 +97,11 @@ export {
   bbFieldSub,
   bbFieldMul,
   bbFieldInv,
+  // KoalaBear field arithmetic
+  kbFieldAdd,
+  kbFieldSub,
+  kbFieldMul,
+  kbFieldInv,
   // Merkle proof verification
   merkleRootSha256,
   merkleRootHash256,

@@ -87,9 +87,13 @@ func emitMerkleRoot(emit func(StackOp), depth int, hashOp string) {
 		// Compute direction bit: (index / 2^i) % 2
 		emit(StackOp{Op: "opcode", Code: "OP_DUP"})
 		// Stack: [current, sibling, index, index]
-		if i > 0 {
-			emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(int64(1 << i))}})
-			emit(StackOp{Op: "opcode", Code: "OP_DIV"})
+		// Extract bit i: (index >> i) & 1
+		// Chronicle opcodes: OP_2DIV (i=1), OP_RSHIFTNUM (i>1)
+		if i == 1 {
+			emit(StackOp{Op: "opcode", Code: "OP_2DIV"})
+		} else if i > 1 {
+			emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(int64(i))}})
+			emit(StackOp{Op: "opcode", Code: "OP_RSHIFTNUM"})
 		}
 		emit(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: big.NewInt(2)}})
 		emit(StackOp{Op: "opcode", Code: "OP_MOD"})

@@ -82,12 +82,15 @@ fn emit_merkle_root(emit: &mut dyn FnMut(StackOp), depth: usize, hash_op: &str) 
         emit(StackOp::Swap);
         // Stack: [current, sibling, index]
 
-        // Compute direction bit: (index / 2^i) % 2
+        // Compute direction bit: (index >> i) & 1
         emit(StackOp::Dup);
         // Stack: [current, sibling, index, index]
-        if i > 0 {
-            emit(StackOp::Push(PushValue::Int((1i128 << i) as i128)));
-            emit(StackOp::Opcode("OP_DIV".into()));
+        // Extract bit i: Chronicle opcodes: OP_2DIV (i=1), OP_RSHIFTNUM (i>1)
+        if i == 1 {
+            emit(StackOp::Opcode("OP_2DIV".into()));
+        } else if i > 1 {
+            emit(StackOp::Push(PushValue::Int(i as i128)));
+            emit(StackOp::Opcode("OP_RSHIFTNUM".into()));
         }
         emit(StackOp::Push(PushValue::Int(2)));
         emit(StackOp::Opcode("OP_MOD".into()));

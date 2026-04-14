@@ -30,7 +30,8 @@ func setupMathDemo(t *testing.T, initialResult int64) (*runar.RunarContract, run
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

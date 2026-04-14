@@ -4,6 +4,7 @@ package integration
 
 import (
 	"encoding/hex"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -13,16 +14,27 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+var cvArtifact *runar.RunarArtifact
+var cvOnce sync.Once
+
+func getCVArtifact(t *testing.T) *runar.RunarArtifact {
+	cvOnce.Do(func() {
+		var err error
+		cvArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/covenant-vault/CovenantVault.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile CovenantVault: %v", err)
+		}
+	})
+	return cvArtifact
+}
+
 func deployCovenantVault(t *testing.T, owner, recipient *helpers.Wallet, minAmount int64) *runar.RunarContract {
 	t.Helper()
 
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/covenant-vault/CovenantVault.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCVArtifact(t)
 	t.Logf("CovenantVault script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{
@@ -33,12 +45,13 @@ func deployCovenantVault(t *testing.T, owner, recipient *helpers.Wallet, minAmou
 
 	funder := helpers.NewWallet()
 	helpers.RPCCall("importaddress", funder.Address, "", false)
-	_, err = helpers.FundWallet(funder, 1.0)
+	_, err := helpers.FundWallet(funder, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(funder)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -53,13 +66,7 @@ func deployCovenantVault(t *testing.T, owner, recipient *helpers.Wallet, minAmou
 }
 
 func TestCovenantVault_Compile(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/covenant-vault/CovenantVault.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCVArtifact(t)
 	if artifact.ContractName != "CovenantVault" {
 		t.Fatalf("expected contract name CovenantVault, got %s", artifact.ContractName)
 	}
@@ -118,7 +125,8 @@ func TestCovenantVault_ValidSpend(t *testing.T) {
 
 	// spend(sig, txPreimage) via SDK terminal call — the covenant verifies
 	// the output hash matches a P2PKH to the registered recipient.
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(owner)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

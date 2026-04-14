@@ -82,6 +82,8 @@ pub const Opcode = enum(u8) {
     // Arithmetic
     op_1add = 0x8b,
     op_1sub = 0x8c,
+    op_2mul = 0x8d,
+    op_2div = 0x8e,
     op_negate = 0x8f,
     op_abs = 0x90,
     op_not = 0x91,
@@ -121,6 +123,13 @@ pub const Opcode = enum(u8) {
     op_checksigverify = 0xad,
     op_checkmultisig = 0xae,
     op_checkmultisigverify = 0xaf,
+
+    // Chronicle opcodes
+    op_substr = 0xb3,
+    op_left = 0xb4,
+    op_right = 0xb5,
+    op_lshiftnum = 0xb6,
+    op_rshiftnum = 0xb7,
 
     // Non-enum raw byte (for unknown opcodes in raw scripts)
     _,
@@ -210,6 +219,8 @@ const name_map = std.StaticStringMap(Opcode).initComptime(.{
     // Arithmetic
     .{ "OP_1ADD", .op_1add },
     .{ "OP_1SUB", .op_1sub },
+    .{ "OP_2MUL", .op_2mul },
+    .{ "OP_2DIV", .op_2div },
     .{ "OP_NEGATE", .op_negate },
     .{ "OP_ABS", .op_abs },
     .{ "OP_NOT", .op_not },
@@ -246,6 +257,12 @@ const name_map = std.StaticStringMap(Opcode).initComptime(.{
     .{ "OP_CHECKSIGVERIFY", .op_checksigverify },
     .{ "OP_CHECKMULTISIG", .op_checkmultisig },
     .{ "OP_CHECKMULTISIGVERIFY", .op_checkmultisigverify },
+    // Chronicle opcodes
+    .{ "OP_SUBSTR", .op_substr },
+    .{ "OP_LEFT", .op_left },
+    .{ "OP_RIGHT", .op_right },
+    .{ "OP_LSHIFTNUM", .op_lshiftnum },
+    .{ "OP_RSHIFTNUM", .op_rshiftnum },
 });
 
 /// Look up an opcode by its standard name (e.g. "OP_DUP"). O(1) via StaticStringMap.
@@ -320,6 +337,8 @@ pub fn toName(opcode: Opcode) []const u8 {
         .op_equalverify => "OP_EQUALVERIFY",
         .op_1add => "OP_1ADD",
         .op_1sub => "OP_1SUB",
+        .op_2mul => "OP_2MUL",
+        .op_2div => "OP_2DIV",
         .op_negate => "OP_NEGATE",
         .op_abs => "OP_ABS",
         .op_not => "OP_NOT",
@@ -353,6 +372,11 @@ pub fn toName(opcode: Opcode) []const u8 {
         .op_checksigverify => "OP_CHECKSIGVERIFY",
         .op_checkmultisig => "OP_CHECKMULTISIG",
         .op_checkmultisigverify => "OP_CHECKMULTISIGVERIFY",
+        .op_substr => "OP_SUBSTR",
+        .op_left => "OP_LEFT",
+        .op_right => "OP_RIGHT",
+        .op_lshiftnum => "OP_LSHIFTNUM",
+        .op_rshiftnum => "OP_RSHIFTNUM",
         _ => "OP_UNKNOWN",
     };
 }

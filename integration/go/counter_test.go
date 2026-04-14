@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -10,26 +11,38 @@ import (
 	runar "github.com/icellan/runar/packages/runar-go"
 )
 
+var counterArtifact *runar.RunarArtifact
+var counterOnce sync.Once
+
+func getCounterArtifact(t *testing.T) *runar.RunarArtifact {
+	counterOnce.Do(func() {
+		var err error
+		counterArtifact, err = helpers.CompileToSDKArtifact(
+			"examples/ts/stateful-counter/Counter.runar.ts",
+			map[string]interface{}{},
+		)
+		if err != nil {
+			t.Fatalf("compile Counter: %v", err)
+		}
+	})
+	return counterArtifact
+}
+
 func TestCounter_Increment(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/stateful-counter/Counter.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCounterArtifact(t)
 	t.Logf("Counter script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -49,24 +62,19 @@ func TestCounter_Increment(t *testing.T) {
 }
 
 func TestCounter_IncrementChain(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/stateful-counter/Counter.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCounterArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -95,24 +103,19 @@ func TestCounter_IncrementChain(t *testing.T) {
 }
 
 func TestCounter_IncrementThenDecrement(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/stateful-counter/Counter.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCounterArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -141,24 +144,19 @@ func TestCounter_IncrementThenDecrement(t *testing.T) {
 }
 
 func TestCounter_WrongStateHash_Rejected(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/stateful-counter/Counter.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCounterArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -180,24 +178,19 @@ func TestCounter_WrongStateHash_Rejected(t *testing.T) {
 }
 
 func TestCounter_DecrementFromZero_Rejected(t *testing.T) {
-	artifact, err := helpers.CompileToSDKArtifact(
-		"examples/ts/stateful-counter/Counter.runar.ts",
-		map[string]interface{}{},
-	)
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getCounterArtifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{int64(0)})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

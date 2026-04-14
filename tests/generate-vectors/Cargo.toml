@@ -15,9 +15,20 @@ path = "src/generate_merkle_vectors.rs"
 name = "generate_fri_vectors"
 path = "src/generate_fri_vectors.rs"
 
+[[bin]]
+name = "generate_koalabear_vectors"
+path = "src/generate_koalabear_vectors.rs"
+
+[[bin]]
+name = "generate_poseidon2_kb_vectors"
+path = "src/generate_poseidon2_kb_vectors.rs"
+
 [dependencies]
 p3-baby-bear = "0.5.2"
 p3-field = "0.5.2"
+p3-koala-bear = "0.5.2"
+p3-poseidon2 = "0.5.2"
+p3-symmetric = "0.5.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"

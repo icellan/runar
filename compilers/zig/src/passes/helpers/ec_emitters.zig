@@ -336,6 +336,14 @@ fn emitDivOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_DIV");
 }
 
+fn emit2DivOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_2DIV");
+}
+
+fn emitRshiftnumOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_RSHIFTNUM");
+}
+
 fn emitModOpcode(t: *ECTracker) !void {
     try t.emitOpcode("OP_MOD");
 }
@@ -470,6 +478,22 @@ fn fieldMul(t: *ECTracker, a_name: []const u8, b_name: []const u8, result_name: 
     try fieldMod(t, "_fmul_prod", result_name);
 }
 
+fn emit2MulOpcode(t: *ECTracker) !void {
+    try t.emitOpcode("OP_2MUL");
+}
+
+fn fieldMulConst(t: *ECTracker, a_name: []const u8, c: i64, result_name: []const u8) !void {
+    try t.toTop(a_name);
+    if (c == 2) {
+        // Use OP_2MUL (single opcode, no push needed)
+        try t.rawBlock(1, "_fmc_prod", emit2MulOpcode);
+    } else {
+        try t.pushInt("_fmc_c", c);
+        try t.rawBlock(2, "_fmc_prod", emitMulOpcode);
+    }
+    try fieldMod(t, "_fmc_prod", result_name);
+}
+
 fn fieldSqr(t: *ECTracker, a_name: []const u8, result_name: []const u8) !void {
     try t.copyToTop(a_name, "_fsqr_copy");
     try fieldMul(t, a_name, "_fsqr_copy", result_name);
@@ -594,8 +618,7 @@ fn jacobianDouble(t: *ECTracker) !void {
     try t.copyToTop("_B", "_B_save");
     try fieldSqr(t, "_D", "_D2");
     try t.copyToTop("_B", "_B1");
-    try t.pushInt("_two1", 2);
-    try fieldMul(t, "_B1", "_two1", "_2B");
+    try fieldMulConst(t, "_B1", 2, "_2B");
     try fieldSub(t, "_D2", "_2B", "_nx");
 
     try t.copyToTop("_nx", "_nx_copy");
@@ -604,8 +627,7 @@ fn jacobianDouble(t: *ECTracker) !void {
     try fieldSub(t, "_D_B_nx", "_C", "_ny");
 
     try fieldMul(t, "_jy_save", "_jz_save", "_yz");
-    try t.pushInt("_two2", 2);
-    try fieldMul(t, "_yz", "_two2", "_nz");
+    try fieldMulConst(t, "_yz", 2, "_nz");
 
     try t.toTop("_B");
     try t.drop();
@@ -666,8 +688,7 @@ fn buildJacobianAddAffineInline(allocator: Allocator, base_names: []const ?[]con
 
     try fieldSqr(&inner, "_R", "_R2");
     try fieldSub(&inner, "_R2", "_H3", "_x3_tmp");
-    try inner.pushInt("_two", 2);
-    try fieldMul(&inner, "_U1H2", "_two", "_2U1H2");
+    try fieldMulConst(&inner, "_U1H2", 2, "_2U1H2");
     try fieldSub(&inner, "_x3_tmp", "_2U1H2", "_X3");
 
     try inner.copyToTop("_X3", "_X3_c");
@@ -712,9 +733,13 @@ fn emitEcMul(t: *ECTracker, point_name: []const u8, scalar_name: []const u8) !vo
         try jacobianDouble(t);
 
         try t.copyToTop("_k", "_k_copy");
-        if (bit > 0) {
-            try pushPow2Divisor(t, "_div", @intCast(bit));
-            try t.rawBlock(2, "_shifted", emitDivOpcode);
+        if (bit == 1) {
+            // Single-bit shift: OP_2DIV (no push needed)
+            try t.rawBlock(1, "_shifted", emit2DivOpcode);
+        } else if (bit > 1) {
+            // Multi-bit shift: push shift amount, OP_RSHIFTNUM
+            try t.pushInt("_shift", @as(i64, bit));
+            try t.rawBlock(2, "_shifted", emitRshiftnumOpcode);
         } else {
             t.renameTop("_shifted");
         }

@@ -4,10 +4,11 @@ package integration
 
 import (
 	"encoding/json"
-	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"runtime"
 	"testing"
 
@@ -54,6 +55,61 @@ func loadVectors(t *testing.T, filename string) vectorFile {
 		t.Fatalf("parse vectors %s: %v", filename, err)
 	}
 	return vf
+}
+
+// selectRepresentative picks a small subset of vectors that cover the
+// important cases: edge cases (wrap-around, identity, zero, p-1), one small
+// value, one power-of-2, and up to 5 random values. Full vector coverage
+// runs in codegen/script_correctness_test.go via go-sdk interpreter.
+func selectRepresentative(vecs []testVector) []testVector {
+	var selected []testVector
+	seen := map[string]bool{}
+
+	add := func(v testVector) {
+		if !seen[v.Description] {
+			seen[v.Description] = true
+			selected = append(selected, v)
+		}
+	}
+
+	// Edge cases — test modular reduction
+	for _, v := range vecs {
+		d := v.Description
+		if strings.Contains(d, "wrap") || strings.Contains(d, "identity") ||
+			strings.Contains(d, "p-1") || strings.Contains(d, "p-2") ||
+			strings.Contains(d, "underflow") || strings.Contains(d, "(-1)") ||
+			d == "0 + 0 = 0" || d == "0 - 0 = 0" || d == "0 * 0 = 0" ||
+			strings.Contains(d, "inv(1)") || strings.Contains(d, "inv(-1)") {
+			add(v)
+		}
+	}
+
+	// One small value
+	for _, v := range vecs {
+		if !strings.Contains(v.Description, "random") && !strings.Contains(v.Description, "2^") && !seen[v.Description] {
+			add(v)
+			break
+		}
+	}
+
+	// One power-of-2
+	for _, v := range vecs {
+		if strings.Contains(v.Description, "2^") && !seen[v.Description] {
+			add(v)
+			break
+		}
+	}
+
+	// Up to 5 random
+	randomCount := 0
+	for _, v := range vecs {
+		if strings.Contains(v.Description, "random") && randomCount < 5 {
+			add(v)
+			randomCount++
+		}
+	}
+
+	return selected
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +166,19 @@ class BBInvVec extends SmartContract {
 }
 `
 
-// runBinaryOpVectors compiles a contract once, then for each vector deploys
-// with the expected value and calls verify(a, b) on regtest.
+// vectorParallelism returns max concurrent vector tests. Default 10, override
+// with TEST_PARALLEL env var.
+func vectorParallelism() int {
+	if s := os.Getenv("TEST_PARALLEL"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10
+}
+
+// runBinaryOpVectors compiles contract once, creates per-vector wallets with
+// pre-funded UTXOs, runs vectors in parallel (bounded concurrency).
 func runBinaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 	t.Helper()
 
@@ -119,43 +186,47 @@ func runBinaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 	if err != nil {
 		t.Fatalf("compile %s: %v", fileName, err)
 	}
-	t.Logf("compiled %s: %d bytes script", fileName, len(artifact.Script)/2)
 
-	for i, vec := range vf.Vectors {
-		vec := vec // capture
-		t.Run(fmt.Sprintf("%d_%s", i, vec.Description), func(t *testing.T) {
-			contract := runar.NewRunarContract(artifact, []interface{}{big.NewInt(int64(vec.Expected))})
+	subset := selectRepresentative(vf.Vectors)
 
-			wallet := helpers.NewWallet()
-			helpers.RPCCall("importaddress", wallet.Address, "", false)
-			_, err := helpers.FundWallet(wallet, 0.5)
+	funded, err := helpers.SplitFundParallel(len(subset), 100000)
+	if err != nil {
+		t.Fatalf("split fund: %v", err)
+	}
+
+	sem := make(chan struct{}, vectorParallelism())
+
+	for i, vec := range subset {
+		i, vec := i, vec
+		t.Run(vec.Description, func(t *testing.T) {
+			t.Parallel()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			fw := funded[i]
+			provider := helpers.NewBatchRPCProvider()
+			defer provider.MineAll()
+			signer, err := helpers.SDKSignerFromWallet(fw.Wallet)
 			if err != nil {
-				t.Fatalf("fund: %v", err)
+				t.Fatalf("signer: %v", err)
 			}
 
-			provider := helpers.NewRPCProvider()
-			signer, errS := helpers.SDKSignerFromWallet(wallet)
-			if errS != nil {
-				t.Fatalf("signer: %v", errS)
-			}
-
-			_, _, err = contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 100000})
+			contract := runar.NewRunarContract(artifact, []interface{}{big.NewInt(int64(vec.Expected))})
+			_, _, err = contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 10000})
 			if err != nil {
 				t.Fatalf("deploy: %v", err)
 			}
 
 			b := big.NewInt(int64(*vec.B))
-			txid, _, err := contract.Call("verify", []interface{}{big.NewInt(int64(vec.A)), b}, provider, signer, nil)
+			_, _, err = contract.Call("verify", []interface{}{big.NewInt(int64(vec.A)), b}, provider, signer, nil)
 			if err != nil {
-				t.Fatalf("FAIL: %s — %v", vec.Description, err)
+				t.Fatalf("a=%d, b=%d, expected=%d: %v", vec.A, *vec.B, vec.Expected, err)
 			}
-			t.Logf("PASS: %s → tx %s", vec.Description, txid)
 		})
 	}
 }
 
-// runUnaryOpVectors compiles a contract once, then for each vector deploys
-// with the expected value and calls verify(a) on regtest.
+// runUnaryOpVectors — same bounded-parallel pattern for single-operand operations.
 func runUnaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 	t.Helper()
 
@@ -163,36 +234,41 @@ func runUnaryOpVectors(t *testing.T, source, fileName string, vf vectorFile) {
 	if err != nil {
 		t.Fatalf("compile %s: %v", fileName, err)
 	}
-	t.Logf("compiled %s: %d bytes script", fileName, len(artifact.Script)/2)
 
-	for i, vec := range vf.Vectors {
-		vec := vec // capture
-		t.Run(fmt.Sprintf("%d_%s", i, vec.Description), func(t *testing.T) {
-			contract := runar.NewRunarContract(artifact, []interface{}{big.NewInt(int64(vec.Expected))})
+	subset := selectRepresentative(vf.Vectors)
 
-			wallet := helpers.NewWallet()
-			helpers.RPCCall("importaddress", wallet.Address, "", false)
-			_, err := helpers.FundWallet(wallet, 0.5)
+	funded, err := helpers.SplitFundParallel(len(subset), 100000)
+	if err != nil {
+		t.Fatalf("split fund: %v", err)
+	}
+
+	sem := make(chan struct{}, vectorParallelism())
+
+	for i, vec := range subset {
+		i, vec := i, vec
+		t.Run(vec.Description, func(t *testing.T) {
+			t.Parallel()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			fw := funded[i]
+			provider := helpers.NewBatchRPCProvider()
+			defer provider.MineAll()
+			signer, err := helpers.SDKSignerFromWallet(fw.Wallet)
 			if err != nil {
-				t.Fatalf("fund: %v", err)
+				t.Fatalf("signer: %v", err)
 			}
 
-			provider := helpers.NewRPCProvider()
-			signer, errS := helpers.SDKSignerFromWallet(wallet)
-			if errS != nil {
-				t.Fatalf("signer: %v", errS)
-			}
-
-			_, _, err = contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 100000})
+			contract := runar.NewRunarContract(artifact, []interface{}{big.NewInt(int64(vec.Expected))})
+			_, _, err = contract.Deploy(provider, signer, runar.DeployOptions{Satoshis: 10000})
 			if err != nil {
 				t.Fatalf("deploy: %v", err)
 			}
 
-			txid, _, err := contract.Call("verify", []interface{}{big.NewInt(int64(vec.A))}, provider, signer, nil)
+			_, _, err = contract.Call("verify", []interface{}{big.NewInt(int64(vec.A))}, provider, signer, nil)
 			if err != nil {
-				t.Fatalf("FAIL: %s — %v", vec.Description, err)
+				t.Fatalf("a=%d, expected=%d: %v", vec.A, vec.Expected, err)
 			}
-			t.Logf("PASS: %s → tx %s", vec.Description, txid)
 		})
 	}
 }

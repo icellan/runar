@@ -311,6 +311,11 @@ type loweringContext struct {
 	insideBranch       bool            // true when executing inside an if-branch; update_prop skips old-value removal
 	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
 	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
+
+	// Mode 3: when true, calls to assertGroth16WitnessAssisted in the
+	// method body are treated as no-ops by lowerCall. The actual verifier
+	// ops were already emitted as a method-entry preamble.
+	skipGroth16WAMarker bool
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -345,72 +350,117 @@ func (ctx *loweringContext) emitOp(op StackOp) {
 // Expects stack: [..., script, len]
 // Leaves stack:  [..., script, varint_bytes]
 //
-// OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need 2 bytes
-// (sign bit). To produce a correct 1-byte unsigned varint, we use
-// OP_NUM2BIN 2 then SPLIT to extract only the low byte.
-// Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+// Bitcoin varint format:
+//   len < 0xfd:        1 byte (len itself)
+//   len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+//   len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+//   otherwise:         0xff + 8 bytes LE                (9 bytes — never used in
+//                                                        practice for BSV scripts)
+//
+// We must support all four shapes; emitting a 3-byte varint for a script whose
+// length exceeds 0xffff produces a truncated value that no longer matches what
+// the BSV node uses for hashOutputs, breaking the state-continuation hash
+// equality assertion downstream. (This is the second of the two bugs fixed
+// alongside `parseVariableLengthStateFields`'s varint stripping — see
+// `integration/go/contracts/RollupBug.runar.go`.)
+//
+// OP_NUM2BIN uses sign-magnitude encoding where high-bit values need an extra
+// sign byte; we generate one extra byte and then SPLIT off the unsigned low
+// bytes to get the correct unsigned varint payload.
 func (ctx *loweringContext) emitVarintEncoding() {
 	// Stack: [..., script, len]
-	ctx.emitOp(StackOp{Op: "dup"}) // [script, len, len]
+
+	// emitNumToLowBytes: [..., len] -> [..., low_n_bytes]. Uses NUM2BIN(n+1)
+	// then SPLIT(n) DROP to drop the sign byte.
+	emitNumToLowBytes := func(nBytes int64) {
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(nBytes + 1)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(nBytes)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	}
+
+	// emitPrefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+	emitPrefix := func(prefixByte byte) {
+		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{prefixByte}}})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "swap"})
+		ctx.sm.swap()
+		ctx.sm.pop()
+		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
+		ctx.sm.push("")
+	}
+
+	// IF len < 253: 1-byte varint.
+	ctx.emitOp(StackOp{Op: "dup"})
 	ctx.sm.dup()
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)}) // [script, len, len, 253]
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"}) // [script, len, isSmall]
-	ctx.sm.pop()
-	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
 	ctx.sm.push("")
-
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
-	ctx.sm.pop() // pop condition
-
-	// Then: 1-byte varint (len < 253)
-	// Use NUM2BIN 2 to avoid sign-magnitude issue for values 128-252,
-	// then take only the first (low) byte via SPLIT.
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"}) // [script, len_2bytes]
 	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)}) // [script, len_2bytes, 1]
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [script, lowByte, highByte]
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("") // lowByte
-	ctx.sm.push("") // highByte
-	ctx.emitOp(StackOp{Op: "drop"}) // [script, lowByte]
-	ctx.sm.pop()
-
+	smAt1Byte := ctx.sm.clone()
+	emitNumToLowBytes(1)
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAt1Byte.clone()
 
-	// Else: 0xfd + 2-byte LE varint (len >= 253)
-	// Use NUM2BIN 4 to avoid sign-magnitude issue for values >= 32768,
-	// then take only the first 2 (low) bytes via SPLIT.
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(4)})
+	// ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.dup()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x10000)})
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUM2BIN"}) // [script, len_4bytes]
-	ctx.sm.pop()
-	ctx.sm.pop()
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
 	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)}) // [script, len_4bytes, 2]
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"}) // [script, low2bytes, high2bytes]
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.sm.push("") // low2bytes
-	ctx.sm.push("") // high2bytes
-	ctx.emitOp(StackOp{Op: "drop"}) // [script, low2bytes]
-	ctx.sm.pop()
-	ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0xfd}}})
-	ctx.sm.push("")
-	ctx.emitOp(StackOp{Op: "swap"})
-	ctx.sm.swap()
-	ctx.sm.pop()
-	ctx.sm.pop()
-	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
-	ctx.sm.push("")
+	smAt3Byte := ctx.sm.clone()
+	emitNumToLowBytes(2)
+	emitPrefix(0xfd)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAt3Byte.clone()
 
+	// ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+	ctx.emitOp(StackOp{Op: "dup"})
+	ctx.sm.dup()
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0x100000000)})
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
+	ctx.sm.pop(); ctx.sm.pop()
+	ctx.sm.push("")
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+	ctx.sm.pop()
+	smAt5Byte := ctx.sm.clone()
+	emitNumToLowBytes(4)
+	emitPrefix(0xfe)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+	ctx.sm = smAt5Byte.clone()
+
+	// ELSE: 0xff + 8-byte LE. (>= 4 GiB script — physically impossible under
+	// BSV block / TX size rules but kept for spec completeness. Removing
+	// this branch would either (a) silently truncate the varint if a caller
+	// ever passed a len > 4 GiB, or (b) regenerate the 9-byte case as an
+	// OP_RETURN abort, which would change the emitted byte sequence of the
+	// outer IF/ELSE nest and churn every conformance hex file for a
+	// theoretical saving of ~20 bytes per stateful contract. Leave as-is.)
+	emitNumToLowBytes(8)
+	emitPrefix(0xff)
+
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 	// --- Stack: [..., script, varint] ---
 }
@@ -956,6 +1006,20 @@ func (ctx *loweringContext) lowerUnaryOp(bindingName, op, operand string, bindin
 }
 
 func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Mode 3: assertGroth16WitnessAssisted is a marker that triggered the
+	// witness-assisted Groth16 verifier preamble at method entry. When we
+	// reach the call site in the body, we emit no opcodes AND we must NOT
+	// push a synthetic slot onto the stack model — a phantom slot would
+	// cause every subsequent bringToTop to compute depths that are one off
+	// (picking items at depth N when the runtime stack has them at depth
+	// N-1), producing body code that reads the wrong stack items. The
+	// marker is void-returning in the type-checker, so no later binding
+	// references its name and the missing slot is invisible to the rest
+	// of the lowering.
+	if funcName == "assertGroth16WitnessAssisted" && ctx.skipGroth16WAMarker {
+		return
+	}
+
 	// Special handling for assert
 	if funcName == "assert" {
 		if len(args) >= 1 {
@@ -1057,8 +1121,23 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if isKBFieldBuiltin(funcName) {
+		ctx.lowerKBFieldBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if isBN254Builtin(funcName) {
+		ctx.lowerBN254Builtin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if funcName == "merkleRootSha256" || funcName == "merkleRootHash256" {
 		ctx.lowerMerkleRoot(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "merkleRootPoseidon2KB" {
+		ctx.lowerMerkleRootPoseidon2KB(bindingName, args, bindingIndex, lastUses)
 		return
 	}
 
@@ -2084,7 +2163,19 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.sm.pop()
 	} else {
 		// Variable-length path: strip varint, use _codePart to find state
-		// Strip varint prefix from varint+scriptCode
+		// Strip varint prefix from varint+scriptCode.
+		//
+		// BIP-143 scriptCode is prefixed by a Bitcoin varint:
+		//   length < 0xfd:        1 byte (length itself)
+		//   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+		//   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+		//   otherwise:            0xff + 8 bytes LE                (9 bytes)
+		//
+		// We must support all four shapes, otherwise scripts whose scriptCode
+		// exceeds 65,535 bytes (e.g. embedded BN254 verifiers) silently
+		// strip too few varint bytes and corrupt the subsequent
+		// state-extraction OP_SPLITs (this is the bug fixed here — see
+		// `integration/go/contracts/RollupBug.runar.go`).
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
@@ -2094,46 +2185,95 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		ctx.sm.push("") // rest
 		ctx.emitOp(StackOp{Op: "swap"})
 		ctx.sm.swap()
-		ctx.emitOp(StackOp{Op: "dup"})
-		ctx.sm.push(ctx.sm.peekAtDepth(0))
-		// Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+		// Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+		// as negative script numbers.
 		ctx.emitOp(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0}}})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CAT"})
 		ctx.sm.pop(); ctx.sm.pop()
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		// Stack: [..., rest, fb_num]
+
+		// emitDropMoreVarintBytes drops `n` additional varint bytes from
+		// the top of stack `rest`. Stack in: [..., rest], stack out:
+		// [..., rest_minus_n].
+		emitDropMoreVarintBytes := func(n int64) {
+			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(n)})
+			ctx.sm.push("")
+			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+			ctx.sm.pop()
+			ctx.sm.pop()
+			ctx.sm.push("")
+			ctx.sm.push("")
+			ctx.emitOp(StackOp{Op: "nip"})
+			ctx.sm.pop()
+			ctx.sm.pop()
+			ctx.sm.push("")
+		}
+
+		// IF fb_num < 253: 1-byte varint, drop fb_num.
+		ctx.emitOp(StackOp{Op: "dup"})
+		ctx.sm.push(ctx.sm.peekAtDepth(0))
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(253)})
 		ctx.sm.push("")
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHAN"})
-		ctx.sm.pop()
-		ctx.sm.pop()
+		ctx.sm.pop(); ctx.sm.pop()
 		ctx.sm.push("")
-
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 		ctx.sm.pop()
-		smAtVarintIf := ctx.sm.clone()
-
+		smAt1ByteIf := ctx.sm.clone()
+		// THEN: 1-byte varint
 		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
-		ctx.sm = smAtVarintIf.clone()
-
+		ctx.sm = smAt1ByteIf.clone()
+		// ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+		ctx.emitOp(StackOp{Op: "dup"})
+		ctx.sm.push(ctx.sm.peekAtDepth(0))
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(254)})
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+		ctx.sm.pop(); ctx.sm.pop()
+		ctx.sm.push("")
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
+		ctx.sm.pop()
+		smAtFEIf := ctx.sm.clone()
+		// THEN: 5-byte varint (0xfe + 4 bytes LE).
 		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+		emitDropMoreVarintBytes(4)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+		ctx.sm = smAtFEIf.clone()
+		// ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+		// NOTE: 0xff is physically unreachable on BSV (it signifies a
+		// scriptCode > 4 GiB, which no transaction policy permits). We
+		// handle it explicitly here anyway so that any future change to
+		// max-script-size doesn't turn this code path into silent
+		// corruption. See the matching comment on the outgoing varint
+		// emission near "0xff + 8-byte LE" for the full rationale.
+		ctx.emitOp(StackOp{Op: "dup"})
+		ctx.sm.push(ctx.sm.peekAtDepth(0))
+		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(255)})
 		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_SPLIT"})
-		ctx.sm.pop()
-		ctx.sm.pop()
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_NUMEQUAL"})
+		ctx.sm.pop(); ctx.sm.pop()
 		ctx.sm.push("")
-		ctx.sm.push("")
-		ctx.emitOp(StackOp{Op: "nip"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_IF"})
 		ctx.sm.pop()
+		smAtFFIf := ctx.sm.clone()
+		// THEN: 9-byte varint (0xff + 8 bytes LE).
+		ctx.emitOp(StackOp{Op: "drop"})
 		ctx.sm.pop()
-		ctx.sm.push("")
-
+		emitDropMoreVarintBytes(8)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ELSE"})
+		ctx.sm = smAtFFIf.clone()
+		// ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+		emitDropMoreVarintBytes(2)
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
+		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 		ctx.emitOp(StackOp{Op: "opcode", Code: "OP_ENDIF"})
 
 		// Compute skip = SIZE(_codePart) - codeSepIdx
@@ -3469,15 +3609,38 @@ func (ctx *loweringContext) lowerLog2(bindingName string, args []string, binding
 // Public API
 // ---------------------------------------------------------------------------
 
+// LowerToStackOptions threads compiler options into the stack-lowering pass.
+// It is a deliberately small struct (rather than reusing the compiler-level
+// CompileOptions) so the codegen package stays free of an import cycle with
+// the compiler package.
+type LowerToStackOptions struct {
+	// Groth16WAConfig is a pre-loaded witness-assisted Groth16 verifier
+	// configuration (verifying key + threshold). When non-nil, any method
+	// containing a call to assertGroth16WitnessAssisted is emitted with
+	// EmitGroth16VerifierWitnessAssisted as a method-entry preamble using
+	// this config.
+	//
+	// The compiler-level layer is responsible for loading the SP1 vk.json
+	// file and building the Groth16Config (the codegen package cannot
+	// depend on bn254witness because of an import cycle: bn254witness
+	// already imports codegen for the NAF table).
+	Groth16WAConfig *Groth16Config
+}
+
 // LowerToStack converts an ANF program to a slice of StackMethods.
 // Private methods are inlined at call sites rather than compiled separately.
 // The constructor is skipped since it's not emitted to Bitcoin Script.
-func LowerToStack(program *ir.ANFProgram) (result []StackMethod, err error) {
+func LowerToStack(program *ir.ANFProgram, opts ...LowerToStackOptions) (result []StackMethod, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("stack lowering failed: %v", r)
 		}
 	}()
+
+	var o LowerToStackOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 
 	// Build map of private methods for inlining
 	privateMethods := make(map[string]*ir.ANFMethod)
@@ -3496,7 +3659,7 @@ func LowerToStack(program *ir.ANFProgram) (result []StackMethod, err error) {
 		if method.Name == "constructor" || (!method.IsPublic && method.Name != "constructor") {
 			continue
 		}
-		sm, err := lowerMethodWithPrivateMethods(method, program.Properties, privateMethods)
+		sm, err := lowerMethodWithPrivateMethodsAndOptions(method, program.Properties, privateMethods, o)
 		if err != nil {
 			return nil, err
 		}
@@ -3516,6 +3679,74 @@ func methodUsesCheckPreimage(bindings []ir.ANFBinding) bool {
 		}
 	}
 	return false
+}
+
+// methodUsesGroth16WAPreamble scans a method's bindings for the
+// assertGroth16WitnessAssisted marker call. If present, the method is
+// emitted with the witness-assisted Groth16 verifier as a method-entry
+// preamble. The marker may appear anywhere in the body (typically as the
+// first statement, but the codegen does not enforce this — the preamble
+// is always inserted at the very start of the method, before regular
+// arg binding).
+func methodUsesGroth16WAPreamble(bindings []ir.ANFBinding) bool {
+	for _, b := range bindings {
+		if b.Value.Kind == "call" && b.Value.Func == "assertGroth16WitnessAssisted" {
+			return true
+		}
+	}
+	return false
+}
+
+// emitGroth16WAPreamble emits the witness-assisted BN254 Groth16 verifier
+// ops as a method-entry preamble.
+//
+// Layout at preamble entry (bottom → top of main stack):
+//
+//	[witness_q, gradients, ..., proof_c, named_param_0, ..., named_param_N-1]
+//
+// where the witness items have been pushed FIRST by the unlocking script
+// and the named params (codePart, opPushTxSig, user args, txPreimage)
+// have been pushed AFTER. The verifier expects q at the deepest position
+// of an OTHERWISE-EMPTY main stack and reads it via OP_DEPTH OP_1SUB
+// OP_PICK throughout, so we must temporarily move the named params out of
+// the way before running it.
+//
+// Steps:
+//
+//  1. OP_TOALTSTACK × N — move N named params from main top to alt top
+//     (in reverse declaration order, so the bottommost named param ends
+//     up on the alt-stack top).
+//  2. EmitGroth16VerifierWitnessAssisted — runs the full verifier. Leaves
+//     only q on the main stack as a truthy nonzero residue.
+//  3. OP_DROP — discard the leftover q (it would clash with the named
+//     params we are about to restore).
+//  4. OP_FROMALTSTACK × N — restore the named params in REVERSE pop
+//     order, so the original main-stack layout is reproduced.
+//
+// Stack-model invariant: sm.depth() == N before AND after the preamble.
+// During the preamble the model and the runtime stack diverge wildly
+// (the verifier internally manipulates hundreds of intermediates), but
+// nothing inside the preamble consults sm so the divergence is safe.
+// At the end, runtime main depth == sm.depth() == N — agreement is
+// restored before normal lowerBindings runs.
+//
+// Source: codegen.EmitGroth16VerifierWitnessAssisted in bn254_groth16.go.
+func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config) {
+	namedDepth := ctx.sm.depth()
+
+	for i := 0; i < namedDepth; i++ {
+		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	}
+
+	EmitGroth16VerifierWitnessAssisted(func(op StackOp) {
+		ctx.ops = append(ctx.ops, op)
+	}, config)
+
+	ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_DROP"})
+
+	for i := 0; i < namedDepth; i++ {
+		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	}
 }
 
 // methodUsesCodePart checks whether a method has add_output, add_raw_output,
@@ -3544,6 +3775,10 @@ func methodUsesCodePart(bindings []ir.ANFBinding) bool {
 }
 
 func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod) (*StackMethod, error) {
+	return lowerMethodWithPrivateMethodsAndOptions(method, properties, privateMethods, LowerToStackOptions{})
+}
+
+func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []ir.ANFProperty, privateMethods map[string]*ir.ANFMethod, opts LowerToStackOptions) (*StackMethod, error) {
 	paramNames := make([]string, len(method.Params))
 	for i, p := range method.Params {
 		paramNames[i] = p.Name
@@ -3566,6 +3801,26 @@ func lowerMethodWithPrivateMethods(method *ir.ANFMethod, properties []ir.ANFProp
 
 	ctx := newLoweringContext(paramNames, properties)
 	ctx.privateMethods = privateMethods
+
+	// Mode 3: witness-assisted Groth16 verifier preamble. If the method
+	// body opens with a call to assertGroth16WitnessAssisted, emit the
+	// witness-assisted verifier ops as a preamble that consumes the
+	// prover-supplied witness items the SDK helper has pushed onto the
+	// top of the stack BEFORE the regular ABI args. After the preamble
+	// runs, the witness items are gone and the declared method params
+	// are at the top of stack — exactly the layout the rest of the
+	// lowering pipeline expects.
+	if methodUsesGroth16WAPreamble(method.Body) {
+		if opts.Groth16WAConfig == nil {
+			return nil, fmt.Errorf(
+				"method %q calls assertGroth16WitnessAssisted but no Groth16WAConfig was supplied to the codegen (set CompileOptions.Groth16WAVKey to a SP1 vk.json path)",
+				method.Name,
+			)
+		}
+		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig)
+		ctx.skipGroth16WAMarker = true
+	}
+
 	// Pass terminalAssert=true for public methods so the last assert leaves
 	// its value on the stack (Bitcoin Script requires a truthy top-of-stack).
 	ctx.lowerBindings(method.Body, method.IsPublic)
@@ -4072,6 +4327,131 @@ func (ctx *loweringContext) lowerBBFieldBuiltin(bindingName, funcName string, ar
 }
 
 // ---------------------------------------------------------------------------
+// KoalaBear field arithmetic builtin helpers
+// ---------------------------------------------------------------------------
+
+var kbFieldBuiltinNames = map[string]bool{
+	"kbFieldAdd": true, "kbFieldSub": true,
+	"kbFieldMul": true, "kbFieldInv": true,
+	"kbExt4Mul0": true, "kbExt4Mul1": true,
+	"kbExt4Mul2": true, "kbExt4Mul3": true,
+	"kbExt4Inv0": true, "kbExt4Inv1": true,
+	"kbExt4Inv2": true, "kbExt4Inv3": true,
+}
+
+func isKBFieldBuiltin(name string) bool {
+	return kbFieldBuiltinNames[name]
+}
+
+func (ctx *loweringContext) lowerKBFieldBuiltin(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Bring all args to stack top in order
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	for range args {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	switch funcName {
+	case "kbFieldAdd":
+		EmitKBFieldAdd(emitFn)
+	case "kbFieldSub":
+		EmitKBFieldSub(emitFn)
+	case "kbFieldMul":
+		EmitKBFieldMul(emitFn)
+	case "kbFieldInv":
+		EmitKBFieldInv(emitFn)
+	case "kbExt4Mul0":
+		EmitKBExt4Mul0(emitFn)
+	case "kbExt4Mul1":
+		EmitKBExt4Mul1(emitFn)
+	case "kbExt4Mul2":
+		EmitKBExt4Mul2(emitFn)
+	case "kbExt4Mul3":
+		EmitKBExt4Mul3(emitFn)
+	case "kbExt4Inv0":
+		EmitKBExt4Inv0(emitFn)
+	case "kbExt4Inv1":
+		EmitKBExt4Inv1(emitFn)
+	case "kbExt4Inv2":
+		EmitKBExt4Inv2(emitFn)
+	case "kbExt4Inv3":
+		EmitKBExt4Inv3(emitFn)
+	default:
+		panic(fmt.Sprintf("unknown KoalaBear builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// BN254 field arithmetic and G1 curve builtin helpers
+// ---------------------------------------------------------------------------
+
+var bn254BuiltinNames = map[string]bool{
+	"bn254FieldAdd": true, "bn254FieldSub": true,
+	"bn254FieldMul": true, "bn254FieldInv": true,
+	"bn254FieldNeg": true,
+	"bn254G1Add": true, "bn254G1ScalarMul": true,
+	"bn254G1Negate": true, "bn254G1OnCurve": true,
+	"bn254Pairing":        true,
+	"bn254MultiPairing4": true,
+	"bn254MultiPairing3": true,
+}
+
+func isBN254Builtin(name string) bool {
+	return bn254BuiltinNames[name]
+}
+
+func (ctx *loweringContext) lowerBN254Builtin(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	for range args {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	switch funcName {
+	case "bn254FieldAdd":
+		EmitBN254FieldAdd(emitFn)
+	case "bn254FieldSub":
+		EmitBN254FieldSub(emitFn)
+	case "bn254FieldMul":
+		EmitBN254FieldMul(emitFn)
+	case "bn254FieldInv":
+		EmitBN254FieldInv(emitFn)
+	case "bn254FieldNeg":
+		EmitBN254FieldNeg(emitFn)
+	case "bn254G1Add":
+		EmitBN254G1Add(emitFn)
+	case "bn254G1ScalarMul":
+		EmitBN254G1ScalarMul(emitFn)
+	case "bn254G1Negate":
+		EmitBN254G1Negate(emitFn)
+	case "bn254G1OnCurve":
+		EmitBN254G1OnCurve(emitFn)
+	case "bn254Pairing":
+		EmitBN254Pairing(emitFn)
+	case "bn254MultiPairing4":
+		EmitBN254MultiPairing4(emitFn)
+	case "bn254MultiPairing3":
+		EmitBN254MultiPairing3WithPrecomputed(emitFn)
+	default:
+		panic(fmt.Sprintf("unknown BN254 builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
 // Merkle proof verification builtin helpers
 // ---------------------------------------------------------------------------
 
@@ -4122,6 +4502,67 @@ func (ctx *loweringContext) lowerMerkleRoot(bindingName, funcName string, args [
 		EmitMerkleRootHash256(emitFn, depth)
 	}
 
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+func (ctx *loweringContext) lowerMerkleRootPoseidon2KB(bindingName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// args: [leaf_0..leaf_7, sib0_0..sib0_7, ..., sib(D-1)_0..sib(D-1)_7, index, depth]
+	// depth must be a compile-time constant (last argument)
+	nArgs := len(args)
+	if nArgs < 10 {
+		panic(fmt.Sprintf("merkleRootPoseidon2KB requires at least 10 arguments, got %d", nArgs))
+	}
+
+	// Extract depth constant from tracked constant values (last arg)
+	depthArg := args[nArgs-1]
+	depthVal, ok := ctx.constValues[depthArg]
+	if !ok || depthVal == nil {
+		panic(fmt.Sprintf(
+			"merkleRootPoseidon2KB: depth (last argument) must be a compile-time constant integer literal. Got a runtime value for '%s'.",
+			depthArg,
+		))
+	}
+	depth := int(depthVal.Int64())
+	if depth < 1 || depth > 64 {
+		panic(fmt.Sprintf("merkleRootPoseidon2KB: depth must be between 1 and 64, got %d", depth))
+	}
+
+	// Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
+	expectedArgs := 8 + depth*8 + 1 + 1
+	if nArgs != expectedArgs {
+		panic(fmt.Sprintf("merkleRootPoseidon2KB: expected %d arguments (8 leaf + %d*8 proof + index + depth), got %d",
+			expectedArgs, depth, nArgs))
+	}
+
+	// Remove depth from the real stack FIRST (compile-time constant, not runtime)
+	if ctx.sm.has(depthArg) {
+		ctx.bringToTop(depthArg, true)
+		ctx.emitOp(StackOp{Op: "drop"})
+		ctx.sm.pop()
+	}
+
+	// Bring all runtime args (leaf*8 + proof*depth*8 + index) to stack top in order
+	runtimeArgCount := nArgs - 1 // all except depth
+	for i := 0; i < runtimeArgCount; i++ {
+		arg := args[i]
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	// Pop all runtime args — the codegen consumes them and produces 8 results
+	for i := 0; i < runtimeArgCount; i++ {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+	EmitPoseidon2MerkleRoot(emitFn, depth)
+
+	// The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
+	// The type system returns a single bigint, so only root_7 (top) is accessible.
+	// Drop the lower 7 elements with OP_NIP to keep the stack clean.
+	for i := 0; i < 7; i++ {
+		ctx.emitOp(StackOp{Op: "nip"})
+	}
 	ctx.sm.push(bindingName)
 	ctx.trackDepth()
 }

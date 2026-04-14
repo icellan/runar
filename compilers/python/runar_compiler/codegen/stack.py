@@ -322,13 +322,59 @@ class _LoweringContext:
         Expects stack: [..., script, len]
         Leaves stack:  [..., script, varint_bytes]
 
-        OP_NUM2BIN uses sign-magnitude encoding where values 128-255 need
-        2 bytes (sign bit). To produce a correct 1-byte unsigned varint,
-        we use OP_NUM2BIN 2 then SPLIT to extract only the low byte.
-        Similarly for 2-byte unsigned varint, we use OP_NUM2BIN 4 then SPLIT.
+        Bitcoin varint format:
+          len < 0xfd:        1 byte (len itself)
+          len <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+          len <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+          otherwise:         0xff + 8 bytes LE                (9 bytes — never
+                                                               used in practice
+                                                               for BSV scripts)
+
+        We must support all four shapes; emitting a 3-byte varint for a script
+        whose length exceeds 0xffff produces a truncated value that no longer
+        matches what the BSV node uses for hashOutputs, breaking the
+        state-continuation hash equality assertion downstream. (This is the
+        second of the two bugs fixed alongside the variable-length state
+        varint stripping — see `integration/go/contracts/RollupBug.runar.go`.)
+
+        OP_NUM2BIN uses sign-magnitude encoding where high-bit values need an
+        extra sign byte; we generate one extra byte and then SPLIT off the
+        unsigned low bytes to get the correct unsigned varint payload.
         """
         # Stack: [..., script, len]
-        self.emit_op(StackOp(op="dup"))  # [script, len, len]
+
+        # emit_num_to_low_bytes: [..., len] -> [..., low_n_bytes]. Uses
+        # NUM2BIN(n+1) then SPLIT(n) DROP to drop the sign byte.
+        def emit_num_to_low_bytes(n_bytes: int) -> None:
+            self.emit_op(StackOp(op="push", value=big_int_push(n_bytes + 1)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+            self.sm.pop()
+            self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="push", value=big_int_push(n_bytes)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+            self.sm.pop()
+            self.sm.pop()
+            self.sm.push("")
+            self.sm.push("")
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # emit_prefix: [..., script, low_bytes] -> [..., script, prefix||low_bytes].
+        def emit_prefix(prefix_byte: int) -> None:
+            self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([prefix_byte]))))
+            self.sm.push("")
+            self.emit_op(StackOp(op="swap"))
+            self.sm.swap()
+            self.sm.pop()
+            self.sm.pop()
+            self.emit_op(StackOp(op="opcode", code="OP_CAT"))
+            self.sm.push("")
+
+        # IF len < 253: 1-byte varint.
+        self.emit_op(StackOp(op="dup"))
         self.sm.dup()
         self.emit_op(StackOp(op="push", value=big_int_push(253)))
         self.sm.push("")
@@ -336,54 +382,54 @@ class _LoweringContext:
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
-
         self.emit_op(StackOp(op="opcode", code="OP_IF"))
-        self.sm.pop()  # pop condition
-
-        # Then: 1-byte varint (len < 253)
-        self.emit_op(StackOp(op="push", value=big_int_push(2)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
         self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(1)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-        self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # lowByte
-        self.sm.push("")  # highByte
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-
+        sm_at_1_byte = self.sm.clone()
+        emit_num_to_low_bytes(1)
         self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_1_byte.clone()
 
-        # Else: 0xfd + 2-byte LE varint (len >= 253)
-        self.emit_op(StackOp(op="push", value=big_int_push(4)))
+        # ELSE-IF len <= 0xffff: 0xfd + 2-byte LE.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(0x10000)))
         self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_NUM2BIN"))
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
         self.sm.pop()
         self.sm.pop()
         self.sm.push("")
-        self.emit_op(StackOp(op="push", value=big_int_push(2)))
-        self.sm.push("")
-        self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
         self.sm.pop()
-        self.sm.pop()
-        self.sm.push("")  # low2bytes
-        self.sm.push("")  # high2bytes
-        self.emit_op(StackOp(op="drop"))
-        self.sm.pop()
-        self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0xFD]))))
-        self.sm.push("")
-        self.emit_op(StackOp(op="swap"))
-        self.sm.swap()
-        self.sm.pop()
-        self.sm.pop()
-        self.emit_op(StackOp(op="opcode", code="OP_CAT"))
-        self.sm.push("")
+        sm_at_3_byte = self.sm.clone()
+        emit_num_to_low_bytes(2)
+        emit_prefix(0xFD)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_3_byte.clone()
 
+        # ELSE-IF len <= 0xffffffff: 0xfe + 4-byte LE.
+        self.emit_op(StackOp(op="dup"))
+        self.sm.dup()
+        self.emit_op(StackOp(op="push", value=big_int_push(0x100000000)))
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
+        self.sm.pop()
+        self.sm.pop()
+        self.sm.push("")
+        self.emit_op(StackOp(op="opcode", code="OP_IF"))
+        self.sm.pop()
+        sm_at_5_byte = self.sm.clone()
+        emit_num_to_low_bytes(4)
+        emit_prefix(0xFE)
+        self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+        self.sm = sm_at_5_byte.clone()
+
+        # ELSE: 0xff + 8-byte LE. (>= 4 GiB script — practically unreachable
+        # on BSV but kept for spec completeness so we never silently truncate.)
+        emit_num_to_low_bytes(8)
+        emit_prefix(0xFF)
+
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+        self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
         # --- Stack: [..., script, varint] ---
 
@@ -954,6 +1000,18 @@ class _LoweringContext:
 
         if _is_bb_builtin(func_name):
             self._lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if _is_kb_builtin(func_name):
+            self._lower_kb_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if _is_bn254_builtin(func_name):
+            self._lower_bn254_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if func_name == "merkleRootPoseidon2KB":
+            self._lower_merkle_root_poseidon2_kb(binding_name, args, binding_index, last_uses)
             return
 
         if _is_merkle_builtin(func_name):
@@ -1850,48 +1908,105 @@ class _LoweringContext:
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
         else:
-            # Variable-length path: strip varint, use _codePart
+            # Variable-length path: strip varint, use _codePart to find state.
+            #
+            # BIP-143 scriptCode is prefixed by a Bitcoin varint:
+            #   length < 0xfd:        1 byte (length itself)
+            #   length <= 0xffff:     0xfd + 2 bytes LE                (3 bytes)
+            #   length <= 0xffffffff: 0xfe + 4 bytes LE                (5 bytes)
+            #   otherwise:            0xff + 8 bytes LE                (9 bytes)
+            #
+            # We must support all four shapes, otherwise scripts whose scriptCode
+            # exceeds 65,535 bytes (e.g. embedded BN254 verifiers) silently
+            # strip too few varint bytes and corrupt the subsequent
+            # state-extraction OP_SPLITs (this is the bug fixed here — see
+            # `integration/go/contracts/RollupBug.runar.go`).
             self.emit_op(StackOp(op="push", value=big_int_push(1)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
             self.sm.pop(); self.sm.pop()
-            self.sm.push(""); self.sm.push("")
+            self.sm.push("")  # firstByte
+            self.sm.push("")  # rest
             self.emit_op(StackOp(op="swap"))
             self.sm.swap()
-            self.emit_op(StackOp(op="dup"))
-            self.sm.push(self.sm.peek_at_depth(0))
-            # Zero-pad before BIN2NUM to prevent sign-bit misinterpretation (0xfd → -125 without pad)
+            # Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't read
+            # as negative script numbers.
             self.emit_op(StackOp(op="push", value=PushValue(kind="bytes", bytes_val=bytes([0]))))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_CAT"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
+            # Stack: [..., rest, fb_num]
+
+            # emit_drop_more_varint_bytes drops `n` additional varint bytes
+            # from the top-of-stack `rest`. [..., rest] -> [..., rest_minus_n].
+            def emit_drop_more_varint_bytes(n: int) -> None:
+                self.emit_op(StackOp(op="push", value=big_int_push(n)))
+                self.sm.push("")
+                self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
+                self.sm.pop(); self.sm.pop()
+                self.sm.push(""); self.sm.push("")
+                self.emit_op(StackOp(op="nip"))
+                self.sm.pop(); self.sm.pop()
+                self.sm.push("")
+
+            # IF fb_num < 253: 1-byte varint, drop fb_num.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
             self.emit_op(StackOp(op="push", value=big_int_push(253)))
             self.sm.push("")
             self.emit_op(StackOp(op="opcode", code="OP_LESSTHAN"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
-
             self.emit_op(StackOp(op="opcode", code="OP_IF"))
             self.sm.pop()
-            sm_at_varint_if = self.sm.clone()
+            sm_at_1_byte_if = self.sm.clone()
+            # THEN: 1-byte varint.
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-
             self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
-            self.sm = sm_at_varint_if.clone()
+            self.sm = sm_at_1_byte_if.clone()
+            # ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
+            self.emit_op(StackOp(op="push", value=big_int_push(254)))
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
+            self.sm.pop(); self.sm.pop()
+            self.sm.push("")
+            self.emit_op(StackOp(op="opcode", code="OP_IF"))
+            self.sm.pop()
+            sm_at_fe_if = self.sm.clone()
+            # THEN: 5-byte varint (0xfe + 4 bytes LE).
             self.emit_op(StackOp(op="drop"))
             self.sm.pop()
-            self.emit_op(StackOp(op="push", value=big_int_push(2)))
+            emit_drop_more_varint_bytes(4)
+            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+            self.sm = sm_at_fe_if.clone()
+            # ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+            self.emit_op(StackOp(op="dup"))
+            self.sm.dup()
+            self.emit_op(StackOp(op="push", value=big_int_push(255)))
             self.sm.push("")
-            self.emit_op(StackOp(op="opcode", code="OP_SPLIT"))
-            self.sm.pop(); self.sm.pop()
-            self.sm.push(""); self.sm.push("")
-            self.emit_op(StackOp(op="nip"))
+            self.emit_op(StackOp(op="opcode", code="OP_NUMEQUAL"))
             self.sm.pop(); self.sm.pop()
             self.sm.push("")
-
+            self.emit_op(StackOp(op="opcode", code="OP_IF"))
+            self.sm.pop()
+            sm_at_ff_if = self.sm.clone()
+            # THEN: 9-byte varint (0xff + 8 bytes LE).
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            emit_drop_more_varint_bytes(8)
+            self.emit_op(StackOp(op="opcode", code="OP_ELSE"))
+            self.sm = sm_at_ff_if.clone()
+            # ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+            emit_drop_more_varint_bytes(2)
+            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
+            self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
             self.emit_op(StackOp(op="opcode", code="OP_ENDIF"))
 
             # Compute skip = SIZE(_codePart) - codeSepIdx
@@ -3390,6 +3505,115 @@ class _LoweringContext:
         self._track_depth()
 
     # -----------------------------------------------------------------
+    # KoalaBear field arithmetic builtins
+    # -----------------------------------------------------------------
+
+    def _lower_kb_builtin(self, binding_name: str, func_name: str,
+                          args: list[str], binding_index: int,
+                          last_uses: dict[str, int]) -> None:
+        # Bring args to top in order
+        for arg in args:
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        for _ in args:
+            self.sm.pop()
+
+        # Delegate to the KoalaBear codegen module
+        from runar_compiler.codegen.koalabear import dispatch_kb_builtin
+        emit_fn = lambda op: self.emit_op(op)
+        dispatch_kb_builtin(func_name, emit_fn)
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # BN254 field and G1 builtins
+    # -----------------------------------------------------------------
+
+    def _lower_bn254_builtin(self, binding_name: str, func_name: str,
+                             args: list[str], binding_index: int,
+                             last_uses: dict[str, int]) -> None:
+        # Bring args to top in order
+        for arg in args:
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        for _ in args:
+            self.sm.pop()
+
+        # Delegate to the BN254 codegen module
+        from runar_compiler.codegen.bn254 import dispatch_bn254_builtin
+        emit_fn = lambda op: self.emit_op(op)
+        dispatch_bn254_builtin(func_name, emit_fn)
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
+    # Poseidon2 KoalaBear Merkle proof verification
+    # -----------------------------------------------------------------
+
+    def _lower_merkle_root_poseidon2_kb(self, binding_name: str, args: list[str],
+                                         binding_index: int,
+                                         last_uses: dict[str, int]) -> None:
+        # args: [leaf_0..leaf_7, sib0_0..sib0_7, ..., sib(D-1)_0..sib(D-1)_7, index, depth]
+        # depth must be a compile-time constant (last argument)
+        n_args = len(args)
+        if n_args < 10:
+            raise RuntimeError(
+                f"merkleRootPoseidon2KB requires at least 10 arguments, got {n_args}"
+            )
+
+        # Extract depth constant from tracked constant values (last arg)
+        depth_arg = args[n_args - 1]
+        depth_value = self.const_values.get(depth_arg)
+        if depth_value is None or not isinstance(depth_value, int):
+            raise RuntimeError(
+                f"merkleRootPoseidon2KB: depth (last argument) must be a compile-time "
+                f"constant integer literal. Got a runtime value for '{depth_arg}'."
+            )
+        depth = int(depth_value)
+        if depth < 1 or depth > 64:
+            raise RuntimeError(
+                f"merkleRootPoseidon2KB: depth must be between 1 and 64, got {depth}"
+            )
+
+        # Validate argument count: 8 leaf + depth*8 proof + 1 index + 1 depth
+        expected_args = 8 + depth * 8 + 1 + 1
+        if n_args != expected_args:
+            raise RuntimeError(
+                f"merkleRootPoseidon2KB: expected {expected_args} arguments "
+                f"(8 leaf + {depth}*8 proof + index + depth), got {n_args}"
+            )
+
+        # Remove depth from the real stack FIRST (compile-time constant, not runtime)
+        if self.sm.has(depth_arg):
+            self.bring_to_top(depth_arg, True)
+            self.emit_op(StackOp(op="drop"))
+            self.sm.pop()
+
+        # Bring all runtime args (leaf*8 + proof*depth*8 + index) to stack top in order
+        runtime_arg_count = n_args - 1  # all except depth
+        for i in range(runtime_arg_count):
+            arg = args[i]
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        # Pop all runtime args -- the codegen consumes them and produces 8 results
+        for _ in range(runtime_arg_count):
+            self.sm.pop()
+
+        from runar_compiler.codegen.poseidon2_merkle import emit_poseidon2_merkle_root
+        emit_fn = lambda op: self.emit_op(op)
+        emit_poseidon2_merkle_root(emit_fn, depth)
+
+        # The codegen leaves 8 elements on the stack (root_0..root_7, root_7 on top).
+        # The type system returns a single bigint, so only root_7 (top) is accessible.
+        # Drop the lower 7 elements with OP_NIP to keep the stack clean.
+        for _ in range(7):
+            self.emit_op(StackOp(op="nip"))
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
     # Merkle proof verification builtins
     # -----------------------------------------------------------------
 
@@ -3476,6 +3700,37 @@ _BB_BUILTIN_NAMES = frozenset({
 
 def _is_bb_builtin(name: str) -> bool:
     return name in _BB_BUILTIN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# KoalaBear builtin names
+# ---------------------------------------------------------------------------
+
+_KB_BUILTIN_NAMES = frozenset({
+    "kbFieldAdd", "kbFieldSub", "kbFieldMul", "kbFieldInv",
+    "kbExt4Mul0", "kbExt4Mul1", "kbExt4Mul2", "kbExt4Mul3",
+    "kbExt4Inv0", "kbExt4Inv1", "kbExt4Inv2", "kbExt4Inv3",
+})
+
+
+def _is_kb_builtin(name: str) -> bool:
+    return name in _KB_BUILTIN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# BN254 builtin names
+# ---------------------------------------------------------------------------
+
+_BN254_BUILTIN_NAMES = frozenset({
+    "bn254FieldAdd", "bn254FieldSub", "bn254FieldMul",
+    "bn254FieldInv", "bn254FieldNeg",
+    "bn254G1Add", "bn254G1ScalarMul",
+    "bn254G1Negate", "bn254G1OnCurve",
+})
+
+
+def _is_bn254_builtin(name: str) -> bool:
+    return name in _BN254_BUILTIN_NAMES
 
 
 # ---------------------------------------------------------------------------

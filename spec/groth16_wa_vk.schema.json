@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://runar.dev/schemas/groth16_wa_vk.schema.json",
+  "title": "Rúnar Groth16 Witness-Assisted Verifying Key",
+  "description": "Input schema for the `runarc groth16-wa` compiler backend. Describes a BN254 Groth16 verifying key in the Rúnar / SP1 convention: β, γ, δ stored PRE-NEGATED on the G2 side, and every Fp2 pair stored as (x0=real, x1=imag). All big-integer values are decimal strings. The alphaG1 field stores POSITIVE α; the compiler computes MillerLoop(α, -β) internally and bakes it into the script.",
+  "type": "object",
+  "required": [
+    "version",
+    "curve",
+    "numPubInputs",
+    "alphaG1",
+    "betaNegG2",
+    "gammaNegG2",
+    "deltaNegG2",
+    "ic"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Source-identifying version tag, e.g. 'sp1-v6.0.0'. Preserved in the output artifact for downstream tooling; not parsed by the compiler."
+    },
+    "curve": {
+      "type": "string",
+      "enum": ["bn254"],
+      "description": "Elliptic curve identifier. Only 'bn254' is supported."
+    },
+    "numPubInputs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Number of public inputs. Must equal len(ic) - 1."
+    },
+    "convention": {
+      "type": "string",
+      "description": "Free-form documentation field describing the G2 sign/order convention. Ignored by the compiler."
+    },
+    "source": {
+      "type": "string",
+      "description": "Optional free-form pointer to the upstream VK source (e.g. SP1 Solidity verifier file). Ignored by the compiler."
+    },
+    "alphaG1": {
+      "$ref": "#/$defs/G1Point",
+      "description": "The α point of the verifying key, on G1. Stored POSITIVE: the compiler computes MillerLoop(α, -β) internally."
+    },
+    "betaNegG2": {
+      "$ref": "#/$defs/G2Point",
+      "description": "The G2 point -β, pre-negated. Used by the compiler to compute MillerLoop(α, -β)."
+    },
+    "gammaNegG2": {
+      "$ref": "#/$defs/G2Point",
+      "description": "The G2 point -γ, pre-negated. Baked into the script as the second pairing's G2."
+    },
+    "deltaNegG2": {
+      "$ref": "#/$defs/G2Point",
+      "description": "The G2 point -δ, pre-negated. Baked into the script as the third pairing's G2."
+    },
+    "ic": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/G1Point"
+      },
+      "description": "Public-input commitment basis. Length MUST equal numPubInputs + 1: ic[0] is the constant term, ic[j+1] is multiplied by public input j. The compiler does NOT bake IC into the script; IC is used only by the off-chain witness generator to compute prepared_inputs via multi-scalar multiplication. Any hardcoding of IC would defeat the witness-assisted design."
+    }
+  },
+  "$defs": {
+    "DecimalBigInt": {
+      "type": "string",
+      "pattern": "^[0-9]+$",
+      "description": "Non-negative big integer encoded as a base-10 string."
+    },
+    "G1Point": {
+      "type": "object",
+      "required": ["x", "y"],
+      "additionalProperties": true,
+      "properties": {
+        "x": {"$ref": "#/$defs/DecimalBigInt"},
+        "y": {"$ref": "#/$defs/DecimalBigInt"},
+        "_comment": {
+          "type": "string",
+          "description": "Optional human-readable comment, ignored by the compiler."
+        }
+      }
+    },
+    "G2Point": {
+      "type": "object",
+      "required": ["x0", "x1", "y0", "y1"],
+      "additionalProperties": true,
+      "properties": {
+        "x0": {
+          "$ref": "#/$defs/DecimalBigInt",
+          "description": "Real part of x coordinate (x = x0 + x1*u in Fp2)."
+        },
+        "x1": {
+          "$ref": "#/$defs/DecimalBigInt",
+          "description": "Imaginary part of x coordinate."
+        },
+        "y0": {
+          "$ref": "#/$defs/DecimalBigInt",
+          "description": "Real part of y coordinate (y = y0 + y1*u in Fp2)."
+        },
+        "y1": {
+          "$ref": "#/$defs/DecimalBigInt",
+          "description": "Imaginary part of y coordinate."
+        }
+      }
+    }
+  }
+}

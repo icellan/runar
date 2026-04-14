@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"math/big"
+	"sync"
 	"testing"
 
 	"runar-integration/helpers"
@@ -88,26 +89,38 @@ class MerkleSha256Test extends SmartContract {
 // Test: merkleRootSha256 — verify leaf at index 0 (leftmost)
 // ---------------------------------------------------------------------------
 
+var merkleSha256Artifact *runar.RunarArtifact
+var merkleSha256Once sync.Once
+
+func getMerkleSha256Artifact(t *testing.T) *runar.RunarArtifact {
+	merkleSha256Once.Do(func() {
+		var err error
+		merkleSha256Artifact, err = helpers.CompileSourceStringToSDKArtifact(merkleSha256Source, "MerkleSha256Test.runar.ts", map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("compile MerkleSha256Test: %v", err)
+		}
+	})
+	return merkleSha256Artifact
+}
+
 func TestMerkle_Sha256_LeafIndex0(t *testing.T) {
 	tree := buildTestTree()
 	proof, leaf := tree.getProof(0)
 
-	artifact, err := helpers.CompileSourceStringToSDKArtifact(merkleSha256Source, "MerkleSha256Test.runar.ts", map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getMerkleSha256Artifact(t)
 	t.Logf("script: %d bytes", len(artifact.Script)/2)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{tree.root})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -133,21 +146,19 @@ func TestMerkle_Sha256_LeafIndex7(t *testing.T) {
 	tree := buildTestTree()
 	proof, leaf := tree.getProof(7)
 
-	artifact, err := helpers.CompileSourceStringToSDKArtifact(merkleSha256Source, "MerkleSha256Test.runar.ts", map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getMerkleSha256Artifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{tree.root})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)
@@ -174,21 +185,19 @@ func TestMerkle_Sha256_WrongLeaf_Rejected(t *testing.T) {
 	proof, _ := tree.getProof(0)
 	wrongLeaf := sha256Hex("ff")
 
-	artifact, err := helpers.CompileSourceStringToSDKArtifact(merkleSha256Source, "MerkleSha256Test.runar.ts", map[string]interface{}{})
-	if err != nil {
-		t.Fatalf("compile: %v", err)
-	}
+	artifact := getMerkleSha256Artifact(t)
 
 	contract := runar.NewRunarContract(artifact, []interface{}{tree.root})
 
 	wallet := helpers.NewWallet()
 	helpers.RPCCall("importaddress", wallet.Address, "", false)
-	_, err = helpers.FundWallet(wallet, 1.0)
+	_, err := helpers.FundWallet(wallet, 1.0)
 	if err != nil {
 		t.Fatalf("fund: %v", err)
 	}
 
-	provider := helpers.NewRPCProvider()
+	provider := helpers.NewBatchRPCProvider()
+	defer provider.MineAll()
 	signer, err := helpers.SDKSignerFromWallet(wallet)
 	if err != nil {
 		t.Fatalf("signer: %v", err)

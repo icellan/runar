@@ -21,4 +21,9 @@ test {
     _ = @import("passes/ec_optimizer.zig");
     _ = @import("tests/e2e.zig");
     _ = @import("compiler_api.zig");
+    _ = @import("passes/helpers/koalabear_emitters.zig");
+    _ = @import("passes/helpers/poseidon2_koalabear.zig");
+    _ = @import("passes/helpers/fiat_shamir_kb.zig");
+    _ = @import("passes/helpers/poseidon2_merkle.zig");
+    _ = @import("passes/helpers/bn254_emitters.zig");
 }

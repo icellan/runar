@@ -13,6 +13,11 @@ export function createProvider(): RPCProvider {
   return new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: true, network: 'testnet' });
 }
 
+/** Create a provider that does NOT mine after each broadcast. Call mine(1) manually. */
+export function createBatchProvider(): RPCProvider {
+  return new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: false, network: 'testnet' });
+}
+
 export async function rpcCall(method: string, ...params: unknown[]): Promise<unknown> {
   const body = JSON.stringify({
     jsonrpc: '1.0',

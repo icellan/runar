@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/icellan/runar/compilers/go/codegen"
+	"github.com/icellan/runar/compilers/go/compiler"
 	"github.com/icellan/runar/compilers/go/frontend"
 	"github.com/icellan/runar/compilers/go/ir"
 	runar "github.com/icellan/runar/packages/runar-go"
@@ -135,6 +136,28 @@ func CompileToSDKArtifactAbs(absPath string) (*runar.RunarArtifact, error) {
 	return compileToSDKArtifact(absPath)
 }
 
+// CompileToSDKArtifactWithGroth16WAVKey compiles a Mode 3 stateful contract
+// (one whose method body calls runar.AssertGroth16WitnessAssisted) by
+// supplying the SP1-format Groth16 verifying key path that the codegen will
+// load and bake into the witness-assisted verifier preamble. The resulting
+// artifact is otherwise a standard SDK artifact and can be deployed and
+// called via RunarContract just like any other.
+//
+// vkAbsPath must be an absolute path to a vk.json file matching the schema
+// in tests/vectors/sp1/v6.0.0/README.md.
+func CompileToSDKArtifactWithGroth16WAVKey(sourcePath string, vkAbsPath string) (*runar.RunarArtifact, error) {
+	absPath := filepath.Join(projectRoot(), sourcePath)
+	return compileToSDKArtifactWithOptions(absPath, vkAbsPath)
+}
+
+// CompileToSDKArtifactAbsWithGroth16WAVKey is the absolute-path variant of
+// CompileToSDKArtifactWithGroth16WAVKey. Use this when the contract source
+// lives outside the Rúnar project tree (e.g. bsv-evm's
+// pkg/covenant/contracts/rollup_groth16_wa.runar.go).
+func CompileToSDKArtifactAbsWithGroth16WAVKey(absSourcePath string, vkAbsPath string) (*runar.RunarArtifact, error) {
+	return compileToSDKArtifactWithOptions(absSourcePath, vkAbsPath)
+}
+
 // CompileToSDKArtifact compiles a source file relative to the Rúnar project
 // root and returns a runar.RunarArtifact suitable for use with RunarContract.
 func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interface{}) (*runar.RunarArtifact, error) {
@@ -143,6 +166,14 @@ func CompileToSDKArtifact(sourcePath string, constructorArgs map[string]interfac
 }
 
 func compileToSDKArtifact(absPath string) (*runar.RunarArtifact, error) {
+	return compileToSDKArtifactWithOptions(absPath, "")
+}
+
+// compileToSDKArtifactWithOptions is the worker behind both compileToSDKArtifact
+// and CompileToSDKArtifactWithGroth16WAVKey. When groth16WAVKey is non-empty,
+// the codegen pass is given a LowerToStackOptions with the loaded VK so the
+// witness-assisted Groth16 verifier preamble emitter has access to it.
+func compileToSDKArtifactWithOptions(absPath, groth16WAVKey string) (*runar.RunarArtifact, error) {
 	source, err := os.ReadFile(absPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading source: %w", err)
@@ -174,7 +205,21 @@ func compileToSDKArtifact(absPath string) (*runar.RunarArtifact, error) {
 	// actual values at deployment time. Setting InitialValue would bake values
 	// into the script AND the SDK would append them again (CLEANSTACK bug).
 
-	stackMethods, err := codegen.LowerToStack(program)
+	var lowerOpts codegen.LowerToStackOptions
+	if groth16WAVKey != "" {
+		// Mode 3 path: load the SP1 vk.json into a Groth16Config so the
+		// codegen preamble emitter can bake the verifying key into the
+		// inlined witness-assisted verifier ops. The compiler package
+		// owns this loader (it can import bn254witness; the codegen
+		// package cannot, due to an import cycle).
+		cfg, cfgErr := compiler.LoadGroth16WAConfigForTests(groth16WAVKey)
+		if cfgErr != nil {
+			return nil, fmt.Errorf("loading groth16 vk %q: %w", groth16WAVKey, cfgErr)
+		}
+		lowerOpts.Groth16WAConfig = &cfg
+	}
+
+	stackMethods, err := codegen.LowerToStack(program, lowerOpts)
 	if err != nil {
 		return nil, fmt.Errorf("stack lowering: %w", err)
 	}
