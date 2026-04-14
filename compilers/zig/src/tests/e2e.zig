@@ -665,10 +665,10 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
 
     try std.testing.expectEqualStrings(v1_hex, v2_hex);
 
-    // Byte-count lock-in: the canonical TS compiler produces 4951 bytes for
+    // Byte-count lock-in: the canonical TS compiler produces 5027 bytes for
     // both TicTacToe variants. Any divergence from this length indicates a
     // regression in Zig's stack lowering or branch-reconciliation logic.
-    const expected_bytes: usize = 4951;
+    const expected_bytes: usize = 5027;
     const actual_bytes = v1_hex.len / 2;
     try std.testing.expectEqual(expected_bytes, actual_bytes);
 

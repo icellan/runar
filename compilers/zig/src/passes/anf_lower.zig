@@ -1576,7 +1576,6 @@ fn remapValueRefs(
             return .{ .add_raw_output = .{
                 .satoshis = r(name_map, aro.satoshis),
                 .script_bytes = if (aro.script_bytes.len > 0) r(name_map, aro.script_bytes) else aro.script_bytes,
-                .script_ref = if (aro.script_ref.len > 0) r(name_map, aro.script_ref) else aro.script_ref,
             } };
         },
         .@"if" => |ifv| {

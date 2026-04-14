@@ -11,7 +11,7 @@ const runar = @import("runar");
 // This file is the Zig DSL mirror of `examples/ts/tic-tac-toe/TicTacToe.v2.runar.ts`
 // — every payout uses the same inline `cat(cat(num2bin(amt, 8), pfx), cat(h, sfx))`
 // form as the canonical TS source, so the compiled script must be a byte-for-byte
-// match for the canonical 4951-byte output.
+// match for the canonical 5027-byte output.
 pub const TicTacToe = struct {
     pub const Contract = runar.StatefulSmartContract;
 
