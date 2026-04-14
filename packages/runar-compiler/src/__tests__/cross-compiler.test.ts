@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execSync } from 'child_process';
-import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSync } from 'fs';
+import { writeFileSync, mkdtempSync, rmSync, readdirSync, readFileSync, existsSync, statSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
@@ -23,6 +23,78 @@ try {
 }
 
 // ---------------------------------------------------------------------------
+// Staleness check helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Walk a directory tree (recursively) and return the most recent mtime in ms
+ * across every regular file whose name matches one of `includeExts` (matched
+ * as suffixes) or one of `includeNames` (matched exactly). Returns 0 if the
+ * root does not exist or is unreadable so callers treat that as "no source
+ * newer than the binary," never triggering a spurious rebuild.
+ *
+ * Implementation uses `readdirSync({withFileTypes: true})` so the total cost
+ * is one stat per matching file plus one readdir per directory.
+ */
+function newestMtimeMs(root: string, includeExts: string[], includeNames: string[]): number {
+  if (!existsSync(root)) return 0;
+  let max = 0;
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        // Skip target/ to avoid walking gigabytes of build artifacts.
+        if (entry.name === 'target' || entry.name === 'node_modules') continue;
+        stack.push(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const matched =
+        includeNames.includes(entry.name) ||
+        includeExts.some((ext) => entry.name.endsWith(ext));
+      if (!matched) continue;
+      try {
+        const m = statSync(full).mtimeMs;
+        if (m > max) max = m;
+      } catch {
+        // ignore unreadable files
+      }
+    }
+  }
+  return max;
+}
+
+/**
+ * Returns true if `binaryPath` does not exist OR if any source file under
+ * `sourceRoot` matching `includeExts`/`includeNames` is newer than the
+ * binary's mtime.
+ */
+function isBinaryStale(
+  binaryPath: string,
+  sourceRoot: string,
+  includeExts: string[],
+  includeNames: string[] = [],
+): boolean {
+  if (!existsSync(binaryPath)) return true;
+  let binMtime = 0;
+  try {
+    binMtime = statSync(binaryPath).mtimeMs;
+  } catch {
+    return true;
+  }
+  const newestSrc = newestMtimeMs(sourceRoot, includeExts, includeNames);
+  return newestSrc > binMtime;
+}
+
+// ---------------------------------------------------------------------------
 // Check if Rust (cargo) is available and the compiler is built
 // ---------------------------------------------------------------------------
 
@@ -37,15 +109,26 @@ try {
 }
 
 if (hasRust) {
-  const candidatePath = join(__dirname, '..', '..', '..', '..', 'compilers', 'rust', 'target', 'release', 'runar-compiler-rust');
-  if (existsSync(candidatePath)) {
+  const rustCompilerDir = join(__dirname, '..', '..', '..', '..', 'compilers', 'rust');
+  const candidatePath = join(rustCompilerDir, 'target', 'release', 'runar-compiler-rust');
+  // Rebuild the release binary when it is missing, or when any Rust source
+  // file or Cargo manifest is newer than the existing binary. The previous
+  // logic skipped the build whenever any binary existed, which caused 33
+  // false test failures during the feat/fixed-arrays merge when a stale
+  // release binary was reused after upstream Rust source updates.
+  const stale = isBinaryStale(
+    candidatePath,
+    rustCompilerDir,
+    ['.rs'],
+    ['Cargo.toml', 'Cargo.lock'],
+  );
+  if (!stale) {
     rustBinaryPath = candidatePath;
   } else {
-    // Try building the release binary
     try {
       execSync('cargo build --release', {
-        cwd: join(__dirname, '..', '..', '..', '..', 'compilers', 'rust'),
-        timeout: 120000,
+        cwd: rustCompilerDir,
+        timeout: 600000,
         stdio: 'pipe',
       });
       if (existsSync(candidatePath)) {
