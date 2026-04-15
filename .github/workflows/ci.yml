@@ -408,7 +408,8 @@ jobs:
             'usecashaddr=0' 'txindex=1' 'excessiveblocksize=1000000000' \
             'maxstackmemoryusageconsensus=100000000' 'maxscriptsizepolicy=0' \
             'maxscriptnumlengthpolicy=0' 'maxstackmemoryusagepolicy=100000000' \
-            'maxtxsizepolicy=0' 'genesisactivationheight=1' 'minminingtxfee=0.00000001' \
+            'maxtxsizepolicy=0' 'genesisactivationheight=1' 'chronicleactivationheight=1' \
+            'minminingtxfee=0.00000001' \
             > integration/regtest-data/n1/bitcoin.conf
 
       - name: Start BSV regtest node
