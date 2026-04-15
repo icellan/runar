@@ -205,14 +205,21 @@ fn compileFromIR(allocator: std.mem.Allocator, path: []const u8, opts: CompileOp
         .constructor_params = stack_program.constructor_params,
     };
 
+    // --hex: output the dispatch-table locking script (same bytes that
+    // appear in the artifact's "script" field), matching compileFromSource
+    // and the Go/Rust/Python/Ruby compilers. Per-method hex is not a valid
+    // locking script on its own for multi-method contracts.
     if (opts.hex_only) {
+        const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
+        defer allocator.free(artifact);
+        const marker = "\"script\":\"";
+        const idx = std.mem.indexOf(u8, artifact, marker) orelse return error.MissingHex;
+        const after = idx + marker.len;
+        const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
+        const hex = artifact[after..end];
         const stdout = std.fs.File.stdout();
-        for (optimized_stack_program.methods) |method| {
-            const hex = try emit.emitMethodScript(allocator, method.instructions);
-            defer allocator.free(hex);
-            try stdout.writeAll(hex);
-            try stdout.writeAll("\n");
-        }
+        try stdout.writeAll(hex);
+        try stdout.writeAll("\n");
         return;
     }
 
