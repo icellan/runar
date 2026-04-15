@@ -306,13 +306,14 @@ class TestZigParserStateful:
         assert count_prop.name == "count"
         assert count_prop.readonly is False
 
-    def test_stateful_counter_has_initializer(self):
+    def test_stateful_counter_strips_initializer_for_ctor_param(self):
+        # `count: i64 = 0` collides with `pub fn init(count: i64)`: the ctor
+        # param always overrides the default so the parser strips the
+        # initializer to match the Zig compiler reference IR.
         result = parse_source(ZIG_COUNTER_SOURCE, "Counter.runar.zig")
         assert result.contract is not None
         count_prop = result.contract.properties[0]
-        assert count_prop.initializer is not None
-        assert isinstance(count_prop.initializer, BigIntLiteral)
-        assert count_prop.initializer.value == 0
+        assert count_prop.initializer is None
 
     def test_stateful_no_arg_method(self):
         result = parse_source(ZIG_COUNTER_SOURCE, "Counter.runar.zig")

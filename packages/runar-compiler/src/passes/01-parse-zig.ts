@@ -399,8 +399,12 @@ class ZigParser extends ParserCore<ZigToken> {
     // constructor params: the constructor argument overrides any default,
     // and the Zig compiler reference implementation omits `initialValue`
     // in this case so every compiler must do the same to keep IR identical.
-    const ctorParamNames = new Set(
-      this.constructorNode?.params.map(p => p.name) ?? [],
+    // Cast is needed: TS 5.9 flow analysis keeps `this.constructorNode`
+    // narrowed to `null` from the reset on line 361 and collapses the
+    // optional-chain's non-null branch to `never`.
+    const ctor = this.constructorNode as MethodNode | null;
+    const ctorParamNames = new Set<string>(
+      ctor ? ctor.params.map((p) => p.name) : [],
     );
     this.properties = this.properties.map((property) => ({
       ...property,

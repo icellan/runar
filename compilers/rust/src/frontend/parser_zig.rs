@@ -2247,9 +2247,13 @@ pub const Counter = struct {
         assert_eq!(contract.parent_class, "StatefulSmartContract");
         assert_eq!(contract.properties.len(), 1);
         assert_eq!(contract.properties[0].name, "count");
-        // count has initializer = 0 and is mutable in stateful -> not readonly
+        // count is mutated in increment/decrement -> not readonly even after
+        // the initializer is stripped below.
         assert!(!contract.properties[0].readonly);
-        assert!(contract.properties[0].initializer.is_some());
+        // `count: i64 = 0` collides with `pub fn init(count: i64)`: the ctor
+        // param always overrides the default so the parser strips the
+        // initializer to match the Zig compiler reference IR.
+        assert!(contract.properties[0].initializer.is_none());
         assert_eq!(contract.methods.len(), 2);
         assert_eq!(contract.methods[0].name, "increment");
         assert_eq!(contract.methods[1].name, "decrement");
