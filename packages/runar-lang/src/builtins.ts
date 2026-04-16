@@ -605,7 +605,7 @@ export function p256EncodeCompressed(_p: P256Point): ByteString {
 /**
  * Verify an ECDSA signature over P-256 (secp256r1).
  *
- * @param msg    - The 32-byte message hash (e.g. SHA-256 digest).
+ * @param msg    - Raw message bytes; SHA-256 hashed internally (same as verifyWOTS).
  * @param sig    - 64-byte raw signature (r[32] || s[32]).
  * @param pubkey - 33-byte compressed P-256 public key.
  */
@@ -665,7 +665,7 @@ export function p384EncodeCompressed(_p: P384Point): ByteString {
 /**
  * Verify an ECDSA signature over P-384 (secp384r1).
  *
- * @param msg    - The 48-byte message hash (e.g. SHA-384 digest).
+ * @param msg    - Raw message bytes; SHA-256 hashed internally (same as verifyWOTS).
  * @param sig    - 96-byte raw signature (r[48] || s[48]).
  * @param pubkey - 49-byte compressed P-384 public key.
  */
