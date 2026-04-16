@@ -242,6 +242,8 @@ const GO_TYPE_MAP: Record<string, string> = {
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',
   Point: 'Point',
+  P256Point: 'P256Point',
+  P384Point: 'P384Point',
 };
 
 function mapGoType(name: string): string {
@@ -250,7 +252,8 @@ function mapGoType(name: string): string {
 
 const PRIMITIVE_TYPES = new Set([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+  'Point', 'P256Point', 'P384Point', 'void',
 ]);
 
 function makePrimitiveOrCustom(name: string): TypeNode {
@@ -308,11 +311,18 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   Safediv: 'safediv', Safemod: 'safemod', Clamp: 'clamp', Sign: 'sign',
   Pow: 'pow', MulDiv: 'mulDiv', PercentOf: 'percentOf', Sqrt: 'sqrt',
   Gcd: 'gcd', Divmod: 'divmod', Log2: 'log2',
-  // EC builtins
+  // EC builtins (secp256k1)
   EcAdd: 'ecAdd', EcMul: 'ecMul', EcMulGen: 'ecMulGen',
   EcNegate: 'ecNegate', EcOnCurve: 'ecOnCurve', EcModReduce: 'ecModReduce',
   EcEncodeCompressed: 'ecEncodeCompressed', EcMakePoint: 'ecMakePoint',
   EcPointX: 'ecPointX', EcPointY: 'ecPointY',
+  // EC builtins (P-256 / secp256r1)
+  P256Add: 'p256Add', P256Mul: 'p256Mul', P256MulGen: 'p256MulGen',
+  P256Negate: 'p256Negate', P256OnCurve: 'p256OnCurve',
+  P256EncodeCompressed: 'p256EncodeCompressed',
+  VerifyECDSAP256: 'verifyECDSA_P256',
+  // EC builtins (P-384 / secp384r1)
+  VerifyECDSAP384: 'verifyECDSA_P384',
   // Baby Bear field arithmetic
   BbFieldAdd: 'bbFieldAdd', BbFieldSub: 'bbFieldSub',
   BbFieldMul: 'bbFieldMul', BbFieldInv: 'bbFieldInv',
@@ -325,7 +335,8 @@ const GO_BUILTIN_MAP: Record<string, string> = {
 /** Known type names used for type cast detection. */
 const GO_CAST_TYPES = new Set([
   'Int', 'Bigint', 'Bool', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+  'Point', 'P256Point', 'P384Point',
 ]);
 
 function mapGoBuiltin(name: string): string {

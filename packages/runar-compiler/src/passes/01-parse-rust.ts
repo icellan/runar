@@ -258,11 +258,18 @@ const RUST_BUILTIN_MAP: Record<string, string> = {
   safediv: 'safediv', safemod: 'safemod', clamp: 'clamp', sign: 'sign',
   pow: 'pow', mulDiv: 'mulDiv', percentOf: 'percentOf', sqrt: 'sqrt',
   gcd: 'gcd', divmod: 'divmod', log2: 'log2',
-  // EC builtins
+  // EC builtins (secp256k1)
   ecAdd: 'ecAdd', ecMul: 'ecMul', ecMulGen: 'ecMulGen',
   ecNegate: 'ecNegate', ecOnCurve: 'ecOnCurve', ecModReduce: 'ecModReduce',
   ecEncodeCompressed: 'ecEncodeCompressed', ecMakePoint: 'ecMakePoint',
   ecPointX: 'ecPointX', ecPointY: 'ecPointY',
+  // EC builtins (P-256 / secp256r1)
+  p256Add: 'p256Add', p256Mul: 'p256Mul', p256MulGen: 'p256MulGen',
+  p256Negate: 'p256Negate', p256OnCurve: 'p256OnCurve',
+  p256EncodeCompressed: 'p256EncodeCompressed',
+  verify_ecdsa_p256: 'verifyECDSA_P256', verifyEcdsaP256: 'verifyECDSA_P256',
+  // EC builtins (P-384 / secp384r1)
+  verify_ecdsa_p384: 'verifyECDSA_P384', verifyEcdsaP384: 'verifyECDSA_P384',
   // Baby Bear field arithmetic
   bb_field_add: 'bbFieldAdd', bb_field_sub: 'bbFieldSub',
   bb_field_mul: 'bbFieldMul', bb_field_inv: 'bbFieldInv',
@@ -296,6 +303,8 @@ const RUST_TYPE_MAP: Record<string, string> = {
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',
   Point: 'Point',
+  P256Point: 'P256Point',
+  P384Point: 'P384Point',
 };
 
 function mapRustType(name: string): string {
@@ -304,7 +313,8 @@ function mapRustType(name: string): string {
 
 const PRIMITIVE_TYPES = new Set([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+  'Point', 'P256Point', 'P384Point', 'void',
 ]);
 
 function makePrimitiveOrCustom(name: string): TypeNode {
