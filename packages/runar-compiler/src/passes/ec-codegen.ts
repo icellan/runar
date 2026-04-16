@@ -40,7 +40,7 @@ function bigintToBytes32(n: bigint): Uint8Array {
 // ECTracker — named stack state tracker (mirrors SLHTracker)
 // ===========================================================================
 
-class ECTracker {
+export class ECTracker {
   nm: (string | null)[];
   _e: (op: StackOp) => void;
 
