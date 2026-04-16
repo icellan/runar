@@ -404,6 +404,20 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
         .{ "bin_2_num", "bin2num" },
         .{ "num_2_bin", "num2bin" },
         .{ "to_byte_string", "toByteString" },
+        .{ "verify_ecdsa_p256", "verifyECDSA_P256" },
+        .{ "p256_add", "p256Add" },
+        .{ "p256_mul", "p256Mul" },
+        .{ "p256_mul_gen", "p256MulGen" },
+        .{ "p256_negate", "p256Negate" },
+        .{ "p256_on_curve", "p256OnCurve" },
+        .{ "p256_encode_compressed", "p256EncodeCompressed" },
+        .{ "verify_ecdsa_p384", "verifyECDSA_P384" },
+        .{ "p384_add", "p384Add" },
+        .{ "p384_mul", "p384Mul" },
+        .{ "p384_mul_gen", "p384MulGen" },
+        .{ "p384_negate", "p384Negate" },
+        .{ "p384_on_curve", "p384OnCurve" },
+        .{ "p384_encode_compressed", "p384EncodeCompressed" },
     });
     if (map.get(name)) |mapped| return mapped;
     return snakeToCamel(allocator, name);

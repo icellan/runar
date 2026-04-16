@@ -649,15 +649,17 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     const alloc = arena.allocator();
 
     // Tests run from compilers/zig; the examples live two levels up.
-    const v1_src = std.fs.cwd().readFileAlloc(
-        alloc,
+    const v1_src = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
         "../../examples/ts/tic-tac-toe/TicTacToe.runar.ts",
-        1 * 1024 * 1024,
-    ) catch return error.SkipZigTest;
-    const v2_src = std.fs.cwd().readFileAlloc(
         alloc,
+        .limited(1 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+    const v2_src = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
         "../../examples/ts/tic-tac-toe/TicTacToe.v2.runar.ts",
-        1 * 1024 * 1024,
+        alloc,
+        .limited(1 * 1024 * 1024),
     ) catch return error.SkipZigTest;
 
     const v1_hex = try compileTsToHex(alloc, v1_src, "TicTacToe.runar.ts");

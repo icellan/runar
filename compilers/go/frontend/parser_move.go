@@ -517,6 +517,22 @@ var moveBuiltinMap = map[string]string{
 	"verify_slh_dsa_sha2_256f": "verifySLHDSA_SHA2_256f",
 	"verifySlhdsaSha2256f":     "verifySLHDSA_SHA2_256f",
 	"verifySlhDsaSha2256f":     "verifySLHDSA_SHA2_256f",
+	// P-256 EC builtins
+	"p256_add":               "p256Add",
+	"p256_mul":               "p256Mul",
+	"p256_mul_gen":           "p256MulGen",
+	"p256_negate":            "p256Negate",
+	"p256_on_curve":          "p256OnCurve",
+	"p256_encode_compressed": "p256EncodeCompressed",
+	"verify_ecdsa_p256":      "verifyECDSA_P256",
+	// P-384 EC builtins
+	"p384_add":               "p384Add",
+	"p384_mul":               "p384Mul",
+	"p384_mul_gen":           "p384MulGen",
+	"p384_negate":            "p384Negate",
+	"p384_on_curve":          "p384OnCurve",
+	"p384_encode_compressed": "p384EncodeCompressed",
+	"verify_ecdsa_p384":      "verifyECDSA_P384",
 }
 
 func moveMapBuiltin(name string) string {

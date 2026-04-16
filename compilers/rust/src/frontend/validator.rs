@@ -59,7 +59,9 @@ fn is_valid_property_primitive(name: &PrimitiveTypeName) -> bool {
         | PrimitiveTypeName::SigHashPreimage
         | PrimitiveTypeName::RabinSig
         | PrimitiveTypeName::RabinPubKey
-        | PrimitiveTypeName::Point => true,
+        | PrimitiveTypeName::Point
+        | PrimitiveTypeName::P256Point
+        | PrimitiveTypeName::P384Point => true,
         PrimitiveTypeName::Void => false,
     }
 }
@@ -118,7 +120,7 @@ fn validate_property_type(type_node: &TypeNode, loc: &SourceLocation, errors: &m
         }
         TypeNode::Custom(name) => {
             errors.push(Diagnostic::error(format!(
-                "Unsupported type '{}' in property declaration. Use one of: bigint, boolean, ByteString, PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage, RabinSig, RabinPubKey, or FixedArray<T, N>",
+                "Unsupported type '{}' in property declaration. Use one of: bigint, boolean, ByteString, PubKey, Sig, Sha256, Ripemd160, Addr, SigHashPreimage, RabinSig, RabinPubKey, Point, P256Point, P384Point, or FixedArray<T, N>",
                 name
             ), Some(loc.clone())));
         }

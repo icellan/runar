@@ -75,6 +75,102 @@ def verify_wots(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return _wots_verify_real(msg, sig, pubkey)
 
 
+# -- Real P-256 ECDSA Verification ------------------------------------------
+
+def verify_ecdsa_p256(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
+    """Verify a P-256 ECDSA signature.
+
+    msg is the raw message (SHA-256 hashed internally).
+    sig is the 64-byte raw signature: r[32] || s[32].
+    pubkey is the 33-byte compressed P-256 public key (02/03 prefix).
+    """
+    import hashlib
+    msg = _as_bytes(msg)
+    sig = _as_bytes(sig)
+    pubkey = _as_bytes(pubkey)
+    if len(sig) != 64:
+        return False
+    # P-256 curve parameters
+    _P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF
+    _P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+    _P256_A = -3 % _P256_P
+    _P256_B = 0x5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B
+    _P256_GX = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296
+    _P256_GY = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5
+
+    def _modinv_p256(a: int, m: int) -> int:
+        g, x, _ = _ext_gcd_p256(a % m, m)
+        if g != 1:
+            return 0
+        return x % m
+
+    def _ext_gcd_p256(a: int, b: int):
+        if a == 0:
+            return b, 0, 1
+        g, x, y = _ext_gcd_p256(b % a, a)
+        return g, y - (b // a) * x, x
+
+    def _p256_add(x1, y1, x2, y2):
+        if x1 is None:
+            return x2, y2
+        if x2 is None:
+            return x1, y1
+        if x1 == x2:
+            if y1 != y2:
+                return None, None
+            lam = (3 * x1 * x1 + _P256_A) * _modinv_p256(2 * y1, _P256_P) % _P256_P
+        else:
+            lam = (y2 - y1) * _modinv_p256(x2 - x1, _P256_P) % _P256_P
+        x3 = (lam * lam - x1 - x2) % _P256_P
+        y3 = (lam * (x1 - x3) - y1) % _P256_P
+        return x3, y3
+
+    def _p256_mul(x, y, k):
+        rx, ry = None, None
+        qx, qy = x, y
+        while k > 0:
+            if k & 1:
+                rx, ry = _p256_add(rx, ry, qx, qy)
+            qx, qy = _p256_add(qx, qy, qx, qy)
+            k >>= 1
+        return rx, ry
+
+    # Decode compressed public key
+    prefix = pubkey[0]
+    if prefix not in (0x02, 0x03) or len(pubkey) != 33:
+        return False
+    pkx = int.from_bytes(pubkey[1:], 'big')
+    # Recover y from x: y^2 = x^3 + ax + b (mod p)
+    y2 = (pow(pkx, 3, _P256_P) + _P256_A * pkx + _P256_B) % _P256_P
+    y = pow(y2, (_P256_P + 1) // 4, _P256_P)
+    if pow(y, 2, _P256_P) != y2:
+        return False
+    if (y % 2) != (prefix % 2):
+        y = _P256_P - y
+
+    # Hash message
+    digest = hashlib.sha256(_as_bytes(msg)).digest()
+    z = int.from_bytes(digest, 'big')
+
+    # Decode signature r, s
+    r = int.from_bytes(sig[:32], 'big')
+    s = int.from_bytes(sig[32:], 'big')
+    if r == 0 or s == 0 or r >= _P256_N or s >= _P256_N:
+        return False
+
+    w = _modinv_p256(s, _P256_N)
+    u1 = z * w % _P256_N
+    u2 = r * w % _P256_N
+
+    # Compute u1*G + u2*Q
+    gx, gy = _p256_mul(_P256_GX, _P256_GY, u1)
+    qx, qy = _p256_mul(pkx, y, u2)
+    rx, ry = _p256_add(gx, gy, qx, qy)
+    if rx is None:
+        return False
+    return rx % _P256_N == r
+
+
 # -- Real SLH-DSA Verification (falls back to mock if slhdsa not installed) -
 
 def verify_slh_dsa_sha2_128s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:

@@ -225,6 +225,8 @@ const ZIG_TYPE_MAP: Record<string, string> = {
   RabinSig: 'RabinSig',
   RabinPubKey: 'RabinPubKey',
   Point: 'Point',
+  P256Point: 'P256Point',
+  P384Point: 'P384Point',
 };
 
 const PRIMITIVE_TYPES = new Set<PrimitiveTypeName>([
@@ -240,8 +242,16 @@ const PRIMITIVE_TYPES = new Set<PrimitiveTypeName>([
   'RabinSig',
   'RabinPubKey',
   'Point',
+  'P256Point',
+  'P384Point',
   'void',
 ]);
+
+/** Map Zig-style builtin names to canonical Rúnar camelCase names. */
+const ZIG_BUILTIN_MAP: Record<string, string> = {
+  verifyECDSAP256: 'verifyECDSA_P256',
+  verifyECDSAP384: 'verifyECDSA_P384',
+};
 
 function mapZigType(name: string): string {
   return ZIG_TYPE_MAP[name] || name;
@@ -1150,7 +1160,7 @@ class ZigParser extends ParserCore<ZigToken> {
           ));
           return { kind: 'bytestring_literal', value: '' };
         }
-        return { kind: 'identifier', name: builtin };
+        return { kind: 'identifier', name: ZIG_BUILTIN_MAP[builtin] ?? builtin };
       }
 
       return { kind: 'identifier', name: token.value };

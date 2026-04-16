@@ -33,6 +33,8 @@ export type PrimitiveTypeName =
   | 'RabinSig'
   | 'RabinPubKey'
   | 'Point'
+  | 'P256Point'
+  | 'P384Point'
   | 'void';
 
 export interface PrimitiveTypeNode {

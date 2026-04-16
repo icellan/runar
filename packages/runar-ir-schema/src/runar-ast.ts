@@ -32,7 +32,9 @@ export type PrimitiveTypeName =
   | 'SigHashPreimage'
   | 'RabinSig'
   | 'RabinPubKey'
-  | 'Point';
+  | 'Point'
+  | 'P256Point'
+  | 'P384Point';
 
 export interface PrimitiveTypeNode {
   kind: 'primitive_type';

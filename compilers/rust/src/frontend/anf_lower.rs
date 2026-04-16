@@ -1265,7 +1265,7 @@ fn lower_decrement_expr(
 /// Byte-typed primitive names -- values that are already byte sequences.
 const BYTE_TYPES: &[&str] = &[
     "ByteString", "PubKey", "Sig", "Sha256", "Ripemd160", "Addr", "SigHashPreimage",
-    "RabinSig", "RabinPubKey", "Point",
+    "RabinSig", "RabinPubKey", "Point", "P256Point", "P384Point",
 ];
 
 /// Builtin functions that return byte-typed values.
@@ -1274,6 +1274,8 @@ const BYTE_RETURNING_FUNCTIONS: &[&str] = &[
     "reverseBytes", "substr", "left", "right",
     "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecMakePoint", "ecEncodeCompressed",
     "sha256Compress", "sha256Finalize", "blake3Compress", "blake3Hash",
+    "p256Add", "p256Mul", "p256MulGen", "p256Negate", "p256EncodeCompressed",
+    "p384Add", "p384Mul", "p384MulGen", "p384Negate", "p384EncodeCompressed",
 ];
 
 /// Determine whether an expression is byte-typed (ByteString, PubKey, Sig, etc.).

@@ -617,7 +617,7 @@ fn emitExt4InvComponent(t: *KBTracker, component: u2) !void {
 
     // Clean up: drop all intermediate and input values, keep only _r
     {
-        var remaining = std.ArrayListUnmanaged([]const u8){};
+        var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
         defer remaining.deinit(t.allocator);
         for (t.names.items) |slot| {
             const name = slot orelse continue;

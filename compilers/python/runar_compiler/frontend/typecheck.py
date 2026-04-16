@@ -112,6 +112,22 @@ BUILTIN_FUNCTIONS: dict[str, FuncSig] = {
     "ecMakePoint":        FuncSig(params=["bigint", "bigint"], return_type="Point"),
     "ecPointX":           FuncSig(params=["Point"], return_type="bigint"),
     "ecPointY":           FuncSig(params=["Point"], return_type="bigint"),
+    # Elliptic curve operations (P-256 / NIST P-256 / secp256r1)
+    "p256Add":              FuncSig(params=["P256Point", "P256Point"], return_type="P256Point"),
+    "p256Mul":              FuncSig(params=["P256Point", "bigint"], return_type="P256Point"),
+    "p256MulGen":           FuncSig(params=["bigint"], return_type="P256Point"),
+    "p256Negate":           FuncSig(params=["P256Point"], return_type="P256Point"),
+    "p256OnCurve":          FuncSig(params=["P256Point"], return_type="boolean"),
+    "p256EncodeCompressed": FuncSig(params=["P256Point"], return_type="ByteString"),
+    "verifyECDSA_P256":     FuncSig(params=["ByteString", "ByteString", "ByteString"], return_type="boolean"),
+    # Elliptic curve operations (P-384 / NIST P-384 / secp384r1)
+    "p384Add":              FuncSig(params=["P384Point", "P384Point"], return_type="P384Point"),
+    "p384Mul":              FuncSig(params=["P384Point", "bigint"], return_type="P384Point"),
+    "p384MulGen":           FuncSig(params=["bigint"], return_type="P384Point"),
+    "p384Negate":           FuncSig(params=["P384Point"], return_type="P384Point"),
+    "p384OnCurve":          FuncSig(params=["P384Point"], return_type="boolean"),
+    "p384EncodeCompressed": FuncSig(params=["P384Point"], return_type="ByteString"),
+    "verifyECDSA_P384":     FuncSig(params=["ByteString", "ByteString", "ByteString"], return_type="boolean"),
     "sha256Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
     "sha256Finalize":    FuncSig(params=["ByteString", "ByteString", "bigint"], return_type="ByteString"),
     "blake3Compress":    FuncSig(params=["ByteString", "ByteString"], return_type="ByteString"),
@@ -184,6 +200,8 @@ _BYTESTRING_SUBTYPES: frozenset[str] = frozenset({
     "Addr",
     "SigHashPreimage",
     "Point",
+    "P256Point",
+    "P384Point",
 })
 
 _BIGINT_SUBTYPES: frozenset[str] = frozenset({

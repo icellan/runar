@@ -428,6 +428,8 @@ var zigTypeMap = map[string]string{
 	"RabinSig":     "RabinSig",
 	"RabinPubKey":  "RabinPubKey",
 	"Point":        "Point",
+	"P256Point":    "P256Point",
+	"P384Point":    "P384Point",
 }
 
 func zigMapType(name string) string {

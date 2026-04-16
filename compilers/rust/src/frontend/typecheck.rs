@@ -112,6 +112,22 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("ecMakePoint", FuncSig { params: vec!["bigint", "bigint"], return_type: "Point" });
     m.insert("ecPointX", FuncSig { params: vec!["Point"], return_type: "bigint" });
     m.insert("ecPointY", FuncSig { params: vec!["Point"], return_type: "bigint" });
+    // Elliptic curve operations (P-256 / NIST P-256 / secp256r1)
+    m.insert("p256Add", FuncSig { params: vec!["P256Point", "P256Point"], return_type: "P256Point" });
+    m.insert("p256Mul", FuncSig { params: vec!["P256Point", "bigint"], return_type: "P256Point" });
+    m.insert("p256MulGen", FuncSig { params: vec!["bigint"], return_type: "P256Point" });
+    m.insert("p256Negate", FuncSig { params: vec!["P256Point"], return_type: "P256Point" });
+    m.insert("p256OnCurve", FuncSig { params: vec!["P256Point"], return_type: "boolean" });
+    m.insert("p256EncodeCompressed", FuncSig { params: vec!["P256Point"], return_type: "ByteString" });
+    m.insert("verifyECDSA_P256", FuncSig { params: vec!["ByteString", "ByteString", "ByteString"], return_type: "boolean" });
+    // Elliptic curve operations (P-384 / NIST P-384 / secp384r1)
+    m.insert("p384Add", FuncSig { params: vec!["P384Point", "P384Point"], return_type: "P384Point" });
+    m.insert("p384Mul", FuncSig { params: vec!["P384Point", "bigint"], return_type: "P384Point" });
+    m.insert("p384MulGen", FuncSig { params: vec!["bigint"], return_type: "P384Point" });
+    m.insert("p384Negate", FuncSig { params: vec!["P384Point"], return_type: "P384Point" });
+    m.insert("p384OnCurve", FuncSig { params: vec!["P384Point"], return_type: "boolean" });
+    m.insert("p384EncodeCompressed", FuncSig { params: vec!["P384Point"], return_type: "ByteString" });
+    m.insert("verifyECDSA_P384", FuncSig { params: vec!["ByteString", "ByteString", "ByteString"], return_type: "boolean" });
     m.insert("abs", FuncSig { params: vec!["bigint"], return_type: "bigint" });
     m.insert("min", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
     m.insert("max", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
@@ -167,7 +183,7 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
 fn is_bytestring_subtype(t: &str) -> bool {
     matches!(
         t,
-        "ByteString" | "PubKey" | "Sig" | "Sha256" | "Ripemd160" | "Addr" | "SigHashPreimage" | "Point"
+        "ByteString" | "PubKey" | "Sig" | "Sha256" | "Ripemd160" | "Addr" | "SigHashPreimage" | "Point" | "P256Point" | "P384Point"
     )
 }
 

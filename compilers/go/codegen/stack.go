@@ -1116,6 +1116,16 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if isNistEcBuiltin(funcName) {
+		ctx.lowerNistEcBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
+	if funcName == "verifyECDSA_P256" || funcName == "verifyECDSA_P384" {
+		ctx.lowerVerifyECDSA(bindingName, funcName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if isBBFieldBuiltin(funcName) {
 		ctx.lowerBBFieldBuiltin(bindingName, funcName, args, bindingIndex, lastUses)
 		return
@@ -4258,6 +4268,91 @@ func (ctx *loweringContext) lowerEcBuiltin(bindingName, funcName string, args []
 		EmitEcPointY(emitFn)
 	default:
 		panic(fmt.Sprintf("unknown EC builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+// ---------------------------------------------------------------------------
+// P-256 and P-384 EC builtin helpers
+// ---------------------------------------------------------------------------
+
+var nistEcBuiltinNames = map[string]bool{
+	"p256Add": true, "p256Mul": true, "p256MulGen": true,
+	"p256Negate": true, "p256OnCurve": true, "p256EncodeCompressed": true,
+	"p384Add": true, "p384Mul": true, "p384MulGen": true,
+	"p384Negate": true, "p384OnCurve": true, "p384EncodeCompressed": true,
+}
+
+func isNistEcBuiltin(name string) bool {
+	return nistEcBuiltinNames[name]
+}
+
+func (ctx *loweringContext) lowerNistEcBuiltin(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	// Bring args to top in order
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	for range args {
+		ctx.sm.pop()
+	}
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	switch funcName {
+	case "p256Add":
+		EmitP256Add(emitFn)
+	case "p256Mul":
+		EmitP256Mul(emitFn)
+	case "p256MulGen":
+		EmitP256MulGen(emitFn)
+	case "p256Negate":
+		EmitP256Negate(emitFn)
+	case "p256OnCurve":
+		EmitP256OnCurve(emitFn)
+	case "p256EncodeCompressed":
+		EmitP256EncodeCompressed(emitFn)
+	case "p384Add":
+		EmitP384Add(emitFn)
+	case "p384Mul":
+		EmitP384Mul(emitFn)
+	case "p384MulGen":
+		EmitP384MulGen(emitFn)
+	case "p384Negate":
+		EmitP384Negate(emitFn)
+	case "p384OnCurve":
+		EmitP384OnCurve(emitFn)
+	case "p384EncodeCompressed":
+		EmitP384EncodeCompressed(emitFn)
+	default:
+		panic(fmt.Sprintf("unknown NIST EC builtin: %s", funcName))
+	}
+
+	ctx.sm.push(bindingName)
+	ctx.trackDepth()
+}
+
+func (ctx *loweringContext) lowerVerifyECDSA(bindingName, funcName string, args []string, bindingIndex int, lastUses map[string]int) {
+	if len(args) < 3 {
+		panic(fmt.Sprintf("%s requires 3 arguments: msg, sig, pubkey", funcName))
+	}
+	// Bring all 3 args to top in order: msg, sig, pubkey
+	for _, arg := range args {
+		isLast := ctx.isLastUse(arg, bindingIndex, lastUses)
+		ctx.bringToTop(arg, isLast)
+	}
+	ctx.sm.pop() // pubkey
+	ctx.sm.pop() // sig
+	ctx.sm.pop() // msg
+
+	emitFn := func(op StackOp) { ctx.emitOp(op) }
+
+	if funcName == "verifyECDSA_P256" {
+		EmitVerifyECDSA_P256(emitFn)
+	} else {
+		EmitVerifyECDSA_P384(emitFn)
 	}
 
 	ctx.sm.push(bindingName)

@@ -34,6 +34,8 @@ pub enum PrimitiveTypeName {
     RabinSig,
     RabinPubKey,
     Point,
+    P256Point,
+    P384Point,
     Void,
 }
 
@@ -53,6 +55,8 @@ impl PrimitiveTypeName {
             "RabinSig" => Some(PrimitiveTypeName::RabinSig),
             "RabinPubKey" => Some(PrimitiveTypeName::RabinPubKey),
             "Point" => Some(PrimitiveTypeName::Point),
+            "P256Point" => Some(PrimitiveTypeName::P256Point),
+            "P384Point" => Some(PrimitiveTypeName::P384Point),
             "void" => Some(PrimitiveTypeName::Void),
             _ => None,
         }
@@ -73,6 +77,8 @@ impl PrimitiveTypeName {
             PrimitiveTypeName::RabinSig => "RabinSig",
             PrimitiveTypeName::RabinPubKey => "RabinPubKey",
             PrimitiveTypeName::Point => "Point",
+            PrimitiveTypeName::P256Point => "P256Point",
+            PrimitiveTypeName::P384Point => "P384Point",
             PrimitiveTypeName::Void => "void",
         }
     }

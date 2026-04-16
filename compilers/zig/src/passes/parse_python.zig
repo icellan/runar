@@ -541,6 +541,20 @@ fn pyConvertName(allocator: Allocator, name: []const u8) []const u8 {
         .{ "ec_make_point", "ecMakePoint" },
         .{ "ec_point_x", "ecPointX" },
         .{ "ec_point_y", "ecPointY" },
+        .{ "verify_ecdsa_p256", "verifyECDSA_P256" },
+        .{ "p256_add", "p256Add" },
+        .{ "p256_mul", "p256Mul" },
+        .{ "p256_mul_gen", "p256MulGen" },
+        .{ "p256_negate", "p256Negate" },
+        .{ "p256_on_curve", "p256OnCurve" },
+        .{ "p256_encode_compressed", "p256EncodeCompressed" },
+        .{ "verify_ecdsa_p384", "verifyECDSA_P384" },
+        .{ "p384_add", "p384Add" },
+        .{ "p384_mul", "p384Mul" },
+        .{ "p384_mul_gen", "p384MulGen" },
+        .{ "p384_negate", "p384Negate" },
+        .{ "p384_on_curve", "p384OnCurve" },
+        .{ "p384_encode_compressed", "p384EncodeCompressed" },
         .{ "add_output", "addOutput" },
         .{ "add_raw_output", "addRawOutput" },
         .{ "get_state_script", "getStateScript" },
@@ -646,6 +660,8 @@ fn resolvePyTypeName(name: []const u8) TypeNode {
     if (std.mem.eql(u8, name, "RabinSig")) return .{ .primitive_type = .rabin_sig };
     if (std.mem.eql(u8, name, "RabinPubKey")) return .{ .primitive_type = .rabin_pub_key };
     if (std.mem.eql(u8, name, "Point")) return .{ .primitive_type = .point };
+    if (std.mem.eql(u8, name, "P256Point")) return .{ .primitive_type = .p256_point };
+    if (std.mem.eql(u8, name, "P384Point")) return .{ .primitive_type = .p384_point };
     if (std.mem.eql(u8, name, "void")) return .{ .primitive_type = .void };
     // Try the canonical lookup
     if (PrimitiveTypeName.fromTsString(name)) |ptn| return .{ .primitive_type = ptn };

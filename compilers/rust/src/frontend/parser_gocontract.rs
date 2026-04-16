@@ -98,6 +98,8 @@ fn map_go_type(name: &str) -> TypeNode {
         "RabinSig" => TypeNode::Primitive(PrimitiveTypeName::RabinSig),
         "RabinPubKey" => TypeNode::Primitive(PrimitiveTypeName::RabinPubKey),
         "Point" => TypeNode::Primitive(PrimitiveTypeName::Point),
+        "P256Point" => TypeNode::Primitive(PrimitiveTypeName::P256Point),
+        "P384Point" => TypeNode::Primitive(PrimitiveTypeName::P384Point),
         _ => TypeNode::Custom(name.to_string()),
     }
 }
@@ -159,6 +161,8 @@ fn map_go_builtin(name: &str) -> String {
         "EcPointY" => "ecPointY".to_string(),
         "Sha256Compress" => "sha256Compress".to_string(),
         "Sha256Finalize" => "sha256Finalize".to_string(),
+        "VerifyECDSAP256" => "verifyECDSA_P256".to_string(),
+        "VerifyECDSAP384" => "verifyECDSA_P384".to_string(),
         _ => go_to_camel(name),
     }
 }

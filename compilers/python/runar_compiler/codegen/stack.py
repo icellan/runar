@@ -998,6 +998,14 @@ class _LoweringContext:
             self._lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
             return
 
+        if _is_nist_ec_builtin(func_name):
+            self._lower_nist_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
+            return
+
+        if func_name in ("verifyECDSA_P256", "verifyECDSA_P384"):
+            self._lower_verify_ecdsa(binding_name, func_name, args, binding_index, last_uses)
+            return
+
         if _is_bb_builtin(func_name):
             self._lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
             return
@@ -3483,6 +3491,64 @@ class _LoweringContext:
         self._track_depth()
 
     # -----------------------------------------------------------------
+    # NIST EC builtins (P-256 and P-384)
+    # -----------------------------------------------------------------
+
+    def _lower_nist_ec_builtin(self, binding_name: str, func_name: str,
+                               args: list[str], binding_index: int,
+                               last_uses: dict[str, int]) -> None:
+        for arg in args:
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        for _ in args:
+            self.sm.pop()
+
+        from runar_compiler.codegen import p256_p384 as nist_mod
+
+        dispatch = {
+            "p256Add":              nist_mod.emit_p256_add,
+            "p256Mul":              nist_mod.emit_p256_mul,
+            "p256MulGen":           nist_mod.emit_p256_mul_gen,
+            "p256Negate":           nist_mod.emit_p256_negate,
+            "p256OnCurve":          nist_mod.emit_p256_on_curve,
+            "p256EncodeCompressed": nist_mod.emit_p256_encode_compressed,
+            "p384Add":              nist_mod.emit_p384_add,
+            "p384Mul":              nist_mod.emit_p384_mul,
+            "p384MulGen":           nist_mod.emit_p384_mul_gen,
+            "p384Negate":           nist_mod.emit_p384_negate,
+            "p384OnCurve":          nist_mod.emit_p384_on_curve,
+            "p384EncodeCompressed": nist_mod.emit_p384_encode_compressed,
+        }
+
+        fn = dispatch.get(func_name)
+        if fn is None:
+            raise RuntimeError(f"unknown NIST EC builtin: {func_name}")
+        fn(lambda op: self.emit_op(op))
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    def _lower_verify_ecdsa(self, binding_name: str, func_name: str,
+                            args: list[str], binding_index: int,
+                            last_uses: dict[str, int]) -> None:
+        for arg in args:
+            is_last = self._is_last_use(arg, binding_index, last_uses)
+            self.bring_to_top(arg, is_last)
+        for _ in args:
+            self.sm.pop()
+
+        from runar_compiler.codegen import p256_p384 as nist_mod
+
+        emit_fn = lambda op: self.emit_op(op)
+        if func_name == "verifyECDSA_P256":
+            nist_mod.emit_verify_ecdsa_p256(emit_fn)
+        else:
+            nist_mod.emit_verify_ecdsa_p384(emit_fn)
+
+        self.sm.push(binding_name)
+        self._track_depth()
+
+    # -----------------------------------------------------------------
     # Baby Bear field arithmetic builtins
     # -----------------------------------------------------------------
 
@@ -3685,6 +3751,22 @@ _EC_BUILTIN_NAMES = frozenset({
 
 def _is_ec_builtin(name: str) -> bool:
     return name in _EC_BUILTIN_NAMES
+
+
+# ---------------------------------------------------------------------------
+# NIST EC builtin names (P-256 and P-384)
+# ---------------------------------------------------------------------------
+
+_NIST_EC_BUILTIN_NAMES = frozenset({
+    "p256Add", "p256Mul", "p256MulGen",
+    "p256Negate", "p256OnCurve", "p256EncodeCompressed",
+    "p384Add", "p384Mul", "p384MulGen",
+    "p384Negate", "p384OnCurve", "p384EncodeCompressed",
+})
+
+
+def _is_nist_ec_builtin(name: str) -> bool:
+    return name in _NIST_EC_BUILTIN_NAMES
 
 
 # ---------------------------------------------------------------------------

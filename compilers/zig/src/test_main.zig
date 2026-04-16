@@ -26,4 +26,5 @@ test {
     _ = @import("passes/helpers/fiat_shamir_kb.zig");
     _ = @import("passes/helpers/poseidon2_merkle.zig");
     _ = @import("passes/helpers/bn254_emitters.zig");
+    _ = @import("passes/helpers/nist_ec_emitters.zig");
 }

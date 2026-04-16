@@ -80,6 +80,22 @@ var builtinFunctions = map[string]funcSig{
 	"ecMakePoint":        {params: []string{"bigint", "bigint"}, returnType: "Point"},
 	"ecPointX":           {params: []string{"Point"}, returnType: "bigint"},
 	"ecPointY":           {params: []string{"Point"}, returnType: "bigint"},
+	// Elliptic curve operations (P-256 / NIST P-256 / secp256r1)
+	"p256Add":              {params: []string{"P256Point", "P256Point"}, returnType: "P256Point"},
+	"p256Mul":              {params: []string{"P256Point", "bigint"}, returnType: "P256Point"},
+	"p256MulGen":           {params: []string{"bigint"}, returnType: "P256Point"},
+	"p256Negate":           {params: []string{"P256Point"}, returnType: "P256Point"},
+	"p256OnCurve":          {params: []string{"P256Point"}, returnType: "boolean"},
+	"p256EncodeCompressed": {params: []string{"P256Point"}, returnType: "ByteString"},
+	"verifyECDSA_P256":     {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
+	// Elliptic curve operations (P-384 / NIST P-384 / secp384r1)
+	"p384Add":              {params: []string{"P384Point", "P384Point"}, returnType: "P384Point"},
+	"p384Mul":              {params: []string{"P384Point", "bigint"}, returnType: "P384Point"},
+	"p384MulGen":           {params: []string{"bigint"}, returnType: "P384Point"},
+	"p384Negate":           {params: []string{"P384Point"}, returnType: "P384Point"},
+	"p384OnCurve":          {params: []string{"P384Point"}, returnType: "boolean"},
+	"p384EncodeCompressed": {params: []string{"P384Point"}, returnType: "ByteString"},
+	"verifyECDSA_P384":     {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"sha256Compress":    {params: []string{"ByteString", "ByteString"}, returnType: "ByteString"},
 	"sha256Finalize":    {params: []string{"ByteString", "ByteString", "bigint"}, returnType: "ByteString"},
 	"blake3Compress":    {params: []string{"ByteString", "ByteString"}, returnType: "ByteString"},
@@ -193,6 +209,8 @@ var byteStringSubtypes = map[string]bool{
 	"Addr":           true,
 	"SigHashPreimage": true,
 	"Point":          true,
+	"P256Point":      true,
+	"P384Point":      true,
 }
 
 var bigintSubtypes = map[string]bool{

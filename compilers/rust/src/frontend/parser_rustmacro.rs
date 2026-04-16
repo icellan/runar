@@ -1105,6 +1105,8 @@ fn map_rust_builtin(name: &str) -> String {
         "bin_2_num" => return "bin2num".to_string(),
         "int_2_str" => return "int2str".to_string(),
         "to_byte_string" => return "toByteString".to_string(),
+        "verify_ecdsa_p256" => return "verifyECDSA_P256".to_string(),
+        "verify_ecdsa_p384" => return "verifyECDSA_P384".to_string(),
         _ => {}
     }
 

@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const opcodes = @import("../codegen/opcodes.zig");
 
 const ParseError = error{
     MissingField,
@@ -37,7 +38,8 @@ pub fn serializeCanonicalJSON(allocator: std.mem.Allocator, program: types.ANFPr
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try writeCanonicalProgram(buf.writer(allocator), program, 0);
+    const w = opcodes.ArrayListWriter{ .list = &buf, .allocator = allocator };
+    try writeCanonicalProgram(w, program, 0);
     try buf.append(allocator, '\n');
 
     return buf.toOwnedSlice(allocator);
@@ -48,7 +50,8 @@ pub fn serializeArtifact(allocator: std.mem.Allocator, artifact: types.Artifact)
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
 
-    try writeCanonicalArtifact(buf.writer(allocator), artifact, 0);
+    const w = opcodes.ArrayListWriter{ .list = &buf, .allocator = allocator };
+    try writeCanonicalArtifact(w, artifact, 0);
     try buf.append(allocator, '\n');
 
     return buf.toOwnedSlice(allocator);

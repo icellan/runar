@@ -128,6 +128,24 @@ const BUILTIN_FUNCTIONS: Map<string, FuncSig> = new Map([
   ['ecPointX',           { params: ['Point'], returnType: 'bigint' }],
   ['ecPointY',           { params: ['Point'], returnType: 'bigint' }],
 
+  // Elliptic curve operations (P-256 / NIST P-256 / secp256r1)
+  ['p256Add',              { params: ['P256Point', 'P256Point'], returnType: 'P256Point' }],
+  ['p256Mul',              { params: ['P256Point', 'bigint'], returnType: 'P256Point' }],
+  ['p256MulGen',           { params: ['bigint'], returnType: 'P256Point' }],
+  ['p256Negate',           { params: ['P256Point'], returnType: 'P256Point' }],
+  ['p256OnCurve',          { params: ['P256Point'], returnType: 'boolean' }],
+  ['p256EncodeCompressed', { params: ['P256Point'], returnType: 'ByteString' }],
+  ['verifyECDSA_P256',     { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
+
+  // Elliptic curve operations (P-384 / NIST P-384 / secp384r1)
+  ['p384Add',              { params: ['P384Point', 'P384Point'], returnType: 'P384Point' }],
+  ['p384Mul',              { params: ['P384Point', 'bigint'], returnType: 'P384Point' }],
+  ['p384MulGen',           { params: ['bigint'], returnType: 'P384Point' }],
+  ['p384Negate',           { params: ['P384Point'], returnType: 'P384Point' }],
+  ['p384OnCurve',          { params: ['P384Point'], returnType: 'boolean' }],
+  ['p384EncodeCompressed', { params: ['P384Point'], returnType: 'ByteString' }],
+  ['verifyECDSA_P384',     { params: ['ByteString', 'ByteString', 'ByteString'], returnType: 'boolean' }],
+
   // Baby Bear field arithmetic (p = 2013265921)
   ['bbFieldAdd',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
   ['bbFieldSub',         { params: ['bigint', 'bigint'], returnType: 'bigint' }],
@@ -214,7 +232,7 @@ const KNOWN_GLOBALS: Map<string, TType> = new Map([
  */
 const BYTESTRING_SUBTYPES = new Set<TType>([
   'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160',
-  'Addr', 'SigHashPreimage', 'Point',
+  'Addr', 'SigHashPreimage', 'Point', 'P256Point', 'P384Point',
 ]);
 
 /**

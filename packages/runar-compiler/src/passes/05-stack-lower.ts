@@ -45,6 +45,12 @@ import {
 import { emitMerkleRootSha256, emitMerkleRootHash256 } from './merkle-codegen.js';
 import { emitPoseidon2KBPermute, emitPoseidon2KBCompress } from './poseidon2-koalabear-codegen.js';
 import { emitPoseidon2MerkleRoot } from './poseidon2-merkle-codegen.js';
+import {
+  emitP256Add, emitP256Mul, emitP256MulGen, emitP256Negate, emitP256OnCurve,
+  emitP256EncodeCompressed, emitVerifyECDSA_P256,
+  emitP384Add, emitP384Mul, emitP384MulGen, emitP384Negate, emitP384OnCurve,
+  emitP384EncodeCompressed, emitVerifyECDSA_P384,
+} from './p256-p384-codegen.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1243,6 +1249,19 @@ class LoweringContext {
         func === 'ecEncodeCompressed' || func === 'ecMakePoint' ||
         func === 'ecPointX' || func === 'ecPointY') {
       this.lowerEcBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+
+    // P-256 and P-384 EC builtins
+    if (func === 'p256Add' || func === 'p256Mul' || func === 'p256MulGen' ||
+        func === 'p256Negate' || func === 'p256OnCurve' || func === 'p256EncodeCompressed' ||
+        func === 'p384Add' || func === 'p384Mul' || func === 'p384MulGen' ||
+        func === 'p384Negate' || func === 'p384OnCurve' || func === 'p384EncodeCompressed') {
+      this.lowerNistEcBuiltin(bindingName, func, args, bindingIndex, lastUses);
+      return;
+    }
+    if (func === 'verifyECDSA_P256' || func === 'verifyECDSA_P384') {
+      this.lowerVerifyECDSA(bindingName, func, args, bindingIndex, lastUses);
       return;
     }
 
@@ -4279,6 +4298,67 @@ class LoweringContext {
       default: throw new Error(`Unknown EC builtin: ${func}`);
     }
 
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  // =========================================================================
+  // P-256 and P-384 EC builtins — delegates to p256-p384-codegen.ts
+  // =========================================================================
+
+  private lowerNistEcBuiltin(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    // Bring all args to stack top
+    for (const arg of args) {
+      this.bringToTop(arg, this.isLastUse(arg, bindingIndex, lastUses));
+    }
+    for (let i = 0; i < args.length; i++) this.stackMap.pop();
+
+    const emitFn = (op: StackOp) => this.emitOp(op);
+
+    switch (func) {
+      case 'p256Add':              emitP256Add(emitFn); break;
+      case 'p256Mul':              emitP256Mul(emitFn); break;
+      case 'p256MulGen':           emitP256MulGen(emitFn); break;
+      case 'p256Negate':           emitP256Negate(emitFn); break;
+      case 'p256OnCurve':          emitP256OnCurve(emitFn); break;
+      case 'p256EncodeCompressed': emitP256EncodeCompressed(emitFn); break;
+      case 'p384Add':              emitP384Add(emitFn); break;
+      case 'p384Mul':              emitP384Mul(emitFn); break;
+      case 'p384MulGen':           emitP384MulGen(emitFn); break;
+      case 'p384Negate':           emitP384Negate(emitFn); break;
+      case 'p384OnCurve':          emitP384OnCurve(emitFn); break;
+      case 'p384EncodeCompressed': emitP384EncodeCompressed(emitFn); break;
+      default: throw new Error(`Unknown NIST EC builtin: ${func}`);
+    }
+
+    this.stackMap.push(bindingName);
+    this.trackDepth();
+  }
+
+  private lowerVerifyECDSA(
+    bindingName: string,
+    func: string,
+    args: string[],
+    bindingIndex: number,
+    lastUses: Map<string, number>,
+  ): void {
+    if (args.length < 3) throw new Error(`${func} requires 3 arguments: msg, sig, pubkey`);
+    const [msg, sig, pubkey] = args as [string, string, string];
+    this.bringToTop(msg, this.isLastUse(msg, bindingIndex, lastUses));
+    this.bringToTop(sig, this.isLastUse(sig, bindingIndex, lastUses));
+    this.bringToTop(pubkey, this.isLastUse(pubkey, bindingIndex, lastUses));
+    this.stackMap.pop(); // pubkey
+    this.stackMap.pop(); // sig
+    this.stackMap.pop(); // msg
+    const emitFn = (op: StackOp) => this.emitOp(op);
+    if (func === 'verifyECDSA_P256') emitVerifyECDSA_P256(emitFn);
+    else emitVerifyECDSA_P384(emitFn);
     this.stackMap.push(bindingName);
     this.trackDepth();
   }

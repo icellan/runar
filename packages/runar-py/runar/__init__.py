@@ -21,6 +21,7 @@ from runar.builtins import (
     sqrt, gcd, divmod_, log2, bool_cast,
     mock_sig, mock_pub_key, mock_preimage,
     verify_wots,
+    verify_ecdsa_p256,
     verify_slh_dsa_sha2_128s, verify_slh_dsa_sha2_128f,
     verify_slh_dsa_sha2_192s, verify_slh_dsa_sha2_192f,
     verify_slh_dsa_sha2_256s, verify_slh_dsa_sha2_256f,
@@ -41,6 +42,7 @@ from runar.test_keys import (
 )
 from runar.wots import wots_keygen, wots_sign, WOTSKeyPair
 from runar.slhdsa_impl import slh_keygen, slh_verify, SLHKeyPair
+from runar.p256 import p256_keygen, p256_sign, P256KeyPair
 from runar.ec import (
     ec_add, ec_mul, ec_mul_gen, ec_negate, ec_on_curve,
     ec_mod_reduce, ec_encode_compressed, ec_make_point,
@@ -112,6 +114,10 @@ __all__ = [
     'mock_sig', 'mock_pub_key', 'mock_preimage',
     # WOTS+ keygen/sign
     'wots_keygen', 'wots_sign', 'WOTSKeyPair',
+    # P-256 keygen/sign
+    'p256_keygen', 'p256_sign', 'P256KeyPair',
+    # P-256 ECDSA verification
+    'verify_ecdsa_p256',
     # SLH-DSA keygen/verify
     'slh_keygen', 'slh_verify', 'SLHKeyPair',
     # Compile check

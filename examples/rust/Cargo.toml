@@ -61,6 +61,10 @@ name = "post_quantum_wallet"
 path = "post-quantum-wallet/PostQuantumWallet_test.rs"
 
 [[test]]
+name = "p256_wallet"
+path = "p256-wallet/P256Wallet_test.rs"
+
+[[test]]
 name = "sphincs_wallet"
 path = "sphincs-wallet/SPHINCSWallet_test.rs"
 

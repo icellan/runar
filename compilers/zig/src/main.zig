@@ -51,13 +51,17 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
     return opts;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
     if (args.len < 2) {
         printUsage();
@@ -80,7 +84,7 @@ pub fn main() !void {
             std.debug.print("{s}", .{message});
             std.process.exit(1);
         };
-        compileFromIR(allocator, args[2], opts) catch |err| {
+        compileFromIR(allocator, io, args[2], opts) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -99,7 +103,7 @@ pub fn main() !void {
             std.debug.print("{s}", .{message});
             std.process.exit(1);
         };
-        compileFromSource(allocator, args[2], opts) catch |err| {
+        compileFromSource(allocator, io, args[2], opts) catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             std.process.exit(1);
         };
@@ -127,9 +131,9 @@ pub fn main() !void {
         };
         const format = detectFormat(file_path);
         const result = if (format == .anf_json)
-            compileFromIR(allocator, file_path, opts)
+            compileFromIR(allocator, io, file_path, opts)
         else
-            compileFromSource(allocator, file_path, opts);
+            compileFromSource(allocator, io, file_path, opts);
         result catch |err| {
             std.debug.print("error: {s}\n", .{@errorName(err)});
             std.process.exit(1);
@@ -177,11 +181,24 @@ fn printUsage() void {
     , .{});
 }
 
+fn writeStdout(io: std.Io, data: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.writeAll(data);
+    try w.interface.flush();
+}
+
+fn writeStdoutLn(io: std.Io, data: []const u8) !void {
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(io, &buf);
+    try w.interface.writeAll(data);
+    try w.interface.writeAll("\n");
+    try w.interface.flush();
+}
+
 /// Compile from ANF IR JSON (passes 5-6 only)
-fn compileFromIR(allocator: std.mem.Allocator, path: []const u8, opts: CompileOptions) !void {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const source = try file.readToEndAlloc(allocator, 10 * 1024 * 1024);
+fn compileFromIR(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(10 * 1024 * 1024));
     defer allocator.free(source);
 
     const program = try json_parser.parseANFProgram(allocator, source);
@@ -190,8 +207,7 @@ fn compileFromIR(allocator: std.mem.Allocator, path: []const u8, opts: CompileOp
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(allocator, program);
         defer allocator.free(canonical);
-        const stdout = std.fs.File.stdout();
-        try stdout.writeAll(canonical);
+        try writeStdout(io, canonical);
         return;
     }
 
@@ -217,28 +233,22 @@ fn compileFromIR(allocator: std.mem.Allocator, path: []const u8, opts: CompileOp
         const after = idx + marker.len;
         const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
         const hex = artifact[after..end];
-        const stdout = std.fs.File.stdout();
-        try stdout.writeAll(hex);
-        try stdout.writeAll("\n");
+        try writeStdoutLn(io, hex);
         return;
     }
 
     const artifact = try emit.emitArtifact(allocator, optimized_stack_program, program);
     defer allocator.free(artifact);
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(artifact);
-    try stdout.writeAll("\n");
+    try writeStdoutLn(io, artifact);
 }
 
 /// Full pipeline: source -> parse -> validate -> typecheck -> ANF -> stack -> emit
-fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: CompileOptions) !void {
+fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8, opts: CompileOptions) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const work_allocator = arena.allocator();
 
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const source = try file.readToEndAlloc(work_allocator, 1 * 1024 * 1024);
+    const source = try std.Io.Dir.cwd().readFileAlloc(io, path, work_allocator, .limited(1 * 1024 * 1024));
 
     const format = detectFormat(path);
 
@@ -360,8 +370,7 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
     // --emit-ir: output canonical ANF IR JSON and stop
     if (opts.emit_ir) {
         const canonical = try json_parser.serializeCanonicalJSON(work_allocator, program);
-        const stdout = std.fs.File.stdout();
-        try stdout.writeAll(canonical);
+        try writeStdout(io, canonical);
         return;
     }
 
@@ -387,18 +396,14 @@ fn compileFromSource(allocator: std.mem.Allocator, path: []const u8, opts: Compi
         const after = idx + marker.len;
         const end = std.mem.indexOfPos(u8, artifact, after, "\"") orelse return error.MissingHex;
         const hex = artifact[after..end];
-        const stdout = std.fs.File.stdout();
-        try stdout.writeAll(hex);
-        try stdout.writeAll("\n");
+        try writeStdoutLn(io, hex);
         return;
     }
 
     // Pass 6: Emit full artifact
     const artifact = try emit.emitArtifact(work_allocator, optimized_stack_program, program);
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(artifact);
-    try stdout.writeAll("\n");
+    try writeStdoutLn(io, artifact);
 
     std.debug.print("Compiled: {s}\n", .{path});
 }

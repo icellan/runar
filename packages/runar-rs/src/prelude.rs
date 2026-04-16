@@ -155,6 +155,12 @@ pub use crate::ec::{
 
 pub use crate::wots::{wots_keygen, wots_sign, WotsKeyPair};
 
+// ---------------------------------------------------------------------------
+// P-256 (NIST P-256 / secp256r1) off-chain helpers for testing
+// ---------------------------------------------------------------------------
+
+pub use crate::p256::{p256_keygen, p256_sign, verify_ecdsa_p256, P256KeyPair};
+
 pub use crate::slh_dsa::{
     slh_keygen, slh_sign, slh_verify, SlhKeyPair, SlhParams,
     SLH_SHA2_128S, SLH_SHA2_128F, SLH_SHA2_192S, SLH_SHA2_192F,

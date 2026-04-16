@@ -48,7 +48,7 @@ module RunarCompiler
 
     BYTE_TYPES = %w[
       ByteString PubKey Sig Sha256 Ripemd160 Addr SigHashPreimage
-      RabinSig RabinPubKey Point
+      RabinSig RabinPubKey Point P256Point P384Point
     ].to_set.freeze
     private_constant :BYTE_TYPES
 
@@ -56,6 +56,8 @@ module RunarCompiler
       sha256 ripemd160 hash160 hash256 cat substr num2bin reverseBytes
       left right int2str toByteString pack ecAdd ecMul ecMulGen ecNegate
       ecMakePoint ecEncodeCompressed blake3Compress blake3Hash
+      p256Add p256Mul p256MulGen p256Negate p256EncodeCompressed
+      p384Add p384Mul p384MulGen p384Negate p384EncodeCompressed
     ].to_set.freeze
     private_constant :BYTE_RETURNING_FUNCTIONS
 

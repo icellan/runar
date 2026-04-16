@@ -435,6 +435,16 @@ function mapBuiltinName(name: string): string {
     'ec_make_point': 'ecMakePoint',
     'ec_point_x': 'ecPointX',
     'ec_point_y': 'ecPointY',
+    // P-256 / secp256r1
+    'p256_add': 'p256Add',
+    'p256_mul': 'p256Mul',
+    'p256_mul_gen': 'p256MulGen',
+    'p256_negate': 'p256Negate',
+    'p256_on_curve': 'p256OnCurve',
+    'p256_encode_compressed': 'p256EncodeCompressed',
+    'verify_ecdsa_p256': 'verifyECDSA_P256',
+    // P-384 / secp384r1
+    'verify_ecdsa_p384': 'verifyECDSA_P384',
     'bb_field_add': 'bbFieldAdd',
     'bb_field_sub': 'bbFieldSub',
     'bb_field_mul': 'bbFieldMul',
@@ -475,13 +485,16 @@ function mapPyType(name: string): string {
     case 'RabinSig': return 'RabinSig';
     case 'RabinPubKey': return 'RabinPubKey';
     case 'Point': return 'Point';
+    case 'P256Point': return 'P256Point';
+    case 'P384Point': return 'P384Point';
     default: return name;
   }
 }
 
 const PRIMITIVE_TYPES = new Set<string>([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
+  'Point', 'P256Point', 'P384Point', 'void',
 ]);
 
 function makePrimitiveOrCustom(name: string): TypeNode {

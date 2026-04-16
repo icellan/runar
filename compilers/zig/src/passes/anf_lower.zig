@@ -85,7 +85,8 @@ pub fn lowerToANF(allocator: Allocator, contract: ContractNode) LowerError!ANFPr
 fn isByteType(t: RunarType) bool {
     return switch (t) {
         .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr,
-        .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point => true,
+        .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point,
+        .p256_point, .p384_point => true,
         else => false,
     };
 }
@@ -100,6 +101,10 @@ fn isByteReturningFunction(name: []const u8) bool {
         .{ "ecMulGen", {} },     .{ "ecNegate", {} },     .{ "ecMakePoint", {} },
         .{ "ecEncodeCompressed", {} },
         .{ "blake3Compress", {} }, .{ "blake3Hash", {} },
+        .{ "p256Add", {} },      .{ "p256Mul", {} },      .{ "p256MulGen", {} },
+        .{ "p256Negate", {} },   .{ "p256EncodeCompressed", {} },
+        .{ "p384Add", {} },      .{ "p384Mul", {} },      .{ "p384MulGen", {} },
+        .{ "p384Negate", {} },   .{ "p384EncodeCompressed", {} },
     });
     return funcs.get(name) != null;
 }

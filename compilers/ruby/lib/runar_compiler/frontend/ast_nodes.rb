@@ -231,6 +231,8 @@ module RunarCompiler
       RabinPubKey
       void
       Point
+      P256Point
+      P384Point
     ].to_set.freeze
 
     # Return true if +name+ is a recognized Runar primitive type.

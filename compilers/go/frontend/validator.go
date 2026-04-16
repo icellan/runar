@@ -95,6 +95,8 @@ var validPropTypes = map[string]bool{
 	"RabinSig":       true,
 	"RabinPubKey":    true,
 	"Point":          true,
+	"P256Point":      true,
+	"P384Point":      true,
 }
 
 func (ctx *validationContext) validateProperties() {

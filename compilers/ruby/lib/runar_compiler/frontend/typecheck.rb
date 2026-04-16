@@ -61,6 +61,22 @@ module RunarCompiler
       "ecMakePoint"        => FuncSig.new(params: ["bigint", "bigint"], return_type: "Point"),
       "ecPointX"           => FuncSig.new(params: ["Point"], return_type: "bigint"),
       "ecPointY"           => FuncSig.new(params: ["Point"], return_type: "bigint"),
+      # P-256 (secp256r1 / NIST P-256)
+      "p256Add"              => FuncSig.new(params: ["P256Point", "P256Point"], return_type: "P256Point"),
+      "p256Mul"              => FuncSig.new(params: ["P256Point", "bigint"], return_type: "P256Point"),
+      "p256MulGen"           => FuncSig.new(params: ["bigint"], return_type: "P256Point"),
+      "p256Negate"           => FuncSig.new(params: ["P256Point"], return_type: "P256Point"),
+      "p256OnCurve"          => FuncSig.new(params: ["P256Point"], return_type: "boolean"),
+      "p256EncodeCompressed" => FuncSig.new(params: ["P256Point"], return_type: "ByteString"),
+      "verifyECDSA_P256"     => FuncSig.new(params: ["ByteString", "ByteString", "ByteString"], return_type: "boolean"),
+      # P-384 (secp384r1 / NIST P-384)
+      "p384Add"              => FuncSig.new(params: ["P384Point", "P384Point"], return_type: "P384Point"),
+      "p384Mul"              => FuncSig.new(params: ["P384Point", "bigint"], return_type: "P384Point"),
+      "p384MulGen"           => FuncSig.new(params: ["bigint"], return_type: "P384Point"),
+      "p384Negate"           => FuncSig.new(params: ["P384Point"], return_type: "P384Point"),
+      "p384OnCurve"          => FuncSig.new(params: ["P384Point"], return_type: "boolean"),
+      "p384EncodeCompressed" => FuncSig.new(params: ["P384Point"], return_type: "ByteString"),
+      "verifyECDSA_P384"     => FuncSig.new(params: ["ByteString", "ByteString", "ByteString"], return_type: "boolean"),
       "sha256Compress"     => FuncSig.new(params: ["ByteString", "ByteString"], return_type: "ByteString"),
       "sha256Finalize"     => FuncSig.new(params: ["ByteString", "ByteString", "bigint"], return_type: "ByteString"),
       "bbFieldAdd"         => FuncSig.new(params: ["bigint", "bigint"], return_type: "bigint"),
@@ -125,7 +141,7 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     BYTESTRING_SUBTYPES = %w[
-      ByteString PubKey Sig Sha256 Ripemd160 Addr SigHashPreimage Point
+      ByteString PubKey Sig Sha256 Ripemd160 Addr SigHashPreimage Point P256Point P384Point
     ].to_set.freeze
 
     BIGINT_SUBTYPES = %w[

@@ -112,6 +112,22 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
     .{ "ecMakePoint", sig(&.{ .bigint, .bigint }, .point) },
     .{ "ecPointX", sig(&.{.point}, .bigint) },
     .{ "ecPointY", sig(&.{.point}, .bigint) },
+    // P-256 (secp256r1)
+    .{ "p256Add", sig(&.{ .p256_point, .p256_point }, .p256_point) },
+    .{ "p256Mul", sig(&.{ .p256_point, .bigint }, .p256_point) },
+    .{ "p256MulGen", sig(&.{.bigint}, .p256_point) },
+    .{ "p256Negate", sig(&.{.p256_point}, .p256_point) },
+    .{ "p256OnCurve", sig(&.{.p256_point}, .boolean) },
+    .{ "p256EncodeCompressed", sig(&.{.p256_point}, .byte_string) },
+    .{ "verifyECDSA_P256", sig(&.{ .byte_string, .byte_string, .byte_string }, .boolean) },
+    // P-384 (secp384r1)
+    .{ "p384Add", sig(&.{ .p384_point, .p384_point }, .p384_point) },
+    .{ "p384Mul", sig(&.{ .p384_point, .bigint }, .p384_point) },
+    .{ "p384MulGen", sig(&.{.bigint}, .p384_point) },
+    .{ "p384Negate", sig(&.{.p384_point}, .p384_point) },
+    .{ "p384OnCurve", sig(&.{.p384_point}, .boolean) },
+    .{ "p384EncodeCompressed", sig(&.{.p384_point}, .byte_string) },
+    .{ "verifyECDSA_P384", sig(&.{ .byte_string, .byte_string, .byte_string }, .boolean) },
     // SHA-256 / Blake3 compression
     .{ "sha256Compress", sig(&.{ .byte_string, .byte_string }, .byte_string) },
     .{ "sha256Finalize", sig(&.{ .byte_string, .byte_string, .bigint }, .byte_string) },
@@ -178,7 +194,8 @@ const builtin_functions = std.StaticStringMap(FuncSig).initComptime(.{
 /// ByteString-family types: all are subtypes of ByteString.
 fn isByteFamily(t: RunarType) bool {
     return switch (t) {
-        .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr, .sig_hash_preimage, .point => true,
+        .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr, .sig_hash_preimage, .point,
+        .p256_point, .p384_point => true,
         else => false,
     };
 }
@@ -1057,6 +1074,12 @@ test "builtin_functions: all 60+ entries present" {
         "ecMul",           "ecMulGen",          "ecNegate",
         "ecOnCurve",       "ecModReduce",       "ecEncodeCompressed",
         "ecMakePoint",     "ecPointX",          "ecPointY",
+        "p256Add",         "p256Mul",           "p256MulGen",
+        "p256Negate",      "p256OnCurve",       "p256EncodeCompressed",
+        "verifyECDSA_P256",
+        "p384Add",         "p384Mul",           "p384MulGen",
+        "p384Negate",      "p384OnCurve",       "p384EncodeCompressed",
+        "verifyECDSA_P384",
         "sha256Compress",  "sha256Finalize",    "blake3Compress",
         "blake3Hash",
         "bbFieldAdd",      "bbFieldSub",        "bbFieldMul",

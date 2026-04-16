@@ -44,6 +44,8 @@ module RunarCompiler
       RabinSig
       RabinPubKey
       Point
+      P256Point
+      P384Point
     ].to_set.freeze
 
     # Validate a Runar AST against language subset constraints.

@@ -287,3 +287,44 @@ class ECDemo extends SmartContract {
     assert(ecOnCurve(result));
   }
 }
+
+// ---------------------------------------------------------------------------
+// P-256 (NIST P-256 / secp256r1) EC primitives
+// ---------------------------------------------------------------------------
+//
+// Rúnar also provides equivalent primitives for the P-256 curve alongside
+// secp256k1. P-256 is the curve used by NIST FIPS 186-4, TLS, WebAuthn, and
+// most hardware security modules. The API mirrors the secp256k1 builtins:
+//
+//   secp256k1      →  P-256 equivalent
+//   ──────────────────────────────────────────────────────
+//   ecMulGen(k)    →  p256MulGen(k)      // k * G₂₅₆
+//   ecOnCurve(p)   →  p256OnCurve(p)     // y² = x³ - 3x + b₂₅₆ (mod p₂₅₆)
+//   ecAdd(a, b)    →  p256Add(a, b)
+//   ecMul(p, k)    →  p256Mul(p, k)
+//   ecNegate(p)    →  p256Negate(p)
+//   ecEncode...(p) →  p256EncodeCompressed(p)
+//
+// Additionally, verifyECDSA_P256(msg, sig, pubkey) verifies a 64-byte raw
+// ECDSA signature (r[32] || s[32]) over a SHA-256 hash of msg, with pubkey
+// as a 33-byte compressed P-256 public key.
+//
+// Example pattern (hybrid secp256k1 + P-256 wallet):
+//
+//   import { SmartContract, assert, hash160, checkSig, verifyECDSA_P256 } from 'runar-lang';
+//
+//   class P256Wallet extends SmartContract {
+//     readonly ecdsaPubKeyHash: Addr;     // HASH160 of secp256k1 pubkey
+//     readonly p256PubKeyHash: ByteString; // HASH160 of P-256 compressed pubkey
+//
+//     public spend(p256Sig: ByteString, p256PubKey: ByteString, sig: Sig, pubKey: PubKey) {
+//       // Bind spend to this transaction via secp256k1 OP_CHECKSIG
+//       assert(hash160(pubKey) === this.ecdsaPubKeyHash);
+//       assert(checkSig(sig, pubKey));
+//       // Authorize secp256k1 sig via P-256 (WebAuthn / HSM key)
+//       assert(hash160(p256PubKey) === this.p256PubKeyHash);
+//       assert(verifyECDSA_P256(sig, p256Sig, p256PubKey));
+//     }
+//   }
+//
+// See examples/ts/p256-wallet/P256Wallet.runar.ts for the full implementation.

@@ -94,6 +94,8 @@ _VALID_PROP_TYPES: frozenset[str] = frozenset({
     "RabinSig",
     "RabinPubKey",
     "Point",
+    "P256Point",
+    "P384Point",
 })
 
 
