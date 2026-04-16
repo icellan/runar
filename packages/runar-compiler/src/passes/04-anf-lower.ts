@@ -1031,6 +1031,7 @@ function lowerDecrementExpr(
 /** Byte-typed primitive names — values that are already byte sequences. */
 const BYTE_TYPES = new Set([
   'ByteString', 'PubKey', 'Sig', 'Sha256', 'Ripemd160', 'Addr', 'SigHashPreimage', 'Point',
+  'P256Point', 'P384Point',
 ]);
 
 /** Builtin functions that return byte-typed values. */
@@ -1038,6 +1039,8 @@ const BYTE_RETURNING_FUNCTIONS = new Set([
   'sha256', 'ripemd160', 'hash160', 'hash256', 'cat', 'num2bin', 'int2str',
   'reverseBytes', 'substr', 'left', 'right',
   'ecAdd', 'ecMul', 'ecMulGen', 'ecNegate', 'ecMakePoint', 'ecEncodeCompressed',
+  'p256Add', 'p256Mul', 'p256MulGen', 'p256Negate', 'p256EncodeCompressed',
+  'p384Add', 'p384Mul', 'p384MulGen', 'p384Negate', 'p384EncodeCompressed',
   'extractOutpoint', 'extractHashPrevouts', 'extractHashSequence', 'extractOutputHash',
   'extractVersion', 'extractLocktime', 'extractSigHashType',
   'blake3Compress', 'blake3Hash',

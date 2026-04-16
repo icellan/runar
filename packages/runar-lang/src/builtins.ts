@@ -17,6 +17,8 @@ import type {
   RabinPubKey,
   RabinSig,
   Point,
+  P256Point,
+  P384Point,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -549,6 +551,126 @@ export function ecPointX(_p: Point): bigint {
  */
 export function ecPointY(_p: Point): bigint {
   return compilerStub('ecPointY');
+}
+
+// ---------------------------------------------------------------------------
+// Elliptic curve point operations (P-256 / NIST P-256 / secp256r1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Add two P-256 curve points.
+ * Compiled to inlined affine point addition using modular arithmetic opcodes.
+ */
+export function p256Add(_a: P256Point, _b: P256Point): P256Point {
+  return compilerStub('p256Add');
+}
+
+/**
+ * Scalar multiplication of a P-256 point by an integer.
+ * Compiled to double-and-add using Jacobian coordinates.
+ */
+export function p256Mul(_p: P256Point, _k: bigint): P256Point {
+  return compilerStub('p256Mul');
+}
+
+/**
+ * Scalar multiplication of the P-256 generator point by an integer.
+ * Equivalent to `p256Mul(P256_G, k)` but the generator is hardcoded.
+ */
+export function p256MulGen(_k: bigint): P256Point {
+  return compilerStub('p256MulGen');
+}
+
+/**
+ * Negate a P-256 curve point: returns (x, p - y).
+ */
+export function p256Negate(_p: P256Point): P256Point {
+  return compilerStub('p256Negate');
+}
+
+/**
+ * Check if a point lies on the P-256 curve: y² ≡ x³ - 3x + b (mod p).
+ */
+export function p256OnCurve(_p: P256Point): boolean {
+  return compilerStub('p256OnCurve');
+}
+
+/**
+ * Encode a P-256 point as a 33-byte compressed public key (02/03 prefix + x).
+ */
+export function p256EncodeCompressed(_p: P256Point): ByteString {
+  return compilerStub('p256EncodeCompressed');
+}
+
+/**
+ * Verify an ECDSA signature over P-256 (secp256r1).
+ *
+ * @param msg    - The 32-byte message hash (e.g. SHA-256 digest).
+ * @param sig    - 64-byte raw signature (r[32] || s[32]).
+ * @param pubkey - 33-byte compressed P-256 public key.
+ */
+export function verifyECDSA_P256(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
+  return compilerStub('verifyECDSA_P256');
+}
+
+// ---------------------------------------------------------------------------
+// Elliptic curve point operations (P-384 / NIST P-384 / secp384r1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Add two P-384 curve points.
+ * Compiled to inlined affine point addition using modular arithmetic opcodes.
+ */
+export function p384Add(_a: P384Point, _b: P384Point): P384Point {
+  return compilerStub('p384Add');
+}
+
+/**
+ * Scalar multiplication of a P-384 point by an integer.
+ * Compiled to double-and-add using Jacobian coordinates.
+ */
+export function p384Mul(_p: P384Point, _k: bigint): P384Point {
+  return compilerStub('p384Mul');
+}
+
+/**
+ * Scalar multiplication of the P-384 generator point by an integer.
+ * Equivalent to `p384Mul(P384_G, k)` but the generator is hardcoded.
+ */
+export function p384MulGen(_k: bigint): P384Point {
+  return compilerStub('p384MulGen');
+}
+
+/**
+ * Negate a P-384 curve point: returns (x, p - y).
+ */
+export function p384Negate(_p: P384Point): P384Point {
+  return compilerStub('p384Negate');
+}
+
+/**
+ * Check if a point lies on the P-384 curve: y² ≡ x³ - 3x + b (mod p).
+ */
+export function p384OnCurve(_p: P384Point): boolean {
+  return compilerStub('p384OnCurve');
+}
+
+/**
+ * Encode a P-384 point as a 49-byte compressed public key (02/03 prefix + x).
+ */
+export function p384EncodeCompressed(_p: P384Point): ByteString {
+  return compilerStub('p384EncodeCompressed');
+}
+
+/**
+ * Verify an ECDSA signature over P-384 (secp384r1).
+ *
+ * @param msg    - The 48-byte message hash (e.g. SHA-384 digest).
+ * @param sig    - 96-byte raw signature (r[48] || s[48]).
+ * @param pubkey - 49-byte compressed P-384 public key.
+ */
+export function verifyECDSA_P384(_msg: ByteString, _sig: ByteString, _pubkey: ByteString): boolean {
+  return compilerStub('verifyECDSA_P384');
 }
 
 // ---------------------------------------------------------------------------

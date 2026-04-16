@@ -32,6 +32,8 @@ export {
   SigHashPreimage,
   OpCodeType,
   Point,
+  P256Point,
+  P384Point,
   SigHash,
   // Pure types (no runtime value):
   type ByteString,
@@ -100,7 +102,7 @@ export {
   // BLAKE3
   blake3Compress,
   blake3Hash,
-  // Elliptic curve operations
+  // Elliptic curve operations (secp256k1)
   ecAdd,
   ecMul,
   ecMulGen,
@@ -111,6 +113,22 @@ export {
   ecMakePoint,
   ecPointX,
   ecPointY,
+  // Elliptic curve operations (P-256 / secp256r1)
+  p256Add,
+  p256Mul,
+  p256MulGen,
+  p256Negate,
+  p256OnCurve,
+  p256EncodeCompressed,
+  verifyECDSA_P256,
+  // Elliptic curve operations (P-384 / secp384r1)
+  p384Add,
+  p384Mul,
+  p384MulGen,
+  p384Negate,
+  p384OnCurve,
+  p384EncodeCompressed,
+  verifyECDSA_P384,
   // Baby Bear field arithmetic
   bbFieldAdd,
   bbFieldSub,

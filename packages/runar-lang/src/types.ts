@@ -20,6 +20,8 @@ declare const Sha256Brand: unique symbol;
 declare const SigHashPreimageBrand: unique symbol;
 declare const OpCodeTypeBrand: unique symbol;
 declare const PointBrand: unique symbol;
+declare const P256PointBrand: unique symbol;
+declare const P384PointBrand: unique symbol;
 
 // ---------------------------------------------------------------------------
 // Core branded types
@@ -65,6 +67,12 @@ export type OpCodeType = ByteString & { readonly [OpCodeTypeBrand]: 'OpCodeType'
 
 /** Elliptic curve point — 64 bytes (x[32] || y[32], big-endian unsigned, no prefix). */
 export type Point = ByteString & { readonly [PointBrand]: 'Point' };
+
+/** P-256 (NIST P-256 / secp256r1) curve point — 64 bytes (x[32] || y[32], big-endian unsigned, no prefix). */
+export type P256Point = ByteString & { readonly [P256PointBrand]: 'P256Point' };
+
+/** P-384 (NIST P-384 / secp384r1) curve point — 96 bytes (x[48] || y[48], big-endian unsigned, no prefix). */
+export type P384Point = ByteString & { readonly [P384PointBrand]: 'P384Point' };
 
 // ---------------------------------------------------------------------------
 // FixedArray<T, N> — compile-time fixed-size tuple
@@ -229,6 +237,24 @@ export function OpCodeType(hex: string): OpCodeType {
 export function Point(hex: string): Point {
   assertHexLength(hex, 64, 'Point');
   return hex as unknown as Point;
+}
+
+/**
+ * Cast a hex string to `P256Point`. Validates 64 bytes (128 hex chars).
+ * Represents a point on the P-256 (secp256r1) curve as x[32]||y[32].
+ */
+export function P256Point(hex: string): P256Point {
+  assertHexLength(hex, 64, 'P256Point');
+  return hex as unknown as P256Point;
+}
+
+/**
+ * Cast a hex string to `P384Point`. Validates 96 bytes (192 hex chars).
+ * Represents a point on the P-384 (secp384r1) curve as x[48]||y[48].
+ */
+export function P384Point(hex: string): P384Point {
+  assertHexLength(hex, 96, 'P384Point');
+  return hex as unknown as P384Point;
 }
 
 // ---------------------------------------------------------------------------
