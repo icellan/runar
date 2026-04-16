@@ -10,6 +10,7 @@
 
 pub mod ec;
 pub mod ecdsa;
+pub mod p256;
 pub mod prelude;
 pub mod rabin;
 pub mod sdk;

@@ -9,7 +9,7 @@
  * We import types from runar-ir-schema (the Rúnar AST definitions).
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, createVerify, createPublicKey } from 'node:crypto';
 import { wotsVerify as wotsVerifyImpl } from '../crypto/wots.js';
 import {
   slhVerify as slhVerifyImpl,
@@ -1034,6 +1034,39 @@ export class RunarInterpreter {
         return { kind: 'bigint', value: ecPointYImpl(pt) };
       }
 
+      // P-256 ECDSA verification — real implementation using Node.js crypto
+      case 'verifyECDSA_P256': {
+        const msg = this.toBytes(args[0]!);
+        const rawSig = this.toBytes(args[1]!); // 64-byte r||s
+        const compressedPub = this.toBytes(args[2]!); // 33-byte compressed
+        return { kind: 'boolean', value: verifyECDSA_P256_impl(msg, rawSig, compressedPub) };
+      }
+
+      // P-384 ECDSA verification (mocked — always true in interpreter)
+      case 'verifyECDSA_P384':
+        return { kind: 'boolean', value: true };
+
+      // P-256 / P-384 curve operations (mocked — return zero bytes)
+      case 'p256Add':
+      case 'p256Mul':
+      case 'p256MulGen':
+      case 'p256Negate':
+      case 'p384Add':
+      case 'p384Mul':
+      case 'p384MulGen':
+      case 'p384Negate':
+        return { kind: 'bytes', value: new Uint8Array(64) };
+
+      case 'p256OnCurve':
+      case 'p384OnCurve':
+        return { kind: 'boolean', value: true };
+
+      case 'p256EncodeCompressed':
+        return { kind: 'bytes', value: new Uint8Array(33) };
+
+      case 'p384EncodeCompressed':
+        return { kind: 'bytes', value: new Uint8Array(49) };
+
       case 'blake3Compress': {
         const cv = this.toBytes(args[0]!);
         const block = this.toBytes(args[1]!);
@@ -1314,6 +1347,77 @@ function decodeScriptNumberLocal(bytes: Uint8Array): bigint {
     result = -result;
   }
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// P-256 ECDSA verification helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify a P-256 ECDSA signature using Node.js crypto.
+ *
+ * @param msg - The raw message bytes that were signed (hashed internally by the
+ *   P-256 codegen as SHA-256 before calling OP_CHECKSIG equivalent)
+ * @param rawSig - 64-byte raw r||s signature
+ * @param compressedPub - 33-byte compressed P-256 public key
+ */
+function verifyECDSA_P256_impl(
+  msg: Uint8Array,
+  rawSig: Uint8Array,
+  compressedPub: Uint8Array,
+): boolean {
+  try {
+    // Convert raw r||s (64 bytes) to DER for Node.js verify()
+    const r = rawSig.subarray(0, 32);
+    const s = rawSig.subarray(32, 64);
+
+    function encodeDERInt(bytes: Uint8Array): Uint8Array {
+      let start = 0;
+      while (start < bytes.length - 1 && bytes[start] === 0) start++;
+      const trimmed = bytes.subarray(start);
+      if ((trimmed[0]! & 0x80) !== 0) {
+        const padded = new Uint8Array(trimmed.length + 1);
+        padded.set(trimmed, 1);
+        return padded;
+      }
+      return trimmed;
+    }
+
+    const rDER = encodeDERInt(r);
+    const sDER = encodeDERInt(s);
+    const seqLen = 2 + rDER.length + 2 + sDER.length;
+    const der = new Uint8Array(2 + seqLen);
+    let off = 0;
+    der[off++] = 0x30;
+    der[off++] = seqLen;
+    der[off++] = 0x02;
+    der[off++] = rDER.length;
+    der.set(rDER, off); off += rDER.length;
+    der[off++] = 0x02;
+    der[off++] = sDER.length;
+    der.set(sDER, off);
+
+    // Build SPKI DER for the compressed P-256 key (33 bytes).
+    // SEQUENCE { SEQUENCE { OID id-ecPublicKey, OID prime256v1 },
+    //            BIT STRING { 0x00, compressedKey[33] } }
+    // Outer length = 19 (alg) + 2 (BIT STRING header) + 1 (unused bits) + 33 = 57 = 0x39
+    // BIT STRING length = 1 (unused) + 33 = 34 = 0x22
+    const spkiPrefix = new Uint8Array([
+      0x30, 0x39, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
+      0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03,
+      0x22, 0x00,
+    ]);
+    const spki = new Uint8Array(spkiPrefix.length + compressedPub.length);
+    spki.set(spkiPrefix);
+    spki.set(compressedPub, spkiPrefix.length);
+
+    const pubKeyObj = createPublicKey({ key: Buffer.from(spki), format: 'der', type: 'spki' });
+    const verifier = createVerify('SHA256');
+    verifier.update(Buffer.from(msg));
+    return verifier.verify(pubKeyObj, Buffer.from(der));
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
