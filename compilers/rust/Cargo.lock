@@ -642,6 +642,8 @@ version = "0.4.4"
 dependencies = [
  "clap",
  "hex",
+ "num-bigint",
+ "num-traits",
  "serde",
  "serde_json",
  "sha2",

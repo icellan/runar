@@ -10,6 +10,7 @@ pub mod blake3;
 pub mod bn254;
 pub mod ec;
 pub mod emit;
+pub mod p256_p384;
 pub mod fiat_shamir_kb;
 pub mod koalabear;
 pub mod merkle;

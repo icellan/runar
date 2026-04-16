@@ -428,6 +428,8 @@ const runar_type_map = std.StaticStringMap(RunarType).initComptime(.{
     .{ "RabinSig", .rabin_sig },
     .{ "RabinPubKey", .rabin_pub_key },
     .{ "Point", .point },
+    .{ "P256Point", .byte_string },
+    .{ "P384Point", .byte_string },
     .{ "OpCodeType", .op_code_type },
     .{ "FixedArray", .fixed_array },
     .{ "void", .void },

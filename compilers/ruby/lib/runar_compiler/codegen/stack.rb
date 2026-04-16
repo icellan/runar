@@ -77,6 +77,15 @@ module RunarCompiler::Codegen
     ecPointX ecPointY
   ]).freeze
 
+  # NIST EC (P-256 / P-384) builtin function names
+  NIST_EC_BUILTIN_NAMES = Set.new(%w[
+    p256Add p256Mul p256MulGen p256Negate p256OnCurve p256EncodeCompressed
+    p384Add p384Mul p384MulGen p384Negate p384OnCurve p384EncodeCompressed
+  ]).freeze
+
+  # ECDSA verification function names
+  VERIFY_ECDSA_NAMES = Set.new(%w[verifyECDSA_P256 verifyECDSA_P384]).freeze
+
   # Baby Bear field arithmetic builtin function names
   BB_BUILTIN_NAMES = Set.new(%w[
     bbFieldAdd bbFieldSub bbFieldMul bbFieldInv
@@ -305,6 +314,18 @@ module RunarCompiler::Codegen
   # @return [Boolean]
   def self.ec_builtin?(name)
     EC_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.nist_ec_builtin?(name)
+    NIST_EC_BUILTIN_NAMES.include?(name)
+  end
+
+  # @param name [String]
+  # @return [Boolean]
+  def self.verify_ecdsa_builtin?(name)
+    VERIFY_ECDSA_NAMES.include?(name)
   end
 
   # @param name [String]
@@ -1249,6 +1270,18 @@ module RunarCompiler::Codegen
         return
       end
 
+      # NIST EC builtins (P-256 / P-384)
+      if RunarCompiler::Codegen.nist_ec_builtin?(func_name)
+        _lower_nist_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
+      # ECDSA verification builtins
+      if RunarCompiler::Codegen.verify_ecdsa_builtin?(func_name)
+        _lower_verify_ecdsa(binding_name, func_name, args, binding_index, last_uses)
+        return
+      end
+
       # Baby Bear field arithmetic builtins
       if RunarCompiler::Codegen.bb_builtin?(func_name)
         _lower_bb_builtin(binding_name, func_name, args, binding_index, last_uses)
@@ -2067,6 +2100,42 @@ module RunarCompiler::Codegen
 
       emit_fn = ->(op) { emit_op(op) }
       EC.dispatch_ec_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_nist_ec_builtin(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "p256_p384"
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      args.length.times { @sm.pop }
+
+      emit_fn = ->(op) { emit_op(op) }
+      NISTEC.dispatch_nist_ec_builtin(func_name, emit_fn)
+
+      @sm.push(binding_name)
+      _track_depth
+    end
+
+    def _lower_verify_ecdsa(binding_name, func_name, args, binding_index, last_uses)
+      require_relative "p256_p384"
+      if args.length < 3
+        raise "#{func_name} requires 3 arguments: msg, sig, pubkey"
+      end
+      # Bring all 3 args to top in order: msg, sig, pubkey
+      args.each do |arg|
+        is_last = _is_last_use(arg, binding_index, last_uses)
+        bring_to_top(arg, is_last)
+      end
+      @sm.pop # pubkey
+      @sm.pop # sig
+      @sm.pop # msg
+
+      emit_fn = ->(op) { emit_op(op) }
+      NISTEC.dispatch_verify_ecdsa(func_name, emit_fn)
 
       @sm.push(binding_name)
       _track_depth

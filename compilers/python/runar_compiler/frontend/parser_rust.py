@@ -110,6 +110,22 @@ _SPECIAL_BUILTINS: dict[str, str] = {
     "bin_2_num": "bin2num",
     "int_2_str": "int2str",
     "to_byte_string": "toByteString",
+    # P-256 (NIST secp256r1)
+    "p256_add":               "p256Add",
+    "p256_mul":               "p256Mul",
+    "p256_mul_gen":           "p256MulGen",
+    "p256_negate":            "p256Negate",
+    "p256_on_curve":          "p256OnCurve",
+    "p256_encode_compressed": "p256EncodeCompressed",
+    "verify_ecdsa_p256":      "verifyECDSA_P256",
+    # P-384 (NIST secp384r1)
+    "p384_add":               "p384Add",
+    "p384_mul":               "p384Mul",
+    "p384_mul_gen":           "p384MulGen",
+    "p384_negate":            "p384Negate",
+    "p384_on_curve":          "p384OnCurve",
+    "p384_encode_compressed": "p384EncodeCompressed",
+    "verify_ecdsa_p384":      "verifyECDSA_P384",
 }
 
 

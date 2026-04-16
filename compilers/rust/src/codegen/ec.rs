@@ -443,7 +443,7 @@ fn compose_point(t: &mut ECTracker, x_name: &str, y_name: &str, result_name: &st
 
 /// Emit inline byte reversal for a 32-byte value on TOS.
 /// After: reversed 32-byte value on TOS.
-fn emit_reverse_32(e: &mut dyn FnMut(StackOp)) {
+pub fn emit_reverse_32(e: &mut dyn FnMut(StackOp)) {
     // Push empty accumulator, swap with data
     e(StackOp::Opcode("OP_0".into()));
     e(StackOp::Swap);

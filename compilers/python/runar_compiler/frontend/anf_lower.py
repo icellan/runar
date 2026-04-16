@@ -96,6 +96,8 @@ _BYTE_TYPES: frozenset[str] = frozenset({
     "RabinSig",
     "RabinPubKey",
     "Point",
+    "P256Point",
+    "P384Point",
 })
 
 _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
@@ -120,6 +122,18 @@ _BYTE_RETURNING_FUNCTIONS: frozenset[str] = frozenset({
     "ecEncodeCompressed",
     "blake3Compress",
     "blake3Hash",
+    # P-256 point-returning functions
+    "p256Add",
+    "p256Mul",
+    "p256MulGen",
+    "p256Negate",
+    "p256EncodeCompressed",
+    # P-384 point-returning functions
+    "p384Add",
+    "p384Mul",
+    "p384MulGen",
+    "p384Negate",
+    "p384EncodeCompressed",
 })
 
 

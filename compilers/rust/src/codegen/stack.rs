@@ -123,6 +123,16 @@ fn is_bn254_builtin(name: &str) -> bool {
     )
 }
 
+fn is_nist_ec_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "p256Add" | "p256Mul" | "p256MulGen"
+            | "p256Negate" | "p256OnCurve" | "p256EncodeCompressed"
+            | "p384Add" | "p384Mul" | "p384MulGen"
+            | "p384Negate" | "p384OnCurve" | "p384EncodeCompressed"
+    )
+}
+
 fn is_merkle_builtin(name: &str) -> bool {
     matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
 }
@@ -1217,6 +1227,16 @@ impl LoweringContext {
 
         if is_ec_builtin(func_name) {
             self.lower_ec_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if is_nist_ec_builtin(func_name) {
+            self.lower_nist_ec_builtin(binding_name, func_name, args, binding_index, last_uses);
+            return;
+        }
+
+        if func_name == "verifyECDSA_P256" || func_name == "verifyECDSA_P384" {
+            self.lower_verify_ecdsa(binding_name, func_name, args, binding_index, last_uses);
             return;
         }
 
@@ -3781,6 +3801,87 @@ impl LoweringContext {
             "ecPointX" => super::ec::emit_ec_point_x(emit),
             "ecPointY" => super::ec::emit_ec_point_y(emit),
             _ => panic!("unknown EC builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
+    // NIST EC operations (P-256 / P-384) -- delegates to p256_p384.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_nist_ec_builtin(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        // Bring args to top in order
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        for _ in args {
+            self.sm.pop();
+        }
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        match func_name {
+            "p256Add" => super::p256_p384::emit_p256_add(emit),
+            "p256Mul" => super::p256_p384::emit_p256_mul(emit),
+            "p256MulGen" => super::p256_p384::emit_p256_mul_gen(emit),
+            "p256Negate" => super::p256_p384::emit_p256_negate(emit),
+            "p256OnCurve" => super::p256_p384::emit_p256_on_curve(emit),
+            "p256EncodeCompressed" => super::p256_p384::emit_p256_encode_compressed(emit),
+            "p384Add" => super::p256_p384::emit_p384_add(emit),
+            "p384Mul" => super::p256_p384::emit_p384_mul(emit),
+            "p384MulGen" => super::p256_p384::emit_p384_mul_gen(emit),
+            "p384Negate" => super::p256_p384::emit_p384_negate(emit),
+            "p384OnCurve" => super::p256_p384::emit_p384_on_curve(emit),
+            "p384EncodeCompressed" => super::p256_p384::emit_p384_encode_compressed(emit),
+            _ => panic!("unknown NIST EC builtin: {}", func_name),
+        }
+
+        self.sm.push(binding_name);
+        self.track_depth();
+    }
+
+    // -----------------------------------------------------------------------
+    // ECDSA verification (P-256 / P-384) -- delegates to p256_p384.rs
+    // -----------------------------------------------------------------------
+
+    fn lower_verify_ecdsa(
+        &mut self,
+        binding_name: &str,
+        func_name: &str,
+        args: &[String],
+        binding_index: usize,
+        last_uses: &HashMap<String, usize>,
+    ) {
+        assert!(
+            args.len() == 3,
+            "{} requires exactly 3 arguments (msg, sig, pubkey)",
+            func_name
+        );
+        // Bring all 3 args to top in order: msg, sig, pubkey
+        for arg in args.iter() {
+            let is_last = self.is_last_use(arg, binding_index, last_uses);
+            self.bring_to_top(arg, is_last);
+        }
+        self.sm.pop(); // pubkey
+        self.sm.pop(); // sig
+        self.sm.pop(); // msg
+
+        let emit = &mut |op: StackOp| self.ops.push(op);
+
+        if func_name == "verifyECDSA_P256" {
+            super::p256_p384::emit_verify_ecdsa_p256(emit);
+        } else {
+            super::p256_p384::emit_verify_ecdsa_p384(emit);
         }
 
         self.sm.push(binding_name);

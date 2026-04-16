@@ -100,6 +100,10 @@ fn isByteReturningFunction(name: []const u8) bool {
         .{ "ecMulGen", {} },     .{ "ecNegate", {} },     .{ "ecMakePoint", {} },
         .{ "ecEncodeCompressed", {} },
         .{ "blake3Compress", {} }, .{ "blake3Hash", {} },
+        .{ "p256Add", {} },      .{ "p256Mul", {} },      .{ "p256MulGen", {} },
+        .{ "p256Negate", {} },   .{ "p256EncodeCompressed", {} },
+        .{ "p384Add", {} },      .{ "p384Mul", {} },      .{ "p384MulGen", {} },
+        .{ "p384Negate", {} },   .{ "p384EncodeCompressed", {} },
     });
     return funcs.get(name) != null;
 }

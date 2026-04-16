@@ -1324,6 +1324,10 @@ func rustMapBuiltin(name string) string {
 		return "num2bin"
 	case "to_byte_string":
 		return "toByteString"
+	case "verify_ecdsa_p256":
+		return "verifyECDSA_P256"
+	case "verify_ecdsa_p384":
+		return "verifyECDSA_P384"
 	}
 	// General: snake_case → camelCase, then return as-is
 	return rustSnakeToCamel(name)

@@ -16,6 +16,7 @@ const crypto_builtins = @import("helpers/crypto_builtins.zig");
 const crypto_emitters = @import("helpers/crypto_emitters.zig");
 const blake3_emitters = @import("helpers/blake3_emitters.zig");
 const ec_emitters = @import("helpers/ec_emitters.zig");
+const nist_ec_emitters = @import("helpers/nist_ec_emitters.zig");
 const pq_emitters = @import("helpers/pq_emitters.zig");
 const sha256_emitters = @import("helpers/sha256_emitters.zig");
 const babybear_emitters = @import("helpers/babybear_emitters.zig");
@@ -1231,6 +1232,22 @@ const LowerCtx = struct {
         ecPairing,
         slhDsaVerify,
         schnorrVerify,
+        // NIST P-256
+        verifyECDSA_P256,
+        p256Add,
+        p256Mul,
+        p256MulGen,
+        p256Negate,
+        p256OnCurve,
+        p256EncodeCompressed,
+        // NIST P-384
+        verifyECDSA_P384,
+        p384Add,
+        p384Mul,
+        p384MulGen,
+        p384Negate,
+        p384OnCurve,
+        p384EncodeCompressed,
         // Baby Bear field arithmetic
         bbFieldAdd,
         bbFieldSub,
@@ -1387,6 +1404,22 @@ const LowerCtx = struct {
         .{ "merkleRootSha256", .merkleRootSha256 },
         .{ "merkleRootHash256", .merkleRootHash256 },
         .{ "super", .super_call },
+        // NIST P-256
+        .{ "verifyECDSA_P256", .verifyECDSA_P256 },
+        .{ "p256Add", .p256Add },
+        .{ "p256Mul", .p256Mul },
+        .{ "p256MulGen", .p256MulGen },
+        .{ "p256Negate", .p256Negate },
+        .{ "p256OnCurve", .p256OnCurve },
+        .{ "p256EncodeCompressed", .p256EncodeCompressed },
+        // NIST P-384
+        .{ "verifyECDSA_P384", .verifyECDSA_P384 },
+        .{ "p384Add", .p384Add },
+        .{ "p384Mul", .p384Mul },
+        .{ "p384MulGen", .p384MulGen },
+        .{ "p384Negate", .p384Negate },
+        .{ "p384OnCurve", .p384OnCurve },
+        .{ "p384EncodeCompressed", .p384EncodeCompressed },
     });
 
     fn lowerBuiltinCall(self: *LowerCtx, bind_name: []const u8, call: types.ANFBuiltinCall) LowerError!void {
@@ -1504,6 +1537,22 @@ const LowerCtx = struct {
             // Merkle proof verification
             .merkleRootSha256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_sha256),
             .merkleRootHash256 => try self.lowerMerkleBuiltin(bind_name, args, call.name, .merkle_root_hash256),
+            // NIST P-256
+            .verifyECDSA_P256 => try self.lowerNistEcBuiltin(bind_name, args, .verify_ecdsa_p256),
+            .p256Add => try self.lowerNistEcBuiltin(bind_name, args, .p256_add),
+            .p256Mul => try self.lowerNistEcBuiltin(bind_name, args, .p256_mul),
+            .p256MulGen => try self.lowerNistEcBuiltin(bind_name, args, .p256_mul_gen),
+            .p256Negate => try self.lowerNistEcBuiltin(bind_name, args, .p256_negate),
+            .p256OnCurve => try self.lowerNistEcBuiltin(bind_name, args, .p256_on_curve),
+            .p256EncodeCompressed => try self.lowerNistEcBuiltin(bind_name, args, .p256_encode_compressed),
+            // NIST P-384
+            .verifyECDSA_P384 => try self.lowerNistEcBuiltin(bind_name, args, .verify_ecdsa_p384),
+            .p384Add => try self.lowerNistEcBuiltin(bind_name, args, .p384_add),
+            .p384Mul => try self.lowerNistEcBuiltin(bind_name, args, .p384_mul),
+            .p384MulGen => try self.lowerNistEcBuiltin(bind_name, args, .p384_mul_gen),
+            .p384Negate => try self.lowerNistEcBuiltin(bind_name, args, .p384_negate),
+            .p384OnCurve => try self.lowerNistEcBuiltin(bind_name, args, .p384_on_curve),
+            .p384EncodeCompressed => try self.lowerNistEcBuiltin(bind_name, args, .p384_encode_compressed),
             // super() is the constructor superclass call — no-op in Bitcoin Script
             .super_call => {
                 try self.stack.push(self.allocator, bind_name);
@@ -1714,6 +1763,30 @@ const LowerCtx = struct {
         var bundle = ec_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.UnsupportedBuiltin => return error.InvalidBuiltin,
+            else => return error.UnsupportedOperation,
+        };
+        defer bundle.deinit();
+
+        for (bundle.ops) |op| {
+            try self.emitEcStackOp(op);
+        }
+
+        try self.stack.push(self.allocator, bind_name);
+        self.trackDepth();
+    }
+
+    fn lowerNistEcBuiltin(self: *LowerCtx, bind_name: []const u8, args: []const []const u8, builtin: crypto_builtins.CryptoBuiltin) LowerError!void {
+        if (args.len < crypto_builtins.requiredArgCount(builtin)) return LowerError.InvalidBuiltin;
+
+        for (args) |arg| {
+            try self.bringToTopAuto(arg);
+        }
+        for (args) |_| {
+            _ = self.stack.pop();
+        }
+
+        var bundle = nist_ec_emitters.buildBuiltinOps(self.allocator, builtin) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
             else => return error.UnsupportedOperation,
         };
         defer bundle.deinit();

@@ -182,6 +182,22 @@ _GO_BUILTIN_MAP: dict[str, str] = {
     "EC_P": "EC_P",
     "EC_N": "EC_N",
     "EC_G": "EC_G",
+    # P-256 (NIST secp256r1)
+    "VerifyECDSAP256":         "verifyECDSA_P256",
+    "P256Add":                 "p256Add",
+    "P256Mul":                 "p256Mul",
+    "P256MulGen":              "p256MulGen",
+    "P256Negate":              "p256Negate",
+    "P256OnCurve":             "p256OnCurve",
+    "P256EncodeCompressed":    "p256EncodeCompressed",
+    # P-384 (NIST secp384r1)
+    "VerifyECDSAP384":         "verifyECDSA_P384",
+    "P384Add":                 "p384Add",
+    "P384Mul":                 "p384Mul",
+    "P384MulGen":              "p384MulGen",
+    "P384Negate":              "p384Negate",
+    "P384OnCurve":             "p384OnCurve",
+    "P384EncodeCompressed":    "p384EncodeCompressed",
 }
 
 

@@ -81,6 +81,8 @@ module RunarCompiler
       class ECTracker
         # @return [Array<String>] named stack entries
         attr_accessor :nm
+        # @return [Proc] emit callback
+        attr_reader :e
 
         # @param init [Array<String>] initial stack names
         # @param emit [Proc] callback receiving a StackOp hash

@@ -141,6 +141,20 @@ fn map_builtin_name(name: &str) -> String {
         "percent_of" => return "percentOf".to_string(),
         "add_output" => return "addOutput".to_string(),
         "get_state_script" => return "getStateScript".to_string(),
+        "p256_add" => return "p256Add".to_string(),
+        "p256_mul" => return "p256Mul".to_string(),
+        "p256_mul_gen" => return "p256MulGen".to_string(),
+        "p256_negate" => return "p256Negate".to_string(),
+        "p256_on_curve" => return "p256OnCurve".to_string(),
+        "p256_encode_compressed" => return "p256EncodeCompressed".to_string(),
+        "verify_ecdsa_p256" => return "verifyECDSA_P256".to_string(),
+        "p384_add" => return "p384Add".to_string(),
+        "p384_mul" => return "p384Mul".to_string(),
+        "p384_mul_gen" => return "p384MulGen".to_string(),
+        "p384_negate" => return "p384Negate".to_string(),
+        "p384_on_curve" => return "p384OnCurve".to_string(),
+        "p384_encode_compressed" => return "p384EncodeCompressed".to_string(),
+        "verify_ecdsa_p384" => return "verifyECDSA_P384".to_string(),
         _ => {}
     }
 
@@ -172,6 +186,8 @@ fn map_py_type(name: &str) -> &str {
         "RabinSig" => "RabinSig",
         "RabinPubKey" => "RabinPubKey",
         "Point" => "Point",
+        "P256Point" => "P256Point",
+        "P384Point" => "P384Point",
         _ => name,
     }
 }

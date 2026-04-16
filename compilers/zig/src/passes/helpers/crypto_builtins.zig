@@ -28,6 +28,22 @@ pub const CryptoBuiltin = enum {
     bb_field_inv,
     merkle_root_sha256,
     merkle_root_hash256,
+    // NIST P-256 (secp256r1)
+    verify_ecdsa_p256,
+    p256_add,
+    p256_mul,
+    p256_mul_gen,
+    p256_negate,
+    p256_on_curve,
+    p256_encode_compressed,
+    // NIST P-384 (secp384r1)
+    verify_ecdsa_p384,
+    p384_add,
+    p384_mul,
+    p384_mul_gen,
+    p384_negate,
+    p384_on_curve,
+    p384_encode_compressed,
 };
 
 pub const CryptoBuiltinGroup = enum {
@@ -38,6 +54,7 @@ pub const CryptoBuiltinGroup = enum {
     ec,
     babybear,
     merkle,
+    nist_ec,
 };
 
 pub const CryptoBuiltinStatus = enum {
@@ -73,6 +90,22 @@ const builtin_map = std.StaticStringMap(CryptoBuiltin).initComptime(.{
     .{ "bbFieldInv", .bb_field_inv },
     .{ "merkleRootSha256", .merkle_root_sha256 },
     .{ "merkleRootHash256", .merkle_root_hash256 },
+    // NIST P-256
+    .{ "verifyECDSA_P256", .verify_ecdsa_p256 },
+    .{ "p256Add", .p256_add },
+    .{ "p256Mul", .p256_mul },
+    .{ "p256MulGen", .p256_mul_gen },
+    .{ "p256Negate", .p256_negate },
+    .{ "p256OnCurve", .p256_on_curve },
+    .{ "p256EncodeCompressed", .p256_encode_compressed },
+    // NIST P-384
+    .{ "verifyECDSA_P384", .verify_ecdsa_p384 },
+    .{ "p384Add", .p384_add },
+    .{ "p384Mul", .p384_mul },
+    .{ "p384MulGen", .p384_mul_gen },
+    .{ "p384Negate", .p384_negate },
+    .{ "p384OnCurve", .p384_on_curve },
+    .{ "p384EncodeCompressed", .p384_encode_compressed },
 });
 
 pub fn classify(name: []const u8) ?CryptoBuiltin {
@@ -108,6 +141,22 @@ pub fn displayName(builtin: CryptoBuiltin) []const u8 {
         .bb_field_inv => "bbFieldInv",
         .merkle_root_sha256 => "merkleRootSha256",
         .merkle_root_hash256 => "merkleRootHash256",
+        // NIST P-256
+        .verify_ecdsa_p256 => "verifyECDSA_P256",
+        .p256_add => "p256Add",
+        .p256_mul => "p256Mul",
+        .p256_mul_gen => "p256MulGen",
+        .p256_negate => "p256Negate",
+        .p256_on_curve => "p256OnCurve",
+        .p256_encode_compressed => "p256EncodeCompressed",
+        // NIST P-384
+        .verify_ecdsa_p384 => "verifyECDSA_P384",
+        .p384_add => "p384Add",
+        .p384_mul => "p384Mul",
+        .p384_mul_gen => "p384MulGen",
+        .p384_negate => "p384Negate",
+        .p384_on_curve => "p384OnCurve",
+        .p384_encode_compressed => "p384EncodeCompressed",
     };
 }
 
@@ -145,6 +194,21 @@ pub fn groupOf(builtin: CryptoBuiltin) CryptoBuiltinGroup {
         .merkle_root_sha256,
         .merkle_root_hash256,
         => .merkle,
+        .verify_ecdsa_p256,
+        .p256_add,
+        .p256_mul,
+        .p256_mul_gen,
+        .p256_negate,
+        .p256_on_curve,
+        .p256_encode_compressed,
+        .verify_ecdsa_p384,
+        .p384_add,
+        .p384_mul,
+        .p384_mul_gen,
+        .p384_negate,
+        .p384_on_curve,
+        .p384_encode_compressed,
+        => .nist_ec,
     };
 }
 
@@ -194,6 +258,22 @@ pub fn requiredArgCount(builtin: CryptoBuiltin) usize {
         .merkle_root_sha256,
         .merkle_root_hash256,
         => 4,
+        // NIST P-256 arg counts
+        .verify_ecdsa_p256 => 3, // msg, sig, pk
+        .p256_add => 2,
+        .p256_mul => 2,
+        .p256_mul_gen => 1,
+        .p256_negate => 1,
+        .p256_on_curve => 1,
+        .p256_encode_compressed => 1,
+        // NIST P-384 arg counts
+        .verify_ecdsa_p384 => 3, // msg, sig, pk
+        .p384_add => 2,
+        .p384_mul => 2,
+        .p384_mul_gen => 1,
+        .p384_negate => 1,
+        .p384_on_curve => 1,
+        .p384_encode_compressed => 1,
     };
 }
 
