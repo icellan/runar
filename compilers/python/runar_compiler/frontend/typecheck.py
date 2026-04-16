@@ -222,6 +222,12 @@ def is_subtype(actual: str, expected: str) -> bool:
         return True
     if expected == "ByteString" and actual in _BYTESTRING_SUBTYPES:
         return True
+    # ByteString is compatible with any ByteString subtype (e.g. passing ByteString where P256Point expected)
+    if actual == "ByteString" and expected in _BYTESTRING_SUBTYPES:
+        return True
+    # Both in the ByteString family -> compatible
+    if actual in _BYTESTRING_SUBTYPES and expected in _BYTESTRING_SUBTYPES:
+        return True
     if expected == "bigint" and actual in _BIGINT_SUBTYPES:
         return True
     if expected.endswith("[]") and actual.endswith("[]"):

@@ -157,6 +157,10 @@ module RunarCompiler
       return true if expected == "<inferred>" || expected == "<unknown>"
 
       return true if expected == "ByteString" && BYTESTRING_SUBTYPES.include?(actual)
+      # ByteString is compatible with any ByteString subtype (e.g. passing ByteString where P256Point expected)
+      return true if actual == "ByteString" && BYTESTRING_SUBTYPES.include?(expected)
+      # Both in the ByteString family -> compatible
+      return true if BYTESTRING_SUBTYPES.include?(actual) && BYTESTRING_SUBTYPES.include?(expected)
       return true if expected == "bigint" && BIGINT_SUBTYPES.include?(actual)
 
       if expected.end_with?("[]") && actual.end_with?("[]")
