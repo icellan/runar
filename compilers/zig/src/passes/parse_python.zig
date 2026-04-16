@@ -660,8 +660,8 @@ fn resolvePyTypeName(name: []const u8) TypeNode {
     if (std.mem.eql(u8, name, "RabinSig")) return .{ .primitive_type = .rabin_sig };
     if (std.mem.eql(u8, name, "RabinPubKey")) return .{ .primitive_type = .rabin_pub_key };
     if (std.mem.eql(u8, name, "Point")) return .{ .primitive_type = .point };
-    if (std.mem.eql(u8, name, "P256Point")) return .{ .primitive_type = .byte_string };
-    if (std.mem.eql(u8, name, "P384Point")) return .{ .primitive_type = .byte_string };
+    if (std.mem.eql(u8, name, "P256Point")) return .{ .primitive_type = .p256_point };
+    if (std.mem.eql(u8, name, "P384Point")) return .{ .primitive_type = .p384_point };
     if (std.mem.eql(u8, name, "void")) return .{ .primitive_type = .void };
     // Try the canonical lookup
     if (PrimitiveTypeName.fromTsString(name)) |ptn| return .{ .primitive_type = ptn };

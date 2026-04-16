@@ -83,6 +83,16 @@ const p256_n_minus_2_be = [_]u8{
     0xf3, 0xb9, 0xca, 0xc2, 0xfc, 0x63, 0x25, 0x4f,
 };
 
+/// P-256 3*n (pre-computed for k+3n in scalar multiplication, matching Go peephole output)
+/// 3n = 0x02fffffffd00000002ffffffffffffffff36b4f008f546db8edb2d6048f5296ff3
+const p256_3n_be = [_]u8{
+    0x02, 0xff, 0xff, 0xff, 0xfd, 0x00, 0x00, 0x00,
+    0x02, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0x36, 0xb4, 0xf0, 0x08, 0xf5, 0x46, 0xdb,
+    0x8e, 0xdb, 0x2d, 0x60, 0x48, 0xf5, 0x29, 0x6f,
+    0xf3,
+};
+
 /// P-256 sqrt exponent = (p+1)/4
 /// = 3fffffffc0000000400000000000000000000000400000000000000000000000
 const p256_sqrt_exp_be = [_]u8{
@@ -176,6 +186,18 @@ const p384_sqrt_exp_be = [_]u8{
     0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00,
 };
 
+/// P-384 3*n (pre-computed for k+3n in scalar multiplication, matching Go peephole output)
+/// 3n = 0x02ffffffffffffffffffffffffffffffffffffffffffffffff5629e885dca5899e084e2916da11f670c6c44c40664f7c59
+const p384_3n_be = [_]u8{
+    0x02, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0x56, 0x29, 0xe8, 0x85, 0xdc, 0xa5, 0x89,
+    0x9e, 0x08, 0x4e, 0x29, 0x16, 0xda, 0x11, 0xf6,
+    0x70, 0xc6, 0xc4, 0x4c, 0x40, 0x66, 0x4f, 0x7c,
+    0x59,
+};
+
 // ===========================================================================
 // Helper: encode big-endian bytes to Bitcoin Script number (unsigned LE + sign byte)
 // ===========================================================================
@@ -227,6 +249,7 @@ const NistCurveParams = struct {
     field_p_minus_2_be: []const u8,
     group_n_be: []const u8,
     group_n_minus_2_be: []const u8,
+    three_n_be: []const u8, // pre-computed 3*n for k+3n (matches Go peephole output)
     curve_b_be: []const u8,
     sqrt_exp_be: []const u8,
     gen_x_be: []const u8,
@@ -239,6 +262,7 @@ const p256_params = NistCurveParams{
     .field_p_minus_2_be = p256_p_minus_2_be[0..],
     .group_n_be = p256_n_be[0..],
     .group_n_minus_2_be = p256_n_minus_2_be[0..],
+    .three_n_be = p256_3n_be[0..],
     .curve_b_be = p256_b_be[0..],
     .sqrt_exp_be = p256_sqrt_exp_be[0..],
     .gen_x_be = p256_gx_be[0..],
@@ -251,6 +275,7 @@ const p384_params = NistCurveParams{
     .field_p_minus_2_be = p384_p_minus_2_be[0..],
     .group_n_be = p384_n_be[0..],
     .group_n_minus_2_be = p384_n_minus_2_be[0..],
+    .three_n_be = p384_3n_be[0..],
     .curve_b_be = p384_b_be[0..],
     .sqrt_exp_be = p384_sqrt_exp_be[0..],
     .gen_x_be = p384_gx_be[0..],
@@ -898,29 +923,20 @@ fn buildScalarMulBundle(allocator: Allocator, params: *const NistCurveParams) !E
 fn emitScalarMulOnTracker(t: *NistTracker) !void {
     const c = t.params;
     const p_be = c.field_p_be;
-    const n_be = c.group_n_be;
 
     try decomposePoint(t, "_pt", "ax", "ay");
 
-    // k' = k + 3n (avoids sign issues in the loop)
+    // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     try t.toTop("_k");
-    try t.pushBigIntBE("_n1", n_be);
-    t.popNames(2);
-    try t.emitOpcode("OP_ADD");
-    try t.names.append(t.allocator, "_kn");
-    try t.pushBigIntBE("_n2", n_be);
-    t.popNames(2);
-    try t.emitOpcode("OP_ADD");
-    try t.names.append(t.allocator, "_kn2");
-    try t.pushBigIntBE("_n3", n_be);
+    try t.pushBigIntBE("_3n", c.three_n_be);
     t.popNames(2);
     try t.emitOpcode("OP_ADD");
     try t.names.append(t.allocator, "_k");
 
-    // n is always non-zero; msbIndex will return non-null
-    const n_msb = msbIndex(n_be).?;
-    const top_bit = n_msb + 1;
-    const start_bit: i64 = @as(i64, @intCast(top_bit)) - 1;
+    // Determine iteration count based on 3n bit length.
+    // The max value of k+3n is 4n-1 which has the same MSB as 3n.
+    const three_n_msb = msbIndex(c.three_n_be).?;
+    const start_bit: i64 = @as(i64, @intCast(three_n_msb)) - 1;
 
     // Init accumulator = P (top bit of k+3n is always 1)
     try t.copyToTop("ax", "jx");

@@ -570,25 +570,18 @@ fn runConformanceTest(test_name: []const u8) !void {
     const script_path = try std.fmt.allocPrint(allocator, "{s}{s}/expected-script.hex", .{ conformance_base, test_name });
     defer allocator.free(script_path);
 
-    // Open expected IR JSON
-    const ir_file = std.fs.cwd().openFile(ir_path, .{}) catch |err| {
+    // Read expected IR JSON
+    const ir_source = std.Io.Dir.cwd().readFileAlloc(std.testing.io, ir_path, allocator, .limited(10 * 1024 * 1024)) catch |err| {
         std.debug.print("[FAIL] {s}: cannot open expected-ir.json ({s})\n", .{ test_name, @errorName(err) });
         return err;
     };
-    defer ir_file.close();
+    defer allocator.free(ir_source);
 
-    // Open expected script hex
-    const script_file = std.fs.cwd().openFile(script_path, .{}) catch |err| {
+    // Read expected script hex
+    const expected_hex_raw = std.Io.Dir.cwd().readFileAlloc(std.testing.io, script_path, allocator, .limited(4 * 1024 * 1024)) catch |err| {
         std.debug.print("[FAIL] {s}: cannot open expected-script.hex ({s})\n", .{ test_name, @errorName(err) });
         return err;
     };
-    defer script_file.close();
-
-    // Read file contents
-    const ir_source = try ir_file.readToEndAlloc(allocator, 10 * 1024 * 1024);
-    defer allocator.free(ir_source);
-
-    const expected_hex_raw = try script_file.readToEndAlloc(allocator, 4 * 1024 * 1024);
     defer allocator.free(expected_hex_raw);
 
     // Strip whitespace from expected hex

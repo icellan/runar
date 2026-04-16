@@ -42,12 +42,13 @@ pub const CompilerDiagnostic = struct {
 pub const RunarType = enum {
     bigint, boolean, byte_string, pub_key, sig, addr, sha256, ripemd160,
     sig_hash_type, sig_hash_preimage, rabin_sig, rabin_pub_key, point,
+    p256_point, p384_point,
     op_code_type, fixed_array, void, unknown,
 };
 
 pub const PrimitiveTypeName = enum {
     bigint, boolean, byte_string, pub_key, sig, sha256, ripemd160, addr,
-    sig_hash_preimage, rabin_sig, rabin_pub_key, point, void,
+    sig_hash_preimage, rabin_sig, rabin_pub_key, point, p256_point, p384_point, void,
 
     pub fn toTsString(self: PrimitiveTypeName) []const u8 {
         return switch (self) {
@@ -55,7 +56,8 @@ pub const PrimitiveTypeName = enum {
             .pub_key => "PubKey", .sig => "Sig", .sha256 => "Sha256",
             .ripemd160 => "Ripemd160", .addr => "Addr",
             .sig_hash_preimage => "SigHashPreimage", .rabin_sig => "RabinSig",
-            .rabin_pub_key => "RabinPubKey", .point => "Point", .void => "void",
+            .rabin_pub_key => "RabinPubKey", .point => "Point",
+            .p256_point => "P256Point", .p384_point => "P384Point", .void => "void",
         };
     }
 
@@ -65,7 +67,8 @@ pub const PrimitiveTypeName = enum {
             .{ "PubKey", .pub_key }, .{ "Sig", .sig }, .{ "Sha256", .sha256 },
             .{ "Ripemd160", .ripemd160 }, .{ "Addr", .addr },
             .{ "SigHashPreimage", .sig_hash_preimage }, .{ "RabinSig", .rabin_sig },
-            .{ "RabinPubKey", .rabin_pub_key }, .{ "Point", .point }, .{ "void", .void },
+            .{ "RabinPubKey", .rabin_pub_key }, .{ "Point", .point },
+            .{ "P256Point", .p256_point }, .{ "P384Point", .p384_point }, .{ "void", .void },
         });
         return map.get(s);
     }
@@ -95,6 +98,8 @@ pub fn typeNodeToRunarType(tn: TypeNode) RunarType {
             .rabin_sig => .rabin_sig,
             .rabin_pub_key => .rabin_pub_key,
             .point => .point,
+            .p256_point => .p256_point,
+            .p384_point => .p384_point,
             .void => .void,
         },
         .fixed_array_type => .fixed_array,
@@ -428,8 +433,8 @@ const runar_type_map = std.StaticStringMap(RunarType).initComptime(.{
     .{ "RabinSig", .rabin_sig },
     .{ "RabinPubKey", .rabin_pub_key },
     .{ "Point", .point },
-    .{ "P256Point", .byte_string },
-    .{ "P384Point", .byte_string },
+    .{ "P256Point", .p256_point },
+    .{ "P384Point", .p384_point },
     .{ "OpCodeType", .op_code_type },
     .{ "FixedArray", .fixed_array },
     .{ "void", .void },
@@ -449,7 +454,9 @@ pub fn runarTypeToString(t: RunarType) []const u8 {
         .pub_key => "PubKey", .sig => "Sig", .addr => "Addr", .sha256 => "Sha256",
         .ripemd160 => "Ripemd160", .sig_hash_type => "SigHashType",
         .sig_hash_preimage => "SigHashPreimage", .rabin_sig => "RabinSig",
-        .rabin_pub_key => "RabinPubKey", .point => "Point", .op_code_type => "OpCodeType",
+        .rabin_pub_key => "RabinPubKey", .point => "Point",
+        .p256_point => "P256Point", .p384_point => "P384Point",
+        .op_code_type => "OpCodeType",
         .fixed_array => "FixedArray", .void => "void", .unknown => "unknown",
     };
 }

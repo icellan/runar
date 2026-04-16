@@ -98,6 +98,8 @@ _GO_TYPE_MAP: dict[str, str] = {
     "RabinSig": "RabinSig",
     "RabinPubKey": "RabinPubKey",
     "Point": "Point",
+    "P256Point": "P256Point",
+    "P384Point": "P384Point",
 }
 
 # Native Go types that map to Runar types

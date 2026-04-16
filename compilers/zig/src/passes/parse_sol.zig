@@ -571,8 +571,8 @@ const Parser = struct {
         if (std.mem.eql(u8, name, "RabinSig")) return .rabin_sig;
         if (std.mem.eql(u8, name, "RabinPubKey")) return .rabin_pub_key;
         if (std.mem.eql(u8, name, "Point")) return .point;
-        if (std.mem.eql(u8, name, "P256Point")) return .byte_string;
-        if (std.mem.eql(u8, name, "P384Point")) return .byte_string;
+        if (std.mem.eql(u8, name, "P256Point")) return .p256_point;
+        if (std.mem.eql(u8, name, "P384Point")) return .p384_point;
         if (std.mem.eql(u8, name, "void")) return .void;
 
         // Also check via PrimitiveTypeName for any we missed

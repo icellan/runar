@@ -121,6 +121,8 @@ module RunarCompiler
       "RabinSig"    => "RabinSig",
       "RabinPubKey" => "RabinPubKey",
       "Point"       => "Point",
+      "P256Point"   => "P256Point",
+      "P384Point"   => "P384Point",
     }.freeze
 
     ZIG_KEYWORDS = {

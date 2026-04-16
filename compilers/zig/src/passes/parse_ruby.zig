@@ -637,8 +637,8 @@ fn rbMapType(name: []const u8) RunarType {
         .{ "RabinSig", .rabin_sig },
         .{ "RabinPubKey", .rabin_pub_key },
         .{ "Point", .point },
-        .{ "P256Point", .byte_string },
-        .{ "P384Point", .byte_string },
+        .{ "P256Point", .p256_point },
+        .{ "P384Point", .p384_point },
     });
     return map.get(name) orelse .unknown;
 }

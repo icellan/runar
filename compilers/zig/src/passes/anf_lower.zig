@@ -85,7 +85,8 @@ pub fn lowerToANF(allocator: Allocator, contract: ContractNode) LowerError!ANFPr
 fn isByteType(t: RunarType) bool {
     return switch (t) {
         .byte_string, .pub_key, .sig, .sha256, .ripemd160, .addr,
-        .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point => true,
+        .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point,
+        .p256_point, .p384_point => true,
         else => false,
     };
 }

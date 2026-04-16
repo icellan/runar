@@ -98,8 +98,8 @@ fn map_go_type(name: &str) -> TypeNode {
         "RabinSig" => TypeNode::Primitive(PrimitiveTypeName::RabinSig),
         "RabinPubKey" => TypeNode::Primitive(PrimitiveTypeName::RabinPubKey),
         "Point" => TypeNode::Primitive(PrimitiveTypeName::Point),
-        "P256Point" => TypeNode::Custom("P256Point".to_string()),
-        "P384Point" => TypeNode::Custom("P384Point".to_string()),
+        "P256Point" => TypeNode::Primitive(PrimitiveTypeName::P256Point),
+        "P384Point" => TypeNode::Primitive(PrimitiveTypeName::P384Point),
         _ => TypeNode::Custom(name.to_string()),
     }
 }

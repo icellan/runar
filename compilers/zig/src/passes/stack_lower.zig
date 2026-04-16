@@ -2713,6 +2713,7 @@ const LowerCtx = struct {
             .addr, .ripemd160 => 20,
             .sha256 => 32,
             .point => 64,
+            .p256_point, .p384_point => 64,
             .byte_string => -1,
             else => LowerError.UnsupportedOperation,
         };

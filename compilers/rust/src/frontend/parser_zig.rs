@@ -97,6 +97,8 @@ fn map_zig_type(name: &str) -> &str {
         "RabinSig" => "RabinSig",
         "RabinPubKey" => "RabinPubKey",
         "Point" => "Point",
+        "P256Point" => "P256Point",
+        "P384Point" => "P384Point",
         _ => name,
     }
 }

@@ -723,18 +723,11 @@ fn c_emit_mul(emit: &mut dyn FnMut(StackOp), c: &NistCurveParams, g: &NistGroupP
     let mut t = ECTracker::new(&["_pt", "_k"], emit);
     c_decompose_point(&mut t, "_pt", "ax", "ay", c);
 
-    // k' = k + 3n
+    // k' = k + 3n (pre-compute 3n to match Go peephole optimizer output)
     t.to_top("_k");
-    t.push_big_int("_n", &*g.n);
-    t.raw_block(&["_k", "_n"], Some("_kn"), |e| {
-        e(StackOp::Opcode("OP_ADD".into()));
-    });
-    t.push_big_int("_n2", &*g.n);
-    t.raw_block(&["_kn", "_n2"], Some("_kn2"), |e| {
-        e(StackOp::Opcode("OP_ADD".into()));
-    });
-    t.push_big_int("_n3", &*g.n);
-    t.raw_block(&["_kn2", "_n3"], Some("_kn3"), |e| {
+    let three_n = &**g.n * 3;
+    t.push_big_int("_3n", &three_n);
+    t.raw_block(&["_k", "_3n"], Some("_kn3"), |e| {
         e(StackOp::Opcode("OP_ADD".into()));
     });
     t.rename("_k");

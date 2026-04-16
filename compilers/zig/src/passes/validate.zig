@@ -91,6 +91,7 @@ fn isValidPropertyType(t: RunarType) bool {
     return switch (t) {
         .bigint, .boolean, .byte_string, .pub_key, .sig, .sha256, .ripemd160,
         .addr, .sig_hash_preimage, .rabin_sig, .rabin_pub_key, .point,
+        .p256_point, .p384_point,
         .fixed_array,
         => true,
         .void, .unknown, .op_code_type, .sig_hash_type => false,

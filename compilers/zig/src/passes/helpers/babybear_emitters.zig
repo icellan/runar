@@ -564,7 +564,7 @@ fn emitExt4InvComponent(t: *BBTracker, component: u2) !void {
     // Must match TS: snapshot names bottom-to-top (excluding null and _r), then drop in that order.
     {
         // Snapshot the name stack (bottom to top), collecting non-null, non-_r names.
-        var remaining = std.ArrayListUnmanaged([]const u8){};
+        var remaining: std.ArrayListUnmanaged([]const u8) = .empty;
         defer remaining.deinit(t.allocator);
         for (t.names.items) |slot| {
             const name = slot orelse continue;

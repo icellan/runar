@@ -41,7 +41,7 @@
       "params": [
         {
           "name": "expectedPoint",
-          "type": "ByteString"
+          "type": "P256Point"
         }
       ]
     },
@@ -130,7 +130,7 @@
         },
         {
           "name": "basePoint",
-          "type": "ByteString"
+          "type": "P256Point"
         }
       ]
     },
@@ -215,11 +215,11 @@
       "params": [
         {
           "name": "a",
-          "type": "ByteString"
+          "type": "P256Point"
         },
         {
           "name": "b",
-          "type": "ByteString"
+          "type": "P256Point"
         }
       ]
     },
@@ -305,7 +305,7 @@
     {
       "name": "expectedPoint",
       "readonly": true,
-      "type": "ByteString"
+      "type": "P256Point"
     }
   ]
 }

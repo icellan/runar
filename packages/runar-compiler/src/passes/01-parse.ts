@@ -335,7 +335,8 @@ function parseParams(
 
 const PRIMITIVE_TYPES = new Set<string>([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point',
+  'P256Point', 'P384Point', 'void',
 ]);
 
 function parseTypeNode(

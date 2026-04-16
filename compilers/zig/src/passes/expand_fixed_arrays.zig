@@ -743,7 +743,7 @@ const Ctx = struct {
                     try out.append(self.allocator, .{ .assign = .{ .target = tname, .value = fallback } });
                 }
             },
-            .property_access => |_| {
+            .property_access => {
                 // property-target statement-form is not representable as a
                 // Zig Assign (which is name-only). Fall back to expression form.
                 return false;

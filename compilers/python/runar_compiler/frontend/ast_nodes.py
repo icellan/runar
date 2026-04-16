@@ -339,6 +339,8 @@ PRIMITIVE_TYPE_NAMES: frozenset[str] = frozenset({
     "RabinPubKey",
     "void",
     "Point",
+    "P256Point",
+    "P384Point",
 })
 
 

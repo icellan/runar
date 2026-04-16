@@ -233,14 +233,6 @@ func isSubtype(actual, expected string) bool {
 	if expected == "ByteString" && byteStringSubtypes[actual] {
 		return true
 	}
-	// ByteString is compatible with any ByteString subtype (e.g. passing ByteString where P256Point expected)
-	if actual == "ByteString" && byteStringSubtypes[expected] {
-		return true
-	}
-	// Both in the ByteString family -> compatible
-	if byteStringSubtypes[actual] && byteStringSubtypes[expected] {
-		return true
-	}
 	if expected == "bigint" && bigintSubtypes[actual] {
 		return true
 	}
