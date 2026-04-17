@@ -144,7 +144,7 @@ pub fn extractConstructorArgs(
 
     // Sort slots by byte offset, deduplicate by param index
     const Slot = struct { param_index: i32, byte_offset: i32 };
-    var slots = std.ArrayListUnmanaged(Slot){};
+    var slots: std.ArrayListUnmanaged(Slot) = .empty;
     defer slots.deinit(allocator);
 
     // First, collect all unique slots sorted by byte offset

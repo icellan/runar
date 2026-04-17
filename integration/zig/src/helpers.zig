@@ -16,15 +16,15 @@ pub const RpcError = error{
 };
 
 fn rpcUrl() []const u8 {
-    return std.posix.getenv("RPC_URL") orelse "http://localhost:18332";
+    return std.testing.environ.getPosix("RPC_URL") orelse "http://localhost:18332";
 }
 
 fn rpcUser() []const u8 {
-    return std.posix.getenv("RPC_USER") orelse "bitcoin";
+    return std.testing.environ.getPosix("RPC_USER") orelse "bitcoin";
 }
 
 fn rpcPass() []const u8 {
-    return std.posix.getenv("RPC_PASS") orelse "bitcoin";
+    return std.testing.environ.getPosix("RPC_PASS") orelse "bitcoin";
 }
 
 /// Make a JSON-RPC 1.0 call to the Bitcoin node. Returns the raw "result" JSON string.
@@ -38,24 +38,24 @@ pub fn rpcCall(allocator: std.mem.Allocator, method: []const u8, params_json: []
 
     // Write body to a unique temp file to avoid ARG_MAX limits for large transactions.
     // curl's @filename syntax reads the POST body from the file.
+    const io = std.testing.io;
     var tmp_name_buf: [64]u8 = undefined;
     const thread_id = std.Thread.getCurrentId();
     const tmp_name_len = (std.fmt.bufPrint(&tmp_name_buf, "/tmp/runar_rpc_{d}.json", .{thread_id}) catch return RpcError.ConnectionFailed).len;
     const tmp_path = tmp_name_buf[0..tmp_name_len];
 
-    var tmp_file = std.fs.createFileAbsolute(tmp_path, .{}) catch return RpcError.ConnectionFailed;
-    tmp_file.writeAll(body) catch {
-        tmp_file.close();
+    var tmp_file = std.Io.Dir.createFileAbsolute(io, tmp_path, .{}) catch return RpcError.ConnectionFailed;
+    tmp_file.writeStreamingAll(io, body) catch {
+        tmp_file.close(io);
         return RpcError.ConnectionFailed;
     };
-    tmp_file.close();
-    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+    tmp_file.close(io);
+    defer std.Io.Dir.deleteFileAbsolute(io, tmp_path) catch {};
 
     const at_path = std.fmt.allocPrint(allocator, "@{s}", .{tmp_path}) catch return RpcError.ConnectionFailed;
     defer allocator.free(at_path);
 
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
+    const result = std.process.run(allocator, io, .{
         .argv = &.{
             "curl",
             "-s",
@@ -71,7 +71,7 @@ pub fn rpcCall(allocator: std.mem.Allocator, method: []const u8, params_json: []
             at_path,
             rpcUrl(),
         },
-        .max_output_bytes = 10 * 1024 * 1024,
+        .stdout_limit = .limited(10 * 1024 * 1024),
     }) catch return RpcError.ConnectionFailed;
     defer {
         allocator.free(result.stdout);
@@ -251,9 +251,9 @@ pub const Wallet = struct {
 
 /// Generate a random ECDSA wallet for regtest.
 pub fn newWallet(allocator: std.mem.Allocator) !Wallet {
-    // Generate 32 random bytes for the private key
+    // Generate 32 random bytes for the private key using the test-context Io.
     var key_bytes: [32]u8 = undefined;
-    std.crypto.random.bytes(&key_bytes);
+    std.testing.io.random(&key_bytes);
 
     // Ensure the key is valid for secp256k1 (not zero, not >= order)
     key_bytes[0] &= 0x7f;

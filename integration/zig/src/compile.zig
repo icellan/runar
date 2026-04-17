@@ -10,7 +10,7 @@ pub fn compileContract(allocator: std.mem.Allocator, source_path: []const u8) !r
     const abs_path = try std.fs.path.join(allocator, &.{ project_root, source_path });
     defer allocator.free(abs_path);
 
-    const source = try std.fs.cwd().readFileAlloc(allocator, abs_path, 10 * 1024 * 1024);
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, abs_path, allocator, .limited(10 * 1024 * 1024));
     defer allocator.free(source);
 
     const file_name = std.fs.path.basename(source_path);

@@ -1132,7 +1132,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     }
     if (std.mem.eql(u8, kind, "call")) {
         const func_name = if (obj.get("func")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var call_args = std.ArrayListUnmanaged([]const u8){};
+        var call_args: std.ArrayListUnmanaged([]const u8) = .empty;
         if (obj.get("args")) |a| {
             if (a == .array) {
                 for (a.array.items) |item| {
@@ -1146,7 +1146,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     }
     if (std.mem.eql(u8, kind, "method_call")) {
         const mname = if (obj.get("method")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var call_args = std.ArrayListUnmanaged([]const u8){};
+        var call_args: std.ArrayListUnmanaged([]const u8) = .empty;
         if (obj.get("args")) |a| {
             if (a == .array) {
                 for (a.array.items) |item| {
@@ -1170,7 +1170,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     if (std.mem.eql(u8, kind, "get_state_script")) return .{ .get_state_script = .{} };
     if (std.mem.eql(u8, kind, "add_raw_output")) return .{ .add_raw_output = .{} };
     if (std.mem.eql(u8, kind, "add_output")) {
-        var state_values = std.ArrayListUnmanaged([]const u8){};
+        var state_values: std.ArrayListUnmanaged([]const u8) = .empty;
         if (obj.get("stateValues")) |sv| {
             if (sv == .array) {
                 for (sv.array.items) |item| {
@@ -1184,7 +1184,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     }
     if (std.mem.eql(u8, kind, "if")) {
         const cond = if (obj.get("cond")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var then_branch = std.ArrayListUnmanaged(ANFBinding){};
+        var then_branch: std.ArrayListUnmanaged(ANFBinding) = .empty;
         if (obj.get("then")) |t| {
             if (t == .array) {
                 for (t.array.items) |item| {
@@ -1192,7 +1192,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
                 }
             }
         }
-        var else_branch = std.ArrayListUnmanaged(ANFBinding){};
+        var else_branch: std.ArrayListUnmanaged(ANFBinding) = .empty;
         if (obj.get("else")) |e| {
             if (e == .array) {
                 for (e.array.items) |item| {
@@ -1209,7 +1209,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     if (std.mem.eql(u8, kind, "loop")) {
         const count: usize = if (obj.get("count")) |v| (if (v == .integer) @as(usize, @intCast(v.integer)) else 0) else 0;
         const iter_var = if (obj.get("iterVar")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
-        var body = std.ArrayListUnmanaged(ANFBinding){};
+        var body: std.ArrayListUnmanaged(ANFBinding) = .empty;
         if (obj.get("body")) |b| {
             if (b == .array) {
                 for (b.array.items) |item| {
