@@ -6,12 +6,14 @@ import type { RunarArtifact, ABIMethod } from 'runar-ir-schema';
 import type { Provider } from './providers/provider.js';
 import type { Signer } from './signers/signer.js';
 import type { TransactionData, UTXO, DeployOptions, CallOptions, PreparedCall } from './types.js';
+import type { Inscription } from './ordinals/types.js';
 import { buildDeployTransaction, selectUtxos } from './deployment.js';
 import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
 import { computeNewState } from './anf-interpreter.js';
+import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
 
@@ -51,6 +53,7 @@ export class RunarContract {
   private readonly constructorArgs: unknown[];
   private _state: Record<string, unknown> = {};
   private _codeScript: string | null = null;
+  private _inscription: Inscription | null = null;
   private currentUtxo: UTXO | null = null;
   /** Returns the current UTXO tracked by this contract, if any. */
   getUtxo(): UTXO | null { return this.currentUtxo; }
@@ -132,6 +135,30 @@ export class RunarContract {
   connect(provider: Provider, signer: Signer): void {
     this._provider = provider;
     this._signer = signer;
+  }
+
+  // -------------------------------------------------------------------------
+  // Ordinals
+  // -------------------------------------------------------------------------
+
+  /**
+   * Attach a 1sat ordinals inscription to this contract. The inscription
+   * envelope is injected into the locking script between the compiled code
+   * and the state section (if any). Once deployed, the inscription is
+   * immutable — it persists identically across all state transitions.
+   *
+   * ```ts
+   * contract.withInscription({ contentType: 'image/png', data: pngHex });
+   * ```
+   */
+  withInscription(inscription: Inscription): this {
+    this._inscription = inscription;
+    return this;
+  }
+
+  /** Returns the current inscription, if any. */
+  get inscription(): Inscription | null {
+    return this._inscription;
   }
 
   /**
@@ -1094,8 +1121,20 @@ export class RunarContract {
    * the serialized state fields.
    */
   getLockingScript(): string {
-    // Use stored code script from chain if available (reconnected contract)
+    // Use stored code script from chain if available (reconnected contract).
+    // When loaded from chain, _codeScript already contains the inscription
+    // envelope (if any). When built from the template, we splice it in.
+    const builtFromTemplate = this._codeScript === null;
     let script = this._codeScript ?? this.buildCodeScript();
+
+    // Inject inscription envelope between code and state (template-built only;
+    // chain-loaded _codeScript already includes it).
+    if (builtFromTemplate && this._inscription) {
+      script += buildInscriptionEnvelope(
+        this._inscription.contentType,
+        this._inscription.data,
+      );
+    }
 
     // Append state section for stateful contracts
     if (this.artifact.stateFields && this.artifact.stateFields.length > 0) {
@@ -1202,9 +1241,17 @@ export class RunarContract {
   /**
    * Get the code script hex (locking script without state) for use as _codePart.
    * Returns the code portion that the on-chain contract uses for output reconstruction.
+   * Includes the inscription envelope if one is attached — this is required for
+   * stateful contracts where the on-chain hashOutputs verification includes
+   * the envelope as part of the codePart.
    */
   private getCodePartHex(): string {
-    return this._codeScript ?? this.buildCodeScript();
+    if (this._codeScript) return this._codeScript;
+    let code = this.buildCodeScript();
+    if (this._inscription) {
+      code += buildInscriptionEnvelope(this._inscription.contentType, this._inscription.data);
+    }
+    return code;
   }
 
   /**
@@ -1365,6 +1412,15 @@ export class RunarContract {
         : utxo.script;
     } else {
       contract._codeScript = utxo.script;
+    }
+
+    // Detect inscription envelope in the code portion. Keep it in _codeScript
+    // (do NOT strip) so that stateful continuation outputs preserve it.
+    if (contract._codeScript) {
+      const inscription = parseInscriptionEnvelope(contract._codeScript);
+      if (inscription) {
+        contract._inscription = inscription;
+      }
     }
 
     contract.currentUtxo = {

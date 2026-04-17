@@ -26,4 +26,13 @@ artifact = Runar::SDK::RunarArtifact.from_hash(data['artifact'])
 args = data['constructorArgs'].map { |a| convert_arg(a) }
 
 contract = Runar::SDK::RunarContract.new(artifact, args)
+if data['inscription']
+  insc = data['inscription']
+  contract.with_inscription(
+    Runar::SDK::Inscription.new(
+      content_type: insc['contentType'],
+      data: insc['data']
+    )
+  )
+end
 $stdout.write(contract.get_locking_script)

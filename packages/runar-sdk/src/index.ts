@@ -15,8 +15,8 @@ export type {
 } from './types.js';
 
 // Providers
-export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider } from './providers/index.js';
-export type { Provider, RPCProviderOptions, WalletProviderOptions } from './providers/index.js';
+export { WhatsOnChainProvider, MockProvider, RPCProvider, WalletProvider, GorillaPoolProvider } from './providers/index.js';
+export type { Provider, RPCProviderOptions, WalletProviderOptions, InscriptionInfo, InscriptionDetail } from './providers/index.js';
 
 // Signers
 export { LocalSigner, ExternalSigner, WalletSigner } from './signers/index.js';
@@ -45,6 +45,24 @@ export { buildP2PKHScript, extractConstructorArgs, matchesArtifact } from './scr
 
 // Token management
 export { TokenWallet } from './tokens.js';
+
+// Ordinals (1sat inscriptions, BSV-20/BSV-21 tokens)
+export type { Inscription, EnvelopeBounds } from './ordinals/index.js';
+export {
+  buildInscriptionEnvelope,
+  parseInscriptionEnvelope,
+  findInscriptionEnvelope,
+  stripInscriptionEnvelope,
+  BSV20,
+  BSV21,
+} from './ordinals/index.js';
+export type {
+  BSV20DeployParams,
+  BSV20MintParams,
+  BSV20TransferParams,
+  BSV21DeployMintParams,
+  BSV21TransferParams,
+} from './ordinals/index.js';
 
 // ANF interpreter (auto-compute state transitions)
 export { computeNewState } from './anf-interpreter.js';

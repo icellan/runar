@@ -16,9 +16,15 @@ type TypedArg struct {
 	Value string `json:"value"`
 }
 
+type InscriptionInput struct {
+	ContentType string `json:"contentType"`
+	Data        string `json:"data"`
+}
+
 type Input struct {
-	Artifact        json.RawMessage `json:"artifact"`
-	ConstructorArgs []TypedArg      `json:"constructorArgs"`
+	Artifact        json.RawMessage  `json:"artifact"`
+	ConstructorArgs []TypedArg       `json:"constructorArgs"`
+	Inscription     *InscriptionInput `json:"inscription,omitempty"`
 }
 
 func convertArg(arg TypedArg) interface{} {
@@ -64,5 +70,11 @@ func main() {
 	}
 
 	contract := runar.NewRunarContract(&artifact, args)
+	if input.Inscription != nil {
+		contract.WithInscription(&runar.Inscription{
+			ContentType: input.Inscription.ContentType,
+			Data:        input.Inscription.Data,
+		})
+	}
 	fmt.Print(contract.GetLockingScript())
 }

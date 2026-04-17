@@ -16,6 +16,7 @@ use super::calling::{build_call_transaction_ext, CallTxOptions, ContractOutput, 
 use super::provider::Provider;
 use super::signer::Signer;
 use super::anf_interpreter;
+use super::ordinals::{Inscription, build_inscription_envelope, parse_inscription_envelope};
 use crate::prelude::hash160 as compute_hash160;
 
 /// Convert a raw transaction hex string to a BSV SDK Transaction object for broadcasting.
@@ -38,6 +39,7 @@ pub struct RunarContract {
     constructor_args: Vec<SdkValue>,
     state: HashMap<String, SdkValue>,
     code_script: Option<String>,
+    inscription: Option<Inscription>,
     current_utxo: Option<Utxo>,
     connected_provider: Option<Box<dyn Provider>>,
     connected_signer: Option<Box<dyn Signer>>,
@@ -89,6 +91,7 @@ impl RunarContract {
             constructor_args,
             state,
             code_script: None,
+            inscription: None,
             current_utxo: None,
             connected_provider: None,
             connected_signer: None,
@@ -1196,19 +1199,53 @@ impl RunarContract {
     }
 
     // -----------------------------------------------------------------------
+    // Inscription
+    // -----------------------------------------------------------------------
+
+    /// Attach a 1sat ordinals inscription to this contract. The inscription
+    /// envelope is injected into the locking script between the compiled code
+    /// and the state section (if any). Once deployed, the inscription is
+    /// immutable -- it persists identically across all state transitions.
+    pub fn with_inscription(&mut self, inscription: Inscription) -> &mut Self {
+        self.inscription = Some(inscription);
+        self
+    }
+
+    /// Returns the current inscription, if any.
+    pub fn inscription(&self) -> Option<&Inscription> {
+        self.inscription.as_ref()
+    }
+
+    // -----------------------------------------------------------------------
     // Script construction
     // -----------------------------------------------------------------------
 
     /// Get the full locking script hex for the contract.
     ///
     /// For stateful contracts this includes the code followed by OP_RETURN and
-    /// the serialized state fields.
+    /// the serialized state fields. When an inscription is attached and the
+    /// script is built from template (not loaded from chain), the inscription
+    /// envelope is spliced between the code and the state section.
     pub fn get_locking_script(&self) -> String {
-        // Use stored code script from chain if available (reconnected contract)
+        // Use stored code script from chain if available (reconnected contract).
+        // When loaded from chain, code_script already contains the inscription
+        // envelope (if any). When built from the template, we splice it in.
+        let built_from_template = self.code_script.is_none();
         let mut script = self
             .code_script
             .clone()
             .unwrap_or_else(|| self.build_code_script());
+
+        // Inject inscription envelope between code and state (template-built only;
+        // chain-loaded code_script already includes it).
+        if built_from_template {
+            if let Some(ref insc) = self.inscription {
+                script.push_str(&build_inscription_envelope(
+                    &insc.content_type,
+                    &insc.data,
+                ));
+            }
+        }
 
         // Append state section for stateful contracts
         if let Some(ref state_fields) = self.artifact.state_fields {
@@ -1343,6 +1380,70 @@ impl RunarContract {
     // Reconnection
     // -----------------------------------------------------------------------
 
+    /// Reconnect to an existing deployed contract from a UTXO.
+    ///
+    /// Parses the on-chain script to extract the code portion, inscription
+    /// envelope (if any), and state (for stateful contracts). The returned
+    /// contract is ready for method calls.
+    pub fn from_utxo(
+        artifact: RunarArtifact,
+        utxo: &Utxo,
+    ) -> Self {
+        // Dummy constructor args -- we store the on-chain code script directly
+        // so these won't be used in get_locking_script().
+        let dummy_args: Vec<SdkValue> = artifact
+            .abi
+            .constructor
+            .params
+            .iter()
+            .map(|_| SdkValue::Int(0))
+            .collect();
+
+        let mut contract = RunarContract::new(artifact, dummy_args);
+
+        // Store the code portion of the on-chain script.
+        // Use opcode-aware walking to find the real OP_RETURN (not a 0x6a
+        // byte inside push data).
+        if let Some(ref state_fields) = contract.artifact.state_fields {
+            if !state_fields.is_empty() {
+                // Stateful: code is everything before the last OP_RETURN
+                let last_op_return = find_last_op_return(&utxo.script);
+                contract.code_script = Some(
+                    last_op_return
+                        .map(|pos| utxo.script[..pos].to_string())
+                        .unwrap_or_else(|| utxo.script.clone()),
+                );
+            } else {
+                contract.code_script = Some(utxo.script.clone());
+            }
+        } else {
+            // Stateless: the full on-chain script IS the code
+            contract.code_script = Some(utxo.script.clone());
+        }
+
+        // Detect inscription envelope in the code portion. Keep it in code_script
+        // (do NOT strip) so that stateful continuation outputs preserve it.
+        if let Some(ref cs) = contract.code_script {
+            if let Some(insc) = parse_inscription_envelope(cs) {
+                contract.inscription = Some(insc);
+            }
+        }
+
+        // Set the current UTXO
+        contract.current_utxo = Some(utxo.clone());
+
+        // Extract state if this is a stateful contract
+        if let Some(ref state_fields) = contract.artifact.state_fields {
+            if !state_fields.is_empty() {
+                if let Some(state) = extract_state_from_script(&contract.artifact, &utxo.script) {
+                    contract.state = state;
+                }
+            }
+        }
+
+        contract
+    }
+
     /// Reconnect to an existing deployed contract from its deployment transaction.
     pub fn from_txid(
         artifact: RunarArtifact,
@@ -1362,57 +1463,12 @@ impl RunarContract {
 
         let output = &tx.outputs[output_index];
 
-        // Dummy constructor args -- we store the on-chain code script directly
-        // so these won't be used in get_locking_script().
-        let dummy_args: Vec<SdkValue> = artifact
-            .abi
-            .constructor
-            .params
-            .iter()
-            .map(|_| SdkValue::Int(0))
-            .collect();
-
-        let mut contract = RunarContract::new(artifact, dummy_args);
-
-        // Store the code portion of the on-chain script.
-        // Use opcode-aware walking to find the real OP_RETURN (not a 0x6a
-        // byte inside push data).
-        if let Some(ref state_fields) = contract.artifact.state_fields {
-            if !state_fields.is_empty() {
-                // Stateful: code is everything before the last OP_RETURN
-                let last_op_return = find_last_op_return(&output.script);
-                contract.code_script = Some(
-                    last_op_return
-                        .map(|pos| output.script[..pos].to_string())
-                        .unwrap_or_else(|| output.script.clone()),
-                );
-            } else {
-                contract.code_script = Some(output.script.clone());
-            }
-        } else {
-            // Stateless: the full on-chain script IS the code
-            contract.code_script = Some(output.script.clone());
-        }
-
-        // Set the current UTXO
-        contract.current_utxo = Some(Utxo {
+        Ok(RunarContract::from_utxo(artifact, &Utxo {
             txid: txid.to_string(),
             output_index: output_index as u32,
             satoshis: output.satoshis,
             script: output.script.clone(),
-        });
-
-        // Extract state if this is a stateful contract
-        if let Some(ref state_fields) = contract.artifact.state_fields {
-            if !state_fields.is_empty() {
-                if let Some(state) = extract_state_from_script(&contract.artifact, &output.script)
-                {
-                    contract.state = state;
-                }
-            }
-        }
-
-        Ok(contract)
+        }))
     }
 
     // -----------------------------------------------------------------------
@@ -1428,9 +1484,20 @@ impl RunarContract {
             .cloned()
     }
 
-    /// Get the code part hex (code script without state).
+    /// Get the code script hex (locking script without state) for use as _codePart.
+    /// Returns the code portion that the on-chain contract uses for output reconstruction.
+    /// Includes the inscription envelope if one is attached -- this is required for
+    /// stateful contracts where the on-chain hashOutputs verification includes
+    /// the envelope as part of the codePart.
     fn get_code_part_hex(&self) -> String {
-        self.code_script.clone().unwrap_or_else(|| self.build_code_script())
+        if let Some(ref cs) = self.code_script {
+            return cs.clone();
+        }
+        let mut code = self.build_code_script();
+        if let Some(ref insc) = self.inscription {
+            code.push_str(&build_inscription_envelope(&insc.content_type, &insc.data));
+        }
+        code
     }
 
     /// Adjust code separator byte offset for constructor arg and codeSepIndex
@@ -2905,5 +2972,252 @@ mod tests {
         assert!(script.chars().all(|c| c.is_ascii_hexdigit()));
         // Should contain OP_RETURN separator
         assert!(script.contains("6a"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Inscription integration
+    // -----------------------------------------------------------------------
+
+    fn utf8_to_hex(s: &str) -> String {
+        s.as_bytes().iter().map(|b| format!("{:02x}", b)).collect()
+    }
+
+    fn hex_to_utf8(hex: &str) -> String {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+            .collect();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    fn make_stateful_artifact(script: &str) -> RunarArtifact {
+        RunarArtifact {
+            version: "runar-v0.1.0".to_string(),
+            contract_name: "Counter".to_string(),
+            abi: Abi {
+                constructor: AbiConstructor {
+                    params: vec![AbiParam { name: "count".to_string(), param_type: "bigint".to_string(), fixed_array: None }],
+                },
+                methods: vec![AbiMethod {
+                    name: "increment".to_string(),
+                    params: vec![],
+                    is_public: true,
+                    is_terminal: None,
+                }],
+            },
+            script: script.to_string(),
+            state_fields: Some(vec![StateField {
+                name: "count".to_string(), field_type: "bigint".to_string(), index: 0,
+                initial_value: None, fixed_array: None,
+            }]),
+            constructor_slots: None,
+            code_sep_index_slots: None,
+            code_separator_index: None,
+            code_separator_indices: None,
+            anf: None,
+        }
+    }
+
+    #[test]
+    fn with_inscription_stores_inscription() {
+        let artifact = make_artifact("51", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+        assert!(contract.inscription().is_none());
+
+        contract.with_inscription(Inscription {
+            content_type: "image/png".to_string(),
+            data: "ff00ff".to_string(),
+        });
+        let insc = contract.inscription().unwrap();
+        assert_eq!(insc.content_type, "image/png");
+        assert_eq!(insc.data, "ff00ff");
+    }
+
+    #[test]
+    fn with_inscription_returns_self_for_chaining() {
+        let artifact = make_artifact("51", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+        let _ = contract.with_inscription(Inscription {
+            content_type: "text/plain".to_string(),
+            data: "".to_string(),
+        });
+        // If it compiles and the inscription is set, chaining works
+        assert!(contract.inscription().is_some());
+    }
+
+    #[test]
+    fn get_locking_script_includes_inscription_stateless() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+        let data = utf8_to_hex("Hello!");
+        contract.with_inscription(Inscription {
+            content_type: "text/plain".to_string(),
+            data: data.clone(),
+        });
+
+        let locking_script = contract.get_locking_script();
+
+        // Should end with the inscription envelope
+        let envelope = super::super::ordinals::build_inscription_envelope("text/plain", &data);
+        assert!(locking_script.ends_with(&envelope));
+
+        // Should be parseable
+        let parsed = super::super::ordinals::parse_inscription_envelope(&locking_script).unwrap();
+        assert_eq!(parsed.content_type, "text/plain");
+        assert_eq!(parsed.data, data);
+    }
+
+    #[test]
+    fn get_locking_script_without_inscription_unchanged() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let a = RunarContract::new(artifact.clone(), vec![]);
+        let b = RunarContract::new(artifact, vec![]);
+        assert_eq!(a.get_locking_script(), b.get_locking_script());
+    }
+
+    #[test]
+    fn get_locking_script_stateful_places_envelope_between_code_and_state() {
+        let artifact = make_stateful_artifact("aabbccdd");
+        let mut contract = RunarContract::new(artifact, vec![SdkValue::Int(0)]);
+        let json_data = utf8_to_hex(r#"{"p":"bsv-20","op":"deploy","tick":"TEST","max":"1000"}"#);
+        contract.with_inscription(Inscription {
+            content_type: "application/bsv-20".to_string(),
+            data: json_data.clone(),
+        });
+
+        let locking_script = contract.get_locking_script();
+        let envelope = super::super::ordinals::build_inscription_envelope("application/bsv-20", &json_data);
+
+        // Script structure: code + envelope + OP_RETURN + state
+        let code_end = locking_script.find(&envelope).expect("envelope not found in locking script");
+        assert!(code_end > 0); // envelope follows code
+
+        let after_envelope = &locking_script[code_end + envelope.len()..];
+        assert!(after_envelope.starts_with("6a")); // OP_RETURN follows envelope
+    }
+
+    #[test]
+    fn from_utxo_detects_inscription_stateless() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let mut original = RunarContract::new(artifact.clone(), vec![]);
+        original.with_inscription(Inscription {
+            content_type: "image/png".to_string(),
+            data: "deadbeef".to_string(),
+        });
+
+        let locking_script = original.get_locking_script();
+        let reconnected = RunarContract::from_utxo(artifact, &Utxo {
+            txid: "00".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: locking_script,
+        });
+
+        let insc = reconnected.inscription().unwrap();
+        assert_eq!(insc.content_type, "image/png");
+        assert_eq!(insc.data, "deadbeef");
+    }
+
+    #[test]
+    fn from_utxo_detects_inscription_and_state_stateful() {
+        let artifact = make_stateful_artifact("aabbccdd");
+        let mut original = RunarContract::new(artifact.clone(), vec![SdkValue::Int(7)]);
+        original.with_inscription(Inscription {
+            content_type: "text/plain".to_string(),
+            data: utf8_to_hex("my counter"),
+        });
+
+        let locking_script = original.get_locking_script();
+        let reconnected = RunarContract::from_utxo(artifact, &Utxo {
+            txid: "00".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: locking_script,
+        });
+
+        // Inscription round-trips
+        let insc = reconnected.inscription().unwrap();
+        assert_eq!(insc.content_type, "text/plain");
+        assert_eq!(insc.data, utf8_to_hex("my counter"));
+
+        // State round-trips
+        assert_eq!(reconnected.state()["count"], SdkValue::Int(7));
+    }
+
+    #[test]
+    fn from_utxo_produces_identical_locking_script_stateful() {
+        let artifact = make_stateful_artifact("aabbccdd");
+        let mut original = RunarContract::new(artifact.clone(), vec![SdkValue::Int(99)]);
+        original.with_inscription(Inscription {
+            content_type: "text/plain".to_string(),
+            data: utf8_to_hex("persisted"),
+        });
+
+        let locking_script = original.get_locking_script();
+        let reconnected = RunarContract::from_utxo(artifact, &Utxo {
+            txid: "00".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: locking_script.clone(),
+        });
+
+        // Reconnected contract should produce the same locking script
+        assert_eq!(reconnected.get_locking_script(), locking_script);
+    }
+
+    #[test]
+    fn from_utxo_no_inscription_sets_none() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let contract = RunarContract::new(artifact.clone(), vec![]);
+        let locking_script = contract.get_locking_script();
+
+        let reconnected = RunarContract::from_utxo(artifact, &Utxo {
+            txid: "00".repeat(32),
+            output_index: 0,
+            satoshis: 1,
+            script: locking_script,
+        });
+
+        assert!(reconnected.inscription().is_none());
+    }
+
+    #[test]
+    fn from_txid_detects_inscription() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let mut original = RunarContract::new(artifact.clone(), vec![]);
+        original.with_inscription(Inscription {
+            content_type: "text/plain".to_string(),
+            data: utf8_to_hex("via txid"),
+        });
+
+        let locking_script = original.get_locking_script();
+        let fake_txid = "bb".repeat(32);
+        let mut provider = MockProvider::testnet();
+        provider.add_transaction(make_tx(
+            &fake_txid,
+            vec![TxOutput { satoshis: 1, script: locking_script }],
+        ));
+
+        let reconnected = RunarContract::from_txid(artifact, &fake_txid, 0, &provider).unwrap();
+        let insc = reconnected.inscription().unwrap();
+        assert_eq!(insc.content_type, "text/plain");
+        assert_eq!(insc.data, utf8_to_hex("via txid"));
+    }
+
+    #[test]
+    fn bsv20_integration_with_contract() {
+        let artifact = make_artifact("aabbccdd", simple_abi());
+        let mut contract = RunarContract::new(artifact, vec![]);
+        let inscription = super::super::ordinals::bsv20_deploy("RUNAR", "21000000", None, None);
+        contract.with_inscription(inscription);
+
+        let locking_script = contract.get_locking_script();
+        let parsed = super::super::ordinals::parse_inscription_envelope(&locking_script).unwrap();
+
+        assert_eq!(parsed.content_type, "application/bsv-20");
+        let json_str = hex_to_utf8(&parsed.data);
+        assert!(json_str.contains(r#""p":"bsv-20""#));
+        assert!(json_str.contains(r#""op":"deploy""#));
+        assert!(json_str.contains(r#""tick":"RUNAR""#));
     }
 }

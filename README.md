@@ -393,8 +393,11 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
 | [Blake3Test](examples/ts/blake3/) | BLAKE3 compression/hash built-ins | No | No |
 | [Sha256CompressTest](examples/ts/sha256-compress/) | SHA-256 compression builtin | No | No |
 | [Sha256FinalizeTest](examples/ts/sha256-finalize/) | SHA-256 finalize builtin | No | No |
+| [OrdinalNFT](examples/ts/ordinal-nft/) | 1sat ordinal NFT inscription | No | No |
+| [BSV20Token](examples/ts/bsv20-token/) | BSV-20 fungible token inscription | No | No |
+| [BSV21Token](examples/ts/bsv21-token/) | BSV-21 fungible token inscription | No | No |
 
-All 21 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 11 contracts are available in all 8 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. A 16-contract subset is also available in `sol/` and `move/`.
+All 24 examples are available in `ts/`, `go/`, `rust/`, `python/`, and `zig/`. 11 contracts are available in all 8 formats (TypeScript, Go, Rust, Ruby, Python, Zig, Solidity, Move). FunctionPatterns, PostQuantumWallet, SPHINCSWallet, SchnorrZKP, and ConvergenceProof are available in TypeScript, Go, Rust, Ruby, and Python. A 16-contract subset is also available in `sol/` and `move/`.
 ```
 examples/
   ts/p2pkh/          P2PKH.runar.ts + P2PKH.test.ts
@@ -408,6 +411,20 @@ examples/
 ```
 
 The Zig example tree is backed by `packages/runar-zig` and a shared runner at `examples/zig/examples_test.zig`.
+
+---
+
+## Documentation
+
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](docs/getting-started.md) | Installation, first contract, compile, test, deploy |
+| [Language Reference](docs/language-reference.md) | Types, operators, built-in functions |
+| [Contract Patterns](docs/contract-patterns.md) | P2PKH, escrow, tokens, auctions, covenants |
+| [1sat Ordinals & Tokens](docs/ordinals-guide.md) | NFT inscriptions, BSV-20/BSV-21 fungible tokens |
+| [Integration Guide](docs/integration-guide.md) | Full lifecycle: local dev, deploy, interact on-chain |
+| [Testing Guide](docs/testing-guide.md) | TestContract, VM, fuzzer, cross-compiler testing |
+| [API Reference](docs/api-reference.md) | SDK classes, provider/signer interfaces |
 
 ---
 

@@ -8,6 +8,7 @@ const deploy_mod = @import("sdk_deploy.zig");
 const call_mod = @import("sdk_call.zig");
 const oppushtx_mod = @import("sdk_oppushtx.zig");
 const anf_interp = @import("sdk_anf_interpreter.zig");
+const ordinals = @import("sdk_ordinals.zig");
 
 // ---------------------------------------------------------------------------
 // RunarContract — main contract runtime wrapper
@@ -32,6 +33,7 @@ pub const RunarContract = struct {
     constructor_args: []types.StateValue,
     state: []types.StateValue,
     code_script: ?[]u8 = null,
+    inscription: ?ordinals.Inscription = null,
     current_utxo: ?types.UTXO = null,
     provider: ?provider_mod.Provider = null,
     signer: ?signer_mod.Signer = null,
@@ -81,6 +83,10 @@ pub const RunarContract = struct {
         for (self.state) |*s| s.deinit(self.allocator);
         if (self.state.len > 0) self.allocator.free(self.state);
         if (self.code_script) |cs| self.allocator.free(cs);
+        if (self.inscription) |*insc| {
+            var mi = insc.*;
+            mi.deinit(self.allocator);
+        }
         if (self.current_utxo) |*u| {
             var mu = u.*;
             mu.deinit(self.allocator);
@@ -97,6 +103,27 @@ pub const RunarContract = struct {
     pub fn connect(self: *RunarContract, provider: provider_mod.Provider, signer_val: signer_mod.Signer) void {
         self.provider = provider;
         self.signer = signer_val;
+    }
+
+    // -------------------------------------------------------------------------
+    // Ordinals
+    // -------------------------------------------------------------------------
+
+    /// Attach a 1sat ordinals inscription to this contract. The inscription
+    /// envelope is injected into the locking script between the compiled code
+    /// and the state section (if any). Once deployed, the inscription is
+    /// immutable -- it persists identically across all state transitions.
+    pub fn withInscription(self: *RunarContract, insc: ordinals.Inscription) !void {
+        if (self.inscription) |*old| {
+            var mi = old.*;
+            mi.deinit(self.allocator);
+        }
+        self.inscription = try insc.clone(self.allocator);
+    }
+
+    /// Returns the current inscription, if any.
+    pub fn getInscription(self: *const RunarContract) ?ordinals.Inscription {
+        return self.inscription;
     }
 
     /// Deploy the contract by creating a UTXO with the locking script.
@@ -772,13 +799,31 @@ pub const RunarContract = struct {
 
     /// GetLockingScript returns the full locking script hex for the contract.
     /// For stateful contracts this includes the code followed by OP_RETURN and
-    /// the serialized state fields.
+    /// the serialized state fields. When an inscription is attached and the
+    /// script is built from the template (not loaded from chain), the envelope
+    /// is spliced between the code and the state section.
     pub fn getLockingScript(self: *const RunarContract) ![]u8 {
-        const code = if (self.code_script) |cs|
+        // Use stored code script from chain if available (reconnected contract).
+        // When loaded from chain, code_script already contains the inscription
+        // envelope (if any). When built from the template, we splice it in.
+        const built_from_template = self.code_script == null;
+        var code = if (self.code_script) |cs|
             try self.allocator.dupe(u8, cs)
         else
             try self.buildCodeScript();
         errdefer self.allocator.free(code);
+
+        // Inject inscription envelope between code and state (template-built
+        // only; chain-loaded code_script already includes it).
+        if (built_from_template) {
+            if (self.inscription) |insc| {
+                const envelope = try ordinals.buildInscriptionEnvelope(self.allocator, insc.content_type, insc.data);
+                defer self.allocator.free(envelope);
+                const new_code = try std.mem.concat(self.allocator, u8, &[_][]const u8{ code, envelope });
+                self.allocator.free(code);
+                code = new_code;
+            }
+        }
 
         if (self.artifact.state_fields.len > 0 and self.state.len > 0) {
             const state_hex = try state_mod.serializeState(
@@ -877,6 +922,68 @@ pub const RunarContract = struct {
         } else {
             self.current_utxo = null;
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // fromUtxo — reconnect a contract from an on-chain UTXO
+    // ---------------------------------------------------------------------------
+
+    /// Reconstruct a RunarContract from an existing on-chain UTXO. The code
+    /// script is extracted from the UTXO's locking script, and if an
+    /// inscription envelope is present it is detected and stored. State is
+    /// deserialized for stateful contracts.
+    pub fn fromUtxo(
+        allocator: std.mem.Allocator,
+        artifact: *types.RunarArtifact,
+        utxo: types.UTXO,
+    ) !RunarContract {
+        // Build with dummy constructor args (zeros)
+        var dummy_args = try allocator.alloc(types.StateValue, artifact.abi.constructor.params.len);
+        for (0..dummy_args.len) |i| dummy_args[i] = .{ .int = 0 };
+
+        var contract = RunarContract{
+            .allocator = allocator,
+            .artifact = artifact,
+            .constructor_args = dummy_args,
+            .state = &.{},
+        };
+
+        // Extract code script from UTXO
+        if (artifact.state_fields.len > 0) {
+            const op_return_pos = state_mod.findLastOpReturn(utxo.script);
+            if (op_return_pos) |pos| {
+                contract.code_script = try allocator.dupe(u8, utxo.script[0..pos]);
+            } else {
+                contract.code_script = try allocator.dupe(u8, utxo.script);
+            }
+        } else {
+            contract.code_script = try allocator.dupe(u8, utxo.script);
+        }
+
+        // Detect inscription envelope in the code portion. Keep it in code_script
+        // (do NOT strip) so that stateful continuation outputs preserve it.
+        if (contract.code_script) |cs| {
+            if (try ordinals.parseInscriptionEnvelope(allocator, cs)) |insc| {
+                contract.inscription = insc;
+            }
+        }
+
+        // Track the UTXO
+        contract.current_utxo = .{
+            .txid = try allocator.dupe(u8, utxo.txid),
+            .output_index = utxo.output_index,
+            .satoshis = utxo.satoshis,
+            .script = try allocator.dupe(u8, utxo.script),
+        };
+
+        // Deserialize state for stateful contracts
+        if (artifact.state_fields.len > 0) {
+            if (try state_mod.extractStateFromScript(allocator, artifact, utxo.script)) |state_vals| {
+                contract.state = state_vals;
+            }
+        }
+
+        return contract;
     }
 
     // ---------------------------------------------------------------------------
@@ -1139,9 +1246,20 @@ pub const RunarContract = struct {
     }
 
     /// getCodePartHex returns the code portion of the locking script (without state).
+    /// Includes the inscription envelope if one is attached -- this is required for
+    /// stateful contracts where the on-chain hashOutputs verification includes
+    /// the envelope as part of the codePart.
     pub fn getCodePartHex(self: *const RunarContract) ![]u8 {
         if (self.code_script) |cs| return self.allocator.dupe(u8, cs);
-        return self.buildCodeScript();
+        var code = try self.buildCodeScript();
+        if (self.inscription) |insc| {
+            const envelope = try ordinals.buildInscriptionEnvelope(self.allocator, insc.content_type, insc.data);
+            defer self.allocator.free(envelope);
+            const new_code = try std.mem.concat(self.allocator, u8, &[_][]const u8{ code, envelope });
+            self.allocator.free(code);
+            code = new_code;
+        }
+        return code;
     }
 };
 
@@ -1395,4 +1513,100 @@ test "insertUnlockingScript replaces empty scriptSig" {
 
     // Should contain "0151" (varint 1 + OP_1)
     try std.testing.expect(std.mem.indexOf(u8, result, "0151") != null);
+}
+
+test "RunarContract.withInscription injects envelope into locking script" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"76a914","asm":"OP_DUP OP_HASH160",
+        \\"abi":{"constructor":{"params":[{"name":"pubKeyHash","type":"Addr"}]},"methods":[{"name":"unlock","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .bytes = "aabbccdd" }});
+    defer contract.deinit();
+
+    // Attach an inscription
+    try contract.withInscription(.{ .content_type = "text/plain", .data = "48656c6c6f" });
+
+    const ls = try contract.getLockingScript();
+    defer allocator.free(ls);
+
+    // Should contain the inscription envelope pattern
+    try std.testing.expect(std.mem.indexOf(u8, ls, "0063036f726451") != null);
+    // Should still start with the code
+    try std.testing.expect(std.mem.startsWith(u8, ls, "76a914"));
+    // getInscription should return it
+    const insc = contract.getInscription().?;
+    try std.testing.expectEqualStrings("text/plain", insc.content_type);
+    try std.testing.expectEqualStrings("48656c6c6f", insc.data);
+}
+
+test "RunarContract.withInscription on stateful contract injects between code and state" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"Counter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 42 }});
+    defer contract.deinit();
+
+    try contract.withInscription(.{ .content_type = "text/plain", .data = "48656c6c6f" });
+
+    const ls = try contract.getLockingScript();
+    defer allocator.free(ls);
+
+    // Should contain OP_RETURN (6a) and the inscription envelope
+    try std.testing.expect(std.mem.indexOf(u8, ls, "6a") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ls, "0063036f726451") != null);
+
+    // Envelope should appear before OP_RETURN (between code and state)
+    const envelope_pos = std.mem.indexOf(u8, ls, "0063036f726451").?;
+    const op_return_pos = std.mem.lastIndexOf(u8, ls, "6a").?;
+    try std.testing.expect(envelope_pos < op_return_pos);
+}
+
+test "RunarContract.fromUtxo detects inscription in code script" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"76a914","asm":"OP_DUP OP_HASH160",
+        \\"abi":{"constructor":{"params":[{"name":"pubKeyHash","type":"Addr"}]},"methods":[{"name":"unlock","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    // Build a script with an inscription envelope
+    const code = "76a914" ++ "00" ** 20 ++ "88ac";
+    const envelope = try ordinals.buildInscriptionEnvelope(allocator, "text/plain", "48656c6c6f");
+    defer allocator.free(envelope);
+    const script = try std.mem.concat(allocator, u8, &[_][]const u8{ code, envelope });
+    defer allocator.free(script);
+
+    const utxo = types.UTXO{
+        .txid = "aa" ** 32,
+        .output_index = 0,
+        .satoshis = 1,
+        .script = script,
+    };
+
+    var contract = try RunarContract.fromUtxo(allocator, &artifact, utxo);
+    defer contract.deinit();
+
+    // Should have detected the inscription
+    const insc = contract.getInscription().?;
+    try std.testing.expectEqualStrings("text/plain", insc.content_type);
+    try std.testing.expectEqualStrings("48656c6c6f", insc.data);
+
+    // code_script should include the envelope (not stripped)
+    try std.testing.expect(contract.code_script != null);
+    try std.testing.expect(std.mem.indexOf(u8, contract.code_script.?, "0063036f726451") != null);
 }

@@ -15,6 +15,8 @@ pub mod script_utils;
 pub mod token_wallet;
 pub mod wallet;
 pub mod woc_provider;
+pub mod ordinals;
+pub mod gorillapool;
 
 pub use types::*;
 pub use state::{serialize_state, deserialize_state, extract_state_from_script, find_last_op_return};
@@ -35,3 +37,11 @@ pub use wallet::{
     WalletActionOutput, WalletActionResult, WalletOutput,
     DeployWithWalletOptions, deploy_with_wallet,
 };
+pub use ordinals::{
+    Inscription, EnvelopeBounds,
+    build_inscription_envelope, parse_inscription_envelope,
+    find_inscription_envelope, strip_inscription_envelope,
+    bsv20_deploy, bsv20_mint, bsv20_transfer,
+    bsv21_deploy_mint, bsv21_transfer,
+};
+pub use gorillapool::GorillaPoolProvider;

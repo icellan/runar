@@ -4,6 +4,7 @@ use std::fs;
 
 use runar_lang::sdk::types::{RunarArtifact, SdkValue};
 use runar_lang::sdk::contract::RunarContract;
+use runar_lang::sdk::ordinals::Inscription;
 
 #[derive(Deserialize)]
 struct TypedArg {
@@ -13,10 +14,18 @@ struct TypedArg {
 }
 
 #[derive(Deserialize)]
+struct InscriptionInput {
+    #[serde(rename = "contentType")]
+    content_type: String,
+    data: String,
+}
+
+#[derive(Deserialize)]
 struct Input {
     artifact: serde_json::Value,
     #[serde(rename = "constructorArgs")]
     constructor_args: Vec<TypedArg>,
+    inscription: Option<InscriptionInput>,
 }
 
 fn convert_arg(arg: &TypedArg) -> SdkValue {
@@ -53,6 +62,12 @@ fn main() {
 
     let sdk_args: Vec<SdkValue> = input.constructor_args.iter().map(convert_arg).collect();
 
-    let contract = RunarContract::new(artifact, sdk_args);
+    let mut contract = RunarContract::new(artifact, sdk_args);
+    if let Some(insc) = input.inscription {
+        contract.with_inscription(Inscription {
+            content_type: insc.content_type,
+            data: insc.data,
+        });
+    }
     print!("{}", contract.get_locking_script());
 }

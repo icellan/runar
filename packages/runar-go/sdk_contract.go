@@ -25,6 +25,7 @@ type RunarContract struct {
 	constructorArgs []interface{}
 	state           map[string]interface{}
 	codeScript      string // stored code portion from on-chain script (for reconnected contracts)
+	inscription     *Inscription
 	currentUtxo     *UTXO
 	provider        Provider
 	signer          Signer
@@ -129,6 +130,20 @@ func flattenFixedArrayCtorArgs(args []interface{}, abiParams []ABIParam) []inter
 func (c *RunarContract) Connect(provider Provider, signer Signer) {
 	c.provider = provider
 	c.signer = signer
+}
+
+// WithInscription attaches a 1sat ordinals inscription to this contract. The
+// inscription envelope is injected into the locking script between the compiled
+// code and the state section (if any). Once deployed, the inscription is
+// immutable -- it persists identically across all state transitions.
+func (c *RunarContract) WithInscription(inscription *Inscription) *RunarContract {
+	c.inscription = inscription
+	return c
+}
+
+// GetInscription returns the current inscription, if any.
+func (c *RunarContract) GetInscription() *Inscription {
+	return c.inscription
 }
 
 // Deploy deploys the contract by creating a UTXO with the locking script.
@@ -463,14 +478,11 @@ func (c *RunarContract) PrepareCall(
 	newSatoshis := int64(0)
 
 	if isStateful && hasMultiOutput {
-		codeScript := c.codeScript
-		if codeScript == "" {
-			codeScript = c.buildCodeScript()
-		}
+		codePartHex := c.getCodePartHex()
 		for _, out := range options.Outputs {
 			stateHex := SerializeState(c.Artifact.StateFields, out.State)
 			contractOutputs = append(contractOutputs, ContractOutput{
-				Script:   codeScript + "6a" + stateHex,
+				Script:   codePartHex + "6a" + stateHex,
 				Satoshis: out.Satoshis,
 			})
 		}
@@ -991,6 +1003,15 @@ func FromUtxo(artifact *RunarArtifact, utxo UTXO) *RunarContract {
 		contract.codeScript = utxo.Script
 	}
 
+	// Detect inscription envelope in the code portion. Keep it in codeScript
+	// (do NOT strip) so that stateful continuation outputs preserve it.
+	if contract.codeScript != "" {
+		insc := ParseInscriptionEnvelope(contract.codeScript)
+		if insc != nil {
+			contract.inscription = insc
+		}
+	}
+
 	// Set the current UTXO
 	contract.currentUtxo = &UTXO{
 		Txid:        utxo.Txid,
@@ -1056,6 +1077,15 @@ func FromTxId(
 		contract.codeScript = output.Script
 	}
 
+	// Detect inscription envelope in the code portion. Keep it in codeScript
+	// (do NOT strip) so that stateful continuation outputs preserve it.
+	if contract.codeScript != "" {
+		insc := ParseInscriptionEnvelope(contract.codeScript)
+		if insc != nil {
+			contract.inscription = insc
+		}
+	}
+
 	// Set the current UTXO
 	contract.currentUtxo = &UTXO{
 		Txid:        txid,
@@ -1079,10 +1109,19 @@ func FromTxId(
 // For stateful contracts this includes the code followed by OP_RETURN and
 // the serialized state fields.
 func (c *RunarContract) GetLockingScript() string {
-	// Use stored code script from chain if available (reconnected contract)
+	// Use stored code script from chain if available (reconnected contract).
+	// When loaded from chain, codeScript already contains the inscription
+	// envelope (if any). When built from the template, we splice it in.
+	builtFromTemplate := c.codeScript == ""
 	script := c.codeScript
 	if script == "" {
 		script = c.buildCodeScript()
+	}
+
+	// Inject inscription envelope between code and state (template-built only;
+	// chain-loaded codeScript already includes it).
+	if builtFromTemplate && c.inscription != nil {
+		script += BuildInscriptionEnvelope(c.inscription.ContentType, c.inscription.Data)
 	}
 
 	// Append state section for stateful contracts
@@ -1227,11 +1266,18 @@ func (c *RunarContract) buildCodeScript() string {
 }
 
 // getCodePartHex returns the code portion of the locking script (without state).
+// Includes the inscription envelope if one is attached -- this is required for
+// stateful contracts where the on-chain hashOutputs verification includes
+// the envelope as part of the codePart.
 func (c *RunarContract) getCodePartHex() string {
 	if c.codeScript != "" {
 		return c.codeScript
 	}
-	return c.buildCodeScript()
+	code := c.buildCodeScript()
+	if c.inscription != nil {
+		code += BuildInscriptionEnvelope(c.inscription.ContentType, c.inscription.Data)
+	}
+	return code
 }
 
 // adjustCodeSepOffset adjusts a code separator byte offset from the base

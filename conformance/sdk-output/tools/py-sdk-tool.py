@@ -6,7 +6,7 @@ import os
 # Add runar-py to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'packages', 'runar-py'))
 
-from runar.sdk import RunarContract, RunarArtifact
+from runar.sdk import RunarContract, RunarArtifact, Inscription
 
 
 def convert_arg(arg: dict):
@@ -32,6 +32,12 @@ def main():
     args = [convert_arg(a) for a in data['constructorArgs']]
 
     contract = RunarContract(artifact, args)
+    if data.get('inscription'):
+        insc = data['inscription']
+        contract.with_inscription(Inscription(
+            content_type=insc['contentType'],
+            data=insc['data'],
+        ))
     sys.stdout.write(contract.get_locking_script())
 
 

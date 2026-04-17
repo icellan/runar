@@ -10,6 +10,7 @@ require_relative 'calling'
 require_relative 'oppushtx'
 require_relative 'anf_interpreter'
 require_relative 'wallet'
+require_relative 'ordinals'
 
 # RunarContract — runtime wrapper for a compiled Runar contract.
 #
@@ -49,7 +50,7 @@ module Runar
   module SDK
     # rubocop:disable Naming/AccessorMethodName, Naming/PredicatePrefix
     class RunarContract
-      attr_reader :artifact
+      attr_reader :artifact, :inscription
 
       # @param artifact         [RunarArtifact] compiled contract artifact
       # @param constructor_args [Array]         constructor argument values
@@ -70,8 +71,22 @@ module Runar
         @current_utxo     = nil
         @provider         = nil
         @signer           = nil
+        @inscription      = nil
 
         init_state_from_constructor_args
+      end
+
+      # Attach a 1sat ordinals inscription to this contract.
+      #
+      # The inscription envelope is injected into the locking script between the
+      # compiled code and the state section (if any). Once deployed, the inscription
+      # is immutable -- it persists identically across all state transitions.
+      #
+      # @param insc [Inscription] inscription data (content_type + hex data)
+      # @return [self] for chaining
+      def with_inscription(insc)
+        @inscription = insc
+        self
       end
 
       # Return the UTXO currently tracked by this contract, or nil if not deployed.
@@ -499,6 +514,13 @@ module Runar
                       end
 
         contract.instance_variable_set(:@code_script, code_script)
+
+        # Detect inscription envelope in the code portion.
+        if code_script && !code_script.empty?
+          insc = Ordinals.parse_inscription_envelope(code_script)
+          contract.instance_variable_set(:@inscription, insc) if insc
+        end
+
         contract.instance_variable_set(
           :@current_utxo,
           Utxo.new(txid: txid, output_index: output_index, satoshis: output.satoshis, script: output.script)
@@ -537,6 +559,14 @@ module Runar
                       end
 
         contract.instance_variable_set(:@code_script, code_script)
+
+        # Detect inscription envelope in the code portion. Keep it in @code_script
+        # (do NOT strip) so that stateful continuation outputs preserve it.
+        if code_script && !code_script.empty?
+          insc = Ordinals.parse_inscription_envelope(code_script)
+          contract.instance_variable_set(:@inscription, insc) if insc
+        end
+
         contract.instance_variable_set(
           :@current_utxo,
           Utxo.new(txid: utxo.txid, output_index: utxo.output_index,
@@ -569,11 +599,21 @@ module Runar
       end
       private_class_method :normalize_utxo
 
-      # Return the full locking script hex (code script + optional OP_RETURN + state).
+      # Return the full locking script hex (code script + optional envelope + optional OP_RETURN + state).
+      #
+      # When loaded from chain, @code_script already contains the inscription
+      # envelope (if any). When built from the template, we splice it in.
       #
       # @return [String]
       def get_locking_script
-        script = @code_script.empty? ? build_code_script : @code_script
+        built_from_template = @code_script.empty?
+        script = built_from_template ? build_code_script : @code_script
+
+        # Inject inscription envelope between code and state (template-built only;
+        # chain-loaded @code_script already includes it).
+        if built_from_template && @inscription
+          script += Ordinals.build_inscription_envelope(@inscription.content_type, @inscription.data)
+        end
 
         unless @artifact.state_fields.empty?
           state_hex = State.serialize_state(@artifact.state_fields, @state)
@@ -1214,8 +1254,20 @@ module Runar
       # Code separator helpers
       # ---------------------------------------------------------------------------
 
+      # Get the code script hex (locking script without state) for use as _codePart.
+      #
+      # Returns the code portion that the on-chain contract uses for output
+      # reconstruction. Includes the inscription envelope if one is attached --
+      # this is required for stateful contracts where the on-chain hashOutputs
+      # verification includes the envelope as part of the codePart.
       def get_code_part_hex
-        @code_script.empty? ? build_code_script : @code_script
+        return @code_script unless @code_script.empty?
+
+        code = build_code_script
+        if @inscription
+          code += Ordinals.build_inscription_envelope(@inscription.content_type, @inscription.data)
+        end
+        code
       end
 
       def adjust_code_sep_offset(base_offset)

@@ -66,6 +66,17 @@ pub fn main(init: std.process.Init) !void {
     var contract = try runar.RunarContract.init(allocator, &artifact, ctor_args);
     defer contract.deinit();
 
+    // Handle optional inscription
+    if (root.get("inscription")) |insc_val| {
+        const insc_obj = insc_val.object;
+        const ct = if (insc_obj.get("contentType")) |v| v.string else "";
+        const d = if (insc_obj.get("data")) |v| v.string else "";
+        try contract.withInscription(.{
+            .content_type = try allocator.dupe(u8, ct),
+            .data = try allocator.dupe(u8, d),
+        });
+    }
+
     const locking_script = try contract.getLockingScript();
     defer allocator.free(locking_script);
 

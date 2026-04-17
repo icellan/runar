@@ -20,6 +20,9 @@ from runar.sdk.state import (
 )
 from runar.sdk.oppushtx import compute_op_push_tx
 from runar.sdk.anf_interpreter import compute_new_state
+from runar.sdk.ordinals import (
+    Inscription, build_inscription_envelope, parse_inscription_envelope,
+)
 
 
 class RunarContract:
@@ -40,6 +43,7 @@ class RunarContract:
         self._constructor_args = list(constructor_args)
         self._state: dict = {}
         self._code_script = ''
+        self._inscription: Inscription | None = None
         self._current_utxo: Utxo | None = None
         self._provider: Provider | None = None
         self._signer: Signer | None = None
@@ -806,6 +810,13 @@ class RunarContract:
         else:
             contract._code_script = utxo.script
 
+        # Detect inscription envelope in the code portion. Keep it in _code_script
+        # (do NOT strip) so that stateful continuation outputs preserve it.
+        if contract._code_script:
+            parsed_inscription = parse_inscription_envelope(contract._code_script)
+            if parsed_inscription:
+                contract._inscription = parsed_inscription
+
         contract._current_utxo = Utxo(
             txid=utxo.txid, output_index=utxo.output_index,
             satoshis=utxo.satoshis, script=utxo.script,
@@ -841,7 +852,19 @@ class RunarContract:
 
     def get_locking_script(self) -> str:
         """Return the full locking script hex."""
+        # Use stored code script from chain if available (reconnected contract).
+        # When loaded from chain, _code_script already contains the inscription
+        # envelope (if any). When built from the template, we splice it in.
+        built_from_template = not self._code_script
         script = self._code_script or self._build_code_script()
+
+        # Inject inscription envelope between code and state (template-built only;
+        # chain-loaded _code_script already includes it).
+        if built_from_template and self._inscription:
+            script += build_inscription_envelope(
+                self._inscription.content_type,
+                self._inscription.data,
+            )
 
         if self.artifact.state_fields:
             state_hex = serialize_state(self.artifact.state_fields, self._state)
@@ -879,6 +902,24 @@ class RunarContract:
     def set_state(self, new_state: dict) -> None:
         """Update state values directly."""
         self._state.update(new_state)
+
+    # -- Ordinals --
+
+    def with_inscription(self, inscription: Inscription) -> 'RunarContract':
+        """Attach a 1sat ordinals inscription to this contract.
+
+        The inscription envelope is injected into the locking script between
+        the compiled code and the state section (if any). Once deployed, the
+        inscription is immutable -- it persists identically across all state
+        transitions.
+        """
+        self._inscription = inscription
+        return self
+
+    @property
+    def inscription(self) -> Inscription | None:
+        """Returns the current inscription, if any."""
+        return self._inscription
 
     # -- Terminal method (prepare path) --
 
@@ -1045,8 +1086,21 @@ class RunarContract:
     # -- Code separator helpers --
 
     def _get_code_part_hex(self) -> str:
-        """Get the code part (code script without state)."""
-        return self._code_script or self._build_code_script()
+        """Get the code part (code script without state).
+
+        Includes the inscription envelope if one is attached -- this is required
+        for stateful contracts where the on-chain hashOutputs verification
+        includes the envelope as part of the codePart.
+        """
+        if self._code_script:
+            return self._code_script
+        code = self._build_code_script()
+        if self._inscription:
+            code += build_inscription_envelope(
+                self._inscription.content_type,
+                self._inscription.data,
+            )
+        return code
 
     def _adjust_code_sep_offset(self, base_offset: int) -> int:
         """Adjust code separator byte offset for constructor arg and codeSepIndex

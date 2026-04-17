@@ -18,6 +18,8 @@ pub const sdk_call = @import("sdk_call.zig");
 pub const sdk_oppushtx = @import("sdk_oppushtx.zig");
 pub const sdk_contract = @import("sdk_contract.zig");
 pub const sdk_woc_provider = @import("sdk_woc_provider.zig");
+pub const sdk_gorillapool = @import("sdk_gorillapool.zig");
+pub const sdk_ordinals = @import("sdk_ordinals.zig");
 pub const sdk_script_utils = @import("sdk_script_utils.zig");
 pub const sdk_anf_interpreter = @import("sdk_anf_interpreter.zig");
 pub const sdk_wallet = @import("sdk_wallet.zig");
@@ -61,6 +63,18 @@ pub const computeOpPushTx = sdk_oppushtx.computeOpPushTx;
 pub const opPushTxPubKeyHex = sdk_oppushtx.opPushTxPubKeyHex;
 pub const buildP2PKHScript = sdk_deploy.buildP2PKHScript;
 pub const insertUnlockingScript = sdk_contract.insertUnlockingScript;
+pub const GorillaPoolProvider = sdk_gorillapool.GorillaPoolProvider;
+pub const Inscription = sdk_ordinals.Inscription;
+pub const EnvelopeBounds = sdk_ordinals.EnvelopeBounds;
+pub const buildInscriptionEnvelope = sdk_ordinals.buildInscriptionEnvelope;
+pub const parseInscriptionEnvelope = sdk_ordinals.parseInscriptionEnvelope;
+pub const findInscriptionEnvelope = sdk_ordinals.findInscriptionEnvelope;
+pub const stripInscriptionEnvelope = sdk_ordinals.stripInscriptionEnvelope;
+pub const bsv20Deploy = sdk_ordinals.bsv20Deploy;
+pub const bsv20Mint = sdk_ordinals.bsv20Mint;
+pub const bsv20Transfer = sdk_ordinals.bsv20Transfer;
+pub const bsv21DeployMint = sdk_ordinals.bsv21DeployMint;
+pub const bsv21Transfer = sdk_ordinals.bsv21Transfer;
 
 pub const Int = base.Int;
 pub const Bigint = builtins.SignedBigint;
@@ -178,6 +192,9 @@ test {
     _ = @import("sdk_call.zig");
     _ = @import("sdk_oppushtx.zig");
     _ = @import("sdk_contract.zig");
+    _ = @import("sdk_ordinals.zig");
+    // sdk_gorillapool uses std.http.Client which requires runtime Io;
+    // its tests are compile-time type checks only, referenced via pub const above.
     _ = @import("sdk_wallet.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

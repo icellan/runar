@@ -6,9 +6,15 @@ interface TypedArg {
   value: string;
 }
 
+interface InscriptionInput {
+  contentType: string;
+  data: string;
+}
+
 interface Input {
   artifact: Record<string, unknown>;
   constructorArgs: TypedArg[];
+  inscription?: InscriptionInput;
 }
 
 function convertArg(arg: TypedArg): unknown {
@@ -33,4 +39,7 @@ if (!inputPath) {
 const input: Input = JSON.parse(readFileSync(inputPath, 'utf-8'));
 const args = input.constructorArgs.map(convertArg);
 const contract = new RunarContract(input.artifact as any, args);
+if (input.inscription) {
+  contract.withInscription(input.inscription);
+}
 process.stdout.write(contract.getLockingScript());

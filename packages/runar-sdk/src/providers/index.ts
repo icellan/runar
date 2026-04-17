@@ -9,3 +9,5 @@ export { RPCProvider } from './rpc-provider.js';
 export type { RPCProviderOptions } from './rpc-provider.js';
 export { WalletProvider } from './wallet-provider.js';
 export type { WalletProviderOptions } from './wallet-provider.js';
+export { GorillaPoolProvider } from './gorillapool.js';
+export type { InscriptionInfo, InscriptionDetail } from './gorillapool.js';
