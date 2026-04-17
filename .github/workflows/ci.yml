@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.16.0
       - run: cd compilers/zig && zig build test
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
@@ -205,7 +205,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.16.0
       - name: SDK tests
         run: cd packages/runar-zig && zig build test
       - name: Example tests
@@ -341,7 +341,7 @@ jobs:
           working-directory: packages/runar-rb
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.16.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - name: Build Rust SDK tool
@@ -394,7 +394,7 @@ jobs:
           working-directory: integration/ruby
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.0
+          version: 0.16.0
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
