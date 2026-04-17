@@ -104,11 +104,15 @@ function generateP384KeyPair(): P384KeyPair {
     const sLen = der[pos++]!;
     const sBytes = der.subarray(pos, pos + sLen);
 
-    // Zero-pad r and s to 48 bytes each (r/s may have a leading 0x00 padding byte).
+    // Right-align r and s into 48-byte buffers. DER may prepend a 0x00 sign
+    // byte when the high bit is set, making the encoded length 49 — take the
+    // low 48 bytes so the padding is dropped rather than truncating the value.
     const r = Buffer.alloc(48);
     const s = Buffer.alloc(48);
-    rBytes.copy(r, Math.max(0, 48 - rBytes.length));
-    sBytes.copy(s, Math.max(0, 48 - sBytes.length));
+    const rSrc = rBytes.length > 48 ? rBytes.subarray(rBytes.length - 48) : rBytes;
+    const sSrc = sBytes.length > 48 ? sBytes.subarray(sBytes.length - 48) : sBytes;
+    rSrc.copy(r, 48 - rSrc.length);
+    sSrc.copy(s, 48 - sSrc.length);
 
     return Buffer.concat([r, s]).toString('hex');
   };

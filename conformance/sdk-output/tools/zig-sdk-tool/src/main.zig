@@ -1,13 +1,17 @@
 const std = @import("std");
 const runar = @import("runar");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_list: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer args_list.deinit(allocator);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    while (args_iter.next()) |arg| {
+        try args_list.append(allocator, arg);
+    }
+    const args = args_list.items;
 
     if (args.len < 2) {
         std.debug.print("Usage: zig-sdk-tool <input.json>\n", .{});
@@ -15,9 +19,7 @@ pub fn main() !void {
     }
 
     const file_path = args[1];
-    const file = try std.fs.cwd().openFile(file_path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, 16 * 1024 * 1024);
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, file_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(data);
 
     // Parse the top-level JSON to extract artifact and constructorArgs
@@ -67,8 +69,8 @@ pub fn main() !void {
     const locking_script = try contract.getLockingScript();
     defer allocator.free(locking_script);
 
-    const stdout = std.fs.File.stdout();
-    try stdout.writeAll(locking_script);
+    const stdout = std.Io.File.stdout();
+    try stdout.writeStreamingAll(io, locking_script);
 }
 
 fn convertArg(allocator: std.mem.Allocator, type_str: []const u8, value: std.json.Value) !runar.StateValue {

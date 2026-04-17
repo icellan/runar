@@ -100,11 +100,15 @@ function generateP256KeyPair(): P256KeyPair {
     const sLen = der[pos++]!;
     const sBytes = der.subarray(pos, pos + sLen);
 
-    // Zero-pad r and s to 32 bytes each (r/s may have a leading 0x00 padding byte).
+    // Right-align r and s into 32-byte buffers. DER may prepend a 0x00 sign
+    // byte when the high bit is set, making the encoded length 33 — take the
+    // low 32 bytes so the padding is dropped rather than truncating the value.
     const r = Buffer.alloc(32);
     const s = Buffer.alloc(32);
-    rBytes.copy(r, Math.max(0, 32 - rBytes.length));
-    sBytes.copy(s, Math.max(0, 32 - sBytes.length));
+    const rSrc = rBytes.length > 32 ? rBytes.subarray(rBytes.length - 32) : rBytes;
+    const sSrc = sBytes.length > 32 ? sBytes.subarray(sBytes.length - 32) : sBytes;
+    rSrc.copy(r, 32 - rSrc.length);
+    sSrc.copy(s, 32 - sSrc.length);
 
     return Buffer.concat([r, s]).toString('hex');
   };
