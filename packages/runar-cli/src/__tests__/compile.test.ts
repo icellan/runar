@@ -2,7 +2,7 @@
 // Tests for runar-cli/commands/compile.ts
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
 // We need to test the jsonWithBigInt helper. Since it's not exported, we
 // re-implement the same logic and also test the compileCommand behavior
@@ -90,6 +90,22 @@ describe('jsonWithBigInt', () => {
 
 describe('compileCommand', () => {
   let compileCommand: typeof import('../commands/compile.js').compileCommand;
+
+  beforeAll(async () => {
+    // Warm the compiler import so the first real test doesn't pay ~1-5s
+    // of cold-import cost against its own timeout budget. compile.ts
+    // dynamically imports either the monorepo source entry or the
+    // published "runar-compiler" package — pre-load both candidates.
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const { pathToFileURL } = await import('node:url');
+    const sourceEntry = path.resolve(process.cwd(), 'packages/runar-compiler/src/index.ts');
+    if (fs.existsSync(sourceEntry)) {
+      await import(pathToFileURL(sourceEntry).href);
+    } else {
+      await import('runar-compiler');
+    }
+  }, 60_000);
 
   beforeEach(async () => {
     const mod = await import('../commands/compile.js');
