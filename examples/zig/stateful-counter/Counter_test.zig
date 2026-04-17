@@ -9,7 +9,7 @@ test "compile-check Counter.runar.zig" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "Counter.runar.zig", .data = contract_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "Counter.runar.zig", .data = contract_source });
 
     const path = try std.fs.path.join(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..], "Counter.runar.zig" });
     defer allocator.free(path);

@@ -38,10 +38,10 @@ pub const runar = struct {
         allocator: std.mem.Allocator,
         probe_case: []const u8,
     ) !void {
-        const result = try std.process.Child.run(.{
-            .allocator = allocator,
+        const result = try std.process.run(allocator, std.testing.io, .{
             .argv = &.{ assert_probe_path, probe_case },
-            .max_output_bytes = 64 * 1024,
+            .stdout_limit = .limited(64 * 1024),
+            .stderr_limit = .limited(64 * 1024),
         });
         defer {
             allocator.free(result.stdout);
@@ -49,8 +49,8 @@ pub const runar = struct {
         }
 
         switch (result.term) {
-            .Exited => |code| try std.testing.expect(code != 0),
-            .Signal => {},
+            .exited => |code| try std.testing.expect(code != 0),
+            .signal => {},
             else => return error.TestUnexpectedResult,
         }
 

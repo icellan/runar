@@ -292,7 +292,7 @@ fn freeOutputValues(allocator: std.mem.Allocator, values: []OutputValue) void {
 const test_state_magic = "rnrt";
 
 fn serializeOutputValueSlice(allocator: std.mem.Allocator, values: []const OutputValue) StatefulRuntimeError![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.appendSlice(allocator, test_state_magic);
@@ -326,7 +326,7 @@ fn wrapContinuationScript(
     state_script: ByteString,
     suffix: ByteString,
 ) StatefulRuntimeError![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
 
     try out.appendSlice(allocator, prefix);
@@ -337,7 +337,7 @@ fn wrapContinuationScript(
 }
 
 fn serializeRecordedOutput(allocator: std.mem.Allocator, output: OutputSnapshot) StatefulRuntimeError![]u8 {
-    var out = std.ArrayList(u8){};
+    var out: std.ArrayList(u8) = .empty;
     defer out.deinit(allocator);
     try appendRecordedOutput(&out, allocator, output);
     return out.toOwnedSlice(allocator);

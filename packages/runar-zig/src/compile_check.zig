@@ -71,7 +71,7 @@ pub fn compileCheckFile(
     allocator: std.mem.Allocator,
     file_path: []const u8,
 ) !CompileCheckResult {
-    const source = try std.fs.cwd().readFileAlloc(allocator, file_path, 1024 * 1024);
+    const source = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, file_path, allocator, .limited(1024 * 1024));
     defer allocator.free(source);
 
     return compileCheckSource(allocator, source, file_path);
@@ -201,7 +201,7 @@ test "compileCheckFile reads and checks a file" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    try tmp.dir.writeFile(.{
+    try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "Simple.runar.zig",
         .data =
         \\const runar = @import("runar");
@@ -223,7 +223,7 @@ test "compileCheckFile reads and checks a file" {
         ,
     });
 
-    const full_path = try tmp.dir.realpathAlloc(std.testing.allocator, "Simple.runar.zig");
+    const full_path = try tmp.dir.realPathFileAlloc(std.testing.io, "Simple.runar.zig", std.testing.allocator);
     defer std.testing.allocator.free(full_path);
 
     const result = try compileCheckFile(std.testing.allocator, full_path);

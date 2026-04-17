@@ -28,18 +28,15 @@ pub const assert_panic_tag = "RUNAR_ASSERT_PANIC";
 pub fn panic(msg: []const u8, st: ?*std.builtin.StackTrace, addr: ?usize) noreturn {
     _ = st;
     if (std.mem.eql(u8, msg, runar.assertFailureMessage)) {
-        var buf: [256]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s}:{s}\n", .{ assert_panic_tag, msg }) catch assert_panic_tag ++ "\n";
-        std.fs.File.stderr().writeAll(line) catch {};
+        std.debug.print("{s}:{s}\n", .{ assert_panic_tag, msg });
     }
     std.debug.defaultPanic(msg, addr);
 }
 
-pub fn main() !void {
-    var args = try std.process.argsWithAllocator(std.heap.page_allocator);
-    defer args.deinit();
-    _ = args.next();
-    const probe_case = args.next() orelse return error.MissingProbeCase;
+pub fn main(init: std.process.Init) !void {
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    _ = args_iter.next();
+    const probe_case = args_iter.next() orelse return error.MissingProbeCase;
     try runCase(probe_case);
 }
 

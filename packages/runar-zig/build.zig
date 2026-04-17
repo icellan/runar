@@ -37,10 +37,11 @@ pub fn build(b: *std.Build) void {
 
     const has_bsvz_runar_harness = blk: {
         const harness_path = b.pathFromRoot("../../../bsvz/tests/support/runar_harness.zig");
-        std.fs.cwd().access(harness_path, .{}) catch |err| switch (err) {
+        const file = b.build_root.handle.openFile(b.graph.io, harness_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :blk false,
             else => break :blk false,
         };
+        file.close(b.graph.io);
         break :blk true;
     };
 

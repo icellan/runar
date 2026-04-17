@@ -594,7 +594,7 @@ pub fn encodeBigScriptNumber(allocator: std.mem.Allocator, decimal_str: []const 
     var work_len = digits.len;
 
     // Result bytes in little-endian order
-    var le_bytes = std.ArrayListUnmanaged(u8){};
+    var le_bytes: std.ArrayListUnmanaged(u8) = .empty;
     defer le_bytes.deinit(allocator);
 
     while (work_len > 0) {
