@@ -65,6 +65,10 @@ name = "p256_wallet"
 path = "p256-wallet/P256Wallet_test.rs"
 
 [[test]]
+name = "p384_wallet"
+path = "p384-wallet/P384Wallet_test.rs"
+
+[[test]]
 name = "sphincs_wallet"
 path = "sphincs-wallet/SPHINCSWallet_test.rs"
 

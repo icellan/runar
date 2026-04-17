@@ -171,6 +171,103 @@ def verify_ecdsa_p256(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return rx % _P256_N == r
 
 
+# -- Real P-384 ECDSA Verification ------------------------------------------
+
+def verify_ecdsa_p384(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
+    """Verify a P-384 ECDSA signature.
+
+    msg is the raw message (SHA-256 hashed internally, matching the on-chain
+    codegen which uses OP_SHA256 for both P-256 and P-384).
+    sig is the 96-byte raw signature: r[48] || s[48].
+    pubkey is the 49-byte compressed P-384 public key (02/03 prefix + x[48]).
+    """
+    import hashlib
+    msg = _as_bytes(msg)
+    sig = _as_bytes(sig)
+    pubkey = _as_bytes(pubkey)
+    if len(sig) != 96:
+        return False
+    # P-384 curve parameters
+    _P384_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF
+    _P384_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973
+    _P384_A = -3 % _P384_P
+    _P384_B = 0xB3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875AC656398D8A2ED19D2A85C8EDD3EC2AEF
+    _P384_GX = 0xAA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A385502F25DBF55296C3A545E3872760AB7
+    _P384_GY = 0x3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C00A60B1CE1D7E819D7A431D7C90EA0E5F
+
+    def _modinv_p384(a: int, m: int) -> int:
+        g, x, _ = _ext_gcd_p384(a % m, m)
+        if g != 1:
+            return 0
+        return x % m
+
+    def _ext_gcd_p384(a: int, b: int):
+        if a == 0:
+            return b, 0, 1
+        g, x, y = _ext_gcd_p384(b % a, a)
+        return g, y - (b // a) * x, x
+
+    def _p384_add(x1, y1, x2, y2):
+        if x1 is None:
+            return x2, y2
+        if x2 is None:
+            return x1, y1
+        if x1 == x2:
+            if y1 != y2:
+                return None, None
+            lam = (3 * x1 * x1 + _P384_A) * _modinv_p384(2 * y1, _P384_P) % _P384_P
+        else:
+            lam = (y2 - y1) * _modinv_p384(x2 - x1, _P384_P) % _P384_P
+        x3 = (lam * lam - x1 - x2) % _P384_P
+        y3 = (lam * (x1 - x3) - y1) % _P384_P
+        return x3, y3
+
+    def _p384_mul(x, y, k):
+        rx, ry = None, None
+        qx, qy = x, y
+        while k > 0:
+            if k & 1:
+                rx, ry = _p384_add(rx, ry, qx, qy)
+            qx, qy = _p384_add(qx, qy, qx, qy)
+            k >>= 1
+        return rx, ry
+
+    # Decode compressed public key (49 bytes)
+    prefix = pubkey[0]
+    if prefix not in (0x02, 0x03) or len(pubkey) != 49:
+        return False
+    pkx = int.from_bytes(pubkey[1:], 'big')
+    # Recover y from x: y^2 = x^3 + ax + b (mod p)
+    y2 = (pow(pkx, 3, _P384_P) + _P384_A * pkx + _P384_B) % _P384_P
+    y = pow(y2, (_P384_P + 1) // 4, _P384_P)
+    if pow(y, 2, _P384_P) != y2:
+        return False
+    if (y % 2) != (prefix % 2):
+        y = _P384_P - y
+
+    # Hash message (SHA-256, matching on-chain codegen for both curves)
+    digest = hashlib.sha256(_as_bytes(msg)).digest()
+    z = int.from_bytes(digest, 'big')
+
+    # Decode signature r, s (48 bytes each)
+    r = int.from_bytes(sig[:48], 'big')
+    s = int.from_bytes(sig[48:], 'big')
+    if r == 0 or s == 0 or r >= _P384_N or s >= _P384_N:
+        return False
+
+    w = _modinv_p384(s, _P384_N)
+    u1 = z * w % _P384_N
+    u2 = r * w % _P384_N
+
+    # Compute u1*G + u2*Q
+    gx, gy = _p384_mul(_P384_GX, _P384_GY, u1)
+    qx, qy = _p384_mul(pkx, y, u2)
+    rx, ry = _p384_add(gx, gy, qx, qy)
+    if rx is None:
+        return False
+    return rx % _P384_N == r
+
+
 # -- Real SLH-DSA Verification (falls back to mock if slhdsa not installed) -
 
 def verify_slh_dsa_sha2_128s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:

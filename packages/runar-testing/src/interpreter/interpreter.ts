@@ -1042,9 +1042,13 @@ export class RunarInterpreter {
         return { kind: 'boolean', value: verifyECDSA_P256_impl(msg, rawSig, compressedPub) };
       }
 
-      // P-384 ECDSA verification (mocked — always true in interpreter)
-      case 'verifyECDSA_P384':
-        return { kind: 'boolean', value: true };
+      // P-384 ECDSA verification — real implementation using Node.js crypto
+      case 'verifyECDSA_P384': {
+        const msg = this.toBytes(args[0]!);
+        const rawSig = this.toBytes(args[1]!); // 96-byte r||s
+        const compressedPub = this.toBytes(args[2]!); // 49-byte compressed
+        return { kind: 'boolean', value: verifyECDSA_P384_impl(msg, rawSig, compressedPub) };
+      }
 
       // P-256 / P-384 curve operations (mocked — return zero bytes)
       case 'p256Add':
@@ -1406,6 +1410,98 @@ function verifyECDSA_P256_impl(
       0x30, 0x39, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02,
       0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03,
       0x22, 0x00,
+    ]);
+    const spki = new Uint8Array(spkiPrefix.length + compressedPub.length);
+    spki.set(spkiPrefix);
+    spki.set(compressedPub, spkiPrefix.length);
+
+    const pubKeyObj = createPublicKey({ key: Buffer.from(spki), format: 'der', type: 'spki' });
+    const verifier = createVerify('SHA256');
+    verifier.update(Buffer.from(msg));
+    return verifier.verify(pubKeyObj, Buffer.from(der));
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// P-384 ECDSA verification helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Verify a P-384 ECDSA signature using Node.js crypto.
+ *
+ * @param msg - The raw message bytes that were signed (hashed internally by the
+ *   P-384 codegen as SHA-256 before verification — matching P-256 behaviour)
+ * @param rawSig - 96-byte raw r||s signature
+ * @param compressedPub - 49-byte compressed P-384 public key (02/03 + x[48])
+ */
+function verifyECDSA_P384_impl(
+  msg: Uint8Array,
+  rawSig: Uint8Array,
+  compressedPub: Uint8Array,
+): boolean {
+  try {
+    // Convert raw r||s (96 bytes) to DER for Node.js verify()
+    const r = rawSig.subarray(0, 48);
+    const s = rawSig.subarray(48, 96);
+
+    function encodeDERInt(bytes: Uint8Array): Uint8Array {
+      let start = 0;
+      while (start < bytes.length - 1 && bytes[start] === 0) start++;
+      const trimmed = bytes.subarray(start);
+      if ((trimmed[0]! & 0x80) !== 0) {
+        const padded = new Uint8Array(trimmed.length + 1);
+        padded.set(trimmed, 1);
+        return padded;
+      }
+      return trimmed;
+    }
+
+    const rDER = encodeDERInt(r);
+    const sDER = encodeDERInt(s);
+    const seqLen = 2 + rDER.length + 2 + sDER.length;
+    // For P-384 signatures the full DER SEQUENCE length often exceeds 127
+    // bytes, which requires the long-form ASN.1 length encoding (0x81 <len>).
+    let der: Uint8Array;
+    if (seqLen < 128) {
+      der = new Uint8Array(2 + seqLen);
+      let off = 0;
+      der[off++] = 0x30;
+      der[off++] = seqLen;
+      der[off++] = 0x02;
+      der[off++] = rDER.length;
+      der.set(rDER, off); off += rDER.length;
+      der[off++] = 0x02;
+      der[off++] = sDER.length;
+      der.set(sDER, off);
+    } else {
+      der = new Uint8Array(3 + seqLen);
+      let off = 0;
+      der[off++] = 0x30;
+      der[off++] = 0x81;
+      der[off++] = seqLen;
+      der[off++] = 0x02;
+      der[off++] = rDER.length;
+      der.set(rDER, off); off += rDER.length;
+      der[off++] = 0x02;
+      der[off++] = sDER.length;
+      der.set(sDER, off);
+    }
+
+    // Build SPKI DER for the compressed P-384 key (49 bytes).
+    // SEQUENCE { SEQUENCE { OID id-ecPublicKey (06 07 2a 86 48 ce 3d 02 01),
+    //                       OID secp384r1      (06 05 2b 81 04 00 22) },
+    //            BIT STRING { 0x00 (unused), compressedKey[49] } }
+    // AlgorithmIdentifier inner length = 9 + 7 = 16 = 0x10
+    // BIT STRING content length = 1 (unused) + 49 = 50 = 0x32
+    // Outer length = 2 (AlgId SEQ header) + 16 (AlgId content) + 2 (BIT STRING header) + 50 = 70 = 0x46
+    const spkiPrefix = new Uint8Array([
+      0x30, 0x46,
+      0x30, 0x10,
+      0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+      0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22,
+      0x03, 0x32, 0x00,
     ]);
     const spki = new Uint8Array(spkiPrefix.length + compressedPub.length);
     spki.set(spkiPrefix);

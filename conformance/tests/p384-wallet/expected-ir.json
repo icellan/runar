@@ -1,0 +1,266 @@
+{
+  "contractName": "P384Wallet",
+  "methods": [
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_prop",
+            "name": "ecdsaPubKeyHash"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_prop",
+            "name": "p384PubKeyHash"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "args": [
+              "t0",
+              "t1"
+            ],
+            "func": "super",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "load_prop",
+            "name": "ecdsaPubKeyHash"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "update_prop",
+            "name": "ecdsaPubKeyHash",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_prop",
+            "name": "p384PubKeyHash"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "update_prop",
+            "name": "p384PubKeyHash",
+            "value": "t5"
+          }
+        }
+      ],
+      "isPublic": false,
+      "name": "constructor",
+      "params": [
+        {
+          "name": "ecdsaPubKeyHash",
+          "type": "Addr"
+        },
+        {
+          "name": "p384PubKeyHash",
+          "type": "ByteString"
+        }
+      ]
+    },
+    {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "args": [
+              "t0"
+            ],
+            "func": "hash160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_prop",
+            "name": "ecdsaPubKeyHash"
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "kind": "bin_op",
+            "left": "t1",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t2"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "assert",
+            "value": "t3"
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "kind": "load_param",
+            "name": "pubKey"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t5",
+              "t6"
+            ],
+            "func": "checkSig",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "kind": "assert",
+            "value": "t7"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_param",
+            "name": "p384PubKey"
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "args": [
+              "t9"
+            ],
+            "func": "hash160",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "load_prop",
+            "name": "p384PubKeyHash"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "bin_op",
+            "left": "t10",
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t11"
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "assert",
+            "value": "t12"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "load_param",
+            "name": "sig"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "load_param",
+            "name": "p384Sig"
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "load_param",
+            "name": "p384PubKey"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "args": [
+              "t14",
+              "t15",
+              "t16"
+            ],
+            "func": "verifyECDSA_P384",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "assert",
+            "value": "t17"
+          }
+        }
+      ],
+      "isPublic": true,
+      "name": "spend",
+      "params": [
+        {
+          "name": "p384Sig",
+          "type": "ByteString"
+        },
+        {
+          "name": "p384PubKey",
+          "type": "ByteString"
+        },
+        {
+          "name": "sig",
+          "type": "Sig"
+        },
+        {
+          "name": "pubKey",
+          "type": "PubKey"
+        }
+      ]
+    }
+  ],
+  "properties": [
+    {
+      "name": "ecdsaPubKeyHash",
+      "readonly": true,
+      "type": "Addr"
+    },
+    {
+      "name": "p384PubKeyHash",
+      "readonly": true,
+      "type": "ByteString"
+    }
+  ]
+}
