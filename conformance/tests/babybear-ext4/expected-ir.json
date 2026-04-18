@@ -1594,7 +1594,7 @@
         }
       ],
       "isPublic": true,
-      "name": "checkFRIFold",
+      "name": "checkFriFold",
       "params": [
         {
           "name": "x",

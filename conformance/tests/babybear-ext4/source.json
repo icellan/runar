@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "babybear-ext4.runar.ts",
+    ".runar.sol": "../../../examples/sol/babybear-ext4/BabyBearExt4Demo.runar.sol",
+    ".runar.move": "../../../examples/move/babybear-ext4/BabyBearExt4Demo.runar.move",
+    ".runar.go": "../../../examples/go/babybear-ext4/BabyBearExt4Demo.runar.go",
+    ".runar.rs": "../../../examples/rust/babybear-ext4/BabyBearExt4Demo.runar.rs",
+    ".runar.py": "../../../examples/python/babybear-ext4/BabyBearExt4Demo.runar.py",
+    ".runar.rb": "../../../examples/ruby/babybear-ext4/BabyBearExt4Demo.runar.rb",
+    ".runar.zig": "../../../examples/zig/babybear-ext4/BabyBearExt4Demo.runar.zig"
+  }
+}

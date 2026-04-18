@@ -44,7 +44,7 @@ class BabyBearExt4Demo extends SmartContract {
   }
 
   /** FRI colinearity check: the core FRI folding relation */
-  public checkFRIFold(
+  public checkFriFold(
     x: bigint,
     fx0: bigint, fx1: bigint, fx2: bigint, fx3: bigint,
     fnx0: bigint, fnx1: bigint, fnx2: bigint, fnx3: bigint,

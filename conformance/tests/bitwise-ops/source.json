@@ -1,5 +1,12 @@
 {
   "sources": {
-    ".runar.ts": "bitwise-ops.runar.ts"
+    ".runar.ts": "bitwise-ops.runar.ts",
+    ".runar.sol": "../../../examples/sol/bitwise-ops/BitwiseOps.runar.sol",
+    ".runar.move": "../../../examples/move/bitwise-ops/BitwiseOps.runar.move",
+    ".runar.go": "../../../examples/go/bitwise-ops/BitwiseOps.runar.go",
+    ".runar.rs": "../../../examples/rust/bitwise-ops/BitwiseOps.runar.rs",
+    ".runar.py": "../../../examples/python/bitwise-ops/BitwiseOps.runar.py",
+    ".runar.rb": "../../../examples/ruby/bitwise-ops/BitwiseOps.runar.rb",
+    ".runar.zig": "../../../examples/zig/bitwise-ops/BitwiseOps.runar.zig"
   }
 }
