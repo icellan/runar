@@ -28,6 +28,7 @@ export {
   Sig,
   Ripemd160,
   Sha256,
+  Sha256Digest,
   Addr,
   SigHashPreimage,
   OpCodeType,

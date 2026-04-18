@@ -16,6 +16,10 @@ PubKey = bytes
 Sig = bytes
 Addr = bytes
 Sha256 = bytes
+# Alias for Sha256. Cross-language parity with the Go SDK, where the type had
+# to be renamed to Sha256Digest to free the identifier `Sha256` for a real
+# hash function (runar.Sha256(x) compiles to OP_SHA256 in Script).
+Sha256Digest = Sha256
 Ripemd160 = bytes
 SigHashPreimage = bytes
 RabinSig = bytes

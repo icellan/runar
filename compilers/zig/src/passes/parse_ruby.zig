@@ -633,6 +633,7 @@ fn rbMapType(name: []const u8) RunarType {
         .{ "Sig", .sig },
         .{ "Addr", .addr },
         .{ "Sha256", .sha256 },
+        .{ "Sha256Digest", .sha256 },
         .{ "Ripemd160", .ripemd160 },
         .{ "SigHashPreimage", .sig_hash_preimage },
         .{ "RabinSig", .rabin_sig },

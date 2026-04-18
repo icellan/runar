@@ -83,6 +83,7 @@ pub const Sig = base.Sig;
 pub const Addr = base.Addr;
 pub const ByteString = base.ByteString;
 pub const Sha256 = base.Sha256;
+pub const Sha256Digest = base.Sha256Digest;
 pub const Ripemd160 = base.Ripemd160;
 pub const SigHashPreimage = base.SigHashPreimage;
 pub const RabinSig = base.RabinSig;

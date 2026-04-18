@@ -746,7 +746,7 @@ func parsePyType(name string) TypeNode {
 		return PrimitiveType{Name: "PubKey"}
 	case "Sig":
 		return PrimitiveType{Name: "Sig"}
-	case "Sha256":
+	case "Sha256", "Sha256Digest":
 		return PrimitiveType{Name: "Sha256"}
 	case "Ripemd160":
 		return PrimitiveType{Name: "Ripemd160"}

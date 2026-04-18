@@ -481,7 +481,9 @@ function mapPyType(name: string): string {
     case 'PubKey': return 'PubKey';
     case 'Sig': return 'Sig';
     case 'Addr': return 'Addr';
-    case 'Sha256': return 'Sha256';
+    case 'Sha256':
+    case 'Sha256Digest':
+      return 'Sha256';
     case 'Ripemd160': return 'Ripemd160';
     case 'SigHashPreimage': return 'SigHashPreimage';
     case 'RabinSig': return 'RabinSig';

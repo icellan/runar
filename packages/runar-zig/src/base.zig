@@ -8,6 +8,10 @@ pub const Sig = []const u8;
 pub const Addr = []const u8;
 pub const ByteString = []const u8;
 pub const Sha256 = []const u8;
+/// Alias for Sha256. Cross-language parity with the Go SDK, where the type
+/// had to be renamed to Sha256Digest to free the identifier `Sha256` for a
+/// real hash function.
+pub const Sha256Digest = Sha256;
 pub const Ripemd160 = []const u8;
 pub const SigHashPreimage = []const u8;
 pub const RabinSig = []const u8;

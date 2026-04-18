@@ -619,7 +619,7 @@ func rbMapType(name string) string {
 		return "Sig"
 	case "Addr":
 		return "Addr"
-	case "Sha256":
+	case "Sha256", "Sha256Digest":
 		return "Sha256"
 	case "Ripemd160":
 		return "Ripemd160"

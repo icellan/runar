@@ -654,7 +654,7 @@ fn resolvePyTypeName(name: []const u8) TypeNode {
     if (std.mem.eql(u8, name, "bytes") or std.mem.eql(u8, name, "ByteString")) return .{ .primitive_type = .byte_string };
     if (std.mem.eql(u8, name, "PubKey")) return .{ .primitive_type = .pub_key };
     if (std.mem.eql(u8, name, "Sig")) return .{ .primitive_type = .sig };
-    if (std.mem.eql(u8, name, "Sha256")) return .{ .primitive_type = .sha256 };
+    if (std.mem.eql(u8, name, "Sha256") or std.mem.eql(u8, name, "Sha256Digest")) return .{ .primitive_type = .sha256 };
     if (std.mem.eql(u8, name, "Ripemd160")) return .{ .primitive_type = .ripemd160 };
     if (std.mem.eql(u8, name, "Addr")) return .{ .primitive_type = .addr };
     if (std.mem.eql(u8, name, "SigHashPreimage")) return .{ .primitive_type = .sig_hash_preimage };

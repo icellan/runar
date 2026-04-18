@@ -193,7 +193,7 @@ module RunarCompiler
       "bigint" => "bigint",
       "Bool" => "boolean", "bool" => "boolean", "boolean" => "boolean",
       "ByteString" => "ByteString",
-      "PubKey" => "PubKey", "Sig" => "Sig", "Sha256" => "Sha256",
+      "PubKey" => "PubKey", "Sig" => "Sig", "Sha256" => "Sha256", "Sha256Digest" => "Sha256",
       "Ripemd160" => "Ripemd160", "Addr" => "Addr",
       "SigHashPreimage" => "SigHashPreimage",
       "RabinSig" => "RabinSig", "RabinPubKey" => "RabinPubKey",

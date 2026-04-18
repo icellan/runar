@@ -201,6 +201,7 @@ fn map_rb_type(name: &str) -> &str {
         "Sig" => "Sig",
         "Addr" => "Addr",
         "Sha256" => "Sha256",
+        "Sha256Digest" => "Sha256",
         "Ripemd160" => "Ripemd160",
         "SigHashPreimage" => "SigHashPreimage",
         "RabinSig" => "RabinSig",

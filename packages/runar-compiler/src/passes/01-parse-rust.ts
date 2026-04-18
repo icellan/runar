@@ -298,7 +298,7 @@ const RUST_TYPE_MAP: Record<string, string> = {
   i128: 'bigint', u128: 'bigint', i256: 'bigint', u256: 'bigint',
   Bool: 'boolean', bool: 'boolean',
   ByteString: 'ByteString',
-  PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256',
+  PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
   Ripemd160: 'Ripemd160', Addr: 'Addr',
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',

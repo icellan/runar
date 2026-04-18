@@ -45,6 +45,14 @@ export type Ripemd160 = ByteString & { readonly [Ripemd160Brand]: 'Ripemd160' };
 /** SHA-256 hash digest — 32 bytes (64 hex chars). */
 export type Sha256 = ByteString & { readonly [Sha256Brand]: 'Sha256' };
 
+/**
+ * Alias for {@link Sha256}. Provides cross-language parity with the Go SDK,
+ * where the type had to be renamed to `Sha256Digest` to free the identifier
+ * `Sha256` for a real hash function (`runar.Sha256(x)` compiles to OP_SHA256
+ * in Script).
+ */
+export type Sha256Digest = Sha256;
+
 /** Bitcoin address = Hash160(pubkey) = RIPEMD-160(SHA-256(pubkey)). */
 export type Addr = Ripemd160;
 
