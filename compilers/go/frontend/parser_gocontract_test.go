@@ -495,3 +495,82 @@ func (c *D) Check(data runar.ByteString) {
 		t.Errorf("expected Sha256Digest to map to primitive 'Sha256', got %q", prim.Name)
 	}
 }
+
+// TestParseGoContract_Bn254BigHelpersResolve confirms that the *Big-suffixed
+// BN254 wrappers (Bn254MultiPairing4Big / Bn254G1ScalarMulBigP / etc.) are
+// registered in the DSL builtin map so contracts that adopt BigintBig fields
+// can call them directly. All *Big variants lower to the same Script builtin
+// as their int64 counterparts (the Script encoding is identical; only the
+// Go-mock runtime differs).
+func TestParseGoContract_Bn254BigHelpersResolve(t *testing.T) {
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type BigPairing struct {
+	runar.SmartContract
+}
+
+func (c *BigPairing) Check(
+	p1 runar.Point, q1x0, q1x1, q1y0, q1y1 runar.BigintBig,
+	p2 runar.Point, q2x0, q2x1, q2y0, q2y1 runar.BigintBig,
+	p3 runar.Point, q3x0, q3x1, q3y0, q3y1 runar.BigintBig,
+	p4 runar.Point, q4x0, q4x1, q4y0, q4y1 runar.BigintBig,
+	scalar runar.BigintBig,
+) {
+	scaled := runar.Bn254G1ScalarMulBigP(p1, scalar)
+	summed := runar.Bn254G1AddBigP(scaled, p2)
+	runar.Assert(runar.Bn254G1OnCurveBigP(summed))
+	runar.Assert(runar.Bn254MultiPairing4Big(
+		p1, q1x0, q1x1, q1y0, q1y1,
+		p2, q2x0, q2x1, q2y0, q2y1,
+		p3, q3x0, q3x1, q3y0, q3y1,
+		p4, q4x0, q4x1, q4y0, q4y1,
+	))
+}
+`
+	result := ParseSource([]byte(source), "BigPairing.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	if result.Contract == nil || len(result.Contract.Methods) == 0 {
+		t.Fatal("expected a contract with at least one method")
+	}
+
+	// Walk the body and record every top-level call identifier.
+	callNames := map[string]bool{}
+	var walk func(e Expression)
+	walk = func(e Expression) {
+		if c, ok := e.(CallExpr); ok {
+			if ident, ok := c.Callee.(Identifier); ok {
+				callNames[ident.Name] = true
+			}
+			for _, a := range c.Args {
+				walk(a)
+			}
+		}
+	}
+	for _, stmt := range result.Contract.Methods[0].Body {
+		switch s := stmt.(type) {
+		case ExpressionStmt:
+			walk(s.Expr)
+		case VariableDeclStmt:
+			if s.Init != nil {
+				walk(s.Init)
+			}
+		}
+	}
+
+	// Each *Big wrapper lowers to the same builtin as its int64 counterpart.
+	for _, expected := range []string{
+		"bn254G1ScalarMul",
+		"bn254G1Add",
+		"bn254G1OnCurve",
+		"bn254MultiPairing4",
+	} {
+		if !callNames[expected] {
+			t.Errorf("expected a %q call in the parsed body; got %v", expected, callNames)
+		}
+	}
+}

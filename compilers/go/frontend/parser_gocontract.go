@@ -780,6 +780,17 @@ func mapGoBuiltin(name string) string {
 		"Bn254G1NegateP":    "bn254G1Negate",
 		"Bn254G1OnCurveP":   "bn254G1OnCurve",
 		"Bn254FieldNegP":    "bn254FieldNeg",
+		// *Big variants — compile to the same Script builtins. The Go-mock
+		// runtime runs real gnark-crypto pairing instead of returning true,
+		// so contracts that type fields as BigintBig get real soundness
+		// coverage under `go test`.
+		"Bn254G1AddBigP":        "bn254G1Add",
+		"Bn254G1ScalarMulBigP":  "bn254G1ScalarMul",
+		"Bn254G1NegateBigP":     "bn254G1Negate",
+		"Bn254G1OnCurveBigP":    "bn254G1OnCurve",
+		"Bn254FieldNegBigP":     "bn254FieldNeg",
+		"Bn254MultiPairing4Big": "bn254MultiPairing4",
+		"Bn254MultiPairing3Big": "bn254MultiPairing3",
 		// Poseidon2 Merkle variadic wrapper (individual args instead of arrays)
 		"MerkleRootPoseidon2KBv": "merkleRootPoseidon2KB",
 	}

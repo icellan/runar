@@ -67,6 +67,27 @@ func bn254CoordsToG2Affine(x0, x1, y0, y1 BigintBig) (bn254.G2Affine, error) {
 	return out, nil
 }
 
+// Bn254G1AddBigP — alias of Bn254G1AddP. Provided for symmetry with the
+// other *Big wrappers so contracts using BigintBig scalar fields can keep a
+// uniform *Big naming convention.
+func Bn254G1AddBigP(a, b Point) Point { return Bn254G1AddP(a, b) }
+
+// Bn254G1NegateBigP — alias of Bn254G1NegateP.
+func Bn254G1NegateBigP(p Point) Point { return Bn254G1NegateP(p) }
+
+// Bn254G1OnCurveBigP — alias of Bn254G1OnCurveP.
+func Bn254G1OnCurveBigP(p Point) bool { return Bn254G1OnCurveP(p) }
+
+// Bn254FieldNegBigP returns (p - a) mod p with a full 254-bit input and
+// output. Unlike the int64 Bn254FieldNegP which silently truncates, this
+// variant preserves arbitrary-precision coordinates.
+func Bn254FieldNegBigP(a BigintBig) BigintBig {
+	if a == nil {
+		return big.NewInt(0)
+	}
+	return Bn254FieldNeg(a)
+}
+
 // Bn254G1ScalarMulBigP performs BN254 G1 scalar multiplication with a
 // full 254-bit scalar, unlike the int64 Bn254G1ScalarMulP variant which
 // silently truncates k to int64.
