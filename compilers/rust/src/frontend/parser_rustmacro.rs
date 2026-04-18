@@ -27,7 +27,7 @@ enum TokenType {
     Semi, Comma, Dot, DotDot, Colon, ColonColon, Arrow,
     // Operators
     Plus, Minus, Star, Slash, Percent,
-    EqEq, BangEq, Lt, LtEq, Gt, GtEq,
+    EqEq, BangEq, Lt, LtEq, Gt, GtEq, Shl, Shr,
     AmpAmp, PipePipe,
     Amp, Pipe, Caret, Tilde, Bang,
     Eq, PlusEq, MinusEq,
@@ -99,6 +99,8 @@ fn tokenize(source: &str) -> Vec<Token> {
                 "!=" => Some(TokenType::BangEq),
                 "<=" => Some(TokenType::LtEq),
                 ">=" => Some(TokenType::GtEq),
+                "<<" => Some(TokenType::Shl),
+                ">>" => Some(TokenType::Shr),
                 "&&" => Some(TokenType::AmpAmp),
                 "||" => Some(TokenType::PipePipe),
                 "+=" => Some(TokenType::PlusEq),
@@ -884,13 +886,27 @@ impl RustDslParser {
     }
 
     fn parse_comparison(&mut self) -> Expression {
-        let mut left = self.parse_add_sub();
+        let mut left = self.parse_shift();
         loop {
             let op = match self.current().typ {
                 TokenType::Lt => BinaryOp::Lt,
                 TokenType::LtEq => BinaryOp::Le,
                 TokenType::Gt => BinaryOp::Gt,
                 TokenType::GtEq => BinaryOp::Ge,
+                _ => break,
+            };
+            self.advance_clone();
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(self.parse_shift()) };
+        }
+        left
+    }
+
+    fn parse_shift(&mut self) -> Expression {
+        let mut left = self.parse_add_sub();
+        loop {
+            let op = match self.current().typ {
+                TokenType::Shl => BinaryOp::Shl,
+                TokenType::Shr => BinaryOp::Shr,
                 _ => break,
             };
             self.advance_clone();

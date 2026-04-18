@@ -92,6 +92,8 @@ const (
 	rustTokPlusEq
 	rustTokMinusEq
 	rustTokDotDot
+	rustTokShl
+	rustTokShr
 )
 
 type rustToken struct {
@@ -195,6 +197,10 @@ func rustTokenize(source string) []rustToken {
 				kind = rustTokMinusEq
 			case "..":
 				kind = rustTokDotDot
+			case "<<":
+				kind = rustTokShl
+			case ">>":
+				kind = rustTokShr
 			default:
 				matched = false
 			}
@@ -1084,7 +1090,7 @@ func (p *rustMacroParser) parseEquality() Expression {
 }
 
 func (p *rustMacroParser) parseComparison() Expression {
-	left := p.parseAddSub()
+	left := p.parseShift()
 	for {
 		var op string
 		switch p.current().kind {
@@ -1096,6 +1102,23 @@ func (p *rustMacroParser) parseComparison() Expression {
 			op = ">"
 		case rustTokGtEq:
 			op = ">="
+		default:
+			return left
+		}
+		p.advance()
+		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift()}
+	}
+}
+
+func (p *rustMacroParser) parseShift() Expression {
+	left := p.parseAddSub()
+	for {
+		var op string
+		switch p.current().kind {
+		case rustTokShl:
+			op = "<<"
+		case rustTokShr:
+			op = ">>"
 		default:
 			return left
 		}

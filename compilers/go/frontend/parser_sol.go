@@ -81,6 +81,8 @@ const (
 	solTokPercentEq // %=
 	solTokQuestion  // ?
 	solTokHat       // ^
+	solTokShl       // <<
+	solTokShr       // >>
 )
 
 type solToken struct {
@@ -263,6 +265,10 @@ func (p *solParser) tokenize(source string) []solToken {
 				twoKind = solTokSlashEq
 			case "%=":
 				twoKind = solTokPercentEq
+			case "<<":
+				twoKind = solTokShl
+			case ">>":
+				twoKind = solTokShr
 			default:
 				found = false
 			}
@@ -1333,20 +1339,36 @@ func (p *solParser) parseSolEquality() Expression {
 }
 
 func (p *solParser) parseSolComparison() Expression {
-	left := p.parseSolAdditive()
+	left := p.parseSolShift()
 	for {
 		if p.match(solTokLt) {
-			right := p.parseSolAdditive()
+			right := p.parseSolShift()
 			left = BinaryExpr{Op: "<", Left: left, Right: right}
 		} else if p.match(solTokLtEq) {
-			right := p.parseSolAdditive()
+			right := p.parseSolShift()
 			left = BinaryExpr{Op: "<=", Left: left, Right: right}
 		} else if p.match(solTokGt) {
-			right := p.parseSolAdditive()
+			right := p.parseSolShift()
 			left = BinaryExpr{Op: ">", Left: left, Right: right}
 		} else if p.match(solTokGtEq) {
-			right := p.parseSolAdditive()
+			right := p.parseSolShift()
 			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+		} else {
+			break
+		}
+	}
+	return left
+}
+
+func (p *solParser) parseSolShift() Expression {
+	left := p.parseSolAdditive()
+	for {
+		if p.match(solTokShl) {
+			right := p.parseSolAdditive()
+			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+		} else if p.match(solTokShr) {
+			right := p.parseSolAdditive()
+			left = BinaryExpr{Op: ">>", Left: left, Right: right}
 		} else {
 			break
 		}

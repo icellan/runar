@@ -178,6 +178,8 @@ enum Token {
     Le,
     Gt,
     Ge,
+    Shl,        // <<
+    Shr,        // >>
     And,        // &&
     Or,         // ||
     Amp,        // &
@@ -264,6 +266,16 @@ fn tokenize(source: &str) -> Vec<Token> {
         }
         if ch == '>' && i + 1 < len && chars[i + 1] == '=' {
             tokens.push(Token::Ge);
+            i += 2;
+            continue;
+        }
+        if ch == '<' && i + 1 < len && chars[i + 1] == '<' {
+            tokens.push(Token::Shl);
+            i += 2;
+            continue;
+        }
+        if ch == '>' && i + 1 < len && chars[i + 1] == '>' {
+            tokens.push(Token::Shr);
             i += 2;
             continue;
         }
@@ -1356,12 +1368,12 @@ impl<'a> MoveParser<'a> {
     }
 
     fn parse_comparison(&mut self) -> Expression {
-        let mut left = self.parse_additive();
+        let mut left = self.parse_shift();
         loop {
             match self.peek() {
                 Token::Lt => {
                     self.advance();
-                    let right = self.parse_additive();
+                    let right = self.parse_shift();
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Lt,
                         left: Box::new(left),
@@ -1370,7 +1382,7 @@ impl<'a> MoveParser<'a> {
                 }
                 Token::Le => {
                     self.advance();
-                    let right = self.parse_additive();
+                    let right = self.parse_shift();
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Le,
                         left: Box::new(left),
@@ -1379,7 +1391,7 @@ impl<'a> MoveParser<'a> {
                 }
                 Token::Gt => {
                     self.advance();
-                    let right = self.parse_additive();
+                    let right = self.parse_shift();
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Gt,
                         left: Box::new(left),
@@ -1388,9 +1400,37 @@ impl<'a> MoveParser<'a> {
                 }
                 Token::Ge => {
                     self.advance();
-                    let right = self.parse_additive();
+                    let right = self.parse_shift();
                     left = Expression::BinaryExpr {
                         op: BinaryOp::Ge,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                }
+                _ => break,
+            }
+        }
+        left
+    }
+
+    fn parse_shift(&mut self) -> Expression {
+        let mut left = self.parse_additive();
+        loop {
+            match self.peek() {
+                Token::Shl => {
+                    self.advance();
+                    let right = self.parse_additive();
+                    left = Expression::BinaryExpr {
+                        op: BinaryOp::Shl,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    };
+                }
+                Token::Shr => {
+                    self.advance();
+                    let right = self.parse_additive();
+                    left = Expression::BinaryExpr {
+                        op: BinaryOp::Shr,
                         left: Box::new(left),
                         right: Box::new(right),
                     };

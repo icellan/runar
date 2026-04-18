@@ -56,6 +56,8 @@ module RunarCompiler
       TOK_MINUSEQ      = 36  # -=
       TOK_ASSERT_BANG  = 37  # assert!
       TOK_ASSERTEQ_BANG = 38 # assert_eq!
+      TOK_SHL          = 39  # <<
+      TOK_SHR          = 40  # >>
     end
 
     # A single token produced by the Move tokenizer.
@@ -186,6 +188,8 @@ module RunarCompiler
       "||" => MoveTokens::TOK_PIPEPIPE,
       "+=" => MoveTokens::TOK_PLUSEQ,
       "-=" => MoveTokens::TOK_MINUSEQ,
+      "<<" => MoveTokens::TOK_SHL,
+      ">>" => MoveTokens::TOK_SHR,
     }.freeze
 
     ONE_CHAR_OPS_MOVE = {
@@ -1088,16 +1092,30 @@ module RunarCompiler
       end
 
       def parse_comparison
-        left = parse_additive
+        left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = BinaryExpr.new(op: "<", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<", left: left, right: parse_shift)
           elsif match_tok(TOK_LTEQ)
-            left = BinaryExpr.new(op: "<=", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift)
           elsif match_tok(TOK_GT)
-            left = BinaryExpr.new(op: ">", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">", left: left, right: parse_shift)
           elsif match_tok(TOK_GTEQ)
-            left = BinaryExpr.new(op: ">=", left: left, right: parse_additive)
+            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift)
+          else
+            break
+          end
+        end
+        left
+      end
+
+      def parse_shift
+        left = parse_additive
+        loop do
+          if match_tok(TOK_SHL)
+            left = BinaryExpr.new(op: "<<", left: left, right: parse_additive)
+          elsif match_tok(TOK_SHR)
+            left = BinaryExpr.new(op: ">>", left: left, right: parse_additive)
           else
             break
           end

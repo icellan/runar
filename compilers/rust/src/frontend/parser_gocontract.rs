@@ -210,6 +210,8 @@ enum TokenType {
     LtEq,
     Gt,
     GtEq,
+    Shl,    // <<
+    Shr,    // >>
     AmpAmp, // &&
     PipePipe, // ||
     Amp,
@@ -364,6 +366,8 @@ fn tokenize(source: &str) -> Vec<Token> {
                 ('-', '=') => Some(TokenType::MinusEq),
                 ('+', '+') => Some(TokenType::PlusPlus),
                 ('-', '-') => Some(TokenType::MinusMinus),
+                ('<', '<') => Some(TokenType::Shl),
+                ('>', '>') => Some(TokenType::Shr),
                 _ => None,
             };
             if let Some(t) = tok {
@@ -1567,13 +1571,28 @@ impl<'a> GoParser<'a> {
     }
 
     fn parse_relational(&mut self) -> Option<Expression> {
-        let mut left = self.parse_additive()?;
+        let mut left = self.parse_shift()?;
         loop {
             let op = match self.current().typ {
                 TokenType::Lt => BinaryOp::Lt,
                 TokenType::LtEq => BinaryOp::Le,
                 TokenType::Gt => BinaryOp::Gt,
                 TokenType::GtEq => BinaryOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_shift()?;
+            left = Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+        }
+        Some(left)
+    }
+
+    fn parse_shift(&mut self) -> Option<Expression> {
+        let mut left = self.parse_additive()?;
+        loop {
+            let op = match self.current().typ {
+                TokenType::Shl => BinaryOp::Shl,
+                TokenType::Shr => BinaryOp::Shr,
                 _ => break,
             };
             self.advance();

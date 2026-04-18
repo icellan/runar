@@ -33,6 +33,7 @@ type TokenType =
   | '(' | ')' | '{' | '}' | '[' | ']' | ';' | ',' | '.' | ':'
   | '+' | '-' | '*' | '/' | '%'
   | '==' | '!=' | '<' | '<=' | '>' | '>=' | '&&' | '||'
+  | '<<' | '>>'
   | '&' | '|' | '^' | '~' | '!'
   | '=' | '+=' | '-='
   | '++' | '--'
@@ -105,6 +106,8 @@ function tokenize(source: string): Token[] {
     if (ch === '!' && peekN(1) === '=') { advance(); advance(); add('!=', '!=', l, c); continue; }
     if (ch === '<' && peekN(1) === '=') { advance(); advance(); add('<=', '<=', l, c); continue; }
     if (ch === '>' && peekN(1) === '=') { advance(); advance(); add('>=', '>=', l, c); continue; }
+    if (ch === '<' && peekN(1) === '<') { advance(); advance(); add('<<', '<<', l, c); continue; }
+    if (ch === '>' && peekN(1) === '>') { advance(); advance(); add('>>', '>>', l, c); continue; }
     if (ch === '&' && peekN(1) === '&') { advance(); advance(); add('&&', '&&', l, c); continue; }
     if (ch === '|' && peekN(1) === '|') { advance(); advance(); add('||', '||', l, c); continue; }
     if (ch === '+' && peekN(1) === '+') { advance(); advance(); add('++', '++', l, c); continue; }
@@ -736,8 +739,17 @@ class SolParser {
   }
 
   private parseComparison(): Expression {
-    let left = this.parseAddSub();
+    let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
+      const op = this.advance().value as BinaryOp;
+      left = { kind: 'binary_expr', op, left, right: this.parseShift() };
+    }
+    return left;
+  }
+
+  private parseShift(): Expression {
+    let left = this.parseAddSub();
+    while (this.current().type === '<<' || this.current().type === '>>') {
       const op = this.advance().value as BinaryOp;
       left = { kind: 'binary_expr', op, left, right: this.parseAddSub() };
     }

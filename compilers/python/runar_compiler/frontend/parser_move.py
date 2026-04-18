@@ -67,6 +67,8 @@ TOK_SLASHEQ = 39
 TOK_PERCENTEQ = 40
 TOK_QUESTION = 41
 TOK_ARROW = 42
+TOK_SHL = 43
+TOK_SHR = 44
 
 
 class Token:
@@ -351,6 +353,8 @@ def _tokenize(source: str) -> list[Token]:
                 "/=": TOK_SLASHEQ,
                 "%=": TOK_PERCENTEQ,
                 "->": TOK_ARROW,
+                "<<": TOK_SHL,
+                ">>": TOK_SHR,
             }.get(two)
             if two_kind is not None:
                 tokens.append(Token(two_kind, two, line, start_col))
@@ -989,20 +993,33 @@ class _MoveParser:
         return left
 
     def _parse_move_comparison(self) -> Expression:
-        left = self._parse_move_additive()
+        left = self._parse_move_shift()
         while True:
             if self.match(TOK_LT):
-                right = self._parse_move_additive()
+                right = self._parse_move_shift()
                 left = BinaryExpr(op="<", left=left, right=right)
             elif self.match(TOK_LTEQ):
-                right = self._parse_move_additive()
+                right = self._parse_move_shift()
                 left = BinaryExpr(op="<=", left=left, right=right)
             elif self.match(TOK_GT):
-                right = self._parse_move_additive()
+                right = self._parse_move_shift()
                 left = BinaryExpr(op=">", left=left, right=right)
             elif self.match(TOK_GTEQ):
-                right = self._parse_move_additive()
+                right = self._parse_move_shift()
                 left = BinaryExpr(op=">=", left=left, right=right)
+            else:
+                break
+        return left
+
+    def _parse_move_shift(self) -> Expression:
+        left = self._parse_move_additive()
+        while True:
+            if self.match(TOK_SHL):
+                right = self._parse_move_additive()
+                left = BinaryExpr(op="<<", left=left, right=right)
+            elif self.match(TOK_SHR):
+                right = self._parse_move_additive()
+                left = BinaryExpr(op=">>", left=left, right=right)
             else:
                 break
         return left

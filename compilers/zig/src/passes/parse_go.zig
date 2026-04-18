@@ -1593,6 +1593,14 @@ const Parser = struct {
             uop.* = .{ .op = .bitnot, .operand = o };
             return .{ .unary_op = uop };
         }
+        if (self.current.kind == .caret) {
+            // Go uses ^ as unary XOR (bitwise NOT)
+            _ = self.bump();
+            const o = self.parseUnary() orelse return null;
+            const uop = self.allocator.create(UnaryOp) catch return null;
+            uop.* = .{ .op = .bitnot, .operand = o };
+            return .{ .unary_op = uop };
+        }
         return self.parsePostfix();
     }
 

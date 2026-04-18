@@ -81,6 +81,8 @@ const (
 	moveTokPercentEq // %=
 	moveTokQuestion  // ?
 	moveTokArrow     // ->
+	moveTokShl       // <<
+	moveTokShr       // >>
 )
 
 type moveToken struct {
@@ -285,6 +287,10 @@ func (p *moveParser) tokenize(source string) []moveToken {
 				twoKind = moveTokPercentEq
 			case "->":
 				twoKind = moveTokArrow
+			case "<<":
+				twoKind = moveTokShl
+			case ">>":
+				twoKind = moveTokShr
 			default:
 				found = false
 			}
@@ -1253,20 +1259,36 @@ func (p *moveParser) parseMoveEquality() Expression {
 }
 
 func (p *moveParser) parseMoveComparison() Expression {
-	left := p.parseMoveAdditive()
+	left := p.parseMoveShift()
 	for {
 		if p.match(moveTokLt) {
-			right := p.parseMoveAdditive()
+			right := p.parseMoveShift()
 			left = BinaryExpr{Op: "<", Left: left, Right: right}
 		} else if p.match(moveTokLtEq) {
-			right := p.parseMoveAdditive()
+			right := p.parseMoveShift()
 			left = BinaryExpr{Op: "<=", Left: left, Right: right}
 		} else if p.match(moveTokGt) {
-			right := p.parseMoveAdditive()
+			right := p.parseMoveShift()
 			left = BinaryExpr{Op: ">", Left: left, Right: right}
 		} else if p.match(moveTokGtEq) {
-			right := p.parseMoveAdditive()
+			right := p.parseMoveShift()
 			left = BinaryExpr{Op: ">=", Left: left, Right: right}
+		} else {
+			break
+		}
+	}
+	return left
+}
+
+func (p *moveParser) parseMoveShift() Expression {
+	left := p.parseMoveAdditive()
+	for {
+		if p.match(moveTokShl) {
+			right := p.parseMoveAdditive()
+			left = BinaryExpr{Op: "<<", Left: left, Right: right}
+		} else if p.match(moveTokShr) {
+			right := p.parseMoveAdditive()
+			left = BinaryExpr{Op: ">>", Left: left, Right: right}
 		} else {
 			break
 		}
