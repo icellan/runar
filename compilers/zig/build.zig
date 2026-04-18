@@ -47,4 +47,23 @@ pub fn build(b: *std.Build) void {
     const run_conformance = b.addRunArtifact(conformance_tests);
     const conformance_step = b.step("conformance", "Run conformance test suite");
     conformance_step.dependOn(&run_conformance.step);
+
+    // Byte-identical golden diff harness — runs the built runar-zig binary
+    // against each `conformance/tests/*/` fixture and asserts IR + hex match
+    // the goldens. Depends on the install step so `zig-out/bin/runar-zig`
+    // exists before the test subprocess tries to invoke it.
+    const conformance_goldens_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests/conformance_goldens.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_conformance_goldens = b.addRunArtifact(conformance_goldens_tests);
+    run_conformance_goldens.step.dependOn(b.getInstallStep());
+    const conformance_goldens_step = b.step(
+        "conformance-goldens",
+        "Run byte-identical golden diff harness against every conformance fixture",
+    );
+    conformance_goldens_step.dependOn(&run_conformance_goldens.step);
 }
