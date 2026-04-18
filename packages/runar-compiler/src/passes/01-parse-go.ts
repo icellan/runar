@@ -170,7 +170,7 @@ function tokenize(source: string): GoToken[] {
           else if (esc === 'x') {
             advance(); // consume 'x'
             const h1 = peek();
-            const h2 = pos + 1 < source.length ? source[pos + 1] : '';
+            const h2 = source[pos + 1] ?? '';
             if (/[0-9a-fA-F]/.test(h1) && /[0-9a-fA-F]/.test(h2)) {
               advance(); advance();
               val += String.fromCharCode(parseInt(h1 + h2, 16));

@@ -28,7 +28,6 @@ export {
   Sig,
   Ripemd160,
   Sha256,
-  Sha256Digest,
   Addr,
   SigHashPreimage,
   OpCodeType,
@@ -38,6 +37,7 @@ export {
   SigHash,
   // Pure types (no runtime value):
   type ByteString,
+  type Sha256Digest,
   type SigHashType,
   type RabinSig,
   type RabinPubKey,

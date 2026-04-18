@@ -951,6 +951,54 @@ func BbExt4Mul3(a0, a1, a2, a3, b0, b1, b2, b3 int64) int64 {
 			BbFieldAdd(BbFieldMul(a2, b1), BbFieldMul(a3, b0))))
 }
 
+// BbExt4Inv0 returns component 0 of the quartic extension field inverse.
+func BbExt4Inv0(a0, a1, a2, a3 int64) int64 {
+	return bbExt4Inv(a0, a1, a2, a3)[0]
+}
+
+// BbExt4Inv1 returns component 1 of the quartic extension field inverse.
+func BbExt4Inv1(a0, a1, a2, a3 int64) int64 {
+	return bbExt4Inv(a0, a1, a2, a3)[1]
+}
+
+// BbExt4Inv2 returns component 2 of the quartic extension field inverse.
+func BbExt4Inv2(a0, a1, a2, a3 int64) int64 {
+	return bbExt4Inv(a0, a1, a2, a3)[2]
+}
+
+// BbExt4Inv3 returns component 3 of the quartic extension field inverse.
+func BbExt4Inv3(a0, a1, a2, a3 int64) int64 {
+	return bbExt4Inv(a0, a1, a2, a3)[3]
+}
+
+// bbExt4Inv computes the quartic extension field inverse over BabyBear.
+// Same algorithm as kbExt4Inv but uses the BabyBear field arithmetic and
+// the BabyBear quartic non-residue bbW.
+func bbExt4Inv(a0, a1, a2, a3 int64) [4]int64 {
+	// conj(a) for x^4 - W: (a0, -a1, a2, -a3).
+	c0, c1, c2, c3 := a0, BbFieldSub(0, a1), a2, BbFieldSub(0, a3)
+
+	// a * conj(a) — lands in the Fp2 subfield (components 1,3 = 0).
+	p0 := BbExt4Mul0(a0, a1, a2, a3, c0, c1, c2, c3)
+	p2 := BbExt4Mul2(a0, a1, a2, a3, c0, c1, c2, c3)
+
+	// Invert the Fp2 element (p0, p2) in Fp[y]/(y^2 - W):
+	//   inv(p0 + p2*y) = (p0 - p2*y) / (p0^2 - W*p2^2)
+	normSq := BbFieldSub(BbFieldMul(p0, p0), BbFieldMul(bbW, BbFieldMul(p2, p2)))
+	normInv := BbFieldInv(normSq)
+
+	inv0 := BbFieldMul(p0, normInv)
+	inv2 := BbFieldSub(0, BbFieldMul(p2, normInv))
+
+	// result = conj(a) * (inv0, 0, inv2, 0)
+	r0 := BbFieldAdd(BbFieldMul(c0, inv0), BbFieldMul(bbW, BbFieldMul(c2, inv2)))
+	r1 := BbFieldAdd(BbFieldMul(c1, inv0), BbFieldMul(bbW, BbFieldMul(c3, inv2)))
+	r2 := BbFieldAdd(BbFieldMul(c0, inv2), BbFieldMul(c2, inv0))
+	r3 := BbFieldAdd(BbFieldMul(c1, inv2), BbFieldMul(c3, inv0))
+
+	return [4]int64{r0, r1, r2, r3}
+}
+
 // ---------------------------------------------------------------------------
 // KoalaBear field arithmetic (p = 2^31 - 2^24 + 1 = 2,130,706,433)
 // ---------------------------------------------------------------------------
