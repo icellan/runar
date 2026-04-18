@@ -12,7 +12,7 @@
 //  9. Opcode-by-opcode stack trace (cancel path)
 //  10. Size comparison
 //
-// Run:  cd end2end-example/go && GOWORK=off go run ./cmd/dump-compiled
+// Run:  cd examples/end2end-example/go && GOWORK=off go run ./cmd/dump-compiled
 package main
 
 import (

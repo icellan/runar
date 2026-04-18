@@ -437,7 +437,7 @@ jobs:
 
       - name: Ruby end-to-end example tests
         run: |
-          cd end2end-example/ruby
+          cd examples/end2end-example/ruby
           bundle install
           bundle exec rspec price_bet_spec.rb --format documentation
 

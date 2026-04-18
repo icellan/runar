@@ -37,12 +37,12 @@ examples/
   move/               # Move-style contracts + vitest tests
   python/             # Python contracts + pytest tests
   sdk-usage/          # SDK usage reference docs (not runnable)
-end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
+  end2end-example/    # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
 spec/                 # Language specification (grammar, semantics, type system)
 docs/                 # User-facing documentation
   formats/            # Format-specific guides (solidity.md, move.md, go.md, rust.md, python.md)
 integration/          # On-chain integration tests (ts, go, rust, python) + regtest tooling
-go.work              # Go workspace: compilers/go + conformance + end2end-example/go + end2end-example/webapp + end2end-example/webapp-blackjack + examples/go + integration/go + packages/runar-go
+go.work              # Go workspace: compilers/go + conformance + examples/end2end-example/go + examples/end2end-example/webapp + examples/end2end-example/webapp-blackjack + examples/go + integration/go + packages/runar-go
 ```
 
 ## Build & Test
@@ -228,7 +228,7 @@ Key SDK concepts:
 
 ### Module Resolution
 - pnpm workspace packages are not hoisted to root `node_modules`. The `vitest.config.ts` at root provides aliases so `examples/` tests can import `runar-testing` by name.
-- `go.work` at the project root connects `compilers/go`, `conformance`, `end2end-example/go`, `end2end-example/webapp`, `end2end-example/webapp-blackjack`, `examples/go`, and `packages/runar-go` so `import runar "github.com/icellan/runar/packages/runar-go"` resolves everywhere.
+- `go.work` at the project root connects `compilers/go`, `conformance`, `examples/end2end-example/go`, `examples/end2end-example/webapp`, `examples/end2end-example/webapp-blackjack`, `examples/go`, and `packages/runar-go` so `import runar "github.com/icellan/runar/packages/runar-go"` resolves everywhere.
 - Rust example tests use `Cargo.toml` at `examples/rust/` with `[[test]]` entries pointing to each contract's `_test.rs` file.
 
 ## Style

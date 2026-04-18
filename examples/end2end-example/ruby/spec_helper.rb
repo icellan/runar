@@ -7,7 +7,7 @@ PROJECT_ROOT = File.expand_path('../..', __dir__).freeze
 
 # Compile a .runar.rb contract through the native Ruby compiler.
 #
-# @param rel_path [String] path relative to end2end-example/ruby/
+# @param rel_path [String] path relative to examples/end2end-example/ruby/
 # @return [String] compiled artifact JSON
 # @raise [RuntimeError] if compilation fails
 def compile_contract(rel_path)

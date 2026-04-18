@@ -3,9 +3,9 @@ go 1.26
 use (
 	./compilers/go
 	./conformance
-	./end2end-example/go
-	./end2end-example/webapp
-	./end2end-example/webapp-blackjack
+	./examples/end2end-example/go
+	./examples/end2end-example/webapp
+	./examples/end2end-example/webapp-blackjack
 	./examples/go
 	./integration/go
 	./packages/runar-go

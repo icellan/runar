@@ -21,6 +21,10 @@ compilers/go/runar*-go
 compilers/go/go
 tests/generate-vectors/bn254/runar-bn254-vectors
 
+# End-to-end webapp build outputs
+examples/end2end-example/webapp/runar-webapp
+examples/end2end-example/webapp-blackjack/runar-webapp-blackjack
+
 # runar-rb
 /packages/runar-rb/tmp/
 

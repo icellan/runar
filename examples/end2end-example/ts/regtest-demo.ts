@@ -11,7 +11,7 @@
  *   - pnpm install && pnpm run build
  *
  * Run:
- *   npx tsx end2end-example/ts/regtest-demo.ts
+ *   npx tsx examples/end2end-example/ts/regtest-demo.ts
  *
  * Environment variables:
  *   RPC_URL   - JSON-RPC endpoint (default: http://localhost:18332)

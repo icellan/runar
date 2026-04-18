@@ -1,5 +1,5 @@
 PATH
-  remote: ../../packages/runar-rb
+  remote: ../../../packages/runar-rb
   specs:
     runar-lang (0.4.4)
 

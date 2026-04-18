@@ -31,7 +31,7 @@ RUST_LOCK_DIRS=(
   "$ROOT/packages/runar-rs"
   "$ROOT/packages/runar-rs-macros"
   "$ROOT/examples/rust"
-  "$ROOT/end2end-example/rust"
+  "$ROOT/examples/end2end-example/rust"
   "$ROOT/integration/rust"
 )
 
@@ -224,7 +224,7 @@ bump_version() {
   for lockfile in "$ROOT/packages/runar-rb/Gemfile.lock" \
                   "$ROOT/integration/ruby/Gemfile.lock" \
                   "$ROOT/examples/ruby/Gemfile.lock" \
-                  "$ROOT/end2end-example/ruby/Gemfile.lock"; do
+                  "$ROOT/examples/end2end-example/ruby/Gemfile.lock"; do
     if [ -f "$lockfile" ]; then
       sed -i '' "s/runar-lang ($OLD)/runar-lang ($NEW)/g" "$lockfile"
       echo "  ✓ $(echo "$lockfile" | sed "s|$ROOT/||")"

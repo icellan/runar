@@ -9,7 +9,7 @@
  *   7. Annotated walkthrough of the locking + unlocking scripts
  *   8. Transaction structure explanation
  *
- * Run:  npx tsx end2end-example/ts/dump-compiled.ts
+ * Run:  npx tsx examples/end2end-example/ts/dump-compiled.ts
  */
 
 import { readFileSync } from 'node:fs';

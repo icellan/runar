@@ -506,7 +506,7 @@ examples/
   move/               # Move-style contracts + tests
   zig/                # Zig contracts + adjacent Zig tests
   sdk-usage/          # SDK usage reference docs (not runnable)
-end2end-example/      # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
+  end2end-example/    # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
 spec/                 # Language specification
 docs/                 # Documentation + format guides
 ```

@@ -18,17 +18,17 @@
 #   - pnpm install && pnpm run build (from project root)
 #
 # Run:
-#   cd end2end-example/ruby && bundle exec ruby regtest_demo.rb
+#   cd examples/end2end-example/ruby && bundle exec ruby regtest_demo.rb
 #   # or with a non-interactive price:
-#   cd end2end-example/ruby && bundle exec ruby regtest_demo.rb 60000
-#   cd end2end-example/ruby && bundle exec ruby regtest_demo.rb -1
+#   cd examples/end2end-example/ruby && bundle exec ruby regtest_demo.rb 60000
+#   cd examples/end2end-example/ruby && bundle exec ruby regtest_demo.rb -1
 #
 # Environment variables:
 #   RPC_URL   - JSON-RPC endpoint (default: http://localhost:18332)
 #   RPC_USER  - RPC username (default: bitcoin)
 #   RPC_PASS  - RPC password (default: bitcoin)
 
-$LOAD_PATH.unshift(File.join(__dir__, '../../packages/runar-rb/lib'))
+$LOAD_PATH.unshift(File.join(__dir__, '../../../packages/runar-rb/lib'))
 
 require 'base64'
 require 'digest'
