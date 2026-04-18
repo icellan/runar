@@ -152,6 +152,7 @@ _SPECIAL_NAMES: dict[str, str] = {
     "hash256": "hash256",
     "num2bin": "num2bin",
     "bin2num": "bin2num",
+    "int_to_str": "int2str",
     "log2": "log2",
     "div_mod": "divmod",
     "EC_P": "EC_P",

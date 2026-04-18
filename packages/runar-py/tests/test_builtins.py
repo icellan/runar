@@ -4,7 +4,7 @@ import pytest
 from runar.builtins import (
     hash160, hash256, sha256, ripemd160,
     check_sig, check_multi_sig, check_preimage,
-    num2bin, bin2num, cat, substr, reverse_bytes, len_,
+    num2bin, bin2num, int_to_str, cat, substr, reverse_bytes, len_,
     safediv, safemod, clamp, sign, pow_, mul_div, percent_of, sqrt, gcd, divmod_, log2,
     mock_sig, mock_pub_key, mock_preimage,
     assert_,
@@ -94,6 +94,23 @@ class TestNum2BinBin2Num:
     def test_round_trip_negative(self):
         for n in [-1, -127, -128, -255, -10000]:
             assert bin2num(num2bin(n, 8)) == n
+
+
+# ---------------------------------------------------------------------------
+# int_to_str (alias for num2bin)
+# ---------------------------------------------------------------------------
+
+class TestIntToStr:
+    def test_int_to_str_matches_num2bin(self):
+        """int_to_str is an alias for num2bin with identical output."""
+        for n in [0, 1, 42, 127, 128, 255, 256, -1, -127, -10000]:
+            for width in [1, 4, 8]:
+                if abs(n) < (1 << (8 * width - 1)):
+                    assert int_to_str(n, width) == num2bin(n, width)
+
+    def test_int_to_str_round_trip(self):
+        for n in [0, 1, 127, 256, -1, -10000]:
+            assert bin2num(int_to_str(n, 8)) == n
 
 
 # ---------------------------------------------------------------------------

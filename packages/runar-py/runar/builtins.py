@@ -598,6 +598,16 @@ def num2bin(v: int, length: int) -> bytes:
         result[-1] |= sign_byte  # set sign on actual last byte
     return bytes(result[:length])
 
+def int_to_str(v: int, length: int) -> bytes:
+    """Convert an integer to its fixed-width byte-string representation.
+
+    Alias for :func:`num2bin`. The Rúnar built-in ``int2str`` (TypeScript name)
+    is exposed as ``int_to_str`` in Python snake_case. Lowers to ``OP_NUM2BIN``
+    in compiled Bitcoin Script.
+    """
+    return num2bin(v, length)
+
+
 def bin2num(data: bytes) -> int:
     """Convert a byte string (Bitcoin Script LE signed-magnitude) to an integer.
     Inverse of num2bin."""
