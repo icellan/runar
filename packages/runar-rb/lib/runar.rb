@@ -13,6 +13,8 @@ require_relative 'runar/ec'
 require_relative 'runar/ec_primitives'
 require_relative 'runar/ecdsa'
 require_relative 'runar/rabin_sig'
+require_relative 'runar/wots'
+require_relative 'runar/slh_dsa'
 require_relative 'runar/test_keys'
 require_relative 'runar/compile_check'
 

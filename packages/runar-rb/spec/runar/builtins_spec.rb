@@ -51,17 +51,22 @@ RSpec.describe Runar::Builtins do
       expect(ctx.verify_rabin_sig('a', 'b', 'c', 'd')).to be false
     end
 
-    it 'verify_wots returns true' do
-      expect(ctx.verify_wots('a', 'b', 'c')).to be true
+    it 'verify_wots rejects obviously invalid inputs' do
+      # Previously this mock returned true for any input; the real verifier
+      # must return false for garbage. See wots_spec.rb for round-trip tests.
+      expect(ctx.verify_wots('a', 'b', 'c')).to be false
     end
 
-    it 'SLH-DSA variants all return true' do
+    it 'SLH-DSA variants all reject obviously invalid inputs' do
+      # Previously these mocks returned true for any input; the real
+      # verifiers must return false for garbage. See slh_dsa_spec.rb for
+      # round-trip tests.
       %i[
         verify_slh_dsa_sha2_128s verify_slh_dsa_sha2_128f
         verify_slh_dsa_sha2_192s verify_slh_dsa_sha2_192f
         verify_slh_dsa_sha2_256s verify_slh_dsa_sha2_256f
       ].each do |method|
-        expect(ctx.send(method, 'a', 'b', 'c')).to be true
+        expect(ctx.send(method, 'a', 'b', 'c')).to be false
       end
     end
 

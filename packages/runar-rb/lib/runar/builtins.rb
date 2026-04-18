@@ -9,6 +9,8 @@
 require 'digest'
 require_relative 'ecdsa'
 require_relative 'rabin_sig'
+require_relative 'wots'
+require_relative 'slh_dsa'
 
 module Runar
   module Builtins
@@ -64,32 +66,36 @@ module Runar
       Runar::RabinSig.rabin_verify(msg, sig, padding, pk)
     end
 
-    def verify_wots(_msg, _sig, _pubkey)
-      true
+    # Real WOTS+ signature verification using SHA-256 hash chains.
+    # All parameters are hex-encoded strings.
+    def verify_wots(msg, sig, pubkey)
+      Runar::WOTS.verify(msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_128s(_msg, _sig, _pubkey)
-      true
+    # Real SLH-DSA (FIPS 205) signature verification. All 6 SHA-2 parameter
+    # sets are implemented in Runar::SLHDSA. Inputs are hex-encoded strings.
+    def verify_slh_dsa_sha2_128s(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_128s], msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_128f(_msg, _sig, _pubkey)
-      true
+    def verify_slh_dsa_sha2_128f(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_128f], msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_192s(_msg, _sig, _pubkey)
-      true
+    def verify_slh_dsa_sha2_192s(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_192s], msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_192f(_msg, _sig, _pubkey)
-      true
+    def verify_slh_dsa_sha2_192f(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_192f], msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_256s(_msg, _sig, _pubkey)
-      true
+    def verify_slh_dsa_sha2_256s(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_256s], msg, sig, pubkey)
     end
 
-    def verify_slh_dsa_sha2_256f(_msg, _sig, _pubkey)
-      true
+    def verify_slh_dsa_sha2_256f(msg, sig, pubkey)
+      Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_256f], msg, sig, pubkey)
     end
 
     # -- SHA-256 Compression (real implementation, FIPS 180-4) ----------------
