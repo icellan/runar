@@ -170,12 +170,12 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	}
 
 	// PUSH(0n) + Roll{depth:0} -> remove both (roll 0 is a no-op)
-	if isPushBigInt(a, 0) && b.Op == "roll" {
+	if isPushBigInt(a, 0) && b.Op == "roll" && b.Depth == 0 {
 		return nil, true
 	}
 
 	// PUSH(1n) + Roll{depth:1} -> SWAP
-	if isPushBigInt(a, 1) && b.Op == "roll" {
+	if isPushBigInt(a, 1) && b.Op == "roll" && b.Depth == 1 {
 		return []StackOp{{Op: "swap"}}, true
 	}
 
@@ -185,12 +185,12 @@ func matchWindow2(a, b StackOp) ([]StackOp, bool) {
 	}
 
 	// PUSH(0n) + Pick{depth:0} -> DUP
-	if isPushBigInt(a, 0) && b.Op == "pick" {
+	if isPushBigInt(a, 0) && b.Op == "pick" && b.Depth == 0 {
 		return []StackOp{{Op: "dup"}}, true
 	}
 
 	// PUSH(1n) + Pick{depth:1} -> OVER
-	if isPushBigInt(a, 1) && b.Op == "pick" {
+	if isPushBigInt(a, 1) && b.Op == "pick" && b.Depth == 1 {
 		return []StackOp{{Op: "over"}}, true
 	}
 

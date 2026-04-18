@@ -273,7 +273,7 @@ func TestOptimizer_Push0Roll_Removed(t *testing.T) {
 func TestOptimizer_Push1Roll_BecomesSwap(t *testing.T) {
 	ops := []StackOp{
 		pushBigIntOp(1),
-		{Op: "roll"},
+		{Op: "roll", Depth: 1},
 	}
 	result := OptimizeStackOps(ops)
 	if len(result) != 1 {
@@ -327,7 +327,7 @@ func TestOptimizer_Push0Pick_BecomesDup(t *testing.T) {
 func TestOptimizer_Push1Pick_BecomesOver(t *testing.T) {
 	ops := []StackOp{
 		pushBigIntOp(1),
-		{Op: "pick"},
+		{Op: "pick", Depth: 1},
 	}
 	result := OptimizeStackOps(ops)
 	if len(result) != 1 {
@@ -728,5 +728,70 @@ func TestOptimizer_MultiPass_Convergence(t *testing.T) {
 	}
 	if result[0].Code != "OP_CHECKSIG" {
 		t.Errorf("expected OP_CHECKSIG, got %s", result[0].Code)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Depth-safety: PUSH(1) ROLL{depth=5} — value and depth do not match,
+// the optimizer must leave this untouched. Parity with TS, which checks
+// `depth === 1` before collapsing to SWAP.
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push1Roll_MismatchedDepth_Untouched(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(1),
+		{Op: "roll", Depth: 5},
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 ops unchanged (value/depth mismatch), got %d", len(result))
+	}
+	if result[0].Op != "push" || result[1].Op != "roll" {
+		t.Errorf("expected [push, roll], got [%s, %s]", result[0].Op, result[1].Op)
+	}
+	if result[1].Depth != 5 {
+		t.Errorf("expected roll depth 5, got %d", result[1].Depth)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Depth-safety: PUSH(0) PICK{depth=3} — must be left alone.
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push0Pick_MismatchedDepth_Untouched(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(0),
+		{Op: "pick", Depth: 3},
+	}
+	result := OptimizeStackOps(ops)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 ops unchanged (value/depth mismatch), got %d", len(result))
+	}
+	if result[0].Op != "push" || result[1].Op != "pick" {
+		t.Errorf("expected [push, pick], got [%s, %s]", result[0].Op, result[1].Op)
+	}
+	if result[1].Depth != 3 {
+		t.Errorf("expected pick depth 3, got %d", result[1].Depth)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Depth-safety: PUSH(2) ROLL{depth=1} — must be left alone.
+// ---------------------------------------------------------------------------
+
+func TestOptimizer_Push2Roll_MismatchedDepth_Untouched(t *testing.T) {
+	ops := []StackOp{
+		pushBigIntOp(2),
+		{Op: "roll", Depth: 1},
+	}
+	result := OptimizeStackOps(ops)
+	// PUSH(1)/Roll{depth=1} would collapse to SWAP, but here the pushed
+	// value is 2, so neither the "PUSH(2)+Roll{2}" nor the "PUSH(1)+Roll{1}"
+	// rule fires. Both ops should pass through.
+	if len(result) != 2 {
+		t.Fatalf("expected 2 ops unchanged (value/depth mismatch), got %d", len(result))
+	}
+	if result[0].Op != "push" || result[1].Op != "roll" {
+		t.Errorf("expected [push, roll], got [%s, %s]", result[0].Op, result[1].Op)
 	}
 }
