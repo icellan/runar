@@ -144,7 +144,7 @@ func executeScript(lockingHex, unlockingHex string) error {
 	eng := interpreter.NewEngine()
 	return eng.Execute(
 		interpreter.WithScripts(locking, unlocking),
-		interpreter.WithAfterGenesis(),
+		interpreter.WithAfterChronicle(),
 		interpreter.WithForkID(),
 	)
 }
@@ -163,7 +163,7 @@ func executeScriptWithTx(lockingHex, unlockingHex string, tx *transaction.Transa
 	eng := interpreter.NewEngine()
 	return eng.Execute(
 		interpreter.WithScripts(locking, unlocking),
-		interpreter.WithAfterGenesis(),
+		interpreter.WithAfterChronicle(),
 		interpreter.WithForkID(),
 		interpreter.WithTx(tx, inputIdx, prevOutput),
 	)
@@ -203,6 +203,14 @@ func buildSpendingTx(lockingHex string, satoshis uint64) (*transaction.Transacti
 	})
 
 	return tx, prevOutput, nil
+}
+
+// isChronicleOpcode reports whether an opcode byte is a Chronicle-re-enabled op.
+// Chronicle (the BSV node variant this repo targets) re-enables OP_2MUL (0x8d) and
+// OP_2DIV (0x8e) which upstream go-sdk's interpreter still flags as disabled.
+// These ops are legitimately emitted by the Rúnar EC codegen.
+func isChronicleOpcode(op byte) bool {
+	return op == script.Op2MUL || op == script.Op2DIV
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +256,7 @@ func TestAllConformanceScripts_ValidOpcodes(t *testing.T) {
 				if op.AlwaysIllegal() {
 					t.Errorf("opcode %d (%s, 0x%02x) is always illegal", i, op.Name(), op.Value())
 				}
-				if op.IsDisabled() {
+				if op.IsDisabled() && !isChronicleOpcode(op.Value()) {
 					t.Errorf("opcode %d (%s, 0x%02x) is disabled", i, op.Name(), op.Value())
 				}
 			}
