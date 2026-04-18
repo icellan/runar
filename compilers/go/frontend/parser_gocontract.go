@@ -702,6 +702,10 @@ func mapGoOp(op token.Token) string {
 		return "|"
 	case token.XOR:
 		return "^"
+	case token.SHL:
+		return "<<"
+	case token.SHR:
+		return ">>"
 	}
 	return "+"
 }
