@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 runar = { package = "runar-lang", path = "../../packages/runar-rs" }
 runar-compiler-rust = { path = "../../compilers/rust" }
+serde_json = "1.0"
 
 [[test]]
 name = "p2pkh"
@@ -127,3 +128,11 @@ path = "cross-covenant/CrossCovenantRef_test.rs"
 [[test]]
 name = "state_covenant"
 path = "state-covenant/StateCovenant_test.rs"
+
+[[test]]
+name = "bsv20_token"
+path = "bsv20-token/BSV20Token_test.rs"
+
+[[test]]
+name = "bsv21_token"
+path = "bsv21-token/BSV21Token_test.rs"

@@ -989,6 +989,7 @@ version = "0.1.0"
 dependencies = [
  "runar-compiler-rust",
  "runar-lang",
+ "serde_json",
 ]
 
 [[package]]
