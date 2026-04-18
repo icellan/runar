@@ -2,6 +2,12 @@
 //!
 //! Both methods require a Sig parameter (checkSig), so spending requires raw
 //! transaction construction. We test compile + deploy via the SDK.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{CallOptions, DeployOptions, RunarContract, SdkValue};
@@ -12,16 +18,13 @@ fn hex_encode_str(s: &str) -> String {
 }
 
 #[test]
-#[ignore]
 fn test_nft_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/token-nft/NFTExample.runar.ts");
     assert_eq!(artifact.contract_name, "SimpleNFT");
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_deploy() {
     skip_if_no_node();
 
@@ -52,7 +55,7 @@ fn test_nft_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_deploy_different_owners() {
     skip_if_no_node();
 
@@ -94,7 +97,7 @@ fn test_nft_deploy_different_owners() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_deploy_long_metadata() {
     skip_if_no_node();
 
@@ -124,7 +127,7 @@ fn test_nft_deploy_long_metadata() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_transfer() {
     skip_if_no_node();
 
@@ -165,7 +168,7 @@ fn test_nft_transfer() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_burn() {
     skip_if_no_node();
 
@@ -204,7 +207,7 @@ fn test_nft_burn() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_nft_wrong_owner_rejected() {
     skip_if_no_node();
 

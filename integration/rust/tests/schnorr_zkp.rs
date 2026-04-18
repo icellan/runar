@@ -30,26 +30,26 @@
 //!   - s is a 256-bit scalar, passed as SdkValue::Bytes (script number hex)
 //!     since SdkValue::Int only supports i64
 //!   - Uses k256 crate for EC arithmetic in the test helper
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use crate::helpers::crypto::{ec_mul_gen_point, generate_schnorr_proof_fs};
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 
 #[test]
-#[ignore]
 fn test_schnorr_zkp_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/schnorr-zkp/SchnorrZKP.runar.ts");
     assert_eq!(artifact.contract_name, "SchnorrZKP");
     assert!(!artifact.script.is_empty());
 }
 
 #[test]
-#[ignore]
 fn test_schnorr_zkp_script_size() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/schnorr-zkp/SchnorrZKP.runar.ts");
     let script_bytes = artifact.script.len() / 2;
     // EC-heavy scripts are typically ~877 KB
@@ -58,7 +58,7 @@ fn test_schnorr_zkp_script_size() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_schnorr_zkp_deploy() {
     skip_if_no_node();
 
@@ -86,7 +86,7 @@ fn test_schnorr_zkp_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_schnorr_zkp_deploy_different_key() {
     skip_if_no_node();
 
@@ -119,7 +119,7 @@ fn test_schnorr_zkp_deploy_different_key() {
 ///   4. Response s = r + e*k mod n
 ///   5. Call verify(R, s) — the contract derives e and verifies s*G === R + e*P
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_schnorr_zkp_spend_valid_proof() {
     skip_if_no_node();
 
@@ -162,7 +162,7 @@ fn test_schnorr_zkp_spend_valid_proof() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_schnorr_zkp_invalid_s_rejected() {
     skip_if_no_node();
 

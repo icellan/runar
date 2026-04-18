@@ -2,6 +2,12 @@
 //!
 //! Tests compile, deploy, transfer (multi-output), and merge (additional
 //! contract inputs with position-dependent balance verification) using the Rúnar SDK.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{
@@ -22,16 +28,13 @@ fn ft_state(owner: &str, balance: i64, merge_balance: i64) -> HashMap<String, Sd
 }
 
 #[test]
-#[ignore]
 fn test_fungible_token_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/token-ft/FungibleTokenExample.runar.ts");
     assert_eq!(artifact.contract_name, "FungibleToken");
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_deploy() {
     skip_if_no_node();
 
@@ -62,7 +65,7 @@ fn test_fungible_token_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_deploy_zero_balance() {
     skip_if_no_node();
 
@@ -91,7 +94,7 @@ fn test_fungible_token_deploy_zero_balance() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_deploy_large_balance() {
     skip_if_no_node();
 
@@ -120,7 +123,7 @@ fn test_fungible_token_deploy_large_balance() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_send() {
     skip_if_no_node();
 
@@ -158,7 +161,7 @@ fn test_fungible_token_send() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_wrong_owner_rejected() {
     skip_if_no_node();
 
@@ -205,7 +208,7 @@ fn test_fungible_token_wrong_owner_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer() {
     skip_if_no_node();
 
@@ -266,7 +269,7 @@ fn test_fungible_token_transfer() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_merge() {
     skip_if_no_node();
 
@@ -338,7 +341,7 @@ fn test_fungible_token_merge() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_merge_inflated_other_balance() {
     skip_if_no_node();
 
@@ -405,7 +408,7 @@ fn test_fungible_token_merge_inflated_other_balance() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_merge_negative_other_balance() {
     skip_if_no_node();
 
@@ -470,7 +473,7 @@ fn test_fungible_token_merge_negative_other_balance() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_merge_zero_balance() {
     skip_if_no_node();
 
@@ -538,7 +541,7 @@ fn test_fungible_token_merge_zero_balance() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_merge_wrong_signer() {
     skip_if_no_node();
 
@@ -604,7 +607,7 @@ fn test_fungible_token_merge_wrong_signer() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_wrong_signer() {
     skip_if_no_node();
 
@@ -661,7 +664,7 @@ fn test_fungible_token_transfer_wrong_signer() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_exact_balance() {
     skip_if_no_node();
 
@@ -717,7 +720,7 @@ fn test_fungible_token_transfer_exact_balance() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_zero_amount_rejected() {
     skip_if_no_node();
 
@@ -769,7 +772,7 @@ fn test_fungible_token_transfer_zero_amount_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_exceeds_balance_rejected() {
     skip_if_no_node();
 
@@ -821,7 +824,7 @@ fn test_fungible_token_transfer_exceeds_balance_rejected() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_inflated_balance() {
     skip_if_no_node();
 
@@ -880,7 +883,7 @@ fn test_fungible_token_transfer_inflated_balance() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_fungible_token_transfer_deflated_balance() {
     skip_if_no_node();
 

@@ -6,21 +6,24 @@
 //!   - refund(buyerSig, arbiterSig) — buyer + arbiter must both sign
 //!
 //! This ensures no party can act alone. The arbiter serves as the trust anchor.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 
 #[test]
-#[ignore]
 fn test_escrow_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/escrow/Escrow.runar.ts");
     assert_eq!(artifact.contract_name, "Escrow");
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_deploy_three_pubkeys() {
     skip_if_no_node();
 
@@ -50,7 +53,7 @@ fn test_escrow_deploy_three_pubkeys() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_deploy_same_key_multiple_roles() {
     skip_if_no_node();
 
@@ -81,7 +84,7 @@ fn test_escrow_deploy_same_key_multiple_roles() {
 /// Uses the same key for both seller and arbiter roles so the SDK
 /// auto-computes both signatures from the single signer.
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_release() {
     skip_if_no_node();
 
@@ -122,7 +125,7 @@ fn test_escrow_release() {
 /// refund(buyerSig, arbiterSig) — method index 1
 /// Uses the same key for both buyer and arbiter roles.
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_refund() {
     skip_if_no_node();
 
@@ -161,7 +164,7 @@ fn test_escrow_refund() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_release_wrong_signer_rejected() {
     skip_if_no_node();
 
@@ -198,7 +201,7 @@ fn test_escrow_release_wrong_signer_rejected() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_escrow_refund_wrong_signer_rejected() {
     skip_if_no_node();
 

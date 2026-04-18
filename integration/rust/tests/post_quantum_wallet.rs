@@ -32,6 +32,12 @@
 //!   require raw transaction construction (two-pass signing: ECDSA first, then
 //!   WOTS over the ECDSA sig). The Go integration suite (TestWOTS_ValidSpend)
 //!   implements the complete two-pass spending flow.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use crate::helpers::crypto::{wots_keygen, wots_pub_key_hex};
@@ -51,20 +57,14 @@ fn hash160_hex(hex_data: &str) -> String {
 }
 
 #[test]
-#[ignore]
 fn test_post_quantum_wallet_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts");
     assert_eq!(artifact.contract_name, "PostQuantumWallet");
     assert!(!artifact.script.is_empty());
 }
 
 #[test]
-#[ignore]
 fn test_post_quantum_wallet_script_size() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/post-quantum-wallet/PostQuantumWallet.runar.ts");
     let script_bytes = artifact.script.len() / 2;
     // WOTS+ scripts are typically ~10 KB
@@ -73,7 +73,7 @@ fn test_post_quantum_wallet_script_size() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_post_quantum_wallet_deploy() {
     skip_if_no_node();
 
@@ -109,7 +109,7 @@ fn test_post_quantum_wallet_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_post_quantum_wallet_deploy_different_seed() {
     skip_if_no_node();
 
@@ -152,7 +152,7 @@ fn test_post_quantum_wallet_deploy_different_seed() {
 /// This two-pass signing pattern is fully tested in the Go integration suite
 /// (TestWOTS_ValidSpend) which uses raw transaction construction.
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_post_quantum_wallet_deploy_and_verify_utxo() {
     skip_if_no_node();
 

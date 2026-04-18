@@ -2,6 +2,12 @@
 //!
 //! Each test compiles a minimal stateless contract that exercises a single EC
 //! built-in, deploys it on regtest, and verifies the deployment succeeds.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use crate::helpers::crypto::{ec_mul_gen_point, ec_mul_gen, encode_point, bigint_to_script_num_hex};
@@ -9,7 +15,7 @@ use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 use num_bigint::BigInt;
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_on_curve_deploy() {
     skip_if_no_node();
 
@@ -55,7 +61,7 @@ class EcOnCurveTest extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_mul_gen_deploy() {
     skip_if_no_node();
 
@@ -103,7 +109,7 @@ class EcMulGenTest extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_add_deploy() {
     skip_if_no_node();
 
@@ -162,7 +168,7 @@ class EcAddTest extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_negate_deploy() {
     skip_if_no_node();
 
@@ -232,7 +238,7 @@ fn hex_to_bigint(hex: &str) -> BigInt {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_point_x_deploy() {
     skip_if_no_node();
 
@@ -274,7 +280,7 @@ class EcPointXTest extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_on_curve_then_point_x() {
     skip_if_no_node();
 
@@ -318,7 +324,7 @@ class EcOnCurveTwice extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_convergence_pattern() {
     skip_if_no_node();
 
@@ -372,7 +378,7 @@ class ConvergencePattern extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_ec_mul_gen_large_scalar() {
     skip_if_no_node();
 

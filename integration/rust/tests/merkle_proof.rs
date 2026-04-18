@@ -3,6 +3,12 @@
 //!
 //! Each test compiles a minimal stateless contract with an unrolled Merkle path
 //! verification, deploys it on regtest, and verifies the deployment + call succeed.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
@@ -100,7 +106,7 @@ class MerkleSha256Test extends SmartContract {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_merkle_sha256_leaf_index_0() {
     skip_if_no_node();
 
@@ -134,7 +140,7 @@ fn test_merkle_sha256_leaf_index_0() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_merkle_sha256_leaf_index_7() {
     skip_if_no_node();
 
@@ -167,7 +173,7 @@ fn test_merkle_sha256_leaf_index_7() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_merkle_sha256_wrong_leaf_rejected() {
     skip_if_no_node();
 

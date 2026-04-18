@@ -2,21 +2,24 @@
 //!
 //! The bid() method checks extractLocktime, and close() requires a Sig.
 //! We test compile + deploy via the SDK.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 
 #[test]
-#[ignore]
 fn test_auction_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/auction/Auction.runar.ts");
     assert_eq!(artifact.contract_name, "Auction");
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_auction_deploy() {
     skip_if_no_node();
 
@@ -46,7 +49,7 @@ fn test_auction_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_auction_deploy_zero_bid() {
     skip_if_no_node();
 
@@ -74,7 +77,7 @@ fn test_auction_deploy_zero_bid() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_auction_deploy_same_key_both_roles() {
     skip_if_no_node();
 
@@ -101,7 +104,7 @@ fn test_auction_deploy_same_key_both_roles() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_auction_close() {
     skip_if_no_node();
 
@@ -139,7 +142,7 @@ fn test_auction_close() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_auction_wrong_signer_rejected() {
     skip_if_no_node();
 

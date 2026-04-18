@@ -2,6 +2,12 @@
 //!
 //! Tests compile, deploy, join, move, full game flow, and rejection cases
 //! using the Runar SDK against a regtest node.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
@@ -31,10 +37,7 @@ fn deploy_game(
 // ---------------------------------------------------------------------------
 
 #[test]
-
 fn test_tic_tac_toe_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/tic-tac-toe/TicTacToe.runar.ts");
     assert_eq!(artifact.contract_name, "TicTacToe");
 }
@@ -43,8 +46,8 @@ fn test_tic_tac_toe_compile() {
 // Deploy
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_deploy() {
     skip_if_no_node();
 
@@ -73,8 +76,8 @@ fn test_tic_tac_toe_deploy() {
 // Join — player O enters the game
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_join() {
     skip_if_no_node();
 
@@ -108,8 +111,8 @@ fn test_tic_tac_toe_join() {
 // Move — single move after join
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_move() {
     skip_if_no_node();
 
@@ -154,8 +157,8 @@ fn test_tic_tac_toe_move() {
 // Full game — X wins top row with moveAndWin
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_full_game() {
     skip_if_no_node();
 
@@ -237,8 +240,8 @@ fn test_tic_tac_toe_full_game() {
 // Wrong player rejected — player O tries to move on player X's turn
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_wrong_player_rejected() {
     skip_if_no_node();
 
@@ -275,8 +278,8 @@ fn test_tic_tac_toe_wrong_player_rejected() {
 // Join after playing rejected — cannot call join when game is in progress
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(not(feature = "regtest"), ignore)]
 #[test]
-
 fn test_tic_tac_toe_join_after_playing_rejected() {
     skip_if_no_node();
 

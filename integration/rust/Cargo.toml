@@ -4,6 +4,17 @@ version = "0.1.0"
 edition = "2021"
 autotests = false
 
+[features]
+# `regtest` gates the on-chain deploy/call tests. These require a local Bitcoin
+# regtest node reachable at RPC_URL (default http://localhost:18332) with
+# credentials RPC_USER/RPC_PASS (defaults bitcoin/bitcoin). Start the node with:
+#   ./integration/regtest.sh start
+# Then run:
+#   cargo test --features regtest
+# Without this feature, only offline compile/script-size tests run.
+default = []
+regtest = []
+
 [dependencies]
 runar-lang = { path = "../../packages/runar-rs" }
 runar-compiler-rust = { path = "../../compilers/rust" }

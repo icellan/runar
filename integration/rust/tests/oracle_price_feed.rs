@@ -25,6 +25,12 @@
 //! ### Important Notes
 //!   - Sig (ECDSA) is auto-computed by the SDK when SdkValue::Auto
 //!   - Uses small test primes (7879, 7883) — real deployments need 1024+ bit primes
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use crate::helpers::crypto::{generate_rabin_key_pair, rabin_sign, bigint_to_script_num_hex};
@@ -43,17 +49,14 @@ fn num2bin_le(value: i64, length: usize) -> Vec<u8> {
 }
 
 #[test]
-#[ignore]
 fn test_oracle_price_feed_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/oracle-price/OraclePriceFeed.runar.ts");
     assert_eq!(artifact.contract_name, "OraclePriceFeed");
     assert!(!artifact.script.is_empty());
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_oracle_price_feed_deploy() {
     skip_if_no_node();
 
@@ -84,7 +87,7 @@ fn test_oracle_price_feed_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_oracle_price_feed_deploy_different_receiver() {
     skip_if_no_node();
 
@@ -120,7 +123,7 @@ fn test_oracle_price_feed_deploy_different_receiver() {
 ///   4. Oracle signs price=55001 as 8-byte LE using Rabin signature
 ///   5. Call settle(price, rabinSig, padding, Auto) — SDK auto-computes ECDSA sig
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_oracle_price_feed_spend_valid_price() {
     skip_if_no_node();
 
@@ -176,7 +179,7 @@ fn test_oracle_price_feed_spend_valid_price() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_oracle_price_feed_below_threshold_rejected() {
     skip_if_no_node();
 
@@ -224,7 +227,7 @@ fn test_oracle_price_feed_below_threshold_rejected() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_oracle_price_feed_wrong_receiver_rejected() {
     skip_if_no_node();
 

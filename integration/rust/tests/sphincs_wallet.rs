@@ -38,6 +38,12 @@
 //!   require raw transaction construction (two-pass signing: ECDSA first, then
 //!   SLH-DSA over the ECDSA sig). The Go integration suite (TestSLHDSA_ValidSpend)
 //!   implements the complete two-pass spending flow.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
@@ -60,20 +66,14 @@ fn hash160_hex(hex_data: &str) -> String {
 }
 
 #[test]
-#[ignore]
 fn test_sphincs_wallet_compile() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts");
     assert_eq!(artifact.contract_name, "SPHINCSWallet");
     assert!(!artifact.script.is_empty());
 }
 
 #[test]
-#[ignore]
 fn test_sphincs_wallet_script_size() {
-    skip_if_no_node();
-
     let artifact = compile_contract("examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts");
     let script_bytes = artifact.script.len() / 2;
     // SLH-DSA scripts are typically ~188 KB
@@ -82,7 +82,7 @@ fn test_sphincs_wallet_script_size() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_sphincs_wallet_deploy() {
     skip_if_no_node();
 
@@ -110,7 +110,7 @@ fn test_sphincs_wallet_deploy() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_sphincs_wallet_deploy_different_key() {
     skip_if_no_node();
 
@@ -147,7 +147,7 @@ fn test_sphincs_wallet_deploy_different_key() {
 /// This two-pass signing pattern is fully tested in the Go integration suite
 /// (TestSLHDSA_ValidSpend) which uses raw transaction construction.
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_sphincs_wallet_deploy_and_verify_utxo() {
     skip_if_no_node();
 

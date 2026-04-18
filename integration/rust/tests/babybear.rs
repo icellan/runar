@@ -3,6 +3,12 @@
 //!
 //! Each test compiles a minimal stateless contract that exercises Baby Bear
 //! built-ins, deploys it on regtest, and verifies the deployment + call succeed.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
@@ -11,7 +17,7 @@ use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 const BB_P: i64 = 2013265921;
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_bb_field_add_deploy() {
     skip_if_no_node();
 
@@ -49,7 +55,7 @@ class BBAddTest extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_bb_field_add_wrap_around() {
     skip_if_no_node();
 
@@ -87,7 +93,7 @@ class BBAddWrap extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_bb_field_inv_identity() {
     skip_if_no_node();
 
@@ -125,7 +131,7 @@ class BBInvIdentity extends SmartContract {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_bb_field_add_wrong_result_rejected() {
     skip_if_no_node();
 

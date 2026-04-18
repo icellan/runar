@@ -3,6 +3,12 @@
 //!
 //! Deploys and advances the covenant on a real regtest node. Tests both valid
 //! state transitions and on-chain rejection of invalid inputs.
+//!
+//! **Gating**: all on-chain tests are gated with
+//! `#[cfg_attr(not(feature = "regtest"), ignore)]`. They require a local Bitcoin
+//! regtest node (see `integration/rust/README.md`). Run with:
+//!     cargo test --features regtest
+//! Tests without the gate (pure compile/script-size checks) run by default.
 
 use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
@@ -147,14 +153,14 @@ fn deploy_state_covenant() -> (RunarContract, Box<dyn runar_lang::sdk::Signer>, 
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_deploy() {
     skip_if_no_node();
     let (_contract, _signer, _wallet) = deploy_state_covenant();
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_advance_state() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
@@ -170,7 +176,7 @@ fn test_state_covenant_advance_state() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_chain_advances() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
@@ -188,7 +194,7 @@ fn test_state_covenant_chain_advances() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_wrong_pre_state_root_rejected() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
@@ -205,7 +211,7 @@ fn test_state_covenant_wrong_pre_state_root_rejected() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_invalid_block_number_rejected() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
@@ -231,7 +237,7 @@ fn test_state_covenant_invalid_block_number_rejected() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_invalid_babybear_proof_rejected() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
@@ -249,7 +255,7 @@ fn test_state_covenant_invalid_babybear_proof_rejected() {
 }
 
 #[test]
-#[ignore]
+#[cfg_attr(not(feature = "regtest"), ignore)]
 fn test_state_covenant_invalid_merkle_proof_rejected() {
     skip_if_no_node();
     let (mut contract, signer, _wallet) = deploy_state_covenant();
