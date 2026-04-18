@@ -87,6 +87,7 @@ class Token:
 _GO_TYPE_MAP: dict[str, str] = {
     "Int": "bigint",
     "Bigint": "bigint",
+    "BigintBig": "bigint",
     "Bool": "boolean",
     "ByteString": "ByteString",
     "PubKey": "PubKey",
@@ -1575,12 +1576,34 @@ class _GoParser:
                 sel_tok = self.expect(TOK_IDENT)
                 sel_name = sel_tok.value
 
-                # Type conversion: runar.Int(0), runar.Bigint(x), runar.Bool(x)
-                if sel_name in ("Int", "Bigint", "Bool") and self.check(TOK_LPAREN):
+                # Type conversion: runar.Int(0), runar.Bigint(x), runar.BigintBig(x), runar.Bool(x)
+                if sel_name in ("Int", "Bigint", "BigintBig", "Bool") and self.check(TOK_LPAREN):
                     args = self._parse_call_args()
                     if len(args) == 1:
                         return args[0]
                     return BigIntLiteral(value=0)
+
+                # runar.ByteString("literal") -> ByteStringLiteral (hex-encoded bytes);
+                # runar.ByteString(variable) -> unwrap (type conversion no-op).
+                if sel_name == "ByteString" and self.check(TOK_LPAREN):
+                    saved_pos = self.pos
+                    self.advance()  # consume '('
+                    if self.check(TOK_STRING):
+                        str_tok = self.advance()
+                        if self.check(TOK_RPAREN):
+                            self.advance()  # consume ')'
+                            # Hex-encode raw bytes of the string literal.
+                            hex_str = str_tok.value.encode("latin-1", errors="replace").hex()
+                            return ByteStringLiteral(value=hex_str)
+                    # Fall back: restore and parse as args for type-conversion unwrap.
+                    self.pos = saved_pos
+                    args = self._parse_call_args()
+                    if len(args) == 1:
+                        return args[0]
+                    return CallExpr(
+                        callee=Identifier(name="byteString"),
+                        args=args,
+                    )
 
                 builtin_name = _map_go_builtin(sel_name)
 

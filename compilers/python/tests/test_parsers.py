@@ -358,6 +358,118 @@ class TestGoParser:
         # Go exported methods like Unlock -> unlock in AST
         assert "unlock" in method_names
 
+    def test_parse_go_bigint_big_is_bigint(self):
+        """runar.BigintBig in the Go DSL must map to the same bigint primitive
+        as runar.Bigint — it is the big.Int-backed alias for arbitrary-precision
+        arithmetic on the mock side, and has identical Script semantics."""
+        source = (
+            'package contract\n'
+            'import "github.com/icellan/runar/packages/runar-go"\n'
+            'type BigMath struct {\n'
+            '    runar.SmartContract\n'
+            '    Target runar.BigintBig `runar:"readonly"`\n'
+            '}\n'
+            'func (c *BigMath) Check(a runar.Bigint, b runar.BigintBig) {\n'
+            '    runar.Assert(a + b == c.Target)\n'
+            '}\n'
+        )
+        result = parse_source(source, "BigMath.runar.go")
+        assert result.errors == [], f"errors: {result.errors}"
+        c = result.contract
+        assert c is not None
+        target = [p for p in c.properties if p.name == "target"][0]
+        assert isinstance(target.type, PrimitiveType)
+        assert target.type.name == "bigint"
+        method = c.methods[0]
+        assert isinstance(method.params[1].type, PrimitiveType)
+        assert method.params[1].type.name == "bigint"
+
+    def test_parse_go_bytestring_literal(self):
+        r"""runar.ByteString("\x00\x6a") emits a ByteStringLiteral whose
+        .value is the hex encoding of the raw literal bytes ('006a')."""
+        source = (
+            'package contract\n'
+            'import "github.com/icellan/runar/packages/runar-go"\n'
+            'type LitDemo struct {\n'
+            '    runar.SmartContract\n'
+            '    Expected runar.ByteString `runar:"readonly"`\n'
+            '}\n'
+            'func (c *LitDemo) Check() {\n'
+            '    runar.Assert(runar.ByteString("\\x00\\x6a") == c.Expected)\n'
+            '}\n'
+        )
+        result = parse_source(source, "LitDemo.runar.go")
+        assert result.errors == [], f"errors: {result.errors}"
+        c = result.contract
+        assert c is not None
+
+        def find_bs_lit(expr):
+            if isinstance(expr, ByteStringLiteral):
+                return expr.value
+            if isinstance(expr, CallExpr):
+                v = find_bs_lit(expr.callee)
+                if v is not None:
+                    return v
+                for a in expr.args:
+                    v = find_bs_lit(a)
+                    if v is not None:
+                        return v
+                return None
+            if isinstance(expr, BinaryExpr):
+                v = find_bs_lit(expr.left)
+                if v is not None:
+                    return v
+                return find_bs_lit(expr.right)
+            return None
+
+        found = None
+        for stmt in c.methods[0].body:
+            if isinstance(stmt, ExpressionStmt):
+                found = find_bs_lit(stmt.expr)
+                if found is not None:
+                    break
+        assert found == "006a", f"expected '006a', got {found!r}"
+
+    def test_parse_go_bytestring_of_variable_unwraps(self):
+        """runar.ByteString(variable) is a no-op type conversion; the inner
+        identifier must flow through unchanged."""
+        source = (
+            'package contract\n'
+            'import "github.com/icellan/runar/packages/runar-go"\n'
+            'type VarDemo struct {\n'
+            '    runar.SmartContract\n'
+            '    Expected runar.ByteString `runar:"readonly"`\n'
+            '}\n'
+            'func (c *VarDemo) Check(data runar.ByteString) {\n'
+            '    runar.Assert(runar.ByteString(data) == c.Expected)\n'
+            '}\n'
+        )
+        result = parse_source(source, "VarDemo.runar.go")
+        assert result.errors == [], f"errors: {result.errors}"
+        c = result.contract
+        assert c is not None
+
+        def has_plain_data_ident(expr):
+            if isinstance(expr, Identifier):
+                return expr.name == "data"
+            if isinstance(expr, BinaryExpr):
+                return has_plain_data_ident(expr.left) or has_plain_data_ident(expr.right)
+            if isinstance(expr, CallExpr):
+                # must not be a byteString(...) call masquerading as unwrap
+                if isinstance(expr.callee, Identifier) and expr.callee.name == "byteString":
+                    return False
+                if any(has_plain_data_ident(a) for a in expr.args):
+                    return True
+                return has_plain_data_ident(expr.callee)
+            return False
+
+        ok = False
+        for stmt in c.methods[0].body:
+            if isinstance(stmt, ExpressionStmt) and has_plain_data_ident(stmt.expr):
+                ok = True
+                break
+        assert ok, "expected runar.ByteString(data) to unwrap to identifier 'data'"
+
 
 # ---------------------------------------------------------------------------
 # Rust DSL parser (.runar.rs)

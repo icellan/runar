@@ -385,6 +385,7 @@ fn mapGoType(name: []const u8) RunarType {
     const map = std.StaticStringMap(RunarType).initComptime(.{
         .{ "Int", .bigint },
         .{ "Bigint", .bigint },
+        .{ "BigintBig", .bigint },
         .{ "int64", .bigint },
         .{ "int", .bigint },
         .{ "Bool", .boolean },
@@ -522,12 +523,71 @@ fn mapGoBuiltinCamel(allocator: Allocator, name: []const u8) []const u8 {
     return mapped;
 }
 
+/// Decode Go string escape sequences (\n, \t, \r, \0, \\, \", \xNN) from the
+/// raw text of a Go string literal, then hex-encode the resulting bytes. Used
+/// so that `runar.ByteString("\x00\x6a")` in source becomes a ByteString
+/// literal with hex value `"006a"`.
+fn decodeGoEscapesAndHex(allocator: Allocator, raw: []const u8) ![]const u8 {
+    var decoded: std.ArrayListUnmanaged(u8) = .empty;
+    defer decoded.deinit(allocator);
+    var i: usize = 0;
+    while (i < raw.len) {
+        const c = raw[i];
+        if (c == '\\' and i + 1 < raw.len) {
+            const nx = raw[i + 1];
+            switch (nx) {
+                'n' => { try decoded.append(allocator, '\n'); i += 2; },
+                't' => { try decoded.append(allocator, '\t'); i += 2; },
+                'r' => { try decoded.append(allocator, '\r'); i += 2; },
+                '0' => { try decoded.append(allocator, 0); i += 2; },
+                '\\' => { try decoded.append(allocator, '\\'); i += 2; },
+                '"' => { try decoded.append(allocator, '"'); i += 2; },
+                'x' => {
+                    if (i + 3 < raw.len) {
+                        const h1 = raw[i + 2];
+                        const h2 = raw[i + 3];
+                        const isHex = std.ascii.isHex(h1) and std.ascii.isHex(h2);
+                        if (isHex) {
+                            const hex_pair = [_]u8{ h1, h2 };
+                            const b = try std.fmt.parseInt(u8, &hex_pair, 16);
+                            try decoded.append(allocator, b);
+                            i += 4;
+                        } else {
+                            try decoded.append(allocator, c);
+                            i += 1;
+                        }
+                    } else {
+                        try decoded.append(allocator, c);
+                        i += 1;
+                    }
+                },
+                else => {
+                    try decoded.append(allocator, nx);
+                    i += 2;
+                },
+            }
+        } else {
+            try decoded.append(allocator, c);
+            i += 1;
+        }
+    }
+    // Hex-encode the decoded bytes.
+    const hex = try allocator.alloc(u8, decoded.items.len * 2);
+    const digits = "0123456789abcdef";
+    for (decoded.items, 0..) |b, idx| {
+        hex[idx * 2] = digits[(b >> 4) & 0xf];
+        hex[idx * 2 + 1] = digits[b & 0xf];
+    }
+    return hex;
+}
+
 /// Check if a Go type name is a type conversion (not a function call).
 /// e.g., runar.Int(0), runar.Bigint(x), runar.Bool(true) are type casts.
 fn isTypeConversion(name: []const u8) bool {
     const convs = std.StaticStringMap(void).initComptime(.{
         .{ "Int", {} },
         .{ "Bigint", {} },
+        .{ "BigintBig", {} },
         .{ "Bool", {} },
     });
     return convs.has(name);
@@ -1628,9 +1688,21 @@ const Parser = struct {
                         .identifier => |id| {
                             // runar.FuncName(args) -> check for type conversion or builtin call
                             if (std.mem.eql(u8, id, "runar")) {
-                                // Check for type conversions: runar.Int(0), runar.Bigint(x), runar.Bool(true)
+                                // Check for type conversions: runar.Int(0), runar.Bigint(x), runar.BigintBig(x), runar.Bool(true)
                                 if (isTypeConversion(member) and args.len == 1) {
                                     expr = args[0];
+                                } else if (std.mem.eql(u8, member, "ByteString") and args.len == 1) {
+                                    // runar.ByteString("literal") -> literal_bytes (hex-encoded);
+                                    // runar.ByteString(variable) -> unwrap.
+                                    switch (args[0]) {
+                                        .literal_bytes => |raw| {
+                                            const hex = decodeGoEscapesAndHex(self.allocator, raw) catch raw;
+                                            expr = .{ .literal_bytes = hex };
+                                        },
+                                        else => {
+                                            expr = args[0];
+                                        },
+                                    }
                                 } else {
                                     // Builtin call: runar.CheckSig(sig, pk) -> checkSig(sig, pk)
                                     const builtin_name = mapGoBuiltinCamel(self.allocator, member);
@@ -2131,6 +2203,108 @@ test "parse BoundedLoop contract (Go)" {
     try std.testing.expectEqual(@as(usize, 1), c.methods.len);
     // Body: short var decl + for loop + assert = 3 statements
     try std.testing.expectEqual(@as(usize, 3), c.methods[0].body.len);
+}
+
+test "parse BigintBig property and param (Go)" {
+    // runar.BigintBig is the big.Int-backed alias for the bigint primitive on
+    // the Go mock side. The DSL parser must map it to the same bigint type so
+    // arithmetic against runar.Bigint typechecks cleanly.
+    const source =
+        \\package contract
+        \\
+        \\import "runar"
+        \\
+        \\type BigMath struct {
+        \\  runar.SmartContract
+        \\  Target runar.BigintBig `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *BigMath) Check(a runar.Bigint, b runar.BigintBig) {
+        \\  runar.Assert(a + b == c.Target)
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseGo(arena.allocator(), source, "BigMath.runar.go");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.contract != null);
+    const c = r.contract.?;
+    // Target property must map to bigint.
+    try std.testing.expectEqual(RunarType.bigint, c.properties[0].type_info);
+    // Method param b runar.BigintBig must also map to bigint.
+    try std.testing.expectEqual(@as(usize, 1), c.methods.len);
+    try std.testing.expectEqual(RunarType.bigint, c.methods[0].params[1].type_info);
+}
+
+test "parse ByteString literal and variable (Go)" {
+    // runar.ByteString("\x00\x6a") emits literal_bytes with hex "006a".
+    // runar.ByteString(data) is a no-op type conversion.
+    const source =
+        \\package contract
+        \\
+        \\import "runar"
+        \\
+        \\type LitDemo struct {
+        \\  runar.SmartContract
+        \\  Expected runar.ByteString `runar:"readonly"`
+        \\}
+        \\
+        \\func (c *LitDemo) Check(data runar.ByteString) {
+        \\  runar.Assert(runar.ByteString("\x00\x6a") == c.Expected)
+        \\  runar.Assert(runar.ByteString(data) == c.Expected)
+        \\}
+    ;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = parseGo(arena.allocator(), source, "LitDemo.runar.go");
+    for (r.errors) |err| std.debug.print("ERROR: {s}\n", .{err});
+    try std.testing.expectEqual(@as(usize, 0), r.errors.len);
+    try std.testing.expect(r.contract != null);
+    const c = r.contract.?;
+    try std.testing.expectEqual(@as(usize, 1), c.methods.len);
+
+    // Body: [assert_stmt(literal), assert_stmt(variable)].
+    try std.testing.expectEqual(@as(usize, 2), c.methods[0].body.len);
+
+    // Walk the first assert's expression and find a literal_bytes == "006a".
+    const Finder = struct {
+        fn find(expr: types.Expression) ?[]const u8 {
+            return switch (expr) {
+                .literal_bytes => |v| v,
+                .binary_op => |bop| find(bop.left) orelse find(bop.right),
+                .call => |call| blk: {
+                    for (call.args) |a| if (find(a)) |v| break :blk v;
+                    break :blk null;
+                },
+                else => null,
+            };
+        }
+        fn findIdent(expr: types.Expression, name: []const u8) bool {
+            return switch (expr) {
+                .identifier => |s| std.mem.eql(u8, s, name),
+                .binary_op => |bop| findIdent(bop.left, name) or findIdent(bop.right, name),
+                .call => |call| blk: {
+                    // Reject a wrapping `byteString(...)` call — that means
+                    // the unwrap didn't happen.
+                    if (std.mem.eql(u8, call.callee, "byteString")) break :blk false;
+                    for (call.args) |a| if (findIdent(a, name)) break :blk true;
+                    break :blk false;
+                },
+                else => false,
+            };
+        }
+    };
+
+    const stmt_0 = c.methods[0].body[0];
+    try std.testing.expect(stmt_0 == .expr_stmt);
+    const lit = Finder.find(stmt_0.expr_stmt);
+    try std.testing.expect(lit != null);
+    try std.testing.expectEqualStrings("006a", lit.?);
+
+    const stmt_1 = c.methods[0].body[1];
+    try std.testing.expect(stmt_1 == .expr_stmt);
+    try std.testing.expect(Finder.findIdent(stmt_1.expr_stmt, "data"));
 }
 
 test "parse IfElse contract (Go)" {

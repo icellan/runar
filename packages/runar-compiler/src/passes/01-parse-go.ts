@@ -160,7 +160,25 @@ function tokenize(source: string): GoToken[] {
       while (pos < source.length && peek() !== '"') {
         if (peek() === '\\') {
           advance(); // skip backslash
-          val += advance(); // take escaped char
+          const esc = peek();
+          if (esc === 'n') { val += '\n'; advance(); }
+          else if (esc === 't') { val += '\t'; advance(); }
+          else if (esc === 'r') { val += '\r'; advance(); }
+          else if (esc === '0') { val += '\0'; advance(); }
+          else if (esc === '\\') { val += '\\'; advance(); }
+          else if (esc === '"') { val += '"'; advance(); }
+          else if (esc === 'x') {
+            advance(); // consume 'x'
+            const h1 = peek();
+            const h2 = pos + 1 < source.length ? source[pos + 1] : '';
+            if (/[0-9a-fA-F]/.test(h1) && /[0-9a-fA-F]/.test(h2)) {
+              advance(); advance();
+              val += String.fromCharCode(parseInt(h1 + h2, 16));
+            } else {
+              val += '\\x';
+            }
+          }
+          else { val += advance(); }
         } else {
           val += advance();
         }
@@ -234,7 +252,7 @@ function goToCamel(name: string): string {
 // ---------------------------------------------------------------------------
 
 const GO_TYPE_MAP: Record<string, string> = {
-  Int: 'bigint', Bigint: 'bigint',
+  Int: 'bigint', Bigint: 'bigint', BigintBig: 'bigint',
   Bool: 'boolean', bool: 'boolean', int: 'bigint',
   ByteString: 'ByteString',
   PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
@@ -334,7 +352,7 @@ const GO_BUILTIN_MAP: Record<string, string> = {
 
 /** Known type names used for type cast detection. */
 const GO_CAST_TYPES = new Set([
-  'Int', 'Bigint', 'Bool', 'ByteString', 'PubKey', 'Sig', 'Sha256',
+  'Int', 'Bigint', 'BigintBig', 'Bool', 'ByteString', 'PubKey', 'Sig', 'Sha256',
   'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey',
   'Point', 'P256Point', 'P384Point',
 ]);
@@ -1149,6 +1167,25 @@ class GoParser extends ParserCore<GoToken> {
       if (t.value === 'runar' && this.current().type === '.') {
         this.advance(); // skip '.'
         const memberName = this.expect('ident').value;
+
+        // Special-case: runar.ByteString("literal") — hex-encode the raw bytes
+        // of the string literal and emit a ByteString literal node directly.
+        // runar.ByteString(variable) falls through to the generic type cast
+        // unwrap below.
+        if (memberName === 'ByteString' && this.current().type === '(' &&
+            this.tokens[this.pos + 1]?.type === 'string' &&
+            this.tokens[this.pos + 2]?.type === ')') {
+          this.advance(); // '('
+          const strTok = this.advance(); // consume string
+          this.advance(); // ')'
+          // Hex-encode the raw bytes of the string literal (tokenizer has
+          // already decoded Go escape sequences like \x00 into real bytes).
+          let hex = '';
+          for (let i = 0; i < strTok.value.length; i++) {
+            hex += strTok.value.charCodeAt(i).toString(16).padStart(2, '0');
+          }
+          return { kind: 'bytestring_literal', value: hex };
+        }
 
         // Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.
         if (GO_CAST_TYPES.has(memberName) && this.current().type === '(') {

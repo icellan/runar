@@ -778,4 +778,108 @@ func (c *BoundedCounter) Increment() {
       expect(maxProp!.initializer!.kind).toBe('bigint_literal');
     });
   });
+
+  // -------------------------------------------------------------------------
+  // BigintBig as a bigint alias
+  // -------------------------------------------------------------------------
+
+  describe('BigintBig alias', () => {
+    it('maps runar.BigintBig to the bigint primitive (property + param)', () => {
+      const go = `
+package contract
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type BigMath struct {
+\truntar.SmartContract
+\tTarget runar.BigintBig \`runar:"readonly"\`
+}
+
+func (c *BigMath) Check(a runar.Bigint, b runar.BigintBig) {
+\truntar.Assert(a + b == c.Target)
+}
+`.replace(/runtar\./g, 'runar.');
+      const result = parseGoSource(go, 'BigMath.runar.go');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const c = result.contract!;
+      const target = c.properties.find(p => p.name === 'target')!;
+      expect(target.type.kind).toBe('primitive_type');
+      expect((target.type as { name: string }).name).toBe('bigint');
+      const b = c.methods[0]!.params[1]!;
+      expect(b.type.kind).toBe('primitive_type');
+      expect((b.type as { name: string }).name).toBe('bigint');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // runar.ByteString("literal") -> ByteString literal (hex of raw bytes)
+  // runar.ByteString(variable)  -> type-conversion no-op
+  // -------------------------------------------------------------------------
+
+  describe('ByteString conversion', () => {
+    it('emits a ByteString literal (hex of raw bytes) for a string-literal arg', () => {
+      const go = `
+package contract
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type LitDemo struct {
+\truntar.SmartContract
+\tExpected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *LitDemo) Check() {
+\truntar.Assert(runar.ByteString("\\x00\\x6a") == c.Expected)
+}
+`.replace(/runtar\./g, 'runar.');
+      const result = parseGoSource(go, 'LitDemo.runar.go');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      const body = result.contract!.methods[0]!.body;
+      // Walk to find any bytestring_literal node; assert value is "006a".
+      const found: string[] = [];
+      function walk(node: unknown): void {
+        if (!node || typeof node !== 'object') return;
+        const n = node as { kind?: string; value?: unknown };
+        if (n.kind === 'bytestring_literal' && typeof n.value === 'string') {
+          found.push(n.value);
+        }
+        for (const v of Object.values(n)) walk(v);
+      }
+      walk(body);
+      expect(found).toContain('006a');
+    });
+
+    it('unwraps runar.ByteString(variable) to the inner identifier', () => {
+      const go = `
+package contract
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type VarDemo struct {
+\truntar.SmartContract
+\tExpected runar.ByteString \`runar:"readonly"\`
+}
+
+func (c *VarDemo) Check(data runar.ByteString) {
+\truntar.Assert(runar.ByteString(data) == c.Expected)
+}
+`.replace(/runtar\./g, 'runar.');
+      const result = parseGoSource(go, 'VarDemo.runar.go');
+      expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
+      // There must be a plain identifier 'data' somewhere, and NO call with
+      // callee Identifier('byteString'). (A stray `byteString(data)` call
+      // would indicate the unwrap didn't happen.)
+      let sawDataIdent = false;
+      let sawByteStringCall = false;
+      function walk(node: unknown): void {
+        if (!node || typeof node !== 'object') return;
+        const n = node as { kind?: string; name?: string; callee?: { name?: string } };
+        if (n.kind === 'identifier' && n.name === 'data') sawDataIdent = true;
+        if (n.kind === 'call_expr' && n.callee && n.callee.name === 'byteString') {
+          sawByteStringCall = true;
+        }
+        for (const v of Object.values(n)) walk(v);
+      }
+      walk(result.contract!.methods[0]!.body);
+      expect(sawDataIdent).toBe(true);
+      expect(sawByteStringCall).toBe(false);
+    });
+  });
 });

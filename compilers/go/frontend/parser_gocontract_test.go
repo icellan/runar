@@ -276,6 +276,183 @@ func (c *H) Check(data runar.ByteString) {
 	}
 }
 
+// TestParseGoContract_BigintBigTypeIsBigint confirms that `runar.BigintBig`
+// (the big.Int-backed arithmetic type in the mock runtime) maps to the same
+// AST primitive as `runar.Bigint` in the DSL parser. This lets contracts
+// declare a `BigintBig` property and perform arithmetic / comparison against
+// ordinary `Bigint` values without any typecheck friction.
+func TestParseGoContract_BigintBigTypeIsBigint(t *testing.T) {
+	source := `
+package contracts
+
+import "github.com/icellan/runar/packages/runar-go"
+
+type BigMath struct {
+	runar.SmartContract
+	Target runar.BigintBig ` + "`" + `runar:"readonly"` + "`" + `
+}
+
+func (c *BigMath) Check(a runar.Bigint, b runar.BigintBig) {
+	runar.Assert(a + b == c.Target)
+}
+`
+	result := ParseSource([]byte(source), "BigMath.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil {
+		t.Fatal("expected contract")
+	}
+
+	// Property must be a bigint primitive
+	var target *PropertyNode
+	for i := range c.Properties {
+		if c.Properties[i].Name == "target" {
+			target = &c.Properties[i]
+			break
+		}
+	}
+	if target == nil {
+		t.Fatal("expected 'target' property")
+	}
+	prim, ok := target.Type.(PrimitiveType)
+	if !ok {
+		t.Fatalf("expected PrimitiveType for target, got %T", target.Type)
+	}
+	if prim.Name != "bigint" {
+		t.Errorf("expected BigintBig to map to primitive 'bigint', got %q", prim.Name)
+	}
+
+	// Method params: second arg is runar.BigintBig — must also be bigint
+	if len(c.Methods) == 0 {
+		t.Fatal("expected method")
+	}
+	m := c.Methods[0]
+	if len(m.Params) != 2 {
+		t.Fatalf("expected 2 params, got %d", len(m.Params))
+	}
+	pp, ok := m.Params[1].Type.(PrimitiveType)
+	if !ok || pp.Name != "bigint" {
+		t.Errorf("expected BigintBig param to map to primitive 'bigint', got %v", m.Params[1].Type)
+	}
+}
+
+// TestParseGoContract_ByteStringLiteral confirms that
+// `runar.ByteString("\x00\x6a")` in a `.runar.go` source becomes a
+// ByteStringLiteral whose hex value represents the raw bytes of the string.
+func TestParseGoContract_ByteStringLiteral(t *testing.T) {
+	source := `
+package contracts
+
+import "github.com/icellan/runar/packages/runar-go"
+
+type LitDemo struct {
+	runar.SmartContract
+	Expected runar.ByteString ` + "`" + `runar:"readonly"` + "`" + `
+}
+
+func (c *LitDemo) Check() {
+	runar.Assert(runar.ByteString("\x00\x6a") == c.Expected)
+}
+`
+	result := ParseSource([]byte(source), "LitDemo.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil || len(c.Methods) == 0 {
+		t.Fatal("expected contract + method")
+	}
+	// Walk the first method body and find the BinaryExpr's left operand.
+	var found *ByteStringLiteral
+	for _, stmt := range c.Methods[0].Body {
+		visitForByteStringLit(stmt, &found)
+	}
+	if found == nil {
+		t.Fatal("expected a ByteStringLiteral in method body")
+	}
+	if found.Value != "006a" {
+		t.Errorf("expected ByteStringLiteral value '006a', got %q", found.Value)
+	}
+}
+
+// TestParseGoContract_ByteStringOfVariableUnwraps confirms
+// `runar.ByteString(existingVar)` is still treated as a no-op type conversion.
+func TestParseGoContract_ByteStringOfVariableUnwraps(t *testing.T) {
+	source := `
+package contracts
+
+import "github.com/icellan/runar/packages/runar-go"
+
+type VarDemo struct {
+	runar.SmartContract
+	Expected runar.ByteString ` + "`" + `runar:"readonly"` + "`" + `
+}
+
+func (c *VarDemo) Check(data runar.ByteString) {
+	runar.Assert(runar.ByteString(data) == c.Expected)
+}
+`
+	result := ParseSource([]byte(source), "VarDemo.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	c := result.Contract
+	if c == nil || len(c.Methods) == 0 {
+		t.Fatal("expected contract + method")
+	}
+	// The left side of the == should be a plain Identifier(data), not a
+	// CallExpr. This proves the ByteString(variable) was unwrapped.
+	var sawPlainIdent bool
+	for _, stmt := range c.Methods[0].Body {
+		es, ok := stmt.(ExpressionStmt)
+		if !ok {
+			continue
+		}
+		walkForPlainByteStringIdent(es.Expr, &sawPlainIdent)
+	}
+	if !sawPlainIdent {
+		t.Fatalf("expected runar.ByteString(data) to unwrap to an Identifier 'data'")
+	}
+}
+
+func visitForByteStringLit(node interface{}, out **ByteStringLiteral) {
+	switch v := node.(type) {
+	case ExpressionStmt:
+		visitForByteStringLit(v.Expr, out)
+	case CallExpr:
+		for _, a := range v.Args {
+			visitForByteStringLit(a, out)
+		}
+	case BinaryExpr:
+		visitForByteStringLit(v.Left, out)
+		visitForByteStringLit(v.Right, out)
+	case ByteStringLiteral:
+		lit := v
+		*out = &lit
+	}
+}
+
+func walkForPlainByteStringIdent(e Expression, found *bool) {
+	switch v := e.(type) {
+	case CallExpr:
+		// We should NOT see a call whose callee is identifier "byteString".
+		if ident, ok := v.Callee.(Identifier); ok && ident.Name == "byteString" {
+			return
+		}
+		for _, a := range v.Args {
+			walkForPlainByteStringIdent(a, found)
+		}
+	case BinaryExpr:
+		if id, ok := v.Left.(Identifier); ok && id.Name == "data" {
+			*found = true
+		}
+		walkForPlainByteStringIdent(v.Left, found)
+		walkForPlainByteStringIdent(v.Right, found)
+	}
+}
+
 // TestParseGoContract_Sha256DigestTypeRecognised confirms the `Sha256Digest`
 // identifier round-trips through the type system as the `Sha256` primitive.
 func TestParseGoContract_Sha256DigestTypeRecognised(t *testing.T) {

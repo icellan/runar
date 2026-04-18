@@ -546,6 +546,13 @@ describe.skipIf(!hasGo)('Cross-compiler: all examples TS IR -> Go', () => {
 function findConformanceTests(): { name: string; sourceFile: string; hexFile: string }[] {
   const tests: { name: string; sourceFile: string; hexFile: string }[] = [];
 
+  // Input-format priority when a fixture only ships non-TS sources. The TS
+  // compiler dispatches by file extension, so any of these work end-to-end.
+  const EXT_PRIORITY = [
+    '.runar.ts', '.runar.sol', '.runar.move', '.runar.py',
+    '.runar.rb', '.runar.rs', '.runar.go', '.runar.zig',
+  ];
+
   try {
     const dirs = readdirSync(CONFORMANCE_DIR, { withFileTypes: true });
     for (const dir of dirs) {
@@ -554,7 +561,9 @@ function findConformanceTests(): { name: string; sourceFile: string; hexFile: st
       const hexFile = join(dirPath, 'expected-script.hex');
       if (!existsSync(hexFile)) continue;
 
-      // Find the .runar.ts source file: check source.json first, then local files
+      // Find a source file: prefer .runar.ts where available, fall back to
+      // any other supported source format so go-only / sol-only fixtures are
+      // still exercised through the TS compiler's multi-format parser.
       let sourceFile: string | undefined;
       const configFile = join(dirPath, 'source.json');
       if (existsSync(configFile)) {
@@ -562,16 +571,24 @@ function findConformanceTests(): { name: string; sourceFile: string; hexFile: st
           path?: string;
           sources?: Record<string, string>;
         };
-        if (config.sources?.['.runar.ts']) {
-          sourceFile = resolve(dirPath, config.sources['.runar.ts']);
-        } else if (config.path) {
+        if (config.sources) {
+          for (const ext of EXT_PRIORITY) {
+            if (config.sources[ext]) {
+              sourceFile = resolve(dirPath, config.sources[ext]!);
+              break;
+            }
+          }
+        }
+        if (!sourceFile && config.path) {
           sourceFile = resolve(dirPath, config.path);
         }
       }
       if (!sourceFile) {
         const files = readdirSync(dirPath);
-        const runarFile = files.find(f => f.endsWith('.runar.ts'));
-        if (runarFile) sourceFile = join(dirPath, runarFile);
+        for (const ext of EXT_PRIORITY) {
+          const runarFile = files.find(f => f.endsWith(ext));
+          if (runarFile) { sourceFile = join(dirPath, runarFile); break; }
+        }
       }
       if (!sourceFile) continue;
 
@@ -610,8 +627,13 @@ describe.skipIf(!hasGo)('Cross-compiler conformance: Go output vs golden hex', (
       const source = readFileSync(test.sourceFile, 'utf-8');
       const expectedHex = readFileSync(test.hexFile, 'utf-8').trim();
 
-      // Compile through TS compiler (disable constant folding to match golden files)
-      const result = compile(source, { disableConstantFolding: true });
+      // Compile through TS compiler (disable constant folding to match golden files).
+      // fileName is passed so the parser dispatches to the correct frontend
+      // for non-TS source fixtures (.runar.go, .runar.sol, etc.).
+      const result = compile(source, {
+        disableConstantFolding: true,
+        fileName: test.sourceFile,
+      });
       if (!result.success) {
         throw new Error(tsCompileErrors(test.name, result.diagnostics));
       }
@@ -703,8 +725,13 @@ describe.skipIf(!hasRust || !rustBinaryPath)('Cross-compiler conformance: Rust o
       const source = readFileSync(test.sourceFile, 'utf-8');
       const expectedHex = readFileSync(test.hexFile, 'utf-8').trim();
 
-      // Disable constant folding to match golden files
-      const result = compile(source, { disableConstantFolding: true });
+      // Disable constant folding to match golden files.
+      // fileName is passed so the parser dispatches to the correct frontend
+      // for non-TS source fixtures (.runar.go, .runar.sol, etc.).
+      const result = compile(source, {
+        disableConstantFolding: true,
+        fileName: test.sourceFile,
+      });
       if (!result.success) {
         throw new Error(tsCompileErrors(test.name, result.diagnostics));
       }

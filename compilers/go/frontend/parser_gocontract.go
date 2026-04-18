@@ -1,6 +1,7 @@
 package frontend
 
 import (
+	"encoding/hex"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -10,6 +11,11 @@ import (
 	"strings"
 	"unicode"
 )
+
+// bytesToHex returns the lowercase hex encoding of b.
+func bytesToHex(b []byte) string {
+	return hex.EncodeToString(b)
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -335,6 +341,7 @@ func mapGoType(name string) TypeNode {
 	typeMap := map[string]string{
 		"Int":             "bigint",
 		"Bigint":          "bigint",
+		"BigintBig":       "bigint",
 		"Bool":            "boolean",
 		"ByteString":      "ByteString",
 		"PubKey":          "PubKey",
@@ -591,11 +598,22 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 		return MemberExpr{Object: obj, Property: goFieldToCamel(e.Sel.Name)}
 
 	case *ast.CallExpr:
-		// Handle type conversions: runar.Int(0), runar.Bigint(x) -> inner value
+		// Handle type conversions: runar.Int(0), runar.Bigint(x), runar.BigintBig(x) -> inner value
 		if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
 			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "runar" {
 				typeName := sel.Sel.Name
-				if (typeName == "Int" || typeName == "Bigint" || typeName == "Bool") && len(e.Args) == 1 {
+				if (typeName == "Int" || typeName == "Bigint" || typeName == "BigintBig" || typeName == "Bool") && len(e.Args) == 1 {
+					return p.convertExpression(e.Args[0])
+				}
+				// runar.ByteString("literal") -> ByteStringLiteral with hex-encoded bytes
+				// runar.ByteString(variable) -> unwrap (type conversion no-op)
+				if typeName == "ByteString" && len(e.Args) == 1 {
+					if lit, ok := e.Args[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+						raw, err := strconv.Unquote(lit.Value)
+						if err == nil {
+							return ByteStringLiteral{Value: bytesToHex([]byte(raw))}
+						}
+					}
 					return p.convertExpression(e.Args[0])
 				}
 			}

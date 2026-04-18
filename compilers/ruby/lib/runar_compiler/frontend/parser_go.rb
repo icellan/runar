@@ -74,6 +74,7 @@ module RunarCompiler
     GO_TYPE_MAP = {
       "Int"             => "bigint",
       "Bigint"          => "bigint",
+      "BigintBig"       => "bigint",
       "Bool"            => "boolean",
       "bool"            => "boolean",
       "int"             => "bigint",
@@ -165,7 +166,7 @@ module RunarCompiler
 
     # Known type names used for type cast detection.
     GO_CAST_TYPES = %w[
-      Int Bigint Bool ByteString PubKey Sig Sha256
+      Int Bigint BigintBig Bool ByteString PubKey Sig Sha256
       Ripemd160 Addr SigHashPreimage RabinSig RabinPubKey Point
     ].to_set.freeze
 
@@ -176,6 +177,43 @@ module RunarCompiler
       return name if name.empty?
 
       name[0].downcase + name[1..]
+    end
+
+    # Decode Go string escape sequences (\n, \t, \r, \0, \\, \", \xNN) from the
+    # raw text of a Go string literal.
+    def self.go_decode_string_escapes(raw)
+      out = String.new(encoding: Encoding::ASCII_8BIT)
+      i = 0
+      n = raw.length
+      while i < n
+        c = raw[i]
+        if c == "\\" && i + 1 < n
+          nx = raw[i + 1]
+          case nx
+          when "n" then out << "\n".b; i += 2
+          when "t" then out << "\t".b; i += 2
+          when "r" then out << "\r".b; i += 2
+          when "0" then out << "\x00".b; i += 2
+          when "\\" then out << "\\".b; i += 2
+          when '"' then out << '"'.b; i += 2
+          when "x"
+            if i + 3 < n && raw[i + 2].match?(/[0-9a-fA-F]/) && raw[i + 3].match?(/[0-9a-fA-F]/)
+              out << raw[(i + 2)..(i + 3)].to_i(16).chr
+              i += 4
+            else
+              out << c.b
+              i += 1
+            end
+          else
+            out << nx.b
+            i += 2
+          end
+        else
+          out << c.b
+          i += 1
+        end
+      end
+      out
     end
 
     def self.go_map_type(name)
@@ -1277,6 +1315,17 @@ module RunarCompiler
           if tok.value == "runar" && check(TOK_DOT)
             advance # skip '.'
             member_name = expect(TOK_IDENT).value
+
+            # Special-case runar.ByteString("literal") -> ByteStringLiteral
+            # with hex-encoded raw bytes. Any other arg form (e.g. a variable)
+            # falls through to the generic type-cast unwrap below.
+            if member_name == "ByteString" && check(TOK_LPAREN) && @tokens[@pos + 1]&.kind == TOK_STRING && @tokens[@pos + 2]&.kind == TOK_RPAREN
+              advance # consume '('
+              str_tok = advance # consume string
+              advance # consume ')'
+              hex_str = Frontend.go_decode_string_escapes(str_tok.value).bytes.map { |b| format("%02x", b) }.join
+              return ByteStringLiteral.new(value: hex_str)
+            end
 
             # Check for type cast: runar.Bigint(expr), runar.Bool(expr), etc.
             if GO_CAST_TYPES.include?(member_name) && check(TOK_LPAREN)
