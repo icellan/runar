@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.sol`
-**Supported compilers:** TypeScript, Go, Rust
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby
 
 ---
 
