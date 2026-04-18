@@ -202,13 +202,16 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
 			// Determine if this method verifies hashOutputs (needs change output support).
-			// Methods that use addOutput or mutate state need hashOutputs verification.
-			// Non-mutating methods (like close/destroy) don't verify outputs.
-			needsChangeOutput := methodMutatesState(method, contract) || methodHasAddOutput(method)
+			// Methods that use addOutput / addDataOutput or mutate state need hashOutputs
+			// verification. Non-mutating methods (like close/destroy) don't verify outputs.
+			hasDataOutput := methodHasAddDataOutput(method)
+			needsChangeOutput := methodMutatesState(method, contract) || methodHasAddOutput(method) || hasDataOutput
 
 			// Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
 			// Multi-output (addOutput) methods already specify amounts explicitly per output.
-			needsNewAmount := methodMutatesState(method, contract) && !methodHasAddOutput(method)
+			// Methods that emit only data outputs (no addOutput) still run the single-output
+			// continuation path for their state continuation, so they also need _newAmount.
+			needsNewAmount := (methodMutatesState(method, contract) || hasDataOutput) && !methodHasAddOutput(method)
 
 			// Register implicit parameters
 			if needsChangeOutput {
@@ -243,19 +246,42 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// Lower the developer's method body
 			methodCtx.lowerStatements(method.Body)
 
-			// Determine state continuation type
+			// Determine state continuation type.
+			//
+			// === Continuation-hash construction ===
+			//
+			// The auto-injected continuation assertion verifies that the spending
+			// transaction's hashOutputs field matches a compiler-constructed hash
+			// over the outputs this method declares. Outputs are concatenated in
+			// the following order before hashing with hash256:
+			//
+			//   1. state outputs   (from this.addOutput / this.addRawOutput)
+			//   2. data outputs    (from this.addDataOutput)
+			//   3. change output   (P2PKH to _changePKH, value = _changeAmount)
+			//
+			// For the "single-output" fast path (no addOutput used, but state is
+			// mutated OR data outputs were declared), the state output is
+			// computed on the fly from (preimage, stateScript, _newAmount)
+			// instead of coming from addOutputRefs. Data outputs may still be
+			// declared in this mode and are inserted BETWEEN the single state
+			// output and the change output.
 			addOutputRefs := methodCtx.getAddOutputRefs()
-			if len(addOutputRefs) > 0 || methodMutatesState(method, contract) {
+			addDataOutputRefs := methodCtx.getAddDataOutputRefs()
+			if len(addOutputRefs) > 0 || len(addDataOutputRefs) > 0 || methodMutatesState(method, contract) {
 				// Build the P2PKH change output for hashOutputs verification
 				changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
 				changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
 				changeOutputRef := methodCtx.emit(makeCall("buildChangeOutput", []string{changePKHRef, changeAmountRef}))
 
 				if len(addOutputRefs) > 0 {
-					// Multi-output continuation: concat all outputs + change output, hash
+					// Multi-output continuation: concat all state outputs, then
+					// all data outputs, then change output, then hash.
 					accumulated := addOutputRefs[0]
 					for i := 1; i < len(addOutputRefs); i++ {
 						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, addOutputRefs[i]}))
+					}
+					for _, dataRef := range addDataOutputRefs {
+						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
 					}
 					accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
 					hashRef := methodCtx.emit(makeCall("hash256", []string{accumulated}))
@@ -264,12 +290,18 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 					eqRef := methodCtx.emit(ir.ANFValue{Kind: "bin_op", Op: "===", Left: hashRef, Right: outputHashRef, ResultType: "bytes"})
 					methodCtx.emit(makeAssert(eqRef))
 				} else {
-					// Single-output continuation: build raw output bytes, concat with change, hash
+					// Single-output continuation: build raw output bytes, then
+					// splice in any declared data outputs, then concat with
+					// change, then hash.
 					stateScriptRef := methodCtx.emit(ir.ANFValue{Kind: "get_state_script"})
 					preimageRef2 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					newAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_newAmount"})
 					contractOutputRef := methodCtx.emit(makeCall("computeStateOutput", []string{preimageRef2, stateScriptRef, newAmountRef}))
-					allOutputs := methodCtx.emit(makeCall("cat", []string{contractOutputRef, changeOutputRef}))
+					accumulated := contractOutputRef
+					for _, dataRef := range addDataOutputRefs {
+						accumulated = methodCtx.emit(makeCall("cat", []string{accumulated, dataRef}))
+					}
+					allOutputs := methodCtx.emit(makeCall("cat", []string{accumulated, changeOutputRef}))
 					hashRef := methodCtx.emit(makeCall("hash256", []string{allOutputs}))
 					preimageRef4 := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "txPreimage"})
 					outputHashRef := methodCtx.emit(makeCall("extractOutputHash", []string{preimageRef4}))
@@ -336,15 +368,16 @@ func lowerParams(params []ParamNode) []ir.ANFParam {
 // ---------------------------------------------------------------------------
 
 type lowerCtx struct {
-	bindings         []ir.ANFBinding
-	counter          int
-	contract         *ContractNode
-	localNames       map[string]bool   // tracks variable names registered via addLocal
-	paramNames       map[string]bool   // tracks parameter names registered via addParam
-	addOutputRefs    []string          // tracks addOutput binding refs for multi-output continuation
-	localAliases     map[string]string // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
-	localByteVars    map[string]bool   // tracks local variables known to be byte-typed
-	currentSourceLoc *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
+	bindings          []ir.ANFBinding
+	counter           int
+	contract          *ContractNode
+	localNames        map[string]bool   // tracks variable names registered via addLocal
+	paramNames        map[string]bool   // tracks parameter names registered via addParam
+	addOutputRefs     []string          // tracks addOutput / addRawOutput binding refs (state outputs)
+	addDataOutputRefs []string          // tracks addDataOutput binding refs — data outputs are included in the continuation hash AFTER state outputs and BEFORE the change output
+	localAliases      map[string]string // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
+	localByteVars     map[string]bool   // tracks local variables known to be byte-typed
+	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
 }
 
 func newLowerCtx(contract *ContractNode) *lowerCtx {
@@ -422,6 +455,18 @@ func (ctx *lowerCtx) addOutputRef(ref string) {
 // getAddOutputRefs returns all addOutput refs collected during lowering.
 func (ctx *lowerCtx) getAddOutputRefs() []string {
 	return ctx.addOutputRefs
+}
+
+// addDataOutputRef tracks an addDataOutput binding ref — distinct from
+// state outputs. Data outputs are concatenated into the continuation hash
+// after all state outputs and before the change output.
+func (ctx *lowerCtx) addDataOutputRef(ref string) {
+	ctx.addDataOutputRefs = append(ctx.addDataOutputRefs, ref)
+}
+
+// getAddDataOutputRefs returns all addDataOutput refs collected during lowering.
+func (ctx *lowerCtx) getAddDataOutputRefs() []string {
+	return ctx.addDataOutputRefs
 }
 
 // isProperty checks if a name is a contract property.
@@ -680,6 +725,14 @@ func (ctx *lowerCtx) lowerIfStatement(stmt IfStmt) {
 	elseOutputRefs := elseCtx.getAddOutputRefs()
 	if len(thenOutputRefs) > 0 || len(elseOutputRefs) > 0 {
 		ctx.addOutputRef(ifName)
+	}
+	// Same propagation for addDataOutput refs — data outputs declared inside
+	// an if-branch must contribute to the continuation hash via the
+	// if-expression result.
+	thenDataRefs := thenCtx.getAddDataOutputRefs()
+	elseDataRefs := elseCtx.getAddDataOutputRefs()
+	if len(thenDataRefs) > 0 || len(elseDataRefs) > 0 {
+		ctx.addDataOutputRef(ifName)
 	}
 
 	// If both branches end by reassigning the same local variable,
@@ -992,6 +1045,28 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		}
 	}
 
+	// this.addDataOutput(satoshis, scriptBytes) -> special node. Wire shape
+	// is identical to addRawOutput, but the continuation hash includes these
+	// AFTER state outputs and BEFORE the change output.
+	if pa, ok := callee.(PropertyAccessExpr); ok && pa.Property == "addDataOutput" {
+		argRefs := ctx.lowerArgs(e.Args)
+		satoshis := argRefs[0]
+		scriptBytes := argRefs[1]
+		ref := ctx.emit(ir.ANFValue{Kind: "add_data_output", Satoshis: satoshis, ScriptBytes: scriptBytes})
+		ctx.addDataOutputRef(ref)
+		return ref
+	}
+	if me, ok := callee.(MemberExpr); ok {
+		if id, ok := me.Object.(Identifier); ok && id.Name == "this" && me.Property == "addDataOutput" {
+			argRefs := ctx.lowerArgs(e.Args)
+			satoshis := argRefs[0]
+			scriptBytes := argRefs[1]
+			ref := ctx.emit(ir.ANFValue{Kind: "add_data_output", Satoshis: satoshis, ScriptBytes: scriptBytes})
+			ctx.addDataOutputRef(ref)
+			return ref
+		}
+	}
+
 	// this.getStateScript()
 	if pa, ok := callee.(PropertyAccessExpr); ok && pa.Property == "getStateScript" {
 		return ctx.emit(ir.ANFValue{Kind: "get_state_script"})
@@ -1248,46 +1323,65 @@ func exprMutatesState(expr Expression, mutableProps map[string]bool) bool {
 // addOutput detection for determining change output necessity
 // ---------------------------------------------------------------------------
 
-// methodHasAddOutput checks if a method body contains any this.addOutput() calls.
-func methodHasAddOutput(method MethodNode) bool {
-	return bodyHasAddOutput(method.Body)
+// State-output intrinsics — methods whose presence triggers the multi-output
+// continuation-hash path. addDataOutput is intentionally excluded: data
+// outputs never replace state outputs, they accompany them.
+var stateOutputMethods = map[string]bool{
+	"addOutput":    true,
+	"addRawOutput": true,
 }
 
-func bodyHasAddOutput(stmts []Statement) bool {
+var dataOutputMethods = map[string]bool{
+	"addDataOutput": true,
+}
+
+// methodHasAddOutput checks if a method body contains any this.addOutput or
+// this.addRawOutput calls (state outputs — excludes addDataOutput).
+func methodHasAddOutput(method MethodNode) bool {
+	return bodyHasCall(method.Body, stateOutputMethods)
+}
+
+// methodHasAddDataOutput checks if a method body contains any
+// this.addDataOutput calls.
+func methodHasAddDataOutput(method MethodNode) bool {
+	return bodyHasCall(method.Body, dataOutputMethods)
+}
+
+func bodyHasCall(stmts []Statement, names map[string]bool) bool {
 	for _, stmt := range stmts {
-		if stmtHasAddOutput(stmt) {
+		if stmtHasCall(stmt, names) {
 			return true
 		}
 	}
 	return false
 }
 
-func stmtHasAddOutput(stmt Statement) bool {
+func stmtHasCall(stmt Statement, names map[string]bool) bool {
 	switch s := stmt.(type) {
 	case ExpressionStmt:
-		return exprHasAddOutput(s.Expr)
+		return exprHasCall(s.Expr, names)
 	case IfStmt:
-		if bodyHasAddOutput(s.Then) {
+		if bodyHasCall(s.Then, names) {
 			return true
 		}
-		if len(s.Else) > 0 && bodyHasAddOutput(s.Else) {
+		if len(s.Else) > 0 && bodyHasCall(s.Else, names) {
 			return true
 		}
 		return false
 	case ForStmt:
-		return bodyHasAddOutput(s.Body)
+		return bodyHasCall(s.Body, names)
 	default:
 		return false
 	}
 }
 
-func exprHasAddOutput(expr Expression) bool {
+func exprHasCall(expr Expression, names map[string]bool) bool {
 	if ce, ok := expr.(CallExpr); ok {
-		if pa, ok := ce.Callee.(PropertyAccessExpr); ok && (pa.Property == "addOutput" || pa.Property == "addRawOutput") {
+		if pa, ok := ce.Callee.(PropertyAccessExpr); ok && names[pa.Property] {
 			return true
 		}
 		if me, ok := ce.Callee.(MemberExpr); ok {
-			if id, ok := me.Object.(Identifier); ok && id.Name == "this" && (me.Property == "addOutput" || me.Property == "addRawOutput") {
+			if id, ok := me.Object.(Identifier); ok && id.Name == "this" && names[me.Property] {
 				return true
 			}
 		}
@@ -1545,6 +1639,10 @@ func remapValueRefs(v ir.ANFValue, nameMap map[string]string) ir.ANFValue {
 		v.StateValues = sv
 		return v
 	case "add_raw_output":
+		v.Satoshis = r(v.Satoshis)
+		v.ScriptBytes = r(v.ScriptBytes)
+		return v
+	case "add_data_output":
 		v.Satoshis = r(v.Satoshis)
 		v.ScriptBytes = r(v.ScriptBytes)
 		return v

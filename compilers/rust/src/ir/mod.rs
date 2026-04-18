@@ -188,6 +188,18 @@ pub enum ANFValue {
         script_bytes: String,
     },
 
+    /// AddDataOutput — records an additional transaction output that is NOT a
+    /// state continuation. The output is included in the auto-computed
+    /// continuation hash in declaration order, after state outputs and before
+    /// the change output. The emit shape is identical to `add_raw_output`:
+    /// amount(8LE) + varint(scriptLen) + scriptBytes.
+    #[serde(rename = "add_data_output")]
+    AddDataOutput {
+        satoshis: String,
+        #[serde(rename = "scriptBytes")]
+        script_bytes: String,
+    },
+
     #[serde(rename = "array_literal")]
     ArrayLiteral {
         elements: Vec<String>,

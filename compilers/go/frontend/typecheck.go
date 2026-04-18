@@ -154,6 +154,15 @@ var builtinFunctions = map[string]funcSig{
 	// is pushed onto the stack at spend time by the SDK helper before the
 	// regular ABI argument pushes.
 	"assertGroth16WitnessAssisted": {params: []string{}, returnType: "void"},
+	// assertGroth16WitnessAssistedWithMSM is the soundness-strict sibling
+	// of assertGroth16WitnessAssisted. It triggers the witness-assisted
+	// verifier variant that also recomputes the SP1 MSM on-chain and binds
+	// the 5 public-input scalars to compile-time-pinned VK domain values.
+	"assertGroth16WitnessAssistedWithMSM": {params: []string{}, returnType: "void"},
+	// groth16PublicInput reads one of the 5 SP1 public-input scalars left
+	// on the stack by the MSM-binding preamble. Parameter must be a
+	// constant in [0, 4]; the typechecker only enforces the type here.
+	"groth16PublicInput": {params: []string{"bigint"}, returnType: "bigint"},
 	"merkleRootSha256":      {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
 	"merkleRootHash256":     {params: []string{"ByteString", "ByteString", "bigint", "bigint"}, returnType: "ByteString"},
 	"merkleRootPoseidon2KB": {params: nil, returnType: "bigint"}, // variable arity: 8 leaf + depth*8 proof + index + depth; validated in checkCallArgs
@@ -764,7 +773,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 		if pa.Property == "getStateScript" {
 			return "ByteString"
 		}
-		if pa.Property == "addOutput" || pa.Property == "addRawOutput" {
+		if pa.Property == "addOutput" || pa.Property == "addRawOutput" || pa.Property == "addDataOutput" {
 			for _, arg := range e.Args {
 				tc.inferExprType(arg, env)
 			}
@@ -791,7 +800,7 @@ func (tc *typeChecker) checkCallExpr(e CallExpr, env *typeEnv) string {
 			if me.Property == "getStateScript" {
 				return "ByteString"
 			}
-			if me.Property == "addOutput" || me.Property == "addRawOutput" {
+			if me.Property == "addOutput" || me.Property == "addRawOutput" || me.Property == "addDataOutput" {
 				for _, arg := range e.Args {
 					tc.inferExprType(arg, env)
 				}

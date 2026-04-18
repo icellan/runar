@@ -360,6 +360,10 @@ fn collect_refs(value: &ANFValue) -> Vec<String> {
             refs.push(satoshis.clone());
             refs.push(script_bytes.clone());
         }
+        ANFValue::AddDataOutput { satoshis, script_bytes } => {
+            refs.push(satoshis.clone());
+            refs.push(script_bytes.clone());
+        }
         ANFValue::ArrayLiteral { elements } => {
             refs.extend(elements.iter().cloned());
         }
@@ -919,6 +923,11 @@ impl LoweringContext {
                 self.lower_add_output(name, satoshis, state_values, preimage, binding_index, last_uses);
             }
             ANFValue::AddRawOutput { satoshis, script_bytes } => {
+                self.lower_add_raw_output(name, satoshis, script_bytes, binding_index, last_uses);
+            }
+            ANFValue::AddDataOutput { satoshis, script_bytes } => {
+                // Wire shape matches add_raw_output: amount(8LE) + varint(scriptLen) + scriptBytes.
+                // The distinction lives in the continuation-hash composition (ANF lowering).
                 self.lower_add_raw_output(name, satoshis, script_bytes, binding_index, last_uses);
             }
             ANFValue::ArrayLiteral { elements } => {

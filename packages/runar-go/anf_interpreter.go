@@ -324,7 +324,7 @@ func anfEvalValue(
 		return nil
 
 	// On-chain-only operations — skip
-	case "check_preimage", "deserialize_state", "get_state_script", "add_raw_output":
+	case "check_preimage", "deserialize_state", "get_state_script", "add_raw_output", "add_data_output":
 		return nil
 	}
 

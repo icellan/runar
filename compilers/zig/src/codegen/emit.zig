@@ -866,6 +866,9 @@ fn emitANFValueJson(w: anytype, value: types.ANFValue) error{OutOfMemory}!void {
         .add_raw_output => {
             try w.writeAll("{\"kind\":\"add_raw_output\"}");
         },
+        .add_data_output => {
+            try w.writeAll("{\"kind\":\"add_data_output\"}");
+        },
         .get_state_script => {
             try w.writeAll("{\"kind\":\"get_state_script\"}");
         },

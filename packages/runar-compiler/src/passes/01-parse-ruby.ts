@@ -400,6 +400,7 @@ function mapBuiltinName(name: string): string {
     'div_mod': 'divmod',
     'add_output': 'addOutput',
     'add_raw_output': 'addRawOutput',
+    'add_data_output': 'addDataOutput',
     'get_state_script': 'getStateScript',
     // SHA-256 partial verification
     'sha256_compress': 'sha256Compress',
@@ -749,7 +750,7 @@ class RbParser {
     // Convert bare calls to declared methods and intrinsics into this.method() calls.
     // In Ruby, bare calls like `add_output(...)` are equivalent to
     // `self.add_output(...)` / `this.addOutput(...)`.
-    const intrinsicMethods = ['addOutput', 'addRawOutput', 'getStateScript'];
+    const intrinsicMethods = ['addOutput', 'addRawOutput', 'addDataOutput', 'getStateScript'];
     const methodNames = new Set([...methods.map(m => m.name), ...intrinsicMethods]);
     for (const method of methods) {
       rewriteBareMethodCalls(method.body, methodNames);

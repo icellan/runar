@@ -42,6 +42,7 @@ const KNOWN_KINDS: &[&str] = &[
     "deserialize_state",
     "add_output",
     "add_raw_output",
+    "add_data_output",
     "array_literal",
 ];
 
@@ -63,6 +64,7 @@ fn kind_name(value: &ANFValue) -> &'static str {
         ANFValue::DeserializeState { .. } => "deserialize_state",
         ANFValue::AddOutput { .. } => "add_output",
         ANFValue::AddRawOutput { .. } => "add_raw_output",
+        ANFValue::AddDataOutput { .. } => "add_data_output",
         ANFValue::ArrayLiteral { .. } => "array_literal",
     }
 }

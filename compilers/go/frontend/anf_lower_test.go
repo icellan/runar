@@ -818,6 +818,298 @@ class Counter extends StatefulSmartContract {
 }
 
 // ---------------------------------------------------------------------------
+// Test: Method calling this.addDataOutput produces add_data_output binding(s)
+// and excludes them from the state-output accumulator so the continuation
+// hash keeps the correct ordering. Mirrors the TS reference compiler's
+// 04-anf-lower tests for addDataOutput.
+// ---------------------------------------------------------------------------
+
+func TestANFLower_Stateful_AddDataOutput_EmitsNode(t *testing.T) {
+	source := `
+import { StatefulSmartContract, ByteString } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public bump(payload: ByteString): void {
+    this.count = this.count + 1n;
+    this.addDataOutput(0n, payload);
+  }
+}
+`
+	contract, _ := mustLowerToANF(t, source)
+	program := LowerToANF(contract)
+
+	var bumpIdx int = -1
+	for i, m := range program.Methods {
+		if m.Name == "bump" {
+			bumpIdx = i
+			break
+		}
+	}
+	if bumpIdx == -1 {
+		t.Fatal("could not find 'bump' method in ANF output")
+	}
+	method := program.Methods[bumpIdx]
+
+	var dataOutputs int
+	var firstDataOutput *struct{ sat, scriptBytes string }
+	for _, b := range method.Body {
+		if b.Value.Kind == "add_data_output" {
+			dataOutputs++
+			if firstDataOutput == nil {
+				firstDataOutput = &struct{ sat, scriptBytes string }{
+					sat: b.Value.Satoshis, scriptBytes: b.Value.ScriptBytes,
+				}
+			}
+		}
+	}
+	if dataOutputs != 1 {
+		t.Fatalf("expected 1 add_data_output binding, got %d", dataOutputs)
+	}
+	if firstDataOutput.sat == "" || firstDataOutput.scriptBytes == "" {
+		t.Errorf("add_data_output must carry both Satoshis and ScriptBytes refs, got %+v", *firstDataOutput)
+	}
+}
+
+func TestANFLower_Stateful_AddDataOutput_ContinuationOrdering(t *testing.T) {
+	// When a method has both addOutput and addDataOutput, the continuation
+	// hash must concat state outputs first, then data outputs, then change.
+	source := `
+import { StatefulSmartContract, PubKey, ByteString } from 'runar-lang';
+
+class FT extends StatefulSmartContract {
+  owner: PubKey;
+  balance: bigint;
+
+  constructor(owner: PubKey, balance: bigint) {
+    super(owner, balance);
+    this.owner = owner;
+    this.balance = balance;
+  }
+
+  public transfer(to: PubKey, amount: bigint, sats: bigint, note: ByteString): void {
+    this.addOutput(sats, to, amount);
+    this.addOutput(sats, this.owner, this.balance - amount);
+    this.addDataOutput(0n, note);
+  }
+}
+`
+	contract, _ := mustLowerToANF(t, source)
+	program := LowerToANF(contract)
+
+	var transfer int = -1
+	for i, m := range program.Methods {
+		if m.Name == "transfer" {
+			transfer = i
+			break
+		}
+	}
+	if transfer == -1 {
+		t.Fatal("could not find 'transfer' method in ANF output")
+	}
+	body := program.Methods[transfer].Body
+
+	// Count bindings by kind and capture refs in declaration order.
+	var stateOutputRefs []string
+	var dataOutputRefs []string
+	var catArgs [][]string
+	var changeRef string
+	for _, b := range body {
+		switch b.Value.Kind {
+		case "add_output":
+			stateOutputRefs = append(stateOutputRefs, b.Name)
+		case "add_data_output":
+			dataOutputRefs = append(dataOutputRefs, b.Name)
+		case "call":
+			if b.Value.Func == "cat" {
+				catArgs = append(catArgs, append([]string(nil), b.Value.Args...))
+			} else if b.Value.Func == "buildChangeOutput" {
+				changeRef = b.Name
+			}
+		}
+	}
+	if len(stateOutputRefs) != 2 {
+		t.Fatalf("expected 2 add_output bindings, got %d", len(stateOutputRefs))
+	}
+	if len(dataOutputRefs) != 1 {
+		t.Fatalf("expected 1 add_data_output binding, got %d", len(dataOutputRefs))
+	}
+	if changeRef == "" {
+		t.Fatal("expected a buildChangeOutput call")
+	}
+	if len(catArgs) < 3 {
+		t.Fatalf("expected at least 3 cat calls (state1+state2, +data, +change), got %d", len(catArgs))
+	}
+	// First cat: addOutput0 + addOutput1
+	if catArgs[0][0] != stateOutputRefs[0] || catArgs[0][1] != stateOutputRefs[1] {
+		t.Errorf("first cat must concat the two state outputs in order, got %v", catArgs[0])
+	}
+	// Second cat: (prev) + dataOutput
+	if catArgs[1][1] != dataOutputRefs[0] {
+		t.Errorf("second cat must append the data output, got %v", catArgs[1])
+	}
+	// Third cat: (prev) + changeOutput
+	if catArgs[2][1] != changeRef {
+		t.Errorf("third cat must append the change output, got %v (change=%s)", catArgs[2], changeRef)
+	}
+}
+
+func TestANFLower_Stateful_AddDataOutput_SingleOutputPath(t *testing.T) {
+	// Single-output continuation path: state mutation + data output, no
+	// explicit addOutput. The continuation should compute the state output
+	// via computeStateOutput, then concat the data output, then change.
+	// _newAmount must be present in the method ABI.
+	source := `
+import { StatefulSmartContract, ByteString } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public bump(payload: ByteString): void {
+    this.count = this.count + 1n;
+    this.addDataOutput(0n, payload);
+  }
+}
+`
+	contract, _ := mustLowerToANF(t, source)
+	program := LowerToANF(contract)
+
+	var bumpIdx int = -1
+	for i, m := range program.Methods {
+		if m.Name == "bump" {
+			bumpIdx = i
+			break
+		}
+	}
+	if bumpIdx == -1 {
+		t.Fatal("could not find 'bump' method in ANF output")
+	}
+	method := program.Methods[bumpIdx]
+
+	// No state outputs should be present
+	var stateOutputs, dataOutputs int
+	var computeStateOutputRef string
+	var dataRef string
+	var catArgs [][]string
+	for _, b := range method.Body {
+		switch b.Value.Kind {
+		case "add_output":
+			stateOutputs++
+		case "add_data_output":
+			dataOutputs++
+			dataRef = b.Name
+		case "call":
+			if b.Value.Func == "computeStateOutput" {
+				computeStateOutputRef = b.Name
+			}
+			if b.Value.Func == "cat" {
+				catArgs = append(catArgs, append([]string(nil), b.Value.Args...))
+			}
+		}
+	}
+	if stateOutputs != 0 {
+		t.Errorf("single-output path should not emit add_output bindings, got %d", stateOutputs)
+	}
+	if dataOutputs != 1 {
+		t.Errorf("expected 1 add_data_output, got %d", dataOutputs)
+	}
+	if computeStateOutputRef == "" {
+		t.Error("expected a computeStateOutput call in single-output continuation")
+	}
+	if len(catArgs) < 2 {
+		t.Fatalf("expected at least 2 cat calls, got %d", len(catArgs))
+	}
+	// First cat should append the data output to the state output
+	firstCatContainsData := catArgs[0][0] == dataRef || catArgs[0][1] == dataRef
+	if !firstCatContainsData {
+		t.Errorf("first cat must reference the data output binding, got %v (data=%s)", catArgs[0], dataRef)
+	}
+
+	// _newAmount must be present (single-output continuation needs it)
+	var hasNewAmount bool
+	for _, p := range method.Params {
+		if p.Name == "_newAmount" {
+			hasNewAmount = true
+		}
+	}
+	if !hasNewAmount {
+		t.Error("expected _newAmount implicit param for single-output continuation")
+	}
+}
+
+func TestANFLower_Stateful_AddDataOutput_NonMutating(t *testing.T) {
+	// A method that emits only a data output but does NOT mutate state still
+	// commits the (unchanged) contract state continuation + the data output
+	// + the change output. _newAmount must be injected so the output value
+	// can be adjusted.
+	source := `
+import { StatefulSmartContract, ByteString } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public ping(payload: ByteString): void {
+    this.addDataOutput(0n, payload);
+  }
+}
+`
+	contract, _ := mustLowerToANF(t, source)
+	program := LowerToANF(contract)
+
+	var pingIdx int = -1
+	for i, m := range program.Methods {
+		if m.Name == "ping" {
+			pingIdx = i
+			break
+		}
+	}
+	if pingIdx == -1 {
+		t.Fatal("could not find 'ping' method in ANF output")
+	}
+	method := program.Methods[pingIdx]
+
+	var dataOutputs int
+	for _, b := range method.Body {
+		if b.Value.Kind == "add_data_output" {
+			dataOutputs++
+		}
+	}
+	if dataOutputs != 1 {
+		t.Fatalf("expected 1 add_data_output binding, got %d", dataOutputs)
+	}
+
+	wantParams := []string{"_changePKH", "_changeAmount", "_newAmount"}
+	for _, name := range wantParams {
+		var found bool
+		for _, p := range method.Params {
+			if p.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("expected implicit param %q for data-output-only method, got params=%+v", name, method.Params)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Test: State-mutating method WITHOUT addOutput has _newAmount as implicit param
 //
 // _newAmount is injected only when a method mutates state but does NOT use

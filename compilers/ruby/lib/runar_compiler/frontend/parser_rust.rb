@@ -164,6 +164,7 @@ module RunarCompiler
       "extractOutputHash" => "extractOutputHash",
       # Output construction
       "addOutput" => "addOutput", "addRawOutput" => "addRawOutput",
+      "addDataOutput" => "addDataOutput",
       "getStateScript" => "getStateScript",
       # Math builtins
       "abs" => "abs", "min" => "min", "max" => "max", "within" => "within",

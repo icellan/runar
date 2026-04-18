@@ -139,6 +139,7 @@ module RunarCompiler
       "extractOutputHash" => "extractOutputHash",
       # Output construction
       "addOutput" => "addOutput", "addRawOutput" => "addRawOutput",
+      "addDataOutput" => "addDataOutput",
       # Math builtins
       "abs" => "abs", "min" => "min", "max" => "max", "within" => "within",
       "safediv" => "safediv", "safemod" => "safemod", "clamp" => "clamp", "sign" => "sign",

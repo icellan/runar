@@ -448,6 +448,10 @@ fn collect_refs_from_value(value: &ANFValue, refs: &mut HashSet<String>) {
             refs.insert(satoshis.clone());
             refs.insert(script_bytes.clone());
         }
+        ANFValue::AddDataOutput { satoshis, script_bytes } => {
+            refs.insert(satoshis.clone());
+            refs.insert(script_bytes.clone());
+        }
         ANFValue::ArrayLiteral { elements } => {
             for elem in elements {
                 refs.insert(elem.clone());
@@ -466,6 +470,7 @@ fn has_side_effect(value: &ANFValue) -> bool {
             | ANFValue::DeserializeState { .. }
             | ANFValue::AddOutput { .. }
             | ANFValue::AddRawOutput { .. }
+            | ANFValue::AddDataOutput { .. }
             | ANFValue::MethodCall { .. }
             | ANFValue::Call { .. }
     )

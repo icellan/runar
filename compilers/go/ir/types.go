@@ -254,6 +254,11 @@ func (v ANFValue) MarshalJSON() ([]byte, error) {
 	case "add_raw_output":
 		out["satoshis"] = v.Satoshis
 		out["scriptBytes"] = v.ScriptBytes
+	case "add_data_output":
+		// Wire shape identical to add_raw_output; distinguished only by
+		// position in the continuation-hash concatenation.
+		out["satoshis"] = v.Satoshis
+		out["scriptBytes"] = v.ScriptBytes
 	case "array_literal":
 		if v.Elements == nil {
 			out["elements"] = []string{}

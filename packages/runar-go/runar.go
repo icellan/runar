@@ -55,6 +55,16 @@ type Int = int64
 // arbitrary precision regardless of how the runtime types are declared.
 type Bigint = int64
 
+// BigintBig is an arbitrary-precision integer for cases where Bigint (int64)
+// would silently truncate — notably BN254 G2 coordinates (254-bit) and SP1
+// Groth16 public inputs. Use the *Big suffixed BN254 helpers
+// (Bn254G1ScalarMulBigP, Bn254MultiPairing4Big, Bn254MultiPairing3Big) with
+// this type in Go-mock tests that consume gnark-generated fixtures. The
+// compiled Bitcoin Script handles arbitrary-width scalars natively via
+// runar-sdk's encodePushBigInt; BigintBig simply keeps the Go-side mock
+// honest.
+type BigintBig = *big.Int
+
 // Bool is a Rúnar boolean.
 type Bool = bool
 
@@ -74,8 +84,17 @@ type Sig = ByteString
 // Addr is a 20-byte address (typically a hash160 of a public key).
 type Addr = ByteString
 
-// Sha256 is a 32-byte SHA-256 hash.
-type Sha256 = ByteString
+// Sha256Digest is a 32-byte SHA-256 hash digest (type annotation).
+//
+// Note: this type was previously named `Sha256`, but that collided with the
+// `.runar.go` DSL parser, which maps the identifier `Sha256` to the `sha256`
+// builtin (OP_SHA256 in Script). With the old alias, `runar.Sha256(x)` read
+// as a Go type-conversion (no-op) under native `go test` and as a real
+// SHA-256 hash under Script compilation — two different semantics for the
+// same source expression. Renaming the TYPE to `Sha256Digest` frees the
+// identifier `Sha256` so it can be a real FUNCTION (see Sha256 below) whose
+// Go-mock semantics match the Script emission exactly.
+type Sha256Digest = ByteString
 
 // Ripemd160Hash is a 20-byte RIPEMD-160 hash.
 type Ripemd160Hash = ByteString
@@ -100,25 +119,73 @@ type Point = ByteString
 // Embed this in your contract struct.
 type SmartContract struct{}
 
-// OutputSnapshot records a single output from AddOutput.
+// OutputKind discriminates OutputSnapshot entries by the intrinsic that
+// recorded them. "state" comes from AddOutput (multi-output state
+// continuation), "data" comes from AddDataOutput (additional arbitrary-script
+// outputs that are included in the continuation hash after state outputs
+// and before the change output).
+type OutputKind string
+
+const (
+	// OutputKindState is the default kind for entries recorded by AddOutput.
+	OutputKindState OutputKind = "state"
+	// OutputKindData is recorded by AddDataOutput.
+	OutputKindData OutputKind = "data"
+)
+
+// OutputSnapshot records a single output from AddOutput / AddDataOutput.
+// Values holds the declared state values (for state outputs) or a single
+// ByteString script (for data outputs); Kind identifies which intrinsic
+// produced the entry.
 type OutputSnapshot struct {
 	Satoshis int64
 	Values   []any
+	Kind     OutputKind
 }
 
 // StatefulSmartContract is the base struct for stateful Rúnar contracts.
-// Embed this in your contract struct. Provides AddOutput and state tracking.
+// Embed this in your contract struct. Provides AddOutput / AddDataOutput
+// and state tracking.
 type StatefulSmartContract struct {
-	outputs    []OutputSnapshot
-	TxPreimage SigHashPreimage
+	outputs     []OutputSnapshot
+	dataOutputs []OutputSnapshot
+	TxPreimage  SigHashPreimage
 }
 
-// AddOutput records a new output with the given satoshis and state values.
+// AddOutput records a new state output with the given satoshis and state values.
 // The values should match the mutable properties in declaration order.
 func (s *StatefulSmartContract) AddOutput(satoshis int64, values ...any) {
 	s.outputs = append(s.outputs, OutputSnapshot{
 		Satoshis: satoshis,
 		Values:   values,
+		Kind:     OutputKindState,
+	})
+}
+
+// AddRawOutput records a new state output with the given satoshis and
+// arbitrary script bytes (instead of the contract's own codePart). In
+// Bitcoin Script this creates an output with caller-specified locking
+// script — used e.g. for token pegs and bridge outputs. It is a state-level
+// output (counted alongside AddOutput in the continuation hash), not a
+// data output.
+func (s *StatefulSmartContract) AddRawOutput(satoshis int64, scriptBytes ByteString) {
+	s.outputs = append(s.outputs, OutputSnapshot{
+		Satoshis: satoshis,
+		Values:   []any{scriptBytes},
+		Kind:     OutputKindState,
+	})
+}
+
+// AddDataOutput records an additional transaction output that is NOT a state
+// continuation. The scriptBytes are used as the output's locking script
+// verbatim. In compiled Bitcoin Script the auto-injected continuation hash
+// verification covers data outputs in declaration order, AFTER all state
+// outputs and BEFORE the change output.
+func (s *StatefulSmartContract) AddDataOutput(satoshis int64, scriptBytes ByteString) {
+	s.dataOutputs = append(s.dataOutputs, OutputSnapshot{
+		Satoshis: satoshis,
+		Values:   []any{scriptBytes},
+		Kind:     OutputKindData,
 	})
 }
 
@@ -127,14 +194,22 @@ func (s *StatefulSmartContract) GetStateScript() ByteString {
 	return ""
 }
 
-// Outputs returns the outputs recorded during the last method execution.
+// Outputs returns the state outputs recorded during the last method
+// execution (from AddOutput). Use DataOutputs for AddDataOutput entries.
 func (s *StatefulSmartContract) Outputs() []OutputSnapshot {
 	return s.outputs
+}
+
+// DataOutputs returns the data outputs recorded during the last method
+// execution (from AddDataOutput).
+func (s *StatefulSmartContract) DataOutputs() []OutputSnapshot {
+	return s.dataOutputs
 }
 
 // ResetOutputs clears recorded outputs (call between test method invocations).
 func (s *StatefulSmartContract) ResetOutputs() {
 	s.outputs = nil
+	s.dataOutputs = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -242,17 +317,25 @@ func Hash160(data PubKey) Addr {
 }
 
 // Hash256 computes SHA256(SHA256(data)), producing a 32-byte hash.
-func Hash256(data ByteString) Sha256 {
+func Hash256(data ByteString) Sha256Digest {
 	h1 := sha256.Sum256([]byte(data))
 	h2 := sha256.Sum256(h1[:])
-	return Sha256(h2[:])
+	return Sha256Digest(h2[:])
 }
 
-// Sha256Hash computes a single SHA-256 hash.
-func Sha256Hash(data ByteString) Sha256 {
+// Sha256 computes a single SHA-256 hash. Matches the DSL parser mapping:
+// in `.runar.go` sources `runar.Sha256(x)` compiles to OP_SHA256 in Script,
+// and this function gives it identical semantics under `go test`. Previously
+// the identifier `Sha256` was a type alias for ByteString, so the call form
+// was a no-op Go type-conversion — a silent divergence between the two
+// compile paths. The type now lives under `Sha256Digest`.
+func Sha256(data ByteString) Sha256Digest {
 	h := sha256.Sum256([]byte(data))
-	return Sha256(h[:])
+	return Sha256Digest(h[:])
 }
+
+// Sha256Hash is a compatibility alias for Sha256. Prefer Sha256 directly.
+func Sha256Hash(data ByteString) Sha256Digest { return Sha256(data) }
 
 // Ripemd160Func computes a RIPEMD-160 hash.
 func Ripemd160Func(data ByteString) Ripemd160Hash {
@@ -432,13 +515,13 @@ func ExtractLocktime(p SigHashPreimage) int64 { return 0 }
 // Tests set TxPreimage = Hash256(expectedOutputBytes) so the assertion
 // Hash256(outputs) == ExtractOutputHash(TxPreimage) passes.
 // Falls back to 32 zero bytes when the preimage is unset (nil/empty).
-func ExtractOutputHash(p SigHashPreimage) Sha256 {
+func ExtractOutputHash(p SigHashPreimage) Sha256Digest {
 	if len(p) >= 32 {
 		result := make([]byte, 32)
 		copy(result, p[:32])
-		return Sha256(result)
+		return Sha256Digest(result)
 	}
-	return Sha256(make([]byte, 32))
+	return Sha256Digest(make([]byte, 32))
 }
 
 // ExtractAmount returns 10000 in test mode.
@@ -453,7 +536,7 @@ func ExtractSequence(p SigHashPreimage) int64 { return 0xffffffff }
 // ExtractHashPrevouts returns Hash256(72 zero bytes) in test mode.
 // This is consistent with passing allPrevouts = 72 zero bytes in tests,
 // since ExtractOutpoint also returns 36 zero bytes.
-func ExtractHashPrevouts(p SigHashPreimage) Sha256 { return Hash256(ByteString(make([]byte, 72))) }
+func ExtractHashPrevouts(p SigHashPreimage) Sha256Digest { return Hash256(ByteString(make([]byte, 72))) }
 
 // ExtractOutpoint returns 36 zero bytes in test mode.
 func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]byte, 36)) }
@@ -1218,7 +1301,7 @@ func MerkleRootPoseidon2KB(leaf [8]int64, proof []int64, index, depth int64) [8]
 // leaf is a 32-byte hash, proof is depth*32 concatenated sibling hashes,
 // index determines left/right at each level, depth is the tree depth.
 func MerkleRootSha256(leaf ByteString, proof ByteString, index, depth int64) ByteString {
-	return merkleRootImpl(leaf, proof, index, depth, Sha256Hash)
+	return merkleRootImpl(leaf, proof, index, depth, Sha256)
 }
 
 // MerkleRootHash256 computes a Merkle root using Hash256 (double SHA-256).

@@ -282,6 +282,9 @@ function collectRefs(value: ANFValue): string[] {
     case 'add_raw_output':
       refs.push(value.satoshis, value.scriptBytes);
       break;
+    case 'add_data_output':
+      refs.push(value.satoshis, value.scriptBytes);
+      break;
     case 'bin_op':
       refs.push(value.left, value.right);
       break;
@@ -953,6 +956,11 @@ class LoweringContext {
         this.lowerAddOutput(name, value.satoshis, value.stateValues, value.preimage, bindingIndex, lastUses);
         break;
       case 'add_raw_output':
+        this.lowerAddRawOutput(name, value.satoshis, value.scriptBytes, bindingIndex, lastUses);
+        break;
+      case 'add_data_output':
+        // Wire shape matches add_raw_output: amount(8LE) + varint(scriptLen) + scriptBytes.
+        // The distinction lives in the continuation-hash composition (ANF lowering).
         this.lowerAddRawOutput(name, value.satoshis, value.scriptBytes, bindingIndex, lastUses);
         break;
       case 'array_literal':

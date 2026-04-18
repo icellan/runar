@@ -92,6 +92,7 @@ fn map_builtin_name(name: &str) -> String {
         "bin2num" => "bin2num".to_string(),
         "add_output" => "addOutput".to_string(),
         "add_raw_output" => "addRawOutput".to_string(),
+        "add_data_output" => "addDataOutput".to_string(),
         "tx_preimage" => "txPreimage".to_string(),
         "bool_cast" => "bool".to_string(),
         "verify_wots" => "verifyWOTS".to_string(),

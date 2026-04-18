@@ -35,6 +35,7 @@ module RunarCompiler
       deserialize_state
       add_output
       add_raw_output
+      add_data_output
       array_literal
     ]).freeze
 

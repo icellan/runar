@@ -586,7 +586,7 @@ class TypeChecker {
 
         if (isStatefulContextType(objType)) {
           if (expr.property === 'txPreimage') return 'SigHashPreimage';
-          if (expr.property === 'getStateScript' || expr.property === 'addOutput' || expr.property === 'addRawOutput') {
+          if (expr.property === 'getStateScript' || expr.property === 'addOutput' || expr.property === 'addRawOutput' || expr.property === 'addDataOutput') {
             return '<method>';
           }
         }
@@ -1018,6 +1018,45 @@ class TypeChecker {
         return VOID;
       }
 
+      if (methodName === 'addDataOutput') {
+        if (this.contract.parentClass !== 'StatefulSmartContract') {
+          this.errors.push(makeDiagnostic(
+            `addDataOutput() is only available in StatefulSmartContract`,
+            'error',
+            expr.sourceLocation,
+          ));
+          return VOID;
+        }
+        if (args.length !== 2) {
+          this.errors.push(makeDiagnostic(
+            `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
+            'error',
+            expr.sourceLocation,
+          ));
+        }
+        if (args.length >= 1) {
+          const satoshisType = this.inferExprType(args[0]!, env);
+          if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
+              'error',
+              args[0]!.sourceLocation,
+            ));
+          }
+        }
+        if (args.length >= 2) {
+          const scriptType = this.inferExprType(args[1]!, env);
+          if (!isSubtype(scriptType, BYTESTRING) && scriptType !== '<unknown>') {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
+              'error',
+              args[1]!.sourceLocation,
+            ));
+          }
+        }
+        return VOID;
+      }
+
       // Check contract method signatures
       const methodSig = this.methodSigs.get(methodName);
       if (methodSig) {
@@ -1025,7 +1064,7 @@ class TypeChecker {
       }
 
       this.errors.push(makeDiagnostic(
-        `Unknown method 'this.${methodName}'. Only Rúnar built-in methods (addOutput, addRawOutput, getStateScript) and contract methods are allowed.`,
+        `Unknown method 'this.${methodName}'. Only Rúnar built-in methods (addOutput, addRawOutput, addDataOutput, getStateScript) and contract methods are allowed.`,
         'error',
         expr.sourceLocation,
       ));
@@ -1128,6 +1167,41 @@ class TypeChecker {
           }
           return VOID;
         }
+
+        if (methodName === 'addDataOutput') {
+          if (this.contract.parentClass !== 'StatefulSmartContract') {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() is only available in StatefulSmartContract`,
+              'error',
+            ));
+            return VOID;
+          }
+          if (args.length !== 2) {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
+              'error',
+            ));
+          }
+          if (args.length >= 1) {
+            const satoshisType = this.inferExprType(args[0]!, env);
+            if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
+                'error',
+              ));
+            }
+          }
+          if (args.length >= 2) {
+            const scriptType = this.inferExprType(args[1]!, env);
+            if (!isSubtype(scriptType, BYTESTRING) && scriptType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
+                'error',
+              ));
+            }
+          }
+          return VOID;
+        }
       }
 
       if (objType === '<this>' || (callee.object.kind === 'identifier' && callee.object.name === 'this')) {
@@ -1217,6 +1291,45 @@ class TypeChecker {
             if (!isSubtype(scriptType, BYTESTRING) && scriptType !== '<unknown>') {
               this.errors.push(makeDiagnostic(
                 `addRawOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
+                'error',
+                args[1]!.sourceLocation,
+              ));
+            }
+          }
+          return VOID;
+        }
+
+        if (methodName === 'addDataOutput') {
+          if (this.contract.parentClass !== 'StatefulSmartContract') {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() is only available in StatefulSmartContract`,
+              'error',
+              expr.sourceLocation,
+            ));
+            return VOID;
+          }
+          if (args.length !== 2) {
+            this.errors.push(makeDiagnostic(
+              `addDataOutput() expects 2 arguments (satoshis, scriptBytes), got ${args.length}`,
+              'error',
+              expr.sourceLocation,
+            ));
+          }
+          if (args.length >= 1) {
+            const satoshisType = this.inferExprType(args[0]!, env);
+            if (!isBigintFamily(satoshisType) && satoshisType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addDataOutput() first argument (satoshis) must be bigint, got '${satoshisType}'`,
+                'error',
+                args[0]!.sourceLocation,
+              ));
+            }
+          }
+          if (args.length >= 2) {
+            const scriptType = this.inferExprType(args[1]!, env);
+            if (!isSubtype(scriptType, BYTESTRING) && scriptType !== '<unknown>') {
+              this.errors.push(makeDiagnostic(
+                `addDataOutput() second argument (scriptBytes) must be ByteString, got '${scriptType}'`,
                 'error',
                 args[1]!.sourceLocation,
               ));

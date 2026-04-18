@@ -8,7 +8,8 @@ require 'digest'
 # method arguments, this interpreter walks the ANF bindings and computes
 # the new state. It handles +update_prop+ nodes to track state mutations,
 # while skipping on-chain-only operations like +check_preimage+,
-# +deserialize_state+, +get_state_script+, +add_output+, and +add_raw_output+.
+# +deserialize_state+, +get_state_script+, +add_output+, +add_raw_output+,
+# and +add_data_output+.
 #
 # This enables the SDK to auto-compute +new_state+ for stateful contract
 # calls, so callers don't need to duplicate contract logic.
@@ -209,7 +210,7 @@ module Runar
           end
           nil
 
-        when 'check_preimage', 'deserialize_state', 'get_state_script', 'add_raw_output'
+        when 'check_preimage', 'deserialize_state', 'get_state_script', 'add_raw_output', 'add_data_output'
           # On-chain-only operations — skip in simulation.
           nil
 

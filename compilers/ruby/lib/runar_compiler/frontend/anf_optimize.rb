@@ -407,7 +407,8 @@ module RunarCompiler
 
       SIDE_EFFECT_KINDS = %w[
         assert update_prop check_preimage deserialize_state
-        add_output if loop call method_call
+        add_output add_raw_output add_data_output
+        if loop call method_call
       ].to_set.freeze
 
       # Remove bindings whose results are never referenced.
@@ -454,14 +455,15 @@ module RunarCompiler
 
         return if v.kind == "load_prop" || v.kind == "get_state_script"
 
-        used.add(v.left)      if v.left
-        used.add(v.right)     if v.right
-        used.add(v.operand)   if v.operand
-        used.add(v.cond)      if v.cond
-        used.add(v.value_ref) if v.value_ref
-        used.add(v.object)    if v.object
-        used.add(v.satoshis)  if v.satoshis
-        used.add(v.preimage)  if v.preimage
+        used.add(v.left)        if v.left
+        used.add(v.right)       if v.right
+        used.add(v.operand)     if v.operand
+        used.add(v.cond)        if v.cond
+        used.add(v.value_ref)   if v.value_ref
+        used.add(v.object)      if v.object
+        used.add(v.satoshis)    if v.satoshis
+        used.add(v.script_bytes) if v.script_bytes
+        used.add(v.preimage)    if v.preimage
         v.args&.each         { |a| used.add(a) }
         v.state_values&.each { |sv| used.add(sv) }
         v.then&.each  { |b| collect_refs(b.value, used) }

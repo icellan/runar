@@ -570,4 +570,61 @@ class TestStackLower < Minitest::Test
     methods = stack_lower_source(source)
     assert methods.length >= 1, "should produce at least one method"
   end
+
+  # ---------------------------------------------------------------------------
+  # 21. addDataOutput lowers through stack codegen (same wire shape as raw)
+  # ---------------------------------------------------------------------------
+
+  def test_add_data_output_compiles_through_stack
+    # Stateful contract with a data output alongside state mutation. This
+    # exercises the single-output continuation path with a data output
+    # spliced in between the state and change outputs.
+    source = <<~TS
+      import { StatefulSmartContract, assert, bigint, ByteString } from 'runar-lang';
+
+      class Logger extends StatefulSmartContract {
+        count: bigint;
+
+        constructor(count: bigint) {
+          super(count);
+          this.count = count;
+        }
+
+        public log(note: ByteString): void {
+          this.count = this.count + 1n;
+          this.addDataOutput(0n, note);
+        }
+      }
+    TS
+
+    methods = stack_lower_source(source, "Logger.runar.ts")
+    log = methods.find { |m| m[:name] == "log" }
+    refute_nil log, "should have a 'log' method"
+    assert log[:ops].length > 0, "log method should have stack ops"
+  end
+
+  def test_add_data_output_full_compile
+    source = <<~TS
+      import { StatefulSmartContract, assert, bigint, ByteString } from 'runar-lang';
+
+      class Logger extends StatefulSmartContract {
+        count: bigint;
+
+        constructor(count: bigint) {
+          super(count);
+          this.count = count;
+        }
+
+        public log(note: ByteString): void {
+          this.count = this.count + 1n;
+          this.addDataOutput(0n, note);
+        }
+      }
+    TS
+
+    artifact = compile_source(source, "Logger.runar.ts")
+    refute_nil artifact
+    # Artifact must have a non-empty locking script hex.
+    assert artifact.script.length > 0
+  end
 end

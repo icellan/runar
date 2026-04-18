@@ -108,6 +108,7 @@ var knownKinds = map[string]bool{
 	"deserialize_state": true,
 	"add_output":        true,
 	"add_raw_output":    true,
+	"add_data_output":   true,
 	"array_literal":     true,
 }
 

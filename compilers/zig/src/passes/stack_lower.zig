@@ -587,6 +587,14 @@ const LowerCtx = struct {
                     self.last_uses.put(self.allocator, aro.script_bytes, idx) catch return;
                 }
             },
+            .add_data_output => |ado| {
+                if (ado.satoshis.len > 0) {
+                    self.last_uses.put(self.allocator, ado.satoshis, idx) catch return;
+                }
+                if (ado.script_bytes.len > 0) {
+                    self.last_uses.put(self.allocator, ado.script_bytes, idx) catch return;
+                }
+            },
             .array_literal => |al| {
                 for (al.elements) |elem| {
                     self.last_uses.put(self.allocator, elem, idx) catch return;
@@ -732,6 +740,10 @@ const LowerCtx = struct {
                 if (aro.satoshis.len > 0 and std.mem.eql(u8, aro.satoshis, name)) return true;
                 return aro.script_bytes.len > 0 and std.mem.eql(u8, aro.script_bytes, name);
             },
+            .add_data_output => |ado| {
+                if (ado.satoshis.len > 0 and std.mem.eql(u8, ado.satoshis, name)) return true;
+                return ado.script_bytes.len > 0 and std.mem.eql(u8, ado.script_bytes, name);
+            },
             .array_literal => |al| {
                 for (al.elements) |elem| {
                     if (std.mem.eql(u8, elem, name)) return true;
@@ -823,6 +835,11 @@ const LowerCtx = struct {
             .assert_op => |a| try self.lowerAssertOp(binding.name, a, false),
             .add_output => |ao| try self.lowerAddOutput(binding.name, ao),
             .add_raw_output => |aro| try self.lowerAddRawOutput(binding.name, aro),
+            .add_data_output => |ado| {
+                // Wire shape identical to add_raw_output; the ordering into
+                // the continuation hash is handled during ANF lowering.
+                try self.lowerAddRawOutput(binding.name, .{ .satoshis = ado.satoshis, .script_bytes = ado.script_bytes });
+            },
             .nop => {},
             .get_state_script => try self.lowerGetStateScript(binding.name),
             // TypeScript-matching variants: delegate to equivalent legacy handlers
@@ -4164,7 +4181,7 @@ fn methodUsesCheckPreimage(bindings: []const types.ANFBinding) bool {
 fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
     for (bindings) |binding| {
         switch (binding.value) {
-            .add_output, .add_raw_output => return true,
+            .add_output, .add_raw_output, .add_data_output => return true,
             .call => |call| {
                 if (std.mem.eql(u8, call.func, "computeStateOutput") or
                     std.mem.eql(u8, call.func, "computeStateOutputHash") or

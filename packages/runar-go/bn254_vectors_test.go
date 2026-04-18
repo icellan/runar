@@ -229,10 +229,11 @@ func TestBN254G1_OnCurve(t *testing.T) {
 		}
 	}
 
-	// Identity point should be on the curve
+	// Identity point (0, 0) is rejected to match compiled Script codegen
+	// (EmitBN254G1OnCurve evaluates y² == x³ + 3 directly; 0 ≠ 3).
 	identity := make([]byte, 64)
-	if !Bn254G1OnCurve(identity) {
-		t.Error("identity point (0,0) should be on curve")
+	if Bn254G1OnCurve(identity) {
+		t.Error("identity point (0,0) should be rejected: Script codegen rejects it")
 	}
 
 	// A random off-curve point should NOT be on the curve

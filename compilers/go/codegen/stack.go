@@ -289,6 +289,9 @@ func collectRefs(value *ir.ANFValue) []string {
 	case "add_raw_output":
 		refs = append(refs, value.Satoshis)
 		refs = append(refs, value.ScriptBytes)
+	case "add_data_output":
+		refs = append(refs, value.Satoshis)
+		refs = append(refs, value.ScriptBytes)
 	case "array_literal":
 		refs = append(refs, value.Elements...)
 	}
@@ -839,6 +842,10 @@ func (ctx *loweringContext) lowerBinding(binding *ir.ANFBinding, bindingIndex in
 		ctx.lowerAddOutput(name, value.Satoshis, value.StateValues, value.Preimage, bindingIndex, lastUses)
 	case "add_raw_output":
 		ctx.lowerAddRawOutput(name, value.Satoshis, value.ScriptBytes, bindingIndex, lastUses)
+	case "add_data_output":
+		// Wire shape is identical to add_raw_output; the continuation-hash
+		// composition in anf_lower already handled the ordering.
+		ctx.lowerAddRawOutput(name, value.Satoshis, value.ScriptBytes, bindingIndex, lastUses)
 	case "array_literal":
 		ctx.lowerArrayLiteral(name, value.Elements, bindingIndex, lastUses)
 	}
@@ -1016,7 +1023,61 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 	// marker is void-returning in the type-checker, so no later binding
 	// references its name and the missing slot is invisible to the rest
 	// of the lowering.
-	if funcName == "assertGroth16WitnessAssisted" && ctx.skipGroth16WAMarker {
+	if (funcName == "assertGroth16WitnessAssisted" || funcName == "assertGroth16WitnessAssistedWithMSM") && ctx.skipGroth16WAMarker {
+		return
+	}
+
+	// groth16PublicInput(i) — DSL intrinsic that copies the i-th SP1
+	// public-input scalar from the MSM-binding preamble's reserved slots
+	// to the top of the stack, where the method body can use it in
+	// assertions like `runar.Assert(runar.Groth16PublicInput(0) == c.Pinned)`.
+	//
+	// The MSM-binding preamble (see emitGroth16WAPreamble + the verifier's
+	// final altstack-shuttle) leaves _pub_0..4 on the main stack just above
+	// the original named params. This handler copies the requested slot
+	// via PICK (PICK keeps the original live for further reads), and
+	// consumes the runtime-materialised index argument so the stack model
+	// stays balanced.
+	//
+	// The index argument MUST be a compile-time constant in [0, 4]; the
+	// scalars are baked into fixed stack slots so the compiler needs to
+	// resolve i at codegen time.
+	if funcName == "groth16PublicInput" {
+		if len(args) != 1 {
+			panic(fmt.Sprintf("groth16PublicInput requires exactly 1 argument, got %d", len(args)))
+		}
+		idxArg := args[0]
+		idxVal, ok := ctx.constValues[idxArg]
+		if !ok || idxVal == nil {
+			panic(fmt.Sprintf(
+				"groth16PublicInput: index must be a compile-time constant integer literal in [0, 4]. Got a runtime value for '%s'.",
+				idxArg,
+			))
+		}
+		idx := int(idxVal.Int64())
+		if idx < 0 || idx > 4 {
+			panic(fmt.Sprintf("groth16PublicInput: index must be in [0, 4], got %d", idx))
+		}
+
+		// Consume the compile-time index argument from the stack (the
+		// load_const binding put it there; the runtime doesn't need it).
+		if ctx.sm.has(idxArg) {
+			ctx.bringToTop(idxArg, true)
+			ctx.sm.pop()
+			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_DROP"})
+		}
+
+		// PICK a copy of _pub_<idx> to the top; rename to the binding.
+		pubName := "_pub_" + string(rune('0'+idx))
+		if !ctx.sm.has(pubName) {
+			panic(fmt.Sprintf(
+				"groth16PublicInput: stack slot %q not found. The method must call runar.AssertGroth16WitnessAssistedWithMSM() as its first statement.",
+				pubName,
+			))
+		}
+		ctx.bringToTop(pubName, false) // PICK copy (consume=false)
+		ctx.sm.pop()                   // replace the placeholder name...
+		ctx.sm.push(bindingName)       // ...with the new binding name.
 		return
 	}
 
@@ -3700,7 +3761,19 @@ func methodUsesCheckPreimage(bindings []ir.ANFBinding) bool {
 // arg binding).
 func methodUsesGroth16WAPreamble(bindings []ir.ANFBinding) bool {
 	for _, b := range bindings {
-		if b.Value.Kind == "call" && b.Value.Func == "assertGroth16WitnessAssisted" {
+		if b.Value.Kind == "call" && (b.Value.Func == "assertGroth16WitnessAssisted" || b.Value.Func == "assertGroth16WitnessAssistedWithMSM") {
+			return true
+		}
+	}
+	return false
+}
+
+// methodUsesGroth16WAPreambleWithMSM returns true when the method's body
+// contains the MSM-binding marker assertGroth16WitnessAssistedWithMSM.
+// Determines which of the two preamble codegen paths to invoke.
+func methodUsesGroth16WAPreambleWithMSM(bindings []ir.ANFBinding) bool {
+	for _, b := range bindings {
+		if b.Value.Kind == "call" && b.Value.Func == "assertGroth16WitnessAssistedWithMSM" {
 			return true
 		}
 	}
@@ -3726,45 +3799,81 @@ func methodUsesGroth16WAPreamble(bindings []ir.ANFBinding) bool {
 //  1. OP_TOALTSTACK × N — move N named params from main top to alt top
 //     (in reverse declaration order, so the bottommost named param ends
 //     up on the alt-stack top).
-//  2. EmitGroth16VerifierWitnessAssisted — runs the full verifier. Leaves
-//     only q on the main stack as a truthy nonzero residue.
-//  3. OP_DROP — discard the leftover q (it would clash with the named
-//     params we are about to restore).
-//  4. OP_FROMALTSTACK × N — restore the named params in REVERSE pop
+//  2. EmitGroth16VerifierWitnessAssisted[WithMSM] — runs the full verifier.
+//     The raw variant leaves only the truthy marker on main. The MSM
+//     variant additionally leaves _pub_0 .. _pub_4 UNDER the truthy
+//     marker (so the method body can reference the SP1 public-input
+//     scalars via groth16PublicInput(i)).
+//  3. OP_DROP — discard the truthy marker.
+//  4. (MSM only) OP_TOALTSTACK × 5 — stash _pub_0 .. _pub_4 on the
+//     altstack temporarily, above the named params.
+//  5. OP_FROMALTSTACK × N — restore the named params in REVERSE pop
 //     order, so the original main-stack layout is reproduced.
+//  6. (MSM only) OP_FROMALTSTACK × 5 — restore _pub_0 .. _pub_4 on top
+//     of the named params (final main stack: [..., named_params...,
+//     _pub_0, _pub_1, _pub_2, _pub_3, _pub_4]).
 //
-// Stack-model invariant: sm.depth() == N before AND after the preamble.
-// During the preamble the model and the runtime stack diverge wildly
-// (the verifier internally manipulates hundreds of intermediates), but
-// nothing inside the preamble consults sm so the divergence is safe.
-// At the end, runtime main depth == sm.depth() == N — agreement is
-// restored before normal lowerBindings runs.
+// Stack-model invariant: sm.depth() == N before the preamble, and
+// sm.depth() == N + 5 after the MSM-binding preamble (N + 0 after the
+// raw preamble). During the preamble the model and the runtime stack
+// diverge wildly (the verifier internally manipulates hundreds of
+// intermediates), but nothing inside the preamble consults sm so the
+// divergence is safe. At the end, runtime main depth == sm.depth() —
+// agreement is restored before normal lowerBindings runs.
 //
-// Source: codegen.EmitGroth16VerifierWitnessAssisted in bn254_groth16.go.
-func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config) {
+// Source: codegen.EmitGroth16VerifierWitnessAssisted[WithMSM] in
+// bn254_groth16.go.
+func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config, useMSM bool) {
 	namedDepth := ctx.sm.depth()
 
 	for i := 0; i < namedDepth; i++ {
 		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
 	}
 
-	EmitGroth16VerifierWitnessAssisted(func(op StackOp) {
-		ctx.ops = append(ctx.ops, op)
-	}, config)
+	if useMSM {
+		EmitGroth16VerifierWitnessAssistedWithMSM(func(op StackOp) {
+			ctx.ops = append(ctx.ops, op)
+		}, config)
+	} else {
+		EmitGroth16VerifierWitnessAssisted(func(op StackOp) {
+			ctx.ops = append(ctx.ops, op)
+		}, config)
+	}
 
 	ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_DROP"})
+
+	if useMSM {
+		// Move _pub_0..4 onto the altstack, above the named params.
+		// Main top is _pub_4, so the first TOALTSTACK moves _pub_4 first;
+		// the last moves _pub_0. Altstack order (bottom→top) after this:
+		//   [named_shallow..named_deep, _pub_4, _pub_3, _pub_2, _pub_1, _pub_0].
+		for i := 0; i < 5; i++ {
+			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+		}
+	}
 
 	for i := 0; i < namedDepth; i++ {
 		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 	}
+
+	if useMSM {
+		// Restore _pub_0..4 on top of the named params. FROMALTSTACK pops
+		// alt-top first: _pub_0, then _pub_1, ..., then _pub_4. Main stack
+		// ends up with _pub_4 on top and _pub_0 just above the named params.
+		for i := 0; i < 5; i++ {
+			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+			ctx.sm.push("_pub_" + string(rune('0'+i)))
+		}
+	}
 }
 
 // methodUsesCodePart checks whether a method has add_output, add_raw_output,
-// or computeStateOutput/computeStateOutputHash calls (recursively).
+// add_data_output, or computeStateOutput/computeStateOutputHash calls
+// (recursively).
 // Only methods that construct continuation outputs need the _codePart implicit parameter.
 func methodUsesCodePart(bindings []ir.ANFBinding) bool {
 	for _, b := range bindings {
-		if b.Value.Kind == "add_output" || b.Value.Kind == "add_raw_output" {
+		if b.Value.Kind == "add_output" || b.Value.Kind == "add_raw_output" || b.Value.Kind == "add_data_output" {
 			return true
 		}
 		// Single-output stateful continuation uses computeStateOutput/computeStateOutputHash
@@ -3827,7 +3936,7 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 				method.Name,
 			)
 		}
-		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig)
+		emitGroth16WAPreamble(ctx, *opts.Groth16WAConfig, methodUsesGroth16WAPreambleWithMSM(method.Body))
 		ctx.skipGroth16WAMarker = true
 	}
 

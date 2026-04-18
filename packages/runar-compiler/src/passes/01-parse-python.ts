@@ -454,6 +454,8 @@ function mapBuiltinName(name: string): string {
     'mul_div': 'mulDiv',
     'percent_of': 'percentOf',
     'add_output': 'addOutput',
+    'add_raw_output': 'addRawOutput',
+    'add_data_output': 'addDataOutput',
     'get_state_script': 'getStateScript',
   };
   const special = SPECIAL[name];

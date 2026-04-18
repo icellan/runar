@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"math/big"
 	"os"
 	"time"
 
@@ -81,7 +82,7 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 		return codegen.Groth16Config{}, fmt.Errorf("PrecomputeAlphaNegBeta: %w", err)
 	}
 
-	return codegen.Groth16Config{
+	cfg := codegen.Groth16Config{
 		// ModuloThreshold=0 matches the load-bearing
 		// TestGroth16WA_EndToEnd_SP1Proof_Script test (groth16_script_test.go)
 		// — strict residue reduction at every step. The 2048-byte deferred
@@ -93,7 +94,25 @@ func loadGroth16WAConfig(vkPath string) (codegen.Groth16Config, error) {
 		AlphaNegBetaFp12: alphaNegBetaFp12,
 		GammaNegG2:       vk.GammaNegG2,
 		DeltaNegG2:       vk.DeltaNegG2,
-	}, nil
+	}
+
+	// Populate IC for the MSM-binding verifier variant. The raw variant
+	// ignores IC; the MSM variant requires exactly 6 points (IC[0] plus
+	// IC[1..5] for the 5 SP1 public inputs). When the VK carries fewer
+	// entries (non-SP1 circuits) or more, the unused slots default to
+	// (0, 0) — the MSM variant is only sound for 5-public-input circuits.
+	for i := 0; i < 6; i++ {
+		if i < len(vk.IC) && vk.IC[i] != nil {
+			cfg.IC[i] = [2]*big.Int{
+				new(big.Int).Set(vk.IC[i][0]),
+				new(big.Int).Set(vk.IC[i][1]),
+			}
+		} else {
+			cfg.IC[i] = [2]*big.Int{big.NewInt(0), big.NewInt(0)}
+		}
+	}
+
+	return cfg, nil
 }
 
 // CompileGroth16WA reads a .groth16.vk.json file, builds the witness-assisted

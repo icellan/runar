@@ -51,16 +51,22 @@ var bn254B = big.NewInt(3)
 // Bn254G1Add performs affine point addition on BN254 G1.
 // Points are represented as 64-byte ByteStrings (x[32] || y[32], big-endian).
 // Returns the sum P + Q. Handles identity (zero-point) and doubling cases.
+// The returned slice is always freshly allocated — never aliases p1 or p2.
 func Bn254G1Add(p1, p2 []byte) []byte {
 	x1, y1 := bn254DecodePoint(p1)
 	x2, y2 := bn254DecodePoint(p2)
 
-	// Handle identity points (both coordinates zero)
+	// Handle identity points (both coordinates zero). Always return a fresh
+	// allocation so callers can mutate the result without touching the input.
 	if x1.Sign() == 0 && y1.Sign() == 0 {
-		return p2
+		out := make([]byte, 64)
+		copy(out, p2)
+		return out
 	}
 	if x2.Sign() == 0 && y2.Sign() == 0 {
-		return p1
+		out := make([]byte, 64)
+		copy(out, p1)
+		return out
 	}
 
 	// If x1 == x2
@@ -153,10 +159,13 @@ func Bn254G1ScalarMul(p []byte, s *big.Int) []byte {
 }
 
 // Bn254G1Negate returns the negation of a BN254 G1 point: (x, p - y).
+// The returned slice is always freshly allocated — never aliases p.
 func Bn254G1Negate(p []byte) []byte {
 	x, y := bn254DecodePoint(p)
 	if y.Sign() == 0 {
-		return p
+		out := make([]byte, 64)
+		copy(out, p)
+		return out
 	}
 	yNeg := new(big.Int).Sub(bn254P, y)
 	yNeg.Mod(yNeg, bn254P)
@@ -164,12 +173,11 @@ func Bn254G1Negate(p []byte) []byte {
 }
 
 // Bn254G1OnCurve checks if a point is on the BN254 G1 curve: y^2 == x^3 + 3 mod p.
+// The identity point (0, 0) is REJECTED here to match the compiled Script
+// codegen in compilers/go/codegen/bn254.go (EmitBN254G1OnCurve), which evaluates
+// y² == x³ + 3 directly and fails for (0, 0) since 0 ≠ 3.
 func Bn254G1OnCurve(p []byte) bool {
 	x, y := bn254DecodePoint(p)
-	// Identity point (0,0) is considered on-curve
-	if x.Sign() == 0 && y.Sign() == 0 {
-		return true
-	}
 	// y^2 mod p
 	lhs := new(big.Int).Mul(y, y)
 	lhs.Mod(lhs, bn254P)
@@ -224,7 +232,10 @@ func Bn254G1AddP(a, b Point) Point {
 }
 
 // Bn254G1ScalarMulP performs BN254 G1 scalar multiplication using Point/Bigint.
-// The scalar is truncated to int64 in the mock; the real operation uses 254 bits.
+// The scalar is TRUNCATED to int64 in the mock; any real-world BN254 scalar
+// (254 bits) is silently wrapped. Use Bn254G1ScalarMulBigP with BigintBig for
+// wide scalars. The compiled Bitcoin Script uses the real 254-bit codegen
+// from compilers/go/codegen/bn254.go regardless.
 func Bn254G1ScalarMulP(p Point, k Bigint) Point {
 	return bn254BytesToPoint(Bn254G1ScalarMul(bn254PointToBytes(p), big.NewInt(k)))
 }
@@ -251,9 +262,12 @@ func Bn254FieldNegP(a Bigint) Bigint {
 // Each G2 point is represented by 4 bigint coordinates (x0, x1, y0, y1)
 // from the Fp2 decomposition: x = x0 + x1*u, y = y0 + y1*u.
 //
-// Mock: always returns true (same strategy as CheckSig/CheckPreimage).
+// Mock: always returns true. BN254 Fp elements are 254 bits and cannot fit
+// in int64, so any "real" implementation accepting Bigint coords would
+// unconditionally fail on real-world fixtures. Use Bn254MultiPairing4Big
+// (*big.Int coords) for tests that consume gnark-generated proofs.
 // The compiled Bitcoin Script performs the real pairing check via the
-// codegen in bn254_pairing.go and bn254_groth16.go.
+// codegen in bn254_pairing.go and bn254_groth16.go regardless.
 func Bn254MultiPairing4(
 	p1 Point, q1x0, q1x1, q1y0, q1y1 Bigint,
 	p2 Point, q2x0, q2x1, q2y0, q2y1 Bigint,
@@ -286,11 +300,46 @@ func Bn254MultiPairing4(
 // real verification.
 func AssertGroth16WitnessAssisted() {}
 
+// AssertGroth16WitnessAssistedWithMSM is the MSM-binding counterpart to
+// AssertGroth16WitnessAssisted. It triggers the stronger codegen path
+// (EmitGroth16VerifierWitnessAssistedWithMSM) that recomputes the
+// prepared-inputs multi-scalar multiplication on-chain and binds the
+// result against 5 SP1 public-input scalars pushed in the witness
+// bundle.
+//
+// Use this variant when the contract must be sound against a hostile
+// prover that bypasses the Rúnar SDK. The raw AssertGroth16WitnessAssisted
+// trusts the prover to supply a consistent prepared_inputs point; the
+// MSM variant derives the expected point from config.IC (baked at compile
+// time) and the 5 witness-pushed scalars (verified at spend time).
+//
+// After the preamble runs the 5 public-input scalars remain on the stack
+// under the tracker names _pub_0 .. _pub_4 and can be consumed via the
+// Groth16PublicInput(i) DSL intrinsic.
+//
+// Mock: no-op. The compiled Bitcoin Script does the real verification.
+func AssertGroth16WitnessAssistedWithMSM() {}
+
+// Groth16PublicInput returns the i-th SP1 public-input scalar pushed as
+// part of the MSM-binding witness bundle. Valid only inside a method body
+// that opens with AssertGroth16WitnessAssistedWithMSM(); calling it from
+// any other context is rejected at compile time.
+//
+// i must be a constant in [0, 4].
+//
+// Mock: always returns 0. The compiled Bitcoin Script reads the named
+// _pub_i tracker slot directly.
+func Groth16PublicInput(i int64) Bigint {
+	_ = i
+	return 0
+}
+
 // Bn254MultiPairing3 checks whether the product of 3 pairings (with
 // pre-computed e(alpha, beta) as Fp12 element) equals the identity.
 // The last 12 bigint args are the pre-computed Fp12 value.
 //
-// Mock: always returns true.
+// Mock: always returns true. Use Bn254MultiPairing3Big with BigintBig
+// coords for a real pairing check.
 func Bn254MultiPairing3(
 	p1 Point, q1x0, q1x1, q1y0, q1y1 Bigint,
 	p2 Point, q2x0, q2x1, q2y0, q2y1 Bigint,

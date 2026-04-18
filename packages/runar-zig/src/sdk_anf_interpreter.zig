@@ -8,7 +8,8 @@ const bsvz = @import("bsvz");
 // method arguments, this interpreter walks the ANF bindings and computes
 // the new state. It handles `update_prop` and `add_output` nodes to track
 // state mutations, while skipping on-chain-only operations like
-// `check_preimage`, `deserialize_state`, `get_state_script`, and `add_raw_output`.
+// `check_preimage`, `deserialize_state`, `get_state_script`, `add_raw_output`,
+// and `add_data_output`.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,7 @@ pub const ANFNode = union(enum) {
     deserialize_state: struct {},
     get_state_script: struct {},
     add_raw_output: struct {},
+    add_data_output: struct {},
     unknown: void,
 };
 
@@ -330,7 +332,7 @@ fn evalNode(
             return anf_none;
         },
         // On-chain-only operations — skip
-        .check_preimage, .deserialize_state, .get_state_script, .add_raw_output => {
+        .check_preimage, .deserialize_state, .get_state_script, .add_raw_output, .add_data_output => {
             return anf_none;
         },
         .unknown => {
@@ -1169,6 +1171,7 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     if (std.mem.eql(u8, kind, "deserialize_state")) return .{ .deserialize_state = .{} };
     if (std.mem.eql(u8, kind, "get_state_script")) return .{ .get_state_script = .{} };
     if (std.mem.eql(u8, kind, "add_raw_output")) return .{ .add_raw_output = .{} };
+    if (std.mem.eql(u8, kind, "add_data_output")) return .{ .add_data_output = .{} };
     if (std.mem.eql(u8, kind, "add_output")) {
         var state_values: std.ArrayListUnmanaged([]const u8) = .empty;
         if (obj.get("stateValues")) |sv| {

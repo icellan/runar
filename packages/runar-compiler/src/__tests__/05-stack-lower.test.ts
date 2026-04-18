@@ -1794,4 +1794,74 @@ describe('Pass 5: Stack Lower', () => {
       expect(() => compileToStack(source)).not.toThrow();
     });
   });
+
+  // -------------------------------------------------------------------------
+  // addDataOutput intrinsic
+  // -------------------------------------------------------------------------
+
+  describe('addDataOutput', () => {
+    // add_data_output lowers like add_raw_output — the shared pipeline builds
+    // amount(8LE) + varint(scriptLen) + scriptBytes. We verify the key opcodes
+    // (OP_NUM2BIN for the 8-byte amount, OP_SIZE for the script length,
+    // OP_CAT to assemble the output).
+    it('emits OP_NUM2BIN + OP_SIZE + OP_CAT for addDataOutput intrinsic', () => {
+      const source = `
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) {
+            super(count);
+            this.count = count;
+          }
+          public bump(payload: ByteString) {
+            this.count = this.count + 1n;
+            this.addDataOutput(0n, payload);
+          }
+        }
+      `;
+      const program = compileToStack(source);
+      const bump = findStackMethod(program, 'bump');
+      const allOps = flattenOps(bump.ops);
+      const opcodes = allOps.filter(o => o.op === 'opcode').map(o => (o as { code: string }).code);
+      expect(opcodes).toContain('OP_NUM2BIN'); // amount as 8-byte LE
+      expect(opcodes).toContain('OP_SIZE');    // script length
+      expect(opcodes).toContain('OP_CAT');     // output assembly
+      expect(opcodes).toContain('OP_HASH256'); // continuation hash
+    });
+
+    it('compiles a contract with addOutput + addDataOutput', () => {
+      const source = `
+        class FT extends StatefulSmartContract {
+          owner: PubKey;
+          balance: bigint;
+          constructor(owner: PubKey, balance: bigint) {
+            super(owner, balance);
+            this.owner = owner;
+            this.balance = balance;
+          }
+          public transfer(to: PubKey, amount: bigint, sats: bigint, note: ByteString) {
+            this.addOutput(sats, to, amount);
+            this.addOutput(sats, this.owner, this.balance - amount);
+            this.addDataOutput(0n, note);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+
+    it('compiles a non-mutating method with addDataOutput', () => {
+      const source = `
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) {
+            super(count);
+            this.count = count;
+          }
+          public ping(payload: ByteString) {
+            this.addDataOutput(0n, payload);
+          }
+        }
+      `;
+      expect(() => compileToStack(source)).not.toThrow();
+    });
+  });
 });

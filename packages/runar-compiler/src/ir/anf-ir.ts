@@ -150,6 +150,23 @@ export interface AddRawOutput {
   scriptBytes: string;   // reference to a temp holding ByteString script
 }
 
+/**
+ * AddDataOutput — records an additional transaction output that is NOT a
+ * state continuation. The output is included in the auto-computed
+ * continuation hash (hashOutputs) in declaration order, after state
+ * outputs and before the change output. The emit shape is identical to
+ * `add_raw_output`: amount(8LE) + varint(scriptLen) + scriptBytes.
+ *
+ * Distinguished from `add_raw_output` only at the continuation-hash
+ * composition stage: `add_data_output` refs are concatenated AFTER all
+ * `add_output` (state) refs and BEFORE the change output.
+ */
+export interface AddDataOutput {
+  kind: 'add_data_output';
+  satoshis: string;      // reference to a temp holding satoshis bigint
+  scriptBytes: string;   // reference to a temp holding ByteString script
+}
+
 export interface ArrayLiteral {
   kind: 'array_literal';
   elements: string[];    // references to temp names
@@ -172,4 +189,5 @@ export type ANFValue =
   | DeserializeState
   | AddOutput
   | AddRawOutput
+  | AddDataOutput
   | ArrayLiteral;

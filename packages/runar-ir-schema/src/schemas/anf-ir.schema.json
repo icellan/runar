@@ -102,6 +102,7 @@
         { "$ref": "#/$defs/DeserializeState" },
         { "$ref": "#/$defs/AddOutput" },
         { "$ref": "#/$defs/AddRawOutput" },
+        { "$ref": "#/$defs/AddDataOutput" },
         { "$ref": "#/$defs/ArrayLiteral" }
       ]
     },
@@ -300,6 +301,17 @@
       "additionalProperties": false,
       "properties": {
         "kind": { "const": "add_raw_output" },
+        "satoshis": { "type": "string", "minLength": 1 },
+        "scriptBytes": { "type": "string", "minLength": 1 }
+      }
+    },
+    "AddDataOutput": {
+      "type": "object",
+      "required": ["kind", "satoshis", "scriptBytes"],
+      "additionalProperties": false,
+      "description": "Additional transaction output emitted by a stateful method. Included in the auto-computed continuation hash after state outputs and before the change output. Wire format matches add_raw_output: amount(8LE) + varint(scriptLen) + scriptBytes.",
+      "properties": {
+        "kind": { "const": "add_data_output" },
         "satoshis": { "type": "string", "minLength": 1 },
         "scriptBytes": { "type": "string", "minLength": 1 }
       }

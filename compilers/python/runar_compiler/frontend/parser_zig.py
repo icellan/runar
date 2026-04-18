@@ -687,7 +687,7 @@ class _ZigParser:
                 prop.readonly = True
 
         # Rewrite bare method calls
-        _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "getStateScript"}
+        _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "addDataOutput", "getStateScript"}
         method_names = {m.name for m in self._methods} | _INTRINSIC_METHODS
         for method in self._methods:
             param_scope = {p.name for p in method.params}
@@ -1503,7 +1503,7 @@ class _ZigParser:
                     expr = PropertyAccessExpr(property=prop)
                 elif (isinstance(expr, Identifier)
                       and expr.name in self._stateful_context_names
-                      and prop in ("txPreimage", "getStateScript", "addOutput", "addRawOutput")):
+                      and prop in ("txPreimage", "getStateScript", "addOutput", "addRawOutput", "addDataOutput")):
                     expr = PropertyAccessExpr(property=prop)
                 else:
                     expr = MemberExpr(object=expr, property=prop)

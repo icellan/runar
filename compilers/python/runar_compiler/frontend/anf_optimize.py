@@ -387,6 +387,7 @@ def _has_side_effect(v: ANFValue) -> bool:
         "deserialize_state",
         "add_output",
         "add_raw_output",
+        "add_data_output",
         "if",
         "loop",
         "call",

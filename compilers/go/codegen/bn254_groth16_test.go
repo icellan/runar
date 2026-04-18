@@ -216,9 +216,15 @@ func TestGroth16WA_ScriptSize(t *testing.T) {
 	//    508 KB - correct Fuentes-Castañeda hard-part formula (more Fp12 muls
 	//             than the previous broken y0..y5 formula, but mathematically
 	//             equivalent to gnark.FinalExponentiation)
+	//    567 KB - witness-assisted G2 prime-order-subgroup check on proof.B
+	//             (ψ(B) == [6·x²]·B expanded as 126 doublings + 69 additions,
+	//             each verified via one Fp² gradient slope). Closes the
+	//             documented TODO(subgroup-check) gap at a per-proof cost of
+	//             ~60 KB of script; the earlier defense-in-depth on-curve
+	//             check on its own left a narrow non-G2 forgery vector.
 	// With witness-assisted public input accumulation (on-curve check + point
 	// addition per public input), the script grows by ~1-2 KB per public input.
-	maxBytes := 520 * 1024 // 520 KB headroom for the correct hard-part formula
+	maxBytes := 600 * 1024 // 600 KB headroom for the correct hard-part formula + subgroup check
 	if scriptBytes > maxBytes {
 		t.Errorf("script too large: %d bytes (max %d)", scriptBytes, maxBytes)
 	}

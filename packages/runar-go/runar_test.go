@@ -102,6 +102,41 @@ func TestSha256Hash_Produces32Bytes(t *testing.T) {
 	}
 }
 
+// TestSha256_Produces32Bytes verifies the renamed Sha256 FUNCTION (formerly
+// a type alias for ByteString) returns a 32-byte digest.
+func TestSha256_Produces32Bytes(t *testing.T) {
+	result := Sha256("hello")
+	if len(result) != 32 {
+		t.Errorf("Sha256 should produce 32 bytes, got %d", len(result))
+	}
+}
+
+// TestSha256_AbcKnownVector is the classic FIPS 180-2 test vector:
+// SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.
+// If this fails, Sha256 is not performing a real hash (e.g. regressing to a
+// type-conversion no-op like the pre-rename `Sha256(x)` did).
+func TestSha256_AbcKnownVector(t *testing.T) {
+	got := Sha256("abc")
+	want := "\xba\x78\x16\xbf\x8f\x01\xcf\xea\x41\x41\x40\xde\x5d\xae\x22\x23" +
+		"\xb0\x03\x61\xa3\x96\x17\x7a\x9c\xb4\x10\xff\x61\xf2\x00\x15\xad"
+	if string(got) != want {
+		t.Errorf("Sha256(\"abc\"): got %x, want %x", string(got), want)
+	}
+}
+
+// TestSha256_MatchesSha256Hash locks in that Sha256Hash (the compatibility
+// alias) and Sha256 (the canonical name) produce byte-identical results.
+func TestSha256_MatchesSha256Hash(t *testing.T) {
+	inputs := []ByteString{"", "a", "hello world", ByteString(make([]byte, 1024))}
+	for _, in := range inputs {
+		a := Sha256(in)
+		b := Sha256Hash(in)
+		if a != b {
+			t.Errorf("Sha256(%q)=%x differs from Sha256Hash(%q)=%x", in, a, in, b)
+		}
+	}
+}
+
 func TestRipemd160Func_Produces20Bytes(t *testing.T) {
 	result := Ripemd160Func("hello")
 	if len(result) != 20 {
@@ -138,10 +173,46 @@ func TestStatefulSmartContract_MultipleOutputs(t *testing.T) {
 func TestStatefulSmartContract_ResetOutputs(t *testing.T) {
 	s := &StatefulSmartContract{}
 	s.AddOutput(1000, "alice")
+	s.AddDataOutput(0, ByteString("\x6a\x04data"))
 	s.ResetOutputs()
 
 	if len(s.Outputs()) != 0 {
 		t.Errorf("expected 0 outputs after reset, got %d", len(s.Outputs()))
+	}
+	if len(s.DataOutputs()) != 0 {
+		t.Errorf("expected 0 data outputs after reset, got %d", len(s.DataOutputs()))
+	}
+}
+
+// TestStatefulSmartContract_AddDataOutput_Tracked verifies that data outputs
+// are recorded distinctly from state outputs, so tests can assert about
+// arbitrary-script outputs emitted alongside state continuations.
+func TestStatefulSmartContract_AddDataOutput_Tracked(t *testing.T) {
+	s := &StatefulSmartContract{}
+	s.AddOutput(1000, "alice", int64(50))
+	s.AddDataOutput(0, ByteString("\x6a\x05hello"))
+
+	if len(s.Outputs()) != 1 {
+		t.Fatalf("expected 1 state output, got %d", len(s.Outputs()))
+	}
+	if s.Outputs()[0].Kind != OutputKindState {
+		t.Errorf("expected Kind=%q on AddOutput entry, got %q", OutputKindState, s.Outputs()[0].Kind)
+	}
+	if len(s.DataOutputs()) != 1 {
+		t.Fatalf("expected 1 data output, got %d", len(s.DataOutputs()))
+	}
+	data := s.DataOutputs()[0]
+	if data.Kind != OutputKindData {
+		t.Errorf("expected Kind=%q on AddDataOutput entry, got %q", OutputKindData, data.Kind)
+	}
+	if data.Satoshis != 0 {
+		t.Errorf("expected data output satoshis=0, got %d", data.Satoshis)
+	}
+	if len(data.Values) != 1 {
+		t.Fatalf("expected data output Values to have 1 entry (script), got %d", len(data.Values))
+	}
+	if got, ok := data.Values[0].(ByteString); !ok || string(got) != "\x6a\x05hello" {
+		t.Errorf("expected data output script bytes to roundtrip as ByteString, got %T=%v", data.Values[0], data.Values[0])
 	}
 }
 

@@ -133,15 +133,20 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             && method.visibility == Visibility::Public
         {
             // Determine if this method verifies hashOutputs (needs change output support).
-            // Methods that use addOutput or mutate state need hashOutputs verification.
-            // Non-mutating methods (like close/destroy) don't verify outputs.
-            let needs_change_output =
-                method_mutates_state(method, contract) || method_has_add_output(method);
+            // Methods that use addOutput / addDataOutput or mutate state need
+            // hashOutputs verification. Non-mutating methods (like close/destroy)
+            // don't verify outputs.
+            let has_data_output = method_has_add_data_output(method);
+            let needs_change_output = method_mutates_state(method, contract)
+                || method_has_add_output(method)
+                || has_data_output;
 
             // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
-            // Methods with addOutput don't need it (they build outputs explicitly).
-            let needs_new_amount =
-                method_mutates_state(method, contract) && !method_has_add_output(method);
+            // Multi-output (addOutput) methods already specify amounts explicitly per output.
+            // Methods that emit only data outputs (no addOutput) still run the single-output
+            // continuation path for their state continuation, so they also need _newAmount.
+            let needs_new_amount = (method_mutates_state(method, contract) || has_data_output)
+                && !method_has_add_output(method);
 
             // Register implicit parameters
             if needs_change_output {
@@ -180,9 +185,32 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // Lower the developer's method body
             lower_statements(&method.body, &mut method_ctx);
 
-            // Determine state continuation type
+            // Determine state continuation type.
+            //
+            // === Continuation-hash construction ===
+            //
+            // The auto-injected continuation assertion verifies that the spending
+            // transaction's hashOutputs field matches a compiler-constructed hash
+            // over the outputs this method declares. Outputs are concatenated in
+            // the following order before hashing with hash256:
+            //
+            //   1. state outputs   (from this.addOutput / this.addRawOutput,
+            //                       tracked via add_output_refs)
+            //   2. data outputs    (from this.addDataOutput, tracked via
+            //                       add_data_output_refs)
+            //   3. change output   (P2PKH to _changePKH, value = _changeAmount)
+            //
+            // For the "single-output" fast path (no addOutput used, but state
+            // is mutated), the state output is computed on the fly from
+            // (preimage, stateScript, _newAmount). Data outputs may still be
+            // declared in this mode and are inserted BETWEEN the single state
+            // output and the change output.
             let add_output_refs = method_ctx.add_output_refs.clone();
-            if !add_output_refs.is_empty() || method_mutates_state(method, contract) {
+            let add_data_output_refs = method_ctx.add_data_output_refs.clone();
+            if !add_output_refs.is_empty()
+                || !add_data_output_refs.is_empty()
+                || method_mutates_state(method, contract)
+            {
                 // Build the P2PKH change output for hashOutputs verification
                 let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
                     name: "_changePKH".to_string(),
@@ -196,12 +224,19 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                 });
 
                 if !add_output_refs.is_empty() {
-                    // Multi-output continuation: concat all outputs + change output, hash
+                    // Multi-output continuation: concat all state outputs, then
+                    // all data outputs, then change output, then hash.
                     let mut accumulated = add_output_refs[0].clone();
                     for i in 1..add_output_refs.len() {
                         accumulated = method_ctx.emit(ANFValue::Call {
                             func: "cat".to_string(),
                             args: vec![accumulated, add_output_refs[i].clone()],
+                        });
+                    }
+                    for data_ref in &add_data_output_refs {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, data_ref.clone()],
                         });
                     }
                     accumulated = method_ctx.emit(ANFValue::Call {
@@ -227,7 +262,9 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                     });
                     method_ctx.emit(ANFValue::Assert { value: eq_ref });
                 } else {
-                    // Single-output continuation: build raw output bytes, concat with change, hash
+                    // Single-output continuation: build raw state output bytes,
+                    // then splice in any declared data outputs, then concat
+                    // with change, then hash.
                     let state_script_ref = method_ctx.emit(ANFValue::GetStateScript {});
                     let preimage_ref2 = method_ctx.emit(ANFValue::LoadParam {
                         name: "txPreimage".to_string(),
@@ -239,9 +276,16 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
                         func: "computeStateOutput".to_string(),
                         args: vec![preimage_ref2.clone(), state_script_ref, new_amount_ref],
                     });
+                    let mut accumulated = contract_output_ref;
+                    for data_ref in &add_data_output_refs {
+                        accumulated = method_ctx.emit(ANFValue::Call {
+                            func: "cat".to_string(),
+                            args: vec![accumulated, data_ref.clone()],
+                        });
+                    }
                     let all_outputs = method_ctx.emit(ANFValue::Call {
                         func: "cat".to_string(),
-                        args: vec![contract_output_ref, change_output_ref],
+                        args: vec![accumulated, change_output_ref],
                     });
                     let hash_ref = method_ctx.emit(ANFValue::Call {
                         func: "hash256".to_string(),
@@ -333,7 +377,13 @@ struct LoweringContext<'a> {
     contract: &'a ContractNode,
     param_names: HashSet<String>,
     local_names: HashSet<String>,
+    /// Refs for state outputs (this.addOutput / this.addRawOutput). These
+    /// appear first in the continuation-hash composition.
     add_output_refs: Vec<String>,
+    /// Refs for data outputs (this.addDataOutput). These appear after state
+    /// outputs and before the change output in the continuation-hash
+    /// composition. Wire shape is identical to add_raw_output.
+    add_data_output_refs: Vec<String>,
     /// Maps local variable names to their current ANF binding name.
     /// Updated after if-statements that reassign locals in both branches.
     local_aliases: HashMap<String, String>,
@@ -353,6 +403,7 @@ impl<'a> LoweringContext<'a> {
             param_names: HashSet::new(),
             local_names: HashSet::new(),
             add_output_refs: Vec::new(),
+            add_data_output_refs: Vec::new(),
             local_aliases: HashMap::new(),
             local_byte_vars: HashSet::new(),
             current_source_loc: None,
@@ -658,11 +709,13 @@ fn lower_if_statement(
         _ => None,
     };
 
-    // Propagate addOutput refs from sub-contexts: when either branch produces
-    // addOutput calls, the if-expression result represents each addOutput
-    // (only one branch executes at runtime).
+    // Propagate addOutput / addDataOutput refs from sub-contexts: when either
+    // branch produces such calls, the if-expression result represents each
+    // output (only one branch executes at runtime).
     let then_has_outputs = !then_ctx.add_output_refs.is_empty();
     let else_has_outputs = !else_ctx.add_output_refs.is_empty();
+    let then_has_data_outputs = !then_ctx.add_data_output_refs.is_empty();
+    let else_has_data_outputs = !else_ctx.add_data_output_refs.is_empty();
 
     let if_name = ctx.emit(ANFValue::If {
         cond: cond_ref,
@@ -672,6 +725,9 @@ fn lower_if_statement(
 
     if then_has_outputs || else_has_outputs {
         ctx.add_output_refs.push(if_name.clone());
+    }
+    if then_has_data_outputs || else_has_data_outputs {
+        ctx.add_data_output_refs.push(if_name.clone());
     }
 
     if let Some(local_name) = alias_local {
@@ -1057,6 +1113,34 @@ fn lower_call_expr(
                 let script_bytes = if arg_refs.len() > 1 { arg_refs[1].clone() } else { String::new() };
                 let r = ctx.emit(ANFValue::AddRawOutput { satoshis, script_bytes });
                 ctx.add_output_refs.push(r.clone());
+                return r;
+            }
+        }
+    }
+
+    // this.addDataOutput(satoshis, scriptBytes) -> special node (via PropertyAccess).
+    // Same wire shape as addRawOutput, but tracked separately so that the
+    // continuation-hash composition can place data outputs AFTER state outputs
+    // and BEFORE the change output.
+    if let Expression::PropertyAccess { property } = callee {
+        if property == "addDataOutput" {
+            let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+            let satoshis = arg_refs.first().cloned().unwrap_or_default();
+            let script_bytes = if arg_refs.len() > 1 { arg_refs[1].clone() } else { String::new() };
+            let r = ctx.emit(ANFValue::AddDataOutput { satoshis, script_bytes });
+            ctx.add_data_output_refs.push(r.clone());
+            return r;
+        }
+    }
+    // this.addDataOutput(satoshis, scriptBytes) -> special node (via MemberExpr with this)
+    if let Expression::MemberExpr { object, property } = callee {
+        if let Expression::Identifier { name } = object.as_ref() {
+            if name == "this" && property == "addDataOutput" {
+                let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+                let satoshis = arg_refs.first().cloned().unwrap_or_default();
+                let script_bytes = if arg_refs.len() > 1 { arg_refs[1].clone() } else { String::new() };
+                let r = ctx.emit(ANFValue::AddDataOutput { satoshis, script_bytes });
+                ctx.add_data_output_refs.push(r.clone());
                 return r;
             }
         }
@@ -1451,51 +1535,55 @@ fn expr_mutates_state(expr: &Expression, mutable_props: &HashSet<String>) -> boo
 }
 
 // ---------------------------------------------------------------------------
-// addOutput detection for determining change output necessity
+// addOutput / addDataOutput detection for determining continuation shape
 // ---------------------------------------------------------------------------
 
-/// Check if a method body contains any this.addOutput() calls.
+/// Check if a method body contains any this.addOutput() or this.addRawOutput()
+/// calls — i.e. any "state output" calls that build the contract's state
+/// continuation explicitly.
 fn method_has_add_output(method: &MethodNode) -> bool {
-    body_has_add_output(&method.body)
+    body_has_call(&method.body, &["addOutput", "addRawOutput"])
 }
 
-fn body_has_add_output(stmts: &[Statement]) -> bool {
-    for stmt in stmts {
-        if stmt_has_add_output(stmt) {
-            return true;
-        }
-    }
-    false
+/// Check if a method body contains any this.addDataOutput() calls — data
+/// outputs that are concatenated into the continuation hash AFTER state
+/// outputs and BEFORE the change output.
+fn method_has_add_data_output(method: &MethodNode) -> bool {
+    body_has_call(&method.body, &["addDataOutput"])
 }
 
-fn stmt_has_add_output(stmt: &Statement) -> bool {
+fn body_has_call(stmts: &[Statement], names: &[&str]) -> bool {
+    stmts.iter().any(|s| stmt_has_call(s, names))
+}
+
+fn stmt_has_call(stmt: &Statement, names: &[&str]) -> bool {
     match stmt {
-        Statement::ExpressionStatement { expression, .. } => expr_has_add_output(expression),
+        Statement::ExpressionStatement { expression, .. } => expr_has_call(expression, names),
         Statement::IfStatement {
             then_branch,
             else_branch,
             ..
         } => {
-            body_has_add_output(then_branch)
+            body_has_call(then_branch, names)
                 || else_branch
                     .as_ref()
-                    .map_or(false, |e| body_has_add_output(e))
+                    .map_or(false, |e| body_has_call(e, names))
         }
-        Statement::ForStatement { body, .. } => body_has_add_output(body),
+        Statement::ForStatement { body, .. } => body_has_call(body, names),
         _ => false,
     }
 }
 
-fn expr_has_add_output(expr: &Expression) -> bool {
+fn expr_has_call(expr: &Expression, names: &[&str]) -> bool {
     if let Expression::CallExpr { callee, .. } = expr {
         if let Expression::PropertyAccess { property } = callee.as_ref() {
-            if property == "addOutput" || property == "addRawOutput" {
+            if names.contains(&property.as_str()) {
                 return true;
             }
         }
         if let Expression::MemberExpr { object, property } = callee.as_ref() {
             if let Expression::Identifier { name } = object.as_ref() {
-                if name == "this" && (property == "addOutput" || property == "addRawOutput") {
+                if name == "this" && names.contains(&property.as_str()) {
                     return true;
                 }
             }
@@ -1722,6 +1810,10 @@ fn remap_value_refs(value: &ANFValue, map: &HashMap<String, String>) -> ANFValue
             preimage: r(preimage),
         },
         ANFValue::AddRawOutput { satoshis, script_bytes } => ANFValue::AddRawOutput {
+            satoshis: r(satoshis),
+            script_bytes: r(script_bytes),
+        },
+        ANFValue::AddDataOutput { satoshis, script_bytes } => ANFValue::AddDataOutput {
             satoshis: r(satoshis),
             script_bytes: r(script_bytes),
         },

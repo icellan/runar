@@ -548,6 +548,7 @@ fn rbConvertName(allocator: Allocator, name: []const u8) []const u8 {
         // Intrinsics
         .{ "add_output", "addOutput" },
         .{ "add_raw_output", "addRawOutput" },
+        .{ "add_data_output", "addDataOutput" },
         .{ "get_state_script", "getStateScript" },
         // SHA-256 partial verification
         .{ "sha256_compress", "sha256Compress" },
@@ -891,6 +892,7 @@ const Parser = struct {
         // Intrinsic methods that must also be rewritten
         method_names.put(self.allocator, "addOutput", {}) catch {};
         method_names.put(self.allocator, "addRawOutput", {}) catch {};
+        method_names.put(self.allocator, "addDataOutput", {}) catch {};
         method_names.put(self.allocator, "getStateScript", {}) catch {};
 
         for (methods.items) |*m| {

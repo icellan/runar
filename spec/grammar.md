@@ -714,10 +714,24 @@ BuiltinFunction_Preimage
 ```ebnf
 BuiltinFunction_State
     = 'addOutput'          /* this.addOutput(satoshis: bigint, ...stateValues): void */
+    | 'addRawOutput'       /* this.addRawOutput(satoshis: bigint, scriptBytes: ByteString): void */
+    | 'addDataOutput'      /* this.addDataOutput(satoshis: bigint, scriptBytes: ByteString): void */
     ;
 ```
 
 **Constraint:** The type checker enforces that `addOutput` receives exactly `1 + N` arguments, where `N` is the number of mutable (non-`readonly`) properties on the contract. The first argument is the satoshi amount (`bigint`). The remaining `N` arguments are the new state values, which must match the types of the mutable properties in declaration order.
+
+`addRawOutput(satoshis, scriptBytes)` registers a state output whose script is given verbatim by the caller (instead of the contract's own code part). It is treated as a state output for continuation-hash purposes.
+
+`addDataOutput(satoshis, scriptBytes)` registers an **additional** transaction output that is NOT a state continuation. Typical use is emitting an `OP_RETURN` data payload alongside the contract's next state.
+
+**Continuation-hash generalization.** For a stateful public method, the compiler asserts that the spending transaction's `hashOutputs` field matches the hash256 of the concatenation of, in order:
+
+1. state outputs — either the single auto-computed state continuation, or every `addOutput` / `addRawOutput` call in source order,
+2. data outputs — every `addDataOutput` call in source order,
+3. the change output — a P2PKH to the SDK-supplied `_changePKH` with value `_changeAmount`.
+
+This is the equation `hashOutputs(txPreimage) == hash256([state outputs] || [data outputs] || changeOutput)`. Both single-output and multi-output state continuations support interleaving data outputs.
 
 The complete set of built-in functions is:
 

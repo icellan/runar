@@ -265,9 +265,17 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
         }
 
         if (contract.parent_class == .stateful_smart_contract and method.is_public) {
-            // Build augmented params
-            const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method);
-            const needs_new_amount = methodMutatesState(method, contract) and !methodHasAddOutput(method);
+            // Build augmented params.
+            // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
+            // verification (i.e. change output support).
+            const has_data_output = methodHasAddDataOutput(method);
+            const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method) or has_data_output;
+            // Single-output continuation needs _newAmount to allow changing the UTXO
+            // satoshis. Multi-output (addOutput) methods specify amounts explicitly.
+            // Methods that emit only data outputs (no addOutput) still run the
+            // single-output continuation path for their state continuation, so they
+            // also need _newAmount.
+            const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method);
 
             var aug_params: std.ArrayListUnmanaged(ParamNode) = .empty;
             for (method.params) |param| {
@@ -327,8 +335,14 @@ fn lowerStatefulPublicMethod(
     method: MethodNode,
     contract: ContractNode,
 ) LowerError!void {
-    const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method);
-    const needs_new_amount = methodMutatesState(method, contract) and !methodHasAddOutput(method);
+    // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
+    // verification (change output support).
+    const has_data_output = methodHasAddDataOutput(method);
+    const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method) or has_data_output;
+    // Single-output continuation needs _newAmount. Methods that emit only data
+    // outputs (no addOutput) still run the single-output continuation path, so
+    // they also need _newAmount.
+    const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method);
 
     // Register implicit parameters
     if (needs_change_output) {
@@ -360,11 +374,29 @@ fn lowerStatefulPublicMethod(
     // Lower the developer's method body
     try lowerStatements(ctx, method.body);
 
-    // Determine state continuation type
+    // Determine state continuation type.
+    //
+    // === Continuation-hash construction ===
+    //
+    // The auto-injected continuation assertion verifies that the spending
+    // transaction's hashOutputs field matches a compiler-constructed hash
+    // over the outputs this method declares. Outputs are concatenated in
+    // the following order before hashing with hash256:
+    //
+    //   1. state outputs   (from this.addOutput / this.addRawOutput)
+    //   2. data outputs    (from this.addDataOutput)
+    //   3. change output   (P2PKH to _changePKH, value = _changeAmount)
+    //
+    // For the "single-output" fast path (no addOutput used, but state is
+    // mutated OR data outputs were declared), the state output is computed
+    // on the fly from (preimage, stateScript, _newAmount). Data outputs may
+    // still be declared in this mode and are inserted BETWEEN the single
+    // state output and the change output.
     const add_output_refs = ctx.getAddOutputRefs();
+    const add_data_output_refs = ctx.getAddDataOutputRefs();
     _ = allocator;
 
-    if (add_output_refs.len > 0 or methodMutatesState(method, contract)) {
+    if (add_output_refs.len > 0 or add_data_output_refs.len > 0 or methodMutatesState(method, contract)) {
         // Build P2PKH change output
         const change_pkh_ref = try ctx.emit(.{ .load_param = .{ .name = "_changePKH" } });
         const change_amount_ref = try ctx.emit(.{ .load_param = .{ .name = "_changeAmount" } });
@@ -374,12 +406,19 @@ fn lowerStatefulPublicMethod(
         } });
 
         if (add_output_refs.len > 0) {
-            // Multi-output: concat all outputs + change, hash, verify
+            // Multi-output: concat all state outputs, then all data outputs,
+            // then change output, then hash, verify.
             var accumulated: []const u8 = add_output_refs[0];
             for (add_output_refs[1..]) |aor| {
                 accumulated = try ctx.emit(.{ .call = .{
                     .func = "cat",
                     .args = try ctx.allocSlice(&.{ accumulated, aor }),
+                } });
+            }
+            for (add_data_output_refs) |dref| {
+                accumulated = try ctx.emit(.{ .call = .{
+                    .func = "cat",
+                    .args = try ctx.allocSlice(&.{ accumulated, dref }),
                 } });
             }
             accumulated = try ctx.emit(.{ .call = .{
@@ -403,7 +442,9 @@ fn lowerStatefulPublicMethod(
             } });
             _ = try ctx.emit(.{ .assert = .{ .value = eq_ref } });
         } else {
-            // Single-output continuation
+            // Single-output continuation: build raw state output bytes, then
+            // splice in declared data outputs, then concat with change,
+            // then hash.
             const state_script_ref = try ctx.emit(.{ .get_state_script = {} });
             const preimage_ref2 = try ctx.emit(.{ .load_param = .{ .name = "txPreimage" } });
             const new_amount_ref = try ctx.emit(.{ .load_param = .{ .name = "_newAmount" } });
@@ -411,9 +452,16 @@ fn lowerStatefulPublicMethod(
                 .func = "computeStateOutput",
                 .args = try ctx.allocSlice(&.{ preimage_ref2, state_script_ref, new_amount_ref }),
             } });
+            var accumulated: []const u8 = contract_output_ref;
+            for (add_data_output_refs) |dref| {
+                accumulated = try ctx.emit(.{ .call = .{
+                    .func = "cat",
+                    .args = try ctx.allocSlice(&.{ accumulated, dref }),
+                } });
+            }
             const all_outputs = try ctx.emit(.{ .call = .{
                 .func = "cat",
-                .args = try ctx.allocSlice(&.{ contract_output_ref, change_output_ref }),
+                .args = try ctx.allocSlice(&.{ accumulated, change_output_ref }),
             } });
             const hash_ref = try ctx.emit(.{ .call = .{
                 .func = "hash256",
@@ -449,6 +497,9 @@ const LowerCtx = struct {
     local_aliases: std.StringHashMapUnmanaged([]const u8),
     local_byte_vars: std.StringHashMapUnmanaged(void),
     add_output_refs: std.ArrayListUnmanaged([]const u8),
+    /// Tracks addDataOutput binding refs — data outputs are included in the
+    /// continuation hash AFTER state outputs and BEFORE the change output.
+    add_data_output_refs: std.ArrayListUnmanaged([]const u8),
     /// Current source location — set before lowering each statement, stamped on bindings.
     current_source_loc: ?types.SourceLocation = null,
 
@@ -463,6 +514,7 @@ const LowerCtx = struct {
             .local_aliases = .empty,
             .local_byte_vars = .empty,
             .add_output_refs = .empty,
+            .add_data_output_refs = .empty,
         };
     }
 
@@ -518,6 +570,17 @@ const LowerCtx = struct {
         return self.add_output_refs.items;
     }
 
+    /// Track an addDataOutput binding ref — kept separate from state output
+    /// refs so the continuation-hash composition can concatenate data
+    /// outputs after state outputs and before the change output.
+    fn addDataOutputRef(self: *LowerCtx, ref: []const u8) void {
+        self.add_data_output_refs.append(self.allocator, ref) catch {};
+    }
+
+    fn getAddDataOutputRefs(self: *const LowerCtx) []const []const u8 {
+        return self.add_data_output_refs.items;
+    }
+
     fn isProperty(self: *const LowerCtx, name: []const u8) bool {
         for (self.contract.properties) |p| {
             if (std.mem.eql(u8, p.name, name)) return true;
@@ -563,6 +626,7 @@ const LowerCtx = struct {
         self.local_aliases.deinit(self.allocator);
         self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);
+        self.add_data_output_refs.deinit(self.allocator);
     }
 
     /// Allocate a slice of string refs on the arena allocator.
@@ -686,9 +750,13 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
     }
     ctx.syncCounter(&else_ctx);
 
-    // Propagate addOutput refs
+    // Propagate addOutput / addDataOutput refs from sub-contexts. When either
+    // branch produces addOutput/addDataOutput calls, the if-expression result
+    // represents the produced output (only one branch executes at runtime).
     const then_has_outputs = then_ctx.getAddOutputRefs().len > 0;
     const else_has_outputs = else_ctx.getAddOutputRefs().len > 0;
+    const then_has_data_outputs = then_ctx.getAddDataOutputRefs().len > 0;
+    const else_has_data_outputs = else_ctx.getAddDataOutputRefs().len > 0;
 
     const if_val = try ctx.allocator.create(types.ANFIf);
     if_val.* = .{
@@ -700,6 +768,9 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
 
     if (then_has_outputs or else_has_outputs) {
         ctx.addOutputRef(if_name);
+    }
+    if (then_has_data_outputs or else_has_data_outputs) {
+        ctx.addDataOutputRef(if_name);
     }
 
     // Alias detection: if both branches end by reassigning same local variable
@@ -966,6 +1037,21 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
         }
     }
 
+    // this.addDataOutput(satoshis, scriptBytes) — wire shape identical to
+    // addRawOutput, but included in the continuation hash AFTER state
+    // outputs and BEFORE the change output (tracked separately).
+    if ((is_self or is_stateful_ctx) and std.mem.eql(u8, mc.method, "addDataOutput")) {
+        const arg_refs = try lowerArgs(ctx, mc.args);
+        if (arg_refs.len >= 2) {
+            const ref = try ctx.emit(.{ .add_data_output = .{
+                .satoshis = arg_refs[0],
+                .script_bytes = arg_refs[1],
+            } });
+            ctx.addDataOutputRef(ref);
+            return ref;
+        }
+    }
+
     // this.getStateScript()
     if ((is_self or is_stateful_ctx) and std.mem.eql(u8, mc.method, "getStateScript")) {
         return try ctx.emit(.{ .get_state_script = {} });
@@ -1223,37 +1309,45 @@ fn exprMutatesState(expr: Expression, contract: ContractNode) bool {
 // ============================================================================
 
 fn methodHasAddOutput(method: MethodNode) bool {
-    return bodyHasAddOutput(method.body, method.params);
+    return bodyHasIntrinsicCall(method.body, method.params, &STATE_OUTPUT_METHODS);
 }
 
-fn bodyHasAddOutput(stmts: []const Statement, params: []const ParamNode) bool {
+/// Return true when a method body contains at least one this.addDataOutput call.
+fn methodHasAddDataOutput(method: MethodNode) bool {
+    return bodyHasIntrinsicCall(method.body, method.params, &DATA_OUTPUT_METHODS);
+}
+
+const STATE_OUTPUT_METHODS = [_][]const u8{ "addOutput", "addRawOutput" };
+const DATA_OUTPUT_METHODS = [_][]const u8{"addDataOutput"};
+
+fn bodyHasIntrinsicCall(stmts: []const Statement, params: []const ParamNode, names: []const []const u8) bool {
     for (stmts) |stmt| {
-        if (stmtHasAddOutput(stmt, params)) return true;
+        if (stmtHasIntrinsicCall(stmt, params, names)) return true;
     }
     return false;
 }
 
-fn stmtHasAddOutput(stmt: Statement, params: []const ParamNode) bool {
+fn stmtHasIntrinsicCall(stmt: Statement, params: []const ParamNode, names: []const []const u8) bool {
     switch (stmt) {
-        .expr_stmt => |expr| return exprHasAddOutput(expr, params),
+        .expr_stmt => |expr| return exprHasIntrinsicCall(expr, params, names),
         .if_stmt => |if_s| {
-            if (bodyHasAddOutput(if_s.then_body, params)) return true;
+            if (bodyHasIntrinsicCall(if_s.then_body, params, names)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyHasAddOutput(eb, params)) return true;
+                if (bodyHasIntrinsicCall(eb, params, names)) return true;
             }
             return false;
         },
-        .for_stmt => |for_s| return bodyHasAddOutput(for_s.body, params),
+        .for_stmt => |for_s| return bodyHasIntrinsicCall(for_s.body, params, names),
         else => return false,
     }
 }
 
-fn exprHasAddOutput(expr: Expression, params: []const ParamNode) bool {
+fn exprHasIntrinsicCall(expr: Expression, params: []const ParamNode, names: []const []const u8) bool {
     switch (expr) {
         .method_call => |mc| {
             if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or paramIsStatefulContext(params, mc.object)) {
-                if (std.mem.eql(u8, mc.method, "addOutput") or std.mem.eql(u8, mc.method, "addRawOutput")) {
-                    return true;
+                for (names) |n| {
+                    if (std.mem.eql(u8, mc.method, n)) return true;
                 }
             }
         },
@@ -1581,6 +1675,12 @@ fn remapValueRefs(
             return .{ .add_raw_output = .{
                 .satoshis = r(name_map, aro.satoshis),
                 .script_bytes = if (aro.script_bytes.len > 0) r(name_map, aro.script_bytes) else aro.script_bytes,
+            } };
+        },
+        .add_data_output => |ado| {
+            return .{ .add_data_output = .{
+                .satoshis = r(name_map, ado.satoshis),
+                .script_bytes = if (ado.script_bytes.len > 0) r(name_map, ado.script_bytes) else ado.script_bytes,
             } };
         },
         .@"if" => |ifv| {

@@ -566,6 +566,8 @@ var pySpecialNames = map[string]string{
 
 	// Intrinsics
 	"add_output":       "addOutput",
+	"add_raw_output":   "addRawOutput",
+	"add_data_output":  "addDataOutput",
 	"get_state_script": "getStateScript",
 
 	// Transaction intrinsics

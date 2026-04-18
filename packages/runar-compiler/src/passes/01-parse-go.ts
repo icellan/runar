@@ -237,7 +237,7 @@ const GO_TYPE_MAP: Record<string, string> = {
   Int: 'bigint', Bigint: 'bigint',
   Bool: 'boolean', bool: 'boolean', int: 'bigint',
   ByteString: 'ByteString',
-  PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256',
+  PubKey: 'PubKey', Sig: 'Sig', Sha256: 'Sha256', Sha256Digest: 'Sha256',
   Ripemd160: 'Ripemd160', Addr: 'Addr',
   SigHashPreimage: 'SigHashPreimage',
   RabinSig: 'RabinSig', RabinPubKey: 'RabinPubKey',
@@ -271,7 +271,7 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   // Assertions
   Assert: 'assert',
   // Hashing
-  Hash160: 'hash160', Hash256: 'hash256', Sha256: 'sha256', Ripemd160: 'ripemd160',
+  Hash160: 'hash160', Hash256: 'hash256', Sha256: 'sha256', Sha256Hash: 'sha256', Ripemd160: 'ripemd160',
   // Signature verification
   CheckSig: 'checkSig', CheckMultiSig: 'checkMultiSig',
   CheckPreimage: 'checkPreimage', VerifyRabinSig: 'verifyRabinSig',
@@ -304,7 +304,7 @@ const GO_BUILTIN_MAP: Record<string, string> = {
   ExtractAmount: 'extractAmount',
   ExtractLocktime: 'extractLocktime',
   // Output construction
-  AddOutput: 'addOutput', AddRawOutput: 'addRawOutput',
+  AddOutput: 'addOutput', AddRawOutput: 'addRawOutput', AddDataOutput: 'addDataOutput',
   GetStateScript: 'getStateScript',
   // Math builtins
   Abs: 'abs', Min: 'min', Max: 'max', Within: 'within',

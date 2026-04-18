@@ -745,6 +745,13 @@ const TypeChecker = struct {
                 for (mc.args) |arg| _ = self.inferExprType(arg, env);
                 return .void;
             }
+            if (std.mem.eql(u8, mc.method, "addDataOutput")) {
+                if (self.contract.parent_class != .stateful_smart_contract) {
+                    self.addError("addDataOutput() is only available in StatefulSmartContract, not SmartContract", .{});
+                }
+                for (mc.args) |arg| _ = self.inferExprType(arg, env);
+                return .void;
+            }
             if (self.method_sigs.get(mc.method)) |method_sig| {
                 return self.checkCallArgs(mc.method, method_sig, mc.args, env);
             }

@@ -283,6 +283,9 @@ module RunarCompiler::Codegen
     when "add_raw_output"
       refs << value.satoshis
       refs << value.script_bytes
+    when "add_data_output"
+      refs << value.satoshis
+      refs << value.script_bytes
     when "array_literal"
       refs.concat(value.elements) if value.elements
     end
@@ -362,14 +365,14 @@ module RunarCompiler::Codegen
     bindings.any? { |b| b.value.kind == "check_preimage" }
   end
 
-  # Check whether a method has add_output, add_raw_output, or
-  # computeStateOutput/computeStateOutputHash calls (recursively).
+  # Check whether a method has add_output, add_raw_output, add_data_output,
+  # or computeStateOutput/computeStateOutputHash calls (recursively).
   #
   # @param bindings [Array<IR::ANFBinding>]
   # @return [Boolean]
   def self.method_uses_code_part?(bindings)
     bindings.each do |b|
-      return true if %w[add_output add_raw_output].include?(b.value.kind)
+      return true if %w[add_output add_raw_output add_data_output].include?(b.value.kind)
       if b.value.kind == "call" && %w[computeStateOutput computeStateOutputHash].include?(b.value.func)
         return true
       end
@@ -980,6 +983,10 @@ module RunarCompiler::Codegen
       when "add_output"
         _lower_add_output(name, value.satoshis, value.state_values || [], value.preimage, binding_index, last_uses)
       when "add_raw_output"
+        _lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
+      when "add_data_output"
+        # Wire shape is identical to add_raw_output; the distinction only
+        # matters at the continuation-hash composition stage in ANF.
         _lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
       when "get_state_script"
         _lower_get_state_script(name)

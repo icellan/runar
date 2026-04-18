@@ -262,3 +262,72 @@ test "compile returns error for invalid contract" {
         compileSourceToHex(std.testing.allocator, source, "bad.runar.zig"),
     );
 }
+
+test "addDataOutput produces add_data_output ANF node" {
+    // Stateful contract that declares a data output alongside a state
+    // continuation. The ANF output must include both an add_data_output
+    // node (tracked separately) and the continuation-hash machinery wiring
+    // the data output between state outputs and the change output.
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const DataCounter = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\
+        \\    count: i64 = 0,
+        \\
+        \\    pub fn init(count: i64) DataCounter {
+        \\        return .{ .count = count };
+        \\    }
+        \\
+        \\    pub fn tick(self: *DataCounter, data: runar.ByteString) void {
+        \\        self.count = self.count + 1;
+        \\        self.addDataOutput(0, data);
+        \\    }
+        \\};
+    ;
+
+    const result = try compileSource(std.testing.allocator, source, "DataCounter.runar.zig");
+    defer result.deinit(std.testing.allocator);
+
+    const json = result.artifact_json orelse return error.TestExpectedJson;
+    try std.testing.expect(std.mem.indexOf(u8, json, "add_data_output") != null);
+    // The hex script should be non-empty and include the state-output
+    // continuation path (bsvz OP_HASH256 followed by OP_EQUALVERIFY-ish
+    // structure). Presence of any non-empty script is enough here.
+    try std.testing.expect(result.script_hex.len > 0);
+}
+
+test "addDataOutput without state mutation still emits continuation hash" {
+    // A stateful method that does NOT mutate state but declares a data
+    // output must still trigger the continuation-hash machinery
+    // (needs_change_output = true, needs_new_amount = true).
+    const source =
+        \\const runar = @import("runar");
+        \\
+        \\pub const DataOnly = struct {
+        \\    pub const Contract = runar.StatefulSmartContract;
+        \\
+        \\    owner: runar.Addr,
+        \\
+        \\    pub fn init(owner: runar.Addr) DataOnly {
+        \\        return .{ .owner = owner };
+        \\    }
+        \\
+        \\    pub fn emit(self: *DataOnly, data: runar.ByteString) void {
+        \\        _ = self;
+        \\        self.addDataOutput(0, data);
+        \\    }
+        \\};
+    ;
+
+    const result = try compileSource(std.testing.allocator, source, "DataOnly.runar.zig");
+    defer result.deinit(std.testing.allocator);
+
+    const json = result.artifact_json orelse return error.TestExpectedJson;
+    try std.testing.expect(std.mem.indexOf(u8, json, "add_data_output") != null);
+    // Change-output / newAmount implicit params must appear in the ABI.
+    try std.testing.expect(std.mem.indexOf(u8, json, "_changePKH") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "_changeAmount") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "_newAmount") != null);
+}

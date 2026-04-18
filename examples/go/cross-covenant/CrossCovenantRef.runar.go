@@ -18,7 +18,7 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //   - Oracle covenant referencing price feed covenant's data
 type CrossCovenantRef struct {
 	runar.SmartContract
-	SourceScriptHash runar.Sha256 `runar:"readonly"`
+	SourceScriptHash runar.Sha256Digest `runar:"readonly"`
 }
 
 // VerifyAndExtract verifies a referenced output and extracts a 32-byte state root.

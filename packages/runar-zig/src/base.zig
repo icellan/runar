@@ -187,6 +187,14 @@ pub const StatefulSmartContract = struct {
         });
     }
 
+    /// Record an extra transaction output that is NOT a state continuation.
+    /// Wire shape matches addRawOutput; the compiler-emitted continuation
+    /// hash places these outputs after state outputs and before the change
+    /// output, preserving declaration order.
+    pub fn addDataOutput(self: *StatefulSmartContract, satoshis: Bigint, script_bytes: ByteString) StatefulRuntimeError!void {
+        return self.addRawOutput(satoshis, script_bytes);
+    }
+
     pub fn getStateScript(self: *const StatefulSmartContract) ByteString {
         return self._current_state_script;
     }
@@ -211,6 +219,10 @@ pub const StatefulContext = struct {
 
     pub fn addRawOutput(self: StatefulContext, satoshis: Bigint, script_bytes: ByteString) void {
         self.runtime.addRawOutput(satoshis, script_bytes) catch @panic("failed to record raw output");
+    }
+
+    pub fn addDataOutput(self: StatefulContext, satoshis: Bigint, script_bytes: ByteString) void {
+        self.runtime.addDataOutput(satoshis, script_bytes) catch @panic("failed to record data output");
     }
 
     pub fn getStateScript(self: StatefulContext) ByteString {
@@ -419,6 +431,29 @@ test "StatefulContext exposes txPreimage and mutating output helpers" {
     const output_hash = try ctx.hashOutputs();
     defer std.testing.allocator.free(output_hash);
     try std.testing.expectEqual(@as(usize, 32), output_hash.len);
+}
+
+test "addDataOutput records output with the same wire shape as addRawOutput" {
+    var runtime = StatefulSmartContract.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    try runtime.addRawOutput(3, "raw-bytes");
+    try runtime.addDataOutput(4, "data-bytes");
+    try std.testing.expectEqual(@as(usize, 2), runtime.outputs().len);
+    try std.testing.expectEqual(@as(i64, 4), runtime.outputs()[1].satoshis);
+    try std.testing.expectEqualSlices(u8, "data-bytes", runtime.outputs()[1].continuationScript);
+    try std.testing.expectEqual(@as(usize, 0), runtime.outputs()[1].stateScript.len);
+}
+
+test "StatefulContext.addDataOutput forwards to the underlying runtime" {
+    var runtime = StatefulSmartContract.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const ctx = try StatefulContext.init(&runtime, "preimage");
+    ctx.addDataOutput(9, "data-payload");
+    try std.testing.expectEqual(@as(usize, 1), ctx.outputs().len);
+    try std.testing.expectEqual(@as(i64, 9), ctx.outputs()[0].satoshis);
+    try std.testing.expectEqualSlices(u8, "data-payload", ctx.outputs()[0].continuationScript);
 }
 
 test "stateful runtime supports explicit current-state and continuation envelopes" {

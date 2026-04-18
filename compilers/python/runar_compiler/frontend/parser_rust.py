@@ -158,7 +158,8 @@ def _map_rust_builtin(name: str) -> str:
         "extractHashPrevouts", "extractHashSequence", "extractOutpoint",
         "extractInputIndex", "extractScriptCode", "extractAmount",
         "extractSequence", "extractOutputs", "extractSigHashType",
-        "addOutput", "reverseBytes", "toByteString",
+        "addOutput", "addRawOutput", "addDataOutput",
+        "reverseBytes", "toByteString",
     }
     if camel in _KNOWN:
         return camel

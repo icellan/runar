@@ -744,6 +744,10 @@ module RunarCompiler
             expr.args.each { |arg| infer_expr_type(arg, env) }
             return "void"
           end
+          if prop == "addDataOutput"
+            expr.args.each { |arg| infer_expr_type(arg, env) }
+            return "void"
+          end
           if @method_sigs.key?(prop)
             return check_call_args(prop, @method_sigs[prop], expr.args, env)
           end
@@ -769,6 +773,10 @@ module RunarCompiler
               return "void"
             end
             if expr.callee.property == "addRawOutput"
+              expr.args.each { |arg| infer_expr_type(arg, env) }
+              return "void"
+            end
+            if expr.callee.property == "addDataOutput"
               expr.args.each { |arg| infer_expr_type(arg, env) }
               return "void"
             end

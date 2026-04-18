@@ -465,6 +465,7 @@ fn fold_value(value: &ANFValue, env: &mut ConstEnv) -> ANFValue {
         | ANFValue::DeserializeState { .. }
         | ANFValue::AddOutput { .. }
         | ANFValue::AddRawOutput { .. }
+        | ANFValue::AddDataOutput { .. }
         | ANFValue::ArrayLiteral { .. } => value.clone(),
     }
 }

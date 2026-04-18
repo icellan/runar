@@ -140,6 +140,8 @@ fn map_builtin_name(name: &str) -> String {
         "mul_div" => return "mulDiv".to_string(),
         "percent_of" => return "percentOf".to_string(),
         "add_output" => return "addOutput".to_string(),
+        "add_raw_output" => return "addRawOutput".to_string(),
+        "add_data_output" => return "addDataOutput".to_string(),
         "get_state_script" => return "getStateScript".to_string(),
         "p256_add" => return "p256Add".to_string(),
         "p256_mul" => return "p256Mul".to_string(),

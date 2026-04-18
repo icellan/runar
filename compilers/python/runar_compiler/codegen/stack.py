@@ -268,6 +268,9 @@ def collect_refs(value: ANFValue) -> list[str]:
     elif kind == "add_raw_output":
         refs.append(value.satoshis)
         refs.append(value.script_bytes)
+    elif kind == "add_data_output":
+        refs.append(value.satoshis)
+        refs.append(value.script_bytes)
     elif kind == "array_literal":
         refs.extend(value.elements)
 
@@ -769,6 +772,10 @@ class _LoweringContext:
         elif kind == "add_output":
             self._lower_add_output(name, value.satoshis, value.state_values, value.preimage, binding_index, last_uses)
         elif kind == "add_raw_output":
+            self._lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
+        elif kind == "add_data_output":
+            # Wire shape is identical to add_raw_output; the distinction only
+            # matters at the continuation-hash composition stage in ANF.
             self._lower_add_raw_output(name, value.satoshis, value.script_bytes, binding_index, last_uses)
         elif kind == "array_literal":
             self._lower_array_literal(name, value.elements, binding_index, last_uses)
@@ -3840,11 +3847,12 @@ def _method_uses_check_preimage(bindings: list[ANFBinding]) -> bool:
 
 
 def _method_uses_code_part(bindings: list[ANFBinding]) -> bool:
-    """Check whether a method has add_output, add_raw_output, or computeStateOutput/
-    computeStateOutputHash calls (recursively). Only methods that construct
-    continuation outputs need the _codePart implicit parameter."""
+    """Check whether a method has add_output, add_raw_output, add_data_output,
+    or computeStateOutput/computeStateOutputHash calls (recursively). Only
+    methods that construct continuation outputs need the _codePart implicit
+    parameter."""
     for b in bindings:
-        if b.value.kind in ("add_output", "add_raw_output"):
+        if b.value.kind in ("add_output", "add_raw_output", "add_data_output"):
             return True
         # Single-output stateful continuation uses computeStateOutput/computeStateOutputHash
         if b.value.kind == "call" and getattr(b.value, "func", None) in ("computeStateOutput", "computeStateOutputHash"):

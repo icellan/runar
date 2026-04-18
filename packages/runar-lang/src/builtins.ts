@@ -44,6 +44,16 @@ export function sha256(_data: ByteString): Sha256 {
 }
 
 /**
+ * Alias for `sha256`. Provides an explicitly-named spelling so cross-format
+ * contract sources that reference the `Sha256Hash` identifier (resolved by
+ * every parser to the `sha256` builtin) have a matching export on the TS
+ * side too. Compiles to `OP_SHA256`.
+ */
+export function Sha256Hash(_data: ByteString): Sha256 {
+  return compilerStub('sha256');
+}
+
+/**
  * RIPEMD-160 hash.
  * Compiles to: `OP_RIPEMD160`
  */

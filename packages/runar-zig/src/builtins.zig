@@ -148,6 +148,14 @@ pub fn sha256(data: base.ByteString) base.Sha256 {
     return dupeBytes(&digest.bytes);
 }
 
+/// Alias for `sha256`. Provides an explicitly-named spelling so cross-format
+/// contract sources that reference the `Sha256Hash` identifier (resolved by
+/// every parser to the `sha256` builtin) have a matching runtime function on
+/// the Zig side too.
+pub fn sha256Hash(data: base.ByteString) base.Sha256 {
+    return sha256(data);
+}
+
 pub fn ripemd160(data: base.ByteString) base.Ripemd160 {
     const digest = bsvz.crypto.hash.ripemd160(data);
     return dupeBytes(&digest.bytes);

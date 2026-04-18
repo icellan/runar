@@ -31,11 +31,28 @@ module Runar
     def initialize(*args)
       super
       @_outputs = []
+      @_data_outputs = []
+      @_raw_outputs = []
       @tx_preimage = ''
     end
 
     def add_output(satoshis, *state_values)
       @_outputs << { satoshis: satoshis, values: state_values }
+    end
+
+    # Add a raw output -- arbitrary script bytes not tied to the contract's
+    # state continuation. Included in the continuation hash as a state
+    # output alongside addOutput results.
+    def add_raw_output(satoshis, script_bytes)
+      @_raw_outputs << { satoshis: satoshis, script_bytes: script_bytes }
+    end
+
+    # Add a data output -- arbitrary script bytes (e.g. OP_RETURN data)
+    # that are NOT a state continuation. The output is included in the
+    # auto-computed continuation hash after state outputs and before the
+    # change output, preserving declaration order.
+    def add_data_output(satoshis, script_bytes)
+      @_data_outputs << { satoshis: satoshis, script_bytes: script_bytes }
     end
 
     def get_state_script
@@ -44,10 +61,20 @@ module Runar
 
     def reset_outputs
       @_outputs = []
+      @_data_outputs = []
+      @_raw_outputs = []
     end
 
     def outputs
       @_outputs
+    end
+
+    def raw_outputs
+      @_raw_outputs
+    end
+
+    def data_outputs
+      @_data_outputs
     end
   end
 end

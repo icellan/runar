@@ -456,6 +456,13 @@ def sha256(data) -> bytes:
     data = _as_bytes(data)
     return hashlib.sha256(data).digest()
 
+def sha256_hash(data) -> bytes:
+    """Alias for sha256. Provides an explicitly-named spelling so cross-format
+    contract sources that reference `Sha256Hash` (which every parser resolves
+    to the `sha256` builtin) have a matching runtime function on the Python
+    side too."""
+    return sha256(data)
+
 def ripemd160(data) -> bytes:
     data = _as_bytes(data)
     return hashlib.new('ripemd160', data).digest()

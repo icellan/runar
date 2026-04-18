@@ -293,6 +293,7 @@ pub const ANFValue = union(enum) {
     deserialize_state: DeserializeState,
     add_output: ANFAddOutput,
     add_raw_output: ANFAddRawOutput,
+    add_data_output: ANFAddDataOutput,
     array_literal: ANFArrayLiteral,
     // Legacy variants (used by json.zig parser — will be migrated)
     literal_int: i64,
@@ -326,6 +327,12 @@ pub const CheckPreimage = struct { preimage: []const u8 };
 pub const DeserializeState = struct { preimage: []const u8 };
 pub const ANFAddOutput = struct { satoshis: []const u8, state_values: []const []const u8 = &.{}, preimage: []const u8 = "", state_refs: []const []const u8 = &.{} };
 pub const ANFAddRawOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "" };
+/// AddDataOutput — an extra transaction output that is NOT a state
+/// continuation. Wire shape is identical to `add_raw_output`. Distinguished
+/// only at continuation-hash composition time: add_data_output refs are
+/// concatenated AFTER all add_output (state) refs and BEFORE the change
+/// output.
+pub const ANFAddDataOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "" };
 pub const ANFArrayLiteral = struct { elements: []const []const u8 };
 
 // -- Legacy value structs (used by json.zig parser) --

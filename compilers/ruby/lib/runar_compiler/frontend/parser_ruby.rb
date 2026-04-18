@@ -171,6 +171,7 @@ module RunarCompiler
       "verify_ecdsa_p384"          => "verifyECDSA_P384",
       "add_output"                 => "addOutput",
       "add_raw_output"             => "addRawOutput",
+      "add_data_output"            => "addDataOutput",
       "get_state_script"           => "getStateScript",
       "extract_locktime"           => "extractLocktime",
       "extract_output_hash"        => "extractOutputHash",
@@ -854,7 +855,7 @@ module RunarCompiler
         # Rewrite bare calls to declared methods and intrinsics as this.method().
         # In Ruby, bare calls like +add_output(...)+ are equivalent to
         # +self.add_output(...)+ / +this.addOutput(...)+.
-        intrinsic_methods = Set.new(%w[addOutput addRawOutput getStateScript])
+        intrinsic_methods = Set.new(%w[addOutput addRawOutput addDataOutput getStateScript])
         method_names = methods.map(&:name).to_set | intrinsic_methods
         methods.each do |m|
           Frontend.rewrite_bare_method_calls(m.body, method_names)

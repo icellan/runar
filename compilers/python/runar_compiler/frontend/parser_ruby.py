@@ -186,6 +186,7 @@ _SPECIAL_NAMES: dict[str, str] = {
     "verify_ecdsa_p384":      "verifyECDSA_P384",
     "add_output": "addOutput",
     "add_raw_output": "addRawOutput",
+    "add_data_output": "addDataOutput",
     "get_state_script": "getStateScript",
     "extract_locktime": "extractLocktime",
     "extract_output_hash": "extractOutputHash",
@@ -827,7 +828,7 @@ class _RbParser:
         # Rewrite bare calls to declared methods and intrinsics as this.method().
         # In Ruby, bare calls like `add_output(...)` are equivalent to
         # `self.add_output(...)` / `this.addOutput(...)`.
-        _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "getStateScript"}
+        _INTRINSIC_METHODS = {"addOutput", "addRawOutput", "addDataOutput", "getStateScript"}
         method_names = {m.name for m in methods} | _INTRINSIC_METHODS
         for method in methods:
             _rewrite_bare_method_calls(method.body, method_names)

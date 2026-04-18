@@ -1332,6 +1332,175 @@ class Counter extends StatefulSmartContract {
             f"read-only method should not have add_output bindings, got: {add_output_bindings}"
         )
 
+    def test_anf_lower_add_data_output(self):
+        """this.addDataOutput(sats, scriptBytes) lowers to add_data_output bindings."""
+        source = """
+import { StatefulSmartContract } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+
+  public bump(payload: ByteString): void {
+    this.count = this.count + 1n;
+    this.addDataOutput(0n, payload);
+  }
+}
+"""
+        result = parse_source(source, "Counter.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+        type_check(result.contract)
+        program = lower_to_anf(result.contract)
+
+        bump = next((m for m in program.methods if m.name == "bump"), None)
+        assert bump is not None
+
+        data_outputs = [b for b in bump.body if b.value.kind == "add_data_output"]
+        assert len(data_outputs) == 1, (
+            f"expected 1 add_data_output, got {len(data_outputs)}"
+        )
+        # satoshis and scriptBytes refs populated
+        assert data_outputs[0].value.satoshis is not None
+        assert data_outputs[0].value.script_bytes is not None
+
+    def test_anf_lower_add_data_output_continuation_hash_multi(self):
+        """With addOutput state outputs and addDataOutput, the continuation hash
+        concatenates state outputs first, then data outputs, then change."""
+        source = """
+import { StatefulSmartContract } from 'runar-lang';
+
+class FT extends StatefulSmartContract {
+  owner: PubKey;
+  balance: bigint;
+  constructor(owner: PubKey, balance: bigint) {
+    super(owner, balance);
+    this.owner = owner;
+    this.balance = balance;
+  }
+  public transfer(to: PubKey, amount: bigint, sats: bigint, note: ByteString): void {
+    this.addOutput(sats, to, amount);
+    this.addOutput(sats, this.owner, this.balance - amount);
+    this.addDataOutput(0n, note);
+  }
+}
+"""
+        result = parse_source(source, "FT.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+        type_check(result.contract)
+        program = lower_to_anf(result.contract)
+
+        transfer = next((m for m in program.methods if m.name == "transfer"), None)
+        assert transfer is not None
+
+        state_refs = [b.name for b in transfer.body if b.value.kind == "add_output"]
+        data_refs = [b.name for b in transfer.body if b.value.kind == "add_data_output"]
+        assert len(state_refs) == 2
+        assert len(data_refs) == 1
+
+        change_builder = next(
+            (b for b in transfer.body
+             if b.value.kind == "call" and b.value.func == "buildChangeOutput"),
+            None,
+        )
+        assert change_builder is not None
+
+        cats = [b for b in transfer.body
+                if b.value.kind == "call" and b.value.func == "cat"]
+        assert len(cats) >= 3
+        # First cat: state[0] + state[1]
+        assert cats[0].value.args == [state_refs[0], state_refs[1]]
+        # Second cat: prev + data[0]
+        assert cats[1].value.args[1] == data_refs[0]
+        # Third cat: prev + change
+        assert cats[2].value.args[1] == change_builder.name
+
+    def test_anf_lower_add_data_output_single_continuation(self):
+        """addDataOutput works with the single-output state continuation path.
+        _newAmount must be injected so the state output value can be adjusted."""
+        source = """
+import { StatefulSmartContract } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+  public bump(payload: ByteString): void {
+    this.count = this.count + 1n;
+    this.addDataOutput(0n, payload);
+  }
+}
+"""
+        result = parse_source(source, "Counter.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+        type_check(result.contract)
+        program = lower_to_anf(result.contract)
+
+        bump = next((m for m in program.methods if m.name == "bump"), None)
+        assert bump is not None
+
+        # Uses computeStateOutput (single-output path), not multi-output addOutput
+        assert len([b for b in bump.body if b.value.kind == "add_output"]) == 0
+        data_refs = [b.name for b in bump.body if b.value.kind == "add_data_output"]
+        assert len(data_refs) == 1
+
+        compute = next(
+            (b for b in bump.body
+             if b.value.kind == "call" and b.value.func == "computeStateOutput"),
+            None,
+        )
+        assert compute is not None
+
+        # Continuation hash must cat: stateOut + dataOut, then +change
+        cats = [b for b in bump.body
+                if b.value.kind == "call" and b.value.func == "cat"]
+        assert len(cats) >= 2
+        assert data_refs[0] in cats[0].value.args
+
+        param_names = {p.name for p in bump.params}
+        assert "_newAmount" in param_names
+
+    def test_anf_lower_add_data_output_non_mutating(self):
+        """A method that emits only a data output (no state mutation) still
+        runs the single-output continuation path and gets all implicit params."""
+        source = """
+import { StatefulSmartContract } from 'runar-lang';
+
+class Counter extends StatefulSmartContract {
+  count: bigint;
+  constructor(count: bigint) {
+    super(count);
+    this.count = count;
+  }
+  public ping(payload: ByteString): void {
+    this.addDataOutput(0n, payload);
+  }
+}
+"""
+        result = parse_source(source, "Counter.runar.ts")
+        assert result.contract is not None
+        validate(result.contract)
+        type_check(result.contract)
+        program = lower_to_anf(result.contract)
+
+        ping = next((m for m in program.methods if m.name == "ping"), None)
+        assert ping is not None
+
+        assert len([b for b in ping.body if b.value.kind == "add_data_output"]) == 1
+
+        param_names = {p.name for p in ping.params}
+        assert "_changePKH" in param_names
+        assert "_changeAmount" in param_names
+        assert "_newAmount" in param_names
+
 
 # ---------------------------------------------------------------------------
 # Type checker — additional rules

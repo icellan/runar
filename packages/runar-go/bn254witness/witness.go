@@ -143,6 +143,28 @@ type Witness struct {
 	// unit and contributes nothing).
 	PreparedInputs [2]*big.Int
 
+	// ProofBSubgroupGradients is the flat witness for the G2 prime-order-
+	// subgroup check on proof.B (see codegen.emitWAG2SubgroupCheck). It is
+	// the left-to-right double-and-add expansion of the fixed scalar
+	// 6·x² in the relation ψ(B) == [6·x²]·B, with one Fp² gradient per
+	// double (126 of them) followed by one per addition (69 of them):
+	// 390 Fp values total. Populated by GenerateWitness when proof.B is
+	// supplied; ToStackOps pushes the gradients between PreparedInputs
+	// and ProofA so they land at the tracker slots
+	// emitWAG2FixedScalarMul reads via the "_sgd" prefix.
+	ProofBSubgroupGradients []*big.Int
+
+	// PublicInputs is the list of 5 SP1 public-input scalars, populated
+	// when the witness targets the MSM-binding verifier variant
+	// (EmitGroth16VerifierWitnessAssistedWithMSM) instead of the raw one.
+	// When populated, ToStackOps emits these 5 scalars between the final-
+	// exponentiation witnesses and PreparedInputs, matching the MSM
+	// variant's initNames layout.
+	//
+	// When all five entries are nil, the witness targets the raw variant
+	// and the 5 scalars are omitted from the stack layout.
+	PublicInputs [5]*big.Int
+
 	// ProofA is the proof's A point (G1 affine, [x, y]).
 	ProofA [2]*big.Int
 
@@ -223,6 +245,17 @@ func GenerateWitness(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Wi
 	}
 	w.PreparedInputs = preparedInputs
 
+	// 1b. Compute the subgroup-check gradient chain for proof.B — one
+	//     Fp² slope per doubling (126) and per addition (69) in the
+	//     expansion of [6·x²]·B. The on-chain preamble calls
+	//     emitWAG2SubgroupCheck on proof.B to close the documented
+	//     TODO(subgroup-check) gap; this chain is the witness it consumes.
+	subgroupGradients, err := computeSubgroupGradients(proof.B)
+	if err != nil {
+		return nil, fmt.Errorf("bn254witness: subgroup gradients: %w", err)
+	}
+	w.ProofBSubgroupGradients = subgroupGradients
+
 	// 2. Run the triple Miller loop with gradient capture.
 	//    Pair 1: (proof_A, proof_B)         — both positive
 	//    Pair 2: (prepared_inputs, -gamma)  — gamma pre-negated in VK
@@ -288,8 +321,26 @@ func (w *Witness) ToStackOps() []codegen.StackOp {
 		}
 	}
 
+	// 4a. 5 SP1 public-input scalars — only emitted when populated (the
+	// MSM-binding variant). The raw variant leaves these nil and the
+	// stack layout collapses to the legacy shape.
+	if w.hasPublicInputs() {
+		for i := 0; i < 5; i++ {
+			ops = append(ops, pushBig(w.PublicInputs[i]))
+		}
+	}
+
 	// 4. prepared_inputs (G1, 2 Fp)
 	ops = append(ops, pushBig(w.PreparedInputs[0]), pushBig(w.PreparedInputs[1]))
+
+	// 4b. G2 subgroup-check gradients for proof.B (390 Fp values: 126
+	// doublings × 2 + 69 additions × 2). Pushed after PreparedInputs and
+	// before the proof points so the tracker's "_sgd_d_*" / "_sgd_a_*"
+	// slot names line up with the layout declared by
+	// codegen.appendSubgroupGradientNames.
+	for _, g := range w.ProofBSubgroupGradients {
+		ops = append(ops, pushBig(g))
+	}
 
 	// 5. Proof points: A (x, y), B (x0, x1, y0, y1), C (x, y)
 	ops = append(ops, pushBig(w.ProofA[0]), pushBig(w.ProofA[1]))
@@ -297,6 +348,47 @@ func (w *Witness) ToStackOps() []codegen.StackOp {
 	ops = append(ops, pushBig(w.ProofC[0]), pushBig(w.ProofC[1]))
 
 	return ops
+}
+
+// hasPublicInputs reports whether the witness targets the MSM-binding
+// verifier variant. It returns true when any of the 5 PublicInputs slots
+// is non-nil.
+func (w *Witness) hasPublicInputs() bool {
+	for i := 0; i < 5; i++ {
+		if w.PublicInputs[i] != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// BuildFromProofWithInputs generates a witness bundle for the MSM-binding
+// variant of the verifier. It is a thin wrapper over GenerateWitness that
+// ALSO populates Witness.PublicInputs with the first 5 scalars of the
+// supplied publicInputs slice, matching the MSM variant's expectation of
+// exactly 5 on-chain public inputs.
+//
+// The off-chain MSM computation inside GenerateWitness continues to use
+// the full publicInputs slice, so the prepared_inputs G1 point is the
+// correct mathematical accumulator.
+//
+// Returns an error if len(publicInputs) != 5 (the MSM variant's current
+// fixed arity; extending this requires codegen changes).
+func BuildFromProofWithInputs(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Witness, error) {
+	if len(publicInputs) != 5 {
+		return nil, fmt.Errorf(
+			"BuildFromProofWithInputs: expected 5 public inputs, got %d",
+			len(publicInputs),
+		)
+	}
+	w, err := GenerateWitness(vk, proof, publicInputs)
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < 5; i++ {
+		w.PublicInputs[i] = new(big.Int).Set(publicInputs[i])
+	}
+	return w, nil
 }
 
 // pushBig produces a StackOp that pushes the given big.Int as a Bitcoin

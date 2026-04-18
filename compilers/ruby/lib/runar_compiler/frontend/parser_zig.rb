@@ -1562,7 +1562,7 @@ module RunarCompiler
               expr = PropertyAccessExpr.new(property: prop)
             elsif expr.is_a?(Identifier) &&
                   @stateful_context_names.include?(expr.name) &&
-                  %w[txPreimage getStateScript addOutput addRawOutput].include?(prop)
+                  %w[txPreimage getStateScript addOutput addRawOutput addDataOutput].include?(prop)
               expr = PropertyAccessExpr.new(property: prop)
             else
               expr = MemberExpr.new(object: expr, property: prop)

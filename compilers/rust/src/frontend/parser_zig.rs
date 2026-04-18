@@ -631,6 +631,7 @@ impl<'a> ZigParser<'a> {
             methods.iter().map(|m| m.name.clone()).collect();
         method_names.insert("addOutput".to_string());
         method_names.insert("addRawOutput".to_string());
+        method_names.insert("addDataOutput".to_string());
         method_names.insert("getStateScript".to_string());
         let mut final_methods = methods;
         for method in &mut final_methods {
@@ -1822,6 +1823,7 @@ impl<'a> ZigParser<'a> {
                                 || prop == "getStateScript"
                                 || prop == "addOutput"
                                 || prop == "addRawOutput"
+                                || prop == "addDataOutput"
                             {
                                 expr = Expression::PropertyAccess { property: prop };
                                 continue;

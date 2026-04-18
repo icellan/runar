@@ -128,6 +128,8 @@ _SPECIAL_NAMES: dict[str, str] = {
     "p384_encode_compressed": "p384EncodeCompressed",
     "verify_ecdsa_p384":      "verifyECDSA_P384",
     "add_output": "addOutput",
+    "add_raw_output": "addRawOutput",
+    "add_data_output": "addDataOutput",
     "get_state_script": "getStateScript",
     "extract_locktime": "extractLocktime",
     "extract_output_hash": "extractOutputHash",

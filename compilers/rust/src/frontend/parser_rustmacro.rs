@@ -1154,6 +1154,8 @@ fn map_rust_builtin(name: &str) -> String {
         "extractOutputs" => "extractOutputs".to_string(),
         "extractSigHashType" => "extractSigHashType".to_string(),
         "addOutput" => "addOutput".to_string(),
+        "addRawOutput" => "addRawOutput".to_string(),
+        "addDataOutput" => "addDataOutput".to_string(),
         "reverseBytes" => "reverseBytes".to_string(),
         "toByteString" => "toByteString".to_string(),
         _ => camel,

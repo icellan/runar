@@ -81,6 +81,7 @@ module RunarCompiler
       "PubKey"          => "PubKey",
       "Sig"             => "Sig",
       "Sha256"          => "Sha256",
+      "Sha256Digest"    => "Sha256",
       "Ripemd160"       => "Ripemd160",
       "Addr"            => "Addr",
       "SigHashPreimage" => "SigHashPreimage",
@@ -112,7 +113,7 @@ module RunarCompiler
       # Assertions
       "Assert" => "assert",
       # Hashing
-      "Hash160" => "hash160", "Hash256" => "hash256", "Sha256" => "sha256", "Ripemd160" => "ripemd160",
+      "Hash160" => "hash160", "Hash256" => "hash256", "Sha256" => "sha256", "Sha256Hash" => "sha256", "Ripemd160" => "ripemd160",
       # Signature verification
       "CheckSig" => "checkSig", "CheckMultiSig" => "checkMultiSig",
       "CheckPreimage" => "checkPreimage", "VerifyRabinSig" => "verifyRabinSig",
@@ -146,6 +147,7 @@ module RunarCompiler
       "ExtractLocktime" => "extractLocktime",
       # Output construction
       "AddOutput" => "addOutput", "AddRawOutput" => "addRawOutput",
+      "AddDataOutput" => "addDataOutput",
       "GetStateScript" => "getStateScript",
       # Math builtins
       "Abs" => "abs", "Min" => "min", "Max" => "max", "Within" => "within",

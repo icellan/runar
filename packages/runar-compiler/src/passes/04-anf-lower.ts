@@ -120,9 +120,10 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
 
     if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
       // Determine if this method verifies hashOutputs (needs change output support).
-      // Methods that use addOutput or mutate state need hashOutputs verification.
-      // Non-mutating methods (like close/destroy) don't verify outputs.
-      const needsChangeOutput = methodMutatesState(method, contract) || methodHasAddOutput(method);
+      // Methods that use addOutput/addDataOutput or mutate state need hashOutputs
+      // verification. Non-mutating methods (like close/destroy) don't verify outputs.
+      const hasDataOutput = methodHasAddDataOutput(method);
+      const needsChangeOutput = methodMutatesState(method, contract) || methodHasAddOutput(method) || hasDataOutput;
 
       // Register implicit parameters
       if (needsChangeOutput) {
@@ -131,7 +132,10 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       }
       // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
       // Multi-output (addOutput) methods already specify amounts explicitly per output.
-      const needsNewAmount = methodMutatesState(method, contract) && !methodHasAddOutput(method);
+      // Methods that emit only data outputs (no addOutput) still run the single-output
+      // continuation path for their state continuation, so they also need _newAmount.
+      const needsNewAmount =
+        (methodMutatesState(method, contract) || hasDataOutput) && !methodHasAddOutput(method);
       if (needsNewAmount) {
         methodCtx.addParam('_newAmount');
       }
@@ -152,19 +156,46 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // Lower the developer's method body
       lowerStatements(method.body, methodCtx);
 
-      // Determine state continuation type
+      // Determine state continuation type.
+      //
+      // === Continuation-hash construction (reference for other compilers) ===
+      //
+      // The auto-injected continuation assertion verifies that the spending
+      // transaction's hashOutputs field matches a compiler-constructed hash
+      // over the outputs this method declares. Outputs are concatenated in
+      // the following order before hashing with hash256:
+      //
+      //   1. state outputs       (from this.addOutput / this.addRawOutput,
+      //                           tracked via addOutputRef)
+      //   2. data outputs        (from this.addDataOutput, tracked via
+      //                           addDataOutputRef) — NEW
+      //   3. change output       (P2PKH to _changePKH, value = _changeAmount)
+      //
+      // For the "single-output" fast path (no addOutput used, but state is
+      // mutated), the state output is computed on the fly from
+      // (preimage, stateScript, _newAmount) instead of coming from
+      // addOutputRefs. Data outputs may still be declared in this mode and
+      // are inserted BETWEEN the single state output and the change output.
+      //
+      // If no state output and no data output is present, the legacy
+      // single-output path applies (no data-output insertion needed).
       const addOutputRefs = methodCtx.getAddOutputRefs();
-      if (addOutputRefs.length > 0 || methodMutatesState(method, contract)) {
+      const addDataOutputRefs = methodCtx.getAddDataOutputRefs();
+      if (addOutputRefs.length > 0 || addDataOutputRefs.length > 0 || methodMutatesState(method, contract)) {
         // Build the P2PKH change output for hashOutputs verification
         const changePKHRef = methodCtx.emit({ kind: 'load_param', name: '_changePKH' });
         const changeAmountRef = methodCtx.emit({ kind: 'load_param', name: '_changeAmount' });
         const changeOutputRef = methodCtx.emit({ kind: 'call', func: 'buildChangeOutput', args: [changePKHRef, changeAmountRef] });
 
         if (addOutputRefs.length > 0) {
-          // Multi-output continuation: concat all outputs + change output, hash
+          // Multi-output continuation: concat all state outputs, then all
+          // data outputs, then change output, then hash.
           let accumulated = addOutputRefs[0]!;
           for (let i = 1; i < addOutputRefs.length; i++) {
             accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, addOutputRefs[i]!] });
+          }
+          for (const dataRef of addDataOutputRefs) {
+            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
           }
           accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
           const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [accumulated] });
@@ -173,12 +204,17 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
           const eqRef = methodCtx.emit({ kind: 'bin_op', op: '===', left: hashRef, right: outputHashRef, result_type: 'bytes' });
           methodCtx.emit({ kind: 'assert', value: eqRef });
         } else {
-          // Single-output continuation: build raw output bytes, concat with change, hash
+          // Single-output continuation: build raw output bytes, then splice in
+          // any declared data outputs, then concat with change, then hash.
           const stateScriptRef = methodCtx.emit({ kind: 'get_state_script' });
           const preimageRef2 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
           const newAmountRef = methodCtx.emit({ kind: 'load_param', name: '_newAmount' });
           const contractOutputRef = methodCtx.emit({ kind: 'call', func: 'computeStateOutput', args: [preimageRef2, stateScriptRef, newAmountRef] });
-          const allOutputs = methodCtx.emit({ kind: 'call', func: 'cat', args: [contractOutputRef, changeOutputRef] });
+          let accumulated = contractOutputRef;
+          for (const dataRef of addDataOutputRefs) {
+            accumulated = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, dataRef] });
+          }
+          const allOutputs = methodCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, changeOutputRef] });
           const hashRef = methodCtx.emit({ kind: 'call', func: 'hash256', args: [allOutputs] });
           const preimageRef4 = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
           const outputHashRef = methodCtx.emit({ kind: 'call', func: 'extractOutputHash', args: [preimageRef4] });
@@ -243,6 +279,7 @@ class LoweringContext {
   private readonly localNames: Set<string> = new Set();
   private readonly localByteVars: Set<string> = new Set();
   private readonly _addOutputRefs: string[] = [];
+  private readonly _addDataOutputRefs: string[] = [];
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
@@ -329,6 +366,16 @@ class LoweringContext {
   /** Get all addOutput refs collected during lowering. */
   getAddOutputRefs(): string[] {
     return this._addOutputRefs;
+  }
+
+  /** Track an addDataOutput binding ref — distinct from state outputs. */
+  addDataOutputRef(ref: string): void {
+    this._addDataOutputRefs.push(ref);
+  }
+
+  /** Get all addDataOutput refs collected during lowering. */
+  getAddDataOutputRefs(): string[] {
+    return this._addDataOutputRefs;
   }
 
   /** Look up the type of a method parameter by name. Returns the type string or null. */
@@ -528,6 +575,11 @@ function lowerIfStatement(
   if (thenOutputRefs.length > 0 || elseOutputRefs.length > 0) {
     // Use the if-expression result as the addOutput ref since only one branch executes
     ctx.addOutputRef(ifName);
+  }
+  const thenDataRefs = thenCtx.getAddDataOutputRefs();
+  const elseDataRefs = elseCtx.getAddDataOutputRefs();
+  if (thenDataRefs.length > 0 || elseDataRefs.length > 0) {
+    ctx.addDataOutputRef(ifName);
   }
 
   // If both branches end by reassigning the same local variable,
@@ -859,6 +911,18 @@ function lowerCallExpr(
     return ref;
   }
 
+  // this.addDataOutput(satoshis, scriptBytes) -> special node. Like
+  // addRawOutput in wire shape, but included in the continuation hash
+  // AFTER state outputs and BEFORE the change output.
+  if (callee.kind === 'property_access' && callee.property === 'addDataOutput') {
+    const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    const satoshis = argRefs[0]!;
+    const scriptBytes = argRefs[1]!;
+    const ref = ctx.emit({ kind: 'add_data_output', satoshis, scriptBytes });
+    ctx.addDataOutputRef(ref);
+    return ref;
+  }
+
   // this.getStateScript() -> special node
   if (callee.kind === 'property_access' && callee.property === 'getStateScript') {
     return ctx.emit({ kind: 'get_state_script' });
@@ -886,6 +950,17 @@ function lowerCallExpr(
     const scriptBytes = argRefs[1]!;
     const ref = ctx.emit({ kind: 'add_raw_output', satoshis, scriptBytes });
     ctx.addOutputRef(ref);
+    return ref;
+  }
+  if (callee.kind === 'member_expr' &&
+      callee.object.kind === 'identifier' &&
+      (callee.object.name === 'this' || ctx.isStatefulContextParam(callee.object.name)) &&
+      callee.property === 'addDataOutput') {
+    const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    const satoshis = argRefs[0]!;
+    const scriptBytes = argRefs[1]!;
+    const ref = ctx.emit({ kind: 'add_data_output', satoshis, scriptBytes });
+    ctx.addDataOutputRef(ref);
     return ref;
   }
   if (callee.kind === 'member_expr' &&
@@ -1165,39 +1240,44 @@ function exprMutatesState(expr: Expression, mutableProps: Set<string>): boolean 
 }
 
 function methodHasAddOutput(method: { body: Statement[] }): boolean {
-  return bodyHasAddOutput(method.body);
+  return bodyHasCall(method.body, STATE_OUTPUT_METHODS);
 }
 
-function bodyHasAddOutput(stmts: Statement[]): boolean {
+function methodHasAddDataOutput(method: { body: Statement[] }): boolean {
+  return bodyHasCall(method.body, DATA_OUTPUT_METHODS);
+}
+
+const STATE_OUTPUT_METHODS = new Set(['addOutput', 'addRawOutput']);
+const DATA_OUTPUT_METHODS = new Set(['addDataOutput']);
+
+function bodyHasCall(stmts: Statement[], names: Set<string>): boolean {
   for (const stmt of stmts) {
-    if (stmtHasAddOutput(stmt)) return true;
+    if (stmtHasCall(stmt, names)) return true;
   }
   return false;
 }
 
-function stmtHasAddOutput(stmt: Statement): boolean {
+function stmtHasCall(stmt: Statement, names: Set<string>): boolean {
   switch (stmt.kind) {
     case 'expression_statement':
-      return exprHasAddOutput(stmt.expression);
+      return exprHasCall(stmt.expression, names);
     case 'if_statement':
-      return bodyHasAddOutput(stmt.then) ||
-             (stmt.else ? bodyHasAddOutput(stmt.else) : false);
+      return bodyHasCall(stmt.then, names) ||
+             (stmt.else ? bodyHasCall(stmt.else, names) : false);
     case 'for_statement':
-      return bodyHasAddOutput(stmt.body);
+      return bodyHasCall(stmt.body, names);
     default:
       return false;
   }
 }
 
-function exprHasAddOutput(expr: Expression): boolean {
+function exprHasCall(expr: Expression, names: Set<string>): boolean {
   if (expr.kind === 'call_expr') {
     const callee = expr.callee;
-    if (callee.kind === 'property_access' &&
-        (callee.property === 'addOutput' || callee.property === 'addRawOutput')) {
+    if (callee.kind === 'property_access' && names.has(callee.property)) {
       return true;
     }
-    if (callee.kind === 'member_expr' &&
-        (callee.property === 'addOutput' || callee.property === 'addRawOutput')) {
+    if (callee.kind === 'member_expr' && names.has(callee.property)) {
       return true;
     }
   }
@@ -1393,6 +1473,8 @@ function remapValueRefs(value: ANFValue, map: Record<string, string>): ANFValue 
     case 'add_output':
       return { ...value, satoshis: r(value.satoshis), stateValues: value.stateValues.map(r), preimage: r(value.preimage) };
     case 'add_raw_output':
+      return { ...value, satoshis: r(value.satoshis), scriptBytes: r(value.scriptBytes) };
+    case 'add_data_output':
       return { ...value, satoshis: r(value.satoshis), scriptBytes: r(value.scriptBytes) };
     case 'if':
       return { ...value, cond: r(value.cond) };

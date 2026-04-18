@@ -1370,7 +1370,7 @@ class ZigParser extends ParserCore<ZigToken> {
         } else if (
           expr.kind === 'identifier' &&
           this.statefulContextNames.has(expr.name) &&
-          (prop === 'txPreimage' || prop === 'getStateScript' || prop === 'addOutput' || prop === 'addRawOutput')
+          (prop === 'txPreimage' || prop === 'getStateScript' || prop === 'addOutput' || prop === 'addRawOutput' || prop === 'addDataOutput')
         ) {
           expr = { kind: 'property_access', property: prop };
         } else {

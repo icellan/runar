@@ -143,6 +143,7 @@ fn map_builtin_name(name: &str) -> String {
         "bin2num" => return "bin2num".to_string(),
         "add_output" => return "addOutput".to_string(),
         "add_raw_output" => return "addRawOutput".to_string(),
+        "add_data_output" => return "addDataOutput".to_string(),
         "get_state_script" => return "getStateScript".to_string(),
         // SHA-256 partial verification
         "sha256_compress" => return "sha256Compress".to_string(),
@@ -937,6 +938,7 @@ impl<'a> RbParser<'a> {
         // Intrinsic methods that must also be rewritten to property_access style.
         method_names.insert("addOutput".to_string());
         method_names.insert("addRawOutput".to_string());
+        method_names.insert("addDataOutput".to_string());
         method_names.insert("getStateScript".to_string());
         for method in &mut methods {
             rewrite_bare_method_calls(&mut method.body, &method_names);

@@ -138,6 +138,10 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
             try used.put(aro.satoshis, {});
             if (aro.script_bytes.len > 0) try used.put(aro.script_bytes, {});
         },
+        .add_data_output => |ado| {
+            try used.put(ado.satoshis, {});
+            if (ado.script_bytes.len > 0) try used.put(ado.script_bytes, {});
+        },
         .array_literal => |al| {
             for (al.elements) |e| try used.put(e, {});
         },
@@ -168,7 +172,7 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
 pub fn hasSideEffect(v: types.ANFValue) bool {
     return switch (v) {
         .assert, .update_prop, .check_preimage, .deserialize_state,
-        .add_output, .add_raw_output, .@"if", .loop, .call, .method_call,
+        .add_output, .add_raw_output, .add_data_output, .@"if", .loop, .call, .method_call,
         => true,
         .assert_op, .if_expr, .for_loop, .builtin_call => true,
         else => false,

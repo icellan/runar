@@ -50,6 +50,7 @@ export {
 export {
   // Crypto
   sha256,
+  Sha256Hash,
   ripemd160,
   hash160,
   hash256,
@@ -375,6 +376,30 @@ export abstract class StatefulSmartContract extends SmartContract {
   protected addRawOutput(_satoshis: bigint, _scriptBytes: ByteString): void {
     throw new Error(
       'StatefulSmartContract.addRawOutput() cannot be called at runtime — compile this contract.',
+    );
+  }
+
+  /**
+   * Register an additional transaction output that is NOT a state continuation.
+   *
+   * Each call adds one output to the transaction with the caller-specified
+   * satoshi amount and script bytes. Unlike `addOutput`, the output is not
+   * derived from the contract's current state; unlike `addRawOutput`, it is
+   * explicitly positioned in the continuation-hash composition AFTER state
+   * outputs and BEFORE the change output.
+   *
+   * Typical use: emit an OP_RETURN with a data-availability payload or any
+   * arbitrary third-party output alongside the contract's state continuation.
+   *
+   * ```ts
+   * this.count = this.count + 1n;
+   * this.addDataOutput(0n, toByteString('6a0568656c6c6f')); // OP_RETURN "hello"
+   * ```
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  protected addDataOutput(_satoshis: bigint, _scriptBytes: ByteString): void {
+    throw new Error(
+      'StatefulSmartContract.addDataOutput() cannot be called at runtime — compile this contract.',
     );
   }
 }

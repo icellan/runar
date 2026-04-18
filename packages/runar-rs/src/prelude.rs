@@ -38,6 +38,14 @@ pub type ByteString = Vec<u8>;
 /// A 32-byte SHA-256 hash.
 pub type Sha256 = Vec<u8>;
 
+/// A 32-byte SHA-256 hash digest. Alias of [`Sha256`] for cross-language
+/// parity with Go, where the identifier `Sha256` must name a function
+/// (mapped to OP_SHA256 in Script) and the TYPE is exposed as
+/// `Sha256Digest` to avoid the type-vs-call ambiguity. Rust doesn't suffer
+/// from the same ambiguity (the function is `sha256` in snake_case), so
+/// both names remain available here and `Sha256` stays canonical.
+pub type Sha256Digest = Sha256;
+
 /// A 20-byte RIPEMD-160 hash.
 pub type Ripemd160 = Vec<u8>;
 
@@ -204,6 +212,14 @@ pub fn hash256(data: &[u8]) -> Sha256 {
 /// Single SHA-256 hash.
 pub fn sha256(data: &[u8]) -> Sha256 {
     Sha256Hasher::digest(data).to_vec()
+}
+
+/// Alias for `sha256`. Provides the PascalCase / explicitly-named spelling
+/// so cross-format contract sources that use the `Sha256Hash` identifier
+/// (resolved by every parser back to the `sha256` builtin) have a matching
+/// runtime function on the Rust side too.
+pub fn sha256_hash(data: &[u8]) -> Sha256 {
+    sha256(data)
 }
 
 /// Single RIPEMD-160 hash.

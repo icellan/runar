@@ -99,6 +99,14 @@ module Kernel
     Runar.sha256(data)
   end
 
+  # Alias for sha256. Provides an explicitly-named spelling so cross-format
+  # contract sources that reference the `Sha256Hash` identifier (resolved by
+  # every parser to the `sha256` builtin) have a matching runtime function
+  # on the Ruby side too.
+  def sha256_hash(data)
+    sha256(data)
+  end
+
   def ripemd160(data)
     Runar.ripemd160(data)
   end

@@ -800,6 +800,150 @@ describe('Pass 4: ANF Lower', () => {
       expect(addOutputs).toHaveLength(1);
     });
 
+    it('lowers this.addDataOutput() to add_data_output nodes', () => {
+      const source = `
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) {
+            super(count);
+            this.count = count;
+          }
+          public bump(payload: ByteString) {
+            this.count = this.count + 1n;
+            this.addDataOutput(0n, payload);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'bump');
+
+      const addDataOutputs = bindingsOfKind(method.body, 'add_data_output');
+      expect(addDataOutputs).toHaveLength(1);
+
+      // add_data_output carries satoshis + scriptBytes refs
+      const first = addDataOutputs[0]!.value as {
+        kind: 'add_data_output';
+        satoshis: string;
+        scriptBytes: string;
+      };
+      expect(first.satoshis).toMatch(/^t\d+$/);
+      expect(first.scriptBytes).toMatch(/^t\d+$/);
+    });
+
+    it('includes data outputs in the continuation hash after state outputs', () => {
+      const source = `
+        class FT extends StatefulSmartContract {
+          owner: PubKey;
+          balance: bigint;
+          constructor(owner: PubKey, balance: bigint) {
+            super(owner, balance);
+            this.owner = owner;
+            this.balance = balance;
+          }
+          public transfer(to: PubKey, amount: bigint, sats: bigint, note: ByteString) {
+            this.addOutput(sats, to, amount);
+            this.addOutput(sats, this.owner, this.balance - amount);
+            this.addDataOutput(0n, note);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'transfer');
+
+      // Both addOutput and addDataOutput must be emitted
+      expect(bindingsOfKind(method.body, 'add_output')).toHaveLength(2);
+      expect(bindingsOfKind(method.body, 'add_data_output')).toHaveLength(1);
+
+      // Continuation hash must cat state outputs, then the data output, then
+      // the change output. Verify cat args reference data output binding.
+      const addOutputRefs = bindingsOfKind(method.body, 'add_output').map(b => b.name);
+      const dataOutputRefs = bindingsOfKind(method.body, 'add_data_output').map(b => b.name);
+      const changeBuilder = method.body.find(
+        b => b.value.kind === 'call' && (b.value as { func: string }).func === 'buildChangeOutput',
+      );
+      expect(changeBuilder).toBeDefined();
+      const changeRef = changeBuilder!.name;
+
+      const cats = method.body.filter(
+        b => b.value.kind === 'call' && (b.value as { func: string }).func === 'cat',
+      );
+      // First cat: addOutput0 + addOutput1
+      // Second cat: (prev) + addDataOutput
+      // Third cat: (prev) + changeOutput
+      expect(cats.length).toBeGreaterThanOrEqual(3);
+      const firstCatArgs = (cats[0]!.value as { args: string[] }).args;
+      expect(firstCatArgs).toEqual([addOutputRefs[0], addOutputRefs[1]]);
+      const secondCatArgs = (cats[1]!.value as { args: string[] }).args;
+      expect(secondCatArgs[1]).toBe(dataOutputRefs[0]);
+      const thirdCatArgs = (cats[2]!.value as { args: string[] }).args;
+      expect(thirdCatArgs[1]).toBe(changeRef);
+    });
+
+    it('supports addDataOutput with single-output state continuation', () => {
+      const source = `
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) {
+            super(count);
+            this.count = count;
+          }
+          public bump(payload: ByteString) {
+            this.count = this.count + 1n;
+            this.addDataOutput(0n, payload);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'bump');
+
+      // Single-output path: uses computeStateOutput, not add_output
+      expect(bindingsOfKind(method.body, 'add_output')).toHaveLength(0);
+      expect(bindingsOfKind(method.body, 'add_data_output')).toHaveLength(1);
+
+      const calls = bindingsOfKind(method.body, 'call');
+      const computeStateOutput = calls.find(b => (b.value as { func: string }).func === 'computeStateOutput');
+      expect(computeStateOutput).toBeDefined();
+
+      // The continuation hash composition must include the data output between
+      // the state output and the change output.
+      const cats = calls.filter(b => (b.value as { func: string }).func === 'cat');
+      expect(cats.length).toBeGreaterThanOrEqual(2);
+      const dataRef = bindingsOfKind(method.body, 'add_data_output')[0]!.name;
+      const firstCatArgs = (cats[0]!.value as { args: string[] }).args;
+      expect(firstCatArgs).toContain(dataRef);
+
+      // _newAmount must be present (single-output continuation needs it)
+      const newAmountParam = method.params.find(p => p.name === '_newAmount');
+      expect(newAmountParam).toBeDefined();
+    });
+
+    it('supports addDataOutput on non-mutating methods', () => {
+      // A method that emits a data output but does NOT mutate state: we still
+      // commit the (unchanged) contract state continuation + the data output +
+      // change. _newAmount is injected so the output value can be adjusted.
+      const source = `
+        class Counter extends StatefulSmartContract {
+          count: bigint;
+          constructor(count: bigint) {
+            super(count);
+            this.count = count;
+          }
+          public ping(payload: ByteString) {
+            this.addDataOutput(0n, payload);
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'ping');
+
+      expect(bindingsOfKind(method.body, 'add_data_output')).toHaveLength(1);
+      // _changePKH / _changeAmount must be present
+      expect(method.params.find(p => p.name === '_changePKH')).toBeDefined();
+      expect(method.params.find(p => p.name === '_changeAmount')).toBeDefined();
+      // _newAmount must be present
+      expect(method.params.find(p => p.name === '_newAmount')).toBeDefined();
+    });
+
     it('does not affect regular SmartContract methods', () => {
       const source = `
         class C extends SmartContract {

@@ -896,7 +896,7 @@ impl<'a> TypeChecker<'a> {
                 return BYTESTRING.to_string();
             }
 
-            if property == "addOutput" || property == "addRawOutput" {
+            if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
                 for arg in args {
                     self.infer_expr_type(arg, env);
                 }
@@ -935,7 +935,7 @@ impl<'a> TypeChecker<'a> {
                     return BYTESTRING.to_string();
                 }
 
-                if property == "addOutput" || property == "addRawOutput" {
+                if property == "addOutput" || property == "addRawOutput" || property == "addDataOutput" {
                     for arg in args {
                         self.infer_expr_type(arg, env);
                     }

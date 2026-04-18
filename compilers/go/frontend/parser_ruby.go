@@ -517,8 +517,9 @@ var rbSpecialNames = map[string]string{
 	"verify_ecdsa_p384":      "verifyECDSA_P384",
 
 	// Intrinsics
-	"add_output":     "addOutput",
-	"add_raw_output": "addRawOutput",
+	"add_output":      "addOutput",
+	"add_raw_output":  "addRawOutput",
+	"add_data_output": "addDataOutput",
 	"get_state_script": "getStateScript",
 
 	// SHA-256 partial verification
@@ -864,6 +865,7 @@ func (p *rbParser) parseContract() (*ContractNode, error) {
 	// Intrinsic methods that must also be rewritten to property_access style.
 	methodNames["addOutput"] = true
 	methodNames["addRawOutput"] = true
+	methodNames["addDataOutput"] = true
 	methodNames["getStateScript"] = true
 	for i := range methods {
 		rewriteBareMethodCallsGo(methods[i].Body, methodNames)

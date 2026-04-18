@@ -175,7 +175,7 @@ fn parseBinding(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u3
 const KindTag = enum {
     load_param, load_prop, load_const, bin_op, unary_op, call, method_call,
     @"if", loop, assert, update_prop, get_state_script, check_preimage,
-    deserialize_state, add_output, add_raw_output, array_literal,
+    deserialize_state, add_output, add_raw_output, add_data_output, array_literal,
 };
 
 const kind_map = std.StaticStringMap(KindTag).initComptime(.{
@@ -195,6 +195,7 @@ const kind_map = std.StaticStringMap(KindTag).initComptime(.{
     .{ "deserialize_state", .deserialize_state },
     .{ "add_output", .add_output },
     .{ "add_raw_output", .add_raw_output },
+    .{ "add_data_output", .add_data_output },
     .{ "array_literal", .array_literal },
 });
 
@@ -229,6 +230,7 @@ fn parseANFValue(allocator: std.mem.Allocator, obj: std.json.ObjectMap, depth: u
         } },
         .add_output => try parseAddOutput(allocator, obj),
         .add_raw_output => try parseAddRawOutput(allocator, obj),
+        .add_data_output => try parseAddDataOutput(allocator, obj),
         .array_literal => .{ .array_literal = .{
             .elements = try parseStringArray(allocator, obj, "elements"),
         } },
@@ -390,6 +392,16 @@ fn parseAddRawOutput(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !typ
     const script_bytes = try getString(obj, "scriptBytes");
 
     return .{ .add_raw_output = .{
+        .satoshis = try allocator.dupe(u8, satoshis),
+        .script_bytes = try allocator.dupe(u8, script_bytes),
+    } };
+}
+
+fn parseAddDataOutput(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ANFValue {
+    const satoshis = try getString(obj, "satoshis");
+    const script_bytes = try getString(obj, "scriptBytes");
+
+    return .{ .add_data_output = .{
         .satoshis = try allocator.dupe(u8, satoshis),
         .script_bytes = try allocator.dupe(u8, script_bytes),
     } };
@@ -974,6 +986,32 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
             try writeJsonString(writer, "scriptBytes");
             try writer.writeAll(": ");
             try writeJsonString(writer, aro.script_bytes);
+            try writer.writeByte('\n');
+
+            try writeIndent(writer, depth);
+            try writer.writeByte('}');
+        },
+        .add_data_output => |ado| {
+            try writer.writeAll("{\n");
+            // Sorted keys: kind, satoshis, scriptBytes. Wire shape identical to
+            // add_raw_output; distinguished only by position in the
+            // continuation-hash concatenation.
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "kind");
+            try writer.writeAll(": ");
+            try writeJsonString(writer, "add_data_output");
+            try writer.writeAll(",\n");
+
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "satoshis");
+            try writer.writeAll(": ");
+            try writeJsonString(writer, ado.satoshis);
+            try writer.writeAll(",\n");
+
+            try writeIndent(writer, depth + 1);
+            try writeJsonString(writer, "scriptBytes");
+            try writer.writeAll(": ");
+            try writeJsonString(writer, ado.script_bytes);
             try writer.writeByte('\n');
 
             try writeIndent(writer, depth);

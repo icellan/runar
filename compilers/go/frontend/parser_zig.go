@@ -745,6 +745,7 @@ func (p *zigParser) tryParseContractDecl() *ContractNode {
 	}
 	methodNames["addOutput"] = true
 	methodNames["addRawOutput"] = true
+	methodNames["addDataOutput"] = true
 	methodNames["getStateScript"] = true
 	for i := range methods {
 		rewriteBareMethodCallsGo(methods[i].Body, methodNames)
@@ -1659,7 +1660,7 @@ func (p *zigParser) parsePostfixChain(expr Expression) Expression {
 				expr = PropertyAccessExpr{Property: prop}
 			} else if ident, ok := expr.(Identifier); ok && p.statefulContextNames[ident.Name] {
 				// StatefulContext member access -> PropertyAccessExpr for intrinsics
-				if prop == "txPreimage" || prop == "getStateScript" || prop == "addOutput" || prop == "addRawOutput" {
+				if prop == "txPreimage" || prop == "getStateScript" || prop == "addOutput" || prop == "addRawOutput" || prop == "addDataOutput" {
 					expr = PropertyAccessExpr{Property: prop}
 				} else {
 					expr = MemberExpr{Object: expr, Property: prop}

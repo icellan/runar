@@ -112,6 +112,7 @@ module RunarCompiler
       "ec_point_y"                   => "ecPointY",
       "add_output"                   => "addOutput",
       "add_raw_output"               => "addRawOutput",
+      "add_data_output"              => "addDataOutput",
       "get_state_script"             => "getStateScript",
       "extract_locktime"             => "extractLocktime",
       "extract_output_hash"          => "extractOutputHash",

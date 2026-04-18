@@ -243,11 +243,13 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
             # Determine if this method verifies hashOutputs (needs change output support).
-            # Methods that use addOutput or mutate state need hashOutputs verification.
-            # Non-mutating methods (like close/destroy) don't verify outputs.
+            # Methods that use addOutput/addDataOutput or mutate state need hashOutputs
+            # verification. Non-mutating methods (like close/destroy) don't verify outputs.
+            has_data_output = _method_has_add_data_output(method)
             needs_change_output = (
                 _method_mutates_state(method, contract)
                 or _method_has_add_output(method)
+                or has_data_output
             )
 
             # Register implicit parameters
@@ -256,7 +258,12 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                 method_ctx.add_param("_changeAmount")
             # Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
             # Multi-output (addOutput) methods already specify amounts explicitly per output.
-            needs_new_amount = _method_mutates_state(method, contract) and not _method_has_add_output(method)
+            # Methods that emit only data outputs (no addOutput) still run the single-output
+            # continuation path for their state continuation, so they also need _newAmount.
+            needs_new_amount = (
+                (_method_mutates_state(method, contract) or has_data_output)
+                and not _method_has_add_output(method)
+            )
             if needs_new_amount:
                 method_ctx.add_param("_newAmount")
             method_ctx.add_param("txPreimage")
@@ -275,19 +282,36 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # Lower the developer's method body
             method_ctx.lower_statements(method.body)
 
-            # Determine state continuation type
+            # Determine state continuation type.
+            #
+            # === Continuation-hash construction ===
+            #
+            # Outputs are concatenated in the following order before hashing
+            # with hash256:
+            #   1. state outputs  (addOutput / addRawOutput, via addOutputRef)
+            #   2. data outputs   (addDataOutput, via addDataOutputRef)
+            #   3. change output  (P2PKH to _changePKH, value = _changeAmount)
+            #
+            # For the "single-output" fast path (no addOutput, but state mutates
+            # or a data output is emitted), the state output is computed on the
+            # fly from (preimage, stateScript, _newAmount); data outputs are
+            # inserted BETWEEN the single state output and the change output.
             add_output_refs = method_ctx.get_add_output_refs()
-            if add_output_refs or _method_mutates_state(method, contract):
+            add_data_output_refs = method_ctx.get_add_data_output_refs()
+            if add_output_refs or add_data_output_refs or _method_mutates_state(method, contract):
                 # Build the P2PKH change output for hashOutputs verification
                 change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
                 change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
                 change_output_ref = method_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
 
                 if add_output_refs:
-                    # Multi-output continuation: concat all outputs + change output, hash
+                    # Multi-output continuation: concat all state outputs, then
+                    # all data outputs, then change output, then hash.
                     accumulated = add_output_refs[0]
                     for i in range(1, len(add_output_refs)):
                         accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
+                    for data_ref in add_data_output_refs:
+                        accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
                     accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
                     hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
@@ -299,12 +323,17 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
                     ))
                     method_ctx.emit(_make_assert(eq_ref))
                 else:
-                    # Single-output continuation: build raw output bytes, concat with change, hash
+                    # Single-output continuation: build raw output bytes, then
+                    # splice in any declared data outputs, then concat with
+                    # change, then hash.
                     state_script_ref = method_ctx.emit(ANFValue(kind="get_state_script"))
                     preimage_ref2 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     new_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_newAmount"))
                     contract_output_ref = method_ctx.emit(_make_call("computeStateOutput", [preimage_ref2, state_script_ref, new_amount_ref]))
-                    all_outputs = method_ctx.emit(_make_call("cat", [contract_output_ref, change_output_ref]))
+                    accumulated = contract_output_ref
+                    for data_ref in add_data_output_refs:
+                        accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
+                    all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
                     hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
                     preimage_ref4 = method_ctx.emit(ANFValue(kind="load_param", name="txPreimage"))
                     output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
@@ -368,6 +397,7 @@ class _LowerCtx:
         self._local_names: set[str] = set()
         self._param_names: set[str] = set()
         self._add_output_refs: list[str] = []
+        self._add_data_output_refs: list[str] = []
         self._local_aliases: dict[str, str] = {}
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
@@ -414,6 +444,14 @@ class _LowerCtx:
 
     def get_add_output_refs(self) -> list[str]:
         return self._add_output_refs
+
+    def add_data_output_ref(self, ref: str) -> None:
+        """Track an addDataOutput binding ref -- distinct from state outputs."""
+        self._add_data_output_refs.append(ref)
+
+    def get_add_data_output_refs(self) -> list[str]:
+        """Get all addDataOutput refs collected during lowering."""
+        return self._add_data_output_refs
 
     def is_property(self, name: str) -> bool:
         return any(p.name == name for p in self._contract.properties)
@@ -563,6 +601,8 @@ class _LowerCtx:
         # (only one branch executes at runtime).
         then_has_outputs = bool(then_ctx.get_add_output_refs())
         else_has_outputs = bool(else_ctx.get_add_output_refs())
+        then_has_data = bool(then_ctx.get_add_data_output_refs())
+        else_has_data = bool(else_ctx.get_add_data_output_refs())
 
         if_name = self.emit(ANFValue(
             kind="if",
@@ -573,6 +613,8 @@ class _LowerCtx:
 
         if then_has_outputs or else_has_outputs:
             self.add_output_ref(if_name)
+        if then_has_data or else_has_data:
+            self.add_data_output_ref(if_name)
 
         # If both branches end by reassigning the same local variable,
         # alias that variable to the if-expression result
@@ -776,6 +818,17 @@ class _LowerCtx:
             self.add_output_ref(ref)
             return ref
 
+        # this.addDataOutput(satoshis, scriptBytes) via PropertyAccessExpr. Like
+        # addRawOutput in wire shape, but included in the continuation hash
+        # AFTER state outputs and BEFORE the change output.
+        if isinstance(callee, PropertyAccessExpr) and callee.property == "addDataOutput":
+            arg_refs = self._lower_args(e.args)
+            satoshis = arg_refs[0]
+            script_bytes_ref = arg_refs[1]
+            ref = self.emit(ANFValue(kind="add_data_output", satoshis=satoshis, script_bytes=script_bytes_ref))
+            self.add_data_output_ref(ref)
+            return ref
+
         # this.addOutput(satoshis, val1, val2, ...) via MemberExpr
         if isinstance(callee, MemberExpr):
             if (
@@ -802,6 +855,20 @@ class _LowerCtx:
                 script_bytes_ref = arg_refs[1]
                 ref = self.emit(ANFValue(kind="add_raw_output", satoshis=satoshis, script_bytes=script_bytes_ref))
                 self.add_output_ref(ref)
+                return ref
+
+        # this.addDataOutput(satoshis, scriptBytes) via MemberExpr
+        if isinstance(callee, MemberExpr):
+            if (
+                isinstance(callee.object, Identifier)
+                and callee.object.name == "this"
+                and callee.property == "addDataOutput"
+            ):
+                arg_refs = self._lower_args(e.args)
+                satoshis = arg_refs[0]
+                script_bytes_ref = arg_refs[1]
+                ref = self.emit(ANFValue(kind="add_data_output", satoshis=satoshis, script_bytes=script_bytes_ref))
+                self.add_data_output_ref(ref)
                 return ref
 
         # this.getStateScript() via PropertyAccessExpr
@@ -1065,6 +1132,50 @@ def _expr_has_add_output(expr: Expression | None) -> bool:
             return True
         if isinstance(callee, MemberExpr):
             if isinstance(callee.object, Identifier) and callee.object.name == "this" and callee.property in ("addOutput", "addRawOutput"):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# addDataOutput detection (distinct from state outputs)
+# ---------------------------------------------------------------------------
+
+def _method_has_add_data_output(method) -> bool:
+    """Check if a method body contains any this.addDataOutput() calls."""
+    return _body_has_add_data_output(method.body)
+
+
+def _body_has_add_data_output(stmts: list[Statement]) -> bool:
+    return any(_stmt_has_add_data_output(stmt) for stmt in stmts)
+
+
+def _stmt_has_add_data_output(stmt: Statement) -> bool:
+    if isinstance(stmt, ExpressionStmt):
+        return _expr_has_add_data_output(stmt.expr)
+    if isinstance(stmt, IfStmt):
+        if _body_has_add_data_output(stmt.then):
+            return True
+        if stmt.else_ and _body_has_add_data_output(stmt.else_):
+            return True
+        return False
+    if isinstance(stmt, ForStmt):
+        return _body_has_add_data_output(stmt.body)
+    return False
+
+
+def _expr_has_add_data_output(expr: Expression | None) -> bool:
+    if expr is None:
+        return False
+    if isinstance(expr, CallExpr):
+        callee = expr.callee
+        if isinstance(callee, PropertyAccessExpr) and callee.property == "addDataOutput":
+            return True
+        if isinstance(callee, MemberExpr):
+            if (
+                isinstance(callee.object, Identifier)
+                and callee.object.name == "this"
+                and callee.property == "addDataOutput"
+            ):
                 return True
     return False
 

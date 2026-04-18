@@ -277,6 +277,13 @@ module Runar
       Digest::SHA256.hexdigest(raw)
     end
 
+    # Alias for sha256. Provides an explicitly-named spelling so cross-format
+    # contract sources that reference `Sha256Hash` (resolved by every parser
+    # to the `sha256` builtin) have a matching runtime function here too.
+    def sha256_hash(data)
+      sha256(data)
+    end
+
     # RIPEMD-160 hash. Input and output are hex-encoded strings.
     def ripemd160(data)
       raw = [data].pack('H*')

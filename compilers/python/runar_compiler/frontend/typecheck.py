@@ -664,6 +664,10 @@ class _TypeChecker:
                 for arg in e.args:
                     self._infer_expr_type(arg, env)
                 return "void"
+            if prop == "addDataOutput":
+                for arg in e.args:
+                    self._infer_expr_type(arg, env)
+                return "void"
             if prop in self.method_sigs:
                 return self._check_call_args(prop, self.method_sigs[prop], e.args, env)
             self._add_error(
@@ -688,6 +692,10 @@ class _TypeChecker:
                         self._infer_expr_type(arg, env)
                     return "void"
                 if e.callee.property == "addRawOutput":
+                    for arg in e.args:
+                        self._infer_expr_type(arg, env)
+                    return "void"
+                if e.callee.property == "addDataOutput":
                     for arg in e.args:
                         self._infer_expr_type(arg, env)
                     return "void"

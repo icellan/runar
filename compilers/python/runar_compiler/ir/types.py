@@ -151,7 +151,7 @@ class ANFValue:
     satoshis: str | None = None
     state_values: list[str] | None = None
 
-    # -- add_raw_output ----------------------------------------------------
+    # -- add_raw_output, add_data_output -----------------------------------
     script_bytes: str | None = None
 
     # -- array_literal -----------------------------------------------------

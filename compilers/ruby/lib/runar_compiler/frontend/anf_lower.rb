@@ -169,9 +169,13 @@ module RunarCompiler
 
         if contract.parent_class == "StatefulSmartContract" && method.visibility == "public"
           # Determine if this method verifies hashOutputs (needs change output support).
+          # Methods that use addOutput / addDataOutput or mutate state need hashOutputs
+          # verification.
+          has_data_output = _method_has_add_data_output(method)
           needs_change_output = (
             _method_mutates_state(method, contract) ||
-            _method_has_add_output(method)
+            _method_has_add_output(method) ||
+            has_data_output
           )
 
           # Register implicit parameters
@@ -180,7 +184,11 @@ module RunarCompiler
             method_ctx.add_param("_changeAmount")
           end
           # Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
-          needs_new_amount = _method_mutates_state(method, contract) && !_method_has_add_output(method)
+          # Methods that emit only data outputs (no addOutput) still run the
+          # single-output continuation path for their state continuation, so
+          # they also need _newAmount.
+          needs_new_amount = (_method_mutates_state(method, contract) || has_data_output) &&
+                             !_method_has_add_output(method)
           if needs_new_amount
             method_ctx.add_param("_newAmount")
           end
@@ -201,19 +209,37 @@ module RunarCompiler
           # Lower the developer's method body
           method_ctx.lower_statements(method.body)
 
-          # Determine state continuation type
+          # Determine state continuation type.
+          #
+          # === Continuation-hash construction ===
+          #
+          # Outputs are concatenated in the following order before hashing
+          # with hash256:
+          #   1. state outputs  (addOutput / addRawOutput, via addOutputRef)
+          #   2. data outputs   (addDataOutput, via addDataOutputRef)
+          #   3. change output  (P2PKH to _changePKH, value = _changeAmount)
+          #
+          # For the "single-output" fast path (no addOutput, but state mutates
+          # or a data output is emitted), the state output is computed on the
+          # fly from (preimage, stateScript, _newAmount); data outputs are
+          # inserted BETWEEN the single state output and the change output.
           add_output_refs = method_ctx.get_add_output_refs
-          if add_output_refs.any? || _method_mutates_state(method, contract)
+          add_data_output_refs = method_ctx.get_add_data_output_refs
+          if add_output_refs.any? || add_data_output_refs.any? || _method_mutates_state(method, contract)
             # Build the P2PKH change output for hashOutputs verification
             change_pkh_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changePKH" })
             change_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_changeAmount" })
             change_output_ref = method_ctx.emit(_make_call("buildChangeOutput", [change_pkh_ref, change_amount_ref]))
 
             if add_output_refs.any?
-              # Multi-output continuation: concat all outputs + change output, hash
+              # Multi-output continuation: concat all state outputs, then all
+              # data outputs, then change output, then hash.
               accumulated = add_output_refs[0]
               (1...add_output_refs.length).each do |i|
                 accumulated = method_ctx.emit(_make_call("cat", [accumulated, add_output_refs[i]]))
+              end
+              add_data_output_refs.each do |data_ref|
+                accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
               end
               accumulated = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
               hash_ref = method_ctx.emit(_make_call("hash256", [accumulated]))
@@ -227,12 +253,18 @@ module RunarCompiler
               end)
               method_ctx.emit(_make_assert(eq_ref))
             else
-              # Single-output continuation: build raw output bytes, concat with change, hash
+              # Single-output continuation: build raw output bytes, then
+              # splice in any declared data outputs, then concat with
+              # change, then hash.
               state_script_ref = method_ctx.emit(IR::ANFValue.new(kind: "get_state_script"))
               preimage_ref2 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               new_amount_ref = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "_newAmount" })
               contract_output_ref = method_ctx.emit(_make_call("computeStateOutput", [preimage_ref2, state_script_ref, new_amount_ref]))
-              all_outputs = method_ctx.emit(_make_call("cat", [contract_output_ref, change_output_ref]))
+              accumulated = contract_output_ref
+              add_data_output_refs.each do |data_ref|
+                accumulated = method_ctx.emit(_make_call("cat", [accumulated, data_ref]))
+              end
+              all_outputs = method_ctx.emit(_make_call("cat", [accumulated, change_output_ref]))
               hash_ref = method_ctx.emit(_make_call("hash256", [all_outputs]))
               preimage_ref4 = method_ctx.emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = "txPreimage" })
               output_hash_ref = method_ctx.emit(_make_call("extractOutputHash", [preimage_ref4]))
@@ -318,6 +350,7 @@ module RunarCompiler
         @local_names = Set.new
         @param_names = Set.new
         @add_output_refs = []
+        @add_data_output_refs = []
         @local_aliases = {}
         @local_byte_vars = Set.new
         @current_source_loc = nil
@@ -390,6 +423,18 @@ module RunarCompiler
       # @return [Array<String>]
       def get_add_output_refs
         @add_output_refs
+      end
+
+      # Track an addDataOutput reference -- distinct from state outputs.
+      # Data outputs are included in the continuation hash AFTER state
+      # outputs and BEFORE the change output.
+      def add_data_output_ref(ref)
+        @add_data_output_refs << ref
+      end
+
+      # @return [Array<String>]
+      def get_add_data_output_refs
+        @add_data_output_refs
       end
 
       # Flatten addOutput args: if the second arg is an array literal,
@@ -666,6 +711,11 @@ module RunarCompiler
         # Propagate addOutput refs from sub-contexts
         then_has_outputs = then_ctx.get_add_output_refs.any?
         else_has_outputs = else_ctx.get_add_output_refs.any?
+        # Propagate addDataOutput refs from sub-contexts -- data outputs
+        # declared inside a branch must contribute to the continuation hash
+        # via the if-expression result.
+        then_has_data = then_ctx.get_add_data_output_refs.any?
+        else_has_data = else_ctx.get_add_data_output_refs.any?
 
         if_name = emit(IR::ANFValue.new(kind: "if").tap do |v|
           v.cond = cond_ref
@@ -675,6 +725,9 @@ module RunarCompiler
 
         if then_has_outputs || else_has_outputs
           add_output_ref(if_name)
+        end
+        if then_has_data || else_has_data
+          add_data_output_ref(if_name)
         end
 
         # If both branches end by reassigning the same local variable,
@@ -818,6 +871,21 @@ module RunarCompiler
           return ref
         end
 
+        # this.addDataOutput(satoshis, scriptBytes) via PropertyAccessExpr. Like
+        # addRawOutput in wire shape, but included in the continuation hash
+        # AFTER state outputs and BEFORE the change output.
+        if callee.is_a?(PropertyAccessExpr) && callee.property == "addDataOutput"
+          arg_refs = _lower_args(e.args)
+          satoshis = arg_refs[0]
+          script_bytes_ref = arg_refs[1]
+          ref = emit(IR::ANFValue.new(kind: "add_data_output").tap do |v|
+            v.satoshis = satoshis
+            v.script_bytes = script_bytes_ref
+          end)
+          add_data_output_ref(ref)
+          return ref
+        end
+
         # this.addOutput(satoshis, val1, val2, ...) via MemberExpr
         if callee.is_a?(MemberExpr) &&
            callee.object.is_a?(Identifier) &&
@@ -849,6 +917,22 @@ module RunarCompiler
             v.script_bytes = script_bytes_ref
           end)
           add_output_ref(ref)
+          return ref
+        end
+
+        # this.addDataOutput(satoshis, scriptBytes) via MemberExpr
+        if callee.is_a?(MemberExpr) &&
+           callee.object.is_a?(Identifier) &&
+           callee.object.name == "this" &&
+           callee.property == "addDataOutput"
+          arg_refs = _lower_args(e.args)
+          satoshis = arg_refs[0]
+          script_bytes_ref = arg_refs[1]
+          ref = emit(IR::ANFValue.new(kind: "add_data_output").tap do |v|
+            v.satoshis = satoshis
+            v.script_bytes = script_bytes_ref
+          end)
+          add_data_output_ref(ref)
           return ref
         end
 
@@ -1191,6 +1275,63 @@ module RunarCompiler
     private_class_method :_expr_has_add_output
 
     # -------------------------------------------------------------------
+    # addDataOutput detection (distinct from state outputs)
+    # -------------------------------------------------------------------
+
+    # Check if a method body contains any this.addDataOutput() calls.
+    def self._method_has_add_data_output(method)
+      _body_has_add_data_output(method.body)
+    end
+    private_class_method :_method_has_add_data_output
+
+    # @param stmts [Array<Statement>]
+    # @return [Boolean]
+    def self._body_has_add_data_output(stmts)
+      stmts.any? { |stmt| _stmt_has_add_data_output(stmt) }
+    end
+    private_class_method :_body_has_add_data_output
+
+    # @param stmt [Statement]
+    # @return [Boolean]
+    def self._stmt_has_add_data_output(stmt)
+      if stmt.is_a?(ExpressionStmt)
+        return _expr_has_add_data_output(stmt.expr)
+      end
+      if stmt.is_a?(IfStmt)
+        return true if _body_has_add_data_output(stmt.then)
+        if stmt.else_ && stmt.else_.any?
+          return true if _body_has_add_data_output(stmt.else_)
+        end
+        return false
+      end
+      if stmt.is_a?(ForStmt)
+        return _body_has_add_data_output(stmt.body)
+      end
+      false
+    end
+    private_class_method :_stmt_has_add_data_output
+
+    # @param expr [Expression, nil]
+    # @return [Boolean]
+    def self._expr_has_add_data_output(expr)
+      return false if expr.nil?
+      if expr.is_a?(CallExpr)
+        callee = expr.callee
+        if callee.is_a?(PropertyAccessExpr) && callee.property == "addDataOutput"
+          return true
+        end
+        if callee.is_a?(MemberExpr) &&
+           callee.object.is_a?(Identifier) &&
+           callee.object.name == "this" &&
+           callee.property == "addDataOutput"
+          return true
+        end
+      end
+      false
+    end
+    private_class_method :_expr_has_add_data_output
+
+    # -------------------------------------------------------------------
     # Loop count extraction
     # -------------------------------------------------------------------
 
@@ -1461,6 +1602,11 @@ module RunarCompiler
         new_v.preimage = r.call(value.preimage)
         new_v
       when "add_raw_output"
+        new_v = _clone_anf_value(value)
+        new_v.satoshis = r.call(value.satoshis)
+        new_v.script_bytes = r.call(value.script_bytes)
+        new_v
+      when "add_data_output"
         new_v = _clone_anf_value(value)
         new_v.satoshis = r.call(value.satoshis)
         new_v.script_bytes = r.call(value.script_bytes)
