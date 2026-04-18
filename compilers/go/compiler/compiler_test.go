@@ -1227,3 +1227,127 @@ func truncate(s string, maxLen int) string {
 	}
 	return s
 }
+
+// ---------------------------------------------------------------------------
+// Test: Large bigint literals (> 2^63) — Fix GO-1 in GAP-FIX-PLAN.md
+//
+// Bitcoin Script natively supports arbitrary-precision integers through
+// variable-length encoding. This test verifies the Go compiler accepts
+// literals outside the int64 range and produces the byte-identical hex
+// that the TypeScript reference compiler produces.
+//
+// Reference hex values below were produced by running the TypeScript
+// compiler against the same source string.
+// ---------------------------------------------------------------------------
+
+func TestCompile_LargeBigIntLiteral(t *testing.T) {
+	// 2^64 = 18446744073709551616 — one past max uint64, and far past max int64.
+	// TS emits the script as:
+	//   <9-byte LE: 00 00 00 00 00 00 00 00 01> OP_GREATERTHANOREQUAL
+	//   Push hex:     09000000000000000001
+	//   Opcode:       a2 (OP_GREATERTHANOREQUAL)
+	source := `import { SmartContract, assert } from 'runar-lang';
+
+export class BigLit extends SmartContract {
+  readonly threshold: bigint;
+
+  constructor(threshold: bigint) {
+    super();
+    this.threshold = threshold;
+  }
+
+  public unlock(val: bigint): void {
+    assert(val >= 18446744073709551616n, 'too small');
+  }
+}`
+
+	result := CompileFromSourceStrWithResult(source, "BigLit.runar.ts")
+	if !result.Success {
+		t.Fatalf("compile failed for 2^64 literal: %v", result.Diagnostics)
+	}
+
+	// The script must contain a 9-byte LE encoding of 2^64 followed by
+	// OP_GREATERTHANOREQUAL (0xa2). We look for the exact substring so
+	// the test is robust against surrounding method-entry preambles that
+	// might change in the future.
+	wantSub := "09000000000000000001a2"
+	if !strings.Contains(result.ScriptHex, wantSub) {
+		t.Errorf("expected script hex to contain %q (push of 2^64 followed by OP_GREATERTHANOREQUAL), got:\n  %s",
+			wantSub, result.ScriptHex)
+	}
+}
+
+func TestCompile_LargeBigIntLiteral_AgainstTSHex(t *testing.T) {
+	// Exact byte-identity assertion against the TypeScript reference output.
+	// TS was run with the same source and produced the full script
+	//   0x09000000000000000001a2
+	// (no method dispatch because only one public method).
+	//
+	// The Go compiler must produce the same bytes.
+	source := `import { SmartContract, assert } from 'runar-lang';
+
+export class BigLit extends SmartContract {
+  readonly threshold: bigint;
+
+  constructor(threshold: bigint) {
+    super();
+    this.threshold = threshold;
+  }
+
+  public unlock(val: bigint): void {
+    assert(val >= 18446744073709551616n, 'too small');
+  }
+}`
+
+	result := CompileFromSourceStrWithResult(source, "BigLit.runar.ts",
+		CompileOptions{DisableConstantFolding: true})
+	if !result.Success {
+		t.Fatalf("compile failed for 2^64 literal: %v", result.Diagnostics)
+	}
+
+	// The reference value was produced by the TypeScript compiler (Pass 6 emit).
+	wantHex := "09000000000000000001a2"
+	if result.ScriptHex != wantHex {
+		t.Errorf("script hex does not match TypeScript output\n  want: %s\n  got:  %s",
+			wantHex, result.ScriptHex)
+	}
+}
+
+// TestCompile_MassiveBigIntLiteral exercises a literal that cannot possibly
+// fit in int64 (a secp256k1-sized field constant).
+func TestCompile_MassiveBigIntLiteral(t *testing.T) {
+	// secp256k1 field prime:
+	//   2^256 - 2^32 - 977 = 115792089237316195423570985008687907853269984665640564039457584007908834671663
+	source := `import { SmartContract, assert } from 'runar-lang';
+
+export class FieldCheck extends SmartContract {
+  readonly p: bigint;
+
+  constructor(p: bigint) {
+    super();
+    this.p = p;
+  }
+
+  public unlock(x: bigint): void {
+    assert(x < 115792089237316195423570985008687907853269984665640564039457584007908834671663n, 'too big');
+  }
+}`
+
+	result := CompileFromSourceStrWithResult(source, "FieldCheck.runar.ts",
+		CompileOptions{DisableConstantFolding: true})
+	if !result.Success {
+		t.Fatalf("compile failed for secp256k1-field-prime literal: %v", result.Diagnostics)
+	}
+
+	// The pushed bytes are the 32-byte little-endian encoding of the prime,
+	// plus a trailing 0x00 for positivity (since the high byte 0xFF has the
+	// sign bit set). The push prefix is 0x21 (33 data bytes to follow).
+	// Reference value produced by the TypeScript compiler for the same source:
+	//   hex: 212ffcfffffeffffffffffffffffffffffffffffffffffffffffffffffffffffff009f
+	//   asm: <...> OP_LESSTHAN
+	wantHex := "212ffcfffffeffffffffffffffffffffffffffffffffffffffffffffffffffffff009f"
+	if strings.ToLower(result.ScriptHex) != wantHex {
+		t.Errorf("script hex does not match TypeScript output\n  want: %s\n  got:  %s",
+			wantHex, result.ScriptHex)
+	}
+}

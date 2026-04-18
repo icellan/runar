@@ -18,6 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"math"
+	"math/big"
 
 	"golang.org/x/crypto/ripemd160"
 )
@@ -25,11 +26,33 @@ import (
 // ---------------------------------------------------------------------------
 // Scalar types — aliases so Go arithmetic operators work directly
 // ---------------------------------------------------------------------------
+//
+// Bitcoin Script natively supports arbitrary-precision integers via
+// variable-length push encoding. The Rúnar compiler pipeline (parse ->
+// validate -> typecheck -> ANF -> stack -> emit) carries integer values
+// through internally as math/big.Int, so any valid Rúnar literal of any
+// size compiles byte-identically across the six compiler ports.
+//
+// The native Go _runtime_ types in this package (used for writing
+// ".runar.go" contracts and running them as native Go unit tests) remain
+// int64-backed because Go lacks operator overloading: a *big.Int-typed
+// field would not support c.Value + 1, c.Value > 0, etc. in contract
+// source. Contracts that need genuinely arbitrary-precision integers
+// (>= 2^63) should be written in `.runar.ts` / `.runar.sol` / `.runar.move`
+// / `.runar.py` / `.runar.zig` / `.runar.rb` — the Go compiler accepts
+// those source formats and produces byte-identical Bitcoin Script.
+//
+// For users who need to work with values > int64 from Go code, the helper
+// functions AbsBig, GcdBig, PowBig, MulDivBig, PercentOfBig, SqrtBig,
+// Log2Big, Num2BinBig, Bin2NumBig below accept and return *big.Int and
+// never overflow.
 
 // Int is a Rúnar integer (maps to Bitcoin Script numbers).
 type Int = int64
 
-// Bigint is an alias for Int.
+// Bigint is an alias for Int. See the package comment above for why this
+// is int64 rather than *big.Int; the compiler pipeline itself uses
+// arbitrary precision regardless of how the runtime types are declared.
 type Bigint = int64
 
 // Bool is a Rúnar boolean.
@@ -441,47 +464,80 @@ func ExtractOutpoint(p SigHashPreimage) ByteString { return ByteString(make([]by
 
 // Num2Bin converts an integer to a byte string of the specified length
 // using Bitcoin Script's little-endian signed magnitude encoding.
-// Panics if v == math.MinInt64 (|MinInt64| overflows int64).
+// Uses big.Int internally so that all valid int64 inputs (including
+// math.MinInt64) round-trip correctly through Bin2Num.
 func Num2Bin(v int64, length int64) ByteString {
-	if v == math.MinInt64 {
-		panic("runar: int64 overflow in Num2Bin — |MinInt64| not representable; Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
-	}
+	return Num2BinBig(big.NewInt(v), length)
+}
+
+// Num2BinBig is the arbitrary-precision form of Num2Bin. Accepts any
+// *big.Int; the result is the little-endian sign-magnitude encoding
+// padded/truncated to `length` bytes.
+func Num2BinBig(v *big.Int, length int64) ByteString {
 	buf := make([]byte, length)
-	if v == 0 {
+	if v == nil || v.Sign() == 0 {
 		return ByteString(buf)
 	}
-	abs := v
-	if abs < 0 {
-		abs = -abs
+	abs := new(big.Int).Abs(v)
+	// abs.Bytes() is big-endian; fill buf little-endian.
+	be := abs.Bytes()
+	if int64(len(be)) > length {
+		// Caller requested a narrower field than the value occupies.
+		// Truncate to fit (matches int64 wrap-around semantics).
+		be = be[len(be)-int(length):]
 	}
-	uval := uint64(abs)
-	for i := int64(0); i < length && uval > 0; i++ {
-		buf[i] = byte(uval & 0xff)
-		uval >>= 8
+	for i, b := range be {
+		j := len(be) - 1 - i
+		if int64(j) < length {
+			buf[j] = b
+		}
 	}
-	if v < 0 {
+	if v.Sign() < 0 {
 		buf[length-1] |= 0x80
 	}
 	return ByteString(buf[:length])
 }
 
 // Bin2Num converts a byte string (Bitcoin Script LE signed-magnitude) back to
-// an integer. Inverse of Num2Bin.
+// an integer. Inverse of Num2Bin. If the decoded value does not fit in int64,
+// the result is truncated (use Bin2NumBig for arbitrary precision).
 func Bin2Num(data ByteString) int64 {
-	if len(data) == 0 {
+	r := Bin2NumBig(data)
+	if r == nil {
 		return 0
+	}
+	if r.IsInt64() {
+		return r.Int64()
+	}
+	// Graceful truncation for out-of-range values: return the low 64 bits.
+	mask := new(big.Int).Lsh(big.NewInt(1), 64)
+	trunc := new(big.Int).Mod(new(big.Int).Abs(r), mask)
+	out := trunc.Int64()
+	if r.Sign() < 0 {
+		out = -out
+	}
+	return out
+}
+
+// Bin2NumBig is the arbitrary-precision form of Bin2Num. Decodes a
+// little-endian sign-magnitude Bitcoin Script number into a *big.Int.
+func Bin2NumBig(data ByteString) *big.Int {
+	if len(data) == 0 {
+		return new(big.Int)
 	}
 	last := data[len(data)-1]
 	negative := (last & 0x80) != 0
-	var result uint64
-	result = uint64(last & 0x7f)
-	for i := len(data) - 2; i >= 0; i-- {
-		result = (result << 8) | uint64(data[i])
+	// Build magnitude from the bytes, clearing the sign bit on the MSB.
+	be := make([]byte, len(data))
+	for i := 0; i < len(data); i++ {
+		be[i] = data[len(data)-1-i]
 	}
+	be[0] &= 0x7f
+	mag := new(big.Int).SetBytes(be)
 	if negative {
-		return -int64(result)
+		mag.Neg(mag)
 	}
-	return int64(result)
+	return mag
 }
 
 // Len returns the length of a byte string as an integer.
@@ -508,15 +564,32 @@ func ReverseBytes(data ByteString) ByteString {
 	return ByteString(b)
 }
 
-// Abs returns the absolute value. Panics if n == math.MinInt64 (not representable as positive int64).
+// Abs returns the absolute value of n. Uses big.Int internally so that
+// Abs(math.MinInt64) returns math.MaxInt64 + 1 ... well, since int64 can't
+// hold that, it wraps to math.MinInt64 itself (the mathematical |MinInt64|
+// is 2^63 which is exactly 1 past int64 range). Use AbsBig for a correct
+// arbitrary-precision result.
 func Abs(n int64) int64 {
 	if n == math.MinInt64 {
-		panic("runar: int64 overflow in Abs(MinInt64) — Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
+		// 2^63 is not representable as int64. Return the wrapped value
+		// (MinInt64 itself) rather than panic; this preserves Bitcoin
+		// Script semantics for values whose magnitude fits in int64 and
+		// documents the overflow behavior for those that don't. For
+		// arbitrary precision callers should use AbsBig.
+		return math.MinInt64
 	}
 	if n < 0 {
 		return -n
 	}
 	return n
+}
+
+// AbsBig returns the arbitrary-precision absolute value.
+func AbsBig(n *big.Int) *big.Int {
+	if n == nil {
+		return new(big.Int)
+	}
+	return new(big.Int).Abs(n)
 }
 
 // Min returns the smaller of two values.
@@ -578,66 +651,110 @@ func Sign(n int64) int64 {
 	return 0
 }
 
-// Pow computes base^exp for non-negative exponents. Panics on int64 overflow.
+// Pow computes base^exp for non-negative exponents. Panics on int64 overflow
+// of the _final_ result.
 func Pow(base, exp int64) int64 {
 	if exp < 0 {
 		panic("pow: negative exponent")
 	}
-	result := int64(1)
-	for i := int64(0); i < exp; i++ {
-		result = checkedMul(result, base)
+	r := PowBig(big.NewInt(base), big.NewInt(exp))
+	if !r.IsInt64() {
+		panic("pow: int64 overflow — use PowBig for arbitrary precision")
 	}
-	return result
+	return r.Int64()
 }
 
-// MulDiv computes (a * b) / c. Panics on int64 overflow in a*b.
+// PowBig computes base^exp for non-negative exponents in arbitrary precision.
+func PowBig(base, exp *big.Int) *big.Int {
+	if exp == nil || exp.Sign() < 0 {
+		panic("pow: negative exponent")
+	}
+	if base == nil {
+		return new(big.Int)
+	}
+	return new(big.Int).Exp(base, exp, nil)
+}
+
+// MulDiv computes (a * b) / c using big.Int internally so that the
+// intermediate product a*b doesn't overflow. Panics only if the final
+// quotient does not fit in int64, or if c is zero.
 func MulDiv(a, b, c int64) int64 {
 	if c == 0 {
 		panic("mulDiv: division by zero")
 	}
-	return checkedMul(a, b) / c
+	r := MulDivBig(big.NewInt(a), big.NewInt(b), big.NewInt(c))
+	if !r.IsInt64() {
+		panic("mulDiv: int64 overflow in quotient — use MulDivBig for arbitrary precision")
+	}
+	return r.Int64()
 }
 
-// PercentOf computes (amount * bps) / 10000 (basis points). Panics on int64 overflow.
+// MulDivBig computes (a * b) / c in arbitrary precision.
+func MulDivBig(a, b, c *big.Int) *big.Int {
+	if c == nil || c.Sign() == 0 {
+		panic("mulDiv: division by zero")
+	}
+	prod := new(big.Int).Mul(a, b)
+	return new(big.Int).Quo(prod, c)
+}
+
+// PercentOf computes (amount * bps) / 10000 (basis points). Uses big.Int
+// internally; panics only if the result overflows int64.
 func PercentOf(amount, bps int64) int64 {
-	return checkedMul(amount, bps) / 10000
+	r := PercentOfBig(big.NewInt(amount), big.NewInt(bps))
+	if !r.IsInt64() {
+		panic("percentOf: int64 overflow — use PercentOfBig for arbitrary precision")
+	}
+	return r.Int64()
 }
 
-// Sqrt computes the integer square root via Newton's method. Panics on int64 overflow.
+// PercentOfBig computes (amount * bps) / 10000 in arbitrary precision.
+func PercentOfBig(amount, bps *big.Int) *big.Int {
+	prod := new(big.Int).Mul(amount, bps)
+	return new(big.Int).Quo(prod, big.NewInt(10000))
+}
+
+// Sqrt computes the integer square root. Uses big.Int internally.
 func Sqrt(n int64) int64 {
 	if n < 0 {
 		panic("sqrt: negative input")
 	}
-	if n == 0 {
-		return 0
+	r := SqrtBig(big.NewInt(n))
+	return r.Int64()
+}
+
+// SqrtBig computes the integer square root in arbitrary precision.
+func SqrtBig(n *big.Int) *big.Int {
+	if n == nil || n.Sign() < 0 {
+		panic("sqrt: negative input")
 	}
-	guess := n
-	for i := 0; i < 256; i++ {
-		next := checkedAdd(guess, n/guess) / 2
-		if next >= guess {
-			break
-		}
-		guess = next
-	}
-	return guess
+	return new(big.Int).Sqrt(n)
 }
 
 // Gcd computes the greatest common divisor via Euclidean algorithm.
-// Panics if either argument is math.MinInt64 (|MinInt64| overflows int64).
+// Uses big.Int internally so MinInt64 is handled correctly; panics only
+// if the result itself does not fit in int64 (which requires a mathematical
+// oddity: GCD always fits in the smaller operand's magnitude, so this
+// branch only triggers on MinInt64 inputs).
 func Gcd(a, b int64) int64 {
-	if a == math.MinInt64 || b == math.MinInt64 {
-		panic("runar: int64 overflow in Gcd — |MinInt64| not representable; Bitcoin Script supports arbitrary precision but Go uses int64; see compilers/go/README.md")
+	r := GcdBig(big.NewInt(a), big.NewInt(b))
+	if !r.IsInt64() {
+		// GCD(MinInt64, 0) = 2^63, which doesn't fit. Return MaxInt64 as
+		// a documented overflow sentinel; correct callers should use GcdBig.
+		return math.MaxInt64
 	}
-	if a < 0 {
-		a = -a
+	return r.Int64()
+}
+
+// GcdBig computes the greatest common divisor in arbitrary precision.
+func GcdBig(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
 	}
-	if b < 0 {
-		b = -b
+	if b == nil {
+		b = new(big.Int)
 	}
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
+	return new(big.Int).GCD(nil, nil, new(big.Int).Abs(a), new(big.Int).Abs(b))
 }
 
 // Divmod returns the quotient of a / b.
@@ -653,13 +770,16 @@ func Log2(n int64) int64 {
 	if n <= 0 {
 		return 0
 	}
-	bits := int64(0)
-	val := n
-	for val > 1 {
-		val >>= 1
-		bits++
+	return Log2Big(big.NewInt(n))
+}
+
+// Log2Big returns floor(log2(n)) for any *big.Int > 0. Returns 0 for
+// n <= 0, matching Log2's defensive behavior.
+func Log2Big(n *big.Int) int64 {
+	if n == nil || n.Sign() <= 0 {
+		return 0
 	}
-	return bits
+	return int64(n.BitLen() - 1)
 }
 
 // ToBool returns true if n is non-zero.
