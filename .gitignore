@@ -32,3 +32,4 @@ tests/generate-vectors/bn254/runar-bn254-vectors
 .zig-global-cache/
 .zig-local-cache/
 zig-out/
+zig-pkg/
