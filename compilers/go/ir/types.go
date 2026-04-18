@@ -150,6 +150,126 @@ type ANFValue struct {
 	Elements []string `json:"elements,omitempty"`
 }
 
+// MarshalJSON emits only the fields relevant to v.Kind so the byte-level
+// output matches the canonical TypeScript ANF JSON shape (anf-ir.ts).
+//
+// The flat-struct layout of ANFValue does not map cleanly onto JSON tags
+// because each variant has its own set of required fields. Using
+// `omitempty` everywhere would silently elide fields that TS emits as
+// explicit empties (e.g. `"else": []` on an if without else, or
+// `"preimage": ""` on an add_output), breaking byte-identical conformance
+// against the golden files.
+func (v ANFValue) MarshalJSON() ([]byte, error) {
+	out := make(map[string]interface{}, 4)
+	out["kind"] = v.Kind
+
+	switch v.Kind {
+	case "load_param", "load_prop":
+		out["name"] = v.Name
+	case "load_const":
+		if len(v.RawValue) > 0 {
+			out["value"] = v.RawValue
+		} else {
+			out["value"] = nil
+		}
+	case "bin_op":
+		out["op"] = v.Op
+		out["left"] = v.Left
+		out["right"] = v.Right
+		if v.ResultType != "" {
+			out["result_type"] = v.ResultType
+		}
+	case "unary_op":
+		out["op"] = v.Op
+		out["operand"] = v.Operand
+		if v.ResultType != "" {
+			out["result_type"] = v.ResultType
+		}
+	case "call":
+		out["func"] = v.Func
+		if v.Args == nil {
+			out["args"] = []string{}
+		} else {
+			out["args"] = v.Args
+		}
+	case "method_call":
+		out["object"] = v.Object
+		out["method"] = v.Method
+		if v.Args == nil {
+			out["args"] = []string{}
+		} else {
+			out["args"] = v.Args
+		}
+	case "if":
+		out["cond"] = v.Cond
+		if v.Then == nil {
+			out["then"] = []ANFBinding{}
+		} else {
+			out["then"] = v.Then
+		}
+		if v.Else == nil {
+			out["else"] = []ANFBinding{}
+		} else {
+			out["else"] = v.Else
+		}
+	case "loop":
+		out["count"] = v.Count
+		out["iterVar"] = v.IterVar
+		if v.Body == nil {
+			out["body"] = []ANFBinding{}
+		} else {
+			out["body"] = v.Body
+		}
+	case "assert":
+		// Prefer the decoded ValueRef when populated by DecodeConstants;
+		// otherwise fall back to the raw JSON value for pre-decode round-trips.
+		if v.ValueRef != "" {
+			out["value"] = v.ValueRef
+		} else if len(v.RawValue) > 0 {
+			out["value"] = v.RawValue
+		} else {
+			out["value"] = ""
+		}
+	case "update_prop":
+		out["name"] = v.Name
+		if v.ValueRef != "" {
+			out["value"] = v.ValueRef
+		} else if len(v.RawValue) > 0 {
+			out["value"] = v.RawValue
+		} else {
+			out["value"] = ""
+		}
+	case "get_state_script":
+		// kind only
+	case "check_preimage", "deserialize_state":
+		out["preimage"] = v.Preimage
+	case "add_output":
+		out["preimage"] = v.Preimage
+		out["satoshis"] = v.Satoshis
+		if v.StateValues == nil {
+			out["stateValues"] = []string{}
+		} else {
+			out["stateValues"] = v.StateValues
+		}
+	case "add_raw_output":
+		out["satoshis"] = v.Satoshis
+		out["scriptBytes"] = v.ScriptBytes
+	case "array_literal":
+		if v.Elements == nil {
+			out["elements"] = []string{}
+		} else {
+			out["elements"] = v.Elements
+		}
+	default:
+		// Fall back to the struct-tag shape for any unknown kind so we
+		// don't silently drop fields while debugging new variants.
+		type anfValueAlias ANFValue
+		return json.Marshal(anfValueAlias(v))
+	}
+
+	return json.Marshal(out)
+}
+
 // DecodeConstants walks the program and decodes the RawValue fields in
 // load_const bindings into their typed Go representations, and extracts
 // the value reference string for assert/update_prop kinds.
