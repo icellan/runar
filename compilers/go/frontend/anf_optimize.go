@@ -95,26 +95,18 @@ func optimizeMethodEC(method *ir.ANFMethod) {
 
 // optimizeBindingECWithInserts is like optimizeBindingEC but also returns
 // any new bindings that should be inserted before the current binding.
+//
+// The actual rule set is loaded from optimizer/ec-rules.json (embedded via
+// go:embed in ec_rules_engine.go); this function simply delegates to the
+// generic rule engine. Adding a new rule to the JSON file makes it active
+// without any changes here, provided it's tagged "go" (or untagged) and
+// fits the engine's match/replace grammar.
 func optimizeBindingECWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
 	v := &b.Value
 	if v.Kind != "call" {
 		return nil, false
 	}
-
-	switch v.Func {
-	case "ecAdd":
-		return optimizeECAddWithInserts(b, lookup)
-	case "ecMul":
-		extra, ok := optimizeECMul(b, lookup)
-		return extra, ok
-	case "ecMulGen":
-		extra, ok := optimizeECMulGen(b, lookup)
-		return extra, ok
-	case "ecNegate":
-		extra, ok := optimizeECNegate(b, lookup)
-		return extra, ok
-	}
-	return nil, false
+	return applyECRules(b, lookup)
 }
 
 func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) bool {
@@ -122,11 +114,8 @@ func optimizeBindingEC(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) bool {
 	return ok
 }
 
-// ---------------------------------------------------------------------------
-// ecAdd optimizations
-// ---------------------------------------------------------------------------
-
 // nextTempName generates a unique temp binding name not already in lookup.
+// Used by the rule engine when emitting synthetic helper bindings.
 func nextTempName(base string, lookup map[string]*ir.ANFValue) string {
 	if _, exists := lookup[base]; !exists {
 		return base
@@ -139,236 +128,21 @@ func nextTempName(base string, lookup map[string]*ir.ANFValue) string {
 	}
 }
 
-func optimizeECAddWithInserts(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
-	v := &b.Value
-	if len(v.Args) != 2 {
-		return nil, false
-	}
-
-	arg0 := v.Args[0]
-	arg1 := v.Args[1]
-
-	// Rule 1: ecAdd(x, INFINITY) -> alias to x
-	if isInfinityRef(arg1, lookup) {
-		makeAlias(b, arg0)
-		return nil, true
-	}
-
-	// Rule 2: ecAdd(INFINITY, x) -> alias to x
-	if isInfinityRef(arg0, lookup) {
-		makeAlias(b, arg1)
-		return nil, true
-	}
-
-	// Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
-	neg1 := resolveValue(arg1, lookup)
-	if neg1 != nil && neg1.Kind == "call" && neg1.Func == "ecNegate" && len(neg1.Args) == 1 && neg1.Args[0] == arg0 {
-		makeInfinityConst(b)
-		return nil, true
-	}
-	// Also check reversed: ecAdd(ecNegate(x), x)
-	neg0 := resolveValue(arg0, lookup)
-	if neg0 != nil && neg0.Kind == "call" && neg0.Func == "ecNegate" && len(neg0.Args) == 1 && neg0.Args[0] == arg1 {
-		makeInfinityConst(b)
-		return nil, true
-	}
-
-	// Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen(k1+k2)
-	// When both k1 and k2 are compile-time constants, fold them directly.
-	// When they are runtime values, emit a new bin_op binding for k1+k2 and
-	// point the ecMulGen call at it.
-	v0 := resolveValue(arg0, lookup)
-	v1 := resolveValue(arg1, lookup)
-	if v0 != nil && v1 != nil &&
-		v0.Kind == "call" && v0.Func == "ecMulGen" && len(v0.Args) == 1 &&
-		v1.Kind == "call" && v1.Func == "ecMulGen" && len(v1.Args) == 1 {
-
-		k1Name := v0.Args[0]
-		k2Name := v1.Args[0]
-
-		// Try compile-time folding first
-		k1 := resolveConstBigInt(k1Name, lookup)
-		k2 := resolveConstBigInt(k2Name, lookup)
-		if k1 != nil && k2 != nil {
-			sum := new(big.Int).Add(k1, k2)
-			sum.Mod(sum, curveN)
-			// Emit a new load_const binding for the sum, then ecMulGen of it
-			sumName := nextTempName(b.Name+"_sum", lookup)
-			raw, _ := json.Marshal(sum.String())
-			sumBinding := ir.ANFBinding{
-				Name: sumName,
-				Value: ir.ANFValue{
-					Kind:        "load_const",
-					RawValue:    raw,
-					ConstBigInt: sum,
-				},
-			}
-			b.Value = ir.ANFValue{
-				Kind: "call",
-				Func: "ecMulGen",
-				Args: []string{sumName},
-			}
-			return []ir.ANFBinding{sumBinding}, true
-		}
-
-		// Runtime case: emit a bin_op for k1+k2 mod N, then ecMulGen of it.
-		sumName := nextTempName(b.Name+"_sum", lookup)
-		sumBinding := ir.ANFBinding{
-			Name: sumName,
-			Value: ir.ANFValue{
-				Kind:  "bin_op",
-				Op:    "+",
-				Left:  k1Name,
-				Right: k2Name,
-			},
-		}
-		b.Value = ir.ANFValue{
-			Kind: "call",
-			Func: "ecMulGen",
-			Args: []string{sumName},
-		}
-		return []ir.ANFBinding{sumBinding}, true
-	}
-
-	// Rule 11: ecAdd(ecMul(k1,p), ecMul(k2,p)) -> ecMul(k1+k2, p)
-	// Same pattern — requires creating new bindings for k1+k2. Skip.
-
-	return nil, false
-}
-
 // ---------------------------------------------------------------------------
-// ecMul optimizations
+// Helpers — shared between anf_optimize.go (driver/DCE) and
+// ec_rules_engine.go (matcher/replacer). The engine uses these to resolve
+// bound variables and emit rewritten bindings.
 // ---------------------------------------------------------------------------
 
-func optimizeECMul(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
-	v := &b.Value
-	if len(v.Args) != 2 {
-		return nil, false
-	}
-
-	point := v.Args[0]
-	scalar := v.Args[1]
-
-	// Rule 3: ecMul(x, 1) -> alias to x
-	if isConstBigInt(scalar, lookup, 1) {
-		makeAlias(b, point)
-		return nil, true
-	}
-
-	// Rule 4: ecMul(x, 0) -> INFINITY
-	if isConstBigInt(scalar, lookup, 0) {
-		makeInfinityConst(b)
-		return nil, true
-	}
-
-	// Rule 12: ecMul(k, G) -> ecMulGen(k)
-	if isGRef(point, lookup) {
-		b.Value = ir.ANFValue{
-			Kind: "call",
-			Func: "ecMulGen",
-			Args: []string{scalar},
-		}
-		return nil, true
-	}
-
-	// Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2)
-	// Requires creating a new const binding for k1*k2. Skip.
-
-	return nil, false
-}
-
-// ---------------------------------------------------------------------------
-// ecMulGen optimizations
-// ---------------------------------------------------------------------------
-
-func optimizeECMulGen(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
-	v := &b.Value
-	if len(v.Args) != 1 {
-		return nil, false
-	}
-
-	scalar := v.Args[0]
-
-	// Rule 5: ecMulGen(0) -> INFINITY
-	if isConstBigInt(scalar, lookup, 0) {
-		makeInfinityConst(b)
-		return nil, true
-	}
-
-	// Rule 6: ecMulGen(1) -> G constant
-	if isConstBigInt(scalar, lookup, 1) {
-		makeGConst(b)
-		return nil, true
-	}
-
-	return nil, false
-}
-
-// ---------------------------------------------------------------------------
-// ecNegate optimizations
-// ---------------------------------------------------------------------------
-
-func optimizeECNegate(b *ir.ANFBinding, lookup map[string]*ir.ANFValue) ([]ir.ANFBinding, bool) {
-	v := &b.Value
-	if len(v.Args) != 1 {
-		return nil, false
-	}
-
-	arg := v.Args[0]
-
-	// Rule 7: ecNegate(ecNegate(x)) -> alias to x
-	inner := resolveValue(arg, lookup)
-	if inner != nil && inner.Kind == "call" && inner.Func == "ecNegate" && len(inner.Args) == 1 {
-		makeAlias(b, inner.Args[0])
-		return nil, true
-	}
-
-	return nil, false
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// resolveValue looks up the ANFValue for a binding name.
-func resolveValue(name string, lookup map[string]*ir.ANFValue) *ir.ANFValue {
-	return lookup[name]
-}
-
-// resolveConstBigInt returns the big.Int value if the named binding is a load_const bigint.
+// resolveConstBigInt returns the big.Int value if the named binding is a
+// load_const bigint. Used by the rule engine for compile-time folding of
+// scalar arithmetic in replace templates.
 func resolveConstBigInt(name string, lookup map[string]*ir.ANFValue) *big.Int {
 	v := lookup[name]
 	if v == nil || v.Kind != "load_const" {
 		return nil
 	}
 	return v.ConstBigInt
-}
-
-// isConstBigInt checks if the named binding is a constant with the given int64 value.
-func isConstBigInt(name string, lookup map[string]*ir.ANFValue, n int64) bool {
-	v := resolveConstBigInt(name, lookup)
-	if v == nil {
-		return false
-	}
-	return v.Cmp(big.NewInt(n)) == 0
-}
-
-// isInfinityRef checks if the named binding is a constant equal to the INFINITY point.
-func isInfinityRef(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
-	if v == nil || v.Kind != "load_const" || v.ConstString == nil {
-		return false
-	}
-	return *v.ConstString == infinityHex
-}
-
-// isGRef checks if the named binding is a constant equal to the generator point G.
-func isGRef(name string, lookup map[string]*ir.ANFValue) bool {
-	v := lookup[name]
-	if v == nil || v.Kind != "load_const" || v.ConstString == nil {
-		return false
-	}
-	return *v.ConstString == gHex
 }
 
 // makeAlias rewrites a binding to be a load_const referencing another binding via @ref:.

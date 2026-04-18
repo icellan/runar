@@ -3,6 +3,9 @@ package frontend
 import (
 	"encoding/json"
 	"math/big"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -717,5 +720,312 @@ func TestANFECOptimizer_MultipleMethodsAllOptimized(t *testing.T) {
 	}
 	if t1m2.Value.ConstString == nil || *t1m2.Value.ConstString != gHex {
 		t.Errorf("method2 t1: expected G")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// JSON-driven engine: rule-set parity, canonical file, and hot-reload tests
+// ---------------------------------------------------------------------------
+
+// TestECOptimizer_EmbeddedJSONMatchesCanonical verifies that the Go compiler's
+// embedded copy of ec-rules.json is byte-identical to the canonical file at
+// the project root (optimizer/ec-rules.json). This is what lets both
+// compilers share a single source of truth — the copy exists only because
+// go:embed can't reach above its source file's directory.
+func TestECOptimizer_EmbeddedJSONMatchesCanonical(t *testing.T) {
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	// thisFile = <repo>/compilers/go/frontend/anf_ec_optimizer_test.go
+	// canonical = <repo>/optimizer/ec-rules.json
+	repoRoot := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(thisFile))))
+	canonicalPath := filepath.Join(repoRoot, "optimizer", "ec-rules.json")
+	canonical, err := os.ReadFile(canonicalPath)
+	if err != nil {
+		t.Fatalf("read canonical %s: %v", canonicalPath, err)
+	}
+	if string(canonical) != string(embeddedECRulesJSON) {
+		t.Errorf("embedded ec-rules.json differs from %s — run: cp optimizer/ec-rules.json compilers/go/frontend/ec-rules.json", canonicalPath)
+	}
+}
+
+// TestECOptimizer_AllJSONRulesTakeEffect exercises every rule tagged for Go
+// (or untagged) by constructing a matching ANF program and asserting the
+// rule fired. Guards against the "implemented in code but never called"
+// regression where a rule name in JSON has no effect.
+func TestECOptimizer_AllJSONRulesTakeEffect(t *testing.T) {
+	// For each rule name, a program + post-optimization assertion.
+	cases := map[string]struct {
+		bindings []ir.ANFBinding
+		target   string // binding expected to be rewritten
+		assert   func(t *testing.T, b *ir.ANFBinding)
+	}{
+		"ec-add-identity-right": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				loadConstHex("t1", infinityHex),
+				callBinding("t2", "ecAdd", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "load_const" || b.Value.ConstString == nil || *b.Value.ConstString != "@ref:t0" {
+					t.Errorf("ec-add-identity-right: expected alias @ref:t0, got %+v", b.Value)
+				}
+			},
+		},
+		"ec-add-identity-left": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", infinityHex),
+				loadConstHex("t1", strings.Repeat("cd", 64)),
+				callBinding("t2", "ecAdd", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "load_const" || b.Value.ConstString == nil || *b.Value.ConstString != "@ref:t1" {
+					t.Errorf("ec-add-identity-left: expected alias @ref:t1, got %+v", b.Value)
+				}
+			},
+		},
+		"ec-mul-one": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				loadConstBigInt("t1", 1),
+				callBinding("t2", "ecMul", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "load_const" || b.Value.ConstString == nil || *b.Value.ConstString != "@ref:t0" {
+					t.Errorf("ec-mul-one: expected alias @ref:t0")
+				}
+			},
+		},
+		"ec-mul-zero": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				loadConstBigInt("t1", 0),
+				callBinding("t2", "ecMul", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != infinityHex {
+					t.Errorf("ec-mul-zero: expected INFINITY")
+				}
+			},
+		},
+		"ec-mulgen-zero": {
+			bindings: []ir.ANFBinding{
+				loadConstBigInt("t0", 0),
+				callBinding("t1", "ecMulGen", []string{"t0"}),
+				assertBinding("t2", "t1"),
+			},
+			target: "t1",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != infinityHex {
+					t.Errorf("ec-mulgen-zero: expected INFINITY")
+				}
+			},
+		},
+		"ec-mulgen-one": {
+			bindings: []ir.ANFBinding{
+				loadConstBigInt("t0", 1),
+				callBinding("t1", "ecMulGen", []string{"t0"}),
+				assertBinding("t2", "t1"),
+			},
+			target: "t1",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != gHex {
+					t.Errorf("ec-mulgen-one: expected G")
+				}
+			},
+		},
+		"ec-negate-negate": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				callBinding("t1", "ecNegate", []string{"t0"}),
+				callBinding("t2", "ecNegate", []string{"t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != "@ref:t0" {
+					t.Errorf("ec-negate-negate: expected alias @ref:t0")
+				}
+			},
+		},
+		"ec-add-negate-cancel": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				callBinding("t1", "ecNegate", []string{"t0"}),
+				callBinding("t2", "ecAdd", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != infinityHex {
+					t.Errorf("ec-add-negate-cancel: expected INFINITY")
+				}
+			},
+		},
+		"ec-add-negate-cancel-reversed": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", strings.Repeat("ab", 64)),
+				callBinding("t1", "ecNegate", []string{"t0"}),
+				callBinding("t2", "ecAdd", []string{"t1", "t0"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.ConstString == nil || *b.Value.ConstString != infinityHex {
+					t.Errorf("ec-add-negate-cancel-reversed: expected INFINITY")
+				}
+			},
+		},
+		"ec-mulgen-linear": {
+			bindings: []ir.ANFBinding{
+				loadConstBigInt("k1", 3),
+				loadConstBigInt("k2", 5),
+				callBinding("t2", "ecMulGen", []string{"k1"}),
+				callBinding("t3", "ecMulGen", []string{"k2"}),
+				callBinding("t4", "ecAdd", []string{"t2", "t3"}),
+				assertBinding("t5", "t4"),
+			},
+			target: "t4",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "call" || b.Value.Func != "ecMulGen" {
+					t.Errorf("ec-mulgen-linear: expected call ecMulGen, got kind=%s func=%s", b.Value.Kind, b.Value.Func)
+				}
+			},
+		},
+		"ec-mul-generator-specialize": {
+			bindings: []ir.ANFBinding{
+				loadConstHex("t0", gHex),
+				loadConstBigInt("t1", 42),
+				callBinding("t2", "ecMul", []string{"t0", "t1"}),
+				assertBinding("t3", "t2"),
+			},
+			target: "t2",
+			assert: func(t *testing.T, b *ir.ANFBinding) {
+				if b.Value.Kind != "call" || b.Value.Func != "ecMulGen" {
+					t.Errorf("ec-mul-generator-specialize: expected call ecMulGen, got kind=%s func=%s", b.Value.Kind, b.Value.Func)
+				}
+			},
+		},
+	}
+
+	// Check that our cases cover every rule currently active for Go.
+	// Any JSON rule tagged for Go (or untagged) that doesn't appear here is
+	// a coverage gap — fail so we remember to add a case.
+	active := ECRuleNames()
+	covered := make(map[string]bool, len(cases))
+	for k := range cases {
+		covered[k] = true
+	}
+	for _, name := range active {
+		if !covered[name] {
+			t.Errorf("rule %q is active in Go but has no coverage case in this test", name)
+		}
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			program := makeTestProgram(tc.bindings)
+			result := OptimizeEC(program)
+			body := getMethodBody(result)
+			b := findBinding(body, tc.target)
+			if b == nil {
+				t.Fatalf("rule %q: target binding %q missing after optimization", name, tc.target)
+			}
+			tc.assert(t, b)
+		})
+	}
+}
+
+// TestECOptimizer_NewJSONRulePickedUp verifies that adding a rule to the
+// JSON rule set (via the testing hook) makes it take effect without any Go
+// code change. This is the acceptance criterion for GO-5: rules are data,
+// not code.
+func TestECOptimizer_NewJSONRulePickedUp(t *testing.T) {
+	// A fake rule: ecOnCurve($x) -> $x. This rule is nonsense semantically,
+	// but the EC optimizer doesn't care — it just pattern-matches. It's
+	// useful as a pure-data test: ecOnCurve is a real EC builtin that the
+	// baseline Go optimizer does NOT rewrite, so any observed rewrite must
+	// have come from the JSON we injected.
+	testJSON := []byte(`[
+		{
+			"name": "test-on-curve-alias",
+			"match": { "func": "ecOnCurve", "args": ["$x"] },
+			"replace": "$x"
+		}
+	]`)
+
+	prev, err := SetECRulesForTesting(testJSON)
+	if err != nil {
+		t.Fatalf("SetECRulesForTesting: %v", err)
+	}
+	defer RestoreECRulesForTesting(prev)
+
+	bindings := []ir.ANFBinding{
+		loadConstHex("t0", strings.Repeat("ab", 64)),
+		callBinding("t1", "ecOnCurve", []string{"t0"}),
+		assertBinding("t2", "t1"),
+	}
+	program := makeTestProgram(bindings)
+	result := OptimizeEC(program)
+	body := getMethodBody(result)
+
+	t1 := findBinding(body, "t1")
+	if t1 == nil {
+		t.Fatal("t1 missing after optimization")
+	}
+	if t1.Value.Kind != "load_const" || t1.Value.ConstString == nil || *t1.Value.ConstString != "@ref:t0" {
+		t.Errorf("expected t1 rewritten to alias @ref:t0 by injected JSON rule, got %+v", t1.Value)
+	}
+
+	// Also verify the baseline (without the injection) does NOT rewrite:
+	// put the ecOnCurve rule on the shelf and re-run with the normal rules.
+	RestoreECRulesForTesting(prev)
+	program2 := makeTestProgram([]ir.ANFBinding{
+		loadConstHex("t0", strings.Repeat("ab", 64)),
+		callBinding("t1", "ecOnCurve", []string{"t0"}),
+		assertBinding("t2", "t1"),
+	})
+	result2 := OptimizeEC(program2)
+	t1b := findBinding(getMethodBody(result2), "t1")
+	if t1b == nil {
+		t.Fatal("baseline t1 missing")
+	}
+	if t1b.Value.Kind != "call" || t1b.Value.Func != "ecOnCurve" {
+		t.Errorf("baseline (no injected rule): expected ecOnCurve call to remain, got %+v", t1b.Value)
+	}
+
+	// Re-apply the injection for the deferred restore to be a no-op paired
+	// correctly. (The defer above will restore to prev, which is what we
+	// want.)
+	if _, err := SetECRulesForTesting(testJSON); err != nil {
+		t.Fatalf("re-inject for cleanup: %v", err)
+	}
+}
+
+// TestECOptimizer_RulesSupportedFieldRespected verifies that rules tagged
+// supported: ["ts"] are skipped by the Go engine. We rely on the two rules
+// in ec-rules.json (ec-mul-associative, ec-mul-distributive) being so
+// tagged; if someone removes the tag (implementing them in Go), this test
+// will point out that the coverage case in TestECOptimizer_AllJSONRulesTakeEffect
+// must be updated.
+func TestECOptimizer_RulesSupportedFieldRespected(t *testing.T) {
+	active := ECRuleNames()
+	activeSet := make(map[string]bool, len(active))
+	for _, n := range active {
+		activeSet[n] = true
+	}
+	for _, unsupported := range []string{"ec-mul-associative", "ec-mul-distributive"} {
+		if activeSet[unsupported] {
+			t.Errorf("rule %q is tagged supported:[ts] in ec-rules.json but is active for Go — update the coverage case in TestECOptimizer_AllJSONRulesTakeEffect and remove this guard", unsupported)
+		}
 	}
 }
