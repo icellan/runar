@@ -253,19 +253,89 @@ module Runar
 
     # -- Mock BLAKE3 Functions -------------------------------------------------
 
-    # Mock BLAKE3 single-block compression.
-    # In compiled Bitcoin Script this expands to ~10,000 opcodes.
-    # Returns 32 zero bytes as hex for business-logic testing.
-    def blake3_compress(_chaining_value, _block)
-      '00' * 32
+    # -- BLAKE3 single-block compression (real implementation) ------------------
+    #
+    # Matches the compiler codegen (blockLen=64, counter=0, flags=11 =
+    # CHUNK_START | CHUNK_END | ROOT) and the TS interpreter reference in
+    # packages/runar-testing/src/interpreter/interpreter.ts:1742.
+
+    BLAKE3_IV_WORDS = [
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ].freeze
+
+    BLAKE3_IV_BYTES = BLAKE3_IV_WORDS.pack('N*').freeze
+
+    BLAKE3_MSG_PERM = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8].freeze
+
+    def self._blake3_rotr32(x, n)
+      ((x >> n) | ((x << (32 - n)) & 0xFFFFFFFF)) & 0xFFFFFFFF
     end
 
-    # Mock BLAKE3 hash for messages up to 64 bytes.
-    # In compiled Bitcoin Script this uses the IV as the chaining value and
-    # applies zero-padding before calling the compression function.
-    # Returns 32 zero bytes as hex for business-logic testing.
-    def blake3_hash(_message)
-      '00' * 32
+    def self._blake3_g(s, a, b, c, d, mx, my)
+      s[a] = (s[a] + s[b] + mx) & 0xFFFFFFFF
+      s[d] = _blake3_rotr32(s[d] ^ s[a], 16)
+      s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+      s[b] = _blake3_rotr32(s[b] ^ s[c], 12)
+      s[a] = (s[a] + s[b] + my) & 0xFFFFFFFF
+      s[d] = _blake3_rotr32(s[d] ^ s[a], 8)
+      s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+      s[b] = _blake3_rotr32(s[b] ^ s[c], 7)
+    end
+
+    def self._blake3_round(s, m)
+      _blake3_g(s, 0, 4, 8, 12, m[0], m[1])
+      _blake3_g(s, 1, 5, 9, 13, m[2], m[3])
+      _blake3_g(s, 2, 6, 10, 14, m[4], m[5])
+      _blake3_g(s, 3, 7, 11, 15, m[6], m[7])
+      _blake3_g(s, 0, 5, 10, 15, m[8], m[9])
+      _blake3_g(s, 1, 6, 11, 12, m[10], m[11])
+      _blake3_g(s, 2, 7, 8, 13, m[12], m[13])
+      _blake3_g(s, 3, 4, 9, 14, m[14], m[15])
+    end
+
+    def self._blake3_compress_impl(cv_bytes, block_bytes)
+      raise ArgumentError, "blake3 cv must be 32 bytes" unless cv_bytes.bytesize == 32
+      raise ArgumentError, "blake3 block must be 64 bytes" unless block_bytes.bytesize == 64
+
+      h = cv_bytes.unpack('N8')
+      m = block_bytes.unpack('N16')
+
+      state = [
+        h[0], h[1], h[2], h[3],
+        h[4], h[5], h[6], h[7],
+        BLAKE3_IV_WORDS[0], BLAKE3_IV_WORDS[1],
+        BLAKE3_IV_WORDS[2], BLAKE3_IV_WORDS[3],
+        0, 0, 64, 11,
+      ]
+
+      msg = m.dup
+      7.times do |r|
+        _blake3_round(state, msg)
+        msg = BLAKE3_MSG_PERM.map { |i| msg[i] } if r < 6
+      end
+
+      out = (0...8).map { |i| (state[i] ^ state[i + 8]) & 0xFFFFFFFF }
+      out.pack('N8')
+    end
+
+    def self._hex_to_bytes(h)
+      return h if h.is_a?(String) && h.encoding == Encoding::ASCII_8BIT
+      return [h].pack('H*') if h.is_a?(String)
+      h.to_s
+    end
+
+    def blake3_compress(chaining_value, block)
+      cv_bytes = Builtins._hex_to_bytes(chaining_value)
+      block_bytes = Builtins._hex_to_bytes(block)
+      Builtins._blake3_compress_impl(cv_bytes, block_bytes).unpack1('H*')
+    end
+
+    def blake3_hash(message)
+      msg_bytes = Builtins._hex_to_bytes(message)
+      padded = msg_bytes.byteslice(0, 64).to_s
+      padded = padded + ("\x00".b * (64 - padded.bytesize)) if padded.bytesize < 64
+      Builtins._blake3_compress_impl(BLAKE3_IV_BYTES, padded).unpack1('H*')
     end
 
     # -- Real Hash Functions ---------------------------------------------------

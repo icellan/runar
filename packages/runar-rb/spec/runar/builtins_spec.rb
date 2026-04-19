@@ -70,26 +70,33 @@ RSpec.describe Runar::Builtins do
       end
     end
 
-    it 'blake3_compress returns 64-char hex string of zeros' do
+    it 'blake3_compress returns a 64-char hex string' do
       result = ctx.blake3_compress('00' * 32, '00' * 64)
-      expect(result).to eq('00' * 32)
+      expect(result.length).to eq(64)
+      expect(result).to match(/\A[0-9a-f]{64}\z/)
+      # Real implementation: compressing all-zero CV+block is non-zero.
+      expect(result).not_to eq('00' * 32)
+    end
+
+    it 'blake3_compress is deterministic over arbitrary hex input' do
+      result1 = ctx.blake3_compress('ab' * 32, 'cd' * 64)
+      result2 = ctx.blake3_compress('ab' * 32, 'cd' * 64)
+      expect(result1).to eq(result2)
+      expect(result1.length).to eq(64)
+    end
+
+    it 'blake3_hash returns a 64-char hex string with pinned empty-input value' do
+      # Empty input → known BLAKE3 (single-block, flags=11) hash.
+      result = ctx.blake3_hash('')
+      expect(result).to eq('7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86')
       expect(result.length).to eq(64)
     end
 
-    it 'blake3_compress accepts arbitrary hex input' do
-      result = ctx.blake3_compress('ab' * 32, 'cd' * 64)
-      expect(result).to eq('00' * 32)
-    end
-
-    it 'blake3_hash returns 64-char hex string of zeros' do
-      result = ctx.blake3_hash('deadbeef')
-      expect(result).to eq('00' * 32)
-      expect(result.length).to eq(64)
-    end
-
-    it 'blake3_hash accepts arbitrary hex input' do
-      result = ctx.blake3_hash('ff' * 64)
-      expect(result).to eq('00' * 32)
+    it 'blake3_hash accepts arbitrary hex input and agrees cross-language' do
+      # 'abc' hex-encoded — same expected value as TS and Python runtime.
+      expect(ctx.blake3_hash('616263')).to eq(
+        '6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d'
+      )
     end
   end
 
