@@ -248,8 +248,9 @@ func GenerateWitness(vk VerifyingKey, proof Proof, publicInputs []*big.Int) (*Wi
 	// 1b. Compute the subgroup-check gradient chain for proof.B — one
 	//     Fp² slope per doubling (126) and per addition (69) in the
 	//     expansion of [6·x²]·B. The on-chain preamble calls
-	//     emitWAG2SubgroupCheck on proof.B to close the documented
-	//     TODO(subgroup-check) gap; this chain is the witness it consumes.
+	//     emitWAG2SubgroupCheck on proof.B to close the previously
+	//     documented subgroup-check gap; this chain is the witness it
+	//     consumes. (Gap is closed — see bn254_subgroup_check_test.go.)
 	subgroupGradients, err := computeSubgroupGradients(proof.B)
 	if err != nil {
 		return nil, fmt.Errorf("bn254witness: subgroup gradients: %w", err)
