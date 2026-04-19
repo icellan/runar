@@ -968,10 +968,15 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
 	initNm := make([]string, len(t.nm))
 	copy(initNm, t.nm)
 	it := NewBN254Tracker(initNm, e)
-	// Propagate prime cache state: the cached prime on the alt-stack is
-	// accessible within OP_IF branches since alt-stack persists across
-	// IF/ELSE/ENDIF boundaries.
+	// Propagate prime-cache state onto the inner tracker. Both the
+	// alt-stack variant (primeCacheActive) and the q-at-bottom variant
+	// (qAtBottom) emit distinct fetch sequences inside field-arithmetic
+	// helpers; without qAtBottom propagation, nested field ops under
+	// qAtBottom mode would emit OP_FROMALTSTACK on an empty alt-stack,
+	// exploding as "index 0 is invalid for stack size 0" at runtime.
 	it.primeCacheActive = t.primeCacheActive
+	it.qAtBottom = t.qAtBottom
+	it.modThreshold = t.modThreshold
 
 	// ------------------------------------------------------------------
 	// Doubling-case detection: H = ax*jz^2 - jx == 0 ?
@@ -998,6 +1003,8 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
 	doublingEmit := func(op StackOp) { doublingOps = append(doublingOps, op) }
 	doublingTracker := NewBN254Tracker(append([]string{}, it.nm...), doublingEmit)
 	doublingTracker.primeCacheActive = it.primeCacheActive
+	doublingTracker.qAtBottom = it.qAtBottom
+	doublingTracker.modThreshold = it.modThreshold
 	bn254G1JacobianDouble(doublingTracker)
 
 	// ------------------------------------------------------------------
@@ -1007,6 +1014,8 @@ func bn254BuildJacobianAddAffineInline(e func(StackOp), t *BN254Tracker) {
 	addEmit := func(op StackOp) { addOps = append(addOps, op) }
 	addTracker := NewBN254Tracker(append([]string{}, it.nm...), addEmit)
 	addTracker.primeCacheActive = it.primeCacheActive
+	addTracker.qAtBottom = it.qAtBottom
+	addTracker.modThreshold = it.modThreshold
 	bn254BuildJacobianAddAffineStandard(addTracker)
 
 	// Both branches leave (jx, jy, jz) replacing the originals with the

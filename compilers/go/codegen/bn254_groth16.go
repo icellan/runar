@@ -16,7 +16,10 @@
 // It generates a monolithic Groth16 verifier, not composable builtins.
 package codegen
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+)
 
 // =========================================================================
 // Configuration
@@ -1936,6 +1939,23 @@ func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth1
 // called via the existing BN254Tracker plumbing (decompose / compose /
 // bn254G1AffineAdd / bn254G1JacobianDouble).
 //
+// Zero-scalar handling: when pub_i == 0, the term pub_i · IC[i+1] is the
+// group identity O, which has no affine (x, y) representation. More
+// practically, the Jacobian double-and-add trajectory for k' = 3r (the
+// k=0 case) passes through the acc = -base state, which
+// bn254BuildJacobianAddAffineInline deliberately does NOT handle (see the
+// comment on that function), producing a wrong point rather than O. SP1
+// Groth16 proofs routinely include public inputs equal to 0 (the fixture
+// under tests/vectors/sp1/v6.0.0 has pub_2 = pub_4 = 0), so the zero case
+// must be handled explicitly for the MSM-binding preamble to match
+// computePreparedInputs off-chain.
+//
+// Implementation: each term is wrapped in OP_IF guarded by (pub_i != 0).
+// In the non-zero branch we run the existing scalar-mul + affine-add and
+// then use the altstack to clean up the intermediate garbage so both
+// branches leave the same stack shape. In the zero branch we just drop
+// the pushed IC[i+1] base point; acc_x / acc_y stay untouched.
+//
 // Semantics on failure: the final equality check against _pi_x / _pi_y
 // uses OP_EQUALVERIFY on each coordinate, aborting the script when they
 // disagree. The 5 pub_i scalars and _pi_x / _pi_y are consumed; the G1
@@ -1948,36 +1968,116 @@ func emitWAGroth16MSMBind(t *BN254Tracker, config Groth16Config) {
 	t.pushBigInt(pfx+"acc_x", config.IC[0][0])
 	t.pushBigInt(pfx+"acc_y", config.IC[0][1])
 
+	accXName := pfx + "acc_x"
+	accYName := pfx + "acc_y"
+
 	for i := 0; i < 5; i++ {
 		// Scalar: pub_i (bring from the witness slot on the main stack).
 		scalarName := "_pub_" + string(rune('0'+i))
 
 		// Push IC[i+1] as the base point (affine bx, by).
-		t.pushBigInt(pfx+"bx_"+itoa(i), config.IC[i+1][0])
-		t.pushBigInt(pfx+"by_"+itoa(i), config.IC[i+1][1])
+		bxName := pfx + "bx_" + itoa(i)
+		byName := pfx + "by_" + itoa(i)
+		t.pushBigInt(bxName, config.IC[i+1][0])
+		t.pushBigInt(byName, config.IC[i+1][1])
 
-		// Term_i = pub_i · IC[i+1]. We reuse the logic of
-		// EmitBN254G1ScalarMul inline via a freshly-initialised sub-tracker
-		// is not straightforward here because the generic emitter expects
-		// a Point blob on the stack; the local field coords are in raw Fp
-		// form. Implement a minimal double-and-add using the existing
-		// Jacobian helpers that operate on named x/y/z triples. We cap at
-		// 254 bits (BN254 scalar field size is < 2^254).
+		// Compute the OP_IF condition: flag = (pub_i != 0). OP_0NOTEQUAL
+		// collapses any nonzero bigint to 1 and 0 to 0.
+		chkName := pfx + "chk_" + itoa(i)
+		isNzName := pfx + "is_nz_" + itoa(i)
+		t.copyToTop(scalarName, chkName)
+		t.rawBlock([]string{chkName}, isNzName, func(e func(StackOp)) {
+			e(StackOp{Op: "opcode", Code: "OP_0NOTEQUAL"})
+		})
+		// Consume the flag for OP_IF.
+		t.toTop(isNzName)
+		t.nm = t.nm[:len(t.nm)-1]
 
-		emitG1ScalarMulNamed(t, pfx+"bx_"+itoa(i), pfx+"by_"+itoa(i), scalarName,
-			pfx+"tx_"+itoa(i), pfx+"ty_"+itoa(i))
+		// Snapshot the tracker state entering the branches. Both inner
+		// trackers start with a copy of this nm.
+		branchInit := append([]string{}, t.nm...)
+		branchLen := len(branchInit)
 
-		// acc = acc + term_i  (affine add)
-		emitG1AffineAddNamed(t, pfx+"acc_x", pfx+"acc_y",
-			pfx+"tx_"+itoa(i), pfx+"ty_"+itoa(i),
-			pfx+"new_acc_x_"+itoa(i), pfx+"new_acc_y_"+itoa(i))
+		// ------------------------------------------------------------------
+		// Non-zero branch: compute tx/ty = pub_i · IC[i+1], then acc += term.
+		// ------------------------------------------------------------------
+		var nonzeroOps []StackOp
+		nonzeroEmit := func(op StackOp) { nonzeroOps = append(nonzeroOps, op) }
+		nz := NewBN254Tracker(append([]string{}, branchInit...), nonzeroEmit)
+		nz.primeCacheActive = t.primeCacheActive
+		nz.qAtBottom = t.qAtBottom
+		nz.modThreshold = t.modThreshold
 
-		// Drop old acc coords (they were consumed by the add) and rename
-		// the new ones back to acc_x / acc_y for the next iteration.
-		t.toTop(pfx + "new_acc_x_" + itoa(i))
-		t.rename(pfx + "acc_x")
-		t.toTop(pfx + "new_acc_y_" + itoa(i))
-		t.rename(pfx + "acc_y")
+		txName := pfx + "tx_" + itoa(i)
+		tyName := pfx + "ty_" + itoa(i)
+		newAccX := pfx + "new_acc_x_" + itoa(i)
+		newAccY := pfx + "new_acc_y_" + itoa(i)
+
+		emitG1ScalarMulNamed(nz, bxName, byName, scalarName, txName, tyName)
+		emitG1AffineAddNamed(nz, accXName, accYName, txName, tyName, newAccX, newAccY)
+
+		// Rename the new acc coords to the stable names so both branches
+		// expose the same top-of-stack names after the IF.
+		nz.toTop(newAccX)
+		nz.rename(accXName)
+		nz.toTop(newAccY)
+		nz.rename(accYName)
+
+		// Stash the new acc on the altstack so we can drop all the
+		// scalar-mul / affine-add intermediates without losing them.
+		// Order: push acc_y first (ends up below on alt), then acc_x
+		// (ends up on top of alt). Pops in forward (x then y) order.
+		nz.toTop(accYName)
+		nz.toAlt()
+		nz.toTop(accXName)
+		nz.toAlt()
+
+		// Drop every intermediate left on the main stack. After this,
+		// the main stack matches the pre-iteration state with the old
+		// acc_x / acc_y / bx / by consumed (length branchLen - 4).
+		dropTarget := branchLen - 4
+		for len(nz.nm) > dropTarget {
+			nz.drop()
+		}
+
+		// Restore the new acc coords from the altstack.
+		nz.fromAlt(accXName)
+		nz.fromAlt(accYName)
+
+		// ------------------------------------------------------------------
+		// Zero branch: acc unchanged; discard the pushed IC base point.
+		// ------------------------------------------------------------------
+		var zeroOps []StackOp
+		zeroEmit := func(op StackOp) { zeroOps = append(zeroOps, op) }
+		zr := NewBN254Tracker(append([]string{}, branchInit...), zeroEmit)
+		zr.primeCacheActive = t.primeCacheActive
+		zr.qAtBottom = t.qAtBottom
+		zr.modThreshold = t.modThreshold
+
+		zr.toTop(byName)
+		zr.drop()
+		zr.toTop(bxName)
+		zr.drop()
+
+		// Sanity-check: both branches must agree on the final nm so the
+		// outer tracker stays coherent.
+		if len(nz.nm) != len(zr.nm) {
+			panic(fmt.Sprintf(
+				"emitWAGroth16MSMBind: branch length mismatch at i=%d: nz=%d zr=%d",
+				i, len(nz.nm), len(zr.nm),
+			))
+		}
+		for j := range nz.nm {
+			if nz.nm[j] != zr.nm[j] {
+				panic(fmt.Sprintf(
+					"emitWAGroth16MSMBind: branch nm mismatch at i=%d pos=%d: nz=%q zr=%q",
+					i, j, nz.nm[j], zr.nm[j],
+				))
+			}
+		}
+
+		t.e(StackOp{Op: "if", Then: nonzeroOps, Else: zeroOps})
+		t.nm = append([]string{}, nz.nm...)
 	}
 
 	// Assert (acc_x, acc_y) == (_pi_x, _pi_y).

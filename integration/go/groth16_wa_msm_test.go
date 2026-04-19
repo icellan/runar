@@ -36,20 +36,6 @@ func readTrimmed(path string) (string, error) {
 // with the prover-supplied prepared_inputs, which aborts the script at
 // the MSM equality check.
 func TestRollupGroth16WAMSM_AdvanceState(t *testing.T) {
-	// KNOWN FAILURE: the 1.4 MB MSM-binding script emitted by this test
-	// is rejected on regtest with `mandatory-script-verify-flag-failed
-	// (Script failed an OP_EQUALVERIFY operation)`. Every main CI run
-	// since commit e7a3689 (which introduced this test) has failed here.
-	// The pairing sanity check passes, smaller Groth16 WA variants
-	// (TestGroth16WASDK_DeployAndCall_SP1, TestRollupGroth16WA_AdvanceState,
-	// TestGroth16WA_Regtest_ValidSpend_SP1) all pass, so the bug is
-	// isolated to the MSM-binding witness/script path. Skip in CI until
-	// the MSM codegen is fixed; unskip with RUN_MSM_TEST=1 for local
-	// debugging.
-	if os.Getenv("RUN_MSM_TEST") == "" {
-		t.Skip("TestRollupGroth16WAMSM_AdvanceState: MSM script fails OP_EQUALVERIFY on regtest; set RUN_MSM_TEST=1 to enable")
-	}
-
 	vkPath := sp1V6FixturePath(t, "vk.json")
 
 	contract, wallet := deployRollupGroth16WAMSM(t, vkPath)

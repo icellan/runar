@@ -3842,28 +3842,44 @@ func emitGroth16WAPreamble(ctx *loweringContext, config Groth16Config, useMSM bo
 
 	ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_DROP"})
 
-	if useMSM {
-		// Move _pub_0..4 onto the altstack, above the named params.
-		// Main top is _pub_4, so the first TOALTSTACK moves _pub_4 first;
-		// the last moves _pub_0. Altstack order (bottom→top) after this:
-		//   [named_shallow..named_deep, _pub_4, _pub_3, _pub_2, _pub_1, _pub_0].
-		for i := 0; i < 5; i++ {
-			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+	if !useMSM {
+		// Raw variant: nothing on main from the verifier, alt still holds
+		// the named params. Pop them back in reverse push order so the
+		// original main layout is reproduced.
+		for i := 0; i < namedDepth; i++ {
+			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 		}
+		return
 	}
 
+	// MSM variant: main currently holds [_pub_0, _pub_1, _pub_2, _pub_3,
+	// _pub_4] (top = _pub_4) and alt holds the named params [named_shallow
+	// (bottom) ... named_deep (top)] from the initial shuttle.
+	//
+	// We want the final main layout to be
+	//   [named_deep ... named_shallow, _pub_0, _pub_1, _pub_2, _pub_3, _pub_4]
+	// which matches what the stack model (ctx.sm) expects so the method
+	// body's OP_ROLL offsets resolve correctly.
+	//
+	// Step A: FROMALTSTACK × namedDepth — pops alt top (named_deep) first,
+	// then named_deep-1, ..., then named_shallow. Main becomes
+	//   [_pub_0, _pub_1, _pub_2, _pub_3, _pub_4, named_deep, ..., named_shallow].
 	for i := 0; i < namedDepth; i++ {
 		ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
 	}
 
-	if useMSM {
-		// Restore _pub_0..4 on top of the named params. FROMALTSTACK pops
-		// alt-top first: _pub_0, then _pub_1, ..., then _pub_4. Main stack
-		// ends up with _pub_4 on top and _pub_0 just above the named params.
-		for i := 0; i < 5; i++ {
-			ctx.ops = append(ctx.ops, StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
-			ctx.sm.push("_pub_" + string(rune('0'+i)))
-		}
+	// Step B: 5 × (push depth, OP_ROLL) — each OP_ROLL rolls the deepest
+	// surviving _pub from depth (namedDepth + 4) up to the top. After 5
+	// rolls the _pub block sits above the named-param block exactly as
+	// the stack model expects.
+	rollDepth := int64(namedDepth + 4)
+	for i := 0; i < 5; i++ {
+		ctx.ops = append(ctx.ops, StackOp{Op: "push", Value: bigIntPush(rollDepth)})
+		ctx.ops = append(ctx.ops, StackOp{Op: "roll", Depth: int(rollDepth)})
+	}
+
+	for i := 0; i < 5; i++ {
+		ctx.sm.push("_pub_" + string(rune('0'+i)))
 	}
 }
 
