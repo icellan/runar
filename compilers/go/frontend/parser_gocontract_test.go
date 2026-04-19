@@ -574,3 +574,156 @@ func (c *BigPairing) Check(
 		}
 	}
 }
+
+// TestParseGoContract_BigintBigOperatorHelpersLower confirms that calls to
+// the BigintBig operator helpers — which exist so Go contracts can express
+// comparisons and arithmetic on *big.Int fields without tripping the Go
+// compiler's "operator not defined on pointer" error — are rewritten into
+// plain BinaryExpr nodes that lower to the same Script opcodes as int64
+// operators.
+func TestParseGoContract_BigintBigOperatorHelpersLower(t *testing.T) {
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type BigOps struct {
+	runar.SmartContract
+	Limit runar.BigintBig ` + "`runar:\"readonly\"`" + `
+}
+
+func (c *BigOps) Unlock(a runar.BigintBig, b runar.BigintBig) {
+	runar.Assert(runar.BigintBigLess(a, c.Limit))
+	runar.Assert(runar.BigintBigLessEq(a, c.Limit))
+	runar.Assert(runar.BigintBigGreater(b, a))
+	runar.Assert(runar.BigintBigGreaterEq(b, a))
+	runar.Assert(runar.BigintBigEqual(a, b))
+	runar.Assert(runar.BigintBigNotEqual(a, b))
+	runar.Assert(runar.BigintBigEqual(runar.BigintBigAdd(a, b), runar.BigintBigSub(c.Limit, runar.BigintBigMul(a, b))))
+	runar.Assert(runar.BigintBigEqual(runar.BigintBigMod(a, c.Limit), runar.BigintBigDiv(b, c.Limit)))
+}
+`
+	result := ParseSource([]byte(source), "BigOps.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	if result.Contract == nil || len(result.Contract.Methods) == 0 {
+		t.Fatal("expected a contract with at least one method")
+	}
+
+	// Collect the operators from every BinaryExpr in the method body.
+	ops := map[string]int{}
+	var walk func(e Expression)
+	walk = func(e Expression) {
+		switch node := e.(type) {
+		case BinaryExpr:
+			ops[node.Op]++
+			walk(node.Left)
+			walk(node.Right)
+		case CallExpr:
+			walk(node.Callee)
+			for _, a := range node.Args {
+				walk(a)
+			}
+		case UnaryExpr:
+			walk(node.Operand)
+		}
+	}
+	for _, stmt := range result.Contract.Methods[0].Body {
+		if s, ok := stmt.(ExpressionStmt); ok {
+			walk(s.Expr)
+		}
+	}
+
+	for _, expected := range []string{"<", "<=", ">", ">=", "===", "!==", "+", "-", "*", "%", "/"} {
+		if ops[expected] == 0 {
+			t.Errorf("expected at least one %q BinaryExpr after rewriting BigintBig helpers; got %v", expected, ops)
+		}
+	}
+
+	// Confirm none of the helpers slipped through as identifiers.
+	callNames := map[string]bool{}
+	var collectCalls func(e Expression)
+	collectCalls = func(e Expression) {
+		if c, ok := e.(CallExpr); ok {
+			if ident, ok := c.Callee.(Identifier); ok {
+				callNames[ident.Name] = true
+			}
+			for _, a := range c.Args {
+				collectCalls(a)
+			}
+		}
+	}
+	for _, stmt := range result.Contract.Methods[0].Body {
+		if s, ok := stmt.(ExpressionStmt); ok {
+			collectCalls(s.Expr)
+		}
+	}
+	for bad := range callNames {
+		if strings.HasPrefix(bad, "bigintBig") {
+			t.Errorf("helper %q leaked into the lowered tree; it should have become a BinaryExpr", bad)
+		}
+	}
+}
+
+// TestParseGoContract_Bin2NumBigMapsToBin2Num confirms that the
+// arbitrary-precision Bin2NumBig / Num2BinBig DSL helpers lower to the
+// same Script builtins as their int64 counterparts.
+func TestParseGoContract_Bin2NumBigMapsToBin2Num(t *testing.T) {
+	source := `
+package contracts
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+type Coder struct {
+	runar.SmartContract
+}
+
+func (c *Coder) Unlock(data runar.ByteString, n runar.BigintBig, width runar.Bigint) {
+	decoded := runar.Bin2NumBig(data)
+	encoded := runar.Num2BinBig(n, width)
+	runar.Assert(runar.BigintBigEqual(decoded, n))
+	runar.Assert(runar.Len(encoded) == width)
+}
+`
+	result := ParseSource([]byte(source), "Coder.runar.go")
+	if len(result.Errors) > 0 {
+		t.Fatalf("parse errors: %s", strings.Join(result.ErrorStrings(), "; "))
+	}
+	if result.Contract == nil || len(result.Contract.Methods) == 0 {
+		t.Fatal("expected a contract with at least one method")
+	}
+
+	callNames := map[string]bool{}
+	var walk func(e Expression)
+	walk = func(e Expression) {
+		if c, ok := e.(CallExpr); ok {
+			if ident, ok := c.Callee.(Identifier); ok {
+				callNames[ident.Name] = true
+			}
+			for _, a := range c.Args {
+				walk(a)
+			}
+		}
+		if b, ok := e.(BinaryExpr); ok {
+			walk(b.Left)
+			walk(b.Right)
+		}
+	}
+	for _, stmt := range result.Contract.Methods[0].Body {
+		switch s := stmt.(type) {
+		case ExpressionStmt:
+			walk(s.Expr)
+		case VariableDeclStmt:
+			if s.Init != nil {
+				walk(s.Init)
+			}
+		}
+	}
+
+	for _, expected := range []string{"bin2num", "num2bin"} {
+		if !callNames[expected] {
+			t.Errorf("expected a %q call in the parsed body; got %v", expected, callNames)
+		}
+	}
+}

@@ -616,6 +616,18 @@ func (p *goContractParser) convertExpression(expr ast.Expr) Expression {
 					}
 					return p.convertExpression(e.Args[0])
 				}
+				// BigintBig operator helpers: Go disallows `a < b` / `a == b` /
+				// `a % b` on *big.Int, so DSL contracts reach for helper
+				// functions. Rewrite those calls into the equivalent Rúnar
+				// BinaryExpr so they lower to the same Script opcodes as plain
+				// int64 operators.
+				if op, ok := bigintBigOpFor(typeName); ok && len(e.Args) == 2 {
+					left := p.convertExpression(e.Args[0])
+					right := p.convertExpression(e.Args[1])
+					if left != nil && right != nil {
+						return BinaryExpr{Op: op, Left: left, Right: right}
+					}
+				}
 			}
 		}
 
@@ -729,6 +741,38 @@ func mapGoOp(op token.Token) string {
 	return "+"
 }
 
+// bigintBigOpFor returns the Rúnar binary-operator string that the named
+// BigintBig helper rewrites to (e.g. `BigintBigLess` → `<`). The second
+// return is false for unrecognised names. The set mirrors the helpers
+// defined in `packages/runar-go/runar.go`.
+func bigintBigOpFor(name string) (string, bool) {
+	switch name {
+	case "BigintBigLess":
+		return "<", true
+	case "BigintBigLessEq":
+		return "<=", true
+	case "BigintBigGreater":
+		return ">", true
+	case "BigintBigGreaterEq":
+		return ">=", true
+	case "BigintBigEqual":
+		return "===", true
+	case "BigintBigNotEqual":
+		return "!==", true
+	case "BigintBigAdd":
+		return "+", true
+	case "BigintBigSub":
+		return "-", true
+	case "BigintBigMul":
+		return "*", true
+	case "BigintBigMod":
+		return "%", true
+	case "BigintBigDiv":
+		return "/", true
+	}
+	return "", false
+}
+
 func mapGoBuiltin(name string) string {
 	builtinMap := map[string]string{
 		"Assert":            "assert",
@@ -752,6 +796,8 @@ func mapGoBuiltin(name string) string {
 		"VerifyECDSAP384":         "verifyECDSA_P384",
 		"Num2Bin":           "num2bin",
 		"Bin2Num":           "bin2num",
+		"Bin2NumBig":        "bin2num",
+		"Num2BinBig":        "num2bin",
 		"Cat":               "cat",
 		"Substr":            "substr",
 		"Len":               "len",

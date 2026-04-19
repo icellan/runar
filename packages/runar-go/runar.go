@@ -623,6 +623,148 @@ func Bin2NumBig(data ByteString) *big.Int {
 	return mag
 }
 
+// BigintBig operator helpers. Go does not allow arithmetic/comparison
+// operators on *big.Int values, so contracts that type fields as
+// BigintBig cannot spell `a < b`, `a == b`, or `a % b` directly. These
+// helpers provide the same semantics as the Script-side operators
+// (value comparison, two's-complement arithmetic) and are registered in
+// the Go-contract DSL so the compiler rewrites calls like
+// `runar.BigintBigLess(a, b)` into a plain Script less-than node.
+//
+// Keep these aligned with the Script lowering: BigintBigLess → `<`,
+// BigintBigLessEq → `<=`, BigintBigGreater → `>`, BigintBigGreaterEq → `>=`,
+// BigintBigEqual → `==`, BigintBigNotEqual → `!=`, BigintBigAdd → `+`,
+// BigintBigSub → `-`, BigintBigMul → `*`, BigintBigMod → `%`,
+// BigintBigDiv → `/`.
+
+// BigintBigLess returns a < b.
+func BigintBigLess(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) < 0
+}
+
+// BigintBigLessEq returns a <= b.
+func BigintBigLessEq(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) <= 0
+}
+
+// BigintBigGreater returns a > b.
+func BigintBigGreater(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) > 0
+}
+
+// BigintBigGreaterEq returns a >= b.
+func BigintBigGreaterEq(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) >= 0
+}
+
+// BigintBigEqual returns a == b by value (not pointer identity).
+func BigintBigEqual(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) == 0
+}
+
+// BigintBigNotEqual returns a != b by value (not pointer identity).
+func BigintBigNotEqual(a, b *big.Int) bool {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return a.Cmp(b) != 0
+}
+
+// BigintBigAdd returns a + b, always freshly allocated.
+func BigintBigAdd(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return new(big.Int).Add(a, b)
+}
+
+// BigintBigSub returns a - b, always freshly allocated.
+func BigintBigSub(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return new(big.Int).Sub(a, b)
+}
+
+// BigintBigMul returns a * b, always freshly allocated.
+func BigintBigMul(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil {
+		b = new(big.Int)
+	}
+	return new(big.Int).Mul(a, b)
+}
+
+// BigintBigMod returns a mod b using truncated semantics (Go's `%` on
+// signed integers), matching Script's OP_MOD. For the classical
+// non-negative remainder use Safemod's big variant. Returns 0 when b
+// is zero to mirror the int64 divmod helper's graceful path.
+func BigintBigMod(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil || b.Sign() == 0 {
+		return new(big.Int)
+	}
+	q := new(big.Int).Quo(a, b) // truncated quotient
+	r := new(big.Int).Mul(q, b)
+	return r.Sub(a, r)
+}
+
+// BigintBigDiv returns a / b using truncated semantics (Go's integer
+// division), matching Script's OP_DIV. Returns 0 when b is zero to
+// mirror safediv's graceful path rather than panicking.
+func BigintBigDiv(a, b *big.Int) *big.Int {
+	if a == nil {
+		a = new(big.Int)
+	}
+	if b == nil || b.Sign() == 0 {
+		return new(big.Int)
+	}
+	return new(big.Int).Quo(a, b)
+}
+
 // Len returns the length of a byte string as an integer.
 func Len(data ByteString) int64 {
 	return int64(len(data))
