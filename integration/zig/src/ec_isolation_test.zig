@@ -40,10 +40,7 @@ test "ECIsolation_ScriptSize" {
 test "ECIsolation_Deploy_ECDemo" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
@@ -93,10 +90,7 @@ test "ECIsolation_Compile_ConvergenceProof" {
 test "ECIsolation_Deploy_DifferentPoints" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
@@ -150,10 +144,7 @@ test "ECIsolation_Deploy_DifferentPoints" {
 test "ECIsolation_Call_CheckOnCurve" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
@@ -198,10 +189,7 @@ test "ECIsolation_Call_CheckOnCurve" {
 test "ECIsolation_Call_CheckMulGenOnCurve" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
@@ -248,10 +236,7 @@ test "ECIsolation_Call_CheckMulGenOnCurve" {
 test "ECIsolation_Call_CheckNegateRoundtrip" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});

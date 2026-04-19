@@ -35,10 +35,7 @@ fn deployP2PKH(allocator: std.mem.Allocator, owner: *helpers.Wallet) !struct { c
 test "P2PKH_ValidUnlock" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var owner = try helpers.newWallet(allocator);
     defer owner.deinit();
@@ -84,10 +81,7 @@ test "P2PKH_ValidUnlock" {
 test "P2PKH_Call_ValidUnlock" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var owner = try helpers.newWallet(allocator);
     defer owner.deinit();
@@ -140,10 +134,7 @@ test "P2PKH_Call_ValidUnlock" {
 test "P2PKH_DeployDifferentPubKeyHash" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
         std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
@@ -197,10 +188,7 @@ test "P2PKH_DeployDifferentPubKeyHash" {
 test "P2PKH_WrongSignerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
         std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});

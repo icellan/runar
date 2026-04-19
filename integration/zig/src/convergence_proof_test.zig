@@ -19,10 +19,7 @@ test "ConvergenceProof_Compile" {
 test "ConvergenceProof_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
         std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
@@ -78,10 +75,7 @@ test "ConvergenceProof_ScriptSize" {
 test "ConvergenceProof_SpendValidDelta" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
         std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});

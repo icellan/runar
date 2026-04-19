@@ -35,10 +35,7 @@ test "PostQuantumWallet_ScriptSize" {
 test "PostQuantumWallet_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
         std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
@@ -83,10 +80,7 @@ test "PostQuantumWallet_Deploy" {
 test "PostQuantumWallet_DeployDifferentSeed" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
         std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});

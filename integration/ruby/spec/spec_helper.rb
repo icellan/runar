@@ -532,21 +532,13 @@ RSpec.configure do |config|
 
   config.before(:suite) do
     unless IntegrationHelpers.node_available?
-      warn 'BSV regtest node not available — all integration tests will be skipped'
-    else
-      info = IntegrationHelpers.rpc_call('getblockchaininfo')
-      raise "SAFETY: Connected to #{info['chain']}, not regtest!" unless info['chain'] == 'regtest'
-      # Ensure at least 101 blocks exist for coinbase maturity
-      count = IntegrationHelpers.rpc_call('getblockcount') rescue 0
-      IntegrationHelpers.mine(101 - count) if count < 101
+      raise 'BSV regtest node not available. Integration tests require a live node. ' \
+            'Start with: cd integration && ./regtest.sh start'
     end
-  end
-
-  config.around(:each) do |example|
-    if IntegrationHelpers.node_available?
-      example.run
-    else
-      skip 'BSV regtest node not available'
-    end
+    info = IntegrationHelpers.rpc_call('getblockchaininfo')
+    raise "SAFETY: Connected to #{info['chain']}, not regtest!" unless info['chain'] == 'regtest'
+    # Ensure at least 101 blocks exist for coinbase maturity
+    count = IntegrationHelpers.rpc_call('getblockcount') rescue 0
+    IntegrationHelpers.mine(101 - count) if count < 101
   end
 end

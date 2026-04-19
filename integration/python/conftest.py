@@ -496,7 +496,15 @@ def ensure_regtest():
 
 
 @pytest.fixture(autouse=True)
-def skip_if_no_node():
-    """Auto-skip all tests if the regtest node is not available."""
+def fail_if_no_node():
+    """Hard-fail every test if the regtest node is not available.
+
+    A silent skip here would let CI pass even when the node is down — masking
+    broken deploy/call flows. Fail fast instead so the missing node is
+    visible in the first failing test's traceback.
+    """
     if not is_node_available():
-        pytest.skip("BSV regtest node not available")
+        pytest.fail(
+            "BSV regtest node not available. Integration tests require a live node. "
+            "Start with: cd integration && ./regtest.sh start"
+        )

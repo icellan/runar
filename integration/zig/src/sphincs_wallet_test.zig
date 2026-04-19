@@ -35,10 +35,7 @@ test "SPHINCSWallet_ScriptSize" {
 test "SPHINCSWallet_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
         std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
@@ -83,10 +80,7 @@ test "SPHINCSWallet_Deploy" {
 test "SPHINCSWallet_DeployDifferentKey" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
         std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});

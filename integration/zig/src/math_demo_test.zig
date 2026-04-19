@@ -20,10 +20,7 @@ test "MathDemo_Compile" {
 test "MathDemo_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -54,10 +51,7 @@ test "MathDemo_Deploy" {
 test "MathDemo_Call_DivideBy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -98,10 +92,7 @@ test "MathDemo_Call_DivideBy" {
 test "MathDemo_Call_SquareRoot" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -142,10 +133,7 @@ test "MathDemo_Call_SquareRoot" {
 test "MathDemo_Call_Normalize" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -187,10 +175,7 @@ test "MathDemo_Call_Normalize" {
 test "MathDemo_Call_Exponentiate" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -232,10 +217,7 @@ test "MathDemo_Call_Exponentiate" {
 test "MathDemo_Call_ScaleByRatio" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -277,10 +259,7 @@ test "MathDemo_Call_ScaleByRatio" {
 test "MathDemo_Call_ChainOperations" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -344,10 +323,7 @@ test "MathDemo_Call_ChainOperations" {
 test "MathDemo_Call_ComputeLog2" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -389,10 +365,7 @@ test "MathDemo_Call_ComputeLog2" {
 test "MathDemo_Call_DivideThenClamp" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -445,10 +418,7 @@ test "MathDemo_Call_DivideThenClamp" {
 test "MathDemo_Call_ReduceGcd" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
@@ -490,10 +460,7 @@ test "MathDemo_Call_ReduceGcd" {
 test "MathDemo_RejectDivideByZero" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});

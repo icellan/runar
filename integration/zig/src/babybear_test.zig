@@ -24,10 +24,7 @@ test "BabyBear_Compile" {
 test "BabyBear_FieldAdd_DeployAndCall" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
@@ -74,10 +71,7 @@ test "BabyBear_FieldAdd_DeployAndCall" {
 test "BabyBear_FieldAdd_WrongResult_Rejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
@@ -123,10 +117,7 @@ test "BabyBear_FieldAdd_WrongResult_Rejected" {
 test "BabyBear_FieldInv_Identity" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
         std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});

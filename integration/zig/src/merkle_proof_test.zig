@@ -122,10 +122,7 @@ test "MerkleProof_Compile" {
 test "MerkleProof_Sha256_LeafIndex0" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     const tree = buildTreeAndProof(allocator, 0) catch |err| {
         std.log.warn("Could not build test tree: {any}, skipping", .{err});
@@ -182,10 +179,7 @@ test "MerkleProof_Sha256_LeafIndex0" {
 test "MerkleProof_Sha256_WrongLeaf_Rejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     const tree = buildTreeAndProof(allocator, 0) catch |err| {
         std.log.warn("Could not build test tree: {any}, skipping", .{err});

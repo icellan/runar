@@ -20,10 +20,7 @@ test "CovenantVault_Compile" {
 test "CovenantVault_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
         std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
@@ -67,10 +64,7 @@ test "CovenantVault_Deploy" {
 test "CovenantVault_DeployZeroMinAmount" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
         std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
@@ -114,10 +108,7 @@ test "CovenantVault_DeployZeroMinAmount" {
 test "CovenantVault_DeployLargeMinAmount" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
         std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
@@ -161,10 +152,7 @@ test "CovenantVault_DeployLargeMinAmount" {
 test "CovenantVault_DeploySameKey" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
         std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
@@ -210,10 +198,7 @@ test "CovenantVault_RejectWrongSigner" {
     // Instead, we test that a wrong signer is rejected (checkSig fails on-chain).
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
         std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});

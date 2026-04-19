@@ -32,10 +32,7 @@ test "NFT_Compile" {
 test "NFT_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
@@ -79,10 +76,7 @@ test "NFT_Deploy" {
 test "NFT_DeployDifferentOwners" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
@@ -148,10 +142,7 @@ test "NFT_DeployDifferentOwners" {
 test "NFT_DeployLongMetadata" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
@@ -205,10 +196,7 @@ test "NFT_DeployLongMetadata" {
 test "NFT_Transfer" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
@@ -275,10 +263,7 @@ test "NFT_Transfer" {
 test "NFT_Burn" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
@@ -332,10 +317,7 @@ test "NFT_Burn" {
 test "NFT_WrongOwnerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
         std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});

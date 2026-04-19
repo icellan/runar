@@ -20,10 +20,7 @@ test "OraclePriceFeed_Compile" {
 test "OraclePriceFeed_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
         std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
@@ -65,10 +62,7 @@ test "OraclePriceFeed_Deploy" {
 test "OraclePriceFeed_DeployDifferentReceiver" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
         std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
@@ -144,10 +138,7 @@ test "OraclePriceFeed_ABI_Methods" {
 test "OraclePriceFeed_SpendValidPrice" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
         std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
@@ -208,10 +199,7 @@ test "OraclePriceFeed_SpendValidPrice" {
 test "OraclePriceFeed_BelowThresholdRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
         std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});

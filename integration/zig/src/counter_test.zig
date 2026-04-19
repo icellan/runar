@@ -48,10 +48,7 @@ fn deployCounter(
 test "Counter_Increment" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
@@ -92,10 +89,7 @@ test "Counter_Increment" {
 test "Counter_Deploy_WithInitialValue" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
@@ -171,10 +165,7 @@ test "Counter_StateField_Metadata" {
 test "Counter_Call_Increment" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
@@ -222,10 +213,7 @@ test "Counter_Call_Increment" {
 test "Counter_Call_IncrementChain" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
@@ -278,10 +266,7 @@ test "Counter_Call_IncrementChain" {
 test "Counter_Call_IncrementThenDecrement" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
         std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});

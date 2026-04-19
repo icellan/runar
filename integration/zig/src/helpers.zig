@@ -127,6 +127,19 @@ pub fn isNodeAvailable(allocator: std.mem.Allocator) bool {
     return true;
 }
 
+/// Hard-fail if the regtest node is not reachable. Call this at the start of
+/// every integration test so a missing node is a real failure rather than a
+/// silent pass. Matches the fail-fast behaviour of the Go / Python / Ruby /
+/// Rust / TypeScript integration suites.
+pub fn requireNodeAvailable(allocator: std.mem.Allocator) void {
+    if (!isNodeAvailable(allocator)) {
+        @panic(
+            "regtest node not available. Integration tests require a live node. " ++
+            "Start with: cd integration && ./regtest.sh start",
+        );
+    }
+}
+
 /// Get the current block height.
 pub fn getBlockCount(allocator: std.mem.Allocator) !i64 {
     const result = try rpcCall(allocator, "getblockchaininfo", "[]");

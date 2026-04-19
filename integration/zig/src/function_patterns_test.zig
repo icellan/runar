@@ -20,10 +20,7 @@ test "FunctionPatterns_Compile" {
 test "FunctionPatterns_Deploy_And_Call_Deposit" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -75,10 +72,7 @@ test "FunctionPatterns_Deploy_And_Call_Deposit" {
 test "FunctionPatterns_Deploy_WithOwnerAndBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -116,10 +110,7 @@ test "FunctionPatterns_Deploy_WithOwnerAndBalance" {
 test "FunctionPatterns_Deploy_LargeBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -157,10 +148,7 @@ test "FunctionPatterns_Deploy_LargeBalance" {
 test "FunctionPatterns_Deploy_ZeroBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -198,10 +186,7 @@ test "FunctionPatterns_Deploy_ZeroBalance" {
 test "FunctionPatterns_Call_DepositThenWithdraw" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -266,10 +251,7 @@ test "FunctionPatterns_Call_DepositThenWithdraw" {
 test "FunctionPatterns_WrongOwnerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
@@ -335,10 +317,7 @@ test "FunctionPatterns_WrongOwnerRejected" {
 test "FunctionPatterns_DistinctDeployTxids" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
         std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});

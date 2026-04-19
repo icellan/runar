@@ -15,13 +15,13 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "Integration tests using node type: %s\n", nodeType)
 
 	if !helpers.IsNodeAvailable() {
-		fmt.Fprintln(os.Stderr, "Regtest node not running. Skipping integration tests.")
+		fmt.Fprintln(os.Stderr, "Regtest node not running. Integration tests require a live node.")
 		if helpers.IsTeranode() {
 			fmt.Fprintln(os.Stderr, "Start with: cd integration && ./teranode.sh start")
 		} else {
 			fmt.Fprintln(os.Stderr, "Start with: cd integration && ./regtest.sh start")
 		}
-		os.Exit(0)
+		os.Exit(1)
 	}
 
 	helpers.EnsureRegtest()

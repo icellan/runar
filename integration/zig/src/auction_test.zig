@@ -20,10 +20,7 @@ test "Auction_Compile" {
 test "Auction_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
         std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
@@ -68,10 +65,7 @@ test "Auction_Deploy" {
 test "Auction_DeployZeroBid" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
         std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
@@ -116,10 +110,7 @@ test "Auction_DeployZeroBid" {
 test "Auction_DeploySameKey" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
         std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
@@ -178,10 +169,7 @@ test "Auction_ABI_Methods" {
 test "Auction_WrongSignerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
         std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});

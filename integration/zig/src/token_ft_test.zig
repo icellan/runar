@@ -32,10 +32,7 @@ test "FungibleToken_Compile" {
 test "FungibleToken_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -78,10 +75,7 @@ test "FungibleToken_Deploy" {
 test "FungibleToken_DeployZeroBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -122,10 +116,7 @@ test "FungibleToken_DeployZeroBalance" {
 test "FungibleToken_DeployLargeBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -186,10 +177,7 @@ test "FungibleToken_StateFields" {
 test "FungibleToken_Send" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -260,10 +248,7 @@ test "FungibleToken_Send" {
 test "FungibleToken_WrongOwnerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -340,10 +325,7 @@ test "FungibleToken_WrongOwnerRejected" {
 test "FungibleToken_Transfer" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -420,10 +402,7 @@ test "FungibleToken_Transfer" {
 test "FungibleToken_TransferExactBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -496,10 +475,7 @@ test "FungibleToken_TransferExactBalance" {
 test "FungibleToken_TransferDeflatedBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -572,10 +548,7 @@ test "FungibleToken_TransferDeflatedBalance" {
 test "FungibleToken_TransferInflatedBalance" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -647,10 +620,7 @@ test "FungibleToken_TransferInflatedBalance" {
 test "FungibleToken_TransferExceedsBalanceRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -721,10 +691,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
 test "FungibleToken_TransferWrongSigner" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -804,10 +771,7 @@ test "FungibleToken_TransferWrongSigner" {
 test "FungibleToken_TransferZeroAmountRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -878,10 +842,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
 test "FungibleToken_Merge" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -968,10 +929,7 @@ test "FungibleToken_Merge" {
 test "FungibleToken_MergeDeflated" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -1051,10 +1009,7 @@ test "FungibleToken_MergeDeflated" {
 test "FungibleToken_MergeInflatedTotal" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
@@ -1133,10 +1088,7 @@ test "FungibleToken_MergeInflatedTotal" {
 test "FungibleToken_MergeWrongSigner" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
         std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});

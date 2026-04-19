@@ -12,9 +12,9 @@ import { isNodeAvailable, getBlockCount, mine, rpcCall } from './helpers/node.js
 export default async function setup() {
   const available = await isNodeAvailable();
   if (!available) {
-    console.error('Regtest node not running. Skipping integration tests.');
+    console.error('Regtest node not running. Integration tests require a live node.');
     console.error('Start with: cd integration && ./regtest.sh start');
-    process.exit(0);
+    process.exit(1);
   }
 
   const info = await rpcCall('getblockchaininfo');

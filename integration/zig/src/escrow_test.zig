@@ -20,10 +20,7 @@ test "Escrow_Compile" {
 test "Escrow_DeployThreePubKeys" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
@@ -71,10 +68,7 @@ test "Escrow_DeployThreePubKeys" {
 test "Escrow_DeploySameKey" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
@@ -138,10 +132,7 @@ test "Escrow_ABI_Methods" {
 test "Escrow_Call_Release_SameKey" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
@@ -217,10 +208,7 @@ test "Escrow_NotStateful" {
 test "Escrow_Refund" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
         std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});

@@ -20,10 +20,7 @@ test "TicTacToe_Compile" {
 test "TicTacToe_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
         std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
@@ -64,10 +61,7 @@ test "TicTacToe_Deploy" {
 test "TicTacToe_Join" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
         std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
@@ -150,10 +144,7 @@ test "TicTacToe_Join" {
 test "TicTacToe_Move" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
         std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
@@ -287,10 +278,7 @@ test "TicTacToe_StateFields" {
 test "TicTacToe_WrongPlayerRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
         std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
@@ -401,10 +389,7 @@ test "TicTacToe_WrongPlayerRejected" {
 test "TicTacToe_JoinAfterPlayingRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
         std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});

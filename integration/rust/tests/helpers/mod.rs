@@ -64,13 +64,14 @@ pub fn create_provider() -> RPCProvider {
     RPCProvider::new_regtest(&url, &user, &pass)
 }
 
-/// Check if the regtest node is reachable. Panics with a descriptive message
-/// if not, so individual tests can call this at the top.
+/// Fail fast if the regtest node is not reachable. Called by each integration
+/// test at entry — panics (hard fail) with a descriptive message so CI and
+/// local runs surface missing-node as a real error instead of a silent pass.
 pub fn skip_if_no_node() {
     if !is_node_available() {
         panic!(
-            "SKIPPED: regtest node not available at {}. \
-             Start the node with `./integration/regtest.sh start` before running integration tests.",
+            "regtest node not available at {}. Integration tests require a live node. \
+             Start with `./integration/regtest.sh start` before running integration tests.",
             std::env::var("RPC_URL").unwrap_or_else(|_| "http://localhost:18332".to_string()),
         );
     }

@@ -246,10 +246,7 @@ fn deployStateCovenant(allocator: std.mem.Allocator) !struct {
 test "StateCovenant_Deploy" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var artifact = compile.compileContract(allocator, "examples/ts/state-covenant/StateCovenant.runar.ts") catch |err| {
         std.log.warn("Could not compile StateCovenant contract: {any}, skipping test", .{err});
@@ -290,10 +287,7 @@ test "StateCovenant_Deploy" {
 test "StateCovenant_AdvanceState" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
@@ -332,10 +326,7 @@ test "StateCovenant_AdvanceState" {
 test "StateCovenant_ChainAdvances" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
@@ -382,10 +373,7 @@ test "StateCovenant_ChainAdvances" {
 test "StateCovenant_WrongPreStateRootRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
@@ -434,10 +422,7 @@ test "StateCovenant_WrongPreStateRootRejected" {
 test "StateCovenant_InvalidBlockNumberRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
@@ -502,10 +487,7 @@ test "StateCovenant_InvalidBlockNumberRejected" {
 test "StateCovenant_InvalidBabyBearProofRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
@@ -550,10 +532,7 @@ test "StateCovenant_InvalidBabyBearProofRejected" {
 test "StateCovenant_InvalidMerkleProofRejected" {
     const allocator = std.testing.allocator;
 
-    if (!helpers.isNodeAvailable(allocator)) {
-        std.log.warn("Regtest node not available, skipping test", .{});
-        return;
-    }
+    helpers.requireNodeAvailable(allocator);
 
     var ctx = deployStateCovenant(allocator) catch return;
     defer ctx.contract.deinit();
