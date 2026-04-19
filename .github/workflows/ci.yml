@@ -416,7 +416,12 @@ jobs:
         run: cd integration && ./regtest.sh start
 
       - name: Go integration tests
-        run: cd integration/go && go test -tags integration -v -timeout 600s
+        # Timeout raised to 30min because TestRollupGroth16WAMSM_AdvanceState
+        # broadcasts a ~900KB Groth16 MSM tx and regularly spends 10+ minutes
+        # in the RPC round-trip on the CI runner. Runs comfortably in <1min
+        # locally when the node is not under memory pressure.
+        run: cd integration/go && go test -tags integration -v -timeout 1800s
+        timeout-minutes: 35
 
       - name: TypeScript integration tests
         run: cd integration/ts && npx vitest run
