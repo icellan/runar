@@ -15,8 +15,11 @@ import (
 var rpcID uint64
 
 // rpcClient uses a longer timeout than http.DefaultClient to handle
-// slow operations like mining 10001 blocks for Genesis activation.
-var rpcClient = &http.Client{Timeout: 10 * time.Minute}
+// slow operations like mining 10001 blocks for Genesis activation and
+// broadcasting multi-hundred-KB Groth16 WA transactions (the Script
+// verifier on regtest can spend 10+ minutes on a single ~900 KB tx
+// when the CI runner is under memory pressure).
+var rpcClient = &http.Client{Timeout: 30 * time.Minute}
 
 // NodeType returns the node type from the NODE_TYPE env var ("svnode" or "teranode").
 func NodeType() string {
