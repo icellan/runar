@@ -201,13 +201,13 @@ def test_unlock():
     c.unlock(mock_sig(), pk)
 ```
 
-`TestContract` uses the interpreter (not the VM) — it tests business logic with mocked crypto (`checkSig` always true, `checkPreimage` always true). Go, Rust, and Python tests run contracts as native code with mock types from the `runar` package/crate.
+`TestContract` uses the interpreter (not the VM) — it tests business logic with mocked crypto (`checkSig` always true, `checkPreimage` always true). Go, Rust, Python, Zig, and Ruby tests run contracts as native code with mock types from the `runar` package/crate/gem.
 
 The `CompileCheck` / `compile_check` functions run the contract through the Rúnar frontend (parse → validate → typecheck) to verify it's valid Rúnar that will compile to Bitcoin Script.
 
-### Deployment SDK (4 languages)
+### Deployment SDK (6 languages)
 
-All four languages have equivalent deployment SDKs for interacting with compiled contracts on-chain:
+All six languages have equivalent deployment SDKs for interacting with compiled contracts on-chain:
 
 **TypeScript** (`packages/runar-sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `LocalSigner` (wraps @bsv/sdk for ECDSA + BIP-143), `buildDeployTransaction`, `buildCallTransaction`, state serialization.
 
@@ -216,6 +216,10 @@ All four languages have equivalent deployment SDKs for interacting with compiled
 **Rust** (`packages/runar-rs/src/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner` (k256 ECDSA + manual BIP-143), `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization.
 
 **Python** (`packages/runar-py/runar/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Zero required dependencies (hashlib is stdlib). Python contracts use snake_case names which the parser converts to camelCase in the AST.
+
+**Zig** (`packages/runar-zig/src/sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
+
+**Ruby** (`packages/runar-rb/lib/runar/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner`, `MockSigner`/`ExternalSigner`, deploy/call transaction builders, state serialization.
 
 Key SDK concepts:
 - `RunarContract` wraps a compiled artifact + constructor args, manages state and UTXO tracking
@@ -249,6 +253,6 @@ Key SDK concepts:
 - `this.addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script bytes (not stateful continuations)
 - OP_CODESEPARATOR is automatically inserted for stateful contracts; artifact includes `codeSeparatorIndex` and `codeSeparatorIndices` fields
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
-- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python)
-- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python)
-- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python)
+- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/codegen/slh_dsa.zig` (Zig), `compilers/ruby/lib/codegen/slh_dsa.rb` (Ruby)
+- EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/codegen/ec.zig` (Zig), `compilers/ruby/lib/codegen/ec.rb` (Ruby)
+- SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/codegen/sha256.zig` (Zig), `compilers/ruby/lib/codegen/sha256.rb` (Ruby)

@@ -12,7 +12,8 @@
     "update-golden": "tsx runner/index.ts --update-golden",
     "fuzz": "tsx fuzzer/index.ts",
     "fuzz:quick": "tsx fuzzer/index.ts --num 10 --verbose",
-    "fuzz:property": "tsx fuzzer/index.ts --property"
+    "fuzz:property": "tsx fuzzer/index.ts --property",
+    "sdk-output": "tsx sdk-output/runner/sdk-runner.ts"
   },
   "dependencies": {
     "fast-check": "^3.22.0"

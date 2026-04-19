@@ -2,7 +2,7 @@
 
 **Cross-compiler conformance test suite ensuring all Rúnar compilers produce identical output.**
 
-The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, Rust, and Python -- must pass the full suite.
+The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, Rust, Python, Zig, and Ruby -- must pass the full suite.
 
 ---
 
@@ -27,6 +27,8 @@ tests/
 |   +-- basic-p2pkh.runar.go      # Source contract (Go)
 |   +-- basic-p2pkh.runar.rs      # Source contract (Rust)
 |   +-- basic-p2pkh.runar.py      # Source contract (Python)
+|   +-- basic-p2pkh.runar.zig     # Source contract (Zig)
+|   +-- basic-p2pkh.runar.rb      # Source contract (Ruby)
 |   +-- basic-p2pkh.runar.json    # Reference artifact (JSON AST, not tested by runner)
 |   +-- expected-ir.json          # Expected ANF IR (canonical JSON)
 |   +-- expected-script.hex       # Expected compiled script (hex string)
@@ -94,7 +96,7 @@ tests/
 +-- token-nft/
 ```
 
-> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`). All format variants must produce the same ANF IR and script output. The post-quantum and ec-primitives tests currently only have `.runar.ts` sources. Several test directories also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`). All format variants must produce the same ANF IR and script output. A handful of test directories currently only have `.runar.ts` sources (e.g. `add-data-output`, `add-raw-output`, `babybear-ext4`, `bitwise-ops`, `cross-covenant`, `ec-unit`, `merkle-proof`, `state-covenant`) and one (`go-dsl-bytestring-literal`) is Go-only. Several test directories also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
 
 ### File Roles
 
@@ -135,8 +137,11 @@ pnpm run test:markdown
 # Filter to a specific test
 pnpm run test:filter -- arithmetic
 
-# Test all input format variants (.ts, .sol, .move, .go, .rs, .py)
+# Test all input format variants (.ts, .sol, .move, .go, .rs, .py, .zig, .rb)
 pnpm test -- --multi-format
+
+# Run cross-SDK locking-script conformance (all 6 SDK tools)
+pnpm run sdk-output
 ```
 
 The runner compiles each test case with the TypeScript reference compiler and compares the output against the golden files.
@@ -243,32 +248,57 @@ Golden file updates should always be reviewed carefully. An unexpected change in
 
 ---
 
-## Current Test Cases (25)
+## Current Test Cases (42)
 
 | Test | Exercises | Has Script Golden |
 |---|---|---|
+| `add-data-output` | `this.addDataOutput(satoshis, bytes)` intrinsic (TS-only fixture) | Yes |
+| `add-raw-output` | `this.addRawOutput(satoshis, scriptBytes)` intrinsic (TS-only fixture) | Yes |
 | `arithmetic` | Binary arithmetic operations (+, -, *, /, %) | Yes |
 | `auction` | Stateful auction with bidding and closing | Yes |
+| `babybear` | BabyBear prime-field arithmetic | Yes |
+| `babybear-ext4` | BabyBear Ext4 extension-field operations (TS-only fixture) | Yes |
 | `basic-p2pkh` | Property loading, hash160, checkSig, assert | Yes |
+| `bitwise-ops` | Bitwise operators (&, \|, ^, ~, <<, >>) on bigint + ByteString (TS-only fixture) | Yes |
+| `blake3` | BLAKE3 compression + full-hash builtins | Yes |
 | `boolean-logic` | Logical operators (&&, \|\|, !), short-circuit lowering | Yes |
 | `bounded-loop` | Loop unrolling in ANF IR | Yes |
 | `convergence-proof` | Convergence proof patterns | Yes |
 | `covenant-vault` | Covenant spending constraints | Yes |
+| `cross-covenant` | Cross-contract covenant validation (TS-only fixture) | Yes |
 | `ec-demo` | EC point operation demos | Yes |
 | `ec-primitives` | EC point operations (ecAdd, ecMul, ecMulGen, etc.) | Yes |
+| `ec-unit` | Fine-grained EC unit tests (TS-only fixture) | Yes |
 | `escrow` | Multi-party escrow with multiple spending paths | Yes |
 | `function-patterns` | Private helper methods and function call patterns | Yes |
+| `go-dsl-bytestring-literal` | `.runar.go` DSL `ByteString` literal grammar (Go-only fixture) | Yes |
 | `if-else` | Conditional branches in ANF IR | Yes |
+| `if-without-else` | if-only conditionals | Yes |
 | `math-demo` | Built-in math functions (abs, min, max, sqrt, pow, etc.) | Yes |
+| `merkle-proof` | Merkle-root verification (TS-only fixture) | Yes |
 | `multi-method` | Method dispatch table generation | Yes |
 | `oracle-price` | Rabin signature oracle price feed | Yes |
+| `p256-primitives` | NIST P-256 EC primitives | Yes |
+| `p256-wallet` | P-256 wallet contract | Yes |
+| `p384-primitives` | NIST P-384 EC primitives | Yes |
+| `p384-wallet` | P-384 wallet contract | Yes |
 | `post-quantum-slhdsa` | SLH-DSA (SPHINCS+) signature verification | Yes |
 | `post-quantum-wallet` | WOTS+ wallet contract | Yes |
 | `post-quantum-wots` | WOTS+ hash chain signature verification | Yes |
 | `property-initializers` | Default values on contract properties | Yes |
 | `schnorr-zkp` | Schnorr zero-knowledge proof (EC ops) | Yes |
 | `sphincs-wallet` | SLH-DSA wallet contract | Yes |
+| `state-covenant` | Stateful covenant constraints (TS-only fixture) | Yes |
 | `stateful` | State updates, checkPreimage, getStateScript | Yes |
+| `stateful-bytestring` | Stateful ByteString mutations | Yes |
 | `stateful-counter` | Stateful counter with increment | Yes |
 | `token-ft` | Fungible token with split/merge | Yes |
 | `token-nft` | NFT with transfer/burn | Yes |
+
+### SDK-output conformance (41 fixtures, 6 SDKs)
+
+`sdk-output/tests/` contains 41 additional fixtures (one `input.json` + one
+`expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
+compiles each fixture through all six SDK tools in `sdk-output/tools/` (TypeScript,
+Go, Python, Ruby, Rust, Zig) and asserts byte-identical locking-script hex across
+every SDK. Invoke with `pnpm run sdk-output`.
