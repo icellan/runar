@@ -136,3 +136,19 @@ path = "bsv20-token/BSV20Token_test.rs"
 [[test]]
 name = "bsv21_token"
 path = "bsv21-token/BSV21Token_test.rs"
+
+[[test]]
+name = "babybear_ext4"
+path = "babybear-ext4/BabyBearExt4Demo_test.rs"
+
+[[test]]
+name = "bitwise_ops"
+path = "bitwise-ops/BitwiseOps_test.rs"
+
+[[test]]
+name = "ec_unit"
+path = "ec-unit/ECUnit_test.rs"
+
+[[test]]
+name = "add_raw_output"
+path = "add-raw-output/RawOutputTest_test.rs"

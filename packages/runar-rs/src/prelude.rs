@@ -630,6 +630,86 @@ pub fn bb_field_inv(a: i64) -> i64 {
 }
 
 // ---------------------------------------------------------------------------
+// Baby Bear quartic extension field (x^4 - W, W = 11)
+// ---------------------------------------------------------------------------
+//
+// Mirrors packages/runar-go/runar.go BbExt4Mul{0..3}/BbExt4Inv{0..3} and
+// the compiler codegen used by the `babybear-ext4` conformance fixture.
+
+const BB_EXT4_W: i64 = 11;
+
+pub fn bb_ext4_mul0(
+    a0: i64, a1: i64, a2: i64, a3: i64,
+    b0: i64, b1: i64, b2: i64, b3: i64,
+) -> i64 {
+    let r = bb_field_mul(a0, b0);
+    let t = bb_field_add(bb_field_mul(a1, b3),
+        bb_field_add(bb_field_mul(a2, b2), bb_field_mul(a3, b1)));
+    bb_field_add(r, bb_field_mul(BB_EXT4_W, t))
+}
+
+pub fn bb_ext4_mul1(
+    a0: i64, a1: i64, a2: i64, a3: i64,
+    b0: i64, b1: i64, b2: i64, b3: i64,
+) -> i64 {
+    let r = bb_field_add(bb_field_mul(a0, b1), bb_field_mul(a1, b0));
+    let t = bb_field_add(bb_field_mul(a2, b3), bb_field_mul(a3, b2));
+    bb_field_add(r, bb_field_mul(BB_EXT4_W, t))
+}
+
+pub fn bb_ext4_mul2(
+    a0: i64, a1: i64, a2: i64, a3: i64,
+    b0: i64, b1: i64, b2: i64, b3: i64,
+) -> i64 {
+    let r = bb_field_add(bb_field_mul(a0, b2),
+        bb_field_add(bb_field_mul(a1, b1), bb_field_mul(a2, b0)));
+    bb_field_add(r, bb_field_mul(BB_EXT4_W, bb_field_mul(a3, b3)))
+}
+
+pub fn bb_ext4_mul3(
+    a0: i64, a1: i64, a2: i64, a3: i64,
+    b0: i64, b1: i64, b2: i64, b3: i64,
+) -> i64 {
+    bb_field_add(
+        bb_field_mul(a0, b3),
+        bb_field_add(
+            bb_field_mul(a1, b2),
+            bb_field_add(bb_field_mul(a2, b1), bb_field_mul(a3, b0)),
+        ),
+    )
+}
+
+fn bb_ext4_inv_all(a0: i64, a1: i64, a2: i64, a3: i64) -> (i64, i64, i64, i64) {
+    let (c0, c1, c2, c3) = (a0, bb_field_sub(0, a1), a2, bb_field_sub(0, a3));
+    let p0 = bb_ext4_mul0(a0, a1, a2, a3, c0, c1, c2, c3);
+    let p2 = bb_ext4_mul2(a0, a1, a2, a3, c0, c1, c2, c3);
+    let norm_sq = bb_field_sub(bb_field_mul(p0, p0),
+        bb_field_mul(BB_EXT4_W, bb_field_mul(p2, p2)));
+    let norm_inv = bb_field_inv(norm_sq);
+    let inv0 = bb_field_mul(p0, norm_inv);
+    let inv2 = bb_field_sub(0, bb_field_mul(p2, norm_inv));
+    (
+        bb_field_add(bb_field_mul(c0, inv0), bb_field_mul(BB_EXT4_W, bb_field_mul(c2, inv2))),
+        bb_field_add(bb_field_mul(c1, inv0), bb_field_mul(BB_EXT4_W, bb_field_mul(c3, inv2))),
+        bb_field_add(bb_field_mul(c0, inv2), bb_field_mul(c2, inv0)),
+        bb_field_add(bb_field_mul(c1, inv2), bb_field_mul(c3, inv0)),
+    )
+}
+
+pub fn bb_ext4_inv0(a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    bb_ext4_inv_all(a0, a1, a2, a3).0
+}
+pub fn bb_ext4_inv1(a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    bb_ext4_inv_all(a0, a1, a2, a3).1
+}
+pub fn bb_ext4_inv2(a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    bb_ext4_inv_all(a0, a1, a2, a3).2
+}
+pub fn bb_ext4_inv3(a0: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    bb_ext4_inv_all(a0, a1, a2, a3).3
+}
+
+// ---------------------------------------------------------------------------
 // Merkle proof verification
 // ---------------------------------------------------------------------------
 
