@@ -8,15 +8,18 @@ Blake3Test = contract_mod.Blake3Test
 
 
 def test_verify_compress():
-    # Mock blake3_compress returns 32 zero bytes, so set expected to match.
-    c = Blake3Test(expected=b'\x00' * 32)
-    c.verify_compress(b'\x00' * 32, b'\x00' * 64)
+    from runar import blake3_compress
+    cv = b'\x00' * 32
+    block = b'\x00' * 64
+    c = Blake3Test(expected=blake3_compress(cv, block))
+    c.verify_compress(cv, block)
 
 
 def test_verify_hash():
-    # Mock blake3_hash returns 32 zero bytes, so set expected to match.
-    c = Blake3Test(expected=b'\x00' * 32)
-    c.verify_hash(b'\x00' * 32)
+    from runar import blake3_hash
+    message = b'\x00' * 32
+    c = Blake3Test(expected=blake3_hash(message))
+    c.verify_hash(message)
 
 
 def test_compile():

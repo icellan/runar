@@ -29,6 +29,12 @@ from runar.builtins import (
     blake3_compress, blake3_hash,
     sha256_compress, sha256_finalize,
     bb_field_add, bb_field_sub, bb_field_mul, bb_field_inv,
+    bb_ext4_mul0, bb_ext4_mul1, bb_ext4_mul2, bb_ext4_mul3,
+    bb_ext4_inv0, bb_ext4_inv1, bb_ext4_inv2, bb_ext4_inv3,
+    kb_field_add, kb_field_sub, kb_field_mul, kb_field_inv,
+    kb_ext4_mul0, kb_ext4_mul1, kb_ext4_mul2, kb_ext4_mul3,
+    kb_ext4_inv0, kb_ext4_inv1, kb_ext4_inv2, kb_ext4_inv3,
+    bn254_field_add, bn254_field_sub, bn254_field_mul, bn254_field_inv, bn254_field_neg,
     merkle_root_sha256, merkle_root_hash256,
 )
 from runar.ecdsa import (
@@ -110,6 +116,17 @@ __all__ = [
     'sha256_compress', 'sha256_finalize',
     # Baby Bear field arithmetic
     'bb_field_add', 'bb_field_sub', 'bb_field_mul', 'bb_field_inv',
+    # Baby Bear quartic extension field (x^4 - 11)
+    'bb_ext4_mul0', 'bb_ext4_mul1', 'bb_ext4_mul2', 'bb_ext4_mul3',
+    'bb_ext4_inv0', 'bb_ext4_inv1', 'bb_ext4_inv2', 'bb_ext4_inv3',
+    # KoalaBear field arithmetic
+    'kb_field_add', 'kb_field_sub', 'kb_field_mul', 'kb_field_inv',
+    # KoalaBear quartic extension field (x^4 - 3)
+    'kb_ext4_mul0', 'kb_ext4_mul1', 'kb_ext4_mul2', 'kb_ext4_mul3',
+    'kb_ext4_inv0', 'kb_ext4_inv1', 'kb_ext4_inv2', 'kb_ext4_inv3',
+    # BN254 field arithmetic
+    'bn254_field_add', 'bn254_field_sub', 'bn254_field_mul',
+    'bn254_field_inv', 'bn254_field_neg',
     # Merkle proof verification
     'merkle_root_sha256', 'merkle_root_hash256',
     # Test helpers

@@ -928,6 +928,17 @@ class _PyParser:
             self.skip_newlines()
             return None
 
+        if self.check_ident("break") or self.check_ident("continue"):
+            kw = self.peek().value
+            self.advance()
+            self.skip_newlines()
+            self.errors.append(Diagnostic(
+                message=f"Unsupported statement kind: {kw} — Rúnar does not support loop early-exit",
+                severity=Severity.ERROR,
+                loc=location,
+            ))
+            return None
+
         return self._parse_expr_or_assign(location)
 
     def _parse_assert(self, loc: SourceLocation) -> Statement:

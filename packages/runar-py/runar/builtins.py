@@ -304,20 +304,99 @@ def _as_bytes(x) -> bytes:
     raise TypeError(f"Expected bytes or hex-encoded string, got {type(x).__name__}")
 
 
-# -- Mock BLAKE3 Functions (compiler intrinsics — stubs return 32 zero bytes)
+# -- BLAKE3 Functions (compiler intrinsics — real single-block implementation)
+#
+# Matches the compiler's codegen (blockLen=64, counter=0, flags=11 =
+# CHUNK_START | CHUNK_END | ROOT) and the TS interpreter reference in
+# packages/runar-testing/src/interpreter/interpreter.ts:1742 (blake3CompressImpl).
+# This covers all one-block uses exercised by contracts; multi-block BLAKE3 is
+# not expressible in the emitted script so no multi-block interpreter branch
+# is needed.
+
+_BLAKE3_IV_WORDS = (
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+)
+
+_BLAKE3_IV_BYTES = b"".join(w.to_bytes(4, "big") for w in _BLAKE3_IV_WORDS)
+
+_BLAKE3_MSG_PERM = (2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8)
+
+
+def _blake3_rotr32(x: int, n: int) -> int:
+    return ((x >> n) | ((x << (32 - n)) & 0xFFFFFFFF)) & 0xFFFFFFFF
+
+
+def _blake3_g(s, a, b, c, d, mx, my):
+    s[a] = (s[a] + s[b] + mx) & 0xFFFFFFFF
+    s[d] = _blake3_rotr32(s[d] ^ s[a], 16)
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+    s[b] = _blake3_rotr32(s[b] ^ s[c], 12)
+    s[a] = (s[a] + s[b] + my) & 0xFFFFFFFF
+    s[d] = _blake3_rotr32(s[d] ^ s[a], 8)
+    s[c] = (s[c] + s[d]) & 0xFFFFFFFF
+    s[b] = _blake3_rotr32(s[b] ^ s[c], 7)
+
+
+def _blake3_round(s, m):
+    _blake3_g(s, 0, 4, 8, 12, m[0], m[1])
+    _blake3_g(s, 1, 5, 9, 13, m[2], m[3])
+    _blake3_g(s, 2, 6, 10, 14, m[4], m[5])
+    _blake3_g(s, 3, 7, 11, 15, m[6], m[7])
+    _blake3_g(s, 0, 5, 10, 15, m[8], m[9])
+    _blake3_g(s, 1, 6, 11, 12, m[10], m[11])
+    _blake3_g(s, 2, 7, 8, 13, m[12], m[13])
+    _blake3_g(s, 3, 4, 9, 14, m[14], m[15])
+
+
+def _blake3_compress_impl(cv: bytes, block: bytes) -> bytes:
+    """Single-block BLAKE3 compression with blockLen=64, counter=0, flags=11."""
+    if len(cv) != 32:
+        raise ValueError(f"blake3 chaining value must be 32 bytes, got {len(cv)}")
+    if len(block) != 64:
+        raise ValueError(f"blake3 block must be 64 bytes, got {len(block)}")
+
+    h = [int.from_bytes(cv[i * 4:i * 4 + 4], "big") for i in range(8)]
+    m = [int.from_bytes(block[i * 4:i * 4 + 4], "big") for i in range(16)]
+
+    state = [
+        h[0], h[1], h[2], h[3],
+        h[4], h[5], h[6], h[7],
+        _BLAKE3_IV_WORDS[0], _BLAKE3_IV_WORDS[1],
+        _BLAKE3_IV_WORDS[2], _BLAKE3_IV_WORDS[3],
+        0, 0, 64, 11,
+    ]
+
+    msg = list(m)
+    for r in range(7):
+        _blake3_round(state, msg)
+        if r < 6:
+            msg = [msg[i] for i in _BLAKE3_MSG_PERM]
+
+    out = bytearray(32)
+    for i in range(8):
+        w = (state[i] ^ state[i + 8]) & 0xFFFFFFFF
+        out[i * 4:i * 4 + 4] = w.to_bytes(4, "big")
+    return bytes(out)
+
 
 def blake3_compress(chaining_value, block) -> bytes:
-    """Mock BLAKE3 single-block compression.
-    In compiled Bitcoin Script this expands to ~10,000 opcodes.
-    Returns 32 zero bytes for business-logic testing."""
-    return b'\x00' * 32
+    """BLAKE3 single-block compression (blockLen=64, counter=0, flags=11)."""
+    cv = _as_bytes(chaining_value)
+    blk = _as_bytes(block)
+    return _blake3_compress_impl(cv, blk)
+
 
 def blake3_hash(message) -> bytes:
-    """Mock BLAKE3 hash for messages up to 64 bytes.
-    In compiled Bitcoin Script this uses the IV as the chaining value and
-    applies zero-padding before calling the compression function.
-    Returns 32 zero bytes for business-logic testing."""
-    return b'\x00' * 32
+    """BLAKE3 hash for messages up to 64 bytes.
+
+    Uses IV as the chaining value and applies zero-padding before calling the
+    single-block compression function. Matches the compiler codegen and the TS
+    interpreter reference.
+    """
+    msg = _as_bytes(message)
+    padded = msg[:64] + b"\x00" * max(0, 64 - len(msg))
+    return _blake3_compress_impl(_BLAKE3_IV_BYTES, padded)
 
 
 # -- SHA-256 Compression (real implementation) --------------------------------
@@ -683,6 +762,214 @@ def bb_field_mul(a: int, b: int) -> int:
 def bb_field_inv(a: int) -> int:
     """Baby Bear field inverse via Fermat's little theorem: a^(p-2) mod p."""
     return pow(((a % _BB_P) + _BB_P) % _BB_P, _BB_P - 2, _BB_P)
+
+
+# -- Baby Bear quartic extension field (x^4 - W, W = 11) ---------------------
+#
+# Mirrors the Go reference in packages/runar-go/runar.go (BbExt4Mul{0..3},
+# BbExt4Inv{0..3}, bbExt4Inv) and the compiler codegen used by the `babybear-ext4`
+# conformance fixture.
+
+_BB_EXT4_W = 11
+
+
+def bb_ext4_mul0(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = bb_field_mul(a0, b0)
+    t = bb_field_add(bb_field_mul(a1, b3),
+                     bb_field_add(bb_field_mul(a2, b2), bb_field_mul(a3, b1)))
+    return bb_field_add(r, bb_field_mul(_BB_EXT4_W, t))
+
+
+def bb_ext4_mul1(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = bb_field_add(bb_field_mul(a0, b1), bb_field_mul(a1, b0))
+    t = bb_field_add(bb_field_mul(a2, b3), bb_field_mul(a3, b2))
+    return bb_field_add(r, bb_field_mul(_BB_EXT4_W, t))
+
+
+def bb_ext4_mul2(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = bb_field_add(bb_field_mul(a0, b2),
+                     bb_field_add(bb_field_mul(a1, b1), bb_field_mul(a2, b0)))
+    return bb_field_add(r, bb_field_mul(_BB_EXT4_W, bb_field_mul(a3, b3)))
+
+
+def bb_ext4_mul3(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    return bb_field_add(
+        bb_field_mul(a0, b3),
+        bb_field_add(
+            bb_field_mul(a1, b2),
+            bb_field_add(bb_field_mul(a2, b1), bb_field_mul(a3, b0)),
+        ),
+    )
+
+
+def _bb_ext4_inv_all(a0: int, a1: int, a2: int, a3: int) -> tuple[int, int, int, int]:
+    """Invert a BabyBear Ext4 element; returns the four components."""
+    # conj(a) for x^4 - W: (a0, -a1, a2, -a3)
+    c0 = a0
+    c1 = bb_field_sub(0, a1)
+    c2 = a2
+    c3 = bb_field_sub(0, a3)
+
+    # a * conj(a) lands in Fp2 (components 1, 3 = 0)
+    p0 = bb_ext4_mul0(a0, a1, a2, a3, c0, c1, c2, c3)
+    p2 = bb_ext4_mul2(a0, a1, a2, a3, c0, c1, c2, c3)
+
+    # Invert the Fp2 element (p0, p2) in Fp[y]/(y^2 - W)
+    norm_sq = bb_field_sub(bb_field_mul(p0, p0),
+                           bb_field_mul(_BB_EXT4_W, bb_field_mul(p2, p2)))
+    norm_inv = bb_field_inv(norm_sq)
+
+    inv0 = bb_field_mul(p0, norm_inv)
+    inv2 = bb_field_sub(0, bb_field_mul(p2, norm_inv))
+
+    r0 = bb_field_add(bb_field_mul(c0, inv0),
+                      bb_field_mul(_BB_EXT4_W, bb_field_mul(c2, inv2)))
+    r1 = bb_field_add(bb_field_mul(c1, inv0),
+                      bb_field_mul(_BB_EXT4_W, bb_field_mul(c3, inv2)))
+    r2 = bb_field_add(bb_field_mul(c0, inv2), bb_field_mul(c2, inv0))
+    r3 = bb_field_add(bb_field_mul(c1, inv2), bb_field_mul(c3, inv0))
+    return r0, r1, r2, r3
+
+
+def bb_ext4_inv0(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _bb_ext4_inv_all(a0, a1, a2, a3)[0]
+
+
+def bb_ext4_inv1(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _bb_ext4_inv_all(a0, a1, a2, a3)[1]
+
+
+def bb_ext4_inv2(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _bb_ext4_inv_all(a0, a1, a2, a3)[2]
+
+
+def bb_ext4_inv3(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _bb_ext4_inv_all(a0, a1, a2, a3)[3]
+
+
+# -- KoalaBear field arithmetic (p = 2^31 - 2^24 + 1 = 2,130,706,433) --------
+
+_KB_P = 2130706433
+_KB_EXT4_W = 3
+
+
+def kb_field_add(a: int, b: int) -> int:
+    return (a + b) % _KB_P
+
+
+def kb_field_sub(a: int, b: int) -> int:
+    return ((a - b) % _KB_P + _KB_P) % _KB_P
+
+
+def kb_field_mul(a: int, b: int) -> int:
+    return (a * b) % _KB_P
+
+
+def kb_field_inv(a: int) -> int:
+    return pow(((a % _KB_P) + _KB_P) % _KB_P, _KB_P - 2, _KB_P)
+
+
+def kb_ext4_mul0(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = kb_field_mul(a0, b0)
+    t = kb_field_add(kb_field_mul(a1, b3),
+                     kb_field_add(kb_field_mul(a2, b2), kb_field_mul(a3, b1)))
+    return kb_field_add(r, kb_field_mul(_KB_EXT4_W, t))
+
+
+def kb_ext4_mul1(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = kb_field_add(kb_field_mul(a0, b1), kb_field_mul(a1, b0))
+    t = kb_field_add(kb_field_mul(a2, b3), kb_field_mul(a3, b2))
+    return kb_field_add(r, kb_field_mul(_KB_EXT4_W, t))
+
+
+def kb_ext4_mul2(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    r = kb_field_add(kb_field_mul(a0, b2),
+                     kb_field_add(kb_field_mul(a1, b1), kb_field_mul(a2, b0)))
+    return kb_field_add(r, kb_field_mul(_KB_EXT4_W, kb_field_mul(a3, b3)))
+
+
+def kb_ext4_mul3(a0: int, a1: int, a2: int, a3: int,
+                 b0: int, b1: int, b2: int, b3: int) -> int:
+    return kb_field_add(
+        kb_field_mul(a0, b3),
+        kb_field_add(
+            kb_field_mul(a1, b2),
+            kb_field_add(kb_field_mul(a2, b1), kb_field_mul(a3, b0)),
+        ),
+    )
+
+
+def _kb_ext4_inv_all(a0: int, a1: int, a2: int, a3: int) -> tuple[int, int, int, int]:
+    c0 = a0
+    c1 = kb_field_sub(0, a1)
+    c2 = a2
+    c3 = kb_field_sub(0, a3)
+
+    p0 = kb_ext4_mul0(a0, a1, a2, a3, c0, c1, c2, c3)
+    p2 = kb_ext4_mul2(a0, a1, a2, a3, c0, c1, c2, c3)
+
+    norm_sq = kb_field_sub(kb_field_mul(p0, p0),
+                           kb_field_mul(_KB_EXT4_W, kb_field_mul(p2, p2)))
+    norm_inv = kb_field_inv(norm_sq)
+
+    inv0 = kb_field_mul(p0, norm_inv)
+    inv2 = kb_field_sub(0, kb_field_mul(p2, norm_inv))
+
+    r0 = kb_field_add(kb_field_mul(c0, inv0),
+                      kb_field_mul(_KB_EXT4_W, kb_field_mul(c2, inv2)))
+    r1 = kb_field_add(kb_field_mul(c1, inv0),
+                      kb_field_mul(_KB_EXT4_W, kb_field_mul(c3, inv2)))
+    r2 = kb_field_add(kb_field_mul(c0, inv2), kb_field_mul(c2, inv0))
+    r3 = kb_field_add(kb_field_mul(c1, inv2), kb_field_mul(c3, inv0))
+    return r0, r1, r2, r3
+
+
+def kb_ext4_inv0(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _kb_ext4_inv_all(a0, a1, a2, a3)[0]
+
+
+def kb_ext4_inv1(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _kb_ext4_inv_all(a0, a1, a2, a3)[1]
+
+
+def kb_ext4_inv2(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _kb_ext4_inv_all(a0, a1, a2, a3)[2]
+
+
+def kb_ext4_inv3(a0: int, a1: int, a2: int, a3: int) -> int:
+    return _kb_ext4_inv_all(a0, a1, a2, a3)[3]
+
+
+# -- BN254 field arithmetic (p = 21888...8583) -------------------------------
+
+_BN254_P = 0x30644E72E131A029B85045B68181585D97816A916871CA8D3C208C16D87CFD47
+
+
+def bn254_field_add(a: int, b: int) -> int:
+    return (a + b) % _BN254_P
+
+
+def bn254_field_sub(a: int, b: int) -> int:
+    return ((a - b) % _BN254_P + _BN254_P) % _BN254_P
+
+
+def bn254_field_mul(a: int, b: int) -> int:
+    return (a * b) % _BN254_P
+
+
+def bn254_field_inv(a: int) -> int:
+    return pow(((a % _BN254_P) + _BN254_P) % _BN254_P, _BN254_P - 2, _BN254_P)
+
+
+def bn254_field_neg(a: int) -> int:
+    return (_BN254_P - (a % _BN254_P)) % _BN254_P
 
 
 # -- Merkle proof verification -----------------------------------------------
