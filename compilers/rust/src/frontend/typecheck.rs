@@ -98,6 +98,32 @@ fn builtin_functions() -> HashMap<&'static str, FuncSig> {
     m.insert("bbExt4Inv2", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
     m.insert("bbExt4Inv3", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
 
+    // KoalaBear field arithmetic (p = 2130706433)
+    m.insert("kbFieldAdd", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbFieldSub", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbFieldMul", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbFieldInv", FuncSig { params: vec!["bigint"], return_type: "bigint" });
+    // KoalaBear quartic extension field (W = 3)
+    m.insert("kbExt4Mul0", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Mul1", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Mul2", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Mul3", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Inv0", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Inv1", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Inv2", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    m.insert("kbExt4Inv3", FuncSig { params: vec!["bigint", "bigint", "bigint", "bigint"], return_type: "bigint" });
+    // BN254 field arithmetic
+    m.insert("bn254FieldAdd", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bn254FieldSub", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bn254FieldMul", FuncSig { params: vec!["bigint", "bigint"], return_type: "bigint" });
+    m.insert("bn254FieldInv", FuncSig { params: vec!["bigint"], return_type: "bigint" });
+    m.insert("bn254FieldNeg", FuncSig { params: vec!["bigint"], return_type: "bigint" });
+    // BN254 G1 curve operations
+    m.insert("bn254G1Add", FuncSig { params: vec!["Point", "Point"], return_type: "Point" });
+    m.insert("bn254G1ScalarMul", FuncSig { params: vec!["Point", "bigint"], return_type: "Point" });
+    m.insert("bn254G1Negate", FuncSig { params: vec!["Point"], return_type: "Point" });
+    m.insert("bn254G1OnCurve", FuncSig { params: vec!["Point"], return_type: "boolean" });
+
     // Merkle proof verification
     m.insert("merkleRootSha256", FuncSig { params: vec!["ByteString", "ByteString", "bigint", "bigint"], return_type: "ByteString" });
     m.insert("merkleRootHash256", FuncSig { params: vec!["ByteString", "ByteString", "bigint", "bigint"], return_type: "ByteString" });
