@@ -23,6 +23,6 @@ pub const P256Wallet = struct {
         runar.assert(runar.bytesEq(runar.hash160(pubKey), self.ecdsaPubKeyHash));
         runar.assert(runar.checkSig(sig, pubKey));
         runar.assert(runar.bytesEq(runar.hash160(p256PubKey), self.p256PubKeyHash));
-        runar.assert(runar.verifyECDSAP256(sig, p256Sig, p256PubKey));
+        runar.assert(runar.verifyECDSA_P256(sig, p256Sig, p256PubKey));
     }
 };

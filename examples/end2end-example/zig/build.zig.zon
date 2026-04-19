@@ -1,0 +1,15 @@
+.{
+    .name = .runar_price_bet_zig,
+    .version = "0.0.0",
+    .fingerprint = 0x9dd03e323373c69e,
+    .dependencies = .{
+        .bsvz = .{
+            .url = "git+https://github.com/b-open-io/bsvz.git#16957c773bdf18f4b2a75f7ea326a2e1cefa3f2d",
+            .hash = "bsvz-0.1.0-wvsL-bhiFQBIsxHKnVuig_LNW5O19aGntcqbZu3XWfjZ",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+    },
+}

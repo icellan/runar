@@ -983,6 +983,85 @@ pub fn bbFieldInv(a: base.Bigint) base.Bigint {
     return result;
 }
 
+// -- Baby Bear quartic extension field (x^4 - W, W = 11) ---------------------
+//
+// Mirrors packages/runar-go/runar.go BbExt4Mul{0..3} / BbExt4Inv{0..3} and
+// the compiler codegen used by the `babybear-ext4` conformance fixture.
+
+const bb_ext4_w: i64 = 11;
+
+pub fn bbExt4Mul0(
+    a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint,
+    b0: base.Bigint, b1: base.Bigint, b2: base.Bigint, b3: base.Bigint,
+) base.Bigint {
+    const r = bbFieldMul(a0, b0);
+    const t = bbFieldAdd(bbFieldMul(a1, b3), bbFieldAdd(bbFieldMul(a2, b2), bbFieldMul(a3, b1)));
+    return bbFieldAdd(r, bbFieldMul(bb_ext4_w, t));
+}
+
+pub fn bbExt4Mul1(
+    a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint,
+    b0: base.Bigint, b1: base.Bigint, b2: base.Bigint, b3: base.Bigint,
+) base.Bigint {
+    const r = bbFieldAdd(bbFieldMul(a0, b1), bbFieldMul(a1, b0));
+    const t = bbFieldAdd(bbFieldMul(a2, b3), bbFieldMul(a3, b2));
+    return bbFieldAdd(r, bbFieldMul(bb_ext4_w, t));
+}
+
+pub fn bbExt4Mul2(
+    a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint,
+    b0: base.Bigint, b1: base.Bigint, b2: base.Bigint, b3: base.Bigint,
+) base.Bigint {
+    const r = bbFieldAdd(bbFieldMul(a0, b2), bbFieldAdd(bbFieldMul(a1, b1), bbFieldMul(a2, b0)));
+    return bbFieldAdd(r, bbFieldMul(bb_ext4_w, bbFieldMul(a3, b3)));
+}
+
+pub fn bbExt4Mul3(
+    a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint,
+    b0: base.Bigint, b1: base.Bigint, b2: base.Bigint, b3: base.Bigint,
+) base.Bigint {
+    return bbFieldAdd(bbFieldMul(a0, b3), bbFieldAdd(bbFieldMul(a1, b2), bbFieldAdd(bbFieldMul(a2, b1), bbFieldMul(a3, b0))));
+}
+
+fn bbExt4InvAll(a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint) [4]base.Bigint {
+    const c0 = a0;
+    const c1 = bbFieldSub(0, a1);
+    const c2 = a2;
+    const c3 = bbFieldSub(0, a3);
+
+    const p0 = bbExt4Mul0(a0, a1, a2, a3, c0, c1, c2, c3);
+    const p2 = bbExt4Mul2(a0, a1, a2, a3, c0, c1, c2, c3);
+
+    const norm_sq = bbFieldSub(bbFieldMul(p0, p0), bbFieldMul(bb_ext4_w, bbFieldMul(p2, p2)));
+    const norm_inv = bbFieldInv(norm_sq);
+
+    const inv0 = bbFieldMul(p0, norm_inv);
+    const inv2 = bbFieldSub(0, bbFieldMul(p2, norm_inv));
+
+    return .{
+        bbFieldAdd(bbFieldMul(c0, inv0), bbFieldMul(bb_ext4_w, bbFieldMul(c2, inv2))),
+        bbFieldAdd(bbFieldMul(c1, inv0), bbFieldMul(bb_ext4_w, bbFieldMul(c3, inv2))),
+        bbFieldAdd(bbFieldMul(c0, inv2), bbFieldMul(c2, inv0)),
+        bbFieldAdd(bbFieldMul(c1, inv2), bbFieldMul(c3, inv0)),
+    };
+}
+
+pub fn bbExt4Inv0(a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint) base.Bigint {
+    return bbExt4InvAll(a0, a1, a2, a3)[0];
+}
+
+pub fn bbExt4Inv1(a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint) base.Bigint {
+    return bbExt4InvAll(a0, a1, a2, a3)[1];
+}
+
+pub fn bbExt4Inv2(a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint) base.Bigint {
+    return bbExt4InvAll(a0, a1, a2, a3)[2];
+}
+
+pub fn bbExt4Inv3(a0: base.Bigint, a1: base.Bigint, a2: base.Bigint, a3: base.Bigint) base.Bigint {
+    return bbExt4InvAll(a0, a1, a2, a3)[3];
+}
+
 // -- Merkle proof verification ------------------------------------------------
 
 pub fn merkleRootSha256(leaf: base.ByteString, proof: base.ByteString, index: base.Bigint, depth: base.Bigint) base.ByteString {

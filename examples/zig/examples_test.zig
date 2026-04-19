@@ -77,6 +77,8 @@ test {
     _ = @import("./auction/Auction_test.zig");
     _ = @import("./babybear/BabyBearDemo_test.zig");
     _ = @import("./blake3/Blake3Test_test.zig");
+    _ = @import("./bsv20-token/BSV20Token_test.zig");
+    _ = @import("./bsv21-token/BSV21Token_test.zig");
     _ = @import("./convergence-proof/ConvergenceProof_test.zig");
     _ = @import("./covenant-vault/CovenantVault_test.zig");
     _ = @import("./cross-covenant/CrossCovenantRef_test.zig");
@@ -87,6 +89,7 @@ test {
     _ = @import("./merkle-proof/MerkleProofDemo_test.zig");
     _ = @import("./message-board/MessageBoard_test.zig");
     _ = @import("./oracle-price/OraclePriceFeed_test.zig");
+    _ = @import("./ordinal-nft/OrdinalNFT_test.zig");
     _ = @import("./p2blake3pkh/P2Blake3PKH_test.zig");
     _ = @import("./p2pkh/P2PKH_test.zig");
     _ = @import("./post-quantum-wallet/PostQuantumWallet_test.zig");
@@ -100,4 +103,11 @@ test {
     _ = @import("./tic-tac-toe/TicTacToe_test.zig");
     _ = @import("./token-ft/FungibleTokenExample_test.zig");
     _ = @import("./token-nft/NFTExample_test.zig");
+    _ = @import("./add-raw-output/RawOutputTest_test.zig");
+    _ = @import("./babybear-ext4/BabyBearExt4Demo_test.zig");
+    _ = @import("./bitwise-ops/BitwiseOps_test.zig");
+    _ = @import("./ec-unit/ECUnit_test.zig");
+    _ = @import("./fixed-array-nested/Grid2x2_test.zig");
+    _ = @import("./p256-wallet/P256Wallet_test.zig");
+    _ = @import("./p384-wallet/P384Wallet_test.zig");
 }
