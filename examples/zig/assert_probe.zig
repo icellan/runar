@@ -3,12 +3,15 @@ const runar = @import("runar");
 
 const Auction = @import("auction/Auction.runar.zig").Auction;
 const Blake3Test = @import("blake3/Blake3Test.runar.zig").Blake3Test;
+const BSV20Token = @import("bsv20-token/BSV20Token.runar.zig").BSV20Token;
+const BSV21Token = @import("bsv21-token/BSV21Token.runar.zig").BSV21Token;
 const ConvergenceProof = @import("convergence-proof/ConvergenceProof.runar.zig").ConvergenceProof;
 const CovenantVault = @import("covenant-vault/CovenantVault.runar.zig").CovenantVault;
 const ECDemo = @import("ec-demo/ECDemo.runar.zig").ECDemo;
 const FunctionPatterns = @import("function-patterns/FunctionPatterns.runar.zig").FunctionPatterns;
 const MathDemo = @import("math-demo/MathDemo.runar.zig").MathDemo;
 const OraclePriceFeed = @import("oracle-price/OraclePriceFeed.runar.zig").OraclePriceFeed;
+const OrdinalNFT = @import("ordinal-nft/OrdinalNFT.runar.zig").OrdinalNFT;
 const P2Blake3PKH = @import("p2blake3pkh/P2Blake3PKH.runar.zig").P2Blake3PKH;
 const P2PKH = @import("p2pkh/P2PKH.runar.zig").P2PKH;
 const PostQuantumWallet = @import("post-quantum-wallet/PostQuantumWallet.runar.zig").PostQuantumWallet;
@@ -45,6 +48,12 @@ fn runCase(probe_case: []const u8) !void {
     if (std.mem.eql(u8, probe_case, "p2pkh-wrong-sig")) return probeP2PKHWrongSig();
     if (std.mem.eql(u8, probe_case, "p2blake3pkh-wrong-pubkey")) return probeP2Blake3PKHWrongPubkey();
     if (std.mem.eql(u8, probe_case, "p2blake3pkh-wrong-sig")) return probeP2Blake3PKHWrongSig();
+    if (std.mem.eql(u8, probe_case, "bsv20-token-wrong-pubkey")) return probeBSV20TokenWrongPubkey();
+    if (std.mem.eql(u8, probe_case, "bsv20-token-wrong-sig")) return probeBSV20TokenWrongSig();
+    if (std.mem.eql(u8, probe_case, "bsv21-token-wrong-pubkey")) return probeBSV21TokenWrongPubkey();
+    if (std.mem.eql(u8, probe_case, "bsv21-token-wrong-sig")) return probeBSV21TokenWrongSig();
+    if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-pubkey")) return probeOrdinalNFTWrongPubkey();
+    if (std.mem.eql(u8, probe_case, "ordinal-nft-wrong-sig")) return probeOrdinalNFTWrongSig();
     if (std.mem.eql(u8, probe_case, "blake3-hash-mismatch")) return probeBlake3HashMismatch();
     if (std.mem.eql(u8, probe_case, "blake3-compress-mismatch")) return probeBlake3CompressMismatch();
     if (std.mem.eql(u8, probe_case, "sha256-compress-mismatch")) return probeSha256CompressMismatch();
@@ -134,6 +143,36 @@ fn probeP2Blake3PKHWrongPubkey() !void {
 
 fn probeP2Blake3PKHWrongSig() !void {
     const contract = P2Blake3PKH.init(runar.blake3Hash(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
+}
+
+fn probeBSV20TokenWrongPubkey() !void {
+    const contract = BSV20Token.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.ALICE), runar.BOB.pubKey);
+}
+
+fn probeBSV20TokenWrongSig() !void {
+    const contract = BSV20Token.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
+}
+
+fn probeBSV21TokenWrongPubkey() !void {
+    const contract = BSV21Token.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.ALICE), runar.BOB.pubKey);
+}
+
+fn probeBSV21TokenWrongSig() !void {
+    const contract = BSV21Token.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
+}
+
+fn probeOrdinalNFTWrongPubkey() !void {
+    const contract = OrdinalNFT.init(runar.hash160(runar.ALICE.pubKey));
+    contract.unlock(runar.signTestMessage(runar.ALICE), runar.BOB.pubKey);
+}
+
+fn probeOrdinalNFTWrongSig() !void {
+    const contract = OrdinalNFT.init(runar.hash160(runar.ALICE.pubKey));
     contract.unlock(runar.signTestMessage(runar.BOB), runar.ALICE.pubKey);
 }
 

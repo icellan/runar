@@ -37,14 +37,10 @@ const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
   .map((file) => file.replace(/\.runar\.ts$/, '.runar.zig'))
   .sort();
 
-// TS examples that don't yet have a Zig port. These are tracked for later
-// backfill; the pending list stops the inventory check from flapping while
-// the port work is outstanding.
-const ZIG_PORT_PENDING: readonly string[] = [
-  'bsv20-token/BSV20Token.runar.zig',
-  'bsv21-token/BSV21Token.runar.zig',
-  'ordinal-nft/OrdinalNFT.runar.zig',
-];
+// TS examples that don't yet have a Zig port. Empty today; kept as an
+// explicit hook so future TS-only landings can be tracked here rather
+// than silently dropped from parity.
+const ZIG_PORT_PENDING: readonly string[] = [];
 
 describe('Zig parser: example inventory', () => {
   it('ships a Zig example for every native example contract (minus known pending ports)', () => {
