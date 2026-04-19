@@ -3,7 +3,7 @@
 require 'runar'
 require 'shellwords'
 
-PROJECT_ROOT = File.expand_path('../..', __dir__).freeze
+PROJECT_ROOT = File.expand_path('../../..', __dir__).freeze
 
 # Compile a .runar.rb contract through the native Ruby compiler.
 #

@@ -53,7 +53,7 @@ RPC_PASS = ENV.fetch('RPC_PASS', 'bitcoin').freeze
 STRIKE       = 50_000
 CONTRACT_SATS = 200_000_000  # 2 BSV split 1 BSV each from Alice + Bob
 
-PROJECT_ROOT = File.expand_path('../..', __dir__).freeze
+PROJECT_ROOT = File.expand_path('../../..', __dir__).freeze
 CONTRACT_PATH = File.join(__dir__, 'PriceBet.runar.rb').freeze
 
 # =============================================================================
