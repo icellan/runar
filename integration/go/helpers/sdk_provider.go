@@ -138,6 +138,14 @@ func (p *RPCProvider) GetRawTransaction(txid string) (string, error) {
 	return rawHex, nil
 }
 
+// GetRawTransactionVerbose returns the verbose getrawtransaction map so
+// covenant.RunarBroadcastClient (via its ConfirmationSource interface)
+// can read confirmation counts without pulling in the helpers package
+// itself. Mirrors pkg/bsvclient.RPCProvider's method of the same name.
+func (p *RPCProvider) GetRawTransactionVerbose(txid string) (map[string]interface{}, error) {
+	return GetRawTransaction(txid)
+}
+
 func (p *RPCProvider) GetFeeRate() (int64, error) {
 	return 1, nil
 }
