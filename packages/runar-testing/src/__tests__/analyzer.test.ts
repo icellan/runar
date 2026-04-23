@@ -141,6 +141,59 @@ describe('Analyzer: crafted bad scripts', () => {
     const result = analyzeScript('67');
     expect(result.findings.some((f) => f.code === 'UNBALANCED_IF_ENDIF')).toBe(true);
   });
+
+  it('lone OP_1 — UNCONDITIONALLY_SUCCEEDS', () => {
+    // OP_1 (51) — script leaves a truthy constant on the stack with no checks
+    const result = analyzeScript('51');
+    expect(
+      result.findings.some(
+        (f) => f.code === 'UNCONDITIONALLY_SUCCEEDS' && f.severity === 'warning',
+      ),
+    ).toBe(true);
+  });
+
+  it('arithmetic-only script — UNCONDITIONALLY_SUCCEEDS', () => {
+    // OP_1 OP_1 OP_ADD (515193) — no verify/sig check anywhere
+    const result = analyzeScript('515193');
+    expect(
+      result.findings.some((f) => f.code === 'UNCONDITIONALLY_SUCCEEDS'),
+    ).toBe(true);
+  });
+
+  it('P2PKH — no UNCONDITIONALLY_SUCCEEDS', () => {
+    // Standard P2PKH has OP_CHECKSIG — should not be flagged
+    const result = analyzeScript('76a90088ac');
+    expect(
+      result.findings.some((f) => f.code === 'UNCONDITIONALLY_SUCCEEDS'),
+    ).toBe(false);
+  });
+
+  it('IF/ELSE with unequal deltas — INCONSISTENT_BRANCH_DEPTH', () => {
+    // OP_1 OP_IF OP_1 OP_ELSE OP_1 OP_1 OP_ENDIF OP_ADD
+    // THEN pushes 1, ELSE pushes 2 — deltas differ.
+    const result = analyzeScript('51635167515168 93'.replace(/ /g, ''));
+    expect(
+      result.findings.some(
+        (f) => f.code === 'INCONSISTENT_BRANCH_DEPTH' && f.severity === 'warning',
+      ),
+    ).toBe(true);
+  });
+
+  it('IF without ELSE with non-zero body delta — INCONSISTENT_BRANCH_DEPTH', () => {
+    // OP_1 OP_IF OP_1 OP_ENDIF — body pushes 1 with no ELSE counterpart
+    const result = analyzeScript('51635168');
+    expect(
+      result.findings.some((f) => f.code === 'INCONSISTENT_BRANCH_DEPTH'),
+    ).toBe(true);
+  });
+
+  it('IF/ELSE with equal deltas — no INCONSISTENT_BRANCH_DEPTH', () => {
+    // OP_1 OP_IF OP_2 OP_ELSE OP_3 OP_ENDIF — both branches push exactly 1
+    const result = analyzeScript('5163526753 68'.replace(/ /g, ''));
+    expect(
+      result.findings.some((f) => f.code === 'INCONSISTENT_BRANCH_DEPTH'),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

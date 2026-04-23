@@ -22,6 +22,11 @@ export interface AnalyzeOptions {
  * Resolve the input to a hex script string.
  */
 function resolveInput(input: string): string {
+  // "-" reads hex from stdin
+  if (input === '-') {
+    return readFileSync(0, 'utf-8').trim();
+  }
+
   // Check if input is a file path
   if (existsSync(input)) {
     const ext = extname(input).toLowerCase();

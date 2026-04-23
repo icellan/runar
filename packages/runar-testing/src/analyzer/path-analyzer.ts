@@ -9,8 +9,22 @@
 import { Opcode } from '../vm/opcodes.js';
 import type { ParsedOpcode } from './script-parser.js';
 import { isCheckSigOpcode } from './script-parser.js';
-import { analyzeStackLinear } from './stack-analyzer.js';
+import { analyzeStackLinear, getStackEffect } from './stack-analyzer.js';
 import type { AnalysisFinding, ExecutionPath } from './types.js';
+
+// Opcodes that can cause a script to fail conditionally (attacker cannot
+// bypass a failing check regardless of unlocking input). Presence of any of
+// these in a path means the path is NOT "unconditionally successful".
+const VERIFICATION_OPCODES = new Set<number>([
+  Opcode.OP_VERIFY,
+  Opcode.OP_RETURN,
+  Opcode.OP_EQUALVERIFY,
+  Opcode.OP_NUMEQUALVERIFY,
+  Opcode.OP_CHECKSIG,
+  Opcode.OP_CHECKSIGVERIFY,
+  Opcode.OP_CHECKMULTISIG,
+  Opcode.OP_CHECKMULTISIGVERIFY,
+]);
 
 // ---------------------------------------------------------------------------
 // Path enumeration
@@ -252,6 +266,16 @@ export function analyzePaths(
       hasCheckSig,
       stackDepthAtEnd: stackResult.depth,
     });
+
+    if (isUnconditionallySuccessful(pathOpcodes)) {
+      findings.push({
+        severity: 'warning',
+        code: 'UNCONDITIONALLY_SUCCEEDS',
+        message:
+          'Execution path has no verification opcode — any unlocking input will satisfy it',
+        path: 'linear (no branches)',
+      });
+    }
   } else {
     // Enumerate all 2^n combinations (up to MAX_PATHS)
     const totalCombinations = Math.min(1 << numBranches, MAX_PATHS);
@@ -282,10 +306,137 @@ export function analyzePaths(
         hasCheckSig,
         stackDepthAtEnd: stackResult.depth,
       });
+
+      if (isUnconditionallySuccessful(pathOpcodes)) {
+        findings.push({
+          severity: 'warning',
+          code: 'UNCONDITIONALLY_SUCCEEDS',
+          message:
+            'Execution path has no verification opcode — any unlocking input will satisfy it',
+          path: description,
+        });
+      }
     }
   }
 
+  findings.push(...detectInconsistentBranchDepth(opcodes, branches));
+
   return { paths, findings };
+}
+
+/**
+ * A path is "unconditionally successful" when it contains no opcode that can
+ * fail the script (OP_VERIFY / *VERIFY / OP_CHECKSIG[VERIFY] / OP_CHECKMULTISIG[VERIFY]
+ * / OP_RETURN). In such a path an attacker can always choose unlocking inputs
+ * that leave a truthy value on the stack, so the script is effectively a
+ * "anyone can spend" script.
+ */
+function isUnconditionallySuccessful(pathOpcodes: ParsedOpcode[]): boolean {
+  if (pathOpcodes.length === 0) return false;
+  for (const op of pathOpcodes) {
+    if (VERIFICATION_OPCODES.has(op.opcode)) return false;
+  }
+  return true;
+}
+
+/**
+ * Detect IF/ELSE pairs whose branches push/consume different numbers of items.
+ * When the two branches leave different stack depths, code after OP_ENDIF sees
+ * a depth that depends on which branch ran — almost always a bug.
+ *
+ * Conservative: only check branch pairs whose bodies contain no nested
+ * OP_IF/OP_NOTIF (nested branches would fork and can't be summarized with a
+ * single flat delta without enumerating sub-paths).
+ */
+function detectInconsistentBranchDepth(
+  opcodes: ParsedOpcode[],
+  branches: BranchPoint[],
+): AnalysisFinding[] {
+  const findings: AnalysisFinding[] = [];
+
+  for (const branch of branches) {
+    // Only consider branches with an ELSE clause — a branchless IF has no
+    // counterpart to compare against. (A branchless IF does have a depth
+    // ambiguity: depth differs by the THEN body's delta depending on the
+    // condition, which is also flaggable. We include this below.)
+    if (branch.elseIndex < 0) {
+      // IF with no ELSE: delta of THEN body must be 0 for consistency.
+      const thenDelta = flatBranchDelta(
+        opcodes,
+        branch.ifIndex + 1,
+        branch.endifIndex,
+      );
+      if (thenDelta === null) continue;
+      if (thenDelta !== 0) {
+        const endifOp = opcodes[branch.endifIndex]!;
+        findings.push({
+          severity: 'warning',
+          code: 'INCONSISTENT_BRANCH_DEPTH',
+          message: `OP_IF body has net stack delta ${thenDelta}; without an OP_ELSE the depth after OP_ENDIF depends on the branch condition`,
+          offset: endifOp.offset,
+          opcode: endifOp.name,
+        });
+      }
+      continue;
+    }
+
+    const thenDelta = flatBranchDelta(
+      opcodes,
+      branch.ifIndex + 1,
+      branch.elseIndex,
+    );
+    const elseDelta = flatBranchDelta(
+      opcodes,
+      branch.elseIndex + 1,
+      branch.endifIndex,
+    );
+
+    // null means the body contained a nested branch — skip (conservative).
+    if (thenDelta === null || elseDelta === null) continue;
+
+    if (thenDelta !== elseDelta) {
+      const endifOp = opcodes[branch.endifIndex]!;
+      findings.push({
+        severity: 'warning',
+        code: 'INCONSISTENT_BRANCH_DEPTH',
+        message: `IF/ELSE branches leave different stack depths (THEN: ${thenDelta}, ELSE: ${elseDelta}) — code after OP_ENDIF will see a depth that depends on which branch ran`,
+        offset: endifOp.offset,
+        opcode: endifOp.name,
+      });
+    }
+  }
+
+  return findings;
+}
+
+/**
+ * Compute the net stack delta of an opcode range, treating each opcode as its
+ * static stack effect. Returns null if the range contains a nested IF/NOTIF
+ * (which would need per-branch enumeration).
+ */
+function flatBranchDelta(
+  opcodes: ParsedOpcode[],
+  start: number,
+  end: number,
+): number | null {
+  let delta = 0;
+  for (let i = start; i < end; i++) {
+    const op = opcodes[i]!;
+    if (op.opcode === Opcode.OP_IF || op.opcode === Opcode.OP_NOTIF) {
+      return null;
+    }
+    // ELSE/ENDIF inside this range shouldn't occur for well-structured scripts
+    // with no nested IFs; skip them defensively.
+    if (
+      op.opcode === Opcode.OP_ELSE ||
+      op.opcode === Opcode.OP_ENDIF
+    ) {
+      continue;
+    }
+    const [pops, pushes] = getStackEffect(op);
+    delta += pushes - pops;
+  }
+  return delta;
 }
 
 /**
