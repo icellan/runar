@@ -609,16 +609,29 @@ func (p *parseContext) parseVariableDecl(node *sitter.Node) Statement {
 	var name string
 	var typeNode TypeNode
 	var initExpr Expression
+	// The declarator has the form `<name> [type_annotation] [= <init>]`.
+	// Once we've walked past the `=` token, remaining children belong to the
+	// initializer (including bare identifiers like `const x = b`, which would
+	// otherwise get mis-parsed as re-declaring `name`).
+	seenEq := false
 
 	for i := 0; i < int(declarator.ChildCount()); i++ {
 		child := declarator.Child(i)
 		switch child.Type() {
+		case "=":
+			seenEq = true
 		case "identifier":
-			name = p.nodeText(child)
+			if !seenEq {
+				name = p.nodeText(child)
+			} else {
+				if expr := p.parseExpression(child); expr != nil {
+					initExpr = expr
+				}
+			}
 		case "type_annotation":
 			typeNode = p.parseTypeAnnotation(child)
 		default:
-			if child.Type() != "=" && child.Type() != ";" && child.Type() != ":" {
+			if child.Type() != ";" && child.Type() != ":" {
 				// Try to parse as init expression
 				expr := p.parseExpression(child)
 				if expr != nil {
