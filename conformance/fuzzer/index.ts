@@ -27,6 +27,10 @@ import {
   type FuzzerOptions,
   type CompilerName,
 } from './differential.js';
+import {
+  runIRDifferentialFuzzing,
+  type RenderStrategy,
+} from './ir-differential.js';
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -42,6 +46,12 @@ interface FuzzerCLIOptions {
   findingsDir?: string;
   output?: string;
   help: boolean;
+  /** Use the rich IR-based generator (arbGeneratedContract). */
+  ir: boolean;
+  /** Render per-compiler native source instead of a shared TS source. */
+  renderStrategy: RenderStrategy;
+  /** Include stateful contracts in the generated distribution (IR mode only). */
+  stateful: boolean;
 }
 
 function parseArgs(argv: string[]): FuzzerCLIOptions {
@@ -52,6 +62,9 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
     property: false,
     hex: false,
     help: false,
+    ir: false,
+    renderStrategy: 'ts',
+    stateful: false,
   };
 
   for (let i = 2; i < argv.length; i++) {
@@ -82,6 +95,21 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
         break;
       case '--output':
         opts.output = resolve(argv[++i] ?? '');
+        break;
+      case '--ir':
+        opts.ir = true;
+        break;
+      case '--render': {
+        const v = argv[++i];
+        if (v !== 'ts' && v !== 'native') {
+          console.error(`--render must be 'ts' or 'native', got ${v}`);
+          process.exit(1);
+        }
+        opts.renderStrategy = v;
+        break;
+      }
+      case '--stateful':
+        opts.stateful = true;
         break;
       case '--help':
       case '-h':
@@ -119,6 +147,13 @@ Options:
   --findings-dir <path>  Directory to save failing cases
                          (default: conformance/fuzz-findings)
   --output <path>        Write results JSON to file
+  --ir                   Use the rich IR-based generator (multi-type props,
+                         built-in calls, multiple methods, stateful contracts).
+  --render <ts|native>   IR mode only. 'ts' (default) renders a single TS source
+                         that all compilers parse. 'native' renders each compiler's
+                         native source (.runar.go / .runar.rs / .runar.py / …) to
+                         also stress each compiler's frontend.
+  --stateful             IR mode only. Mix stateful contracts into the sample.
   --help, -h             Show this help message
 
 Examples:
@@ -143,6 +178,10 @@ Examples:
 // Main
 // ---------------------------------------------------------------------------
 
+function writeOutput(path: string, report: unknown): void {
+  writeFileSync(path, JSON.stringify(report, null, 2) + '\n', 'utf-8');
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv);
 
@@ -158,8 +197,55 @@ async function main(): Promise<void> {
   if (opts.seed !== undefined) {
     console.log(`  Seed: ${opts.seed}`);
   }
+  if (opts.ir) {
+    console.log(`  Generator: IR (render=${opts.renderStrategy}${opts.stateful ? ', stateful' : ''})`);
+  }
   console.log(`  Mode: ${opts.property ? 'property-based (with shrinking)' : 'sample-based'}`);
   console.log('');
+
+  if (opts.ir) {
+    const results = await runIRDifferentialFuzzing(opts.num, {
+      seed: opts.seed,
+      compilers: opts.compilers,
+      verbose: opts.verbose,
+      compareHex: opts.hex,
+      renderStrategy: opts.renderStrategy,
+      includeStateful: opts.stateful,
+      findingsDir: opts.findingsDir,
+    });
+
+    const mismatches = results.filter((r) => !r.match);
+    if (mismatches.length > 0) {
+      console.log(`\nMismatches found: ${mismatches.length}`);
+      for (const m of mismatches) {
+        console.log(`\n--- Mismatching contract: ${m.contractName} ---`);
+        console.log(`Details: ${m.mismatchDetails}`);
+      }
+    }
+
+    if (opts.output) {
+      writeOutput(opts.output, {
+        timestamp: new Date().toISOString(),
+        totalPrograms: results.length,
+        mismatches: mismatches.length,
+        seed: opts.seed,
+        compilers: opts.compilers,
+        compareHex: opts.hex,
+        generator: 'ir',
+        renderStrategy: opts.renderStrategy,
+        stateful: opts.stateful,
+        results: results.map((r) => ({
+          match: r.match,
+          mismatchDetails: r.mismatchDetails,
+          contractName: r.contractName,
+        })),
+      });
+      console.log(`\nResults written to: ${opts.output}`);
+    }
+
+    if (mismatches.length > 0) process.exit(1);
+    return;
+  }
 
   const fuzzerOpts: FuzzerOptions = {
     seed: opts.seed,
@@ -205,7 +291,7 @@ async function main(): Promise<void> {
           source: r.programSource,
         })),
       };
-      writeFileSync(opts.output, JSON.stringify(report, null, 2) + '\n', 'utf-8');
+      writeOutput(opts.output, report);
       console.log(`\nResults written to: ${opts.output}`);
     }
 

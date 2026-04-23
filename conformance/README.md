@@ -227,6 +227,47 @@ pnpm run fuzz -- --num 5000 --seed 42
 pnpm run fuzz:property
 ```
 
+### IR-based Fuzzing (Richer Grammar, All 6 Compilers)
+
+The legacy fuzzer (above) emits a single `.runar.ts` source and feeds it to every compiler. A newer IR-based generator produces a language-neutral contract description (`GeneratedContract`) and can render it either as shared TypeScript or as each compiler's native source (`.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`). The IR generator covers multiple property types (`bigint`, `boolean`, `ByteString`, `PubKey`, `Sig`), stateful contracts, multiple methods, built-in calls (`hash160`, `sha256`, `abs`, `min`, `max`, etc.), and `if/else` bodies.
+
+```bash
+# Run the IR generator, compare compiled hex across all 6 compilers
+pnpm run fuzz:ir -- --num 100 --seed 1
+
+# Render each compiler's native source format (stresses the frontends too)
+pnpm run fuzz:ir:native
+
+# Mix stateful contracts into the sample
+pnpm run fuzz:ir:stateful
+```
+
+Failing cases are written to `conformance/fuzz-findings-ir/<timestamp>/` with one `source-<compiler>.txt` and one `output-<compiler>.txt` per compiler plus a `finding.json` describing the mismatch.
+
+### Script-Level Static Analysis
+
+Compiled scripts can be checked independently of the compiler via `runar analyze`:
+
+```bash
+# Hex string
+runar analyze 76a90088ac
+
+# .hex file
+runar analyze conformance/tests/basic-p2pkh/expected-script.hex
+
+# Artifact JSON (reads the "script" field)
+runar analyze artifacts/Counter.json
+
+# Stdin
+cat script.hex | runar analyze -
+
+# JSON output / filter by severity
+runar analyze 76a90088ac --json
+runar analyze 76a90088ac --severity warning
+```
+
+The analyzer enumerates spending paths, runs symbolic stack analysis along each, and reports findings: stack underflow, unreachable code after `OP_RETURN`, unbalanced `OP_IF/OP_ENDIF`, branches that leave inconsistent stack depths, paths with no signature check or no verification at all (would allow anyone to spend), dropped `OP_CHECKSIG` results, `OP_CODESEPARATOR` presence, inefficient `OP_PUSHDATA` encodings, and oversized scripts.
+
 ---
 
 ## Golden File Management

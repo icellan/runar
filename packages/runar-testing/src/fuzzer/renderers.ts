@@ -150,7 +150,7 @@ export function renderTypeScript(contract: GeneratedContract): string {
 function goType(t: RuinarType): string {
   switch (t) {
     case 'bigint': return 'runar.Int';
-    case 'boolean': return 'bool';
+    case 'boolean': return 'runar.Bool';
     case 'ByteString': return 'runar.ByteString';
     case 'PubKey': return 'runar.PubKey';
     case 'Sig': return 'runar.Sig';
