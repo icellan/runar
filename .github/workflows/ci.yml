@@ -96,6 +96,27 @@ jobs:
           name: runar-zig
           path: compilers/zig/zig-out/bin/runar-zig
 
+  java-compiler:
+    name: Java Compiler
+    runs-on: ubuntu-latest
+    # Phase 1 skeleton: the Java tier is non-blocking until milestone 7
+    # lands the .runar.java parser in every existing compiler. See
+    # docs/java-tier-plan.md for the roadmap.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build Java compiler
+        run: cd compilers/java && gradle build --no-daemon
+      - name: Build runar-java SDK
+        run: cd packages/runar-java && gradle build --no-daemon
+      - name: Build examples/java
+        run: cd examples/java && gradle build --no-daemon
+
   ruby-compiler:
     name: Ruby Compiler
     runs-on: ubuntu-latest
