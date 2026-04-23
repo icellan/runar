@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import runar.compiler.ir.anf.ConstValue;
+import runar.compiler.ir.stack.PushValue;
 
 /**
  * RFC 8785 / JCS (JSON Canonicalization Scheme) serialiser.
@@ -33,11 +34,18 @@ import runar.compiler.ir.anf.ConstValue;
  *   <li>{@link Record} &rarr; JSON object built from record components,
  *       keys sorted. Fields whose accessor returns {@code null} are
  *       OMITTED. If the record declares a no-argument {@code kind()}
- *       method (as sealed-interface variants in the Rúnar IR do), its
- *       result is emitted as a synthetic {@code "kind"} field.</li>
+ *       method (as sealed-interface variants in the Rúnar ANF IR do),
+ *       its result is emitted as a synthetic {@code "kind"} field.
+ *       Alternatively, a no-argument {@code op()} method (as used by
+ *       Stack IR variants) is emitted as a synthetic {@code "op"}
+ *       field. A record should declare at most one of the two.</li>
  *   <li>{@link ConstValue} &rarr; delegated to {@link ConstValue#raw()}
  *       so that LoadConst wrappers emit the raw value rather than a
  *       nested object.</li>
+ *   <li>{@link PushValue} &rarr; delegated to {@link PushValue#raw()}
+ *       so that PushOp's {@code value} field emits the raw payload
+ *       (hex string, bare integer, or boolean) rather than a nested
+ *       object.</li>
  * </ul>
  *
  * <p><strong>Not supported</strong> (ANF IR does not use them):
@@ -88,6 +96,11 @@ public final class Jcs {
 
         if (value instanceof ConstValue cv) {
             write(cv.raw(), sb, seen);
+            return;
+        }
+
+        if (value instanceof PushValue pv) {
+            write(pv.raw(), sb, seen);
             return;
         }
 
@@ -235,18 +248,29 @@ public final class Jcs {
         Class<?> cls = record.getClass();
         TreeMap<String, Object> map = new TreeMap<>();
 
-        // Inject "kind" if the record declares a no-arg String kind() method.
-        // This is how sealed-interface IR variants carry their discriminator
-        // without every subclass duplicating a component field.
-        Method kindMethod = findNoArgStringMethod(cls, "kind");
-        if (kindMethod != null) {
+        // Inject a discriminator field if the record declares a no-arg String
+        // method named `kind()` (ANF IR convention) or `op()` (Stack IR
+        // convention). This is how sealed-interface IR variants carry their
+        // discriminator without every subclass duplicating a component field.
+        // A record should declare at most one of the two.
+        String discriminatorKey = null;
+        Method discriminator = findNoArgStringMethod(cls, "kind");
+        if (discriminator != null) {
+            discriminatorKey = "kind";
+        } else {
+            discriminator = findNoArgStringMethod(cls, "op");
+            if (discriminator != null) {
+                discriminatorKey = "op";
+            }
+        }
+        if (discriminator != null) {
             try {
-                Object k = kindMethod.invoke(record);
+                Object k = discriminator.invoke(record);
                 if (k != null) {
-                    map.put("kind", k);
+                    map.put(discriminatorKey, k);
                 }
             } catch (ReflectiveOperationException e) {
-                throw new RuntimeException("failed to invoke kind() on " + cls.getName(), e);
+                throw new RuntimeException("failed to invoke " + discriminator.getName() + "() on " + cls.getName(), e);
             }
         }
 

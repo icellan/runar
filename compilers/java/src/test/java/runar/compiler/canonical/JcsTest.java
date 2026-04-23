@@ -16,6 +16,10 @@ import runar.compiler.ir.anf.ConstValue;
 import runar.compiler.ir.anf.LoadConst;
 import runar.compiler.ir.anf.LoadParam;
 import runar.compiler.ir.anf.LoadProp;
+import runar.compiler.ir.stack.DupOp;
+import runar.compiler.ir.stack.OpcodeOp;
+import runar.compiler.ir.stack.PushOp;
+import runar.compiler.ir.stack.PushValue;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -212,6 +216,34 @@ class JcsTest {
     void assertRecordEmitsValueRef() {
         Assert a = new Assert("t3");
         assertEquals("{\"kind\":\"assert\",\"value\":\"t3\"}", Jcs.stringify(a));
+    }
+
+    // ---------------------------------------------------------------
+    // Records with op() injection (Stack IR convention)
+    // ---------------------------------------------------------------
+
+    @Test
+    void dupOpEmitsOpDiscriminatorOnly() {
+        // Confirms the op() reflection injection used by Stack IR
+        // variants, analogous to kind() for ANF IR.
+        assertEquals("{\"op\":\"dup\"}", Jcs.stringify(new DupOp()));
+    }
+
+    @Test
+    void opcodeOpEmitsOpDiscriminatorAndComponents() {
+        assertEquals(
+            "{\"code\":\"OP_ADD\",\"op\":\"opcode\"}",
+            Jcs.stringify(new OpcodeOp("OP_ADD"))
+        );
+    }
+
+    @Test
+    void pushOpEmitsRawPushValuePayload() {
+        // Confirms PushValue dispatch (parallel to ConstValue).
+        assertEquals(
+            "{\"op\":\"push\",\"value\":7}",
+            Jcs.stringify(new PushOp(PushValue.of(7)))
+        );
     }
 
     // ---------------------------------------------------------------
