@@ -11,6 +11,9 @@ coverage/
 .idea/
 .vscode/
 /conformance/.tmp/
+/conformance/artifacts/
+/conformance/fuzz-findings/
+/conformance/fuzz-findings-ir/
 target/
 __pycache__/
 *.pyc
