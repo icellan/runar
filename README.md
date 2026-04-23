@@ -2,7 +2,7 @@
 
 *Old Norse plural for "runes" (rún = secret/script/mystery). Pronounced ROO-nar.*
 
-**Write Bitcoin smart contracts in TypeScript, Go, Rust, Ruby, Python, Zig, Solidity, or Move. Compile to Bitcoin Script.**
+**Write Bitcoin smart contracts in TypeScript, Go, Rust, Java, Ruby, Python, Zig, Solidity, or Move. Compile to Bitcoin Script.**
 
 <!-- Badges -->
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
@@ -348,8 +348,11 @@ Zig example tests live next to the contracts under `examples/zig/` and use `pack
 | Rust DSL | `.runar.rs` | Rust, Python | Full (`rust-analyzer`) | Experimental |
 | Ruby | `.runar.rb` | TS, Go, Rust, Python | Full (Ruby LSP) | Experimental |
 | Python | `.runar.py` | TS, Go, Rust, Python | Full (`pyright`) | Experimental |
+| Java | `.runar.java` | Java[^java-tier] | Full (IntelliJ, Eclipse) | Experimental |
 | Solidity-like | `.runar.sol` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
 | Move-style | `.runar.move` | TS, Go, Rust, Python | Syntax highlighting | Experimental |
+
+[^java-tier]: Java is the seventh native compiler + SDK tier and is landing in phases. The Java compiler accepts `.runar.java` today; parity across the other six compilers lands in milestone 7 of [`docs/java-tier-plan.md`](docs/java-tier-plan.md).
 
 All formats parse into the same `ContractNode` AST. From there, the pipeline is identical:
 
@@ -358,7 +361,8 @@ All formats parse into the same `ContractNode` AST. From there, the pipeline is 
   .runar.zig ──┤
   .runar.sol ──┤
   .runar.move ─┤
-  .runar.py ───┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
+  .runar.py ───┤
+  .runar.java ─┼──► ContractNode AST ──► Validate ──► TypeCheck ──► ANF ──► Stack ──► Bitcoin Script
   .runar.rb ───┤
   .runar.go ───┤
   .runar.rs ───┘
