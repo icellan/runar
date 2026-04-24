@@ -17,6 +17,8 @@ pub const SigHashPreimage = []const u8;
 pub const RabinSig = []const u8;
 pub const RabinPubKey = []const u8;
 pub const Point = []const u8;
+pub const P256Point = ByteString;
+pub const P384Point = ByteString;
 
 pub fn Readonly(comptime T: type) type {
     return T;

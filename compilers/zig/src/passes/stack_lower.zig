@@ -2607,29 +2607,20 @@ const LowerCtx = struct {
                 try self.stack.push(self.allocator, null);
             }
 
-            switch (prop.type_info) {
-                .bigint => {
-                    try self.emitPushInt(8);
-                    try self.stack.push(self.allocator, null);
-                    try self.emitOp(.op_num2bin);
-                    _ = self.stack.pop();
-                    _ = self.stack.pop();
-                    try self.stack.push(self.allocator, null);
-                },
-                .boolean => {
-                    try self.emitPushInt(1);
-                    try self.stack.push(self.allocator, null);
-                    try self.emitOp(.op_num2bin);
-                    _ = self.stack.pop();
-                    _ = self.stack.pop();
-                    try self.stack.push(self.allocator, null);
-                },
-                .byte_string => {
-                    // Prepend push-data length prefix (matching SDK format)
-                    try self.emitPushDataEncode();
-                },
-                else => {},
+            if (isNumericStateType(prop.type_info)) {
+                const width: i64 = if (prop.type_info == .boolean) 1 else 8;
+                try self.emitPushInt(width);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_num2bin);
+                _ = self.stack.pop();
+                _ = self.stack.pop();
+                try self.stack.push(self.allocator, null);
+            } else if (isVariableLengthStateType(prop.type_info)) {
+                // Prepend push-data length prefix (matching SDK format)
+                try self.emitPushDataEncode();
             }
+            // Fixed-width byte types (PubKey, Addr, Ripemd160, Sha256, Point,
+            // P256Point, P384Point) are already byte sequences and used as-is.
 
             if (!first) {
                 try self.emitOp(.op_cat);
@@ -2644,16 +2635,41 @@ const LowerCtx = struct {
         self.trackDepth();
     }
 
+    /// Returns true if the type is serialized as a fixed-size big-endian numeric
+    /// value via OP_NUM2BIN (and deserialized via OP_BIN2NUM). Covers bigint,
+    /// boolean and the Rabin primitives (treated as 8-byte scalars on the wire).
+    fn isNumericStateType(t: types.RunarType) bool {
+        return switch (t) {
+            .bigint, .boolean, .rabin_sig, .rabin_pub_key => true,
+            else => false,
+        };
+    }
+
+    /// Returns true if the type has no fixed wire length and must be serialized
+    /// with a push-data length prefix (ByteString, Sig, SigHashPreimage).
+    fn isVariableLengthStateType(t: types.RunarType) bool {
+        return switch (t) {
+            .byte_string, .sig, .sig_hash_preimage => true,
+            else => false,
+        };
+    }
+
+    /// Size in bytes of a state property on the wire, or -1 for variable-length
+    /// fields that carry a push-data length prefix.
+    ///
+    /// Covers all 14 validator-permitted property types. Keep in sync with
+    /// lowerGetStateScript, splitFixedStateFields, parseVariableLengthStateFields,
+    /// and lowerAddOutput — all of which dispatch on the same type set.
     fn statePropSize(prop: types.ANFProperty) LowerError!i64 {
         return switch (prop.type_info) {
-            .bigint => 8,
+            .bigint, .rabin_sig, .rabin_pub_key => 8,
             .boolean => 1,
-            .pub_key => 33,
             .addr, .ripemd160 => 20,
             .sha256 => 32,
-            .point => 64,
-            .p256_point, .p384_point => 64,
-            .byte_string => -1,
+            .pub_key => 33,
+            .point, .p256_point => 64,
+            .p384_point => 96,
+            .byte_string, .sig, .sig_hash_preimage => -1,
             else => LowerError.UnsupportedOperation,
         };
     }
@@ -2977,10 +2993,7 @@ const LowerCtx = struct {
     fn splitFixedStateFields(self: *LowerCtx, state_props: []const types.ANFProperty, prop_sizes: []const i64) !void {
         if (state_props.len == 1) {
             const prop = state_props[0];
-            switch (prop.type_info) {
-                .bigint, .boolean => try self.emitOp(.op_bin2num),
-                else => {},
-            }
+            if (isNumericStateType(prop.type_info)) try self.emitOp(.op_bin2num);
             try self.stack.renameAtDepth(self.allocator, 0, prop.name);
         } else {
             for (state_props, 0..) |prop, i| {
@@ -3000,10 +3013,7 @@ const LowerCtx = struct {
                     try self.stack.push(self.allocator, rest);
                     try self.stack.push(self.allocator, prop_bytes);
 
-                    switch (prop.type_info) {
-                        .bigint, .boolean => try self.emitOp(.op_bin2num),
-                        else => {},
-                    }
+                    if (isNumericStateType(prop.type_info)) try self.emitOp(.op_bin2num);
 
                     try self.emitOp(.op_swap);
                     const prop_value = self.stack.pop();
@@ -3012,37 +3022,32 @@ const LowerCtx = struct {
                     try self.stack.push(self.allocator, remainder);
                     try self.stack.renameAtDepth(self.allocator, 1, prop.name);
                 } else {
-                    switch (prop.type_info) {
-                        .bigint, .boolean => try self.emitOp(.op_bin2num),
-                        else => {},
-                    }
+                    if (isNumericStateType(prop.type_info)) try self.emitOp(.op_bin2num);
                     try self.stack.renameAtDepth(self.allocator, 0, prop.name);
                 }
             }
         }
     }
 
-    /// Parse state fields left-to-right, handling variable-length ByteString fields.
+    /// Parse state fields left-to-right, handling variable-length fields
+    /// (ByteString, Sig, SigHashPreimage) that carry a push-data length prefix.
     fn parseVariableLengthStateFields(self: *LowerCtx, state_props: []const types.ANFProperty, prop_sizes: []const i64) !void {
         if (state_props.len == 1) {
             const prop = state_props[0];
-            if (prop.type_info == .byte_string) {
-                // Single ByteString field: decode push-data prefix, drop trailing empty
+            if (isVariableLengthStateType(prop.type_info)) {
+                // Single variable-length field: decode push-data prefix, drop trailing empty
                 try self.emitPushDataDecode(); // [..., data, remaining]
                 try self.emitOp(.op_drop);
                 _ = self.stack.pop();
-            } else {
-                switch (prop.type_info) {
-                    .bigint, .boolean => try self.emitOp(.op_bin2num),
-                    else => {},
-                }
+            } else if (isNumericStateType(prop.type_info)) {
+                try self.emitOp(.op_bin2num);
             }
             try self.stack.renameAtDepth(self.allocator, 0, prop.name);
         } else {
             for (state_props, 0..) |prop, i| {
                 if (i < state_props.len - 1) {
-                    if (prop.type_info == .byte_string) {
-                        // ByteString: decode push-data prefix, extract data
+                    if (isVariableLengthStateType(prop.type_info)) {
+                        // Variable-length: decode push-data prefix, extract data
                         try self.emitPushDataDecode(); // [..., data, rest]
                         _ = self.stack.pop();
                         _ = self.stack.pop();
@@ -3061,10 +3066,7 @@ const LowerCtx = struct {
                         const sw_next = self.stack.pop();
                         try self.stack.push(self.allocator, sw_top);
                         try self.stack.push(self.allocator, sw_next);
-                        switch (prop.type_info) {
-                            .bigint, .boolean => try self.emitOp(.op_bin2num),
-                            else => {},
-                        }
+                        if (isNumericStateType(prop.type_info)) try self.emitOp(.op_bin2num);
                         try self.emitOp(.op_swap);
                         const prop_val = self.stack.pop();
                         const rest_val = self.stack.pop();
@@ -3073,16 +3075,13 @@ const LowerCtx = struct {
                         try self.stack.renameAtDepth(self.allocator, 1, prop.name);
                     }
                 } else {
-                    if (prop.type_info == .byte_string) {
-                        // Last ByteString: decode push-data prefix, drop trailing empty
+                    if (isVariableLengthStateType(prop.type_info)) {
+                        // Last variable-length field: decode push-data prefix, drop trailing empty
                         try self.emitPushDataDecode(); // [..., data, remaining]
                         try self.emitOp(.op_drop);
                         _ = self.stack.pop();
-                    } else {
-                        switch (prop.type_info) {
-                            .bigint, .boolean => try self.emitOp(.op_bin2num),
-                            else => {},
-                        }
+                    } else if (isNumericStateType(prop.type_info)) {
+                        try self.emitOp(.op_bin2num);
                     }
                     try self.stack.renameAtDepth(self.allocator, 0, prop.name);
                 }
@@ -3834,24 +3833,17 @@ const LowerCtx = struct {
             state_index += 1;
 
             try self.bringToTopAuto(value_ref);
-            switch (prop.type_info) {
-                .bigint => {
-                    try self.emitPushInt(8);
-                    try self.stack.push(self.allocator, null);
-                    try self.emitOp(.op_num2bin);
-                    _ = self.stack.pop();
-                },
-                .boolean => {
-                    try self.emitPushInt(1);
-                    try self.stack.push(self.allocator, null);
-                    try self.emitOp(.op_num2bin);
-                    _ = self.stack.pop();
-                },
-                .byte_string => {
-                    try self.emitPushDataEncode();
-                },
-                else => {},
+            if (isNumericStateType(prop.type_info)) {
+                const width: i64 = if (prop.type_info == .boolean) 1 else 8;
+                try self.emitPushInt(width);
+                try self.stack.push(self.allocator, null);
+                try self.emitOp(.op_num2bin);
+                _ = self.stack.pop();
+            } else if (isVariableLengthStateType(prop.type_info)) {
+                try self.emitPushDataEncode();
             }
+            // Fixed-width byte types (PubKey, Addr, Ripemd160, Sha256, Point,
+            // P256Point, P384Point) are already byte sequences and used as-is.
 
             _ = self.stack.pop();
             _ = self.stack.pop();
@@ -4964,4 +4956,98 @@ fn test_program() types.ANFProgram {
         .properties = &.{},
         .methods = &.{},
     };
+}
+
+/// Test-only shim exposing the private state-property size calculation.
+/// Kept together with the in-file tests that exercise it; not part of any
+/// public compiler API.
+fn testStatePropSize(t: types.RunarType) !i64 {
+    return LowerCtx.statePropSize(.{ .name = "p", .type_info = t, .readonly = false });
+}
+
+test "statePropSize P384Point is 96 bytes" {
+    try std.testing.expectEqual(@as(i64, 96), try testStatePropSize(.p384_point));
+}
+
+test "statePropSize P256Point is 64 bytes" {
+    try std.testing.expectEqual(@as(i64, 64), try testStatePropSize(.p256_point));
+}
+
+test "statePropSize covers all fixed-size state types" {
+    try std.testing.expectEqual(@as(i64, 8), try testStatePropSize(.bigint));
+    try std.testing.expectEqual(@as(i64, 1), try testStatePropSize(.boolean));
+    try std.testing.expectEqual(@as(i64, 20), try testStatePropSize(.addr));
+    try std.testing.expectEqual(@as(i64, 20), try testStatePropSize(.ripemd160));
+    try std.testing.expectEqual(@as(i64, 32), try testStatePropSize(.sha256));
+    try std.testing.expectEqual(@as(i64, 33), try testStatePropSize(.pub_key));
+    try std.testing.expectEqual(@as(i64, 64), try testStatePropSize(.point));
+    try std.testing.expectEqual(@as(i64, 8), try testStatePropSize(.rabin_sig));
+    try std.testing.expectEqual(@as(i64, 8), try testStatePropSize(.rabin_pub_key));
+}
+
+test "statePropSize covers all variable-length state types" {
+    try std.testing.expectEqual(@as(i64, -1), try testStatePropSize(.byte_string));
+    try std.testing.expectEqual(@as(i64, -1), try testStatePropSize(.sig));
+    try std.testing.expectEqual(@as(i64, -1), try testStatePropSize(.sig_hash_preimage));
+}
+
+// --- Integration: stateful contracts with uncommon state types compile ---
+
+fn loweredGetStateScript(allocator: std.mem.Allocator, prop_type: types.RunarType, type_name: []const u8) !types.StackProgram {
+    const bindings = try allocator.dupe(types.ANFBinding, &[_]types.ANFBinding{
+        .{ .name = "_state", .value = .{ .get_state_script = {} } },
+        .{ .name = "t0", .value = .{ .assert = .{ .value = "_state" } } },
+    });
+
+    const props = try allocator.dupe(types.ANFProperty, &[_]types.ANFProperty{
+        .{ .name = "field", .type_name = type_name, .type_info = prop_type, .readonly = false },
+    });
+
+    const methods = try allocator.dupe(types.ANFMethod, &[_]types.ANFMethod{
+        .{ .name = "snapshot", .is_public = true, .params = &.{}, .bindings = bindings },
+    });
+
+    const program = types.ANFProgram{
+        .contract_name = "S",
+        .parent_class = .stateful_smart_contract,
+        .properties = props,
+        .methods = methods,
+        .constructor = .{ .params = &.{}, .assertions = &.{} },
+    };
+    defer allocator.free(bindings);
+    defer allocator.free(props);
+    defer allocator.free(methods);
+    return try lower(allocator, program);
+}
+
+test "stateful contract with RabinSig state property compiles" {
+    const allocator = std.testing.allocator;
+    const result = try loweredGetStateScript(allocator, .rabin_sig, "RabinSig");
+    defer result.deinit(allocator);
+    try std.testing.expect(result.methods.len == 1);
+    try std.testing.expect(result.methods[0].instructions.len > 0);
+}
+
+test "stateful contract with Sig state property compiles" {
+    const allocator = std.testing.allocator;
+    const result = try loweredGetStateScript(allocator, .sig, "Sig");
+    defer result.deinit(allocator);
+    try std.testing.expect(result.methods.len == 1);
+    try std.testing.expect(result.methods[0].instructions.len > 0);
+}
+
+test "stateful contract with Ripemd160 state property compiles" {
+    const allocator = std.testing.allocator;
+    const result = try loweredGetStateScript(allocator, .ripemd160, "Ripemd160");
+    defer result.deinit(allocator);
+    try std.testing.expect(result.methods.len == 1);
+    try std.testing.expect(result.methods[0].instructions.len > 0);
+}
+
+test "stateful contract with P384Point state property compiles" {
+    const allocator = std.testing.allocator;
+    const result = try loweredGetStateScript(allocator, .p384_point, "P384Point");
+    defer result.deinit(allocator);
+    try std.testing.expect(result.methods.len == 1);
+    try std.testing.expect(result.methods[0].instructions.len > 0);
 }
