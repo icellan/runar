@@ -2,22 +2,25 @@ package runar.lang;
 
 import java.math.BigInteger;
 
+import runar.lang.runtime.ContractSimulator;
+import runar.lang.runtime.SimulatorContext;
+
 /**
  * Base class for stateless Rúnar contracts. All fields of a subclass
  * are implicitly readonly; the compiler rejects mutation in method
  * bodies.
  *
- * <p>Phase 1 stub: methods throw at runtime. The off-chain simulator
- * (milestone 11) provides real implementations for unit testing, and
- * the compiler consumes these classes as AST-extraction targets rather
- * than executing them.
+ * <p>Outside the simulator the {@code addOutput} / {@code addRawOutput}
+ * methods throw, since actual output emission happens on-chain. Inside
+ * the simulator (see {@link runar.lang.runtime.ContractSimulator}) they
+ * route to the simulator's output capture, letting tests inspect what
+ * the contract emitted across a method invocation.
  */
 public abstract class SmartContract {
 
     protected SmartContract(Object... constructorArgs) {
-        // The compiler replaces super(...) with a no-op AST binding;
-        // at Java runtime this is a harmless constructor hook for any
-        // future off-chain simulator.
+        // The compiler replaces super(...) with a no-op AST binding.
+        // Kept as a harmless constructor hook for test-time simulation.
     }
 
     /**
@@ -26,18 +29,24 @@ public abstract class SmartContract {
      * declaration order (stateful) or be absent (stateless).
      */
     protected final void addOutput(BigInteger satoshis, Object... values) {
-        throw new UnsupportedOperationException(
-            "addOutput is a compile-time intrinsic; invoke via the off-chain simulator (milestone 11)"
-        );
+        if (!SimulatorContext.isActive()) {
+            throw new UnsupportedOperationException(
+                "addOutput is a compile-time intrinsic; invoke via the off-chain simulator"
+            );
+        }
+        ContractSimulator.captureOutput(satoshis, values);
     }
 
     /**
      * Add a raw output with caller-specified script bytes instead of
      * the contract's own codePart.
      */
-    protected final void addRawOutput(BigInteger satoshis, Object scriptBytes) {
-        throw new UnsupportedOperationException(
-            "addRawOutput is a compile-time intrinsic; invoke via the off-chain simulator (milestone 11)"
-        );
+    protected final void addRawOutput(BigInteger satoshis, byte[] scriptBytes) {
+        if (!SimulatorContext.isActive()) {
+            throw new UnsupportedOperationException(
+                "addRawOutput is a compile-time intrinsic; invoke via the off-chain simulator"
+            );
+        }
+        ContractSimulator.captureRawOutput(satoshis, scriptBytes);
     }
 }
