@@ -50,7 +50,8 @@ function toSnakeCase(name: string): string {
 export async function codegenCommand(patterns: string[], options: CodegenOptions): Promise<void> {
   if (!SUPPORTED_LANGS.includes(options.lang)) {
     console.error(`Error: language '${options.lang}' is not supported. Available: ${SUPPORTED_LANGS.join(', ')}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Expand glob patterns (handles quoted globs on Windows / shells that don't expand)
@@ -66,7 +67,8 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
 
   if (files.length === 0) {
     console.error('Error: no artifact files matched.');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Dynamically import the codegen functions from runar-sdk
@@ -87,7 +89,8 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
     const resolvedPath = path.resolve(file);
     if (!fs.existsSync(resolvedPath)) {
       console.error(`Error: artifact not found: ${resolvedPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     let artifact: Record<string, unknown>;
@@ -96,7 +99,8 @@ export async function codegenCommand(patterns: string[], options: CodegenOptions
       artifact = JSON.parse(json);
     } catch (err) {
       console.error(`Error: failed to parse ${resolvedPath}: ${(err as Error).message}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const code = generate(artifact as any);

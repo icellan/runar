@@ -5,7 +5,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-type Lang = 'ts' | 'zig';
+type Lang = 'ts' | 'zig' | 'go' | 'rust' | 'python' | 'ruby';
+
+const SUPPORTED_LANGS: readonly Lang[] = ['ts', 'zig', 'go', 'rust', 'python', 'ruby'] as const;
 
 interface InitOptions {
   lang: Lang;
@@ -17,8 +19,8 @@ interface InitOptions {
  */
 export async function initCommand(name: string | undefined, options: InitOptions): Promise<void> {
   const lang = options.lang;
-  if (lang !== 'ts' && lang !== 'zig') {
-    console.error(`Unsupported language: ${lang}. Supported: ts, zig`);
+  if (!SUPPORTED_LANGS.includes(lang)) {
+    console.error(`Unsupported language: ${lang}. Supported: ${SUPPORTED_LANGS.join(', ')}`);
     process.exitCode = 1;
     return;
   }
@@ -30,6 +32,22 @@ export async function initCommand(name: string | undefined, options: InitOptions
 
   if (lang === 'zig') {
     scaffoldZig(projectDir, projectName);
+    return;
+  }
+  if (lang === 'go') {
+    scaffoldGo(projectDir, projectName);
+    return;
+  }
+  if (lang === 'rust') {
+    scaffoldRust(projectDir, projectName);
+    return;
+  }
+  if (lang === 'python') {
+    scaffoldPython(projectDir, projectName);
+    return;
+  }
+  if (lang === 'ruby') {
+    scaffoldRuby(projectDir, projectName);
     return;
   }
 
@@ -542,4 +560,288 @@ test "compile-check P2PKH.runar.zig" {
   console.log('Next steps:');
   console.log(`  cd ${projectName}`);
   console.log('  zig build test              # run contract compile-check tests');
+}
+
+// ---------------------------------------------------------------------------
+// Go scaffolding
+// ---------------------------------------------------------------------------
+
+function scaffoldGo(projectDir: string, projectName: string): void {
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  fs.writeFileSync(path.join(projectDir, 'go.mod'), `module ${projectName}
+
+go 1.22
+
+require github.com/icellan/runar v0.0.0
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'Counter.runar.go'), `package contract
+
+import runar "github.com/icellan/runar/packages/runar-go"
+
+// Counter is a minimal stateful contract.
+//
+// Because this struct embeds runar.StatefulSmartContract, the compiler
+// injects checkPreimage on entry and state continuation on exit.
+type Counter struct {
+\truncar.StatefulSmartContract
+\tCount runar.Bigint // no tag = mutable (stateful)
+}
+
+func (c *Counter) Increment() {
+\tc.Count++
+}
+
+func (c *Counter) Decrement() {
+\trunar.Assert(c.Count > 0)
+\tc.Count--
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'Counter_test.go'), `package contract
+
+import (
+\t"testing"
+\trunar "github.com/icellan/runar/packages/runar-go"
+)
+
+func TestCounter_Increment(t *testing.T) {
+\tc := &Counter{Count: 0}
+\tc.Increment()
+\tif c.Count != 1 {
+\t\tt.Errorf("expected Count=1, got %d", c.Count)
+\t}
+}
+
+func TestCounter_Compile(t *testing.T) {
+\tif err := runar.CompileCheck("Counter.runar.go"); err != nil {
+\t\tt.Fatalf("Runar compile check failed: %v", err)
+\t}
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, '.gitignore'), `*.exe
+*.test
+*.out
+`);
+
+  console.log(`Project created at: ${projectDir}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  cd ${projectName}`);
+  console.log('  go test ./...               # run contract + compile-check tests');
+}
+
+// ---------------------------------------------------------------------------
+// Rust scaffolding
+// ---------------------------------------------------------------------------
+
+function scaffoldRust(projectDir: string, projectName: string): void {
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(path.join(projectDir, 'tests'), { recursive: true });
+
+  fs.writeFileSync(path.join(projectDir, 'Cargo.toml'), `[package]
+name = "${projectName}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+runar = { path = "../packages/runar-rs", package = "runar-rs" }
+
+[[test]]
+name = "counter_test"
+path = "tests/Counter_test.rs"
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'Counter.runar.rs'), `use runar::prelude::*;
+
+/// Counter — a minimal stateful smart contract.
+#[runar::contract]
+pub struct Counter {
+    pub count: Bigint,
+}
+
+#[runar::methods(Counter)]
+impl Counter {
+    #[public]
+    pub fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    #[public]
+    pub fn decrement(&mut self) {
+        assert!(self.count > 0);
+        self.count -= 1;
+    }
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'tests', 'Counter_test.rs'), `#[path = "../Counter.runar.rs"]
+mod contract;
+
+use contract::*;
+
+#[test]
+fn test_increment() {
+    let mut c = Counter { count: 0 };
+    c.increment();
+    assert_eq!(c.count, 1);
+}
+
+#[test]
+fn test_compile() {
+    runar::compile_check(include_str!("../Counter.runar.rs"), "Counter.runar.rs").unwrap();
+}
+`);
+
+  fs.writeFileSync(path.join(projectDir, '.gitignore'), `target/
+Cargo.lock
+`);
+
+  console.log(`Project created at: ${projectDir}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  cd ${projectName}`);
+  console.log('  cargo test                  # run contract + compile-check tests');
+}
+
+// ---------------------------------------------------------------------------
+// Python scaffolding
+// ---------------------------------------------------------------------------
+
+function scaffoldPython(projectDir: string, projectName: string): void {
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  fs.writeFileSync(path.join(projectDir, 'Counter.runar.py'), `from runar import StatefulSmartContract, Bigint, public, assert_
+
+
+class Counter(StatefulSmartContract):
+    """Counter -- a minimal stateful smart contract."""
+
+    count: Bigint  # mutable (stateful)
+
+    def __init__(self, count: Bigint):
+        super().__init__(count)
+        self.count = count
+
+    @public
+    def increment(self):
+        self.count += 1
+
+    @public
+    def decrement(self):
+        assert_(self.count > 0)
+        self.count -= 1
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'test_counter.py'), `import importlib.util
+from pathlib import Path
+
+
+def load_contract(path: str):
+    spec = importlib.util.spec_from_file_location("contract", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+contract_mod = load_contract(str(Path(__file__).parent / "Counter.runar.py"))
+Counter = contract_mod.Counter
+
+
+def test_increment():
+    c = Counter(count=0)
+    c.increment()
+    assert c.count == 1
+
+
+def test_compile():
+    from runar import compile_check
+    source_path = Path(__file__).parent / "Counter.runar.py"
+    compile_check(source_path.read_text(), "Counter.runar.py")
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'requirements.txt'), `# Point PYTHONPATH at packages/runar-py to import the runar module.
+`);
+
+  fs.writeFileSync(path.join(projectDir, '.gitignore'), `__pycache__/
+*.pyc
+.venv/
+`);
+
+  console.log(`Project created at: ${projectDir}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  cd ${projectName}`);
+  console.log('  PYTHONPATH=../packages/runar-py python3 -m pytest');
+}
+
+// ---------------------------------------------------------------------------
+// Ruby scaffolding
+// ---------------------------------------------------------------------------
+
+function scaffoldRuby(projectDir: string, projectName: string): void {
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  fs.writeFileSync(path.join(projectDir, 'Gemfile'), `source 'https://rubygems.org'
+
+gem 'rspec'
+# Uses the local runar-rb gem checkout.
+gem 'runar', path: '../packages/runar-rb'
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'Counter.runar.rb'), `require 'runar'
+
+class Counter < Runar::StatefulSmartContract
+  prop :count, Bigint
+
+  def initialize(count)
+    super(count)
+    @count = count
+  end
+
+  runar_public
+  def increment
+    @count += 1
+  end
+
+  runar_public
+  def decrement
+    assert @count > 0
+    @count -= 1
+  end
+end
+`);
+
+  fs.writeFileSync(path.join(projectDir, 'counter_spec.rb'), `# frozen_string_literal: true
+
+require 'rspec'
+require_relative 'Counter.runar'
+
+RSpec.describe Counter do
+  it 'increments' do
+    c = Counter.new(0)
+    c.increment
+    expect(c.count).to eq(1)
+  end
+
+  it 'fails to decrement at zero' do
+    c = Counter.new(0)
+    expect { c.decrement }.to raise_error(RuntimeError)
+  end
+end
+`);
+
+  fs.writeFileSync(path.join(projectDir, '.gitignore'), `*.gem
+.bundle/
+vendor/bundle/
+`);
+
+  console.log(`Project created at: ${projectDir}`);
+  console.log('');
+  console.log('Next steps:');
+  console.log(`  cd ${projectName}`);
+  console.log('  bundle install');
+  console.log('  bundle exec rspec counter_spec.rb');
 }

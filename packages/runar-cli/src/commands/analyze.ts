@@ -139,12 +139,12 @@ export async function analyzeCommand(
     // Exit with non-zero if there are errors
     const hasErrors = result.findings.some((f) => f.severity === 'error');
     if (hasErrors) {
-      process.exit(1);
+      process.exitCode = 1;
     }
   } catch (err) {
     console.error(
       `Error: ${err instanceof Error ? err.message : String(err)}`,
     );
-    process.exit(1);
+    process.exitCode = 1;
   }
 }

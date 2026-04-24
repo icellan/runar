@@ -22,7 +22,7 @@ program
   .command('init')
   .description('Initialize a new Rúnar project')
   .argument('[name]', 'project name')
-  .option('-l, --lang <lang>', 'project language (ts, zig)', 'ts')
+  .option('-l, --lang <lang>', 'project language (ts, zig, go, rust, python, ruby)', 'ts')
   .action(initCommand);
 
 program

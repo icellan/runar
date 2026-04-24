@@ -17,18 +17,17 @@ describe('codegenCommand', () => {
     expect(typeof codegenCommand).toBe('function');
   });
 
-  it('rejects unsupported language with process.exit', async () => {
+  it('rejects unsupported language by setting process.exitCode', async () => {
     const mod = await import('../commands/codegen.js');
     codegenCommand = mod.codegenCommand;
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
-      throw new Error('process.exit called');
-    });
+    const prevExitCode = process.exitCode;
+    process.exitCode = 0;
 
-    await expect(
-      codegenCommand(['some-file.json'], { lang: 'fortran' }),
-    ).rejects.toThrow('process.exit called');
+    await codegenCommand(['some-file.json'], { lang: 'fortran' });
+
+    expect(process.exitCode).toBe(1);
 
     const errCalls = consoleSpy.mock.calls.map(c => c[0]);
     expect(errCalls.some(
@@ -36,22 +35,21 @@ describe('codegenCommand', () => {
     )).toBe(true);
 
     consoleSpy.mockRestore();
-    exitSpy.mockRestore();
+    process.exitCode = prevExitCode;
   });
 
-  it('rejects empty file list after expansion with process.exit', async () => {
+  it('rejects empty file list after expansion by setting process.exitCode', async () => {
     const mod = await import('../commands/codegen.js');
     codegenCommand = mod.codegenCommand;
 
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
-      throw new Error('process.exit called');
-    });
+    const prevExitCode = process.exitCode;
+    process.exitCode = 0;
 
     // A glob pattern that matches nothing
-    await expect(
-      codegenCommand(['/tmp/nonexistent-runar-glob-*.json'], { lang: 'ts' }),
-    ).rejects.toThrow('process.exit called');
+    await codegenCommand(['/tmp/nonexistent-runar-glob-*.json'], { lang: 'ts' });
+
+    expect(process.exitCode).toBe(1);
 
     const errCalls = consoleSpy.mock.calls.map(c => c[0]);
     expect(errCalls.some(
@@ -59,7 +57,7 @@ describe('codegenCommand', () => {
     )).toBe(true);
 
     consoleSpy.mockRestore();
-    exitSpy.mockRestore();
+    process.exitCode = prevExitCode;
   });
 
   it('accepts all supported languages without language error', async () => {
@@ -68,9 +66,8 @@ describe('codegenCommand', () => {
 
     for (const lang of ['ts', 'go', 'rust', 'python']) {
       const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-      const exitSpy = vi.spyOn(process, 'exit').mockImplementation((_code?: string | number | null) => {
-        throw new Error('process.exit called');
-      });
+      const prevExitCode = process.exitCode;
+      process.exitCode = 0;
 
       // Pass a non-existent file (not a glob). It will pass the lang check
       // but fail at the file-existence check. The key thing is that it does
@@ -81,7 +78,7 @@ describe('codegenCommand', () => {
           { lang },
         );
       } catch {
-        // Expected — will fail on file not found or missing runar-sdk import
+        // Expected — may fail on missing runar-sdk import
       }
 
       const errCalls = consoleSpy.mock.calls.map(c => c[0]);
@@ -91,7 +88,7 @@ describe('codegenCommand', () => {
       expect(hasLangError).toBe(false);
 
       consoleSpy.mockRestore();
-      exitSpy.mockRestore();
+      process.exitCode = prevExitCode;
     }
   });
 });

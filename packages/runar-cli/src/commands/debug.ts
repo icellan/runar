@@ -38,7 +38,8 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
   const resolvedPath = path.resolve(artifactPath);
   if (!fs.existsSync(resolvedPath)) {
     console.error(`Error: artifact not found: ${resolvedPath}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   let artifact: ArtifactLike;
@@ -52,7 +53,8 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
     });
   } catch (err) {
     console.error(`Error: failed to parse artifact: ${(err as Error).message}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Build unlocking script
@@ -60,13 +62,20 @@ export async function debugCommand(artifactPath: string, options: DebugOptions):
   if (options.unlock) {
     unlockingHex = options.unlock;
   } else if (options.method) {
-    unlockingHex = buildUnlockingScript(artifact, options.method, options.args);
+    try {
+      unlockingHex = buildUnlockingScript(artifact, options.method, options.args);
+    } catch (err) {
+      console.error((err as Error).message);
+      process.exitCode = 1;
+      return;
+    }
   }
 
   const lockingHex = artifact.script;
   if (!lockingHex) {
     console.error('Error: artifact has no compiled script.');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   // Import VM and source map resolver
@@ -381,9 +390,10 @@ function buildUnlockingScript(
 ): string {
   const method = artifact.abi.methods.find(m => m.name === methodName && m.isPublic !== false);
   if (!method) {
-    console.error(`Error: public method '${methodName}' not found in artifact.`);
-    console.error(`Available methods: ${artifact.abi.methods.filter(m => m.isPublic !== false).map(m => m.name).join(', ')}`);
-    process.exit(1);
+    const available = artifact.abi.methods.filter(m => m.isPublic !== false).map(m => m.name).join(', ');
+    throw new Error(
+      `Error: public method '${methodName}' not found in artifact.\nAvailable methods: ${available}`,
+    );
   }
 
   // Parse args JSON
@@ -392,8 +402,7 @@ function buildUnlockingScript(
     try {
       args = JSON.parse(argsJson);
     } catch (err) {
-      console.error(`Error: invalid JSON for --args: ${(err as Error).message}`);
-      process.exit(1);
+      throw new Error(`Error: invalid JSON for --args: ${(err as Error).message}`);
     }
   }
 

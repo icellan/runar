@@ -4,6 +4,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   RunarContract,
   WhatsOnChainProvider,
@@ -112,8 +113,13 @@ export async function deployCommand(
  * - Mainnet version byte: 0x80
  * - Testnet version byte: 0xef
  * - Compressed flag: 0x01 (optional, indicates compressed pubkey)
+ *
+ * The trailing 4-byte checksum is `SHA256(SHA256(payload))[0..4]` where
+ * `payload` is everything before the checksum. We must verify it so a WIF
+ * corrupted in transit is rejected rather than silently producing a
+ * different private key.
  */
-function decodeWIF(wif: string): string {
+export function decodeWIF(wif: string): string {
   const ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
   // Base58 decode
@@ -143,6 +149,19 @@ function decodeWIF(wif: string): string {
   if (totalBytes !== 37 && totalBytes !== 38) {
     throw new Error(
       `Invalid WIF length: expected 37 or 38 bytes, got ${totalBytes}`,
+    );
+  }
+
+  // Verify the Base58Check checksum before trusting any of the payload.
+  const payloadHex = hex.slice(0, (totalBytes - 4) * 2);
+  const checksumHex = hex.slice((totalBytes - 4) * 2);
+  const payloadBytes = Buffer.from(payloadHex, 'hex');
+  const firstHash = createHash('sha256').update(payloadBytes).digest();
+  const secondHash = createHash('sha256').update(firstHash).digest();
+  const expectedChecksum = secondHash.subarray(0, 4).toString('hex');
+  if (expectedChecksum !== checksumHex) {
+    throw new Error(
+      `Invalid WIF checksum: expected ${expectedChecksum}, got ${checksumHex}`,
     );
   }
 
