@@ -792,6 +792,7 @@ func mapGoBuiltin(name string) string {
 		"VerifySLHDSA_SHA2_192f":  "verifySLHDSA_SHA2_192f",
 		"VerifySLHDSA_SHA2_256s":  "verifySLHDSA_SHA2_256s",
 		"VerifySLHDSA_SHA2_256f":  "verifySLHDSA_SHA2_256f",
+		"VerifySP1FRI":           "verifySP1FRI",
 		"VerifyECDSAP256":         "verifyECDSA_P256",
 		"VerifyECDSAP384":         "verifyECDSA_P384",
 		"Num2Bin":           "num2bin",
