@@ -356,6 +356,15 @@ pub const RunarContract = struct {
         var new_satoshis: i64 = 0;
         defer if (new_locking_script.len > 0) self.allocator.free(new_locking_script);
 
+        // Data outputs resolved from this.addDataOutput(...) in the method
+        // body (or supplied explicitly via options.data_outputs). We free
+        // these — including each entry's script slice — at call-scope exit.
+        var anf_data_outputs: []anf_interp.DataOutputEntry = &.{};
+        defer {
+            for (anf_data_outputs) |d| self.allocator.free(d.script);
+            if (anf_data_outputs.len > 0) self.allocator.free(anf_data_outputs);
+        }
+
         if (is_stateful) {
             new_satoshis = contract_utxo.satoshis;
             if (options) |o| {
@@ -374,10 +383,8 @@ pub const RunarContract = struct {
                 }
                 self.state = vals;
             } else if (needs_change and self.artifact.anf_json != null) {
-                // Auto-compute new state from ANF IR
-                self.autoComputeState(method_name, user_params, resolved_args) catch {
-                    // If ANF interpretation fails, continue with current state
-                };
+                // Auto-compute new state + data outputs from ANF IR
+                anf_data_outputs = self.autoComputeState(method_name, user_params, resolved_args) catch &.{};
             }
             new_locking_script = try self.getLockingScript();
         }
@@ -410,6 +417,32 @@ pub const RunarContract = struct {
         }
 
         const code_sep_idx = try self.getCodeSepIndex(method_index);
+
+        // Convert data outputs (interpreter DataOutputEntry -> ContractOutput
+        // with hex-encoded scripts) for the tx builder. The scripts must be
+        // hex-encoded because CallBuildOptions.contract_outputs uses hex too.
+        // Explicit options.data_outputs wins over the ANF-resolved set.
+        var data_outputs_hex: std.ArrayListUnmanaged(types.ContractOutput) = .empty;
+        defer {
+            for (data_outputs_hex.items) |co| self.allocator.free(@constCast(co.script));
+            data_outputs_hex.deinit(self.allocator);
+        }
+        if (is_stateful) {
+            const explicit_do: ?[]const types.ContractOutput =
+                if (options) |o| o.data_outputs else null;
+            if (explicit_do) |eo| {
+                for (eo) |co| {
+                    const dup_script = try self.allocator.dupe(u8, co.script);
+                    try data_outputs_hex.append(self.allocator, .{ .script = dup_script, .satoshis = co.satoshis });
+                }
+            } else {
+                for (anf_data_outputs) |d| {
+                    const hex_buf = try self.allocator.alloc(u8, d.script.len * 2);
+                    _ = try bsvz.primitives.hex.encodeLower(d.script, hex_buf);
+                    try data_outputs_hex.append(self.allocator, .{ .script = hex_buf, .satoshis = d.satoshis });
+                }
+            }
+        }
 
         // ---------------------------------------------------------------
         // Stateless path
@@ -508,6 +541,12 @@ pub const RunarContract = struct {
         );
         defer self.allocator.free(placeholder_unlock);
 
+        const build_opts: call_mod.CallBuildOptions = .{
+            .data_outputs = data_outputs_hex.items,
+        };
+        const build_opts_ptr: ?*const call_mod.CallBuildOptions =
+            if (data_outputs_hex.items.len > 0) &build_opts else null;
+
         var call_result = call_mod.buildCallTransaction(
             self.allocator,
             contract_utxo,
@@ -517,7 +556,7 @@ pub const RunarContract = struct {
             change_address,
             additional_utxos.items,
             fee_rate,
-            null,
+            build_opts_ptr,
         ) catch return ContractError.CallFailed;
         defer call_result.deinit(self.allocator);
 
@@ -584,7 +623,7 @@ pub const RunarContract = struct {
                 change_address,
                 additional_utxos.items,
                 fee_rate,
-                null,
+                build_opts_ptr,
             ) catch {
                 self.allocator.free(first_unlock);
                 ptx_result.deinit(self.allocator);
@@ -991,14 +1030,18 @@ pub const RunarContract = struct {
     // ---------------------------------------------------------------------------
 
     /// Auto-compute state transitions from the ANF IR embedded in the artifact.
-    /// Converts StateValue arrays to/from ANFValue hashmaps for the interpreter.
+    /// Also returns any data outputs declared via `this.addDataOutput(...)` in
+    /// the method body, allocated from `self.allocator`. Caller owns both the
+    /// returned slice and each entry's `script`. Returns an empty slice if the
+    /// artifact has no ANF IR or the interpreter fails.
     fn autoComputeState(
         self: *RunarContract,
         method_name: []const u8,
         user_params: []types.ABIParam,
         resolved_args: []const types.StateValue,
-    ) !void {
-        const anf_json = self.artifact.anf_json orelse return;
+    ) ![]anf_interp.DataOutputEntry {
+        const empty: []anf_interp.DataOutputEntry = &.{};
+        const anf_json = self.artifact.anf_json orelse return empty;
 
         // Use an arena for all ANF parsing and interpretation work
         var arena = std.heap.ArenaAllocator.init(self.allocator);
@@ -1006,7 +1049,7 @@ pub const RunarContract = struct {
         const work = arena.allocator();
 
         // Parse the ANF IR from JSON
-        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return;
+        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return empty;
 
         // Build current state map: property name -> ANFValue
         var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
@@ -1030,14 +1073,17 @@ pub const RunarContract = struct {
             ctor_anf_args[i] = stateValueToAnf(arg);
         }
 
-        // Compute new state
-        var computed = anf_interp.computeNewState(work, &anf_program, method_name, current_state, named_args, ctor_anf_args) catch return;
-        defer computed.deinit();
+        // Compute new state AND data outputs.
+        const result = anf_interp.computeNewStateAndDataOutputs(
+            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
+        ) catch return empty;
+        var state_map = result.state;
+        defer state_map.deinit();
 
         // Apply computed state back to self.state
         for (self.artifact.state_fields, 0..) |field, i| {
             if (i < self.state.len) {
-                if (computed.get(field.name)) |anf_val| {
+                if (state_map.get(field.name)) |anf_val| {
                     // Free old state value
                     self.state[i].deinit(self.allocator);
                     // Convert ANFValue back to StateValue
@@ -1045,6 +1091,8 @@ pub const RunarContract = struct {
                 }
             }
         }
+
+        return result.data_outputs;
     }
 
     // ---------------------------------------------------------------------------

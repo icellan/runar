@@ -41,6 +41,29 @@ def compute_new_state(
     Returns:
         The updated state (merged with current_state).
     """
+    state, _ = compute_new_state_and_data_outputs(
+        anf, method_name, current_state, args, constructor_args,
+    )
+    return state
+
+
+def compute_new_state_and_data_outputs(
+    anf: dict,
+    method_name: str,
+    current_state: dict,
+    args: dict,
+    constructor_args: list = None,
+):
+    """Like :func:`compute_new_state` but also returns data outputs.
+
+    Data outputs come from ``this.addDataOutput(...)`` calls in the method
+    body, in declaration order. Each entry is a ``{"script": hex, "satoshis": int}``
+    dict. The SDK uses these to populate the tx between state outputs and
+    the change output so the on-chain continuation-hash check matches.
+
+    Returns:
+        (state, data_outputs) — the new state dict and a list of data output dicts.
+    """
     if constructor_args is None:
         constructor_args = []
     method = None
@@ -84,13 +107,14 @@ def compute_new_state(
         if pname in args:
             env[pname] = args[pname]
 
-    # Track state mutations
+    # Track state mutations and data outputs
     state_delta: Dict[str, Any] = {}
+    data_outputs: List[dict] = []
 
     # Walk bindings
-    _eval_bindings(method.get('body', []), env, state_delta, anf)
+    _eval_bindings(method.get('body', []), env, state_delta, data_outputs, anf)
 
-    return {**current_state, **state_delta}
+    return {**current_state, **state_delta}, data_outputs
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +125,11 @@ def _eval_bindings(
     bindings: List[dict],
     env: Dict[str, Any],
     state_delta: Dict[str, Any],
+    data_outputs: List[dict],
     anf: Optional[dict] = None,
 ) -> None:
     for binding in bindings:
-        val = _eval_value(binding['value'], env, state_delta, anf)
+        val = _eval_value(binding['value'], env, state_delta, data_outputs, anf)
         env[binding['name']] = val
 
 
@@ -112,6 +137,7 @@ def _eval_value(
     value: dict,
     env: Dict[str, Any],
     state_delta: Dict[str, Any],
+    data_outputs: List[dict],
     anf: Optional[dict] = None,
 ) -> Any:
     kind = value.get('kind', '')
@@ -150,13 +176,13 @@ def _eval_value(
 
     if kind == 'method_call':
         call_args = [env.get(a) for a in value.get('args', [])]
-        return _eval_method_call(env.get(value.get('object')), value.get('method'), call_args, env, state_delta, anf)
+        return _eval_method_call(env.get(value.get('object')), value.get('method'), call_args, env, state_delta, data_outputs, anf)
 
     if kind == 'if':
         cond = env.get(value['cond'])
         branch = value['then'] if _is_truthy(cond) else value['else']
         child_env = dict(env)
-        _eval_bindings(branch, child_env, state_delta, anf)
+        _eval_bindings(branch, child_env, state_delta, data_outputs, anf)
         env.update(child_env)
         if branch:
             return child_env.get(branch[-1]['name'])
@@ -170,7 +196,7 @@ def _eval_value(
         for i in range(count):
             env[iter_var] = i
             loop_env = dict(env)
-            _eval_bindings(body, loop_env, state_delta, anf)
+            _eval_bindings(body, loop_env, state_delta, data_outputs, anf)
             env.update(loop_env)
             if body:
                 last_val = loop_env.get(body[-1]['name'])
@@ -201,9 +227,19 @@ def _eval_value(
                     state_delta[prop_name] = resolved
         return None
 
+    if kind == 'add_data_output':
+        # Resolve the two arg refs from env and record the data output.
+        sat_ref = value.get('satoshis', '')
+        script_ref = value.get('scriptBytes', '')
+        sats = _to_int(env.get(sat_ref))
+        script_val = env.get(script_ref)
+        script_hex = script_val if isinstance(script_val, str) else ''
+        data_outputs.append({'satoshis': sats, 'script': script_hex})
+        return None
+
     # On-chain-only operations -- skip in simulation
     if kind in ('check_preimage', 'deserialize_state', 'get_state_script',
-                'add_raw_output', 'add_data_output'):
+                'add_raw_output'):
         return None
 
     return None
@@ -425,8 +461,11 @@ def _eval_method_call(
     args: List[Any],
     caller_env: Optional[Dict[str, Any]] = None,
     state_delta: Optional[Dict[str, Any]] = None,
+    data_outputs: Optional[List[dict]] = None,
     anf: Optional[dict] = None,
 ) -> Any:
+    if data_outputs is None:
+        data_outputs = []
     # Look up private method in ANF IR
     if anf and method:
         for m in anf.get('methods', []):
@@ -446,7 +485,7 @@ def _eval_method_call(
                 # Evaluate method body
                 body = m.get('body', [])
                 child_delta: Dict[str, Any] = {}
-                _eval_bindings(body, new_env, child_delta, anf)
+                _eval_bindings(body, new_env, child_delta, data_outputs, anf)
                 # Propagate state delta back
                 if state_delta is not None:
                     state_delta.update(child_delta)

@@ -86,6 +86,22 @@ pub struct CallOptions {
     /// The fee comes from the contract balance. The contract is considered
     /// fully spent after this call (currentUtxo becomes None).
     pub terminal_outputs: Option<Vec<TerminalOutput>>,
+    /// Optional explicit override for data outputs emitted via
+    /// `this.addDataOutput(...)` in the method body. When `None`, the SDK
+    /// resolves data outputs automatically by running the ANF interpreter
+    /// on the method body (the common case). Pass a non-empty `Vec` to
+    /// bypass the interpreter.
+    pub data_outputs: Option<Vec<ContractDataOutput>>,
+}
+
+/// A data output entry — hex-encoded script + satoshis — for the
+/// `CallOptions::data_outputs` fallback API. Same shape as
+/// `calling::ContractOutput` but kept in this module so callers can
+/// construct options without importing from `calling`.
+#[derive(Debug, Clone)]
+pub struct ContractDataOutput {
+    pub script: String,
+    pub satoshis: i64,
 }
 
 /// Specification for an exact output in a terminal method call.

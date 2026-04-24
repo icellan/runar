@@ -165,6 +165,15 @@ fn json_to_val(v: &serde_json::Value) -> Val {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// A data output resolved from `this.addDataOutput(...)` in the method body.
+/// The SDK emits these between state outputs and the change output so the
+/// tx's hashOutputs matches the compile-time continuation-hash constant.
+#[derive(Debug, Clone)]
+pub struct DataOutputEntry {
+    pub satoshis: i64,
+    pub script: String,
+}
+
 /// Compute the new state after executing a contract method.
 ///
 /// Returns the updated state (merged with `current_state`).
@@ -179,6 +188,20 @@ pub fn compute_new_state(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
 ) -> Result<HashMap<String, SdkValue>, String> {
+    compute_new_state_and_data_outputs(anf, method_name, current_state, args, constructor_args)
+        .map(|(state, _)| state)
+}
+
+/// Compute the new state AND resolved data outputs after executing a
+/// contract method. See [`compute_new_state`] for state semantics; data
+/// outputs come from `this.addDataOutput(...)` calls in declaration order.
+pub fn compute_new_state_and_data_outputs(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), String> {
     // Find the public method
     let method = anf.methods.iter().find(|m| m.name == method_name && m.is_public)
         .ok_or_else(|| format!("compute_new_state: method '{}' not found in ANF IR", method_name))?;
@@ -222,18 +245,19 @@ pub fn compute_new_state(
         }
     }
 
-    // Track state mutations
+    // Track state mutations and data outputs
     let mut state_delta: HashMap<String, Val> = HashMap::new();
+    let mut data_outputs: Vec<DataOutputEntry> = Vec::new();
 
     // Walk bindings
-    eval_bindings(&method.body, &mut env, &mut state_delta, anf);
+    eval_bindings(&method.body, &mut env, &mut state_delta, &mut data_outputs, anf);
 
     // Merge delta into current_state
     let mut result = current_state.clone();
     for (k, v) in state_delta {
         result.insert(k, v.to_sdk());
     }
-    Ok(result)
+    Ok((result, data_outputs))
 }
 
 // ---------------------------------------------------------------------------
@@ -244,10 +268,11 @@ fn eval_bindings(
     bindings: &[ANFBinding],
     env: &mut HashMap<String, Val>,
     state_delta: &mut HashMap<String, Val>,
+    data_outputs: &mut Vec<DataOutputEntry>,
     anf: &ANFProgram,
 ) {
     for binding in bindings {
-        let val = eval_value(&binding.value, env, state_delta, anf);
+        let val = eval_value(&binding.value, env, state_delta, data_outputs, anf);
         env.insert(binding.name.clone(), val);
     }
 }
@@ -256,6 +281,7 @@ fn eval_value(
     value: &serde_json::Value,
     env: &mut HashMap<String, Val>,
     state_delta: &mut HashMap<String, Val>,
+    data_outputs: &mut Vec<DataOutputEntry>,
     anf: &ANFProgram,
 ) -> Val {
     let kind = match value.get("kind").and_then(|k| k.as_str()) {
@@ -333,7 +359,7 @@ fn eval_value(
                         child_env.insert(param.name.clone(), arg_val.clone());
                     }
                 }
-                eval_bindings(&method.body, &mut child_env, state_delta, anf);
+                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, anf);
                 // Copy property updates back to caller env
                 for prop in &anf.properties {
                     if let Some(v) = child_env.get(&prop.name) {
@@ -361,7 +387,7 @@ fn eval_value(
                     .collect();
                 // Create child env for the branch
                 let mut child_env = env.clone();
-                eval_bindings(&bindings, &mut child_env, state_delta, anf);
+                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, anf);
                 // Copy new bindings back
                 for (k, v) in &child_env {
                     env.insert(k.clone(), v.clone());
@@ -389,7 +415,7 @@ fn eval_value(
                 for i in 0..count {
                     env.insert(iter_var.clone(), Val::Int(i));
                     let mut loop_env = env.clone();
-                    eval_bindings(&bindings, &mut loop_env, state_delta, anf);
+                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, anf);
                     // Copy loop bindings back
                     for (k, v) in &loop_env {
                         env.insert(k.clone(), v.clone());
@@ -431,9 +457,19 @@ fn eval_value(
             Val::Undefined
         }
 
+        "add_data_output" => {
+            // Resolve the two arg refs from env and record the data output.
+            let sat_ref = str_field(value, "satoshis");
+            let script_ref = str_field(value, "scriptBytes");
+            let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
+            let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
+            data_outputs.push(DataOutputEntry { satoshis: sats, script: script_hex });
+            Val::Undefined
+        }
+
         // On-chain-only operations — skip in simulation
         "check_preimage" | "deserialize_state" | "get_state_script"
-        | "add_raw_output" | "add_data_output" => Val::Undefined,
+        | "add_raw_output" => Val::Undefined,
 
         _ => Val::Undefined,
     }

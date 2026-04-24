@@ -33,6 +33,10 @@ module Runar
     # @param options [Hash, nil] optional extensions:
     #   - +:contract_outputs+ [Array<Hash>] each +{script:, satoshis:}+ for multi-output
     #   - +:additional_contract_inputs+ [Array<Hash>] each +{utxo:, unlocking_script:}+
+    #   - +:data_outputs+ [Array<Hash>] data outputs declared via
+    #     +this.addDataOutput(...)+ in the method body. Each +{script:, satoshis:}+.
+    #     Emitted between the contract (state) outputs and the change output, in
+    #     declaration order — matching the compile-time continuation-hash layout.
     # @return [Array(String, Integer, Integer)] [tx_hex, input_count, change_amount]
     def build_call_transaction(
       current_utxo,
@@ -47,6 +51,7 @@ module Runar
     )
       opts                   = options || {}
       extra_contract_inputs  = opts[:additional_contract_inputs] || []
+      data_outputs           = opts[:data_outputs] || []
       additional             = additional_utxos || []
 
       all_utxos = [current_utxo] + extra_contract_inputs.map { |ci| ci[:utxo] } + additional
@@ -63,7 +68,9 @@ module Runar
           []
         end
 
-      contract_output_sats = resolved_outputs.sum { |co| co[:satoshis] }
+      contract_output_sats =
+        resolved_outputs.sum { |co| co[:satoshis] } +
+        data_outputs.sum { |do_| do_[:satoshis] }
 
       # Estimate transaction size for fee calculation.
       #
@@ -83,6 +90,10 @@ module Runar
 
       outputs_size = resolved_outputs.sum do |co|
         s_len = co[:script].length / 2
+        8 + varint_byte_size(s_len) + s_len
+      end
+      outputs_size += data_outputs.sum do |do_|
+        s_len = do_[:script].length / 2
         8 + varint_byte_size(s_len) + s_len
       end
 
@@ -132,13 +143,22 @@ module Runar
 
       # Output count
       has_change = change.positive? && has_change_recipient
-      output_count = resolved_outputs.length + (has_change ? 1 : 0)
+      output_count = resolved_outputs.length + data_outputs.length + (has_change ? 1 : 0)
       tx << encode_varint(output_count)
 
       # Contract continuation outputs.
       resolved_outputs.each do |co|
         s = co[:script]
         tx << to_le64(co[:satoshis])
+        tx << encode_varint(s.length / 2)
+        tx << s
+      end
+
+      # Data outputs (from this.addDataOutput in method body). Emitted after
+      # state outputs and before change to match the continuation hash.
+      data_outputs.each do |do_|
+        s = do_[:script]
+        tx << to_le64(do_[:satoshis])
         tx << encode_varint(s.length / 2)
         tx << s
       end

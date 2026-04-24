@@ -76,6 +76,11 @@ pub const CallOptions = struct {
     satoshis: i64 = 0,
     change_address: ?[]const u8 = null,
     new_state: ?[]const StateValue = null,
+    /// Optional explicit override for data outputs emitted via
+    /// `this.addDataOutput(...)` in the method body. When null, the SDK
+    /// resolves data outputs automatically by running the ANF interpreter.
+    /// Scripts must be hex-encoded.
+    data_outputs: ?[]const ContractOutput = null,
 };
 
 /// ContractOutput describes one contract continuation output.

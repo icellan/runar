@@ -94,6 +94,15 @@ type CallOptions struct {
 	// proof + the same VK that was baked into the contract at compile
 	// time via CompileOptions.Groth16WAVKey.
 	Groth16WAWitness *bn254witness.Witness `json:"-"`
+
+	// DataOutputs is an optional explicit override for data outputs
+	// emitted via this.addDataOutput(...) in the method body. When nil,
+	// the SDK resolves data outputs automatically by running the ANF
+	// interpreter on the method body (the common case). Pass a non-nil
+	// slice to bypass the interpreter — useful when the caller already
+	// knows the exact (satoshis, script) pairs and does not want the SDK
+	// to re-derive them from method arguments.
+	DataOutputs []ContractOutput `json:"dataOutputs,omitempty"`
 }
 
 // TerminalOutput specifies an exact output for a terminal method call.

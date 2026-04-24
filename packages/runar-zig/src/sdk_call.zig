@@ -11,6 +11,11 @@ const provider_mod = @import("sdk_provider.zig");
 
 pub const CallBuildOptions = struct {
     contract_outputs: []const types.ContractOutput = &.{},
+    /// Data outputs declared via `this.addDataOutput(...)` in the method
+    /// body. Emitted between the contract (state) outputs and the change
+    /// output, in declaration order — matching the compile-time
+    /// continuation-hash layout.
+    data_outputs: []const types.ContractOutput = &.{},
 };
 
 pub const CallResult = struct {
@@ -52,12 +57,16 @@ pub fn buildCallTransaction(
         try contract_outputs.append(allocator, .{ .script = new_locking_script_hex, .satoshis = sats });
     }
 
+    const data_outputs: []const types.ContractOutput =
+        if (opts != null) opts.?.data_outputs else &.{};
+
     // Calculate total inputs
     var total_input: i64 = current_utxo.satoshis;
     for (additional_utxos) |u| total_input += u.satoshis;
 
     var contract_output_sats: i64 = 0;
     for (contract_outputs.items) |co| contract_output_sats += co.satoshis;
+    for (data_outputs) |do_| contract_output_sats += do_.satoshis;
 
     // Estimate fee
     const input0_script_len = unlocking_script_hex.len / 2;
@@ -68,6 +77,10 @@ pub fn buildCallTransaction(
     var outputs_size: usize = 0;
     for (contract_outputs.items) |co| {
         const script_len = co.script.len / 2;
+        outputs_size += 8 + varIntByteSize(script_len) + script_len;
+    }
+    for (data_outputs) |do_| {
+        const script_len = do_.script.len / 2;
         outputs_size += 8 + varIntByteSize(script_len) + script_len;
     }
     if (change_address != null) {
@@ -134,6 +147,18 @@ pub fn buildCallTransaction(
         try builder.addOutput(.{
             .satoshis = co.satoshis,
             .locking_script = bsvz.script.Script.init(co_bytes),
+        });
+    }
+
+    // Data outputs (from this.addDataOutput in method body). Emitted
+    // after state outputs and before change to match the continuation
+    // hash the compiler embedded in the locking script.
+    for (data_outputs) |do_| {
+        const do_bytes = try bsvz.primitives.hex.decode(allocator, do_.script);
+        defer allocator.free(do_bytes);
+        try builder.addOutput(.{
+            .satoshis = do_.satoshis,
+            .locking_script = bsvz.script.Script.init(do_bytes),
         });
     }
 

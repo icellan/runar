@@ -33,9 +33,15 @@ export function buildCallTransaction(
     contractOutputs?: Array<{ script: string; satoshis: number }>;
     /** Additional contract inputs with their own unlocking scripts (for merge). */
     additionalContractInputs?: Array<{ utxo: UTXO; unlockingScript: string }>;
+    /** Data outputs declared via `this.addDataOutput(...)` in the method
+     * body. Emitted between contract (state) outputs and the change output,
+     * in declaration order — matching the compile-time continuation-hash
+     * layout. */
+    dataOutputs?: Array<{ script: string; satoshis: number }>;
   },
 ): { tx: Transaction; inputCount: number; changeAmount: number } {
   const extraContractInputs = options?.additionalContractInputs ?? [];
+  const dataOutputs = options?.dataOutputs ?? [];
   const allUtxos = [currentUtxo, ...extraContractInputs.map((i) => i.utxo), ...(additionalUtxos ?? [])];
 
   const totalInput = allUtxos.reduce((sum, u) => sum + u.satoshis, 0);
@@ -47,7 +53,9 @@ export function buildCallTransaction(
       ? [{ script: newLockingScript, satoshis: newSatoshis ?? currentUtxo.satoshis }]
       : []);
 
-  const contractOutputSats = contractOutputs.reduce((sum, o) => sum + o.satoshis, 0);
+  const contractOutputSats =
+    contractOutputs.reduce((sum, o) => sum + o.satoshis, 0)
+    + dataOutputs.reduce((sum, o) => sum + o.satoshis, 0);
 
   // Estimate fee using actual script sizes
   const input0Size = 32 + 4 + varIntByteSize(unlockingScript.length / 2) +
@@ -64,6 +72,9 @@ export function buildCallTransaction(
   let outputsSize = 0;
   for (const co of contractOutputs) {
     outputsSize += 8 + varIntByteSize(co.script.length / 2) + co.script.length / 2;
+  }
+  for (const do_ of dataOutputs) {
+    outputsSize += 8 + varIntByteSize(do_.script.length / 2) + do_.script.length / 2;
   }
   if (changeAddress || changeScript) {
     outputsSize += 34; // P2PKH change
@@ -111,6 +122,15 @@ export function buildCallTransaction(
     tx.addOutput({
       satoshis: co.satoshis,
       lockingScript: LockingScript.fromHex(co.script),
+    });
+  }
+
+  // Data outputs (from this.addDataOutput in method body). Emitted after
+  // state outputs and before change to match the continuation hash.
+  for (const do_ of dataOutputs) {
+    tx.addOutput({
+      satoshis: do_.satoshis,
+      lockingScript: LockingScript.fromHex(do_.script),
     });
   }
 

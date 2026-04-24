@@ -48,6 +48,20 @@ module Runar
       # @return [Hash] the updated state (merged with current_state)
       # @raise [ArgumentError] when method_name is not found as a public method in the ANF IR
       def compute_new_state(anf, method_name, current_state, args, constructor_args: [], max_loop_iterations: MAX_LOOP_ITERATIONS)
+        state, _ = compute_new_state_and_data_outputs(
+          anf, method_name, current_state, args,
+          constructor_args: constructor_args,
+          max_loop_iterations: max_loop_iterations,
+        )
+        state
+      end
+
+      # Like #compute_new_state but also returns data outputs resolved
+      # from +this.addDataOutput(...)+ in declaration order. Each entry
+      # is +{satoshis: Integer, script: String}+. The SDK uses these
+      # to populate the tx between state outputs and the change output
+      # so the on-chain continuation-hash check matches.
+      def compute_new_state_and_data_outputs(anf, method_name, current_state, args, constructor_args: [], max_loop_iterations: MAX_LOOP_ITERATIONS)
         method = find_public_method(anf, method_name)
 
         unless method
@@ -93,9 +107,10 @@ module Runar
         end
 
         state_delta = {}
-        eval_bindings(Array(method['body']), env, state_delta, anf)
+        data_outputs = []
+        eval_bindings(Array(method['body']), env, state_delta, data_outputs, anf)
 
-        current_state.merge(state_delta)
+        [current_state.merge(state_delta), data_outputs]
       ensure
         Thread.current[:runar_max_loop_iterations] = nil
       end
@@ -106,9 +121,9 @@ module Runar
       # @param env         [Hash]        current name → value environment (mutated in place)
       # @param state_delta [Hash]        accumulated state mutations (mutated in place)
       # @param anf         [Hash, nil]   full ANF IR (for method lookup)
-      def eval_bindings(bindings, env, state_delta, anf = nil)
+      def eval_bindings(bindings, env, state_delta, data_outputs, anf = nil)
         bindings.each do |binding|
-          val = eval_value(binding['value'], env, state_delta, anf)
+          val = eval_value(binding['value'], env, state_delta, data_outputs, anf)
           env[binding['name']] = val
         end
       end
@@ -121,7 +136,7 @@ module Runar
       # @param anf         [Hash, nil]
       # @return [Object]
       # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
-      def eval_value(value, env, state_delta, anf = nil)
+      def eval_value(value, env, state_delta, data_outputs, anf = nil)
         kind = value['kind'].to_s
 
         case kind
@@ -154,13 +169,13 @@ module Runar
 
         when 'method_call'
           call_args = Array(value['args']).map { |a| env[a] }
-          eval_method_call(env[value['object']], value['method'], call_args, env, state_delta, anf)
+          eval_method_call(env[value['object']], value['method'], call_args, env, state_delta, data_outputs, anf)
 
         when 'if'
           cond   = env[value['cond']]
           branch = is_truthy(cond) ? value['then'] : value['else']
           child_env = env.dup
-          eval_bindings(Array(branch), child_env, state_delta, anf)
+          eval_bindings(Array(branch), child_env, state_delta, data_outputs, anf)
           env.merge!(child_env)
           branch && !branch.empty? ? child_env[branch.last['name']] : nil
 
@@ -177,7 +192,7 @@ module Runar
           count.times do |i|
             env[iter_var] = i
             loop_env = env.dup
-            eval_bindings(body, loop_env, state_delta, anf)
+            eval_bindings(body, loop_env, state_delta, data_outputs, anf)
             env.merge!(loop_env)
             last_val = body.empty? ? nil : loop_env[body.last['name']]
           end
@@ -210,7 +225,18 @@ module Runar
           end
           nil
 
-        when 'check_preimage', 'deserialize_state', 'get_state_script', 'add_raw_output', 'add_data_output'
+        when 'add_data_output'
+          # Resolve the two arg refs and record the data output.
+          sat_ref = value['satoshis']
+          script_ref = value['scriptBytes']
+          sats = env[sat_ref]
+          sats = sats.to_i if sats
+          script_val = env[script_ref]
+          script_hex = script_val.is_a?(String) ? script_val : ''
+          data_outputs << { satoshis: sats || 0, script: script_hex }
+          nil
+
+        when 'check_preimage', 'deserialize_state', 'get_state_script', 'add_raw_output'
           # On-chain-only operations — skip in simulation.
           nil
 
@@ -488,7 +514,7 @@ module Runar
       # @param state_delta [Hash, nil]
       # @param anf         [Hash, nil]
       # @return [Object]
-      def eval_method_call(_obj, method_name, args, caller_env = nil, state_delta = nil, anf = nil)
+      def eval_method_call(_obj, method_name, args, caller_env = nil, state_delta = nil, data_outputs = [], anf = nil)
         return nil unless anf && method_name
 
         private_method = Array(anf['methods']).find do |m|
@@ -514,7 +540,7 @@ module Runar
 
         body = Array(private_method['body'])
         child_delta = {}
-        eval_bindings(body, new_env, child_delta, anf)
+        eval_bindings(body, new_env, child_delta, data_outputs, anf)
 
         # Propagate state mutations back to the caller environment.
         state_delta&.merge!(child_delta)

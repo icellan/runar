@@ -12,7 +12,7 @@ import { buildCallTransaction } from './calling.js';
 import { serializeState, extractStateFromScript, findLastOpReturn } from './state.js';
 import { computeOpPushTx } from './oppushtx.js';
 import { buildP2PKHScript } from './script-utils.js';
-import { computeNewState } from './anf-interpreter.js';
+import { computeNewStateAndDataOutputs } from './anf-interpreter.js';
 import { buildInscriptionEnvelope, parseInscriptionEnvelope } from './ordinals/envelope.js';
 import { Utils, Hash, Transaction as BsvTransaction, LockingScript, UnlockingScript } from '@bsv/sdk';
 import { WalletProvider } from './providers/wallet-provider.js';
@@ -708,6 +708,14 @@ export class RunarContract {
     const extraContractUtxos = options?.additionalContractInputs ?? [];
     const hasMultiOutput = options?.outputs && options.outputs.length > 0;
 
+    // Data outputs declared via this.addDataOutput(...). Explicit
+    // options.dataOutputs wins; otherwise populated by the ANF
+    // interpreter pass below.
+    let resolvedDataOutputs: Array<{ script: string; satoshis: number }> =
+      options?.dataOutputs
+        ? options.dataOutputs.map((d) => ({ script: d.script, satoshis: Number(d.satoshis) }))
+        : [];
+
     if (isStateful && hasMultiOutput) {
       const codeScript = this._codeScript ?? this.buildCodeScript();
       contractOutputs = options!.outputs!.map((out) => {
@@ -727,10 +735,16 @@ export class RunarContract {
         // expanded scalars) can read them by name.
         const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
         const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
-        const computed = computeNewState(
+        const { state: computed, dataOutputs: anfDataOutputs } = computeNewStateAndDataOutputs(
           this.artifact.anf, methodName, flatState, namedArgs,
           flatCtorArgs,
         );
+        if (anfDataOutputs.length > 0 && resolvedDataOutputs.length === 0) {
+          resolvedDataOutputs = anfDataOutputs.map((d) => ({
+            script: d.script,
+            satoshis: Number(d.satoshis),
+          }));
+        }
         const merged = { ...flatState, ...computed };
         // Re-group synthetic scalars back into array values, then merge
         // into the user-visible state.
@@ -787,6 +801,7 @@ export class RunarContract {
         additionalContractInputs: extraContractUtxos.length > 0
           ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlockPlaceholders[i]! }))
           : undefined,
+        dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
       },
     );
 
@@ -885,6 +900,7 @@ export class RunarContract {
           additionalContractInputs: extraContractUtxos.length > 0
             ? extraContractUtxos.map((utxo, i) => ({ utxo, unlockingScript: extraUnlocks[i]! }))
             : undefined,
+          dataOutputs: resolvedDataOutputs.length > 0 ? resolvedDataOutputs : undefined,
         },
       ));
 

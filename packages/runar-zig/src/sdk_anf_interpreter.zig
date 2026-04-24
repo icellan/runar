@@ -106,7 +106,10 @@ pub const ANFNode = union(enum) {
     deserialize_state: struct {},
     get_state_script: struct {},
     add_raw_output: struct {},
-    add_data_output: struct {},
+    add_data_output: struct {
+        satoshis: []const u8 = "",
+        script_bytes: []const u8 = "",
+    },
     unknown: void,
 };
 
@@ -118,9 +121,23 @@ pub const InterpreterError = error{
 /// Sentinel value for "no result" / undefined.
 const anf_none: ANFValue = .{ .none = {} };
 
+/// A data output resolved from `this.addDataOutput(...)` in the method body.
+/// Caller owns the `script` slice (allocated from the caller's allocator).
+pub const DataOutputEntry = struct {
+    satoshis: i64,
+    script: []u8,
+};
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/// Result of `computeNewStateAndDataOutputs`: the new state map and a
+/// slice of data outputs. Caller owns both.
+pub const NewStateResult = struct {
+    state: std.StringHashMap(ANFValue),
+    data_outputs: []DataOutputEntry,
+};
 
 /// Compute the new state after executing a contract method.
 ///
@@ -133,6 +150,27 @@ pub fn computeNewState(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) !std.StringHashMap(ANFValue) {
+    const result = try computeNewStateAndDataOutputs(
+        allocator, anf, method_name, current_state, args, constructor_args,
+    );
+    // Discard data outputs — free their script allocations.
+    for (result.data_outputs) |d| allocator.free(d.script);
+    allocator.free(result.data_outputs);
+    return result.state;
+}
+
+/// Like `computeNewState` but also returns data outputs resolved from
+/// `this.addDataOutput(...)` calls in declaration order. Caller owns both
+/// the state map and the returned data-output slice (including each
+/// entry's `script`).
+pub fn computeNewStateAndDataOutputs(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+) !NewStateResult {
     // Use an arena for all intermediate allocations during interpretation
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -187,11 +225,13 @@ pub fn computeNewState(
         }
     }
 
-    // Track state mutations
+    // Track state mutations and data outputs. data_outputs holds arena
+    // slices; we dupe them into the caller allocator below.
     var state_delta = std.StringHashMap(ANFValue).init(arena_alloc);
+    var data_outputs_arena = std.ArrayList(DataOutputEntry).empty;
 
     // Walk bindings
-    try evalBindings(arena_alloc, meth.body, &env, &state_delta, anf);
+    try evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf);
 
     // Merge with current state — use caller allocator for result
     var result = std.StringHashMap(ANFValue).init(allocator);
@@ -209,7 +249,14 @@ pub fn computeNewState(
         try result.put(entry.key_ptr.*, val);
     }
 
-    return result;
+    // Dupe data-output scripts into the caller allocator so they survive
+    // the arena deinit.
+    const do_out = try allocator.alloc(DataOutputEntry, data_outputs_arena.items.len);
+    for (data_outputs_arena.items, 0..) |d, i| {
+        do_out[i] = .{ .satoshis = d.satoshis, .script = try allocator.dupe(u8, d.script) };
+    }
+
+    return .{ .state = result, .data_outputs = do_out };
 }
 
 // ---------------------------------------------------------------------------
@@ -232,10 +279,11 @@ fn evalBindings(
     bindings: []const ANFBinding,
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
+    data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
 ) error{OutOfMemory}!void {
     for (bindings) |binding| {
-        const val = try evalNode(allocator, binding.value, env, state_delta, anf);
+        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, anf);
         try env.put(binding.name, val);
     }
 }
@@ -245,6 +293,7 @@ fn evalNode(
     node: ANFNode,
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
+    data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
 ) error{OutOfMemory}!ANFValue {
     switch (node) {
@@ -282,12 +331,12 @@ fn evalNode(
             return evalCall(allocator, c.func, c.args, env);
         },
         .method_call => |mc| {
-            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, anf);
+            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, anf);
         },
         .if_node => |ifn| {
             const cond = env.get(ifn.cond) orelse anf_none;
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
-            try evalBindings(allocator, branch, env, state_delta, anf);
+            try evalBindings(allocator, branch, env, state_delta, data_outputs, anf);
             if (branch.len > 0) {
                 return env.get(branch[branch.len - 1].name) orelse anf_none;
             }
@@ -297,7 +346,7 @@ fn evalNode(
             var last_val: ANFValue = anf_none;
             for (0..ln.count) |i| {
                 try env.put(ln.iter_var, .{ .int = @intCast(i) });
-                try evalBindings(allocator, ln.body, env, state_delta, anf);
+                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, anf);
                 if (ln.body.len > 0) {
                     last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
                 }
@@ -331,8 +380,26 @@ fn evalNode(
             }
             return anf_none;
         },
+        .add_data_output => |ado| {
+            // Resolve the two arg refs from env and record the data output.
+            const sat_val = env.get(ado.satoshis) orelse anf_none;
+            const script_val = env.get(ado.script_bytes) orelse anf_none;
+            const sats: i64 = switch (sat_val) {
+                .int => |n| n,
+                else => 0,
+            };
+            const script_bytes: []const u8 = switch (script_val) {
+                .bytes => |b| b,
+                else => "",
+            };
+            try data_outputs.append(allocator, .{
+                .satoshis = sats,
+                .script = try allocator.dupe(u8, script_bytes),
+            });
+            return anf_none;
+        },
         // On-chain-only operations — skip
-        .check_preimage, .deserialize_state, .get_state_script, .add_raw_output, .add_data_output => {
+        .check_preimage, .deserialize_state, .get_state_script, .add_raw_output => {
             return anf_none;
         },
         .unknown => {
@@ -695,6 +762,7 @@ fn evalMethodCall(
     arg_names: []const []const u8,
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
+    data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
 ) error{OutOfMemory}!ANFValue {
     // Find the private method
@@ -719,7 +787,7 @@ fn evalMethodCall(
             }
 
             // Execute the method body
-            try evalBindings(allocator, m.body, &method_env, state_delta, anf);
+            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, anf);
 
             // Propagate property changes back
             for (anf.properties) |prop| {
@@ -1177,7 +1245,12 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     if (std.mem.eql(u8, kind, "deserialize_state")) return .{ .deserialize_state = .{} };
     if (std.mem.eql(u8, kind, "get_state_script")) return .{ .get_state_script = .{} };
     if (std.mem.eql(u8, kind, "add_raw_output")) return .{ .add_raw_output = .{} };
-    if (std.mem.eql(u8, kind, "add_data_output")) return .{ .add_data_output = .{} };
+    if (std.mem.eql(u8, kind, "add_data_output")) {
+        return .{ .add_data_output = .{
+            .satoshis = if (obj.get("satoshis")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+            .script_bytes = if (obj.get("scriptBytes")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+        } };
+    }
     if (std.mem.eql(u8, kind, "add_output")) {
         var state_values: std.ArrayListUnmanaged([]const u8) = .empty;
         if (obj.get("stateValues")) |sv| {

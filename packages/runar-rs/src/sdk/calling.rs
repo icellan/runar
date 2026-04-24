@@ -24,6 +24,11 @@ pub struct CallTxOptions {
     pub contract_outputs: Option<Vec<ContractOutput>>,
     /// Additional contract inputs with their own unlocking scripts (for merge).
     pub additional_contract_inputs: Option<Vec<AdditionalContractInput>>,
+    /// Data outputs declared via `this.addDataOutput(...)` in the method
+    /// body. Emitted between the contract (state) outputs and the change
+    /// output, in declaration order — matching the order the compiler's
+    /// auto-injected continuation-hash check expects.
+    pub data_outputs: Option<Vec<ContractOutput>>,
 }
 
 /// Build a raw transaction that spends a contract UTXO (method call).
@@ -101,7 +106,15 @@ pub fn build_call_transaction_ext(
         vec![]
     };
 
-    let contract_output_sats: i64 = contract_outputs.iter().map(|o| o.satoshis).sum();
+    let data_outputs: Vec<ContractOutput> = if let Some(dos) = options.and_then(|o| o.data_outputs.as_ref()) {
+        dos.iter().map(|co| ContractOutput { script: co.script.clone(), satoshis: co.satoshis }).collect()
+    } else {
+        vec![]
+    };
+
+    let contract_output_sats: i64 =
+        contract_outputs.iter().map(|o| o.satoshis).sum::<i64>()
+            + data_outputs.iter().map(|o| o.satoshis).sum::<i64>();
 
     // Estimate fee using actual script sizes
     let unlock_byte_len = unlocking_script.len() / 2;
@@ -118,6 +131,10 @@ pub fn build_call_transaction_ext(
     for co in &contract_outputs {
         let co_byte_len = co.script.len() / 2;
         outputs_size += 8 + varint_byte_size(co_byte_len) + co_byte_len as i64;
+    }
+    for do_ in &data_outputs {
+        let do_byte_len = do_.script.len() / 2;
+        outputs_size += 8 + varint_byte_size(do_byte_len) + do_byte_len as i64;
     }
     let has_change_target = change_address.is_some() || change_script.is_some();
     if has_change_target {
@@ -164,7 +181,7 @@ pub fn build_call_transaction_ext(
     }
 
     // Output count
-    let mut num_outputs = contract_outputs.len() as u64;
+    let mut num_outputs = (contract_outputs.len() + data_outputs.len()) as u64;
     if change > 0 && has_change_target {
         num_outputs += 1;
     }
@@ -175,6 +192,14 @@ pub fn build_call_transaction_ext(
         tx.push_str(&to_little_endian_64(co.satoshis));
         tx.push_str(&encode_varint((co.script.len() / 2) as u64));
         tx.push_str(&co.script);
+    }
+
+    // Data outputs (from this.addDataOutput in method body). Emitted after
+    // state outputs and before change to match the continuation hash.
+    for do_ in &data_outputs {
+        tx.push_str(&to_little_endian_64(do_.satoshis));
+        tx.push_str(&encode_varint((do_.script.len() / 2) as u64));
+        tx.push_str(&do_.script);
     }
 
     // Change output
