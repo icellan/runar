@@ -68,12 +68,16 @@ fn new_token(owner: PubKey, balance: Bigint) -> FungibleToken {
 #[test]
 fn test_transfer() {
     let mut c = new_token(alice(), 100);
+    // token_id is set in new_token; verify it is preserved by construction
+    assert_eq!(c.token_id, b"test-token-001".to_vec());
     c.transfer(&alice_sig(), bob(), 30, 1000);
     assert_eq!(c.outputs.len(), 2);
     assert_eq!(c.outputs[0].owner, bob());
+    assert_eq!(c.outputs[0].satoshis, 1000);
     assert_eq!(c.outputs[0].balance, 30);
     assert_eq!(c.outputs[0].merge_balance, 0);
     assert_eq!(c.outputs[1].owner, alice());
+    assert_eq!(c.outputs[1].satoshis, 1000);
     assert_eq!(c.outputs[1].balance, 70);
     assert_eq!(c.outputs[1].merge_balance, 0);
 }

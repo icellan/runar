@@ -205,6 +205,41 @@ fn varint_byte_size(n: usize) -> i64 {
     else { 9 }
 }
 
+/// Estimate the fee for a method call transaction.
+///
+/// Mirrors `estimateCallFee` in the TypeScript SDK: uses the actual
+/// unlocking-script byte length (with correct varint prefix size) and the
+/// actual locking-script byte length for the new contract output, plus
+/// `num_funding_inputs` P2PKH funding inputs and a single P2PKH change
+/// output. Fee rate is in sat/KB (default 100, i.e. 0.1 sat/byte).
+pub fn estimate_call_fee(
+    locking_script_byte_len: usize,
+    unlocking_script_byte_len: usize,
+    num_funding_inputs: usize,
+    fee_rate: Option<i64>,
+) -> i64 {
+    const P2PKH_INPUT_SIZE: i64 = 148;
+    const P2PKH_OUTPUT_SIZE: i64 = 34;
+    const TX_OVERHEAD: i64 = 10;
+
+    let rate = fee_rate.filter(|&r| r > 0).unwrap_or(100);
+    let contract_input_size = 32 + 4
+        + varint_byte_size(unlocking_script_byte_len)
+        + unlocking_script_byte_len as i64
+        + 4;
+    let funding_inputs_size = num_funding_inputs as i64 * P2PKH_INPUT_SIZE;
+    let contract_output_size = 8
+        + varint_byte_size(locking_script_byte_len)
+        + locking_script_byte_len as i64;
+    let change_output_size = P2PKH_OUTPUT_SIZE;
+    let tx_size = TX_OVERHEAD
+        + contract_input_size
+        + funding_inputs_size
+        + contract_output_size
+        + change_output_size;
+    (tx_size * rate + 999) / 1000
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -492,6 +527,59 @@ mod tests {
         );
         let parsed = parse_tx_hex(&tx_hex);
         assert_eq!(parsed.output_count, 0);
+    }
+
+    #[test]
+    fn estimate_call_fee_matches_hand_calculation() {
+        // locking_script=1 byte, unlocking_script=1 byte, 0 funding inputs, default rate.
+        //   input0 = 32 + 4 + 1 (varint) + 1 + 4 = 42
+        //   funding = 0
+        //   contract output = 8 + 1 + 1 = 10
+        //   change output = 34
+        //   tx overhead = 10
+        //   total = 96, fee = ceil(96 * 100 / 1000) = 10
+        assert_eq!(estimate_call_fee(1, 1, 0, None), 10);
+    }
+
+    #[test]
+    fn estimate_call_fee_honors_mock_provider_rate() {
+        // Pull the fee rate from a MockProvider and feed it to estimate_call_fee.
+        // Confirms the function plugs into the same provider.get_fee_rate() flow
+        // the higher-level build-call path uses.
+        use crate::sdk::provider::{MockProvider, Provider};
+
+        let mut mp = MockProvider::new("testnet");
+        mp.set_fee_rate(500); // 500 sat/KB
+        let rate = mp.get_fee_rate().expect("mock provider has a fee rate");
+
+        // Same shape as above but with a larger locking script (25-byte P2PKH).
+        //   input0 = 32 + 4 + 1 + 1 + 4 = 42
+        //   contract output = 8 + 1 + 25 = 34
+        //   change output = 34
+        //   tx overhead = 10
+        //   total = 120, fee = ceil(120 * 500 / 1000) = 60
+        let fee = estimate_call_fee(25, 1, 0, Some(rate));
+        assert_eq!(fee, 60);
+    }
+
+    #[test]
+    fn estimate_call_fee_funding_inputs_grow_fee() {
+        let base = estimate_call_fee(1, 1, 0, None);
+        let with_funding = estimate_call_fee(1, 1, 2, None);
+        // 2 extra P2PKH inputs add 2 * 148 = 296 bytes; at 100 sat/KB that's
+        // ceil(296 * 100 / 1000) ≈ 30 extra sats. Check direction + bound.
+        assert!(with_funding > base);
+        assert!(with_funding - base >= 29 && with_funding - base <= 31);
+    }
+
+    #[test]
+    fn estimate_call_fee_defaults_to_100_sat_per_kb() {
+        let with_default = estimate_call_fee(1, 1, 0, None);
+        let with_explicit = estimate_call_fee(1, 1, 0, Some(100));
+        assert_eq!(with_default, with_explicit);
+        // Non-positive rate should also fall back to 100.
+        assert_eq!(estimate_call_fee(1, 1, 0, Some(0)), with_default);
+        assert_eq!(estimate_call_fee(1, 1, 0, Some(-1)), with_default);
     }
 
     #[test]

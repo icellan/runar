@@ -46,9 +46,13 @@ fn new_nft(owner: PubKey) -> SimpleNFT {
 #[test]
 fn test_transfer() {
     let mut c = new_nft(alice());
+    // token_id and metadata are constructed in new_nft; verify preservation
+    assert_eq!(c.token_id, b"unique-nft-001".to_vec());
+    assert_eq!(c.metadata, b"ipfs://QmTest".to_vec());
     c.transfer(&ALICE.sign_test_message(), bob(), 1000);
     assert_eq!(c.outputs.len(), 1);
     assert_eq!(c.outputs[0].owner, bob());
+    assert_eq!(c.outputs[0].satoshis, 1000);
 }
 
 #[test]

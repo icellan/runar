@@ -1015,6 +1015,11 @@ dependencies = [
 [[package]]
 name = "runar-lang-macros"
 version = "0.4.4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "rustc-hash"
