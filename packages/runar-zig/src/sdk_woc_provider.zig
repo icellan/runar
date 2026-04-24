@@ -5,6 +5,33 @@ const provider_mod = @import("sdk_provider.zig");
 // ---------------------------------------------------------------------------
 // WhatsOnChainProvider — HTTP-based BSV blockchain provider via WoC API
 // ---------------------------------------------------------------------------
+//
+// Mirrors the Go/TS WhatsOnChain provider API. Because std.http.Client in
+// zig 0.16 requires a runtime `Io` value that is awkward to construct in a
+// synchronous helper, the HTTP transport is abstracted behind a small
+// callback (see sdk_rpc_provider.zig for the same pattern). Tests inject a
+// MockHttpTransport; production callers either implement an Io-backed
+// transport, or pass `null` and accept `TransportNotConfigured` errors when
+// a method that needs network access is called.
+
+/// HttpTransport performs one GET or POST request and returns the response
+/// body. The implementation owns the returned buffer; the caller frees via
+/// the `allocator` passed in.
+pub const HttpTransport = struct {
+    ctx: *anyopaque,
+    get: *const fn (
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+    ) provider_mod.ProviderError![]u8,
+    post: *const fn (
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) provider_mod.ProviderError![]u8,
+};
 
 /// WhatsOnChainProvider implements Provider by making HTTP requests to the
 /// WhatsOnChain API (https://whatsonchain.com). Supports mainnet and testnet.
@@ -12,6 +39,7 @@ pub const WhatsOnChainProvider = struct {
     allocator: std.mem.Allocator,
     network: Network,
     base_url: []const u8,
+    transport: ?HttpTransport = null,
 
     pub const Network = enum {
         mainnet,
@@ -43,6 +71,13 @@ pub const WhatsOnChainProvider = struct {
         _ = self;
     }
 
+    /// Inject a concrete HTTP transport. Call before using any network-facing
+    /// Provider vtable method. In unit tests this is a MockHttpTransport; in
+    /// production callers supply an Io-backed transport.
+    pub fn setTransport(self: *WhatsOnChainProvider, transport: HttpTransport) void {
+        self.transport = transport;
+    }
+
     /// Return a Provider interface backed by this WhatsOnChainProvider.
     pub fn provider(self: *WhatsOnChainProvider) provider_mod.Provider {
         return .{
@@ -66,58 +101,36 @@ pub const WhatsOnChainProvider = struct {
     // -----------------------------------------------------------------------
 
     fn httpGet(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, path: []const u8) provider_mod.ProviderError![]u8 {
+        const transport = self.transport orelse return provider_mod.ProviderError.NetworkError;
         const url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path }) catch return provider_mod.ProviderError.OutOfMemory;
         defer self.allocator.free(url);
-
-        var client = std.http.Client{ .allocator = allocator };
-        defer client.deinit();
-
-        var buf: [8192]u8 = undefined;
-        const uri = std.Uri.parse(url) catch return provider_mod.ProviderError.NetworkError;
-        var req = client.open(.GET, uri, .{ .server_header_buffer = &buf }) catch return provider_mod.ProviderError.NetworkError;
-        defer req.deinit();
-
-        req.send() catch return provider_mod.ProviderError.NetworkError;
-        req.wait() catch return provider_mod.ProviderError.NetworkError;
-
-        if (req.status != .ok) {
-            if (req.status == .not_found) return provider_mod.ProviderError.NotFound;
-            return provider_mod.ProviderError.NetworkError;
-        }
-
-        const body = req.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch return provider_mod.ProviderError.OutOfMemory;
-        return body;
+        return transport.get(transport.ctx, allocator, url);
     }
 
     fn httpPost(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, path: []const u8, json_body: []const u8) provider_mod.ProviderError![]u8 {
+        const transport = self.transport orelse return provider_mod.ProviderError.NetworkError;
         const url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path }) catch return provider_mod.ProviderError.OutOfMemory;
         defer self.allocator.free(url);
+        return transport.post(transport.ctx, allocator, url, "application/json", json_body);
+    }
 
-        var client = std.http.Client{ .allocator = allocator };
-        defer client.deinit();
+    // -----------------------------------------------------------------------
+    // Path helpers (exposed for testing request shape)
+    // -----------------------------------------------------------------------
 
-        var buf: [8192]u8 = undefined;
-        const uri = std.Uri.parse(url) catch return provider_mod.ProviderError.NetworkError;
-        var req = client.open(.POST, uri, .{
-            .server_header_buffer = &buf,
-            .extra_headers = &.{
-                .{ .name = "Content-Type", .value = "application/json" },
-            },
-        }) catch return provider_mod.ProviderError.NetworkError;
-        defer req.deinit();
+    pub fn buildTxPath(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, txid: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "/tx/hash/{s}", .{txid}) catch return provider_mod.ProviderError.OutOfMemory;
+    }
 
-        req.transfer_encoding = .{ .content_length = json_body.len };
-        req.send() catch return provider_mod.ProviderError.NetworkError;
-        req.writeAll(json_body) catch return provider_mod.ProviderError.NetworkError;
-        req.finish() catch return provider_mod.ProviderError.NetworkError;
-        req.wait() catch return provider_mod.ProviderError.NetworkError;
+    pub fn buildUtxosPath(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, address: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "/address/{s}/unspent", .{address}) catch return provider_mod.ProviderError.OutOfMemory;
+    }
 
-        if (req.status != .ok) {
-            return provider_mod.ProviderError.BroadcastFailed;
-        }
-
-        const body = req.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch return provider_mod.ProviderError.OutOfMemory;
-        return body;
+    pub fn buildBroadcastBody(self: *WhatsOnChainProvider, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "{{\"txhex\":\"{s}\"}}", .{tx_hex}) catch return provider_mod.ProviderError.OutOfMemory;
     }
 
     // -----------------------------------------------------------------------
@@ -366,6 +379,60 @@ pub const WhatsOnChainProvider = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// MockHttpTransport captures the last URL/body and returns a canned response.
+const MockHttpTransport = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    last_url: []u8 = &.{},
+    last_body: []u8 = &.{},
+    last_content_type: []u8 = &.{},
+    method: []const u8 = "",
+
+    fn init(allocator: std.mem.Allocator, response: []const u8) MockHttpTransport {
+        return .{ .allocator = allocator, .response = response };
+    }
+
+    fn deinit(self: *MockHttpTransport) void {
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        if (self.last_body.len > 0) self.allocator.free(self.last_body);
+        if (self.last_content_type.len > 0) self.allocator.free(self.last_content_type);
+    }
+
+    fn getFn(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+    ) provider_mod.ProviderError![]u8 {
+        const self: *MockHttpTransport = @ptrCast(@alignCast(ctx));
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        self.last_url = self.allocator.dupe(u8, url) catch return provider_mod.ProviderError.OutOfMemory;
+        self.method = "GET";
+        return allocator.dupe(u8, self.response) catch return provider_mod.ProviderError.OutOfMemory;
+    }
+
+    fn postFn(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) provider_mod.ProviderError![]u8 {
+        const self: *MockHttpTransport = @ptrCast(@alignCast(ctx));
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        if (self.last_body.len > 0) self.allocator.free(self.last_body);
+        if (self.last_content_type.len > 0) self.allocator.free(self.last_content_type);
+        self.last_url = self.allocator.dupe(u8, url) catch return provider_mod.ProviderError.OutOfMemory;
+        self.last_body = self.allocator.dupe(u8, body) catch return provider_mod.ProviderError.OutOfMemory;
+        self.last_content_type = self.allocator.dupe(u8, content_type) catch return provider_mod.ProviderError.OutOfMemory;
+        self.method = "POST";
+        return allocator.dupe(u8, self.response) catch return provider_mod.ProviderError.OutOfMemory;
+    }
+
+    fn transport(self: *MockHttpTransport) HttpTransport {
+        return .{ .ctx = @ptrCast(self), .get = MockHttpTransport.getFn, .post = MockHttpTransport.postFn };
+    }
+};
+
 test "WhatsOnChainProvider initializes correctly" {
     const allocator = std.testing.allocator;
     var woc = WhatsOnChainProvider.init(allocator, .mainnet);
@@ -385,4 +452,43 @@ test "WhatsOnChainProvider testnet URL" {
 
     const fee_rate = try prov.getFeeRate();
     try std.testing.expectEqual(@as(i64, 100), fee_rate);
+}
+
+test "WhatsOnChainProvider buildTxPath and buildUtxosPath shape" {
+    const allocator = std.testing.allocator;
+    var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+    defer woc.deinit();
+
+    const p1 = try woc.buildTxPath(allocator, "deadbeef");
+    defer allocator.free(p1);
+    try std.testing.expectEqualStrings("/tx/hash/deadbeef", p1);
+
+    const p2 = try woc.buildUtxosPath(allocator, "1abc");
+    defer allocator.free(p2);
+    try std.testing.expectEqualStrings("/address/1abc/unspent", p2);
+
+    const body = try woc.buildBroadcastBody(allocator, "0100deadbeef");
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"txhex\":\"0100deadbeef\"}", body);
+}
+
+test "WhatsOnChainProvider broadcast via mock transport strips quotes" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport.init(allocator, "\"abcd1234\"");
+    defer mock.deinit();
+
+    var woc = WhatsOnChainProvider.init(allocator, .mainnet);
+    defer woc.deinit();
+    woc.setTransport(mock.transport());
+
+    const prov = woc.provider();
+    const txid = try prov.broadcast(allocator, "0100deadbeef");
+    defer allocator.free(txid);
+    try std.testing.expectEqualStrings("abcd1234", txid);
+
+    // Verify request shape
+    try std.testing.expect(std.mem.endsWith(u8, mock.last_url, "/tx/raw"));
+    try std.testing.expect(std.mem.indexOf(u8, mock.last_body, "\"txhex\":\"0100deadbeef\"") != null);
+    try std.testing.expectEqualStrings("application/json", mock.last_content_type);
+    try std.testing.expectEqualStrings("POST", mock.method);
 }

@@ -140,6 +140,7 @@ pub const MockPreimageParts = struct {
 };
 
 pub fn assert(condition: bool) void {
+    // CONTRACT-ABORT: assertion failure IS script-failure semantics.
     if (!condition) @panic(assert_failure_message);
 }
 
@@ -208,23 +209,56 @@ pub fn checkPreimage(preimage: base.SigHashPreimage) bool {
     return true;
 }
 
-pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
-    const private_key = parseFixturePrivateKey(pair.privKey) catch @panic("invalid fixture private key");
-    const derived_pub_key = private_key.publicKey() catch @panic("invalid fixture private key");
+pub const SignTestMessageError = error{
+    InvalidFixturePrivateKey,
+    FixtureKeyMismatch,
+    SigningFailed,
+    OutOfMemory,
+};
+
+/// Error-returning variant of `signTestMessage`. Prefer this in SDK / host
+/// code. The non-`Checked` variant remains panic-based because it is called
+/// from Rúnar contract bodies.
+pub fn signTestMessageChecked(allocator: std.mem.Allocator, pair: test_keys.TestKeyPair) SignTestMessageError!base.Sig {
+    const private_key = parseFixturePrivateKey(pair.privKey) catch return SignTestMessageError.InvalidFixturePrivateKey;
+    const derived_pub_key = private_key.publicKey() catch return SignTestMessageError.InvalidFixturePrivateKey;
     if (!std.mem.eql(u8, &derived_pub_key.bytes, pair.pubKey)) {
-        @panic("fixture private/public key mismatch");
+        return SignTestMessageError.FixtureKeyMismatch;
     }
 
     if (lookupCanonicalFixtureSig(pair)) |sig_bytes| {
-        return dupeBytes(sig_bytes);
+        return allocator.dupe(u8, sig_bytes) catch return SignTestMessageError.OutOfMemory;
     }
 
-    const sig = private_key.signSha256(test_message) catch @panic("unable to sign fixture test message");
-    return dupeBytes(sig.asSlice());
+    const sig = private_key.signSha256(test_message) catch return SignTestMessageError.SigningFailed;
+    return allocator.dupe(u8, sig.asSlice()) catch return SignTestMessageError.OutOfMemory;
 }
 
-pub fn mockPreimage(parts: MockPreimageParts) base.SigHashPreimage {
-    var encoded = std.heap.page_allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch @panic("OOM");
+pub fn signTestMessage(pair: test_keys.TestKeyPair) base.Sig {
+    // INTERNAL-INVARIANT semantics: fixture keys are compile-time constants
+    // (test_keys.ALICE/BOB/CHARLIE). Any failure here indicates a malformed
+    // fixture, not caller input. Called from test contract bodies with no
+    // error channel.
+    return signTestMessageChecked(std.heap.page_allocator, pair) catch |err| switch (err) {
+        SignTestMessageError.InvalidFixturePrivateKey => @panic("invalid fixture private key"),
+        SignTestMessageError.FixtureKeyMismatch => @panic("fixture private/public key mismatch"),
+        SignTestMessageError.SigningFailed => @panic("unable to sign fixture test message"),
+        SignTestMessageError.OutOfMemory => @panic("OOM"),
+    };
+}
+
+pub const MockPreimageError = error{
+    OutOfMemory,
+    LocktimeOutOfRange,
+};
+
+/// Error-returning variant of `mockPreimage`. Prefer this in SDK / harness
+/// code that can handle allocation failure or invalid caller input. The
+/// non-`Checked` variant remains panic-based because it is called directly
+/// from Rúnar contract bodies (which cannot propagate errors — contract
+/// method signatures compile to Bitcoin Script and have no error channel).
+pub fn mockPreimageChecked(allocator: std.mem.Allocator, parts: MockPreimageParts) MockPreimageError!base.SigHashPreimage {
+    var encoded = allocator.alloc(u8, 4 + 32 + 32 + 36 + 1 + 8 + 4 + 32 + 4 + 4) catch return MockPreimageError.OutOfMemory;
     std.mem.writeInt(i32, encoded[0..4], 2, .little);
     copyFixed(encoded[4..36], parts.hashPrevouts);
     @memset(encoded[36..68], 0);
@@ -233,10 +267,19 @@ pub fn mockPreimage(parts: MockPreimageParts) base.SigHashPreimage {
     @memset(encoded[105..113], 0);
     std.mem.writeInt(u32, encoded[113..117], 0xffff_ffff, .little);
     copyFixed(encoded[117..149], parts.outputHash);
-    const locktime: u32 = std.math.cast(u32, parts.locktime) orelse @panic("mockPreimage: locktime out of range");
+    const locktime: u32 = std.math.cast(u32, parts.locktime) orelse return MockPreimageError.LocktimeOutOfRange;
     std.mem.writeInt(u32, encoded[149..153], locktime, .little);
     std.mem.writeInt(u32, encoded[153..157], 0x41, .little);
     return encoded;
+}
+
+pub fn mockPreimage(parts: MockPreimageParts) base.SigHashPreimage {
+    // CONTRACT-ABORT semantics: called from test contract bodies which have
+    // no error channel. Allocation failure here is treated as script-abort.
+    return mockPreimageChecked(std.heap.page_allocator, parts) catch |err| switch (err) {
+        MockPreimageError.OutOfMemory => @panic("OOM"),
+        MockPreimageError.LocktimeOutOfRange => @panic("mockPreimage: locktime out of range"),
+    };
 }
 
 pub fn extractHashPrevouts(preimage: base.SigHashPreimage) base.Sha256 {
@@ -259,8 +302,19 @@ pub fn extractLocktime(preimage: base.SigHashPreimage) base.Bigint {
     return extracted;
 }
 
-pub fn buildChangeOutput(pkh: base.ByteString, amount: base.Bigint) base.ByteString {
-    if (pkh.len != 20) @panic("buildChangeOutput: pubkey hash must be 20 bytes");
+pub const BuildChangeOutputError = error{
+    OutOfMemory,
+    InvalidPubKeyHashLength,
+};
+
+/// Error-returning variant of `buildChangeOutput`. Prefer this in SDK / host
+/// code where allocation or caller-supplied input validation failures are
+/// recoverable. The non-`Checked` variant remains panic-based because it is
+/// called directly from Rúnar contract bodies (which cannot propagate errors
+/// — contract method signatures compile to Bitcoin Script and have no error
+/// channel).
+pub fn buildChangeOutputChecked(allocator: std.mem.Allocator, pkh: base.ByteString, amount: base.Bigint) BuildChangeOutputError!base.ByteString {
+    if (pkh.len != 20) return BuildChangeOutputError.InvalidPubKeyHashLength;
 
     var pubkey_hash: bsvz.crypto.Hash160 = undefined;
     @memcpy(&pubkey_hash.bytes, pkh[0..20]);
@@ -272,13 +326,26 @@ pub fn buildChangeOutput(pkh: base.ByteString, amount: base.Bigint) base.ByteStr
             .bytes = &locking_script,
         },
     };
-    const out = std.heap.page_allocator.alloc(u8, output.serializedLen()) catch @panic("OOM");
+    const out = allocator.alloc(u8, output.serializedLen()) catch return BuildChangeOutputError.OutOfMemory;
     _ = output.writeInto(out);
 
     return out;
 }
 
+pub fn buildChangeOutput(pkh: base.ByteString, amount: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT semantics: called from test contract bodies (e.g.
+    // CovenantVault.runar.zig) which have no error channel. Length / OOM
+    // failures surface as script-abort panics, matching Bitcoin Script
+    // verification semantics.
+    return buildChangeOutputChecked(std.heap.page_allocator, pkh, amount) catch |err| switch (err) {
+        BuildChangeOutputError.OutOfMemory => @panic("OOM"),
+        BuildChangeOutputError.InvalidPubKeyHashLength => @panic("buildChangeOutput: pubkey hash must be 20 bytes"),
+    };
+}
+
 pub fn cat(left: base.ByteString, right: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure is treated
+    // as script-abort. Size is bounded by Bitcoin Script max element size.
     return bsvz.script.cat(std.heap.page_allocator, left, right) catch @panic("OOM");
 }
 
@@ -297,21 +364,27 @@ pub fn substr(bytes: base.ByteString, start: base.Bigint, len: base.Bigint) base
     if (start < 0 or len <= 0) return &.{};
     const start_usize = std.math.cast(usize, start) orelse return &.{};
     const len_usize = std.math.cast(usize, len) orelse return &.{};
+    // CONTRACT-ABORT: in-contract builtin; page_allocator failure = script-abort.
     return bsvz.script.substr(std.heap.page_allocator, bytes, start_usize, len_usize) catch @panic("OOM");
 }
 
 pub fn num2bin(value: anytype, size: base.Bigint) base.ByteString {
     if (size < 0) return &.{};
     const size_usize = std.math.cast(usize, size) orelse return &.{};
+    // CONTRACT-ABORT: in-contract builtin; OOM = script-abort.
     var script_num = scriptNumFromValue(std.heap.page_allocator, value) catch @panic("OOM");
     defer script_num.deinit();
     return script_num.num2binOwned(std.heap.page_allocator, size_usize) catch |err| switch (err) {
+        // CONTRACT-ABORT: Bitcoin Script OP_NUM2BIN semantics — size too
+        // small for the value's encoding fails the script.
         error.InvalidEncoding => @panic("num2bin: size too small"),
         error.OutOfMemory => @panic("OOM"),
     };
 }
 
 pub fn bin2num(bytes: base.ByteString) SignedBigint {
+    // CONTRACT-ABORT: in-contract builtin; malformed encoding = script-abort
+    // matching Bitcoin Script OP_BIN2NUM semantics.
     var script_num = bsvz.script.ScriptNum.bin2num(std.heap.page_allocator, bytes) catch @panic("bin2num: invalid encoding");
     defer script_num.deinit();
     return signedBigintFromScriptNum(&script_num);
@@ -336,6 +409,7 @@ pub fn sign(value: base.Bigint) base.Bigint {
 }
 
 pub fn pow(base_value: base.Bigint, exponent: base.Bigint) base.Bigint {
+    // CONTRACT-ABORT: negative exponent is an in-contract math error.
     if (exponent < 0) @panic("pow: negative exponent");
     if (exponent == 0) return 1;
 
@@ -393,6 +467,7 @@ pub fn log2(value: base.Bigint) base.Bigint {
 }
 
 pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: length invariants of the in-contract SHA-256 builtin.
     if (chaining_value.len != 32) @panic("sha256Compress: state must be 32 bytes");
     if (block.len != 64) @panic("sha256Compress: block must be 64 bytes");
 
@@ -402,6 +477,7 @@ pub fn sha256Compress(chaining_value: base.ByteString, block: base.ByteString) b
 }
 
 pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteString, total_len: base.Bigint) base.ByteString {
+    // CONTRACT-ABORT: length / range invariants of the in-contract SHA-256 finalize builtin.
     if (chaining_value.len != 32) @panic("sha256Finalize: state must be 32 bytes");
     if (remaining.len > 119) @panic("sha256Finalize: remaining must be <= 119 bytes");
     if (total_len < 0) @panic("sha256Finalize: total bit length must be non-negative");
@@ -427,6 +503,7 @@ pub fn sha256Finalize(chaining_value: base.ByteString, remaining: base.ByteStrin
 }
 
 pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: length invariants of the in-contract Blake3 builtin.
     if (chaining_value.len != 32) @panic("blake3Compress: chaining value must be 32 bytes");
     if (block.len != 64) @panic("blake3Compress: block must be 64 bytes");
 
@@ -460,6 +537,7 @@ pub fn blake3Compress(chaining_value: base.ByteString, block: base.ByteString) b
 }
 
 pub fn blake3Hash(message: base.ByteString) base.ByteString {
+    // CONTRACT-ABORT: message length invariant of the in-contract Blake3 builtin.
     if (message.len > 64) @panic("blake3Hash: message must be <= 64 bytes");
 
     var block = [_]u8{0} ** 64;
@@ -504,6 +582,7 @@ pub fn verifyWOTS(message: base.ByteString, sig: base.ByteString, pub_key: base.
     Sha256Hasher.hash(message, &msg_hash, .{});
 
     const digits = wots.allDigits(&msg_hash);
+    // CONTRACT-ABORT: in-contract WOTS+ verifier; OOM = script-abort.
     var endpoints = std.heap.page_allocator.alloc(u8, wots_len * wots_n) catch @panic("OOM");
     defer std.heap.page_allocator.free(endpoints);
 
@@ -683,6 +762,7 @@ fn slhT(comptime params: SlhParams, pk_seed: []const u8, adrs: *const SlhAdrs, m
     var input: std.ArrayList(u8) = .empty;
     defer input.deinit(std.heap.page_allocator);
 
+    // CONTRACT-ABORT: in-contract SLH-DSA helper; OOM = script-abort.
     input.appendSlice(std.heap.page_allocator, pk_seed) catch @panic("OOM");
     input.appendNTimes(std.heap.page_allocator, 0, 64 - params.n) catch @panic("OOM");
     input.appendSlice(std.heap.page_allocator, &compressed_adrs) catch @panic("OOM");
@@ -698,6 +778,7 @@ fn slhHmsg(comptime params: SlhParams, r: []const u8, pk_seed: []const u8, pk_ro
     var seed: std.ArrayList(u8) = .empty;
     defer seed.deinit(std.heap.page_allocator);
 
+    // CONTRACT-ABORT: in-contract SLH-DSA helper; OOM = script-abort.
     seed.appendSlice(std.heap.page_allocator, r) catch @panic("OOM");
     seed.appendSlice(std.heap.page_allocator, pk_seed) catch @panic("OOM");
     seed.appendSlice(std.heap.page_allocator, pk_root) catch @panic("OOM");
@@ -895,22 +976,26 @@ pub fn ecMakePoint(x: base.Bigint, y: base.Bigint) base.Point {
 }
 
 pub fn ecPointX(point: base.Point) base.Bigint {
+    // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
     if (point.len != 64) @panic("ecPointX: point must be 64 bytes");
     return @bitCast(std.mem.readInt(u64, point[24..32], .big));
 }
 
 pub fn ecPointY(point: base.Point) base.Bigint {
+    // CONTRACT-ABORT: in-contract EC builtin; malformed Point = script-abort.
     if (point.len != 64) @panic("ecPointY: point must be 64 bytes");
     return @bitCast(std.mem.readInt(u64, point[56..64], .big));
 }
 
 pub fn ecAdd(left: base.Point, right: base.Point) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
     const lp = parsePoint(left) catch @panic("ecAdd: invalid point");
     const rp = parsePoint(right) catch @panic("ecAdd: invalid point");
     return serializePoint(lp.add(rp));
 }
 
 pub fn ecMul(point: base.Point, scalar: anytype) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point/scalar = script-abort.
     const p = parsePoint(point) catch @panic("ecMul: invalid point");
     if (isIdentityPoint(point)) return dupeBytes(&([_]u8{0} ** 64));
 
@@ -926,12 +1011,14 @@ pub fn ecMulGen(scalar: anytype) base.Point {
     const reduced_scalar = reduceScalarForSecp256k1(scalar);
     if (reduced_scalar.is_zero) return dupeBytes(&([_]u8{0} ** 64));
 
+    // CONTRACT-ABORT: in-contract EC builtin; invalid scalar = script-abort.
     var result = bsvz.crypto.Point.basePointMul(reduced_scalar.bytes) catch @panic("ecMulGen: invalid scalar");
     if (reduced_scalar.negative) result = result.negate();
     return serializePoint(result);
 }
 
 pub fn ecNegate(point: base.Point) base.Point {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
     const p = parsePoint(point) catch @panic("ecNegate: invalid point");
     return serializePoint(p.negate());
 }
@@ -948,6 +1035,7 @@ pub fn ecModReduce(value: base.Bigint, modulus: base.Bigint) base.Bigint {
 }
 
 pub fn ecEncodeCompressed(point: base.Point) base.ByteString {
+    // CONTRACT-ABORT: in-contract EC builtin; invalid Point = script-abort.
     const p = parsePoint(point) catch @panic("ecEncodeCompressed: invalid point");
     if (isIdentityPoint(point)) return dupeBytes(&[_]u8{0x00});
     const compressed = p.toCompressedSec1();
@@ -1078,6 +1166,7 @@ fn merkleRootImpl(leaf: base.ByteString, proof: base.ByteString, index: base.Big
     for (0..depth_u) |i| {
         const sibling_start = i * 32;
         const sibling_end = sibling_start + 32;
+        // CONTRACT-ABORT: in-contract merkle-proof builtin; short proof = script-abort.
         if (sibling_end > proof.len) @panic("merkleRoot: proof too short");
         const sibling = proof[sibling_start..sibling_end];
         const bit = (index >> @intCast(i)) & 1;
@@ -1156,6 +1245,8 @@ fn parseChecksigDer(sig: []const u8) ?bsvz.crypto.DerSignature {
 }
 
 fn dupeBytes(bytes: []const u8) []const u8 {
+    // CONTRACT-ABORT: internal helper called throughout in-contract builtins;
+    // page_allocator OOM = script-abort.
     return std.heap.page_allocator.dupe(u8, bytes) catch @panic("OOM");
 }
 
@@ -1219,6 +1310,7 @@ fn copyFixed(dest: []u8, source: []const u8) void {
 
 fn sliceOrZero(bytes: []const u8, start: usize, len: usize) []const u8 {
     if (start > bytes.len or len > bytes.len - start) {
+        // CONTRACT-ABORT: internal helper for in-contract builtins; OOM = script-abort.
         const zeros = std.heap.page_allocator.alloc(u8, len) catch @panic("OOM");
         @memset(zeros, 0);
         return zeros;
@@ -1243,11 +1335,13 @@ fn decodeInt64Le(bytes: []const u8) i64 {
 
 fn checkedMul(lhs: i64, rhs: i64) i64 {
     const result = @mulWithOverflow(lhs, rhs);
+    // CONTRACT-ABORT: arithmetic overflow from in-contract math = script-abort.
     if (result[1] != 0) @panic("runar integer overflow");
     return result[0];
 }
 
 fn checkedAbs(value: i64) i64 {
+    // CONTRACT-ABORT: abs(i64::MIN) overflow from in-contract math = script-abort.
     if (value == std.math.minInt(i64)) @panic("runar integer overflow");
     return if (value < 0) -value else value;
 }
@@ -1565,6 +1659,9 @@ pub const SignedBigint = struct {
         const Value = @TypeOf(value);
         if (Value == SignedBigint) return value;
         return switch (@typeInfo(Value)) {
+            // INTERNAL-INVARIANT: only reachable if caller passes an integer
+            // type that can't fit in i64 (e.g. u128); Rúnar front-ends only
+            // pass i64-range values.
             .int, .comptime_int => fromI64(std.math.cast(i64, value) orelse @panic("scalar out of range")),
             else => @compileError("expected i64/comptime_int or SignedBigint"),
         };
@@ -1572,6 +1669,7 @@ pub const SignedBigint = struct {
 
     fn fromLeSignedMagnitude(bytes: []const u8) SignedBigint {
         if (bytes.len == 0) return zero();
+        // CONTRACT-ABORT: in-contract OP_BIN2NUM bound; magnitude > 32 bytes = script-abort.
         if (bytes.len > 32) @panic("bin2num: magnitude too large");
 
         var out = zero();
@@ -1705,6 +1803,7 @@ fn signedBigintFromScriptNum(script_num: *const bsvz.script.ScriptNum) SignedBig
     return switch (script_num.*) {
         .small => |value| SignedBigint.fromI64(value),
         .big => {
+            // CONTRACT-ABORT: internal bigint<->ScriptNum bridge; OOM = script-abort.
             const encoded = script_num.encodeOwned(std.heap.page_allocator) catch @panic("OOM");
             defer std.heap.page_allocator.free(encoded);
             return SignedBigint.fromLeSignedMagnitude(encoded);
@@ -1722,6 +1821,7 @@ fn reduceScalarForSecp256k1(value: anytype) ReducedScalar {
         };
     }
 
+    // CONTRACT-ABORT: in-contract scalar reduction for EC ops; OOM/rem failure = script-abort.
     var order = BigUint.fromBeBytes(std.heap.page_allocator, &secp256k1_order_be) catch @panic("OOM");
     defer order.deinit();
     var magnitude = bigint.toBigUint() catch @panic("OOM");
@@ -1751,6 +1851,10 @@ fn bigUintToFixedBe32(value: *const BigUint) [32]u8 {
             const absolute_index = limb_index * 8 + byte_index;
             const byte: u8 = @truncate(limb >> @intCast(byte_index * 8));
             if (absolute_index >= out.len) {
+                // INTERNAL-INVARIANT: unreachable — called only after
+                // magnitude.rem(secp256k1_order), which bounds the value at
+                // < 2^256 (i.e. fits in 32 bytes). A non-zero high byte here
+                // would indicate a bug in BigUint.rem, not caller input.
                 if (byte != 0) @panic("scalar exceeds 32 bytes");
                 continue;
             }
@@ -1808,8 +1912,9 @@ test "checkSig accepts a trailing sighash byte" {
     const base_sig = signTestMessage(test_keys.ALICE);
     defer freeIfOwned(base_sig);
 
-    var with_sighash = std.heap.page_allocator.alloc(u8, base_sig.len + 1) catch @panic("OOM");
-    defer std.heap.page_allocator.free(with_sighash);
+    // CONVERTED: use testing allocator + `try` instead of page_allocator + @panic("OOM").
+    var with_sighash = try std.testing.allocator.alloc(u8, base_sig.len + 1);
+    defer std.testing.allocator.free(with_sighash);
     @memcpy(with_sighash[0..base_sig.len], base_sig);
     with_sighash[base_sig.len] = 0x41;
 
@@ -1833,6 +1938,46 @@ test "bytesEq compares byte content explicitly" {
     try std.testing.expect(bytesEq("abc", "abc"));
     try std.testing.expect(!bytesEq("abc", "abd"));
     try std.testing.expect(bytesEq(&.{}, &.{}));
+}
+
+test "buildChangeOutputChecked rejects malformed pubkey hash" {
+    const allocator = std.testing.allocator;
+    const bad_pkh = [_]u8{0} ** 19; // too short
+    const result = buildChangeOutputChecked(allocator, &bad_pkh, 1000);
+    try std.testing.expectError(BuildChangeOutputError.InvalidPubKeyHashLength, result);
+}
+
+test "buildChangeOutputChecked happy path matches buildChangeOutput" {
+    const allocator = std.testing.allocator;
+    const pkh = [_]u8{0x11} ** 20;
+    const checked = try buildChangeOutputChecked(allocator, &pkh, 5000);
+    defer allocator.free(checked);
+    const legacy = buildChangeOutput(&pkh, 5000);
+    defer freeIfOwned(legacy);
+    try std.testing.expectEqualSlices(u8, legacy, checked);
+}
+
+test "mockPreimageChecked rejects out-of-range locktime" {
+    const allocator = std.testing.allocator;
+    const result = mockPreimageChecked(allocator, .{ .locktime = @as(i64, std.math.maxInt(u32)) + 1 });
+    try std.testing.expectError(MockPreimageError.LocktimeOutOfRange, result);
+}
+
+test "mockPreimageChecked happy path matches mockPreimage" {
+    const allocator = std.testing.allocator;
+    const checked = try mockPreimageChecked(allocator, .{ .locktime = 42 });
+    defer allocator.free(checked);
+    const legacy = mockPreimage(.{ .locktime = 42 });
+    defer freeIfOwned(legacy);
+    try std.testing.expectEqualSlices(u8, legacy, checked);
+}
+
+test "signTestMessageChecked succeeds with known fixture" {
+    const allocator = std.testing.allocator;
+    const sig = try signTestMessageChecked(allocator, test_keys.ALICE);
+    defer allocator.free(sig);
+    try std.testing.expect(sig.len > 0);
+    try std.testing.expect(checkSig(sig, test_keys.ALICE.pubKey));
 }
 
 test "cat and substr preserve current Runar byte-string semantics" {
@@ -1915,7 +2060,9 @@ test "wide signed-magnitude values flow through bin2num and secp256k1 scalar mul
     defer freeIfOwned(actual);
 
     const reduced = reduceScalarForSecp256k1(scalar);
-    var expected_point = bsvz.crypto.Point.basePointMul(reduced.bytes) catch @panic("invalid test scalar");
+    // CONVERTED: `try` inside test — basePointMul error is a legitimate test
+    // failure to surface, not a runtime panic.
+    var expected_point = try bsvz.crypto.Point.basePointMul(reduced.bytes);
     if (reduced.negative) expected_point = expected_point.negate();
     const expected = serializePoint(expected_point);
     defer freeIfOwned(expected);

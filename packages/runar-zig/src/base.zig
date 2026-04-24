@@ -494,3 +494,30 @@ test "serialize helpers produce explicit deterministic test state bytes" {
     try std.testing.expect(std.mem.startsWith(u8, continuation, "prefix:"));
     try std.testing.expect(std.mem.endsWith(u8, continuation, ":suffix"));
 }
+
+test "Sha256Digest aliases Sha256 and serializes through test state helpers" {
+    const allocator = std.testing.allocator;
+
+    // Sha256Digest is a byte-string alias for Sha256. Using the alias for a
+    // state-field-like value must preserve the wire shape of the raw bytes.
+    const digest_bytes = [_]u8{ 0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x70, 0x81 } ** 4;
+    const digest: Sha256Digest = &digest_bytes;
+    try std.testing.expectEqual(@as(usize, 32), digest.len);
+
+    // Round-trip a Sha256Digest as a test state value and confirm the bytes
+    // are present in the serialized output (a Sha256Digest is a ByteString at
+    // runtime, so serialization is byte-identical).
+    const serialized = try serializeTestStateValues(allocator, .{digest});
+    defer allocator.free(serialized);
+    try std.testing.expect(std.mem.startsWith(u8, serialized, test_state_magic));
+    // The raw digest bytes should appear somewhere after the magic prefix.
+    try std.testing.expect(std.mem.indexOf(u8, serialized, &digest_bytes) != null);
+
+    // Sha256Digest end-to-end through the stateful runtime: the continuation
+    // wrapper should include the digest bytes when passed as a state value.
+    const continuation = try wrapTestContinuationScript(allocator, "p:", .{digest}, ":s");
+    defer allocator.free(continuation);
+    try std.testing.expect(std.mem.startsWith(u8, continuation, "p:"));
+    try std.testing.expect(std.mem.endsWith(u8, continuation, ":s"));
+    try std.testing.expect(std.mem.indexOf(u8, continuation, &digest_bytes) != null);
+}

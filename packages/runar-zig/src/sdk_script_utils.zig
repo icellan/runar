@@ -182,7 +182,7 @@ pub fn extractConstructorArgs(
         if (adjusted_hex_offset >= code_hex.len) continue;
 
         const elem = readScriptElement(code_hex, adjusted_hex_offset);
-        cumulative_shift += @as(i64, @intCast(elem.total_hex_chars)) / 2 - 1;
+        cumulative_shift += @divTrunc(@as(i64, @intCast(elem.total_hex_chars)), 2) - 1;
 
         const param_idx: usize = @intCast(slot.param_index);
         if (param_idx >= artifact.abi.constructor.params.len) continue;

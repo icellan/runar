@@ -3,6 +3,7 @@ const bsvz = @import("bsvz");
 const types = @import("sdk_types.zig");
 const state_mod = @import("sdk_state.zig");
 const deploy_mod = @import("sdk_deploy.zig");
+const provider_mod = @import("sdk_provider.zig");
 
 // ---------------------------------------------------------------------------
 // Transaction construction for method invocation
@@ -167,6 +168,31 @@ fn varIntByteSize(n: usize) usize {
     return 9;
 }
 
+/// EstimateCallFee estimates the fee for a call transaction. Mirrors the TS
+/// `estimateCallFee` semantics: accounts for the contract spending input
+/// (including its unlocking script), any P2PKH funding inputs (148 bytes each),
+/// each contract continuation output, and an optional P2PKH change output.
+/// `fee_rate_in` is satoshis per KB (0 defaults to 100).
+pub fn estimateCallFee(
+    unlocking_script_byte_len: usize,
+    continuation_script_byte_lens: []const usize,
+    num_additional_utxos: usize,
+    has_change: bool,
+    fee_rate_in: i64,
+) i64 {
+    const tx_overhead: usize = 10;
+    const input0_size: usize = 32 + 4 + varIntByteSize(unlocking_script_byte_len) + unlocking_script_byte_len + 4;
+    const p2pkh_inputs_size: usize = num_additional_utxos * 148;
+    var outputs_size: usize = 0;
+    for (continuation_script_byte_lens) |n| {
+        outputs_size += 8 + varIntByteSize(n) + n;
+    }
+    if (has_change) outputs_size += 34;
+    const total: i64 = @intCast(tx_overhead + input0_size + p2pkh_inputs_size + outputs_size);
+    const rate: i64 = if (fee_rate_in > 0) fee_rate_in else 100;
+    return @divTrunc(total * rate + 999, 1000);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -197,4 +223,120 @@ test "buildCallTransaction with stateless contract" {
 
     try std.testing.expect(result.tx_hex.len > 0);
     try std.testing.expectEqual(@as(usize, 1), result.input_count);
+}
+
+test "estimateCallFee mirrors TS semantics" {
+    // No continuation outputs, no change, no extra inputs
+    const fee0 = estimateCallFee(1, &.{}, 0, false, 100);
+    try std.testing.expect(fee0 > 0);
+
+    // Adding an extra P2PKH input raises the fee
+    const fee1 = estimateCallFee(1, &.{}, 1, false, 100);
+    try std.testing.expect(fee1 > fee0);
+
+    // Adding a continuation output raises the fee
+    const fee2 = estimateCallFee(1, &.{100}, 0, false, 100);
+    try std.testing.expect(fee2 > fee0);
+
+    // Adding change output raises the fee
+    const fee3 = estimateCallFee(1, &.{}, 0, true, 100);
+    try std.testing.expect(fee3 > fee0);
+
+    // Default fee rate (0 → 100)
+    const fee4 = estimateCallFee(1, &.{}, 0, false, 0);
+    try std.testing.expectEqual(fee0, fee4);
+}
+
+// E2E: deploy → broadcast via MockProvider → consume deploy output in a call tx.
+// Uses a trivial stateful-like locking script (OP_1) and a trivial unlock (OP_1)
+// to exercise the plumbing end-to-end without needing full compiler output here.
+test "deploy->broadcast->call lifecycle via MockProvider" {
+    const allocator = std.testing.allocator;
+
+    // Set up MockProvider with a funding UTXO for "deployer" address.
+    var mock = provider_mod.MockProvider.init(allocator, "testnet");
+    defer mock.deinit();
+
+    const fund_utxo = types.UTXO{
+        .txid = "bb" ** 32,
+        .output_index = 0,
+        .satoshis = 100_000,
+        .script = "76a914" ++ ("11" ** 20) ++ "88ac",
+    };
+    try mock.addUtxo("deployer", fund_utxo);
+
+    var prov = mock.provider();
+    const utxos = try prov.getUtxos(allocator, "deployer");
+    defer {
+        for (utxos) |*u| {
+            var mu = u.*;
+            mu.deinit(allocator);
+        }
+        allocator.free(utxos);
+    }
+    try std.testing.expect(utxos.len >= 1);
+
+    // Build deploy tx that creates a contract output with locking script "51" (OP_1).
+    const contract_script_hex = "51";
+    var deploy_res = try deploy_mod.buildDeployTransaction(
+        allocator,
+        contract_script_hex,
+        utxos,
+        1000,
+        "1BitcoinEaterAddressDontSendf59kuE",
+        100,
+    );
+    defer deploy_res.deinit(allocator);
+
+    try std.testing.expect(deploy_res.tx_hex.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), deploy_res.input_count);
+
+    // "Broadcast" via MockProvider — returns a fake txid and stores the raw tx.
+    const deploy_txid = try prov.broadcast(allocator, deploy_res.tx_hex);
+    defer allocator.free(deploy_txid);
+    try std.testing.expectEqual(@as(usize, 64), deploy_txid.len);
+
+    // Provider should recall the raw tx by txid.
+    const recalled = try prov.getRawTransaction(allocator, deploy_txid);
+    defer allocator.free(recalled);
+    try std.testing.expectEqualStrings(deploy_res.tx_hex, recalled);
+
+    // Build a call tx that consumes the deploy output (index 0).
+    const deploy_outpoint = types.UTXO{
+        .txid = deploy_txid,
+        .output_index = 0,
+        .satoshis = 1000,
+        .script = contract_script_hex,
+    };
+
+    var call_res = try buildCallTransaction(
+        allocator,
+        deploy_outpoint,
+        "51", // unlocking: OP_1
+        "", // stateless call — no continuation
+        0,
+        null,
+        &.{},
+        100,
+        null,
+    );
+    defer call_res.deinit(allocator);
+
+    try std.testing.expect(call_res.tx_hex.len > 0);
+    try std.testing.expectEqual(@as(usize, 1), call_res.input_count);
+
+    // The call tx must reference the deploy txid in its first input.
+    // Raw tx layout: version(4) | input_count varint | input0{ prev_txid(32 LE) prev_idx(4) script_varint script sequence(4) } ...
+    // We check the hex string contains the prev txid bytes in little-endian.
+    // deploy_txid is display order (big-endian); the serialized tx has it LE-reversed.
+    var le_txid_buf: [64]u8 = undefined;
+    for (0..32) |i| {
+        le_txid_buf[i * 2] = deploy_txid[(31 - i) * 2];
+        le_txid_buf[i * 2 + 1] = deploy_txid[(31 - i) * 2 + 1];
+    }
+    const le_txid: []const u8 = le_txid_buf[0..];
+    try std.testing.expect(std.mem.indexOf(u8, call_res.tx_hex, le_txid) != null);
+
+    // And it should contain the OP_1 unlocking script push (after the script-len varint 0x01).
+    try std.testing.expect(std.mem.indexOf(u8, call_res.tx_hex, "0151") != null);
 }

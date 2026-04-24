@@ -7,17 +7,40 @@ const provider_mod = @import("sdk_provider.zig");
 // ---------------------------------------------------------------------------
 //
 // Implements the standard Provider interface using the GorillaPool 1sat
-// Ordinals REST API.
+// Ordinals REST API. HTTP transport is injected (same pattern as
+// sdk_rpc_provider / sdk_woc_provider) so tests can exercise the request
+// shape without opening sockets — which was the blocker under zig 0.16's
+// Io-based std.http.Client.
 //
 // Endpoints:
 //   Mainnet: https://ordinals.gorillapool.io/api/
 //   Testnet: https://testnet.ordinals.gorillapool.io/api/
 // ---------------------------------------------------------------------------
 
+/// HttpTransport performs one GET or POST request and returns the response
+/// body. The implementation owns the returned buffer; the caller frees via
+/// the `allocator` passed in.
+pub const HttpTransport = struct {
+    ctx: *anyopaque,
+    get: *const fn (
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+    ) provider_mod.ProviderError![]u8,
+    post: *const fn (
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) provider_mod.ProviderError![]u8,
+};
+
 pub const GorillaPoolProvider = struct {
     allocator: std.mem.Allocator,
     network: Network,
     base_url: []const u8,
+    transport: ?HttpTransport = null,
 
     pub const Network = enum {
         mainnet,
@@ -49,6 +72,12 @@ pub const GorillaPoolProvider = struct {
         _ = self;
     }
 
+    /// Inject a concrete HTTP transport. Tests use MockHttpTransport; production
+    /// callers supply an Io-backed transport built against std.http.Client.
+    pub fn setTransport(self: *GorillaPoolProvider, transport: HttpTransport) void {
+        self.transport = transport;
+    }
+
     /// Return a Provider interface backed by this GorillaPoolProvider.
     pub fn provider(self: *GorillaPoolProvider) provider_mod.Provider {
         return .{
@@ -68,62 +97,40 @@ pub const GorillaPoolProvider = struct {
     };
 
     // -----------------------------------------------------------------------
-    // HTTP helpers
+    // HTTP helpers (delegate to injected transport)
     // -----------------------------------------------------------------------
 
     fn httpGet(self: *GorillaPoolProvider, allocator: std.mem.Allocator, path: []const u8) provider_mod.ProviderError![]u8 {
+        const transport = self.transport orelse return provider_mod.ProviderError.NetworkError;
         const url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path }) catch return provider_mod.ProviderError.OutOfMemory;
         defer self.allocator.free(url);
-
-        var client = std.http.Client{ .allocator = allocator, .io = std.testing.io };
-        defer client.deinit();
-
-        var buf: [8192]u8 = undefined;
-        const uri = std.Uri.parse(url) catch return provider_mod.ProviderError.NetworkError;
-        var req = client.open(.GET, uri, .{ .server_header_buffer = &buf }) catch return provider_mod.ProviderError.NetworkError;
-        defer req.deinit();
-
-        req.send() catch return provider_mod.ProviderError.NetworkError;
-        req.wait() catch return provider_mod.ProviderError.NetworkError;
-
-        if (req.status != .ok) {
-            if (req.status == .not_found) return provider_mod.ProviderError.NotFound;
-            return provider_mod.ProviderError.NetworkError;
-        }
-
-        const body = req.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch return provider_mod.ProviderError.OutOfMemory;
-        return body;
+        return transport.get(transport.ctx, allocator, url);
     }
 
     fn httpPost(self: *GorillaPoolProvider, allocator: std.mem.Allocator, path: []const u8, json_body: []const u8) provider_mod.ProviderError![]u8 {
+        const transport = self.transport orelse return provider_mod.ProviderError.NetworkError;
         const url = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ self.base_url, path }) catch return provider_mod.ProviderError.OutOfMemory;
         defer self.allocator.free(url);
+        return transport.post(transport.ctx, allocator, url, "application/json", json_body);
+    }
 
-        var client = std.http.Client{ .allocator = allocator, .io = std.testing.io };
-        defer client.deinit();
+    // -----------------------------------------------------------------------
+    // Path helpers (exposed for testing request shape)
+    // -----------------------------------------------------------------------
 
-        var buf: [8192]u8 = undefined;
-        const uri = std.Uri.parse(url) catch return provider_mod.ProviderError.NetworkError;
-        var req = client.open(.POST, uri, .{
-            .server_header_buffer = &buf,
-            .extra_headers = &.{
-                .{ .name = "Content-Type", .value = "application/json" },
-            },
-        }) catch return provider_mod.ProviderError.NetworkError;
-        defer req.deinit();
+    pub fn buildTxPath(self: *GorillaPoolProvider, allocator: std.mem.Allocator, txid: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "/tx/{s}", .{txid}) catch return provider_mod.ProviderError.OutOfMemory;
+    }
 
-        req.transfer_encoding = .{ .content_length = json_body.len };
-        req.send() catch return provider_mod.ProviderError.NetworkError;
-        req.writeAll(json_body) catch return provider_mod.ProviderError.NetworkError;
-        req.finish() catch return provider_mod.ProviderError.NetworkError;
-        req.wait() catch return provider_mod.ProviderError.NetworkError;
+    pub fn buildUtxosPath(self: *GorillaPoolProvider, allocator: std.mem.Allocator, address: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "/address/{s}/utxos", .{address}) catch return provider_mod.ProviderError.OutOfMemory;
+    }
 
-        if (req.status != .ok) {
-            return provider_mod.ProviderError.BroadcastFailed;
-        }
-
-        const body = req.reader().readAllAlloc(allocator, 10 * 1024 * 1024) catch return provider_mod.ProviderError.OutOfMemory;
-        return body;
+    pub fn buildBroadcastBody(self: *GorillaPoolProvider, allocator: std.mem.Allocator, tx_hex: []const u8) provider_mod.ProviderError![]u8 {
+        _ = self;
+        return std.fmt.allocPrint(allocator, "{{\"rawTx\":\"{s}\"}}", .{tx_hex}) catch return provider_mod.ProviderError.OutOfMemory;
     }
 
     // -----------------------------------------------------------------------
@@ -390,6 +397,60 @@ pub const GorillaPoolProvider = struct {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// MockHttpTransport captures the last URL/body and returns a canned response.
+const MockHttpTransport = struct {
+    allocator: std.mem.Allocator,
+    response: []const u8,
+    last_url: []u8 = &.{},
+    last_body: []u8 = &.{},
+    last_content_type: []u8 = &.{},
+    method: []const u8 = "",
+
+    fn init(allocator: std.mem.Allocator, response: []const u8) MockHttpTransport {
+        return .{ .allocator = allocator, .response = response };
+    }
+
+    fn deinit(self: *MockHttpTransport) void {
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        if (self.last_body.len > 0) self.allocator.free(self.last_body);
+        if (self.last_content_type.len > 0) self.allocator.free(self.last_content_type);
+    }
+
+    fn getFn(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+    ) provider_mod.ProviderError![]u8 {
+        const self: *MockHttpTransport = @ptrCast(@alignCast(ctx));
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        self.last_url = self.allocator.dupe(u8, url) catch return provider_mod.ProviderError.OutOfMemory;
+        self.method = "GET";
+        return allocator.dupe(u8, self.response) catch return provider_mod.ProviderError.OutOfMemory;
+    }
+
+    fn postFn(
+        ctx: *anyopaque,
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        content_type: []const u8,
+        body: []const u8,
+    ) provider_mod.ProviderError![]u8 {
+        const self: *MockHttpTransport = @ptrCast(@alignCast(ctx));
+        if (self.last_url.len > 0) self.allocator.free(self.last_url);
+        if (self.last_body.len > 0) self.allocator.free(self.last_body);
+        if (self.last_content_type.len > 0) self.allocator.free(self.last_content_type);
+        self.last_url = self.allocator.dupe(u8, url) catch return provider_mod.ProviderError.OutOfMemory;
+        self.last_body = self.allocator.dupe(u8, body) catch return provider_mod.ProviderError.OutOfMemory;
+        self.last_content_type = self.allocator.dupe(u8, content_type) catch return provider_mod.ProviderError.OutOfMemory;
+        self.method = "POST";
+        return allocator.dupe(u8, self.response) catch return provider_mod.ProviderError.OutOfMemory;
+    }
+
+    fn transport(self: *MockHttpTransport) HttpTransport {
+        return .{ .ctx = @ptrCast(self), .get = MockHttpTransport.getFn, .post = MockHttpTransport.postFn };
+    }
+};
+
 test "GorillaPoolProvider initializes correctly" {
     const allocator = std.testing.allocator;
     var gp = GorillaPoolProvider.init(allocator, .mainnet);
@@ -409,4 +470,43 @@ test "GorillaPoolProvider testnet URL" {
 
     const fee_rate = try prov.getFeeRate();
     try std.testing.expectEqual(@as(i64, 100), fee_rate);
+}
+
+test "GorillaPoolProvider buildTxPath and buildUtxosPath shape" {
+    const allocator = std.testing.allocator;
+    var gp = GorillaPoolProvider.init(allocator, .mainnet);
+    defer gp.deinit();
+
+    const p1 = try gp.buildTxPath(allocator, "deadbeef");
+    defer allocator.free(p1);
+    try std.testing.expectEqualStrings("/tx/deadbeef", p1);
+
+    const p2 = try gp.buildUtxosPath(allocator, "1abc");
+    defer allocator.free(p2);
+    try std.testing.expectEqualStrings("/address/1abc/utxos", p2);
+
+    const body = try gp.buildBroadcastBody(allocator, "0100deadbeef");
+    defer allocator.free(body);
+    try std.testing.expectEqualStrings("{\"rawTx\":\"0100deadbeef\"}", body);
+}
+
+test "GorillaPoolProvider broadcast via mock transport strips quotes" {
+    const allocator = std.testing.allocator;
+    var mock = MockHttpTransport.init(allocator, "\"abcd1234\"");
+    defer mock.deinit();
+
+    var gp = GorillaPoolProvider.init(allocator, .mainnet);
+    defer gp.deinit();
+    gp.setTransport(mock.transport());
+
+    const prov = gp.provider();
+    const txid = try prov.broadcast(allocator, "0100deadbeef");
+    defer allocator.free(txid);
+    try std.testing.expectEqualStrings("abcd1234", txid);
+
+    // Verify request shape
+    try std.testing.expect(std.mem.endsWith(u8, mock.last_url, "/tx"));
+    try std.testing.expect(std.mem.indexOf(u8, mock.last_body, "\"rawTx\":\"0100deadbeef\"") != null);
+    try std.testing.expectEqualStrings("application/json", mock.last_content_type);
+    try std.testing.expectEqualStrings("POST", mock.method);
 }

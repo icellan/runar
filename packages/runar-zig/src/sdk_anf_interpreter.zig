@@ -908,15 +908,21 @@ fn bin2numInt(hex: []const u8) i64 {
         bytes_buf[i] = hexByteDecode(hex[i * 2], hex[i * 2 + 1]);
     }
 
+    // Strip trailing zero bytes (MSB-side padding from num2bin) so the sign bit
+    // is located on the last non-zero byte, matching Bitcoin script-num semantics.
+    var eff_len: usize = decode_len;
+    while (eff_len > 0 and bytes_buf[eff_len - 1] == 0) : (eff_len -= 1) {}
+    if (eff_len == 0) return 0;
+
     // Check sign bit
-    const negative = (bytes_buf[decode_len - 1] & 0x80) != 0;
+    const negative = (bytes_buf[eff_len - 1] & 0x80) != 0;
     if (negative) {
-        bytes_buf[decode_len - 1] &= 0x7f;
+        bytes_buf[eff_len - 1] &= 0x7f;
     }
 
     // Build integer from LE bytes
     var result: i64 = 0;
-    var i: usize = decode_len;
+    var i: usize = eff_len;
     while (i > 0) {
         i -= 1;
         result = (result << 8) | @as(i64, bytes_buf[i]);
