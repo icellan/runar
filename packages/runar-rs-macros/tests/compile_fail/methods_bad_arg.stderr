@@ -1,0 +1,7 @@
+error: #[methods(...)] expects a single identifier naming the contract struct
+ --> tests/compile_fail/methods_bad_arg.rs:9:1
+  |
+9 | #[methods("not an ident")]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `methods` (in Nightly builds, run with -Z macro-backtrace for more info)
