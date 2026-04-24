@@ -70,24 +70,23 @@ class RunarArtifactTest {
         assertTrue(art.abi().methods().isEmpty());
     }
 
-    /** Locates a fixture relative to the worktree root. */
+    /** Loads a test fixture from the test-resources classpath. */
     private static Path locateFixture(String relative) {
-        String repoRoot = System.getProperty("runar.repo.root");
-        if (repoRoot != null) {
-            Path p = Path.of(repoRoot, relative);
-            if (Files.exists(p)) return p;
+        // Strip an "artifacts/" prefix so both legacy worktree-root paths
+        // ("artifacts/foo.json") and direct names ("foo.json") resolve.
+        String leaf = relative.startsWith("artifacts/")
+            ? relative.substring("artifacts/".length())
+            : relative;
+        var url = RunarArtifactTest.class.getClassLoader().getResource("artifacts/" + leaf);
+        if (url == null) {
+            throw new IllegalStateException(
+                "fixture not found on test classpath: artifacts/" + leaf
+            );
         }
-        Path cwd = Path.of("").toAbsolutePath();
-        Path p = cwd;
-        for (int i = 0; i < 8; i++) {
-            Path candidate = p.resolve(relative);
-            if (Files.exists(candidate)) return candidate;
-            Path parent = p.getParent();
-            if (parent == null) break;
-            p = parent;
+        try {
+            return Path.of(url.toURI());
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalStateException("bad fixture URL for " + leaf, e);
         }
-        throw new IllegalStateException(
-            "fixture not found: " + relative + " (cwd=" + cwd + ", runar.repo.root=" + repoRoot + ")"
-        );
     }
 }

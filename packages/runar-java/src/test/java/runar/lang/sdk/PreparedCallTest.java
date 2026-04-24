@@ -239,22 +239,18 @@ class PreparedCallTest {
     }
 
     static RunarArtifact loadArtifact(String relative) {
-        try {
-            String repoRoot = System.getProperty("runar.repo.root");
-            if (repoRoot != null) {
-                Path p = Path.of(repoRoot, relative);
-                if (Files.exists(p)) return RunarArtifact.fromJson(Files.readString(p));
-            }
-            Path cwd = Path.of("").toAbsolutePath();
-            Path p = cwd;
-            for (int i = 0; i < 8; i++) {
-                Path candidate = p.resolve(relative);
-                if (Files.exists(candidate)) return RunarArtifact.fromJson(Files.readString(candidate));
-                Path parent = p.getParent();
-                if (parent == null) break;
-                p = parent;
-            }
-            throw new IllegalStateException("fixture not found: " + relative + " (cwd=" + cwd + ", runar.repo.root=" + repoRoot + ")");
+        String leaf = relative.startsWith("artifacts/")
+            ? relative.substring("artifacts/".length())
+            : relative;
+        var url = PreparedCallTest.class.getClassLoader().getResource("artifacts/" + leaf);
+        if (url == null) {
+            throw new IllegalStateException(
+                "fixture not found on test classpath: artifacts/" + leaf
+            );
+        }
+        try (var in = url.openStream()) {
+            byte[] bytes = in.readAllBytes();
+            return RunarArtifact.fromJson(new String(bytes, java.nio.charset.StandardCharsets.UTF_8));
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
