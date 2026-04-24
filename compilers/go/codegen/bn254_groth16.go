@@ -1729,12 +1729,19 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 // preamble, so the method body can reference them via the
 // Groth16PublicInput(i) DSL intrinsic.
 //
-// TODO(msm-expose): the current implementation consumes the 5 scalars
-// during MSM construction. Exposing them to the method body requires
-// duplicating the scalar on entry (one copy for MSM, one copy kept for
-// var_ref) and wiring a new ANF binding kind. That is pending the parser
-// and stack-lowering wiring described in the plan; the codegen leaves the
-// scalars consumed today.
+// LIMIT: the 5-scalar MSM binding is intentional — it matches the SP1
+// Groth16 verifier's fixed public-input arity (pub_0..pub_4). The scalars
+// are consumed during MSM construction and then restored from the altstack
+// at the end of the preamble so the method body can reference them via the
+// Groth16PublicInput(i) DSL intrinsic (see the _pub_* altstack dance at
+// the end of this function). Callers that rely on this arity:
+//   - compilers/go/codegen/stack.go: emitGroth16WAPreamble (useMSM=true)
+//   - packages/runar-go/bn254witness/witness.go (witness-stack layout)
+//   - packages/runar-go/bn254.go (Groth16Config.IC documentation)
+// Generalising to an arbitrary number of public inputs would require
+// threading the arity through Groth16Config, the witness-stack layout,
+// and the SP1Verifier contract DSL; that is out of scope for this
+// function.
 func EmitGroth16VerifierWitnessAssistedWithMSM(emit func(StackOp), config Groth16Config) {
 	// Count Miller loop iterations for gradient allocation (same NAF
 	// structure as the raw variant).

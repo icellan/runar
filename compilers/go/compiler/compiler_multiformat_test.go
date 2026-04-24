@@ -62,7 +62,7 @@ func TestParseSource_Dispatch(t *testing.T) {
 
 			if result.Contract == nil {
 				if len(result.Errors) > 0 {
-					t.Skipf("parser produced errors: %v", result.Errors)
+					t.Fatalf("parser produced errors: %v", result.Errors)
 				}
 				t.Fatalf("expected contract to be parsed from %s", tt.ext)
 			}
@@ -213,7 +213,7 @@ func TestMultiFormat_PropertyConsistency(t *testing.T) {
 			result := frontend.ParseSource(source, fileName)
 
 			if result.Contract == nil {
-				t.Skipf("parser failed for %s (errors: %v)", ext, result.Errors)
+				t.Fatalf("parser failed for %s (errors: %v)", ext, result.Errors)
 			}
 
 			// All formats should produce: 1 readonly property named "target"
@@ -243,7 +243,7 @@ func TestMultiFormat_MethodParamConsistency(t *testing.T) {
 			result := frontend.ParseSource(source, fileName)
 
 			if result.Contract == nil {
-				t.Skipf("parser failed for %s (errors: %v)", ext, result.Errors)
+				t.Fatalf("parser failed for %s (errors: %v)", ext, result.Errors)
 			}
 
 			if len(result.Contract.Methods) < 1 {
@@ -527,7 +527,7 @@ func TestParseSource_DispatchesPythonFormat(t *testing.T) {
 
 	if result.Contract == nil {
 		if len(result.Errors) > 0 {
-			t.Skipf("Python parser produced errors: %v", result.Errors)
+			t.Fatalf("Python parser produced errors: %v", result.Errors)
 		}
 		t.Fatal("expected non-nil contract from Python format parser")
 	}
