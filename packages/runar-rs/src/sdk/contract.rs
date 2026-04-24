@@ -513,6 +513,34 @@ impl RunarContract {
 
         let mut contract_outputs: Option<Vec<ContractOutput>> = None;
 
+        // Resolve data outputs declared via this.addDataOutput(...).
+        // Explicit options.data_outputs wins; otherwise run the ANF
+        // interpreter to resolve them. Also keep the computed state so
+        // the block below doesn't have to re-run the interpreter.
+        let mut resolved_data_outputs: Vec<ContractOutput> = Vec::new();
+        let mut auto_computed_state: Option<HashMap<String, SdkValue>> = None;
+        if is_stateful {
+            if let Some(ref anf) = self.artifact.anf {
+                let named_args = build_named_args(&user_params, &resolved_args);
+                if let Ok((state, data_outs)) = anf_interpreter::compute_new_state_and_data_outputs(
+                    anf, method_name, &self.state, &named_args,
+                    &self.constructor_args,
+                ) {
+                    auto_computed_state = Some(state);
+                    resolved_data_outputs = data_outs.into_iter().map(|d| ContractOutput {
+                        script: d.script,
+                        satoshis: d.satoshis,
+                    }).collect();
+                }
+            }
+        }
+        if let Some(explicit) = options.and_then(|o| o.data_outputs.as_ref()) {
+            resolved_data_outputs = explicit.iter().map(|d| ContractOutput {
+                script: d.script.clone(),
+                satoshis: d.satoshis,
+            }).collect();
+        }
+
         if is_stateful && has_multi_output {
             // Multi-output: build a locking script for each output
             let code_script = self.code_script.clone().unwrap_or_else(|| self.build_code_script());
@@ -543,15 +571,9 @@ impl RunarContract {
                     self.state.insert(k.clone(), v.clone());
                 }
             } else if method_needs_change {
-                if let Some(ref anf) = self.artifact.anf {
-                    let named_args = build_named_args(&user_params, &resolved_args);
-                    if let Ok(computed) = anf_interpreter::compute_new_state(
-                        anf, method_name, &self.state, &named_args,
-                        &self.constructor_args,
-                    ) {
-                        for (k, v) in computed {
-                            self.state.insert(k, v);
-                        }
+                if let Some(computed) = auto_computed_state.take() {
+                    for (k, v) in computed {
+                        self.state.insert(k, v);
                     }
                 }
             }
@@ -620,6 +642,14 @@ impl RunarContract {
                         utxo: utxo.clone(),
                         unlocking_script: extra_unlock_placeholders[i].clone(),
                     }
+                }).collect())
+            },
+            data_outputs: if resolved_data_outputs.is_empty() {
+                None
+            } else {
+                Some(resolved_data_outputs.iter().map(|co| ContractOutput {
+                    script: co.script.clone(),
+                    satoshis: co.satoshis,
                 }).collect())
             },
         };
@@ -770,6 +800,14 @@ impl RunarContract {
                             utxo: utxo.clone(),
                             unlocking_script: extra_unlocks[i].clone(),
                         }
+                    }).collect())
+                },
+                data_outputs: if resolved_data_outputs.is_empty() {
+                    None
+                } else {
+                    Some(resolved_data_outputs.iter().map(|co| ContractOutput {
+                        script: co.script.clone(),
+                        satoshis: co.satoshis,
                     }).collect())
                 },
             };

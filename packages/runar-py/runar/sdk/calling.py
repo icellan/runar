@@ -19,17 +19,23 @@ def build_call_transaction(
     fee_rate: int = 100,
     contract_outputs: list[dict] | None = None,
     additional_contract_inputs: list[dict] | None = None,
+    data_outputs: list[dict] | None = None,
 ) -> tuple[str, int, int]:
     """Build a raw transaction that spends a contract UTXO.
 
     contract_outputs: list of {"script": str, "satoshis": int} for multi-output.
     additional_contract_inputs: list of {"utxo": Utxo, "unlocking_script": str}
         for additional contract inputs (e.g. merge).
+    data_outputs: list of {"script": str, "satoshis": int} declared via
+        `this.addDataOutput(...)` in the method body. Emitted between
+        contract (state) outputs and the change output in declaration
+        order — matching the compile-time continuation-hash layout.
 
     Returns (tx_hex, input_count, change_amount).
     """
     extra_contract_inputs = additional_contract_inputs or []
     additional = additional_utxos or []
+    resolved_data_outputs = data_outputs or []
     all_utxos = (
         [current_utxo]
         + [ci['utxo'] for ci in extra_contract_inputs]
@@ -46,7 +52,10 @@ def build_call_transaction(
         sats = new_satoshis if new_satoshis > 0 else current_utxo.satoshis
         resolved_contract_outputs = [{'script': new_locking_script, 'satoshis': sats}]
 
-    contract_output_sats = sum(co['satoshis'] for co in resolved_contract_outputs)
+    contract_output_sats = (
+        sum(co['satoshis'] for co in resolved_contract_outputs)
+        + sum(do['satoshis'] for do in resolved_data_outputs)
+    )
 
     # Estimate fee using actual script sizes
     input0_size = (
@@ -70,6 +79,9 @@ def build_call_transaction(
     outputs_size = 0
     for co in resolved_contract_outputs:
         s = co['script']
+        outputs_size += 8 + _varint_byte_size(len(s) // 2) + len(s) // 2
+    for do in resolved_data_outputs:
+        s = do['script']
         outputs_size += 8 + _varint_byte_size(len(s) // 2) + len(s) // 2
     if change_address or change_script:
         outputs_size += 34  # P2PKH change
@@ -110,7 +122,7 @@ def build_call_transaction(
         tx += 'ffffffff'
 
     # Outputs
-    num_outputs = len(resolved_contract_outputs)
+    num_outputs = len(resolved_contract_outputs) + len(resolved_data_outputs)
     if change > 0 and (change_address or change_script):
         num_outputs += 1
     tx += _encode_varint(num_outputs)
@@ -119,6 +131,14 @@ def build_call_transaction(
     for co in resolved_contract_outputs:
         tx += _to_le64(co['satoshis'])
         s = co['script']
+        tx += _encode_varint(len(s) // 2)
+        tx += s
+
+    # Data outputs (from this.addDataOutput in method body). Emitted after
+    # state outputs and before change to match the continuation hash.
+    for do in resolved_data_outputs:
+        tx += _to_le64(do['satoshis'])
+        s = do['script']
         tx += _encode_varint(len(s) // 2)
         tx += s
 

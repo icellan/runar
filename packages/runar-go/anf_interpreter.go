@@ -66,6 +66,27 @@ func ComputeNewState(
 	args map[string]interface{},
 	constructorArgs []interface{},
 ) (map[string]interface{}, error) {
+	state, _, err := ComputeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs)
+	return state, err
+}
+
+// ComputeNewStateAndDataOutputs is like ComputeNewState but also returns
+// data outputs resolved from this.addDataOutput(...) calls in the method
+// body, in declaration order. The returned ContractOutput entries have
+// Script as the hex-encoded ByteString and Satoshis as declared.
+//
+// Data outputs are what the compiler's auto-injected continuation-hash
+// check expects to see in the spending tx between the state outputs and
+// the change output. The SDK uses the returned slice to populate
+// BuildCallOptions.DataOutputs so BuildCallTransaction emits them at the
+// correct position.
+func ComputeNewStateAndDataOutputs(
+	anf *ANFProgram,
+	methodName string,
+	currentState map[string]interface{},
+	args map[string]interface{},
+	constructorArgs []interface{},
+) (map[string]interface{}, []ContractOutput, error) {
 	// Find the method
 	var method *ANFMethod
 	for i := range anf.Methods {
@@ -75,7 +96,7 @@ func ComputeNewState(
 		}
 	}
 	if method == nil {
-		return nil, fmt.Errorf("computeNewState: method '%s' not found in ANF IR", methodName)
+		return nil, nil, fmt.Errorf("computeNewState: method '%s' not found in ANF IR", methodName)
 	}
 
 	// Initialize environment with property values: mutable fields from
@@ -117,11 +138,12 @@ func ComputeNewState(
 		}
 	}
 
-	// Track state mutations
+	// Track state mutations and data outputs
 	stateDelta := make(map[string]interface{})
+	var dataOutputs []ContractOutput
 
 	// Walk bindings
-	anfEvalBindings(anf, method.Body, env, stateDelta)
+	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs)
 
 	// Merge delta into current state
 	result := make(map[string]interface{})
@@ -131,7 +153,7 @@ func ComputeNewState(
 	for k, v := range stateDelta {
 		result[k] = v
 	}
-	return result, nil
+	return result, dataOutputs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -143,9 +165,10 @@ func anfEvalBindings(
 	bindings []ANFBinding,
 	env map[string]interface{},
 	stateDelta map[string]interface{},
+	dataOutputs *[]ContractOutput,
 ) {
 	for _, binding := range bindings {
-		val := anfEvalValue(anf, binding.Value, env, stateDelta)
+		val := anfEvalValue(anf, binding.Value, env, stateDelta, dataOutputs)
 		env[binding.Name] = val
 	}
 }
@@ -155,6 +178,7 @@ func anfEvalValue(
 	value map[string]interface{},
 	env map[string]interface{},
 	stateDelta map[string]interface{},
+	dataOutputs *[]ContractOutput,
 ) interface{} {
 	kind, _ := value["kind"].(string)
 
@@ -224,7 +248,7 @@ func anfEvalValue(
 						}
 					}
 					// Evaluate method body
-					anfEvalBindings(anf, m.Body, callEnv, stateDelta)
+					anfEvalBindings(anf, m.Body, callEnv, stateDelta, dataOutputs)
 					// Copy updated property values back to caller env
 					for _, prop := range anf.Properties {
 						if v, ok := callEnv[prop.Name]; ok {
@@ -255,7 +279,7 @@ func anfEvalValue(
 		for k, v := range env {
 			childEnv[k] = v
 		}
-		anfEvalBindings(anf, branch, childEnv, stateDelta)
+		anfEvalBindings(anf, branch, childEnv, stateDelta, dataOutputs)
 		// Copy new bindings back
 		for k, v := range childEnv {
 			env[k] = v
@@ -277,7 +301,7 @@ func anfEvalValue(
 			for k, v := range env {
 				loopEnv[k] = v
 			}
-			anfEvalBindings(anf, body, loopEnv, stateDelta)
+			anfEvalBindings(anf, body, loopEnv, stateDelta, dataOutputs)
 			for k, v := range loopEnv {
 				env[k] = v
 			}
@@ -323,8 +347,24 @@ func anfEvalValue(
 		}
 		return nil
 
+	case "add_data_output":
+		// Resolve the two arg refs from env and record the data output.
+		// satoshis operand: bigint/int/float — coerce via *big.Int.Int64().
+		// scriptBytes operand: ByteString stored as a hex string.
+		satRef, _ := value["satoshis"].(string)
+		scriptRef, _ := value["scriptBytes"].(string)
+		sats := anfToBigInt(env[satRef]).Int64()
+		scriptHex := anfToString(env[scriptRef])
+		if dataOutputs != nil {
+			*dataOutputs = append(*dataOutputs, ContractOutput{
+				Script:   scriptHex,
+				Satoshis: sats,
+			})
+		}
+		return nil
+
 	// On-chain-only operations — skip
-	case "check_preimage", "deserialize_state", "get_state_script", "add_raw_output", "add_data_output":
+	case "check_preimage", "deserialize_state", "get_state_script", "add_raw_output":
 		return nil
 	}
 

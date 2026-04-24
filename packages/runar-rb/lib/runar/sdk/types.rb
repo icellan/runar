@@ -239,6 +239,7 @@ module Runar
       :additional_contract_input_args,
       :terminal_outputs,
       :funding_utxos,
+      :data_outputs,
       keyword_init: true
     ) do
       def initialize(
@@ -250,7 +251,8 @@ module Runar
         additional_contract_inputs: nil,
         additional_contract_input_args: nil,
         terminal_outputs: nil,
-        funding_utxos: nil
+        funding_utxos: nil,
+        data_outputs: nil
       )
         super
       end

@@ -213,6 +213,11 @@ class CallOptions:
     additional_contract_input_args: list[list] | None = None
     terminal_outputs: list[TerminalOutput | dict] | None = None
     funding_utxos: list[Utxo] | None = None
+    # Optional explicit override for data outputs emitted via
+    # this.addDataOutput(...) in the method body. When None or empty, the
+    # SDK resolves data outputs automatically by running the ANF interpreter.
+    # Entries are {"script": hex, "satoshis": int}.
+    data_outputs: list[dict] | None = None
 
 
 @dataclass

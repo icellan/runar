@@ -138,4 +138,13 @@ export interface CallOptions {
    * when the contract's own balance is insufficient for outputs + fees.
    */
   fundingUtxos?: UTXO[];
+
+  /**
+   * Optional explicit override for data outputs emitted via
+   * `this.addDataOutput(...)` in the method body. When omitted, the SDK
+   * resolves data outputs automatically by running the ANF interpreter on
+   * the method body (the common case). Pass a non-empty array to bypass
+   * the interpreter.
+   */
+  dataOutputs?: Array<{ script: string; satoshis: number | bigint }>;
 }

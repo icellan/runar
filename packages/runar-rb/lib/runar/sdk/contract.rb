@@ -318,16 +318,30 @@ module Runar
         change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
 
         # Auto-compute new state via ANF interpreter when artifact has ANF IR and
-        # no explicit new_state was provided. This mirrors the Python SDK behavior:
-        # compute_new_state is called here (where method_name and args are available),
-        # not in build_continuation (which has neither).
+        # no explicit new_state was provided. This also resolves data outputs
+        # declared via this.addDataOutput(...) in the method body, which the
+        # SDK needs to emit in the tx so the on-chain continuation-hash check
+        # matches at spend time.
+        resolved_data_outputs = Array(opts.data_outputs).map do |entry|
+          if entry.is_a?(Hash)
+            { script: entry[:script] || entry['script'], satoshis: entry[:satoshis] || entry['satoshis'] }
+          else
+            entry
+          end
+        end
         if is_stateful && @artifact.anf && opts.new_state.nil?
           named_args = build_named_args(user_params, resolved_args)
-          opts = opts.dup
-          opts.new_state = ANFInterpreter.compute_new_state(
+          computed_state, anf_data_outputs = ANFInterpreter.compute_new_state_and_data_outputs(
             @artifact.anf, method_name, @state, named_args,
             constructor_args: @constructor_args
           )
+          opts = opts.dup
+          opts.new_state = computed_state
+          if resolved_data_outputs.empty? && anf_data_outputs.any?
+            resolved_data_outputs = anf_data_outputs.map do |d|
+              { script: d[:script], satoshis: d[:satoshis] }
+            end
+          end
         end
 
         # Terminal call path: build a transaction with exact outputs, no funding inputs.
@@ -410,6 +424,7 @@ module Runar
 
         call_options = {}
         call_options[:contract_outputs] = contract_outputs if contract_outputs
+        call_options[:data_outputs] = resolved_data_outputs if resolved_data_outputs.any?
         if extra_contract_utxos.any?
           call_options[:additional_contract_inputs] = extra_contract_utxos.each_with_index.map do |utxo, i|
             { utxo: utxo, unlocking_script: extra_unlock_placeholders[i] }
@@ -436,6 +451,7 @@ module Runar
             change_address, change_script, additional_utxos, fee_rate, signer,
             is_stateful, needs_op_push_tx, preimage_index,
             contract_outputs: contract_outputs,
+            data_outputs: resolved_data_outputs,
             extra_contract_utxos: extra_contract_utxos,
             resolved_per_input_args: resolved_per_input_args,
             prevouts_indices: prevouts_indices
@@ -976,6 +992,7 @@ module Runar
         change_address, change_script, additional_utxos, fee_rate, signer,
         is_stateful, needs_op_push_tx, preimage_index,
         contract_outputs: nil,
+        data_outputs: [],
         extra_contract_utxos: [],
         resolved_per_input_args: [],
         prevouts_indices: []
@@ -992,6 +1009,7 @@ module Runar
               change_amount, new_satoshis, new_locking_script,
               change_address, change_script, additional_utxos, fee_rate, signer,
               contract_outputs: contract_outputs,
+              data_outputs: data_outputs,
               extra_contract_utxos: extra_contract_utxos,
               resolved_per_input_args: resolved_per_input_args,
               prevouts_indices: prevouts_indices
@@ -1025,6 +1043,7 @@ module Runar
         change_amount, new_satoshis, new_locking_script,
         change_address, change_script, additional_utxos, fee_rate, signer,
         contract_outputs: nil,
+        data_outputs: [],
         extra_contract_utxos: [],
         resolved_per_input_args: [],
         prevouts_indices: []
@@ -1034,6 +1053,7 @@ module Runar
 
         call_opts = {}
         call_opts[:contract_outputs] = contract_outputs if contract_outputs
+        call_opts[:data_outputs] = data_outputs if data_outputs && !data_outputs.empty?
 
         # First pass — build unlock with placeholder Sig/prevouts params.
         input0_unlock, = build_stateful_unlock(

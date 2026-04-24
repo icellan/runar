@@ -19,7 +19,7 @@ from runar.sdk.state import (
     _parse_fixed_array_dims, _flatten_nested, _regroup_nested,
 )
 from runar.sdk.oppushtx import compute_op_push_tx
-from runar.sdk.anf_interpreter import compute_new_state
+from runar.sdk.anf_interpreter import compute_new_state, compute_new_state_and_data_outputs
 from runar.sdk.ordinals import (
     Inscription, build_inscription_envelope, parse_inscription_envelope,
 )
@@ -422,6 +422,19 @@ class RunarContract:
         # Build contract outputs: multi-output takes priority, then single
         contract_outputs: list[dict] | None = None
 
+        # Data outputs resolved from this.addDataOutput(...). Explicit
+        # opts.data_outputs (if provided) wins; otherwise populated by the
+        # ANF interpreter pass below.
+        resolved_data_outputs: list[dict] = []
+        explicit_data_outputs = getattr(opts, 'data_outputs', None)
+        if explicit_data_outputs:
+            resolved_data_outputs = [
+                {'script': d['script'], 'satoshis': d['satoshis']}
+                if isinstance(d, dict)
+                else {'script': d.script, 'satoshis': d.satoshis}
+                for d in explicit_data_outputs
+            ]
+
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
             code_script = self._code_script or self._build_code_script()
@@ -459,10 +472,12 @@ class RunarContract:
                     self._constructor_args,
                     self.artifact.abi.constructor_params,
                 )
-                computed = compute_new_state(
+                computed, data_outs = compute_new_state_and_data_outputs(
                     self.artifact.anf, method_name, flat_state, named_args,
                     flat_ctor_args,
                 )
+                if data_outs and not resolved_data_outputs:
+                    resolved_data_outputs = data_outs
                 merged = {**flat_state, **computed}
                 # Re-group synthetic scalars back into array values.
                 regrouped = _regroup_fixed_array_state(
@@ -517,6 +532,7 @@ class RunarContract:
                 {'utxo': u, 'unlocking_script': extra_unlock_placeholders[i]}
                 for i, u in enumerate(extra_contract_utxos)
             ] if extra_contract_utxos else None,
+            data_outputs=resolved_data_outputs or None,
         )
 
         # Sign P2PKH funding inputs (after contract inputs)
@@ -602,6 +618,7 @@ class RunarContract:
                     {'utxo': u, 'unlocking_script': extra_unlocks[i]}
                     for i, u in enumerate(extra_contract_utxos)
                 ] if extra_contract_utxos else None,
+                data_outputs=resolved_data_outputs or None,
             )
             signed_tx = tx_hex
 

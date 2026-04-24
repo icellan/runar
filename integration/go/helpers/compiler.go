@@ -663,6 +663,10 @@ func ConvertIRValue(v ir.ANFValue) map[string]interface{} {
 		m["satoshis"] = v.Satoshis
 		m["scriptBytes"] = v.ScriptBytes
 
+	case "add_data_output":
+		m["satoshis"] = v.Satoshis
+		m["scriptBytes"] = v.ScriptBytes
+
 	case "get_state_script":
 		// no extra fields needed
 	}

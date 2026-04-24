@@ -474,6 +474,25 @@ func (c *RunarContract) PrepareCall(
 	var contractOutputs []ContractOutput
 	hasMultiOutput := options != nil && len(options.Outputs) > 0
 
+	// Resolve data outputs declared via this.addDataOutput(...). Explicit
+	// options.DataOutputs wins; otherwise run the ANF interpreter to
+	// resolve the method body. This also gives us the new state without
+	// a second interpreter pass, so reuse it below.
+	var resolvedDataOutputs []ContractOutput
+	var autoComputedState map[string]interface{}
+	if isStateful && c.Artifact.ANF != nil {
+		namedArgs := buildNamedArgs(userParams, resolvedArgs)
+		if state, dataOuts, err := ComputeNewStateAndDataOutputs(
+			c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs,
+		); err == nil {
+			autoComputedState = state
+			resolvedDataOutputs = dataOuts
+		}
+	}
+	if options != nil && options.DataOutputs != nil {
+		resolvedDataOutputs = options.DataOutputs
+	}
+
 	newLockingScript := ""
 	newSatoshis := int64(0)
 
@@ -496,14 +515,9 @@ func (c *RunarContract) PrepareCall(
 			for k, v := range options.NewState {
 				c.state[k] = v
 			}
-		} else if methodNeedsChange && c.Artifact.ANF != nil {
-			// Auto-compute new state from ANF IR
-			namedArgs := buildNamedArgs(userParams, resolvedArgs)
-			computed, err := ComputeNewState(c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs)
-			if err == nil {
-				for k, v := range computed {
-					c.state[k] = v
-				}
+		} else if methodNeedsChange && autoComputedState != nil {
+			for k, v := range autoComputedState {
+				c.state[k] = v
 			}
 		}
 		newLockingScript = c.GetLockingScript()
@@ -582,6 +596,9 @@ func (c *RunarContract) PrepareCall(
 	buildOpts := &BuildCallOptions{}
 	if len(contractOutputs) > 0 {
 		buildOpts.ContractOutputs = contractOutputs
+	}
+	if len(resolvedDataOutputs) > 0 {
+		buildOpts.DataOutputs = resolvedDataOutputs
 	}
 	if len(extraContractUtxos) > 0 {
 		buildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))
@@ -720,6 +737,9 @@ func (c *RunarContract) PrepareCall(
 		rebuildOpts := &BuildCallOptions{}
 		if len(contractOutputs) > 0 {
 			rebuildOpts.ContractOutputs = contractOutputs
+		}
+		if len(resolvedDataOutputs) > 0 {
+			rebuildOpts.DataOutputs = resolvedDataOutputs
 		}
 		if len(extraContractUtxos) > 0 {
 			rebuildOpts.AdditionalContractInputs = make([]AdditionalContractInput, len(extraContractUtxos))

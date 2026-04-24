@@ -14,6 +14,11 @@ type BuildCallOptions struct {
 	ContractOutputs []ContractOutput
 	// Additional contract inputs with their own unlocking scripts (for merge).
 	AdditionalContractInputs []AdditionalContractInput
+	// Data outputs declared in the method body via this.addDataOutput(...).
+	// Emitted between the contract (state) outputs and the change output, in
+	// declaration order — matching the order the compiler's auto-injected
+	// continuation-hash check expects.
+	DataOutputs []ContractOutput
 }
 
 // ContractOutput describes one contract continuation output.
@@ -56,9 +61,11 @@ func BuildCallTransaction(
 ) (tx *transaction.Transaction, inputCount int, changeAmount int64) {
 	var extraContractInputs []AdditionalContractInput
 	var contractOutputs []ContractOutput
+	var dataOutputs []ContractOutput
 	if len(opts) > 0 && opts[0] != nil {
 		extraContractInputs = opts[0].AdditionalContractInputs
 		contractOutputs = opts[0].ContractOutputs
+		dataOutputs = opts[0].DataOutputs
 	}
 
 	// Build full input list: primary contract, extra contract inputs, P2PKH funding
@@ -86,6 +93,9 @@ func BuildCallTransaction(
 	for _, co := range contractOutputs {
 		contractOutputSats += co.Satoshis
 	}
+	for _, do := range dataOutputs {
+		contractOutputSats += do.Satoshis
+	}
 
 	// Estimate fee using actual script sizes
 	input0Size := 32 + 4 + varIntByteSize(len(unlockingScript)/2) +
@@ -102,6 +112,9 @@ func BuildCallTransaction(
 	outputsSize := 0
 	for _, co := range contractOutputs {
 		outputsSize += 8 + varIntByteSize(len(co.Script)/2) + len(co.Script)/2
+	}
+	for _, do := range dataOutputs {
+		outputsSize += 8 + varIntByteSize(len(do.Script)/2) + len(do.Script)/2
 	}
 	if changeAddress != "" || changeScript != "" {
 		outputsSize += 34 // P2PKH change
@@ -156,6 +169,17 @@ func BuildCallTransaction(
 		ls, _ := sdkscript.NewFromHex(co.Script)
 		tx.AddOutput(&transaction.TransactionOutput{
 			Satoshis:      uint64(co.Satoshis),
+			LockingScript: ls,
+		})
+	}
+
+	// Data outputs (from this.addDataOutput in the method body). Emitted
+	// after all state outputs and before the change output so the tx's
+	// hashOutputs matches the compile-time continuation-hash check.
+	for _, do := range dataOutputs {
+		ls, _ := sdkscript.NewFromHex(do.Script)
+		tx.AddOutput(&transaction.TransactionOutput{
+			Satoshis:      uint64(do.Satoshis),
 			LockingScript: ls,
 		})
 	}

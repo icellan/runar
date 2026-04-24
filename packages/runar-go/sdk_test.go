@@ -2938,3 +2938,179 @@ func TestComputeNewState_UnknownMethod_Error(t *testing.T) {
 		t.Fatal("expected error for unknown method")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// addDataOutput SDK emission — BSVM R9
+// The spec's continuation hash for a stateful method that calls
+// addDataOutput commits to `[state outputs] || [data outputs] ||
+// changeOutput`. These tests verify BuildCallTransaction emits the
+// data outputs at the right position with correct fee accounting and
+// that the ANF interpreter resolves them from the method body.
+// ---------------------------------------------------------------------------
+
+func TestBuildCallTransaction_DataOutputsOrder(t *testing.T) {
+	utxo := makeUtxo(100000, 0)
+	stateScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
+	data0 := "6a0474657374"   // OP_RETURN "test"
+	data1 := "6a056c6162656c" // OP_RETURN "label"
+	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
+
+	opts := &BuildCallOptions{
+		DataOutputs: []ContractOutput{
+			{Script: data0, Satoshis: 0},
+			{Script: data1, Satoshis: 0},
+		},
+	}
+	callTxObj, _, _ := BuildCallTransaction(
+		utxo, "51", stateScript, 50000, "changeaddr", changeScript, nil, 100, opts,
+	)
+	parsed := parseTxHex(callTxObj.Hex())
+
+	if parsed.outputCount != 4 {
+		t.Fatalf("expected 4 outputs (state, data0, data1, change), got %d", parsed.outputCount)
+	}
+	if parsed.outputs[0].script != stateScript {
+		t.Errorf("output 0 (state): expected state script, got %s", parsed.outputs[0].script)
+	}
+	if parsed.outputs[1].script != data0 {
+		t.Errorf("output 1 (data0): expected %s, got %s", data0, parsed.outputs[1].script)
+	}
+	if parsed.outputs[2].script != data1 {
+		t.Errorf("output 2 (data1): expected %s, got %s", data1, parsed.outputs[2].script)
+	}
+	if parsed.outputs[3].script != changeScript {
+		t.Errorf("output 3 (change): expected change script, got %s", parsed.outputs[3].script)
+	}
+}
+
+func TestBuildCallTransaction_DataOutputsFeeEstimate(t *testing.T) {
+	makeTx := func(opts *BuildCallOptions) int64 {
+		utxo := makeUtxo(100000, 0)
+		stateScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
+		changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
+		var variadic []*BuildCallOptions
+		if opts != nil {
+			variadic = []*BuildCallOptions{opts}
+		}
+		_, _, change := BuildCallTransaction(
+			utxo, "51", stateScript, 50000, "changeaddr", changeScript, nil, 100, variadic...,
+		)
+		return change
+	}
+
+	changeWithout := makeTx(nil)
+	dataScript := "6a" + strings.Repeat("ab", 30) // 32-byte OP_RETURN payload
+	changeWith := makeTx(&BuildCallOptions{
+		DataOutputs: []ContractOutput{{Script: dataScript, Satoshis: 0}},
+	})
+
+	dataByteLen := len(dataScript) / 2
+	// Output on wire: 8 (value) + varint(scriptLen) + scriptLen. scriptLen < 0xfd ⇒ varint=1.
+	extraOutputBytes := int64(8 + 1 + dataByteLen)
+	feeRate := int64(100)
+	expectedFeeDelta := (extraOutputBytes*feeRate + 999) / 1000
+	diff := changeWithout - changeWith
+	if diff != expectedFeeDelta {
+		t.Errorf("expected change to drop by %d sat (fee for %d extra bytes @ %d/kB), got drop of %d (without=%d, with=%d)",
+			expectedFeeDelta, extraOutputBytes, feeRate, diff, changeWithout, changeWith)
+	}
+}
+
+func TestBuildCallTransaction_DataOutputsWithNonZeroSats(t *testing.T) {
+	utxo := makeUtxo(100000, 0)
+	stateScript := "76a914" + strings.Repeat("dd", 20) + "88ac"
+	changeScript := "76a914" + strings.Repeat("ff", 20) + "88ac"
+
+	// Same tx without data output for baseline change calc
+	_, _, baselineChange := BuildCallTransaction(
+		utxo, "51", stateScript, 50000, "changeaddr", changeScript, nil, 100,
+	)
+
+	dataScript := "76a914" + strings.Repeat("cc", 20) + "88ac"
+	opts := &BuildCallOptions{
+		DataOutputs: []ContractOutput{{Script: dataScript, Satoshis: 1000}},
+	}
+	callTxObj, _, changeWith := BuildCallTransaction(
+		utxo, "51", stateScript, 50000, "changeaddr", changeScript, nil, 100, opts,
+	)
+	parsed := parseTxHex(callTxObj.Hex())
+
+	// The data output must carry its declared 1000 satoshis
+	if parsed.outputs[1].satoshis != 1000 {
+		t.Errorf("expected data output to carry 1000 sats, got %d", parsed.outputs[1].satoshis)
+	}
+	if parsed.outputs[1].script != dataScript {
+		t.Errorf("expected data output script, got %s", parsed.outputs[1].script)
+	}
+
+	// Fee only goes up by the extra output bytes. So change = baseline - 1000 - feeDelta.
+	dataByteLen := len(dataScript) / 2
+	extraOutputBytes := int64(8 + 1 + dataByteLen)
+	feeDelta := (extraOutputBytes*100 + 999) / 1000
+	expected := baselineChange - 1000 - feeDelta
+	if changeWith != expected {
+		t.Errorf("expected change=%d (baseline %d - 1000 sats - %d fee), got %d",
+			expected, baselineChange, feeDelta, changeWith)
+	}
+}
+
+func TestComputeDataOutputs_FromANF(t *testing.T) {
+	// Minimal ANF with a single add_data_output binding. The satoshis
+	// come from a load_const bigint; the scriptBytes come from a
+	// load_const hex-encoded ByteString.
+	opReturnHex := "6a0474657374" // OP_RETURN "test"
+	anf := &ANFProgram{
+		ContractName: "DataEmitter",
+		Properties: []ANFProperty{
+			{Name: "counter", Type: "bigint", Readonly: false},
+		},
+		Methods: []ANFMethod{
+			{Name: "constructor", IsPublic: false, Body: []ANFBinding{}},
+			{
+				Name:     "emit",
+				IsPublic: true,
+				Params: []ANFParam{
+					{Name: "txPreimage", Type: "SigHashPreimage"},
+					{Name: "_changePKH", Type: "Addr"},
+					{Name: "_changeAmount", Type: "bigint"},
+				},
+				Body: []ANFBinding{
+					{Name: "t_sats", Value: map[string]interface{}{"kind": "load_const", "value": float64(0)}},
+					{Name: "t_script", Value: map[string]interface{}{"kind": "load_const", "value": opReturnHex}},
+					{Name: "t_emit", Value: map[string]interface{}{
+						"kind":        "add_data_output",
+						"satoshis":    "t_sats",
+						"scriptBytes": "t_script",
+					}},
+					// Keep the counter mutating so this exercises state transition too
+					{Name: "t_prop", Value: map[string]interface{}{"kind": "load_prop", "name": "counter"}},
+					{Name: "t_one", Value: map[string]interface{}{"kind": "load_const", "value": float64(1)}},
+					{Name: "t_sum", Value: map[string]interface{}{"kind": "bin_op", "op": "+", "left": "t_prop", "right": "t_one", "resultType": "bigint"}},
+					{Name: "t_update", Value: map[string]interface{}{"kind": "update_prop", "name": "counter", "value": "t_sum"}},
+				},
+			},
+		},
+	}
+
+	currentState := map[string]interface{}{"counter": big.NewInt(0)}
+	newState, dataOutputs, err := ComputeNewStateAndDataOutputs(
+		anf, "emit", currentState, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("ComputeNewStateAndDataOutputs failed: %v", err)
+	}
+	if len(dataOutputs) != 1 {
+		t.Fatalf("expected 1 data output, got %d", len(dataOutputs))
+	}
+	if dataOutputs[0].Satoshis != 0 {
+		t.Errorf("expected 0 sats, got %d", dataOutputs[0].Satoshis)
+	}
+	if dataOutputs[0].Script != opReturnHex {
+		t.Errorf("expected script %s, got %s", opReturnHex, dataOutputs[0].Script)
+	}
+	// Also assert state transition still worked
+	countVal, ok := newState["counter"].(*big.Int)
+	if !ok || countVal.Int64() != 1 {
+		t.Errorf("expected counter=1 after emit, got %v", newState["counter"])
+	}
+}

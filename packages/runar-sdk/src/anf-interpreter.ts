@@ -32,6 +32,11 @@ import { Hash, Utils } from '@bsv/sdk';
  * @param constructorArgs  Constructor arg values (declaration order) for readonly fields.
  * @returns The updated state (merged with currentState).
  */
+export interface DataOutputEntry {
+  satoshis: bigint | number;
+  script: string;
+}
+
 export function computeNewState(
   anf: ANFProgram,
   methodName: string,
@@ -39,6 +44,25 @@ export function computeNewState(
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
 ): Record<string, unknown> {
+  return computeNewStateAndDataOutputs(
+    anf, methodName, currentState, args, constructorArgs,
+  ).state;
+}
+
+/**
+ * Like {@link computeNewState} but also returns data outputs resolved
+ * from `this.addDataOutput(...)` in the method body. Entries appear in
+ * declaration order and are what `buildCallTransaction` should emit
+ * between state outputs and the change output so the on-chain
+ * continuation-hash check passes.
+ */
+export function computeNewStateAndDataOutputs(
+  anf: ANFProgram,
+  methodName: string,
+  currentState: Record<string, unknown>,
+  args: Record<string, unknown>,
+  constructorArgs: unknown[] = [],
+): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
   // Find the method in ANF
   const method = anf.methods.find(
     (m) => m.name === methodName && m.isPublic,
@@ -83,13 +107,14 @@ export function computeNewState(
     }
   }
 
-  // Track state mutations
+  // Track state mutations and data outputs
   const stateDelta: Record<string, unknown> = {};
+  const dataOutputs: DataOutputEntry[] = [];
 
   // Walk bindings
-  evalBindings(method.body, env, stateDelta, anf);
+  evalBindings(method.body, env, stateDelta, dataOutputs, anf);
 
-  return { ...currentState, ...stateDelta };
+  return { state: { ...currentState, ...stateDelta }, dataOutputs };
 }
 
 // ---------------------------------------------------------------------------
@@ -100,10 +125,11 @@ function evalBindings(
   bindings: ANFBinding[],
   env: Record<string, unknown>,
   stateDelta: Record<string, unknown>,
+  dataOutputs: DataOutputEntry[],
   anf?: ANFProgram,
 ): void {
   for (const binding of bindings) {
-    const val = evalValue(binding.value, env, stateDelta, anf);
+    const val = evalValue(binding.value, env, stateDelta, dataOutputs, anf);
     env[binding.name] = val;
   }
 }
@@ -112,6 +138,7 @@ function evalValue(
   value: ANFValue,
   env: Record<string, unknown>,
   stateDelta: Record<string, unknown>,
+  dataOutputs: DataOutputEntry[],
   anf?: ANFProgram,
 ): unknown {
   switch (value.kind) {
@@ -150,6 +177,7 @@ function evalValue(
         value.method,
         value.args.map((a: string) => env[a]),
         stateDelta,
+        dataOutputs,
         anf,
       );
 
@@ -158,7 +186,7 @@ function evalValue(
       const branch = isTruthy(cond) ? value.then : value.else;
       // Create a child env for the branch
       const childEnv = { ...env };
-      evalBindings(branch, childEnv, stateDelta, anf);
+      evalBindings(branch, childEnv, stateDelta, dataOutputs, anf);
       // Copy any new bindings back (the last binding is typically the branch result)
       Object.assign(env, childEnv);
       // Return the last binding's value from the branch
@@ -174,7 +202,7 @@ function evalValue(
       for (let i = 0; i < count; i++) {
         env[iterVar] = BigInt(i);
         const loopEnv = { ...env };
-        evalBindings(body, loopEnv, stateDelta, anf);
+        evalBindings(body, loopEnv, stateDelta, dataOutputs, anf);
         // Copy loop bindings back
         Object.assign(env, loopEnv);
         if (body.length > 0) {
@@ -209,6 +237,17 @@ function evalValue(
           stateDelta[propName] = newVal;
         }
       }
+      return undefined;
+    }
+
+    case 'add_data_output': {
+      // Resolve the two arg refs from env and record the data output.
+      const sats = toBigInt(env[value.satoshis]);
+      const script = env[value.scriptBytes];
+      dataOutputs.push({
+        satoshis: sats,
+        script: typeof script === 'string' ? script : '',
+      });
       return undefined;
     }
 
@@ -439,6 +478,7 @@ function evalMethodCall(
   methodName: string,
   args: unknown[],
   stateDelta: Record<string, unknown>,
+  dataOutputs: DataOutputEntry[],
   anf?: ANFProgram,
 ): unknown {
   // Private method calls appear in the ANF with their bodies available
@@ -463,7 +503,7 @@ function evalMethodCall(
 
       // Execute the method body — pass real stateDelta so update_prop
       // mutations in private methods are captured
-      evalBindings(method.body, methodEnv, stateDelta, anf);
+      evalBindings(method.body, methodEnv, stateDelta, dataOutputs, anf);
 
       // Propagate property changes back to the caller's env
       for (const prop of anf.properties) {
