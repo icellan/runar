@@ -36,7 +36,7 @@ function exprStmt(expression: Expression): Statement {
 }
 
 function varDecl(name: string, init: Expression): Statement {
-  return { kind: 'variable_decl', name, init, sourceLocation: loc() };
+  return { kind: 'variable_decl', name, mutable: false, init, sourceLocation: loc() };
 }
 
 function returnStmt(value: Expression): Statement {

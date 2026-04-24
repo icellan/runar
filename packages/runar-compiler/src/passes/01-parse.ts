@@ -339,6 +339,17 @@ const PRIMITIVE_TYPES = new Set<string>([
   'P256Point', 'P384Point', 'void',
 ]);
 
+/**
+ * Type-name aliases recognised by the TS parser. `Sha256Digest` is the
+ * cross-language spelling exposed by runar-lang (`packages/runar-lang/src/types.ts`);
+ * Go, Rust, Python, Zig, and Ruby parsers already map it to the canonical
+ * `Sha256` primitive — the TS parser has to do the same so contracts can use
+ * the alias in field/param annotations.
+ */
+const TYPE_ALIASES: Record<string, PrimitiveTypeName> = {
+  Sha256Digest: 'Sha256',
+};
+
 function parseTypeNode(
   typeNode: Node,
   file: string,
@@ -361,6 +372,9 @@ function parseTypeNode(
   // Check for primitive types by text (covers TypeReference nodes like Sha256, PubKey, etc.)
   if (PRIMITIVE_TYPES.has(text)) {
     return { kind: 'primitive_type', name: text as PrimitiveTypeName };
+  }
+  if (TYPE_ALIASES[text]) {
+    return { kind: 'primitive_type', name: TYPE_ALIASES[text]! };
   }
 
   // Check for FixedArray<T, N> and other type references
@@ -398,6 +412,9 @@ function parseTypeNode(
     // Other type references -- might be a primitive like Sha256 used as a reference
     if (PRIMITIVE_TYPES.has(typeName)) {
       return { kind: 'primitive_type', name: typeName as PrimitiveTypeName };
+    }
+    if (TYPE_ALIASES[typeName]) {
+      return { kind: 'primitive_type', name: TYPE_ALIASES[typeName]! };
     }
 
     // Unknown type reference
