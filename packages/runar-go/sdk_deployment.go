@@ -134,6 +134,27 @@ func EstimateDeployFee(numInputs int, lockingScriptByteLen int, feeRate ...int64
 	return (txSize*rate + 999) / 1000
 }
 
+// EstimateCallFee estimates the fee for a method-call transaction. The
+// transaction consumes the previous contract UTXO (with an unlocking script
+// of unlockingScriptByteLen bytes), numFundingInputs P2PKH funding inputs,
+// emits a stateful continuation output with the given lockingScriptByteLen,
+// and a P2PKH change output. feeRate is in satoshis per KB (0 defaults to 100).
+//
+// Mirrors the TS estimateCallFee in packages/runar-sdk/src/calling.ts.
+func EstimateCallFee(lockingScriptByteLen int, unlockingScriptByteLen int, numFundingInputs int, feeRate ...int64) int64 {
+	rate := int64(100)
+	if len(feeRate) > 0 && feeRate[0] > 0 {
+		rate = feeRate[0]
+	}
+	// Contract input: prevTxid(32) + index(4) + varint + script + sequence(4).
+	contractInputSize := 32 + 4 + varIntByteSize(unlockingScriptByteLen) + unlockingScriptByteLen + 4
+	fundingInputsSize := numFundingInputs * p2pkhInputSize
+	contractOutputSize := 8 + varIntByteSize(lockingScriptByteLen) + lockingScriptByteLen
+	changeOutputSize := p2pkhOutputSize
+	txSize := int64(txOverhead + contractInputSize + fundingInputsSize + contractOutputSize + changeOutputSize)
+	return (txSize*rate + 999) / 1000
+}
+
 // ---------------------------------------------------------------------------
 // Bitcoin wire format helpers (kept for fee estimation and other callers)
 // ---------------------------------------------------------------------------
