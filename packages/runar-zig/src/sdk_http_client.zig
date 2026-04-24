@@ -275,8 +275,11 @@ pub const StdHttpTransport = struct {
 const testing = std.testing;
 
 fn liveHttpEnabled() bool {
-    const raw = std.c.getenv("RUN_LIVE_HTTP") orelse return false;
-    const v = std.mem.sliceTo(raw, 0);
+    // std.testing.environ is the test runner's pre-populated env block; it
+    // avoids a libc dependency that std.c.getenv would force the build to
+    // link. Only referenced from a test block so the testing module is
+    // always available where this is called from.
+    const v = std.testing.environ.getPosix("RUN_LIVE_HTTP") orelse return false;
     return std.mem.eql(u8, v, "1");
 }
 
