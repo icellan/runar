@@ -10,7 +10,12 @@ import runar.compiler.canonical.Jcs;
 import runar.compiler.frontend.JavaParser;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.ast.ContractNode;
+import runar.compiler.ir.stack.StackProgram;
 import runar.compiler.passes.AnfLower;
+import runar.compiler.passes.AnfLoader;
+import runar.compiler.passes.Emit;
+import runar.compiler.passes.Peephole;
+import runar.compiler.passes.StackLower;
 import runar.compiler.passes.Typecheck;
 import runar.compiler.passes.Validate;
 
@@ -68,9 +73,7 @@ public final class Cli {
         }
 
         if (parsed.ir != null) {
-            // M5 will wire stack lowering + emit on a pre-generated IR.
-            err.println("runar-java: --ir is not yet implemented (M5 will add stack lowering + emit)");
-            return 64;
+            return compileIr(parsed);
         }
 
         if (parsed.source != null) {
@@ -138,17 +141,57 @@ public final class Cli {
         }
 
         if (parsed.hex) {
-            // M5 will implement stack lowering + peephole + emit. Until
-            // then, make the failure mode explicit so the conformance runner
-            // can distinguish "not yet" from "broken".
-            err.println("runar-java: --hex is not yet implemented (M5 will add stack lowering + emit)");
-            return 64;
+            return emitHex(anf);
         }
 
         // No output flag specified; default to IR emission for parity with
         // the other compilers' behaviour when --emit-ir is implied.
         out.println(Jcs.stringify(anf));
         return 0;
+    }
+
+    private int compileIr(Args parsed) {
+        String irPath = parsed.ir;
+        String json;
+        try {
+            json = Files.readString(Path.of(irPath));
+        } catch (IOException e) {
+            err.println("runar-java: failed to read " + irPath + ": " + e.getMessage());
+            return 74;
+        }
+
+        AnfProgram anf;
+        try {
+            anf = AnfLoader.parse(json);
+        } catch (RuntimeException e) {
+            err.println("runar-java: ir parse error: " + e.getMessage());
+            return 65;
+        }
+
+        if (parsed.emitIr) {
+            out.println(Jcs.stringify(anf));
+            return 0;
+        }
+
+        if (parsed.hex) {
+            return emitHex(anf);
+        }
+
+        out.println(Jcs.stringify(anf));
+        return 0;
+    }
+
+    private int emitHex(AnfProgram anf) {
+        try {
+            StackProgram stack = StackLower.run(anf);
+            StackProgram optimised = Peephole.run(stack);
+            String hex = Emit.run(optimised);
+            out.println(hex);
+            return 0;
+        } catch (RuntimeException e) {
+            err.println("runar-java: emit error: " + e.getMessage());
+            return 70;
+        }
     }
 
     static void printUsage(PrintStream stream) {

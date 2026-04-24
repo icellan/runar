@@ -80,10 +80,7 @@ class CliTest {
     }
 
     @Test
-    void hexFlagStillNotImplemented() throws Exception {
-        // Stack lowering + emit land in M5. Until then, --hex must exit
-        // non-zero with an explicit "not implemented" message so the
-        // conformance runner can distinguish "not yet" from "broken".
+    void hexFlagProducesBitcoinScriptHex() throws Exception {
         String src = """
             package runar.examples.p2pkh;
 
@@ -108,22 +105,50 @@ class CliTest {
         try {
             Files.writeString(tmp, src);
             Result r = run("--source", tmp.toString(), "--hex", "--disable-constant-folding");
-            assertEquals(64, r.exit);
-            assertTrue(r.stderr.contains("not yet implemented"),
-                "stderr should mention the stub state: " + r.stderr);
+            assertEquals(0, r.exit, "stderr: " + r.stderr);
+            String hex = r.stdout.trim();
+            assertNotEquals("", hex, "expected non-empty hex output");
+            assertTrue(hex.contains("ac"),
+                "expected OP_CHECKSIG opcode byte 'ac' in output hex: " + hex);
         } finally {
             Files.deleteIfExists(tmp);
         }
     }
 
     @Test
-    void irFlagStillNotImplemented() {
-        // --ir (reading pre-generated ANF JSON) is an M5 concern — stack
-        // lowering + emit on IR input arrives alongside --hex.
-        Result r = run("--ir", "/nonexistent.json", "--hex");
-        assertEquals(64, r.exit);
-        assertTrue(r.stderr.contains("not yet implemented"),
-            "stderr should mention the stub state: " + r.stderr);
+    void irFlagWithHexCompilesIrFile() throws Exception {
+        // Minimal P2PKH ANF JSON that canonical stringify would emit.
+        String irJson = """
+            {"contractName":"P2PKH",\
+            "methods":[\
+            {"body":[\
+            {"name":"t0","value":{"kind":"load_param","name":"pubKey"}},\
+            {"name":"t1","value":{"args":["t0"],"func":"hash160","kind":"call"}},\
+            {"name":"t2","value":{"kind":"load_prop","name":"pubKeyHash"}},\
+            {"name":"t3","value":{"kind":"bin_op","left":"t1","op":"===","result_type":"bytes","right":"t2"}},\
+            {"name":"t4","value":{"kind":"assert","value":"t3"}},\
+            {"name":"t5","value":{"kind":"load_param","name":"sig"}},\
+            {"name":"t6","value":{"kind":"load_param","name":"pubKey"}},\
+            {"name":"t7","value":{"args":["t5","t6"],"func":"checkSig","kind":"call"}},\
+            {"name":"t8","value":{"kind":"assert","value":"t7"}}\
+            ],\
+            "isPublic":true,\
+            "name":"unlock",\
+            "params":[{"name":"sig","type":"Sig"},{"name":"pubKey","type":"PubKey"}]}\
+            ],\
+            "properties":[{"name":"pubKeyHash","readonly":true,"type":"Addr"}]}
+            """;
+        Path tmp = Files.createTempFile("p2pkh-ir", ".json");
+        try {
+            Files.writeString(tmp, irJson);
+            Result r = run("--ir", tmp.toString(), "--hex");
+            assertEquals(0, r.exit, "stderr: " + r.stderr);
+            String hex = r.stdout.trim();
+            assertTrue(hex.contains("ac"),
+                "expected OP_CHECKSIG opcode byte 'ac' in output hex: " + hex);
+        } finally {
+            Files.deleteIfExists(tmp);
+        }
     }
 
     private record Result(int exit, String stdout, String stderr) {}
