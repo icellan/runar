@@ -28,6 +28,46 @@ from runar_compiler.ir.types import (
 
 MAX_STACK_DEPTH = 800
 
+
+# ---------------------------------------------------------------------------
+# State-field type classification helpers.
+#
+# These mirror ``is_numeric_state_type`` / ``is_variable_length_state_type`` in
+# ``compilers/rust/src/codegen/stack.rs``.  The validator accepts 14 property
+# types but only three shapes matter for deserialization:
+#
+#   * Numeric / script-number:   require OP_BIN2NUM after extraction.
+#   * Variable-length:           stored with a push-data length prefix and
+#                                must be parsed with ``emit_push_data_decode``
+#                                instead of a fixed OP_SPLIT.
+#   * Fixed-length byte strings: extracted with a plain fixed-size OP_SPLIT.
+# ---------------------------------------------------------------------------
+
+_NUMERIC_STATE_TYPES: frozenset[str] = frozenset({
+    "bigint",
+    "boolean",
+    # RabinSig / RabinPubKey are bigint aliases -- same 8-byte script-number
+    # layout in state.
+    "RabinSig",
+    "RabinPubKey",
+})
+
+_VARIABLE_LENGTH_STATE_TYPES: frozenset[str] = frozenset({
+    "ByteString",
+    "Sig",
+    "SigHashPreimage",
+})
+
+
+def is_numeric_state_type(t: str) -> bool:
+    """State types that are stored as script numbers (need OP_BIN2NUM)."""
+    return t in _NUMERIC_STATE_TYPES
+
+
+def is_variable_length_state_type(t: str) -> bool:
+    """State types that are stored with a push-data length prefix."""
+    return t in _VARIABLE_LENGTH_STATE_TYPES
+
 # ---------------------------------------------------------------------------
 # Stack IR types
 # ---------------------------------------------------------------------------
@@ -1837,17 +1877,31 @@ class _LoweringContext:
             state_props.append(p)
             if p.type == "bigint":
                 sz = 8
+            # RabinSig / RabinPubKey are bigint aliases -- same 8-byte layout.
+            elif p.type in ("RabinSig", "RabinPubKey"):
+                sz = 8
             elif p.type == "boolean":
                 sz = 1
             elif p.type == "PubKey":
                 sz = 33
             elif p.type == "Addr":
                 sz = 20
+            # Ripemd160 is 20 bytes (same underlying size as Addr).
+            elif p.type == "Ripemd160":
+                sz = 20
             elif p.type == "Sha256":
                 sz = 32
             elif p.type == "Point":
                 sz = 64
-            elif p.type == "ByteString":
+            # P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+            elif p.type == "P256Point":
+                sz = 64
+            # P-384 point: x[48] || y[48] = 96 bytes.
+            elif p.type == "P384Point":
+                sz = 96
+            # ByteString-typed variable-length fields -- treated the same as
+            # ByteString (push-data prefixed in state).
+            elif p.type in ("ByteString", "Sig", "SigHashPreimage"):
                 sz = -1
                 has_variable_length = True
             else:
@@ -2053,7 +2107,7 @@ class _LoweringContext:
     def _split_fixed_state_fields(self, state_props: list[ANFProperty], prop_sizes: list[int]) -> None:
         if len(state_props) == 1:
             prop = state_props[0]
-            if prop.type in ("bigint", "boolean"):
+            if is_numeric_state_type(prop.type):
                 self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
             self.sm.pop()
             self.sm.push(prop.name)
@@ -2068,7 +2122,7 @@ class _LoweringContext:
                     self.sm.push(""); self.sm.push("")
                     self.emit_op(StackOp(op="swap"))
                     self.sm.swap()
-                    if prop.type in ("bigint", "boolean"):
+                    if is_numeric_state_type(prop.type):
                         self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.emit_op(StackOp(op="swap"))
                     self.sm.swap()
@@ -2076,7 +2130,7 @@ class _LoweringContext:
                     self.sm.push(prop.name)
                     self.sm.push("")
                 else:
-                    if prop.type in ("bigint", "boolean"):
+                    if is_numeric_state_type(prop.type):
                         self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.sm.pop()
                     self.sm.push(prop.name)
@@ -2084,19 +2138,21 @@ class _LoweringContext:
     def _parse_variable_length_state_fields(self, state_props: list[ANFProperty], prop_sizes: list[int]) -> None:
         if len(state_props) == 1:
             prop = state_props[0]
-            if prop.type == "ByteString":
-                # Single ByteString field: decode push-data prefix, drop trailing empty
+            if is_variable_length_state_type(prop.type):
+                # Single variable-length byte-string: decode push-data prefix,
+                # drop the trailing empty remainder.
                 self.emit_push_data_decode()  # [..., data, remaining]
                 self.emit_op(StackOp(op="drop")); self.sm.pop()
-            elif prop.type in ("bigint", "boolean"):
+            elif is_numeric_state_type(prop.type):
                 self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
             self.sm.pop()
             self.sm.push(prop.name)
         else:
             for i, prop in enumerate(state_props):
                 if i < len(state_props) - 1:
-                    if prop.type == "ByteString":
-                        # ByteString: decode push-data prefix, extract data
+                    if is_variable_length_state_type(prop.type):
+                        # Variable-length field: decode push-data prefix,
+                        # extract data.
                         self.emit_push_data_decode()  # [..., data, rest]
                         self.sm.pop(); self.sm.pop()
                         self.sm.push(prop.name)
@@ -2109,18 +2165,19 @@ class _LoweringContext:
                         self.sm.pop(); self.sm.pop()
                         self.sm.push(""); self.sm.push("")
                         self.emit_op(StackOp(op="swap")); self.sm.swap()
-                        if prop.type in ("bigint", "boolean"):
+                        if is_numeric_state_type(prop.type):
                             self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                         self.emit_op(StackOp(op="swap")); self.sm.swap()
                         self.sm.pop(); self.sm.pop()
                         self.sm.push(prop.name)
                         self.sm.push("")
                 else:
-                    if prop.type == "ByteString":
-                        # Last ByteString: decode push-data prefix, drop trailing empty
+                    if is_variable_length_state_type(prop.type):
+                        # Last variable-length field: decode push-data prefix,
+                        # drop the trailing empty remainder.
                         self.emit_push_data_decode()  # [..., data, remaining]
                         self.emit_op(StackOp(op="drop")); self.sm.pop()
-                    elif prop.type in ("bigint", "boolean"):
+                    elif is_numeric_state_type(prop.type):
                         self.emit_op(StackOp(op="opcode", code="OP_BIN2NUM"))
                     self.sm.pop()
                     self.sm.push(prop.name)

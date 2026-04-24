@@ -25,6 +25,10 @@ SigHashPreimage = bytes
 RabinSig = bytes
 RabinPubKey = bytes
 Point = bytes  # 64 bytes: x[32] || y[32], big-endian, no prefix
+# P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+P256Point = bytes
+# P-384 point: x[48] || y[48] = 96 bytes.
+P384Point = bytes
 
 # Readonly marker for stateful contract properties
 T = TypeVar('T')

@@ -6,7 +6,8 @@ for writing and testing Runar smart contracts in Python.
 
 from runar.types import (
     Bigint, Int, ByteString, PubKey, Sig, Addr, Sha256, Ripemd160,
-    SigHashPreimage, RabinSig, RabinPubKey, Point, Readonly, FixedArray,
+    SigHashPreimage, RabinSig, RabinPubKey, Point, P256Point, P384Point,
+    Readonly, FixedArray,
 )
 from runar.builtins import (
     assert_,
@@ -75,6 +76,7 @@ __all__ = [
     # Types
     'Bigint', 'Int', 'ByteString', 'PubKey', 'Sig', 'Addr', 'Sha256',
     'Ripemd160', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point',
+    'P256Point', 'P384Point',
     'Readonly', 'FixedArray',
     # Decorators
     'public',
