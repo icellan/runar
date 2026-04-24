@@ -29,3 +29,13 @@ dependencies {
 tasks.named<Test>("test") {
     useJUnitPlatform()
 }
+
+tasks.withType<Javadoc>().configureEach {
+    // SDK classes reference compiler-side names in prose; disable doclint
+    // so a broken link in a Javadoc tag doesn't fail the build, and keep
+    // the tool quiet.
+    (options as StandardJavadocDocletOptions).apply {
+        addStringOption("Xdoclint:none", "-quiet")
+        addBooleanOption("quiet", true)
+    }
+}

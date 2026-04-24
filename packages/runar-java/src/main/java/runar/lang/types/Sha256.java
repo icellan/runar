@@ -2,7 +2,7 @@ package runar.lang.types;
 
 /**
  * Short-hand alias for {@link Sha256Digest}. Both names are recognised by
- * the parser (via {@link runar.compiler.ir.ast.PrimitiveTypeName}).
+ * the parser (via {@code runar.compiler.ir.ast.PrimitiveTypeName}).
  * Prefer {@code Sha256} in contract source for brevity; use
  * {@code Sha256Digest} when you want to emphasise that a value is a
  * digest rather than a call to a hash function.

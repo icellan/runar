@@ -108,12 +108,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Java compiler
         run: cd compilers/java && gradle build --no-daemon
-      - name: Build runar-java SDK
-        run: cd packages/runar-java && gradle build --no-daemon
-      - name: Build examples/java
-        run: cd examples/java && gradle build --no-daemon
-      - name: Build conformance SDK driver
-        run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: runar-java
@@ -251,6 +245,23 @@ jobs:
           cd examples/ruby
           bundle install
           bundle exec rspec **/*_spec.rb
+
+  java-sdk:
+    name: Java SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: SDK tests
+        run: cd packages/runar-java && gradle test --no-daemon
+      - name: Example tests
+        run: cd examples/java && gradle test --no-daemon
+      - name: Build conformance SDK driver
+        run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
 
   # ---------------------------------------------------------------------------
   # Conformance — cross-compiler + SDK output
