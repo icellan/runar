@@ -19,6 +19,7 @@ export { parseGoSource } from './passes/01-parse-go.js';
 export { parseRustSource } from './passes/01-parse-rust.js';
 export { parseRubySource } from './passes/01-parse-ruby.js';
 export { parseZigSource } from './passes/01-parse-zig.js';
+export { parseJavaSource } from './passes/01-parse-java.js';
 
 export { validate } from './passes/02-validate.js';
 export type { ValidationResult } from './passes/02-validate.js';

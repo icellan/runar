@@ -10,6 +10,7 @@
  *   - `.runar.go`   → Go (hand-written tokenizer + recursive descent, extends ParserCore)
  *   - `.runar.rs`   → Rust (hand-written tokenizer + recursive descent, extends ParserCore)
  *   - `.runar.zig`  → Zig (hand-written tokenizer + recursive descent, extends ParserCore)
+ *   - `.runar.java` → Java (hand-written tokenizer + recursive descent)
  */
 
 import {
@@ -51,6 +52,7 @@ import { parseGoSource } from './01-parse-go.js';
 import { parseRustSource } from './01-parse-rust.js';
 import { parseRubySource } from './01-parse-ruby.js';
 import { parseZigSource } from './01-parse-zig.js';
+import { parseJavaSource } from './01-parse-java.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -92,6 +94,9 @@ export function parse(source: string, fileName?: string): ParseResult {
   }
   if (file.endsWith('.runar.zig')) {
     return parseZigSource(source, file);
+  }
+  if (file.endsWith('.runar.java')) {
+    return parseJavaSource(source, file);
   }
 
   // Default: TypeScript parser (for .runar.ts and any unrecognized extension)
