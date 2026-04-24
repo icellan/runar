@@ -360,8 +360,11 @@ jobs:
     needs:
       - ts-compiler
       - go-compiler
+      - go-sdk
       - rust-compiler
+      - rust-sdk
       - python-compiler
+      - python-sdk
       - zig-compiler
       - zig-sdk
       - ruby-compiler
