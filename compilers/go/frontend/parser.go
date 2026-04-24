@@ -38,6 +38,7 @@ func (r *ParseResult) ErrorStrings() []string {
 //   - .runar.rs -> ParseRustMacro
 //   - .runar.rb -> ParseRuby
 //   - .runar.zig -> ParseZig
+//   - .runar.java -> ParseJava
 //   - default -> Parse (existing TypeScript parser)
 func ParseSource(source []byte, fileName string) *ParseResult {
 	lower := strings.ToLower(fileName)
@@ -56,6 +57,8 @@ func ParseSource(source []byte, fileName string) *ParseResult {
 		return ParseRuby(source, fileName)
 	case strings.HasSuffix(lower, ".runar.zig"):
 		return ParseZig(source, fileName)
+	case strings.HasSuffix(lower, ".runar.java"):
+		return ParseJava(source, fileName)
 	default:
 		return Parse(source, fileName)
 	}
