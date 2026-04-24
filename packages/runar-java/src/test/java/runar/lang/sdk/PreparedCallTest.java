@@ -240,6 +240,11 @@ class PreparedCallTest {
 
     static RunarArtifact loadArtifact(String relative) {
         try {
+            String repoRoot = System.getProperty("runar.repo.root");
+            if (repoRoot != null) {
+                Path p = Path.of(repoRoot, relative);
+                if (Files.exists(p)) return RunarArtifact.fromJson(Files.readString(p));
+            }
             Path cwd = Path.of("").toAbsolutePath();
             Path p = cwd;
             for (int i = 0; i < 8; i++) {
@@ -249,7 +254,7 @@ class PreparedCallTest {
                 if (parent == null) break;
                 p = parent;
             }
-            throw new IllegalStateException("fixture not found: " + relative + " (cwd=" + cwd + ")");
+            throw new IllegalStateException("fixture not found: " + relative + " (cwd=" + cwd + ", runar.repo.root=" + repoRoot + ")");
         } catch (Exception e) {
             throw new RuntimeException(e);
         }

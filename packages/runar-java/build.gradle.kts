@@ -28,6 +28,9 @@ dependencies {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+    // Test fixtures live at <repo-root>/artifacts/; pass the path in so
+    // SDK tests work regardless of the JVM's working directory on CI.
+    systemProperty("runar.repo.root", rootDir.parentFile.parentFile.absolutePath)
 }
 
 tasks.withType<Javadoc>().configureEach {

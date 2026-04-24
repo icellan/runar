@@ -72,6 +72,11 @@ class RunarArtifactTest {
 
     /** Locates a fixture relative to the worktree root. */
     private static Path locateFixture(String relative) {
+        String repoRoot = System.getProperty("runar.repo.root");
+        if (repoRoot != null) {
+            Path p = Path.of(repoRoot, relative);
+            if (Files.exists(p)) return p;
+        }
         Path cwd = Path.of("").toAbsolutePath();
         Path p = cwd;
         for (int i = 0; i < 8; i++) {
@@ -82,7 +87,7 @@ class RunarArtifactTest {
             p = parent;
         }
         throw new IllegalStateException(
-            "fixture not found: " + relative + " (cwd=" + cwd + ")"
+            "fixture not found: " + relative + " (cwd=" + cwd + ", runar.repo.root=" + repoRoot + ")"
         );
     }
 }

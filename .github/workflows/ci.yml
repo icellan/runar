@@ -269,7 +269,7 @@ jobs:
 
   conformance:
     name: Conformance Tests
-    needs: [ts-compiler, go-compiler, rust-compiler, python-compiler, zig-compiler, ruby-compiler]
+    needs: [ts-compiler, go-compiler, rust-compiler, python-compiler, zig-compiler, ruby-compiler, java-compiler]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -351,7 +351,7 @@ jobs:
 
   sdk-conformance:
     name: SDK Output Conformance
-    needs: [ts-compiler, go-sdk, rust-sdk, python-sdk, zig-sdk, ruby-sdk]
+    needs: [ts-compiler, go-sdk, rust-sdk, python-sdk, zig-sdk, ruby-sdk, java-sdk]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -376,13 +376,20 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - name: Build Rust SDK tool
         run: cd conformance/sdk-output/tools/rs-sdk-tool && cargo build --release
       - name: Build Zig SDK tool
         run: cd conformance/sdk-output/tools/zig-sdk-tool && zig build -Doptimize=ReleaseFast
-      - name: Run SDK output conformance (39 contracts x 6 SDKs)
+      - name: Build Java SDK driver
+        run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
+      - name: Run SDK output conformance (39 contracts x 7 SDKs)
         run: cd conformance/sdk-output && npx tsx runner/sdk-runner.ts
 
   # ---------------------------------------------------------------------------
@@ -403,6 +410,8 @@ jobs:
       - zig-sdk
       - ruby-compiler
       - ruby-sdk
+      - java-compiler
+      - java-sdk
     runs-on: ubuntu-latest
     env:
       RPC_URL: http://localhost:18332
