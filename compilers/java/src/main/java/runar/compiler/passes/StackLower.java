@@ -754,6 +754,10 @@ public final class StackLower {
                 lowerSha256Finalize(bindingName, args, idx, lastUses);
                 return;
             }
+            if (runar.compiler.codegen.Ec.isEcBuiltin(funcName)) {
+                lowerEcBuiltin(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
 
             // General builtin path
             for (String a : args) {
@@ -801,6 +805,20 @@ public final class StackLower {
             for (int i = 0; i < 2; i++) sm.pop();
 
             runar.compiler.codegen.Sha256.emitSha256Compress(this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // EC builtins: delegate to Ec.dispatch for secp256k1 primitives.
+        void lowerEcBuiltin(String bindingName, String funcName, List<String> args,
+                            int idx, Map<String, Integer> lastUses) {
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < args.size(); i++) sm.pop();
+
+            runar.compiler.codegen.Ec.dispatch(funcName, this::emitOp);
 
             sm.push(bindingName);
             trackDepth();
