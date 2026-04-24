@@ -1033,17 +1033,6 @@ fn writeANFValue(writer: anytype, value: types.ANFValue, depth: usize) anyerror!
             try writeIndent(writer, depth);
             try writer.writeByte('}');
         },
-        // Legacy variants — write as generic object with kind
-        else => {
-            try writer.writeAll("{\n");
-            try writeIndent(writer, depth + 1);
-            try writeJsonString(writer, "kind");
-            try writer.writeAll(": ");
-            try writeJsonString(writer, "unknown");
-            try writer.writeByte('\n');
-            try writeIndent(writer, depth);
-            try writer.writeByte('}');
-        },
     }
 }
 

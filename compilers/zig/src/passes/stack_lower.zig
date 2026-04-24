@@ -465,7 +465,6 @@ const LowerCtx = struct {
 
     fn scanValueForRefs(self: *LowerCtx, value: types.ANFValue, idx: usize) void {
         switch (value) {
-            .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .nop => {},
             .load_param => |lp| {
                 self.last_uses.put(self.allocator, lp.name, idx) catch return;
             },
@@ -480,28 +479,12 @@ const LowerCtx = struct {
                     else => {},
                 }
             },
-            .ref => |name| {
-                self.last_uses.put(self.allocator, name, idx) catch return;
-            },
-            .property_read => {},
-            .property_write => |pw| {
-                self.last_uses.put(self.allocator, pw.value_ref, idx) catch return;
-            },
-            .binary_op => |bop| {
-                self.last_uses.put(self.allocator, bop.left, idx) catch return;
-                self.last_uses.put(self.allocator, bop.right, idx) catch return;
-            },
             .bin_op => |bop| {
                 self.last_uses.put(self.allocator, bop.left, idx) catch return;
                 self.last_uses.put(self.allocator, bop.right, idx) catch return;
             },
             .unary_op => |uop| {
                 self.last_uses.put(self.allocator, uop.operand, idx) catch return;
-            },
-            .builtin_call => |call| {
-                for (call.args) |arg| {
-                    self.last_uses.put(self.allocator, arg, idx) catch return;
-                }
             },
             .call => |c| {
                 for (c.args) |arg| {
@@ -525,29 +508,10 @@ const LowerCtx = struct {
                     self.scanValueForRefs(binding.value, idx);
                 }
             },
-            .if_expr => |ie| {
-                self.last_uses.put(self.allocator, ie.condition, idx) catch return;
-                for (ie.then_bindings) |binding| {
-                    self.scanValueForRefs(binding.value, idx);
-                }
-                if (ie.else_bindings) |else_bindings| {
-                    for (else_bindings) |binding| {
-                        self.scanValueForRefs(binding.value, idx);
-                    }
-                }
-            },
-            .for_loop => |fl| {
-                for (fl.body_bindings) |binding| {
-                    self.scanValueForRefs(binding.value, idx);
-                }
-            },
             .loop => |lp| {
                 for (lp.body) |binding| {
                     self.scanValueForRefs(binding.value, idx);
                 }
-            },
-            .assert_op => |a| {
-                self.last_uses.put(self.allocator, a.condition, idx) catch return;
             },
             .assert => |a| {
                 self.last_uses.put(self.allocator, a.value, idx) catch return;
@@ -638,13 +602,13 @@ const LowerCtx = struct {
         if (terminal_assert and bindings.len > 0) {
             const last_idx = bindings.len - 1;
             switch (bindings[last_idx].value) {
-                .@"if", .if_expr => terminal_if_idx = last_idx,
+                .@"if" => terminal_if_idx = last_idx,
                 else => {
                     var i: usize = bindings.len;
                     while (i > 0) {
                         i -= 1;
                         switch (bindings[i].value) {
-                            .assert, .assert_op => {
+                            .assert => {
                                 terminal_assert_idx = i;
                                 break;
                             },
@@ -661,14 +625,13 @@ const LowerCtx = struct {
             if (terminal_assert_idx != null and idx == terminal_assert_idx.?) {
                 switch (binding.value) {
                     .assert => |a| try self.lowerAssertOp(binding.name, .{ .condition = a.value }, true),
-                    .assert_op => |a| try self.lowerAssertOp(binding.name, a, true),
                     else => try self.lowerBinding(binding),
                 }
             } else if (terminal_if_idx != null and idx == terminal_if_idx.?) {
                 switch (binding.value) {
-                    .if_expr => |ie| try self.lowerIfExprTerminal(binding.name, ie, true),
                     .@"if" => |ie| {
                         const legacy = try self.allocator.create(types.ANFIfExpr);
+                        defer self.allocator.destroy(legacy);
                         legacy.* = .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null };
                         try self.lowerIfExprTerminal(binding.name, legacy, true);
                     },
@@ -696,17 +659,8 @@ const LowerCtx = struct {
                 .string => |s| return std.mem.startsWith(u8, s, "@ref:") and std.mem.eql(u8, s[5..], name),
                 else => return false,
             },
-            .ref => |ref_name| return std.mem.eql(u8, ref_name, name),
-            .property_write => |pw| return std.mem.eql(u8, pw.value_ref, name),
-            .binary_op => |bop| return std.mem.eql(u8, bop.left, name) or std.mem.eql(u8, bop.right, name),
             .bin_op => |bop| return std.mem.eql(u8, bop.left, name) or std.mem.eql(u8, bop.right, name),
             .unary_op => |uop| return std.mem.eql(u8, uop.operand, name),
-            .builtin_call => |call| {
-                for (call.args) |arg| {
-                    if (std.mem.eql(u8, arg, name)) return true;
-                }
-                return false;
-            },
             .call => |call| {
                 for (call.args) |arg| {
                     if (std.mem.eql(u8, arg, name)) return true;
@@ -720,7 +674,6 @@ const LowerCtx = struct {
                 }
                 return false;
             },
-            .assert_op => |a| return std.mem.eql(u8, a.condition, name),
             .assert => |a| return std.mem.eql(u8, a.value, name),
             .update_prop => |up| return std.mem.eql(u8, up.value, name),
             .check_preimage => |cp| return std.mem.eql(u8, cp.preimage, name),
@@ -750,7 +703,7 @@ const LowerCtx = struct {
                 }
                 return false;
             },
-            .@"if", .if_expr, .for_loop, .loop, .load_prop, .property_read, .get_state_script, .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .nop => return false,
+            .@"if", .loop, .load_prop, .get_state_script => return false,
         }
     }
 
@@ -804,35 +757,6 @@ const LowerCtx = struct {
 
     fn lowerBinding(self: *LowerCtx, binding: types.ANFBinding) LowerError!void {
         switch (binding.value) {
-            .literal_int => |n| {
-                try self.emitPushInt(n);
-                try self.stack.push(self.allocator, binding.name);
-                self.trackDepth();
-            },
-            .literal_bigint => |s| {
-                try self.emitPushData(s);
-                try self.stack.push(self.allocator, binding.name);
-                self.trackDepth();
-            },
-            .literal_bool => |b| {
-                try self.emitPushBool(b);
-                try self.stack.push(self.allocator, binding.name);
-                self.trackDepth();
-            },
-            .literal_bytes => |data| {
-                try self.emitPushData(data);
-                try self.stack.push(self.allocator, binding.name);
-                self.trackDepth();
-            },
-            .ref => |name| try self.lowerRef(binding.name, name),
-            .property_read => |prop_name| try self.lowerPropertyRead(binding.name, prop_name),
-            .property_write => |pw| try self.lowerPropertyWrite(binding.name, pw),
-            .binary_op => |bop| try self.lowerBinaryOp(binding.name, bop),
-            .unary_op => |uop| try self.lowerUnaryOp(binding.name, uop),
-            .builtin_call => |call| try self.lowerBuiltinCall(binding.name, call),
-            .if_expr => |ie| try self.lowerIfExpr(binding.name, ie),
-            .for_loop => |fl| try self.lowerForLoop(binding.name, fl),
-            .assert_op => |a| try self.lowerAssertOp(binding.name, a, false),
             .add_output => |ao| try self.lowerAddOutput(binding.name, ao),
             .add_raw_output => |aro| try self.lowerAddRawOutput(binding.name, aro),
             .add_data_output => |ado| {
@@ -840,14 +764,11 @@ const LowerCtx = struct {
                 // the continuation hash is handled during ANF lowering.
                 try self.lowerAddRawOutput(binding.name, .{ .satoshis = ado.satoshis, .script_bytes = ado.script_bytes });
             },
-            .nop => {},
             .get_state_script => try self.lowerGetStateScript(binding.name),
-            // TypeScript-matching variants: delegate to equivalent legacy handlers
             .load_param => |lp| try self.lowerLoadParam(binding.name, lp.name),
             .load_prop => |lp| try self.lowerPropertyRead(binding.name, lp.name),
-            .load_const => |lc| {
-                try self.lowerLoadConst(binding.name, lc.value);
-            },
+            .load_const => |lc| try self.lowerLoadConst(binding.name, lc.value),
+            .unary_op => |uop| try self.lowerUnaryOp(binding.name, uop),
             .bin_op => |bop| {
                 const legacy_op = types.BinOperator.fromTsString(bop.op) orelse return LowerError.UnsupportedOperation;
                 try self.lowerBinaryOp(binding.name, .{ .op = legacy_op, .left = bop.left, .right = bop.right, .result_type = bop.result_type });
@@ -863,11 +784,13 @@ const LowerCtx = struct {
             .method_call => |mc| try self.lowerMethodCall(binding.name, mc),
             .@"if" => |ie| {
                 const legacy = try self.allocator.create(types.ANFIfExpr);
+                defer self.allocator.destroy(legacy);
                 legacy.* = .{ .condition = ie.cond, .then_bindings = ie.then, .else_bindings = if (ie.@"else".len > 0) ie.@"else" else null };
                 try self.lowerIfExpr(binding.name, legacy);
             },
             .loop => |lp| {
                 const legacy = try self.allocator.create(types.ANFForLoop);
+                defer self.allocator.destroy(legacy);
                 legacy.* = .{ .var_name = lp.iter_var, .init_val = 0, .bound = @intCast(lp.count), .body_bindings = lp.body };
                 try self.lowerForLoop(binding.name, legacy);
             },
@@ -1008,7 +931,7 @@ const LowerCtx = struct {
                     const should_force_copy =
                         self.isForceCopyBinding(last_binding_name) or
                         switch (last_binding.value) {
-                            .call, .builtin_call, .method_call => true,
+                            .call, .method_call => true,
                             else => false,
                         };
                     if (should_force_copy) {
@@ -2000,7 +1923,6 @@ const LowerCtx = struct {
         for (self.scope_bindings) |binding| {
             if (std.mem.eql(u8, binding.name, name)) {
                 switch (binding.value) {
-                    .literal_int => |n| return n,
                     .load_const => |lc| switch (lc.value) {
                         .integer => |n| return std.math.cast(i64, n),
                         else => return null,
@@ -4124,17 +4046,13 @@ fn methodBindings(method: types.ANFMethod) []const types.ANFBinding {
 fn endsWithAssert(bindings: []const types.ANFBinding) bool {
     if (bindings.len == 0) return false;
     return switch (bindings[bindings.len - 1].value) {
-        .assert, .assert_op => true,
+        .assert => true,
         // TS reference compiler propagates `terminalAssert=true` into the
         // last `if` binding, and both branches leave a truthy value on the
         // stack instead of executing OP_VERIFY. Treat such a terminal `if`
         // as ending-with-assert so we don't append an extra OP_1 at the
         // method tail.
         .@"if" => |ie| endsWithAssert(ie.then) and endsWithAssert(ie.@"else"),
-        .if_expr => |ie| blk: {
-            const else_bindings = ie.else_bindings orelse &[_]types.ANFBinding{};
-            break :blk endsWithAssert(ie.then_bindings) and endsWithAssert(else_bindings);
-        },
         else => false,
     };
 }
@@ -4160,17 +4078,8 @@ fn methodUsesCheckPreimage(bindings: []const types.ANFBinding) bool {
             .@"if" => |ie| {
                 if (methodUsesCheckPreimage(ie.then) or methodUsesCheckPreimage(ie.@"else")) return true;
             },
-            .if_expr => |ie| {
-                if (methodUsesCheckPreimage(ie.then_bindings)) return true;
-                if (ie.else_bindings) |else_bindings| {
-                    if (methodUsesCheckPreimage(else_bindings)) return true;
-                }
-            },
             .loop => |loop| {
                 if (methodUsesCheckPreimage(loop.body)) return true;
-            },
-            .for_loop => |loop| {
-                if (methodUsesCheckPreimage(loop.body_bindings)) return true;
             },
             else => {},
         }
@@ -4191,29 +4100,11 @@ fn methodUsesCodePart(bindings: []const types.ANFBinding) bool {
                     return true;
                 }
             },
-            .builtin_call => |call| {
-                if (std.mem.eql(u8, call.name, "computeStateOutput") or
-                    std.mem.eql(u8, call.name, "computeStateOutputHash") or
-                    std.mem.eql(u8, call.name, "buildChangeOutput") or
-                    std.mem.eql(u8, call.name, "buildStateOutput"))
-                {
-                    return true;
-                }
-            },
             .@"if" => |ie| {
                 if (methodUsesCodePart(ie.then) or methodUsesCodePart(ie.@"else")) return true;
             },
-            .if_expr => |ie| {
-                if (methodUsesCodePart(ie.then_bindings)) return true;
-                if (ie.else_bindings) |else_bindings| {
-                    if (methodUsesCodePart(else_bindings)) return true;
-                }
-            },
             .loop => |loop| {
                 if (methodUsesCodePart(loop.body)) return true;
-            },
-            .for_loop => |loop| {
-                if (methodUsesCodePart(loop.body_bindings)) return true;
             },
             else => {},
         }
@@ -4237,17 +4128,8 @@ fn methodUsesDeserializeState(bindings: []const types.ANFBinding) bool {
                 if (methodUsesDeserializeState(ie.then)) return true;
                 if (methodUsesDeserializeState(ie.@"else")) return true;
             },
-            .if_expr => |ie| {
-                if (methodUsesDeserializeState(ie.then_bindings)) return true;
-                if (ie.else_bindings) |else_bindings| {
-                    if (methodUsesDeserializeState(else_bindings)) return true;
-                }
-            },
             .loop => |loop| {
                 if (methodUsesDeserializeState(loop.body)) return true;
-            },
-            .for_loop => |loop| {
-                if (methodUsesDeserializeState(loop.body_bindings)) return true;
             },
             else => {},
         }
@@ -4551,16 +4433,14 @@ test "lower simple P2PKH contract" {
     const bindings = [_]types.ANFBinding{
         .{
             .name = "t0",
-            .value = .{ .builtin_call = .{
-                .name = "checkSig",
+            .value = .{ .call = .{
+                .func = "checkSig",
                 .args = &[_][]const u8{ "sig", "pubkey" },
             } },
         },
         .{
             .name = "t1",
-            .value = .{ .assert_op = .{
-                .condition = "t0",
-            } },
+            .value = .{ .assert = .{ .value = "t0" } },
         },
     };
 
@@ -4625,8 +4505,8 @@ test "lower arithmetic bindings" {
     const bindings = [_]types.ANFBinding{
         .{
             .name = "t0",
-            .value = .{ .binary_op = .{
-                .op = .add,
+            .value = .{ .bin_op = .{
+                .op = "+",
                 .left = "x",
                 .right = "y",
             } },
@@ -4675,8 +4555,8 @@ test "lower literal push" {
     const allocator = std.testing.allocator;
 
     const bindings = [_]types.ANFBinding{
-        .{ .name = "t0", .value = .{ .literal_int = 42 } },
-        .{ .name = "t1", .value = .{ .literal_bool = true } },
+        .{ .name = "t0", .value = .{ .load_const = .{ .value = .{ .integer = 42 } } } },
+        .{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .boolean = true } } } },
     };
 
     const method = types.ANFMethod{
@@ -4713,8 +4593,8 @@ test "lower hash builtin" {
     const bindings = [_]types.ANFBinding{
         .{
             .name = "t0",
-            .value = .{ .builtin_call = .{
-                .name = "sha256",
+            .value = .{ .call = .{
+                .func = "sha256",
                 .args = &[_][]const u8{"data"},
             } },
         },
@@ -4762,8 +4642,8 @@ test "lower sha256Compress builtin" {
     const bindings = [_]types.ANFBinding{
         .{
             .name = "t0",
-            .value = .{ .builtin_call = .{
-                .name = "sha256Compress",
+            .value = .{ .call = .{
+                .func = "sha256Compress",
                 .args = &[_][]const u8{ "state", "block" },
             } },
         },
@@ -4818,8 +4698,8 @@ test "lower sha256Finalize builtin" {
     const bindings = [_]types.ANFBinding{
         .{
             .name = "t0",
-            .value = .{ .builtin_call = .{
-                .name = "sha256Finalize",
+            .value = .{ .call = .{
+                .func = "sha256Finalize",
                 .args = &[_][]const u8{ "state", "remaining", "bit_len" },
             } },
         },
@@ -4876,22 +4756,22 @@ test "lower if expression" {
     const allocator = std.testing.allocator;
 
     const then_bindings = [_]types.ANFBinding{
-        .{ .name = "t_then", .value = .{ .literal_int = 1 } },
+        .{ .name = "t_then", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } } },
     };
 
     const else_bindings = [_]types.ANFBinding{
-        .{ .name = "t_else", .value = .{ .literal_int = 0 } },
+        .{ .name = "t_else", .value = .{ .load_const = .{ .value = .{ .integer = 0 } } } },
     };
 
-    var if_expr = types.ANFIfExpr{
-        .condition = "cond",
-        .then_bindings = @constCast(&then_bindings),
-        .else_bindings = @constCast(&else_bindings),
+    var if_expr = types.ANFIf{
+        .cond = "cond",
+        .then = @constCast(&then_bindings),
+        .@"else" = @constCast(&else_bindings),
     };
 
     const bindings = [_]types.ANFBinding{
-        .{ .name = "cond", .value = .{ .literal_bool = true } },
-        .{ .name = "result", .value = .{ .if_expr = &if_expr } },
+        .{ .name = "cond", .value = .{ .load_const = .{ .value = .{ .boolean = true } } } },
+        .{ .name = "result", .value = .{ .@"if" = &if_expr } },
     };
 
     const method = types.ANFMethod{
@@ -4938,18 +4818,17 @@ test "lower for loop unrolling" {
     const allocator = std.testing.allocator;
 
     const loop_body = [_]types.ANFBinding{
-        .{ .name = "t_body", .value = .{ .literal_int = 99 } },
+        .{ .name = "t_body", .value = .{ .load_const = .{ .value = .{ .integer = 99 } } } },
     };
 
-    var loop_val = types.ANFForLoop{
-        .var_name = "i",
-        .init_val = 0,
-        .bound = 3,
-        .body_bindings = @constCast(&loop_body),
+    var loop_val = types.ANFLoop{
+        .iter_var = "i",
+        .count = 3,
+        .body = @constCast(&loop_body),
     };
 
     const bindings = [_]types.ANFBinding{
-        .{ .name = "loop_result", .value = .{ .for_loop = &loop_val } },
+        .{ .name = "loop_result", .value = .{ .loop = &loop_val } },
     };
 
     const method = types.ANFMethod{
@@ -4989,10 +4868,10 @@ test "lower multi-method produces one StackMethod per public method" {
     const allocator = std.testing.allocator;
 
     const bindings1 = [_]types.ANFBinding{
-        .{ .name = "t0", .value = .{ .literal_int = 1 } },
+        .{ .name = "t0", .value = .{ .load_const = .{ .value = .{ .integer = 1 } } } },
     };
     const bindings2 = [_]types.ANFBinding{
-        .{ .name = "t0", .value = .{ .literal_int = 2 } },
+        .{ .name = "t0", .value = .{ .load_const = .{ .value = .{ .integer = 2 } } } },
     };
 
     var methods_arr = [_]types.ANFMethod{

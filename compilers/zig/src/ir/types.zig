@@ -275,8 +275,19 @@ pub const ConstValue = union(enum) {
     }
 };
 
+// Canonical ANFValue union — every variant here mirrors the TypeScript
+// reference compiler's ANF IR (packages/runar-compiler/src/ir/anf-ir.ts)
+// one-to-one. Producers: ir/json.zig (fuzzer/differential input) and
+// passes/anf_lower.zig (Zig-native frontend). Consumers: passes/stack_lower
+// dispatch, passes/dce, codegen/emit, passes/ec_optimizer.
+//
+// The types.ANFBinaryOp / ANFIfExpr / ANFForLoop / ANFBuiltinCall /
+// ANFLegacyAssert / PropertyWrite structs that used to back a second
+// "legacy" variant family are retained below purely as internal lowering
+// helpers for stack_lower (it adapts the canonical variants into these
+// shapes to share one implementation with previous code paths). They are
+// NOT reachable through ANFValue itself.
 pub const ANFValue = union(enum) {
-    // TypeScript-matching variants (used by stack_lower.zig)
     load_param: LoadParam,
     load_prop: LoadProp,
     load_const: LoadConst,
@@ -295,20 +306,6 @@ pub const ANFValue = union(enum) {
     add_raw_output: ANFAddRawOutput,
     add_data_output: ANFAddDataOutput,
     array_literal: ANFArrayLiteral,
-    // Legacy variants (used by json.zig parser — will be migrated)
-    literal_int: i64,
-    literal_bigint: []const u8,
-    literal_bool: bool,
-    literal_bytes: []const u8,
-    ref: []const u8,
-    property_read: []const u8,
-    property_write: PropertyWrite,
-    binary_op: ANFBinaryOp,
-    builtin_call: ANFBuiltinCall,
-    if_expr: *ANFIfExpr,
-    for_loop: *ANFForLoop,
-    assert_op: ANFLegacyAssert,
-    nop: void,
 };
 
 // -- TypeScript-matching value structs (used by stack_lower.zig) --
@@ -335,7 +332,12 @@ pub const ANFAddRawOutput = struct { satoshis: []const u8, script_bytes: []const
 pub const ANFAddDataOutput = struct { satoshis: []const u8, script_bytes: []const u8 = "" };
 pub const ANFArrayLiteral = struct { elements: []const []const u8 };
 
-// -- Legacy value structs (used by json.zig parser) --
+// -- Internal lowering helpers (stack_lower-only). These are NOT ANFValue
+// -- variants; they are parameter shapes that stack_lower adapts the
+// -- canonical ANFValue variants into so that `lowerBinaryOp` / `lowerIfExpr`
+// -- / `lowerForLoop` / `lowerBuiltinCall` / `lowerAssertOp` /
+// -- `lowerPropertyWrite` share one implementation each. Keep them next to
+// -- the ANF types because stack_lower imports via `types.` namespace.
 pub const PropertyWrite = struct { name: []const u8, value_ref: []const u8 };
 pub const ANFBinaryOp = struct { op: BinOperator, left: []const u8, right: []const u8, result_type: ?[]const u8 = null };
 pub const ANFBuiltinCall = struct { name: []const u8, args: []const []const u8 };
@@ -348,8 +350,6 @@ fn freeBindings(allocator: std.mem.Allocator, bindings: []ANFBinding) void {
         switch (binding.value) {
             .@"if" => |v| { freeBindings(allocator, v.then); freeBindings(allocator, v.@"else"); allocator.destroy(v); },
             .loop => |v| { freeBindings(allocator, v.body); allocator.destroy(v); },
-            .if_expr => |v| { freeBindings(allocator, v.then_bindings); if (v.else_bindings) |eb| freeBindings(allocator, eb); allocator.destroy(v); },
-            .for_loop => |v| { freeBindings(allocator, v.body_bindings); allocator.destroy(v); },
             else => {},
         }
     }

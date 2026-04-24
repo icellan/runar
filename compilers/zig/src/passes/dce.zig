@@ -145,26 +145,6 @@ fn collectRefs(v: types.ANFValue, used: *std.StringHashMap(void)) !void {
         .array_literal => |al| {
             for (al.elements) |e| try used.put(e, {});
         },
-        // Legacy variants
-        .binary_op => |bo| {
-            try used.put(bo.left, {});
-            try used.put(bo.right, {});
-        },
-        .builtin_call => |bc| {
-            for (bc.args) |arg| try used.put(arg, {});
-        },
-        .property_write => |pw| try used.put(pw.value_ref, {}),
-        .if_expr => |ie| {
-            try used.put(ie.condition, {});
-            for (ie.then_bindings) |b| try collectRefs(b.value, used);
-            if (ie.else_bindings) |eb| for (eb) |b| try collectRefs(b.value, used);
-        },
-        .for_loop => |fl| {
-            for (fl.body_bindings) |b| try collectRefs(b.value, used);
-        },
-        .assert_op => |a| try used.put(a.condition, {}),
-        .ref => |r| try used.put(r, {}),
-        .literal_int, .literal_bigint, .literal_bool, .literal_bytes, .property_read, .nop => {},
     }
 }
 
@@ -174,7 +154,6 @@ pub fn hasSideEffect(v: types.ANFValue) bool {
         .assert, .update_prop, .check_preimage, .deserialize_state,
         .add_output, .add_raw_output, .add_data_output, .@"if", .loop, .call, .method_call,
         => true,
-        .assert_op, .if_expr, .for_loop, .builtin_call => true,
         else => false,
     };
 }
