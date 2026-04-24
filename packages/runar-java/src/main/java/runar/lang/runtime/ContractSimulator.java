@@ -85,12 +85,19 @@ public final class ContractSimulator {
     /**
      * Call a stateful method with an injected preimage. The preimage is
      * stashed on the simulator; tests can read it back via
-     * {@link #lastPreimage()}.
+     * {@link #lastPreimage()}. Inside the call, contract code can access
+     * the preimage via {@code this.currentPreimage()} (defined on
+     * {@link runar.lang.StatefulSmartContract}).
      */
     public Object callStateful(String methodName, Preimage preimage, Object... args) {
         if (!stateful) throw new IllegalStateException("contract is not stateful");
         this.lastPreimage = preimage;
-        return call(methodName, args);
+        SimulatorContext.setCurrentPreimage(preimage);
+        try {
+            return call(methodName, args);
+        } finally {
+            SimulatorContext.clearCurrentPreimage();
+        }
     }
 
     /**
@@ -163,25 +170,35 @@ public final class ContractSimulator {
 
     /** A captured output emission from {@code this.addOutput(...)}. */
     public static final class Output {
+        public enum Kind { STATE, RAW, DATA }
+
+        public final Kind kind;
         public final java.math.BigInteger satoshis;
         public final Object[] values;
-        public final byte[] rawScriptBytes; // non-null for addRawOutput
+        public final byte[] rawScriptBytes; // non-null for RAW / DATA
 
-        Output(java.math.BigInteger satoshis, Object[] values, byte[] rawScriptBytes) {
+        Output(Kind kind, java.math.BigInteger satoshis, Object[] values, byte[] rawScriptBytes) {
+            this.kind = kind;
             this.satoshis = satoshis;
             this.values = values;
             this.rawScriptBytes = rawScriptBytes;
         }
 
         public static Output state(java.math.BigInteger satoshis, Object[] values) {
-            return new Output(satoshis, values, null);
+            return new Output(Kind.STATE, satoshis, values, null);
         }
 
         public static Output raw(java.math.BigInteger satoshis, byte[] script) {
-            return new Output(satoshis, null, script);
+            return new Output(Kind.RAW, satoshis, null, script);
         }
 
-        public boolean isRaw() { return rawScriptBytes != null; }
+        public static Output data(java.math.BigInteger satoshis, byte[] script) {
+            return new Output(Kind.DATA, satoshis, null, script);
+        }
+
+        public boolean isRaw() { return kind == Kind.RAW; }
+        public boolean isData() { return kind == Kind.DATA; }
+        public boolean isState() { return kind == Kind.STATE; }
     }
 
     /** Package-private accessor for {@link SmartContract#addOutput} delegation. */
@@ -191,5 +208,9 @@ public final class ContractSimulator {
 
     public static void captureRawOutput(java.math.BigInteger satoshis, byte[] script) {
         OutputCapture.emit(Output.raw(satoshis, script));
+    }
+
+    public static void captureDataOutput(java.math.BigInteger satoshis, byte[] script) {
+        OutputCapture.emit(Output.data(satoshis, script));
     }
 }

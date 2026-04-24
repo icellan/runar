@@ -39,6 +39,8 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import javax.tools.Diagnostic;
 import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
@@ -457,15 +459,18 @@ public final class JavaParser {
             return new Identifier(id.getName().toString());
         }
         if (e instanceof MemberSelectTree ms) {
-            // Special-case BigInteger.ZERO/ONE/TWO/TEN → literal.
-            if (ms.getExpression() instanceof IdentifierTree bi && bi.getName().contentEquals("BigInteger")) {
+            // Special-case BigInteger.ZERO/ONE/TWO/TEN → literal. The Bigint
+            // wrapper re-exports the same constants so both spellings are
+            // accepted.
+            if (ms.getExpression() instanceof IdentifierTree bi
+                && (bi.getName().contentEquals("BigInteger") || bi.getName().contentEquals("Bigint"))) {
                 return switch (ms.getIdentifier().toString()) {
                     case "ZERO" -> new BigIntLiteral(BigInteger.ZERO);
                     case "ONE" -> new BigIntLiteral(BigInteger.ONE);
                     case "TWO" -> new BigIntLiteral(BigInteger.TWO);
                     case "TEN" -> new BigIntLiteral(BigInteger.TEN);
                     default -> throw new ParseException(
-                        "unsupported BigInteger constant " + ms.getIdentifier() + " in " + filename
+                        "unsupported " + bi.getName() + " constant " + ms.getIdentifier() + " in " + filename
                     );
                 };
             }
@@ -561,10 +566,13 @@ public final class JavaParser {
             && hex.getValue() instanceof String hs) {
             return new ByteStringLiteral(hs);
         }
-        // Recognise BigInteger.valueOf(<int literal>) → BigIntLiteral.
+        // Recognise BigInteger.valueOf(<int literal>) → BigIntLiteral, and
+        // Bigint.of(<int literal>) as the equivalent shorthand on the Bigint
+        // wrapper.
         if (callee instanceof MemberSelectTree ms
-            && ms.getIdentifier().contentEquals("valueOf")
-            && ms.getExpression() instanceof IdentifierTree bi && bi.getName().contentEquals("BigInteger")
+            && ms.getExpression() instanceof IdentifierTree bi
+            && ((bi.getName().contentEquals("BigInteger") && ms.getIdentifier().contentEquals("valueOf"))
+                || (bi.getName().contentEquals("Bigint") && ms.getIdentifier().contentEquals("of")))
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree n
             && n.getValue() instanceof Number num) {
@@ -575,11 +583,90 @@ public final class JavaParser {
             List<Expression> args = convertArgs(mi, filename, cu);
             return new CallExpr(new Identifier("super"), args);
         }
+        // Recognise Bigint-wrapper arithmetic: a.plus(b) → BinaryExpr(ADD, a, b),
+        // a.neg() → UnaryExpr(NEG, a), etc. Matched by method name and arity;
+        // the receiver type is not consulted (the parser has no type info at
+        // this stage), so non-Bigint receivers with identically-named methods
+        // would also be lowered. In practice contract source calls these only
+        // on Bigint values, and the typechecker will catch misuse.
+        Optional<Expression> lowered = tryLowerBigintMethod(mi, filename, cu);
+        if (lowered.isPresent()) {
+            return lowered.get();
+        }
         // General call: callee = expression, args = list.
         Expression calleeExpr = convertExpression(callee, filename, cu);
         List<Expression> args = convertArgs(mi, filename, cu);
         return new CallExpr(calleeExpr, args);
     }
+
+    /**
+     * Lower {@code Bigint}-wrapper method calls to their canonical AST
+     * arithmetic form, so contract source written in {@code a.plus(b)} style
+     * compiles identically to source written as {@code a + b}.
+     *
+     * <p>Recognised method names:
+     * <ul>
+     *   <li>binary arithmetic: {@code plus}, {@code minus}, {@code times},
+     *       {@code div}, {@code mod}, {@code shl}, {@code shr},
+     *       {@code and}, {@code or}, {@code xor}</li>
+     *   <li>binary comparison: {@code gt}, {@code lt}, {@code ge},
+     *       {@code le}, {@code eq}, {@code neq}</li>
+     *   <li>unary: {@code neg}, {@code abs}</li>
+     * </ul>
+     *
+     * <p>Returns {@link Optional#empty()} if the call does not match the
+     * Bigint-method pattern (wrong callee shape, wrong arity, or unknown
+     * method name); callers fall back to the general call lowering.
+     */
+    private static Optional<Expression> tryLowerBigintMethod(
+        MethodInvocationTree mi,
+        String filename,
+        CompilationUnitTree cu
+    ) {
+        ExpressionTree callee = mi.getMethodSelect();
+        if (!(callee instanceof MemberSelectTree ms)) return Optional.empty();
+        String method = ms.getIdentifier().toString();
+
+        Expression.BinaryOp binOp = BIGINT_BINARY_METHODS.get(method);
+        if (binOp != null) {
+            if (mi.getArguments().size() != 1) return Optional.empty();
+            Expression receiver = convertExpression(ms.getExpression(), filename, cu);
+            Expression arg = convertExpression(mi.getArguments().get(0), filename, cu);
+            return Optional.of(new BinaryExpr(binOp, receiver, arg));
+        }
+
+        if ("neg".equals(method) && mi.getArguments().isEmpty()) {
+            Expression receiver = convertExpression(ms.getExpression(), filename, cu);
+            return Optional.of(new UnaryExpr(Expression.UnaryOp.NEG, receiver));
+        }
+        if ("abs".equals(method) && mi.getArguments().isEmpty()) {
+            // abs is a Rúnar builtin, not an operator: lower to CallExpr(abs, a).
+            Expression receiver = convertExpression(ms.getExpression(), filename, cu);
+            return Optional.of(new CallExpr(new Identifier("abs"), List.of(receiver)));
+        }
+
+        return Optional.empty();
+    }
+
+    /** Bigint method-name → canonical BinaryOp table (unary ops handled separately). */
+    private static final Map<String, Expression.BinaryOp> BIGINT_BINARY_METHODS = Map.ofEntries(
+        Map.entry("plus",  Expression.BinaryOp.ADD),
+        Map.entry("minus", Expression.BinaryOp.SUB),
+        Map.entry("times", Expression.BinaryOp.MUL),
+        Map.entry("div",   Expression.BinaryOp.DIV),
+        Map.entry("mod",   Expression.BinaryOp.MOD),
+        Map.entry("shl",   Expression.BinaryOp.SHL),
+        Map.entry("shr",   Expression.BinaryOp.SHR),
+        Map.entry("and",   Expression.BinaryOp.BIT_AND),
+        Map.entry("or",    Expression.BinaryOp.BIT_OR),
+        Map.entry("xor",   Expression.BinaryOp.BIT_XOR),
+        Map.entry("gt",    Expression.BinaryOp.GT),
+        Map.entry("lt",    Expression.BinaryOp.LT),
+        Map.entry("ge",    Expression.BinaryOp.GE),
+        Map.entry("le",    Expression.BinaryOp.LE),
+        Map.entry("eq",    Expression.BinaryOp.EQ),
+        Map.entry("neq",   Expression.BinaryOp.NEQ)
+    );
 
     private static List<Expression> convertArgs(MethodInvocationTree mi, String filename, CompilationUnitTree cu) {
         List<Expression> args = new ArrayList<>(mi.getArguments().size());

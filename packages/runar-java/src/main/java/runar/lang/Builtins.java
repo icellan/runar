@@ -8,7 +8,10 @@ import runar.lang.runtime.SimulatorContext;
 import runar.lang.types.Addr;
 import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
+import runar.lang.types.RabinPubKey;
+import runar.lang.types.RabinSig;
 import runar.lang.types.Sig;
+import runar.lang.types.SigHashPreimage;
 
 /**
  * Rúnar built-in functions, as static methods for import-static use
@@ -286,11 +289,70 @@ public final class Builtins {
     }
 
     // ===================================================================
-    // Preimage
+    // Preimage (structured)
     // ===================================================================
 
     public static boolean checkPreimage(Preimage preimage) {
         if (!SimulatorContext.isActive()) throw notInSimulator("checkPreimage");
         return Preimage.checkPreimage(preimage);
+    }
+
+    /**
+     * {@code SigHashPreimage}-typed overload. The Rúnar compiler treats
+     * {@link Preimage} and {@link SigHashPreimage} as two surfaces of
+     * the same thing: the structured Java {@code Preimage} builder used
+     * by tests, and the opaque-bytes {@code SigHashPreimage} that
+     * contract source declares. This overload lets contracts written
+     * against {@link SigHashPreimage} compile under the simulator.
+     */
+    public static boolean checkPreimage(SigHashPreimage preimage) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("checkPreimage");
+        return true;
+    }
+
+    // ===================================================================
+    // Preimage field extractors — mirror the OP_PUSH_TX opcode family.
+    // The Rúnar compiler lowers these to the corresponding byte-window
+    // opcodes; under the simulator they delegate to the structured
+    // {@link Preimage} accessors and return sensible defaults when the
+    // test has not explicitly built a preimage.
+    // ===================================================================
+
+    // SigHashPreimage overloads resolve through the simulator's active
+    // Preimage when one is set; otherwise they return the Preimage
+    // defaults (version = 1, locktime = 0, etc.).
+    private static Preimage resolvePreimage(SigHashPreimage unused) {
+        return SimulatorContext.currentPreimage();
+    }
+
+    public static BigInteger extractVersion(SigHashPreimage p) { return Preimage.extractVersion(resolvePreimage(p)); }
+    public static BigInteger extractVersion(Preimage p) { return Preimage.extractVersion(p); }
+
+    public static ByteString extractHashPrevouts(SigHashPreimage p) { return Preimage.extractHashPrevouts(resolvePreimage(p)); }
+    public static ByteString extractHashPrevouts(Preimage p) { return Preimage.extractHashPrevouts(p); }
+
+    public static ByteString extractOutpoint(SigHashPreimage p) { return Preimage.extractOutpoint(resolvePreimage(p)); }
+    public static ByteString extractOutpoint(Preimage p) { return Preimage.extractOutpoint(p); }
+
+    public static BigInteger extractLocktime(SigHashPreimage p) { return Preimage.extractLocktime(resolvePreimage(p)); }
+    public static BigInteger extractLocktime(Preimage p) { return Preimage.extractLocktime(p); }
+
+    public static ByteString extractOutputHash(SigHashPreimage p) { return Preimage.extractOutputHash(resolvePreimage(p)); }
+    public static ByteString extractOutputHash(Preimage p) { return Preimage.extractOutputHash(p); }
+
+    public static BigInteger extractAmount(SigHashPreimage p) { return Preimage.extractAmount(resolvePreimage(p)); }
+    public static BigInteger extractAmount(Preimage p) { return Preimage.extractAmount(p); }
+
+    public static BigInteger extractSigHashType(SigHashPreimage p) { return Preimage.extractSigHashType(resolvePreimage(p)); }
+    public static BigInteger extractSigHashType(Preimage p) { return Preimage.extractSigHashType(p); }
+
+    // ===================================================================
+    // Rabin-typed overloads. Rabin signatures / pub keys are plain big
+    // integers on-chain; the wrapper types carry semantic intent.
+    // ===================================================================
+
+    public static boolean verifyRabinSig(ByteString msg, RabinSig sig, ByteString padding, RabinPubKey pubKey) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("verifyRabinSig");
+        return MockCrypto.verifyRabinSig(msg, sig.value(), padding, pubKey.value());
     }
 }

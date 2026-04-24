@@ -13,6 +13,7 @@ import runar.compiler.ir.ast.ParentClass;
 import runar.compiler.ir.ast.PrimitiveType;
 import runar.compiler.ir.ast.PrimitiveTypeName;
 import runar.compiler.ir.ast.PropertyAccessExpr;
+import runar.compiler.ir.ast.UnaryExpr;
 import runar.compiler.ir.ast.Visibility;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -226,5 +227,141 @@ class JavaParserTest {
             () -> JavaParser.parse(src, "Bad.runar.java")
         );
         assertTrue(e.getMessage().contains("javac reported errors"));
+    }
+
+    // -----------------------------------------------------------------
+    // Bigint-wrapper method lowering (task 2 of M12 part 2)
+    // -----------------------------------------------------------------
+
+    @Test
+    void lowersBigintPlusIntoBinaryAddExpr() {
+        String src = """
+            import runar.lang.types.Bigint;
+            class C extends StatefulSmartContract {
+                Bigint count;
+                C(Bigint count) { super(count); this.count = count; }
+                @Public void bump(Bigint delta) {
+                    this.count = this.count.plus(delta);
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var bump = c.methods().stream().filter(m -> m.name().equals("bump")).findFirst().orElseThrow();
+        var assign = (AssignmentStatement) bump.body().get(0);
+        var rhs = (BinaryExpr) assign.value();
+        assertEquals(Expression.BinaryOp.ADD, rhs.op());
+        // LHS of the ADD is `this.count` (PropertyAccessExpr), RHS is `delta`.
+        assertEquals("count", ((PropertyAccessExpr) rhs.left()).property());
+        assertEquals("delta", ((Identifier) rhs.right()).name());
+    }
+
+    @Test
+    void lowersBigintGtIntoBinaryGtExpr() {
+        String src = """
+            import runar.lang.types.Bigint;
+            class C extends StatefulSmartContract {
+                Bigint count;
+                C(Bigint count) { super(count); this.count = count; }
+                @Public void check(Bigint threshold) {
+                    assertThat(this.count.gt(threshold));
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var check = c.methods().stream().filter(m -> m.name().equals("check")).findFirst().orElseThrow();
+        var stmt = (ExpressionStatement) check.body().get(0);
+        var call = (CallExpr) stmt.expression();
+        var cmp = (BinaryExpr) call.args().get(0);
+        assertEquals(Expression.BinaryOp.GT, cmp.op());
+    }
+
+    @Test
+    void lowersBigintNegIntoUnaryNegExpr() {
+        String src = """
+            import runar.lang.types.Bigint;
+            class C extends SmartContract {
+                @Readonly Bigint a;
+                C(Bigint a) { super(a); this.a = a; }
+                @Public void check(Bigint x) {
+                    assertThat(x.neg().eq(this.a));
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var check = c.methods().get(0);
+        var stmt = (ExpressionStatement) check.body().get(0);
+        var call = (CallExpr) stmt.expression();
+        // assertThat(x.neg().eq(this.a)) → BinaryExpr(EQ, UnaryExpr(NEG, x), this.a)
+        var eq = (BinaryExpr) call.args().get(0);
+        assertEquals(Expression.BinaryOp.EQ, eq.op());
+        var neg = (UnaryExpr) eq.left();
+        assertEquals(Expression.UnaryOp.NEG, neg.op());
+        assertEquals("x", ((Identifier) neg.operand()).name());
+    }
+
+    @Test
+    void lowersBigintBitwiseMethods() {
+        String src = """
+            import runar.lang.types.Bigint;
+            class C extends SmartContract {
+                @Readonly Bigint a;
+                @Readonly Bigint b;
+                C(Bigint a, Bigint b) { super(a, b); this.a = a; this.b = b; }
+                @Public void op() {
+                    assertThat(this.a.and(this.b).eq(this.a.xor(this.b)));
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var op = c.methods().get(0);
+        var stmt = (ExpressionStatement) op.body().get(0);
+        var call = (CallExpr) stmt.expression();
+        var eq = (BinaryExpr) call.args().get(0);
+        var lhs = (BinaryExpr) eq.left();
+        var rhs = (BinaryExpr) eq.right();
+        assertEquals(Expression.BinaryOp.BIT_AND, lhs.op());
+        assertEquals(Expression.BinaryOp.BIT_XOR, rhs.op());
+    }
+
+    @Test
+    void lowersBigintAbsMethodToCallExpr() {
+        String src = """
+            import runar.lang.types.Bigint;
+            class C extends StatefulSmartContract {
+                Bigint value;
+                C(Bigint value) { super(value); this.value = value; }
+                @Public void normalise() {
+                    this.value = this.value.abs();
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var m = c.methods().get(0);
+        var assign = (AssignmentStatement) m.body().get(0);
+        var rhs = (CallExpr) assign.value();
+        assertEquals("abs", ((Identifier) rhs.callee()).name());
+        assertEquals(1, rhs.args().size());
+        assertEquals("value", ((PropertyAccessExpr) rhs.args().get(0)).property());
+    }
+
+    @Test
+    void preservesByteStringEqualsAsMemberCall() {
+        // Regression: Bigint.eq lowering must not swallow the native-Java
+        // .equals() member-access pattern on ByteString-family receivers.
+        String src = """
+            class C extends SmartContract {
+                @Readonly Addr a;
+                C(Addr a) { super(a); this.a = a; }
+                @Public void check(Addr other) {
+                    assertThat(other.equals(this.a));
+                }
+            }
+            """;
+        ContractNode c = JavaParser.parse(src, "C.runar.java");
+        var stmt = (ExpressionStatement) c.methods().get(0).body().get(0);
+        var assertCall = (CallExpr) stmt.expression();
+        var equalsCall = (CallExpr) assertCall.args().get(0);
+        var callee = (MemberExpr) equalsCall.callee();
+        assertEquals("equals", callee.property());
     }
 }

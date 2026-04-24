@@ -52,4 +52,21 @@ public final class SimulatorContext {
     }
 
     private static final ThreadLocal<Integer> DEPTH = ThreadLocal.withInitial(() -> 0);
+
+    // -----------------------------------------------------------------
+    // Preimage propagation — lets StatefulSmartContract.currentPreimage()
+    // read whatever the active ContractSimulator.callStateful threaded
+    // through as the spending-transaction preimage.
+    // -----------------------------------------------------------------
+
+    private static final ThreadLocal<Preimage> PREIMAGE = new ThreadLocal<>();
+
+    /** Set by {@link ContractSimulator} before invoking a stateful method. */
+    public static void setCurrentPreimage(Preimage p) { PREIMAGE.set(p); }
+
+    /** Cleared by {@link ContractSimulator} after the method returns. */
+    public static void clearCurrentPreimage() { PREIMAGE.remove(); }
+
+    /** Accessor used by {@link runar.lang.StatefulSmartContract#currentPreimage()}. */
+    public static Preimage currentPreimage() { return PREIMAGE.get(); }
 }

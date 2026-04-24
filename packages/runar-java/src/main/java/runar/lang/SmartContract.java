@@ -4,6 +4,7 @@ import java.math.BigInteger;
 
 import runar.lang.runtime.ContractSimulator;
 import runar.lang.runtime.SimulatorContext;
+import runar.lang.types.Bigint;
 
 /**
  * Base class for stateless Rúnar contracts. All fields of a subclass
@@ -37,6 +38,16 @@ public abstract class SmartContract {
         ContractSimulator.captureOutput(satoshis, values);
     }
 
+    /** Ergonomic {@code Bigint}-accepting overload that routes to {@link #addOutput(BigInteger, Object...)}. */
+    protected final void addOutput(Bigint satoshis, Object... values) {
+        addOutput(satoshis.value(), values);
+    }
+
+    /** Ergonomic {@code long}-accepting overload that routes to {@link #addOutput(BigInteger, Object...)}. */
+    protected final void addOutput(long satoshis, Object... values) {
+        addOutput(BigInteger.valueOf(satoshis), values);
+    }
+
     /**
      * Add a raw output with caller-specified script bytes instead of
      * the contract's own codePart.
@@ -48,5 +59,40 @@ public abstract class SmartContract {
             );
         }
         ContractSimulator.captureRawOutput(satoshis, scriptBytes);
+    }
+
+    /** Ergonomic {@code long}-accepting overload for {@link #addRawOutput(BigInteger, byte[])}. */
+    protected final void addRawOutput(long satoshis, byte[] scriptBytes) {
+        addRawOutput(BigInteger.valueOf(satoshis), scriptBytes);
+    }
+
+    /** Ergonomic overload accepting the script bytes as a Rúnar {@link runar.lang.types.ByteString}. */
+    protected final void addRawOutput(BigInteger satoshis, runar.lang.types.ByteString scriptBytes) {
+        addRawOutput(satoshis, scriptBytes.toByteArray());
+    }
+
+    /** Ergonomic {@code long} + {@link runar.lang.types.ByteString} overload. */
+    protected final void addRawOutput(long satoshis, runar.lang.types.ByteString scriptBytes) {
+        addRawOutput(BigInteger.valueOf(satoshis), scriptBytes.toByteArray());
+    }
+
+    /**
+     * Add a data output -- an arbitrary-script output committed to by the
+     * compiler-generated continuation hash. Unlike {@link #addRawOutput}
+     * data outputs are tied to the state continuation, so spenders cannot
+     * swap them out. Mirrors the TypeScript / Go / Python SDK shapes.
+     */
+    protected final void addDataOutput(BigInteger satoshis, runar.lang.types.ByteString scriptBytes) {
+        if (!SimulatorContext.isActive()) {
+            throw new UnsupportedOperationException(
+                "addDataOutput is a compile-time intrinsic; invoke via the off-chain simulator"
+            );
+        }
+        ContractSimulator.captureDataOutput(satoshis, scriptBytes.toByteArray());
+    }
+
+    /** Ergonomic {@code long}-accepting overload for {@link #addDataOutput(BigInteger, runar.lang.types.ByteString)}. */
+    protected final void addDataOutput(long satoshis, runar.lang.types.ByteString scriptBytes) {
+        addDataOutput(BigInteger.valueOf(satoshis), scriptBytes);
     }
 }
