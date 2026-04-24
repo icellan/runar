@@ -142,10 +142,13 @@ module RunarCompiler
     elsif lower.end_with?(".runar.zig")
       require_relative "frontend/parser_zig"
       Frontend.parse_zig(source, file_name)
+    elsif lower.end_with?(".runar.java")
+      require_relative "frontend/parser_java"
+      Frontend.parse_java(source, file_name)
     else
       raise ArgumentError,
             "Unsupported source format: #{file_name}. " \
-            "Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, or .runar.zig"
+            "Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
     end
   end
   private_class_method :_parse_source

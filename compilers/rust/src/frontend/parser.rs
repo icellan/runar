@@ -1159,6 +1159,7 @@ fn bigint_to_i128(bigint_lit: &swc::BigInt) -> i128 {
 /// - `.runar.move` -> Move-style parser
 /// - `.runar.rs` -> Rust DSL parser
 /// - `.runar.py` -> Python parser
+/// - `.runar.java` -> Java parser
 /// - anything else (including `.runar.ts`) -> TypeScript parser (default)
 pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     let name = file_name.unwrap_or("contract.ts");
@@ -1182,6 +1183,9 @@ pub fn parse_source(source: &str, file_name: Option<&str>) -> ParseResult {
     }
     if name.ends_with(".runar.zig") {
         return super::parser_zig::parse_zig(source, file_name);
+    }
+    if name.ends_with(".runar.java") {
+        return super::parser_java::parse_java(source, file_name);
     }
     // Default: TypeScript parser
     parse(source, file_name)
