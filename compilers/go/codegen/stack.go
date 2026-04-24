@@ -1181,6 +1181,11 @@ func (ctx *loweringContext) lowerCall(bindingName, funcName string, args []strin
 		return
 	}
 
+	if funcName == "verifySP1FRI" {
+		ctx.lowerVerifySP1FRI(bindingName, args, bindingIndex, lastUses)
+		return
+	}
+
 	if funcName == "sha256Compress" {
 		ctx.lowerSha256Compress(bindingName, args, bindingIndex, lastUses)
 		return

@@ -70,6 +70,7 @@ var builtinFunctions = map[string]funcSig{
 	"verifySLHDSA_SHA2_192f": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"verifySLHDSA_SHA2_256s": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"verifySLHDSA_SHA2_256f": {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
+	"verifySP1FRI":       {params: []string{"ByteString", "ByteString", "ByteString"}, returnType: "boolean"},
 	"ecAdd":              {params: []string{"Point", "Point"}, returnType: "Point"},
 	"ecMul":              {params: []string{"Point", "bigint"}, returnType: "Point"},
 	"ecMulGen":           {params: []string{"bigint"}, returnType: "Point"},

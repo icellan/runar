@@ -301,6 +301,34 @@ func VerifySLHDSA_SHA2_256f(msg ByteString, sig ByteString, pubkey ByteString) b
 	return SLHVerify(SLH_SHA2_256f, []byte(msg), []byte(sig), []byte(pubkey))
 }
 
+// VerifySP1FRI verifies an SP1 v6.0.2 STARK / FRI proof on-chain.
+//
+// Used by rollup / proof-bridge covenants. See docs/sp1-fri-verifier.md for
+// the API shape, transcript order, and performance targets, and
+// docs/sp1-proof-format.md for the serialized proof byte layout.
+//
+// The Go-native return value is always true — native invocation during
+// test execution skips proof verification (the heavy lifting lives in the
+// compiled Bitcoin Script). This lets covenant authors write tests against
+// their state-transition logic without bundling an SP1 proof generator into
+// the test harness.
+//
+// In compiled Bitcoin Script, the intrinsic lowers to a full on-chain
+// verifier that absorbs proofBlob, publicValues, and sp1VKeyHash into the
+// Fiat-Shamir transcript, replays the STARK argument, and fails OP_VERIFY
+// on any mismatch.
+//
+// NOTE: stack-lowering is not yet implemented (tracked under BSVM
+// handoff R10). Type-checking the intrinsic succeeds so covenant ABIs
+// can be authored against it; contracts using this call will fail at
+// the codegen stage until the verifier body lands.
+func VerifySP1FRI(proofBlob ByteString, publicValues ByteString, sp1VKeyHash ByteString) bool {
+	_ = proofBlob
+	_ = publicValues
+	_ = sp1VKeyHash
+	return true
+}
+
 // ---------------------------------------------------------------------------
 // EC (elliptic curve) functions — real secp256k1 arithmetic for testing.
 // In compiled Bitcoin Script, these map to EC codegen opcodes.
