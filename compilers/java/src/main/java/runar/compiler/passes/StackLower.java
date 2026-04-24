@@ -741,6 +741,20 @@ public final class StackLower {
                 return;
             }
 
+            // ------------------------------------------------------------------
+            // M6: crypto builtins -- dispatch to dedicated codegen modules.
+            // Each module emits a long, self-contained op sequence that leaves
+            // a single named result on the stack.
+            // ------------------------------------------------------------------
+            if ("sha256Compress".equals(funcName)) {
+                lowerSha256Compress(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("sha256Finalize".equals(funcName)) {
+                lowerSha256Finalize(bindingName, args, idx, lastUses);
+                return;
+            }
+
             // General builtin path
             for (String a : args) {
                 bringToTop(a, isLastUse(a, idx, lastUses));
@@ -771,6 +785,42 @@ public final class StackLower {
                 sm.push(bindingName);
             }
 
+            trackDepth();
+        }
+
+        // sha256Compress: [state, block] -> [newState]. See Sha256.emitSha256Compress.
+        void lowerSha256Compress(String bindingName, List<String> args, int idx,
+                                 Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException(
+                    "sha256Compress requires 2 arguments: state, block");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < 2; i++) sm.pop();
+
+            runar.compiler.codegen.Sha256.emitSha256Compress(this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // sha256Finalize: [state, remaining, msgBitLen] -> [hash].
+        void lowerSha256Finalize(String bindingName, List<String> args, int idx,
+                                 Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException(
+                    "sha256Finalize requires 3 arguments: state, remaining, msgBitLen");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < 3; i++) sm.pop();
+
+            runar.compiler.codegen.Sha256.emitSha256Finalize(this::emitOp);
+
+            sm.push(bindingName);
             trackDepth();
         }
 
