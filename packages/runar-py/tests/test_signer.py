@@ -202,17 +202,34 @@ def bsv_mocked():
 
 
 class TestLocalSigner:
-    def test_raises_without_bsv_sdk(self):
-        """LocalSigner raises RuntimeError when bsv-sdk is not installed."""
+    def test_uses_fallback_when_bsv_sdk_missing(self):
+        """When bsv-sdk is unavailable, LocalSigner uses the pure-Python fallback."""
         import runar.sdk.local_signer as ls_module
         original = ls_module._BSV_SDK_AVAILABLE
         ls_module._BSV_SDK_AVAILABLE = False
+        try:
+            from runar.sdk.local_signer import LocalSigner
+            s = LocalSigner('aa' * 32)
+            # Pure-Python fallback must produce a valid compressed pubkey
+            assert len(s.get_public_key()) == 66
+            assert s.get_public_key()[:2] in ('02', '03')
+        finally:
+            ls_module._BSV_SDK_AVAILABLE = original
+
+    def test_raises_when_both_backends_missing(self):
+        """LocalSigner raises RuntimeError only when BOTH backends are unavailable."""
+        import runar.sdk.local_signer as ls_module
+        orig_bsv = ls_module._BSV_SDK_AVAILABLE
+        orig_fb = ls_module._FALLBACK_AVAILABLE
+        ls_module._BSV_SDK_AVAILABLE = False
+        ls_module._FALLBACK_AVAILABLE = False
         try:
             with pytest.raises(RuntimeError, match='bsv-sdk'):
                 from runar.sdk.local_signer import LocalSigner
                 LocalSigner('aa' * 32)
         finally:
-            ls_module._BSV_SDK_AVAILABLE = original
+            ls_module._BSV_SDK_AVAILABLE = orig_bsv
+            ls_module._FALLBACK_AVAILABLE = orig_fb
 
     def test_get_public_key(self, bsv_mocked):
         """get_public_key() returns the hex from PrivateKey.public_key().hex()."""
