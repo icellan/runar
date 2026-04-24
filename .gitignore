@@ -41,3 +41,8 @@ examples/end2end-example/webapp-blackjack/runar-webapp-blackjack
 .zig-local-cache/
 zig-out/
 zig-pkg/
+
+# Gradle / Java build outputs
+.gradle/
+conformance/sdk-output/tools/java-driver/build/
+

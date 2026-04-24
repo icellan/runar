@@ -23,6 +23,7 @@ public final class RunarContract {
     private final List<Object> constructorArgs;
     private final Map<String, Object> state;
     private UTXO currentUtxo;
+    private Inscription inscription;
 
     public RunarContract(RunarArtifact artifact, List<Object> constructorArgs) {
         this.artifact = artifact;
@@ -68,7 +69,22 @@ public final class RunarContract {
 
     /** Renders the current locking script: template + constructor args + state. */
     public String lockingScript() {
-        return ContractScript.renderLockingScript(artifact, constructorArgs, state);
+        return ContractScript.renderLockingScript(artifact, constructorArgs, state, inscription);
+    }
+
+    /**
+     * Attaches a 1sat ordinals inscription to this contract. The envelope
+     * is spliced between the code part and the state section of the
+     * locking script. Parity with Go {@code WithInscription}, Rust
+     * {@code with_inscription}, and TS {@code withInscription}.
+     */
+    public RunarContract withInscription(Inscription insc) {
+        this.inscription = insc;
+        return this;
+    }
+
+    public Inscription inscription() {
+        return inscription;
     }
 
     // ------------------------------------------------------------------

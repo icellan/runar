@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process';
-import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants } from 'fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, accessSync, constants, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
@@ -107,6 +107,59 @@ function buildSdkTools(): SdkTool[] {
           cwd: zigToolDir,
           stdio: 'pipe',
           timeout: 120_000,
+        });
+      },
+    });
+  }
+
+  // Java: invoke the shaded fat jar produced by `gradle :fatJar` in
+  // `java-driver/`. If the jar is missing, build it on the fly. Gradle
+  // is located by looking up a cached wrapper distribution if the
+  // binary isn't on PATH (GitHub Actions' setup-gradle caches into the
+  // same location).
+  const javaToolDir = join(toolsDir, 'java-driver');
+  const javaJar = join(javaToolDir, 'build', 'libs', 'java-sdk-driver-0.4.4-all.jar');
+  const resolveGradle = (): string => {
+    try {
+      const out = execFileSync('which', ['gradle'], { stdio: 'pipe' }).toString().trim();
+      if (out) return out;
+    } catch {
+      // fall through
+    }
+    const cacheRoot = join(process.env.HOME ?? '', '.gradle', 'wrapper', 'dists');
+    if (existsSync(cacheRoot)) {
+      for (const dist of readdirSync(cacheRoot)) {
+        const distRoot = join(cacheRoot, dist);
+        try {
+          if (!statSync(distRoot).isDirectory()) continue;
+          for (const hashDir of readdirSync(distRoot)) {
+            const bin = join(distRoot, hashDir, dist.replace('-bin', ''), 'bin', 'gradle');
+            if (existsSync(bin) && isExecutable(bin)) return bin;
+          }
+        } catch {
+          // Non-directory cache entries (e.g. CACHEDIR.TAG) — skip.
+        }
+      }
+    }
+    return 'gradle';
+  };
+  if (existsSync(javaJar)) {
+    tools.push({
+      name: 'java',
+      cmd: 'java',
+      args: (input) => ['-jar', javaJar, input],
+    });
+  } else {
+    tools.push({
+      name: 'java',
+      cmd: 'java',
+      args: (input) => ['-jar', javaJar, input],
+      preBuild: () => {
+        const gradle = resolveGradle();
+        execFileSync(gradle, ['fatJar', '--no-daemon', '-x', 'javadoc'], {
+          cwd: javaToolDir,
+          stdio: 'pipe',
+          timeout: 300_000,
         });
       },
     });
