@@ -2057,8 +2057,9 @@ class LoweringContext {
         this.stackMap.push(null);
       }
 
-      // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN
-      if (prop.type === 'bigint') {
+      // Convert numeric/boolean values to fixed-width bytes via OP_NUM2BIN.
+      // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
+      if (prop.type === 'bigint' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
         this.emitOp({ op: 'push', value: 8n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
@@ -2073,7 +2074,9 @@ class LoweringContext {
         // Prepend push-data length prefix (matching SDK format)
         this.emitPushDataEncode();
       }
-      // For other byte types (PubKey, Sig, Sha256, etc.), no conversion needed
+      // For other byte types (PubKey, Sig, Sha256, Ripemd160, Addr, Point,
+      // P256Point, P384Point, SigHashPreimage), no conversion needed — they
+      // are already fixed-width byte strings.
 
       if (!first) {
         // Concatenate with previous
@@ -2392,8 +2395,9 @@ class LoweringContext {
       const isLast = this.isLastUse(valueRef, bindingIndex, lastUses);
       this.bringToTop(valueRef, isLast);
 
-      // Convert numeric/boolean values to fixed-width bytes
-      if (prop.type === 'bigint') {
+      // Convert numeric/boolean values to fixed-width bytes.
+      // RabinSig / RabinPubKey are bigint aliases and share the 8-byte layout.
+      if (prop.type === 'bigint' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
         this.emitOp({ op: 'push', value: 8n });
         this.stackMap.push(null);
         this.emitOp({ op: 'opcode', code: 'OP_NUM2BIN' });
@@ -2407,7 +2411,8 @@ class LoweringContext {
         // Prepend push-data length prefix (matching SDK format)
         this.emitPushDataEncode();
       }
-      // Other byte types used as-is
+      // Other byte types (PubKey, Sig, Sha256, Ripemd160, Addr, Point,
+      // P256Point, P384Point, SigHashPreimage) used as-is.
 
       // Concatenate with accumulator
       this.stackMap.pop();
@@ -2529,11 +2534,20 @@ class LoweringContext {
     for (const prop of stateProps) {
       switch (prop.type) {
         case 'bigint': propSizes.push(8); break;
+        // RabinSig / RabinPubKey are bigint aliases — same 8-byte layout.
+        case 'RabinSig':
+        case 'RabinPubKey': propSizes.push(8); break;
         case 'boolean': propSizes.push(1); break;
         case 'PubKey': propSizes.push(33); break;
         case 'Addr': propSizes.push(20); break;
+        // Ripemd160 is 20 bytes (same underlying shape as Addr).
+        case 'Ripemd160': propSizes.push(20); break;
         case 'Sha256': propSizes.push(32); break;
         case 'Point': propSizes.push(64); break;
+        // P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+        case 'P256Point': propSizes.push(64); break;
+        // P-384 point: x[48] || y[48] = 96 bytes.
+        case 'P384Point': propSizes.push(96); break;
         case 'ByteString': propSizes.push(-1); hasVariableLength = true; break;
         default:
           throw new Error(`deserialize_state: unsupported type '${prop.type}' for '${prop.name}'`);
@@ -2754,7 +2768,7 @@ class LoweringContext {
           this.emitPushDataDecode(); // [..., data, remaining]
           this.emitOp({ op: 'drop' }); // drop remaining (should be empty for single field)
           this.stackMap.pop();
-        } else if (prop.type === 'bigint' || prop.type === 'boolean') {
+        } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
           this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
         }
         // Other byte types need no conversion
@@ -2786,7 +2800,7 @@ class LoweringContext {
               // Swap to bring property bytes on top
               this.emitOp({ op: 'swap' });
               this.stackMap.swap();
-              if (prop.type === 'bigint' || prop.type === 'boolean') {
+              if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
                 this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
               }
               // Swap back so rest is on top for next iteration
@@ -2803,7 +2817,7 @@ class LoweringContext {
               this.emitPushDataDecode(); // [..., data, remaining]
               this.emitOp({ op: 'drop' }); // drop remaining (should be empty)
               this.stackMap.pop();
-            } else if (prop.type === 'bigint' || prop.type === 'boolean') {
+            } else if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
               this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
             }
             this.stackMap.pop();
@@ -2823,7 +2837,7 @@ class LoweringContext {
   private splitFixedStateFields(stateProps: ANFProperty[], propSizes: number[]): void {
     if (stateProps.length === 1) {
       const prop = stateProps[0]!;
-      if (prop.type === 'bigint' || prop.type === 'boolean') {
+      if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
         this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
       }
       this.stackMap.pop();
@@ -2843,7 +2857,7 @@ class LoweringContext {
           this.stackMap.push(null);
           this.emitOp({ op: 'swap' });
           this.stackMap.swap();
-          if (prop.type === 'bigint' || prop.type === 'boolean') {
+          if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
             this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
           }
           this.emitOp({ op: 'swap' });
@@ -2853,7 +2867,7 @@ class LoweringContext {
           this.stackMap.push(prop.name);
           this.stackMap.push(null);
         } else {
-          if (prop.type === 'bigint' || prop.type === 'boolean') {
+          if (prop.type === 'bigint' || prop.type === 'boolean' || prop.type === 'RabinSig' || prop.type === 'RabinPubKey') {
             this.emitOp({ op: 'opcode', code: 'OP_BIN2NUM' });
           }
           this.stackMap.pop();
