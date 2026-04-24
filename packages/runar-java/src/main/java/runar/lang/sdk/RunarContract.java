@@ -183,6 +183,207 @@ public final class RunarContract {
     public record CallOutcome(String txid, String rawTxHex, UTXO nextContractUtxo) {}
 
     // ------------------------------------------------------------------
+    // Multi-signer API (prepareCall / finalizeCall)
+    // ------------------------------------------------------------------
+
+    /**
+     * Prepares a call for external signing. Mirrors the Go SDK's
+     * {@code PrepareCall} and the TS SDK's {@code prepareCall()}.
+     *
+     * <p>Unlike {@link #call}, this does <em>not</em> sign and does not
+     * broadcast. The caller receives a {@link PreparedCall} containing
+     * the tx hex (with 72-byte zero placeholders in every {@code Sig}
+     * slot) and one BIP-143 sighash per placeholder. External signer(s)
+     * sign each digest out-of-band and hand the DER signatures back to
+     * {@link #finalizeCall(PreparedCall, java.util.List, Provider)}.
+     *
+     * <p>{@code null} entries in {@code args} are treated as auto-compute
+     * slots:
+     * <ul>
+     *   <li>{@code Sig} — replaced with a 72-byte zero placeholder; the
+     *       sighash for this slot is added to
+     *       {@link PreparedCall#sighashes()}</li>
+     *   <li>{@code PubKey} — if a {@code signer} is provided, replaced
+     *       with its compressed pubkey; otherwise the caller must
+     *       supply the pubkey explicitly</li>
+     * </ul>
+     *
+     * @param signer optional signer used to fill in auto-compute PubKey
+     *               slots. Pass {@code null} if the caller is supplying
+     *               every non-{@code Sig} arg up front (e.g. a pure
+     *               remote-signing flow).
+     */
+    public PreparedCall prepareCall(
+        String methodName,
+        List<Object> args,
+        Map<String, Object> stateUpdates,
+        Provider provider,
+        Signer signer
+    ) {
+        if (currentUtxo == null) {
+            throw new IllegalStateException(
+                "RunarContract.prepareCall: contract has not been deployed. Call deploy() or setCurrentUtxo()."
+            );
+        }
+        RunarArtifact.ABIMethod m = findMethod(methodName);
+        if (m == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.prepareCall: method '" + methodName + "' not found in " + artifact.contractName()
+            );
+        }
+
+        // Snapshot state + apply pending updates so the prepared tx
+        // reflects the continuation the caller expects.
+        if (artifact.isStateful() && stateUpdates != null) {
+            state.putAll(stateUpdates);
+        }
+
+        List<Integer> sigIndices = new ArrayList<>();
+        List<Object> resolved = new ArrayList<>(args);
+        for (int i = 0; i < m.params().size() && i < resolved.size(); i++) {
+            String type = m.params().get(i).type();
+            if ("Sig".equals(type) && resolved.get(i) == null) {
+                sigIndices.add(i);
+                resolved.set(i, "00".repeat(72));
+            }
+            if ("PubKey".equals(type) && resolved.get(i) == null && signer != null) {
+                resolved.set(i, ScriptUtils.bytesToHex(signer.pubKey()));
+            }
+        }
+
+        String unlockHex = buildUnlockingScript(m, resolved);
+        Map<String, Object> continuation = artifact.isStateful() ? new java.util.LinkedHashMap<>(state) : null;
+        long newSats = artifact.isStateful() ? currentUtxo.satoshis() : 0;
+
+        TransactionBuilder.CallResult result = TransactionBuilder.buildCallTransaction(
+            artifact, currentUtxo, unlockHex, continuation, newSats, provider, signer, null
+        );
+        String txHex = result.txHex();
+
+        // BIP-143 is invariant under scriptSig contents (it hashes the
+        // subscript — i.e. the locking script — not the unlocking
+        // script of the input being signed). Since every Sig
+        // placeholder is the same 72 bytes and sits in the same input,
+        // each signer gets the *same* sighash to sign. That mirrors the
+        // BSV stateless-contract multisig pattern used by the other
+        // SDKs.
+        byte[] sighash = new byte[0];
+        if (!sigIndices.isEmpty()) {
+            sighash = computeContractSighash(txHex, 0);
+        }
+        List<byte[]> sighashes = new ArrayList<>(sigIndices.size());
+        for (int i = 0; i < sigIndices.size(); i++) sighashes.add(sighash);
+
+        return new PreparedCall(
+            txHex,
+            sighashes,
+            sigIndices,
+            methodName,
+            resolved,
+            currentUtxo,
+            artifact.isStateful(),
+            continuation,
+            result.newLockingScriptHex(),
+            newSats
+        );
+    }
+
+    public PreparedCall prepareCall(
+        String methodName,
+        List<Object> args,
+        Provider provider,
+        Signer signer
+    ) {
+        return prepareCall(methodName, args, null, provider, signer);
+    }
+
+    public PreparedCall prepareCall(
+        String methodName,
+        List<Object> args,
+        Provider provider
+    ) {
+        return prepareCall(methodName, args, null, provider, null);
+    }
+
+    /**
+     * Finalises a {@link PreparedCall} by splicing external signatures
+     * into the unlocking script and broadcasting. Mirrors the Go SDK's
+     * {@code FinalizeCall}.
+     *
+     * <p>{@code signatures} must contain one DER-encoded ECDSA
+     * signature per entry in {@link PreparedCall#sigIndices()}, in the
+     * same order. The SDK appends the standard {@code SIGHASH_ALL |
+     * FORKID} flag byte before the signature lands in the unlocking
+     * script.
+     *
+     * @throws IllegalArgumentException if {@code signatures.size()} does
+     *         not match {@code prepared.sigIndices().size()} or any
+     *         signature is empty / malformed (does not start with
+     *         0x30 DER tag).
+     */
+    public CallOutcome finalizeCall(
+        PreparedCall prepared,
+        List<byte[]> signatures,
+        Provider provider
+    ) {
+        if (prepared == null) {
+            throw new IllegalArgumentException("RunarContract.finalizeCall: prepared is null");
+        }
+        if (signatures == null) {
+            throw new IllegalArgumentException("RunarContract.finalizeCall: signatures is null");
+        }
+        if (signatures.size() != prepared.sigIndices().size()) {
+            throw new IllegalArgumentException(
+                "RunarContract.finalizeCall: expected " + prepared.sigIndices().size()
+                    + " signatures, got " + signatures.size()
+            );
+        }
+        for (byte[] sig : signatures) {
+            if (sig == null || sig.length < 2 || (sig[0] & 0xff) != 0x30) {
+                throw new IllegalArgumentException(
+                    "RunarContract.finalizeCall: signature is not a DER sequence (must start with 0x30)"
+                );
+            }
+        }
+
+        RunarArtifact.ABIMethod m = findMethod(prepared.methodName);
+        if (m == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.finalizeCall: method '" + prepared.methodName
+                    + "' not found in " + artifact.contractName()
+            );
+        }
+
+        // Splice real signatures into the resolved-args list.
+        List<Object> resolved = new ArrayList<>(prepared.resolvedArgs);
+        for (int i = 0; i < prepared.sigIndices().size(); i++) {
+            int argIdx = prepared.sigIndices().get(i);
+            byte[] der = signatures.get(i);
+            String sigHex = ScriptUtils.bytesToHex(der)
+                + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
+            resolved.set(argIdx, sigHex);
+        }
+        String unlockHex = buildUnlockingScript(m, resolved);
+
+        // Rebuild the tx with the real unlocking script. The outputs
+        // (and therefore BIP-143 sighash inputs) are identical to the
+        // prepared tx, so the spliced signatures remain valid.
+        RawTx tx = RawTxParser.parse(prepared.txHex());
+        tx.setUnlockingScript(0, unlockHex);
+        String finalHex = tx.toHex();
+
+        String txid = provider.broadcastRaw(finalHex);
+        UTXO nextUtxo = null;
+        if (prepared.isStateful && prepared.newLockingScriptHex != null) {
+            nextUtxo = new UTXO(txid, 0, prepared.newSatoshis, prepared.newLockingScriptHex);
+            this.currentUtxo = nextUtxo;
+        } else {
+            this.currentUtxo = null;
+        }
+        return new CallOutcome(txid, finalHex, nextUtxo);
+    }
+
+    // ------------------------------------------------------------------
     // Internals
     // ------------------------------------------------------------------
 
