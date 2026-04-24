@@ -13,6 +13,7 @@ test {
     _ = @import("passes/parse_rust.zig");
     _ = @import("passes/parse_python.zig");
     _ = @import("passes/parse_ruby.zig");
+    _ = @import("passes/parse_java.zig");
     _ = @import("passes/validate.zig");
     _ = @import("passes/typecheck.zig");
     _ = @import("passes/expand_fixed_arrays.zig");

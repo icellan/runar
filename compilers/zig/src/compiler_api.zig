@@ -8,6 +8,7 @@ const parse_go = @import("passes/parse_go.zig");
 const parse_rust = @import("passes/parse_rust.zig");
 const parse_python = @import("passes/parse_python.zig");
 const parse_ruby = @import("passes/parse_ruby.zig");
+const parse_java = @import("passes/parse_java.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const anf_lower = @import("passes/anf_lower.zig");
@@ -37,7 +38,7 @@ pub const CompileResult = struct {
     }
 };
 
-const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, unknown };
+const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, unknown };
 
 fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
@@ -48,6 +49,7 @@ fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
     if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
     if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
+    if (std.mem.endsWith(u8, path, ".runar.java")) return .runar_java;
     return .unknown;
 }
 
@@ -84,6 +86,10 @@ fn parseSource(work: std.mem.Allocator, source: []const u8, file_name: []const u
         },
         .runar_rb => blk: {
             const r = parse_ruby.parseRuby(work, source, file_name);
+            break :blk .{ .contract = r.contract, .errors = r.errors };
+        },
+        .runar_java => blk: {
+            const r = parse_java.parseJava(work, source, file_name);
             break :blk .{ .contract = r.contract, .errors = r.errors };
         },
         .unknown => blk: {
