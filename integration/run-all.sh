@@ -103,6 +103,31 @@ else
   FAILED=$((FAILED + 1))
 fi
 
+echo ""
+echo "=== Java integration tests ==="
+# Java integration uses Gradle + JUnit 5. Tests are gated behind the
+# `-Drunar.integration=true` system property so a bare `gradle test`
+# inside the examples/java build does not attempt to reach a node that
+# is not running. Pass the flag through here so the full matrix driver
+# actually exercises the deploy / call / broadcast path.
+GRADLE_BIN=""
+for candidate in gradle /opt/homebrew/bin/gradle /usr/local/bin/gradle; do
+  if command -v "$candidate" >/dev/null 2>&1; then
+    GRADLE_BIN="$candidate"
+    break
+  fi
+done
+if [ -z "$GRADLE_BIN" ]; then
+  echo "--- Java: SKIPPED (no gradle >= 8 on PATH) ---"
+else
+  if (cd java && "$GRADLE_BIN" test -Drunar.integration=true --no-daemon); then
+    echo "--- Java: PASSED ---"
+  else
+    echo "--- Java: FAILED ---"
+    FAILED=$((FAILED + 1))
+  fi
+fi
+
 if $STOP_NODE; then
   echo ""
   echo "=== Stopping regtest node ==="
