@@ -992,15 +992,6 @@ module RunarCompiler::Codegen
         _lower_get_state_script(name)
       when "array_literal"
         _lower_array_literal(name, value.elements || [], binding_index, last_uses)
-      when "compute_state_output"
-        # handled through call dispatch
-        @sm.push(name)
-      when "extract_output_hash"
-        # handled through call dispatch
-        @sm.push(name)
-      when "build_change_output"
-        # handled through call dispatch
-        @sm.push(name)
       end
     end
 
