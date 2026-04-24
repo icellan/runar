@@ -6,7 +6,7 @@
     ".runar.go": "../../../examples/go/sha256-finalize/Sha256FinalizeTest.runar.go",
     ".runar.rs": "../../../examples/rust/sha256-finalize/Sha256FinalizeTest.runar.rs",
     ".runar.py": "../../../examples/python/sha256-finalize/Sha256FinalizeTest.runar.py",
-    ".runar.rb": "Sha256FinalizeTest.runar.rb",
-    ".runar.zig": "Sha256FinalizeTest.runar.zig"
+    ".runar.rb": "../../../examples/ruby/sha256-finalize/Sha256FinalizeTest.runar.rb",
+    ".runar.zig": "../../../examples/zig/sha256-finalize/Sha256FinalizeTest.runar.zig"
   }
 }

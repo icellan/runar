@@ -15,6 +15,7 @@ pub const Sha256FinalizeTest = struct {
         remaining: runar.ByteString,
         msgBitLen: i64,
     ) void {
-        runar.assert(runar.bytesEq(runar.sha256Finalize(state, remaining, msgBitLen), self.expected));
+        const result = runar.sha256Finalize(state, remaining, msgBitLen);
+        runar.assert(runar.bytesEq(result, self.expected));
     }
 };

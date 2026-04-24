@@ -1,6 +1,6 @@
 require 'runar'
 
-# Sha256Compress -- A stateless contract demonstrating the built-in SHA-256
+# Sha256CompressTest -- A stateless contract demonstrating the built-in SHA-256
 # compression primitive available in Runar.
 #
 # What is SHA-256 compression?
@@ -38,11 +38,11 @@ require 'runar'
 #   - Hash-locked payments: lock funds to a SHA-256 preimage
 #   - Commitment schemes: commit to a value with SHA-256, reveal later
 
-class Sha256Compress < Runar::SmartContract
+class Sha256CompressTest < Runar::SmartContract
   # The expected 32-byte SHA-256 state output. Set at deployment time as part
   # of the locking script. The spending method computes sha256_compress from
   # the unlocking arguments and asserts the result matches this value.
-  prop :expected, ByteString
+  prop :expected, ByteString, readonly: true
 
   def initialize(expected)
     super(expected)

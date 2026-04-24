@@ -1,6 +1,6 @@
 require 'runar'
 
-# Sha256Finalize -- A stateless contract demonstrating the built-in SHA-256
+# Sha256FinalizeTest -- A stateless contract demonstrating the built-in SHA-256
 # finalization primitive available in Runar.
 #
 # What is SHA-256 finalization?
@@ -46,11 +46,11 @@ require 'runar'
 #   - Hash-locked payments where the preimage is up to 55 bytes
 #   - Commitment schemes with automatic padding
 
-class Sha256Finalize < Runar::SmartContract
+class Sha256FinalizeTest < Runar::SmartContract
   # The expected 32-byte SHA-256 digest. Set at deployment time as part of
   # the locking script. The spending method computes sha256_finalize and
   # asserts the result matches this value.
-  prop :expected, ByteString
+  prop :expected, ByteString, readonly: true
 
   def initialize(expected)
     super(expected)

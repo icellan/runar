@@ -6,7 +6,7 @@
     ".runar.go": "../../../examples/go/sha256-compress/Sha256CompressTest.runar.go",
     ".runar.rs": "../../../examples/rust/sha256-compress/Sha256CompressTest.runar.rs",
     ".runar.py": "../../../examples/python/sha256-compress/Sha256CompressTest.runar.py",
-    ".runar.rb": "Sha256CompressTest.runar.rb",
-    ".runar.zig": "Sha256CompressTest.runar.zig"
+    ".runar.rb": "../../../examples/ruby/sha256-compress/Sha256CompressTest.runar.rb",
+    ".runar.zig": "../../../examples/zig/sha256-compress/Sha256CompressTest.runar.zig"
   }
 }
