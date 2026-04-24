@@ -51,6 +51,14 @@ RSpec.describe Runar::Types do
     expect(Runar::Types::Point).to eq(String)
   end
 
+  it 'defines P256Point as String' do
+    expect(Runar::Types::P256Point).to eq(String)
+  end
+
+  it 'defines P384Point as String' do
+    expect(Runar::Types::P384Point).to eq(String)
+  end
+
   it 'defines OpCodeType as String' do
     expect(Runar::Types::OpCodeType).to eq(String)
   end

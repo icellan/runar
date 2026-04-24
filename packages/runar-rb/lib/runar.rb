@@ -38,6 +38,8 @@ SigHashPreimage = Runar::Types::SigHashPreimage
 RabinSig     = Runar::Types::RabinSig
 RabinPubKey  = Runar::Types::RabinPubKey
 Point        = Runar::Types::Point
+P256Point    = Runar::Types::P256Point
+P384Point    = Runar::Types::P384Point
 OpCodeType   = Runar::Types::OpCodeType
 Boolean      = Runar::Types::Boolean
 

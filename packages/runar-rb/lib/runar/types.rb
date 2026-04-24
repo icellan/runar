@@ -24,6 +24,10 @@ module Runar
     RabinSig     = String
     RabinPubKey  = String
     Point        = String
+    # NIST P-256 curve point: x[32] || y[32] = 64 bytes (no prefix).
+    P256Point    = String
+    # NIST P-384 curve point: x[48] || y[48] = 96 bytes (no prefix).
+    P384Point    = String
     OpCodeType   = String
     # Boolean is the Runar boolean type. Ruby uses native true/false values;
     # this constant exists so `prop :active, Boolean` resolves at load time.

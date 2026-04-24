@@ -390,6 +390,30 @@ module RunarCompiler::Codegen
   end
 
   # -----------------------------------------------------------------------
+  # State-property type classification helpers
+  # -----------------------------------------------------------------------
+
+  # State-field types that are stored as script numbers (require OP_BIN2NUM
+  # after extraction). `RabinSig`/`RabinPubKey` are bigint aliases.
+  NUMERIC_STATE_TYPES = %w[bigint boolean RabinSig RabinPubKey].to_set.freeze
+
+  # State-field types that are stored with a push-data length prefix and thus
+  # require `emit_push_data_decode` instead of a fixed OP_SPLIT.
+  VARIABLE_LENGTH_STATE_TYPES = %w[ByteString Sig SigHashPreimage].to_set.freeze
+
+  # @param t [String]
+  # @return [Boolean]
+  def self.numeric_state_type?(t)
+    NUMERIC_STATE_TYPES.include?(t)
+  end
+
+  # @param t [String]
+  # @return [Boolean]
+  def self.variable_length_state_type?(t)
+    VARIABLE_LENGTH_STATE_TYPES.include?(t)
+  end
+
+  # -----------------------------------------------------------------------
   # LoweringContext -- mutable state for the stack-lowering pass
   # -----------------------------------------------------------------------
 
@@ -2788,12 +2812,22 @@ module RunarCompiler::Codegen
         state_props << p
         sz = case p.type
              when "bigint" then 8
+             # RabinSig / RabinPubKey are bigint aliases — same 8-byte layout.
+             when "RabinSig", "RabinPubKey" then 8
              when "boolean" then 1
              when "PubKey" then 33
              when "Addr" then 20
+             # Ripemd160 is 20 bytes (same underlying shape as Addr).
+             when "Ripemd160" then 20
              when "Sha256" then 32
              when "Point" then 64
-             when "ByteString"
+             # P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+             when "P256Point" then 64
+             # P-384 point: x[48] || y[48] = 96 bytes.
+             when "P384Point" then 96
+             # ByteString-typed variable-length fields — treated the same
+             # as ByteString (push-data-prefixed in state).
+             when "ByteString", "Sig", "SigHashPreimage"
                has_variable_length = true
                -1
              else
@@ -2934,7 +2968,7 @@ module RunarCompiler::Codegen
     def _split_fixed_state_fields(state_props, prop_sizes)
       if state_props.length == 1
         prop = state_props[0]
-        emit_opcode("OP_BIN2NUM") if %w[bigint boolean].include?(prop.type)
+        emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
         @sm.pop
         @sm.push(prop.name)
       else
@@ -2944,12 +2978,12 @@ module RunarCompiler::Codegen
             emit_push_int(sz); @sm.push("")
             emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
             emit_op({ op: "swap" }); @sm.swap
-            emit_opcode("OP_BIN2NUM") if %w[bigint boolean].include?(prop.type)
+            emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
             emit_op({ op: "swap" }); @sm.swap
             @sm.pop; @sm.pop
             @sm.push(prop.name); @sm.push("")
           else
-            emit_opcode("OP_BIN2NUM") if %w[bigint boolean].include?(prop.type)
+            emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
             @sm.pop
             @sm.push(prop.name)
           end
@@ -2960,10 +2994,10 @@ module RunarCompiler::Codegen
     def _parse_variable_length_state_fields(state_props, prop_sizes)
       if state_props.length == 1
         prop = state_props[0]
-        if prop.type == "ByteString"
+        if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
           emit_push_data_decode
           emit_op({ op: "drop" }); @sm.pop
-        elsif %w[bigint boolean].include?(prop.type)
+        elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
           emit_opcode("OP_BIN2NUM")
         end
         @sm.pop
@@ -2971,7 +3005,7 @@ module RunarCompiler::Codegen
       else
         state_props.each_with_index do |prop, i|
           if i < state_props.length - 1
-            if prop.type == "ByteString"
+            if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
               emit_push_data_decode
               @sm.pop; @sm.pop
               @sm.push(prop.name); @sm.push("")
@@ -2980,16 +3014,16 @@ module RunarCompiler::Codegen
               emit_push_int(sz); @sm.push("")
               emit_opcode("OP_SPLIT"); @sm.pop; @sm.pop; @sm.push(""); @sm.push("")
               emit_op({ op: "swap" }); @sm.swap
-              emit_opcode("OP_BIN2NUM") if %w[bigint boolean].include?(prop.type)
+              emit_opcode("OP_BIN2NUM") if RunarCompiler::Codegen.numeric_state_type?(prop.type)
               emit_op({ op: "swap" }); @sm.swap
               @sm.pop; @sm.pop
               @sm.push(prop.name); @sm.push("")
             end
           else
-            if prop.type == "ByteString"
+            if RunarCompiler::Codegen.variable_length_state_type?(prop.type)
               emit_push_data_decode
               emit_op({ op: "drop" }); @sm.pop
-            elsif %w[bigint boolean].include?(prop.type)
+            elsif RunarCompiler::Codegen.numeric_state_type?(prop.type)
               emit_opcode("OP_BIN2NUM")
             end
             @sm.pop
