@@ -151,17 +151,17 @@ The signer must track which keys have been used. Reusing an index breaks securit
 
 ## Implementation Status
 
-Both WOTS+ and SLH-DSA are fully implemented in the maintained compiler set (TypeScript, Go, Rust, Python, Zig), producing byte-identical Bitcoin Script on the shared conformance suite.
+Both WOTS+ and SLH-DSA are fully implemented in the maintained compiler set (TypeScript, Go, Rust, Python, Zig, Ruby), producing byte-identical Bitcoin Script on the shared conformance suite.
 
 | Scheme | Measured Script Size | Conformance Status |
 |--------|---------------------|-------------------|
-| WOTS+ (`verifyWOTS`) | 10,530 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-128s | 207,874 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-128f | 612,518 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-192s | 306,049 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-192f | 905,067 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-256s | 416,592 bytes | TS, Go, Rust, Python, Zig: byte-identical |
-| SLH-DSA-SHA2-256f | 848,327 bytes | TS, Go, Rust, Python, Zig: byte-identical |
+| WOTS+ (`verifyWOTS`) | 10,530 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-128s | 207,874 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-128f | 612,518 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-192s | 306,049 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-192f | 905,067 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-256s | 416,592 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
+| SLH-DSA-SHA2-256f | 848,327 bytes | TS, Go, Rust, Python, Zig, Ruby: byte-identical |
 
 ## Hybrid ECDSA + Post-Quantum Patterns
 

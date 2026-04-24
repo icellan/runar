@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.go`
-**Supported compilers:** Go only
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby (all six)
 
 ---
 
@@ -10,7 +10,7 @@
 
 The Go format lets you write Rúnar contracts as idiomatic Go code. Contracts are Go structs embedding `runar.SmartContract` or `runar.StatefulSmartContract`, with methods defined as receiver functions. The Go compiler parses these directly -- no intermediate conversion to TypeScript.
 
-This format is **only supported by the Go compiler** (`compilers/go`). The TypeScript and Rust compilers cannot parse `.runar.go` files. If you need cross-compiler portability, use the TypeScript format instead.
+This format is supported by all six compilers (TypeScript, Go, Rust, Python, Zig, Ruby) via their respective `parser_go*` modules, so `.runar.go` contracts produce identical Bitcoin Script across compilers.
 
 ---
 

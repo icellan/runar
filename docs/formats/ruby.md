@@ -2,7 +2,7 @@
 
 **Status:** Experimental
 **File extension:** `.runar.rb`
-**Supported compilers:** TypeScript, Go, Rust, Python (all four)
+**Supported compilers:** TypeScript, Go, Rust, Python, Zig, Ruby (all six)
 
 ---
 
@@ -10,7 +10,7 @@
 
 The Ruby format lets you write Runar contracts as Ruby classes extending `Runar::SmartContract` or `Runar::StatefulSmartContract`. Contracts use a lightweight DSL — `prop` for typed properties, `runar_public` for public method visibility, and `params` for private method parameter types. Instance variables use `@var` syntax.
 
-All four compilers (TypeScript, Go, Rust, Python) support `.runar.rb` parsing, so Ruby-format contracts produce identical Bitcoin Script across all compilers.
+All six compilers (TypeScript, Go, Rust, Python, Zig, Ruby) support `.runar.rb` parsing, so Ruby-format contracts produce identical Bitcoin Script across all compilers.
 
 ---
 

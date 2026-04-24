@@ -17,7 +17,6 @@ A provably-fair blackjack game that uses Bitcoin SV smart contracts (compiled wi
 This will:
 - Pull `bitcoinsv/bitcoin-sv:latest` from Docker Hub (on first run)
 - Create a `regtest/n1` directory with a `bitcoin.conf` for regtest mode
-- Copy `regtest_wallet.dat` into the node's data directory (if the wallet file exists)
 - Start a `bitcoin-sv-regtest` Docker container with the data volume mounted at `/data`, exposing RPC on port `18332`
 
 You can interact with the node directly:

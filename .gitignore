@@ -12,6 +12,7 @@ coverage/
 .vscode/
 /conformance/.tmp/
 /conformance/artifacts/
+/artifacts/
 /conformance/fuzz-findings/
 /conformance/fuzz-findings-ir/
 target/

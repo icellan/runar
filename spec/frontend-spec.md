@@ -3,7 +3,7 @@
 **Version:** 0.1.0
 **Status:** Draft
 
-This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, Solidity-like, Move-like, Go, Rust) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
+This document specifies the **language-agnostic contract** of Rúnar frontend parsers. Every parser -- regardless of input format (TypeScript, Solidity-like, Move-like, Go, Rust, Python, Zig, Ruby) -- must produce a `ContractNode` AST that conforms to this specification. The AST is the universal interface between the frontend (parsing) and the backend (validate, typecheck, ANF lower, stack lower, emit).
 
 ---
 

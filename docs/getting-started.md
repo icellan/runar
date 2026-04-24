@@ -14,7 +14,9 @@ Before you begin, make sure you have the following installed:
 | **pnpm** | 9.0.0+          | Package manager (workspace support required) |
 | **Go** | 1.26+           | Only needed if you want to build/use the Go compiler |
 | **Rust** | 1.75+           | Only needed if you want to build/use the Rust compiler |
+| **Python** | 3.13+           | Only needed if you want to build/use the Python compiler |
 | **Zig** | 0.15.x           | Only needed if you want to build/use the Zig compiler |
+| **Ruby** | 3.2+            | Only needed if you want to build/use the Ruby compiler |
 
 Verify your installations:
 

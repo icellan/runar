@@ -107,7 +107,7 @@ six-phase pipeline: parsing, validation, type checking, A-Normal Form (ANF)
 lowering, stack lowering, and opcode emission. All five frontends converge
 onto a shared Abstract Syntax Tree, which is then lowered through an
 ANF-based intermediate representation that serves as the \emph{conformance
-boundary} between three independent compiler implementations. We formalize
+boundary} between six independent compiler implementations. We formalize
 the type system, describe the stack scheduling algorithm that maps named
 temporaries to positional stack operations, and characterize the correctness
 properties guaranteed by the pipeline: type safety, termination, determinism,
@@ -145,15 +145,15 @@ locking scripts. The key design decisions are:
     compilation output.
   \item \textbf{ANF as conformance boundary.} The A-Normal Form intermediate
     representation is fully specified and canonically serializable, enabling
-    three independent compiler implementations (TypeScript, Go, Rust) to
-    produce byte-identical output for the same input.
+    six independent compiler implementations (TypeScript, Go, Rust, Python,
+    Zig, Ruby) to produce byte-identical output for the same input.
   \item \textbf{Static guarantees.} The type system, combined with validation
     constraints (bounded loops, no recursion, affine consumption tracking
     for signature and preimage types), ensures that all compiled programs
     terminate, maintain type safety, and preserve UTXO integrity.
   \item \textbf{Deterministic stack scheduling.} A last-use analysis algorithm
     deterministically maps named ANF temporaries to Bitcoin Script stack
-    positions, producing identical bytecode across all three compiler
+    positions, producing identical bytecode across all six compiler
     implementations.
 \end{enumerate}
 
@@ -836,7 +836,7 @@ becomes:
 
 Temporaries are numbered sequentially ($t_0, t_1, t_2, \ldots$) within each
 method. This canonical naming scheme is critical for cross-compiler
-conformance: all three compiler implementations must produce identical
+conformance: all six compiler implementations must produce identical
 temporary indices for the same input.
 
 \subsubsection{Logical Operator Lowering}
@@ -902,13 +902,13 @@ remain valid.
 Although the constant folding optimizer is fully implemented, it is
 \emph{disabled by default} in the standard compilation pipeline. The
 reason is architectural: the ANF IR serves as the conformance boundary
-between the three independent compiler implementations
-(Section~\ref{sec:eval-conformance}), and all three must produce
+between the six independent compiler implementations
+(Section~\ref{sec:eval-conformance}), and all six must produce
 byte-identical ANF IR for the same input to satisfy
 Theorem~\ref{thm:conformance}. Enabling constant folding would modify the
 ANF IR---replacing operation bindings with pre-computed constants---thereby
 altering the canonical representation that the conformance suite validates
-against. Since the three compilers share the same stack lowering and
+against. Since the six compilers share the same stack lowering and
 emission algorithms, any script size reduction achieved by folding at the
 ANF level would equally be achievable by each compiler independently, but
 the intermediate ANF output would no longer match, breaking the
@@ -1118,7 +1118,7 @@ The value kinds $V$ are:
 
 The ANF IR is serialized as JSON with lexicographically sorted object keys
 and deterministic formatting, producing a canonical form that serves as the
-\emph{conformance boundary}: all three compiler implementations must produce
+\emph{conformance boundary}: all six compiler implementations must produce
 byte-identical ANF IR JSON for the same input. The conformance runner
 canonicalizes by recursively sorting keys and re-serializing with uniform
 indentation. A strict RFC~8785 (JSON Canonicalization Scheme) serializer
@@ -1232,7 +1232,7 @@ OP_NIP OP_NIP         // clean up, leave result
 \end{lstlisting}
 
 This computes $\textit{base}^{\min(\textit{exp}, 32)}$ in exactly 32
-conditional multiply steps. The algorithm is identical across all three
+conditional multiply steps. The algorithm is identical across all six
 compiler implementations for cross-compiler conformance.
 
 \paragraph{Square Root (\texttt{sqrt}).}
@@ -1438,14 +1438,14 @@ map and last-use analysis, both of which are determined by the ANF IR.
 
 \begin{theorem}[Cross-Compiler Conformance]
 \label{thm:conformance}
-The three compiler implementations (TypeScript, Go, Rust) produce
-byte-identical Bitcoin Script for any valid \runar{} source program.
+The six compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby)
+produce byte-identical Bitcoin Script for any valid \runar{} source program.
 \end{theorem}
 
 \begin{proof}[Proof sketch]
-All three implementations adhere to the same ANF IR specification (which
+All six implementations adhere to the same ANF IR specification (which
 is canonically serializable) and the same stack lowering algorithm. The
-ANF IR serves as the conformance boundary: if all three produce the same
+ANF IR serves as the conformance boundary: if all six produce the same
 ANF IR, and the stack lowering and emission algorithms are specified
 unambiguously, then the output must be identical.
 \end{proof}
@@ -1602,7 +1602,7 @@ The \runar{} test suite comprises three tiers of validation:
     state transitions, and assertion behavior.
   \item \textbf{Cross-compiler conformance tests} (9 golden-file tests +
     dynamic discovery): The conformance suite compiles each test case through
-    all three compiler implementations and compares the output against a
+    all six compiler implementations and compares the output against a
     golden \texttt{expected-script.hex} file, requiring byte-identical results.
 \end{enumerate}
 
@@ -1656,7 +1656,7 @@ post-quantum-slhdsa & 207,874 & SLH-DSA (SHA2-128s) \\
 \bottomrule
 \end{tabular}
 \caption{Conformance test cases with byte-identical output across
-  all three compiler implementations (TypeScript, Go, Rust).}
+  all six compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby).}
 \label{tab:conformance}
 \end{table}
 
@@ -1727,7 +1727,7 @@ Several observations emerge from these measurements:
 \label{sec:eval-infra}
 %-----------------------------------------------------------------------------
 
-The CI pipeline validates all three compilers independently:
+The CI pipeline validates all six compilers independently:
 
 \begin{enumerate}[nosep]
   \item \textbf{TypeScript}: \texttt{pnpm test} runs all package-level
@@ -1736,8 +1736,8 @@ The CI pipeline validates all three compilers independently:
     compiler tests and native Go contract tests.
   \item \textbf{Rust}: \texttt{cargo test} runs compiler tests and
     native Rust contract tests.
-  \item \textbf{Conformance}: A dedicated job (dependent on all three)
-    compiles each conformance test through Go and Rust, comparing hex
+  \item \textbf{Conformance}: A dedicated job (dependent on all six)
+    compiles each conformance test through every compiler, comparing hex
     output against golden files.
 \end{enumerate}
 
@@ -1750,8 +1750,8 @@ a production-grade script interpreter.
 \subsection{Deployment SDKs}
 \label{sec:eval-sdk}
 
-Deployment SDKs are provided in all three implementation languages
-(TypeScript, Go, Rust), enabling contract deployment, method invocation,
+Deployment SDKs are provided in all six implementation languages
+(TypeScript, Go, Rust, Python, Zig, Ruby), enabling contract deployment, method invocation,
 state management, and blockchain interaction from any language. Each SDK
 provides equivalent functionality: contract lifecycle management
 (\texttt{RunarContract}), blockchain abstraction (\texttt{Provider}
@@ -1812,8 +1812,8 @@ unrolling or runtime loop constructs (which would require Bitcoin Script
 extensions) could mitigate this, but are not currently supported.
 
 \paragraph{Post-quantum features are experimental.}
-Both WOTS+ and SLH-DSA script generation are implemented across all three
-compilers (TypeScript, Go, Rust) and produce byte-identical output in
+Both WOTS+ and SLH-DSA script generation are implemented across all six
+compilers (TypeScript, Go, Rust, Python, Zig, Ruby) and produce byte-identical output in
 conformance testing. However, the resulting scripts are large:
 SLH-DSA SHA2-128s generates approximately 203~KB of Bitcoin Script
 (Table~\ref{tab:conformance}), and larger parameter sets produce
@@ -1822,12 +1822,11 @@ proportionally larger scripts. While these sizes are within Bitcoin SV's
 to be evaluated. The post-quantum APIs are experimental and may change in
 future releases.
 
-\paragraph{Go and Rust frontends are single-compiler.}
-The Go frontend (\texttt{.runar.go}) is supported only by the Go compiler,
-and the Rust frontend (\texttt{.runar.rs}) only by the Rust compiler.
-Cross-compiler conformance for these formats would require implementing
-Go and Rust parsers in all three compiler codebases, which is not
-currently planned.
+\paragraph{Go and Rust frontend parity.}
+The Go frontend (\texttt{.runar.go}) and the Rust frontend (\texttt{.runar.rs})
+were originally single-compiler formats, but all six compilers now ship
+parsers for both, so cross-compiler conformance holds for these formats as
+well.
 
 \paragraph{No formal Bitcoin Script semantics.}
 The correctness arguments assume but do not formalize the semantics of
@@ -1847,7 +1846,7 @@ languages to Bitcoin Script or similar stack-based targets.
 \textbf{sCrypt}~\cite{scrypt} provides a TypeScript-based DSL for Bitcoin SV
 smart contracts, sharing a similar source language design with \runar{}.
 However, sCrypt uses a single compiler implementation, whereas \runar{}
-employs three independent implementations with a formal conformance boundary.
+employs six independent implementations with a formal conformance boundary.
 
 \textbf{Miniscript}~\cite{miniscript} is a structured subset of Bitcoin
 Script focused on composability and analysis of spending policies. Unlike
@@ -1886,7 +1885,7 @@ six-phase pipeline. The key contributions are:
     language-agnostic smart contract compilation, allowing developers to
     write Bitcoin contracts in their preferred syntax.
   \item A \textbf{canonically serializable ANF IR} that serves as a formal
-    conformance boundary between three independent compiler implementations,
+    conformance boundary between six independent compiler implementations,
     enabling cross-compiler verification of correctness.
   \item A \textbf{deterministic stack scheduling algorithm} that maps named
     temporaries to positional stack operations with last-use analysis,

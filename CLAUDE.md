@@ -37,11 +37,12 @@ examples/
   move/               # Move-style contracts + vitest tests
   python/             # Python contracts + pytest tests
   sdk-usage/          # SDK usage reference docs (not runnable)
-  end2end-example/    # End-to-end example (ts, go, rust, sol, move, webapp, webapp-blackjack)
+  end2end-example/    # End-to-end example (ts, go, rust, sol, move, python, ruby, zig, webapp, webapp-blackjack)
 spec/                 # Language specification (grammar, semantics, type system)
 docs/                 # User-facing documentation
   formats/            # Format-specific guides (solidity.md, move.md, go.md, rust.md, python.md)
-integration/          # On-chain integration tests (ts, go, rust, python) + regtest tooling
+integration/          # On-chain integration tests (ts, go, rust, python, ruby, zig) + regtest tooling
+tests/                # Repo-root research vectors (babybear/koalabear/bn254/merkle/FRI) + vitest tests that consume them
 go.work              # Go workspace: compilers/go + conformance + examples/end2end-example/go + examples/end2end-example/webapp + examples/end2end-example/webapp-blackjack + examples/go + integration/go + packages/runar-go
 ```
 
@@ -215,7 +216,7 @@ All six languages have equivalent deployment SDKs for interacting with compiled 
 
 **Rust** (`packages/runar-rs/src/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner` (k256 ECDSA + manual BIP-143), `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization.
 
-**Python** (`packages/runar-py/runar/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Zero required dependencies (hashlib is stdlib). Python contracts use snake_case names which the parser converts to camelCase in the AST.
+**Python** (`packages/runar-py/runar/sdk/`): `RunarContract`, `MockProvider`, `MockSigner`/`ExternalSigner`, `build_deploy_transaction`, `build_call_transaction`, state serialization. Zero required dependencies (hashlib is stdlib). `LocalSigner` uses bsv-sdk if installed for speed; otherwise falls back to the bundled pure-Python ECDSA implementation. Python contracts use snake_case names which the parser converts to camelCase in the AST.
 
 **Zig** (`packages/runar-zig/src/sdk/`): `RunarContract`, `MockProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `LocalSigner`/`MockSigner`/`ExternalSigner`, BSV-20/BSV-21 ordinals, `deployWithWallet`, ANF interpreter.
 
@@ -232,7 +233,7 @@ Key SDK concepts:
 
 ### Module Resolution
 - pnpm workspace packages are not hoisted to root `node_modules`. The `vitest.config.ts` at root provides aliases so `examples/` tests can import `runar-testing` by name.
-- `go.work` at the project root connects `compilers/go`, `conformance`, `examples/end2end-example/go`, `examples/end2end-example/webapp`, `examples/end2end-example/webapp-blackjack`, `examples/go`, and `packages/runar-go` so `import runar "github.com/icellan/runar/packages/runar-go"` resolves everywhere.
+- `go.work` at the project root connects `compilers/go`, `conformance`, `examples/end2end-example/go`, `examples/end2end-example/webapp`, `examples/end2end-example/webapp-blackjack`, `examples/go`, `integration/go`, and `packages/runar-go` so `import runar "github.com/icellan/runar/packages/runar-go"` resolves everywhere.
 - Rust example tests use `Cargo.toml` at `examples/rust/` with `[[test]]` entries pointing to each contract's `_test.rs` file.
 
 ## Style

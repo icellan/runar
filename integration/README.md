@@ -1,6 +1,6 @@
 # Integration Tests
 
-End-to-end integration tests that deploy and spend Runar contracts on a real Bitcoin node. Tests are organized by language — each suite uses its own compiler and SDK for deployment/calling.
+End-to-end integration tests that deploy and spend Runar contracts on a real Bitcoin node. Tests are organized by language (Go, TypeScript, Rust, Python, Ruby, Zig) — each suite uses its own compiler and SDK for deployment/calling.
 
 Two node backends are supported:
 
@@ -85,23 +85,23 @@ pnpm integration:all:run
 
 ## Contracts Tested
 
-| Contract | Type | Go | TS | Rust | Python | Key Feature |
-|----------|------|----|----|------|--------|-------------|
-| P2PKH | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | ECDSA checkSig |
-| Escrow | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Multi-method, multi-signer |
-| Counter | Stateful | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | OP_PUSH_TX, state transitions |
-| MathDemo | Stateful | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Built-in math functions |
-| FungibleToken | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | PubKey + balance state |
-| SimpleNFT | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Token transfer + burn |
-| Auction | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Bidding + locktime |
-| CovenantVault | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Covenant rules (SigHashPreimage) |
-| OraclePriceFeed | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Rabin signatures |
-| FunctionPatterns | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Private methods, composition |
-| PostQuantumWallet | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | WOTS+ (19KB script) |
-| SPHINCSWallet | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | SLH-DSA (188KB script) |
-| SchnorrZKP | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | EC operations, ZKP (877KB) |
-| ConvergenceProof | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | EC point arithmetic |
-| EC Isolation | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | ecOnCurve, ecMulGen, ecAdd, ecNegate |
+| Contract | Type | Go | TS | Rust | Python | Ruby | Zig | Key Feature |
+|----------|------|----|----|------|--------|------|-----|-------------|
+| P2PKH | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | ECDSA checkSig |
+| Escrow | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Multi-method, multi-signer |
+| Counter | Stateful | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | OP_PUSH_TX, state transitions |
+| MathDemo | Stateful | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Deploy + Call | Built-in math functions |
+| FungibleToken | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | PubKey + balance state |
+| SimpleNFT | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Token transfer + burn |
+| Auction | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Bidding + locktime |
+| CovenantVault | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Covenant rules (SigHashPreimage) |
+| OraclePriceFeed | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Rabin signatures |
+| FunctionPatterns | Stateful | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Private methods, composition |
+| PostQuantumWallet | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | WOTS+ (19KB script) |
+| SPHINCSWallet | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | SLH-DSA (188KB script) |
+| SchnorrZKP | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | EC operations, ZKP (877KB) |
+| ConvergenceProof | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | EC point arithmetic |
+| EC Isolation | Stateless | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | Deploy + Spend | ecOnCurve, ecMulGen, ecAdd, ecNegate |
 
 ## Node Setup Details
 
