@@ -137,6 +137,18 @@ fn is_merkle_builtin(name: &str) -> bool {
     matches!(name, "merkleRootSha256" | "merkleRootHash256" | "merkleRootPoseidon2KB")
 }
 
+/// State-field types that are stored as script numbers (require OP_BIN2NUM
+/// after extraction). `RabinSig`/`RabinPubKey` are bigint aliases.
+fn is_numeric_state_type(t: &str) -> bool {
+    matches!(t, "bigint" | "boolean" | "RabinSig" | "RabinPubKey")
+}
+
+/// State-field types that are stored with a push-data length prefix and thus
+/// require `emit_push_data_decode` instead of a fixed OP_SPLIT.
+fn is_variable_length_state_type(t: &str) -> bool {
+    matches!(t, "ByteString" | "Sig" | "SigHashPreimage")
+}
+
 fn builtin_opcodes(name: &str) -> Option<Vec<&'static str>> {
     match name {
         "sha256" => Some(vec!["OP_SHA256"]),
@@ -2522,12 +2534,22 @@ impl LoweringContext {
             prop_types.push(p.prop_type.clone());
             let sz: i128 = match p.prop_type.as_str() {
                 "bigint" => 8,
+                // RabinSig / RabinPubKey are bigint aliases — same 8-byte layout.
+                "RabinSig" | "RabinPubKey" => 8,
                 "boolean" => 1,
                 "PubKey" => 33,
                 "Addr" => 20,
+                // Ripemd160 is 20 bytes (same underlying type as Addr).
+                "Ripemd160" => 20,
                 "Sha256" => 32,
                 "Point" => 64,
-                "ByteString" => { has_variable_length = true; -1 },
+                // P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+                "P256Point" => 64,
+                // P-384 point: x[48] || y[48] = 96 bytes.
+                "P384Point" => 96,
+                // ByteString-typed variable-length fields — treated the same as
+                // ByteString (push-data-prefixed in state).
+                "ByteString" | "Sig" | "SigHashPreimage" => { has_variable_length = true; -1 },
                 _ => panic!("deserialize_state: unsupported type: {}", p.prop_type),
             };
             prop_sizes.push(sz);
@@ -2749,7 +2771,7 @@ impl LoweringContext {
     ) {
         let num_props = prop_names.len();
         if num_props == 1 {
-            if prop_types[0] == "bigint" || prop_types[0] == "boolean" {
+            if is_numeric_state_type(&prop_types[0]) {
                 self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
             }
             self.sm.pop();
@@ -2765,7 +2787,7 @@ impl LoweringContext {
                     self.sm.push(""); self.sm.push("");
                     self.emit_op(StackOp::Swap);
                     self.sm.swap();
-                    if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                    if is_numeric_state_type(&prop_types[i]) {
                         self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
                     }
                     self.emit_op(StackOp::Swap);
@@ -2774,7 +2796,7 @@ impl LoweringContext {
                     self.sm.push(&prop_names[i]);
                     self.sm.push("");
                 } else {
-                    if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                    if is_numeric_state_type(&prop_types[i]) {
                         self.emit_op(StackOp::Opcode("OP_BIN2NUM".to_string()));
                     }
                     self.sm.pop();
@@ -2792,11 +2814,11 @@ impl LoweringContext {
     ) {
         let num_props = prop_names.len();
         if num_props == 1 {
-            if prop_types[0] == "ByteString" {
-                // Single ByteString field: decode push-data prefix, drop trailing empty
+            if is_variable_length_state_type(&prop_types[0]) {
+                // Variable-length byte-string: decode push-data prefix, drop trailing empty
                 self.emit_push_data_decode(); // [..., data, remaining]
                 self.emit_op(StackOp::Drop); self.sm.pop();
-            } else if prop_types[0] == "bigint" || prop_types[0] == "boolean" {
+            } else if is_numeric_state_type(&prop_types[0]) {
                 self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
             }
             self.sm.pop();
@@ -2804,8 +2826,8 @@ impl LoweringContext {
         } else {
             for i in 0..num_props {
                 if i < num_props - 1 {
-                    if prop_types[i] == "ByteString" {
-                        // ByteString: decode push-data prefix, extract data
+                    if is_variable_length_state_type(&prop_types[i]) {
+                        // Variable-length byte-string: decode push-data prefix, extract data
                         self.emit_push_data_decode(); // [..., data, rest]
                         self.sm.pop(); self.sm.pop();
                         self.sm.push(&prop_names[i]);
@@ -2817,7 +2839,7 @@ impl LoweringContext {
                         self.sm.pop(); self.sm.pop();
                         self.sm.push(""); self.sm.push("");
                         self.emit_op(StackOp::Swap); self.sm.swap();
-                        if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                        if is_numeric_state_type(&prop_types[i]) {
                             self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
                         }
                         self.emit_op(StackOp::Swap); self.sm.swap();
@@ -2826,11 +2848,11 @@ impl LoweringContext {
                         self.sm.push("");
                     }
                 } else {
-                    if prop_types[i] == "ByteString" {
-                        // Last ByteString: decode push-data prefix, drop trailing empty
+                    if is_variable_length_state_type(&prop_types[i]) {
+                        // Last variable-length field: decode push-data prefix, drop trailing empty
                         self.emit_push_data_decode(); // [..., data, remaining]
                         self.emit_op(StackOp::Drop); self.sm.pop();
-                    } else if prop_types[i] == "bigint" || prop_types[i] == "boolean" {
+                    } else if is_numeric_state_type(&prop_types[i]) {
                         self.emit_op(StackOp::Opcode("OP_BIN2NUM".into()));
                     }
                     self.sm.pop();

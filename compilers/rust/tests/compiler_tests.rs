@@ -2088,3 +2088,36 @@ fn test_exit_builtin() {
     println!("ExitTest script hex: {}", artifact.script);
     println!("ExitTest script asm: {}", artifact.asm);
 }
+
+// ---------------------------------------------------------------------------
+// Test: deserialize_state supports the full set of property types the
+// validator allows (Ripemd160, Sig, SigHashPreimage, RabinSig, RabinPubKey,
+// P256Point, P384Point). Previously the codegen allowlist was narrower than
+// the validator and panicked with "deserialize_state: unsupported type" for
+// these byte-string-typed state fields.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deserialize_state_ripemd160_codegens_cleanly() {
+    let source = r#"
+import { StatefulSmartContract, Ripemd160 } from 'runar-lang';
+
+class Tag extends StatefulSmartContract {
+    hash: Ripemd160;
+
+    constructor(hash: Ripemd160) {
+        super(hash);
+        this.hash = hash;
+    }
+
+    public update(newHash: Ripemd160) {
+        this.hash = newHash;
+    }
+}
+"#;
+    let artifact = compile_from_source_str(source, Some("Tag.runar.ts"))
+        .expect("Ripemd160 state field should codegen cleanly");
+    assert_eq!(artifact.contract_name, "Tag");
+    assert!(!artifact.script.is_empty());
+}
+

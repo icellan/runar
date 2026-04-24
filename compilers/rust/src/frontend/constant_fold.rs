@@ -507,7 +507,7 @@ pub fn fold_constants_only(program: &ANFProgram) -> ANFProgram {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFValue};
+    use crate::ir::{ANFBinding, ANFMethod, ANFProgram, ANFValue};
 
     fn make_program(methods: Vec<ANFMethod>) -> ANFProgram {
         ANFProgram {
