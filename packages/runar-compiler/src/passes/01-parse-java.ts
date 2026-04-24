@@ -469,18 +469,6 @@ class JavaParser {
     return last;
   }
 
-  // Parse any qualified identifier, returning the full text with dots.
-  private parseQualifiedNameFull(): string {
-    let t = this.expect('ident');
-    let acc = t.value;
-    while (this.current().type === '.') {
-      this.advance();
-      t = this.expect('ident');
-      acc += '.' + t.value;
-    }
-    return acc;
-  }
-
   // Skip an annotation: `@Name` with optional `(...)` argument list.
   private skipAnnotation(): void {
     this.expect('@');

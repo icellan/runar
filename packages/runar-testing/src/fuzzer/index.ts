@@ -37,6 +37,7 @@ export {
   renderPython,
   renderZig,
   renderRuby,
+  renderJava,
   RENDERERS,
   FORMAT_EXTENSIONS,
 } from './renderers.js';

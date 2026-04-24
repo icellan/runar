@@ -697,10 +697,318 @@ export function renderRuby(contract: GeneratedContract): string {
 }
 
 // ---------------------------------------------------------------------------
+// Java renderer (.runar.java)
+// ---------------------------------------------------------------------------
+//
+// The Java compiler (compilers/java/) parses .runar.java via javac, so every
+// contract we produce here must be syntactically valid Java on top of being
+// valid Rúnar. The rules:
+//
+//   * Arithmetic on bigints goes through the Bigint-wrapper methods
+//     (.plus/.minus/.times/.gt/.lt/.eq/...). javac does not accept native
+//     `+`/`-`/`*` on reference types, and the parser lowers the wrapper calls
+//     to the canonical arithmetic AST identically to `a + b` in TypeScript.
+//   * Integer literals lower to BigInteger constants via Bigint.of(N);
+//     small constants use Bigint.ZERO/ONE/TWO/TEN.
+//   * Boolean operators (`&&`, `||`, `!`) and `==`/`!=` on `boolean` work
+//     natively. `===`/`!==` (TypeScript strict equality) map to `==`/`!=`.
+//   * Builtins are static-imported from `runar.lang.Builtins`.
+//   * All fields in a `SmartContract` must be `@Readonly`; mutable fields
+//     are only legal on `StatefulSmartContract` (the validator enforces
+//     this, matching TS/Python behaviour).
+
+function javaType(t: RuinarType): string {
+  switch (t) {
+    case 'bigint': return 'Bigint';
+    case 'boolean': return 'boolean';
+    case 'ByteString': return 'ByteString';
+    case 'PubKey': return 'PubKey';
+    case 'Sig': return 'Sig';
+    case 'Addr': return 'Addr';
+    case 'Sha256': return 'Sha256';
+    case 'Ripemd160': return 'Ripemd160';
+  }
+}
+
+/** Javac requires contract identifiers to be valid Java identifiers. */
+function javaIdent(name: string): string {
+  // The IR generator only produces alphanumerics, but guard anyway.
+  return name.replace(/[^A-Za-z0-9_]/g, '_');
+}
+
+const JAVA_BIGINT_BIN_METHOD: Partial<Record<string, string>> = {
+  '+': 'plus',
+  '-': 'minus',
+  '*': 'times',
+  '/': 'div',
+  '%': 'mod',
+  '<': 'lt',
+  '>': 'gt',
+  '<=': 'le',
+  '>=': 'ge',
+  '===': 'eq',
+  '!==': 'neq',
+};
+
+/** Java has no `2n` literal; surface via Bigint.of(N). */
+function javaBigintLiteral(value: bigint): string {
+  if (value === 0n) return 'Bigint.ZERO';
+  if (value === 1n) return 'Bigint.ONE';
+  if (value === 2n) return 'Bigint.TWO';
+  if (value === 10n) return 'Bigint.TEN';
+  // TypeScript's `-N n` literal syntax parses as `UnaryExpr(NEG, BigIntLiteral N)`
+  // rather than a single literal with value `-N`, so every other compiler emits
+  // a `unary_op -` node around a positive constant. Match that shape exactly by
+  // wrapping negatives in `.neg()` — otherwise `Bigint.of(-51L)` would be folded
+  // into a single BigIntLiteral(-51) at parse time, diverging from the rest.
+  if (value < 0n) return `Bigint.of(${(-value).toString()}L).neg()`;
+  return `Bigint.of(${value.toString()}L)`;
+}
+
+/** True when `expr` has bigint type in the generated IR. */
+function isBigintExpr(expr: Expr): boolean {
+  switch (expr.kind) {
+    case 'bigint_literal': return true;
+    case 'bool_literal': return false;
+    case 'bytestring_literal': return false;
+    case 'var_ref': return true; // IR generator only emits bigint locals
+    case 'property_ref': return true; // callers only use this for bigint props here
+    case 'binary': {
+      switch (expr.op) {
+        case '+': case '-': case '*': case '/': case '%':
+          return true;
+        default:
+          return false; // comparisons / logical ops → boolean
+      }
+    }
+    case 'unary': return expr.op === '-';
+    case 'call': {
+      // The IR generator only emits bigint-returning builtins here (abs, min, max);
+      // hash/check builtins that return non-bigint types aren't used.
+      return true;
+    }
+    case 'ternary': return isBigintExpr(expr.consequent);
+  }
+}
+
+function javaBigintExpr(expr: Expr, bigintVars: Set<string>, boolVars: Set<string>): string {
+  switch (expr.kind) {
+    case 'bigint_literal': return javaBigintLiteral(expr.value);
+    case 'var_ref': return bigintVars.has(expr.name) ? expr.name : expr.name;
+    case 'property_ref': return `this.${expr.name}`;
+    case 'binary': {
+      const method = JAVA_BIGINT_BIN_METHOD[expr.op];
+      if (!method) {
+        // Should not happen for bigint-typed expressions, but fall back.
+        return `(${javaExpr(expr.left, bigintVars, boolVars)} ${expr.op} ${javaExpr(expr.right, bigintVars, boolVars)})`;
+      }
+      const left = javaBigintExpr(expr.left, bigintVars, boolVars);
+      const right = javaBigintExpr(expr.right, bigintVars, boolVars);
+      return `${left}.${method}(${right})`;
+    }
+    case 'unary':
+      if (expr.op === '-') return `${javaBigintExpr(expr.operand, bigintVars, boolVars)}.neg()`;
+      return `!(${javaExpr(expr.operand, bigintVars, boolVars)})`;
+    case 'call': {
+      const args = expr.args.map((a) => javaBigintExpr(a, bigintVars, boolVars)).join(', ');
+      return `${expr.fn}(${args})`;
+    }
+    case 'ternary':
+      return `(${javaBoolExpr(expr.condition, bigintVars, boolVars)} ? ${javaBigintExpr(expr.consequent, bigintVars, boolVars)} : ${javaBigintExpr(expr.alternate, bigintVars, boolVars)})`;
+    case 'bool_literal': return expr.value ? 'true' : 'false';
+    case 'bytestring_literal': return `ByteString.fromHex("${expr.hex}")`;
+  }
+}
+
+function javaBoolExpr(expr: Expr, bigintVars: Set<string>, boolVars: Set<string>): string {
+  switch (expr.kind) {
+    case 'bool_literal': return expr.value ? 'true' : 'false';
+    case 'var_ref': return expr.name;
+    case 'property_ref': return `this.${expr.name}`;
+    case 'binary': {
+      const op = expr.op;
+      if (op === '&&' || op === '||') {
+        return `(${javaBoolExpr(expr.left, bigintVars, boolVars)} ${op} ${javaBoolExpr(expr.right, bigintVars, boolVars)})`;
+      }
+      // Comparisons: both sides are bigint → use Bigint wrapper method
+      if (op === '===' || op === '!==' || op === '<' || op === '>' || op === '<=' || op === '>=') {
+        const method = JAVA_BIGINT_BIN_METHOD[op];
+        if (method) {
+          return `${javaBigintExpr(expr.left, bigintVars, boolVars)}.${method}(${javaBigintExpr(expr.right, bigintVars, boolVars)})`;
+        }
+      }
+      return `(${javaExpr(expr.left, bigintVars, boolVars)} ${op} ${javaExpr(expr.right, bigintVars, boolVars)})`;
+    }
+    case 'unary':
+      if (expr.op === '!') return `!(${javaBoolExpr(expr.operand, bigintVars, boolVars)})`;
+      return `(${javaBigintExpr(expr.operand, bigintVars, boolVars)}).neg()`;
+    case 'ternary':
+      return `(${javaBoolExpr(expr.condition, bigintVars, boolVars)} ? ${javaBoolExpr(expr.consequent, bigintVars, boolVars)} : ${javaBoolExpr(expr.alternate, bigintVars, boolVars)})`;
+    case 'bigint_literal': return javaBigintLiteral(expr.value); // unusual but well-typed
+    case 'call': {
+      const args = expr.args.map((a) => javaExpr(a, bigintVars, boolVars)).join(', ');
+      return `${expr.fn}(${args})`;
+    }
+    case 'bytestring_literal': return `ByteString.fromHex("${expr.hex}")`;
+  }
+}
+
+function javaExpr(expr: Expr, bigintVars: Set<string>, boolVars: Set<string>): string {
+  return isBigintExpr(expr)
+    ? javaBigintExpr(expr, bigintVars, boolVars)
+    : javaBoolExpr(expr, bigintVars, boolVars);
+}
+
+function javaStmt(
+  stmt: Stmt,
+  indent: string,
+  bigintVars: Set<string>,
+  boolVars: Set<string>,
+): string {
+  switch (stmt.kind) {
+    case 'var_decl': {
+      if (stmt.type === 'bigint') bigintVars.add(stmt.name);
+      if (stmt.type === 'boolean') boolVars.add(stmt.name);
+      const valueSrc = stmt.type === 'boolean'
+        ? javaBoolExpr(stmt.value, bigintVars, boolVars)
+        : javaBigintExpr(stmt.value, bigintVars, boolVars);
+      return `${indent}${javaType(stmt.type)} ${stmt.name} = ${valueSrc};`;
+    }
+    case 'assert':
+      return `${indent}assertThat(${javaBoolExpr(stmt.condition, bigintVars, boolVars)});`;
+    case 'assign': {
+      // IR generator only targets bigint properties for assigns today; guard anyway.
+      const valueSrc = javaBigintExpr(stmt.value, bigintVars, boolVars);
+      return stmt.isProperty
+        ? `${indent}this.${stmt.target} = ${valueSrc};`
+        : `${indent}${stmt.target} = ${valueSrc};`;
+    }
+    case 'if': {
+      const lines = [`${indent}if (${javaBoolExpr(stmt.condition, bigintVars, boolVars)}) {`];
+      for (const s of stmt.then) lines.push(javaStmt(s, indent + '    ', bigintVars, boolVars));
+      if (stmt.else_ && stmt.else_.length > 0) {
+        lines.push(`${indent}} else {`);
+        for (const s of stmt.else_) lines.push(javaStmt(s, indent + '    ', bigintVars, boolVars));
+      }
+      lines.push(`${indent}}`);
+      return lines.join('\n');
+    }
+    case 'expr':
+      return `${indent}${javaExpr(stmt.expr, bigintVars, boolVars)};`;
+  }
+}
+
+export function renderJava(contract: GeneratedContract): string {
+  const usedFns = collectUsedFunctions(contract);
+  const usedTypes = collectUsedTypes(contract);
+  const isStateful = contract.parentClass === 'StatefulSmartContract';
+  const contractName = javaIdent(contract.name);
+
+  // Pre-seed locals from properties / method params in each method context.
+  const propBigintNames = new Set(
+    contract.properties.filter((p) => p.type === 'bigint').map((p) => p.name),
+  );
+  const propBoolNames = new Set(
+    contract.properties.filter((p) => p.type === 'boolean').map((p) => p.name),
+  );
+
+  const lines: string[] = [];
+  // Package name must be a valid dotted identifier — reuse the (lowercased)
+  // contract name as a single package segment.
+  lines.push(`package runar.fuzz.${contractName.toLowerCase()};`);
+  lines.push('');
+
+  // Imports. Keep the list small; javac is strict about unused imports? No,
+  // only warnings. Emit everything we might reference to keep the renderer
+  // simple.
+  lines.push(`import runar.lang.${isStateful ? 'StatefulSmartContract' : 'SmartContract'};`);
+  lines.push('import runar.lang.annotations.Public;');
+  lines.push('import runar.lang.annotations.Readonly;');
+
+  // Type imports — we need whichever non-primitive types are used.
+  const typeImports = new Set<string>();
+  for (const t of usedTypes) {
+    if (t === 'boolean') continue;
+    typeImports.add(javaType(t));
+  }
+  // Always import Bigint — used for literals / wrappers.
+  typeImports.add('Bigint');
+  const sortedTypes = [...typeImports].sort();
+  for (const t of sortedTypes) {
+    lines.push(`import runar.lang.types.${t};`);
+  }
+
+  // Static builtin imports.
+  const staticImports = new Set<string>(['assertThat']);
+  const knownBuiltins = [
+    'abs', 'min', 'max', 'within', 'safediv', 'safemod', 'clamp', 'sign',
+    'pow', 'mulDiv', 'percentOf', 'sqrt', 'gcd', 'log2',
+    'hash160', 'sha256', 'hash256', 'ripemd160', 'checkSig', 'len', 'cat',
+  ];
+  for (const fn of knownBuiltins) {
+    if (usedFns.has(fn)) staticImports.add(fn);
+  }
+  const sortedStatic = [...staticImports].sort();
+  for (const fn of sortedStatic) {
+    lines.push(`import static runar.lang.Builtins.${fn};`);
+  }
+  lines.push('');
+
+  // Class declaration.
+  const base = isStateful ? 'StatefulSmartContract' : 'SmartContract';
+  lines.push(`class ${contractName} extends ${base} {`);
+  lines.push('');
+
+  // Fields.
+  for (const prop of contract.properties) {
+    const readonly = prop.readonly ? '@Readonly ' : '';
+    const init = prop.initializer ? ` = ${javaExpr(prop.initializer, propBigintNames, propBoolNames)}` : '';
+    lines.push(`    ${readonly}${javaType(prop.type)} ${prop.name}${init};`);
+  }
+  lines.push('');
+
+  // Constructor.
+  const ctorProps = contract.properties.filter((p) => !p.initializer);
+  const ctorParams = ctorProps.map((p) => `${javaType(p.type)} ${p.name}`).join(', ');
+  const superArgs = contract.properties
+    .map((p) => p.initializer ? javaExpr(p.initializer, propBigintNames, propBoolNames) : p.name)
+    .join(', ');
+  lines.push(`    ${contractName}(${ctorParams}) {`);
+  lines.push(`        super(${superArgs});`);
+  for (const p of ctorProps) {
+    lines.push(`        this.${p.name} = ${p.name};`);
+  }
+  lines.push('    }');
+  lines.push('');
+
+  // Methods.
+  for (const method of contract.methods) {
+    const bigintVars = new Set<string>(propBigintNames);
+    const boolVars = new Set<string>(propBoolNames);
+    for (const p of method.params) {
+      if (p.type === 'bigint') bigintVars.add(p.name);
+      if (p.type === 'boolean') boolVars.add(p.name);
+    }
+
+    const params = method.params.map((p) => `${javaType(p.type)} ${p.name}`).join(', ');
+    if (method.visibility === 'public') lines.push('    @Public');
+    lines.push(`    void ${method.name}(${params}) {`);
+    for (const stmt of method.body) {
+      lines.push(javaStmt(stmt, '        ', bigintVars, boolVars));
+    }
+    lines.push('    }');
+    lines.push('');
+  }
+
+  lines.push('}');
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Format registry
 // ---------------------------------------------------------------------------
 
-export type RenderFormat = 'ts' | 'go' | 'rs' | 'py' | 'zig' | 'rb';
+export type RenderFormat = 'ts' | 'go' | 'rs' | 'py' | 'zig' | 'rb' | 'java';
 
 export const RENDERERS: Record<RenderFormat, (contract: GeneratedContract) => string> = {
   ts: renderTypeScript,
@@ -709,6 +1017,7 @@ export const RENDERERS: Record<RenderFormat, (contract: GeneratedContract) => st
   py: renderPython,
   zig: renderZig,
   rb: renderRuby,
+  java: renderJava,
 };
 
 export const FORMAT_EXTENSIONS: Record<RenderFormat, string> = {
@@ -718,4 +1027,5 @@ export const FORMAT_EXTENSIONS: Record<RenderFormat, string> = {
   py: '.runar.py',
   zig: '.runar.zig',
   rb: '.runar.rb',
+  java: '.runar.java',
 };

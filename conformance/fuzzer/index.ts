@@ -55,9 +55,14 @@ interface FuzzerCLIOptions {
 }
 
 function parseArgs(argv: string[]): FuzzerCLIOptions {
+  // Default compiler list: includes every compiler that can be driven from a
+  // single generator run. The IR-based harness (`ir-differential.ts`) renders
+  // per-compiler native sources for 'java' automatically. The legacy string
+  // harness in `differential.ts` can only emit .runar.ts and silently skips
+  // Java; that is intentional and documented in compileJavaSource().
   const opts: FuzzerCLIOptions = {
     num: 100,
-    compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby'],
+    compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'],
     verbose: false,
     property: false,
     hex: false,
@@ -77,7 +82,7 @@ function parseArgs(argv: string[]): FuzzerCLIOptions {
         opts.seed = parseInt(argv[++i] ?? '0', 10);
         break;
       case '--compilers': {
-        const raw = argv[++i] ?? 'ts,go,rust,python,zig,ruby';
+        const raw = argv[++i] ?? 'ts,go,rust,python,zig,ruby,java';
         opts.compilers = raw.split(',').map((s) => s.trim()) as CompilerName[];
         break;
       }
@@ -138,7 +143,7 @@ Usage:
 Options:
   --num <count>          Number of random programs to generate (default: 100)
   --seed <n>             RNG seed for reproducible runs
-  --compilers <list>     Comma-separated list: ts,go,rust,python,zig,ruby
+  --compilers <list>     Comma-separated list: ts,go,rust,python,zig,ruby,java
                          (default: all available)
   --verbose              Print each generated program and its result
   --property             Use fast-check property-based mode with shrinking

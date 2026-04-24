@@ -1,5 +1,5 @@
 import fc from 'fast-check';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -11,7 +11,7 @@ const __dirname = dirname(__filename);
 // Types
 // ---------------------------------------------------------------------------
 
-export type CompilerName = 'ts' | 'go' | 'rust' | 'python' | 'zig' | 'ruby';
+export type CompilerName = 'ts' | 'go' | 'rust' | 'python' | 'zig' | 'ruby' | 'java';
 
 export interface DifferentialResult {
   programSource: string;
@@ -21,6 +21,7 @@ export interface DifferentialResult {
   pythonOutput?: string;
   zigOutput?: string;
   rubyOutput?: string;
+  javaOutput?: string;
   match: boolean;
   mismatchDetails?: string;
 }
@@ -232,6 +233,27 @@ function compileRubySource(source: string, tmpDir: string, hex: boolean = false)
   return runCompilerProcess('ruby', [rubyScript, '--source', tmpFile, flag, '--disable-constant-folding']);
 }
 
+let _javaSkipWarned = false;
+/**
+ * The Java compiler (compilers/java/) only parses `.runar.java` source today.
+ * The `.runar.ts` parser for Java lands in milestone 7. The legacy string-
+ * based fuzzer in this file generates TypeScript source directly, so there
+ * is no structured AST to re-render as Java; we simply skip Java here and
+ * direct users to the IR-differential harness in `ir-differential.ts`, which
+ * renders every compiler's native source from a shared generator.
+ */
+function compileJavaSource(_source: string, _tmpDir: string, _hex: boolean = false): string | null {
+  const javaJar = findJavaBinary();
+  if (javaJar && !_javaSkipWarned) {
+    _javaSkipWarned = true;
+    console.warn(
+      'note: Java compiler is available but the legacy fuzzer generates .runar.ts source only; ' +
+      'use `npx tsx conformance/fuzzer/index.ts --ir --render native` to include Java.',
+    );
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Binary discovery
 // ---------------------------------------------------------------------------
@@ -284,6 +306,33 @@ function findRubyBinary(): string | null {
   return null;
 }
 
+/**
+ * Mirrors the Java-binary discovery in `conformance/runner/runner.ts` so the
+ * legacy fuzzer can at least tell whether `java -jar <runar-java.jar>` would
+ * be reachable, even though it cannot currently drive Java (see
+ * `compileJavaSource` above).
+ */
+function findJavaBinary(): string | null {
+  const libsDir = resolve(ROOT, 'compilers/java/build/libs');
+  if (!existsSync(libsDir)) return null;
+  try {
+    execFileSync('java', ['-version'], { stdio: 'pipe', timeout: 5000 });
+  } catch {
+    return null;
+  }
+  const preferred = join(libsDir, 'runar-java.jar');
+  if (existsSync(preferred)) return preferred;
+  try {
+    const entries = readdirSync(libsDir);
+    for (const entry of entries) {
+      if (entry.startsWith('runar-java-compiler-') && entry.endsWith('.jar')) {
+        return join(libsDir, entry);
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Compiler dispatch
 // ---------------------------------------------------------------------------
@@ -297,6 +346,7 @@ const COMPILER_MAP: Record<CompilerName, CompileFn> = {
   python: compilePythonSource,
   zig: compileZigSource,
   ruby: compileRubySource,
+  java: compileJavaSource,
 };
 
 function canonicalize(json: string): string {
