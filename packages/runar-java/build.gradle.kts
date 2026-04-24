@@ -18,9 +18,8 @@ repositories {
 }
 
 dependencies {
-    // Placeholder deps. Real crypto / HTTP / JSON land in milestones 8-10.
-    // api("org.bouncycastle:bcprov-jdk18on:1.78")
-    // implementation("com.fasterxml.jackson.core:jackson-core:2.17.1")
+    // secp256k1 ECDSA + SHA-256 / RIPEMD-160 / BIP-143 sighash.
+    api("org.bouncycastle:bcprov-jdk18on:1.78")
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")
