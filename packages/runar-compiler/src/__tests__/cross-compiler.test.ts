@@ -147,7 +147,49 @@ if (hasRust) {
 if (!hasGo) console.warn('WARNING: Go compiler not found — skipping Go cross-compiler tests');
 if (!hasRust) console.warn('WARNING: Rust compiler not found — skipping Rust cross-compiler tests');
 
-// TODO: Add cross-compiler tests for Python, Zig, and Ruby compilers
+// ---------------------------------------------------------------------------
+// Python: invoke via `python3 -m runar_compiler` with cwd=compilers/python
+// ---------------------------------------------------------------------------
+const PYTHON_COMPILER_DIR = join(__dirname, '..', '..', '..', '..', 'compilers', 'python');
+let hasPython = false;
+try {
+  execSync('python3 --version', { stdio: 'pipe' });
+  execSync('python3 -c "import runar_compiler"', {
+    cwd: PYTHON_COMPILER_DIR,
+    stdio: 'pipe',
+  });
+  hasPython = true;
+} catch {
+  // python3 or runar_compiler not importable
+}
+
+// ---------------------------------------------------------------------------
+// Zig: invoke the pre-built compiler binary at zig-out/bin/runar-zig.
+// ---------------------------------------------------------------------------
+const ZIG_BINARY_CANDIDATE = join(
+  __dirname, '..', '..', '..', '..', 'compilers', 'zig', 'zig-out', 'bin', 'runar-zig',
+);
+const zigBinaryPath: string | null = existsSync(ZIG_BINARY_CANDIDATE)
+  ? ZIG_BINARY_CANDIDATE
+  : null;
+
+// ---------------------------------------------------------------------------
+// Ruby: invoke via `ruby compilers/ruby/bin/runar-compiler-ruby`.
+// ---------------------------------------------------------------------------
+const RUBY_SCRIPT_CANDIDATE = join(
+  __dirname, '..', '..', '..', '..', 'compilers', 'ruby', 'bin', 'runar-compiler-ruby',
+);
+let rubyScriptPath: string | null = null;
+try {
+  execSync('ruby --version', { stdio: 'pipe' });
+  if (existsSync(RUBY_SCRIPT_CANDIDATE)) rubyScriptPath = RUBY_SCRIPT_CANDIDATE;
+} catch {
+  // ruby not installed
+}
+
+if (!hasPython) console.warn('WARNING: Python compiler not found — skipping Python cross-compiler tests');
+if (!zigBinaryPath) console.warn('WARNING: Zig compiler binary not found — skipping Zig cross-compiler tests');
+if (!rubyScriptPath) console.warn('WARNING: Ruby compiler not found — skipping Ruby cross-compiler tests');
 
 // ---------------------------------------------------------------------------
 // Helper functions
@@ -233,6 +275,77 @@ function runRustCompiler(irFilePath: string): CompilerOutput {
       {
         cwd: RUST_COMPILER_DIR,
         timeout: 30000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
+  }
+}
+
+/**
+ * Run the Python compiler on an ANF IR JSON file.
+ *
+ * The Python package is located at compilers/python/runar_compiler — we
+ * invoke it as a module from that cwd so `import runar_compiler` resolves
+ * without requiring the user to `pip install -e .` first.
+ */
+function runPythonCompiler(irFilePath: string): CompilerOutput {
+  try {
+    const result = execSync(
+      `python3 -m runar_compiler --ir "${irFilePath}" --hex`,
+      {
+        cwd: PYTHON_COMPILER_DIR,
+        timeout: 60_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
+  }
+}
+
+/**
+ * Run the Zig compiler on an ANF IR JSON file using the `compile-ir`
+ * subcommand. Zig's debug allocator prints leak warnings on stderr for
+ * the current build; we rely on stdout for the canonical output.
+ */
+function runZigCompiler(irFilePath: string): CompilerOutput {
+  if (!zigBinaryPath) return { hex: null, stderr: 'Zig binary not available' };
+  try {
+    // Zig's `compile-ir` rejects --disable-constant-folding because the
+    // IR path doesn't run the folder; passing the flag is an error.
+    const result = execSync(
+      `"${zigBinaryPath}" compile-ir "${irFilePath}" --hex`,
+      {
+        timeout: 30_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
+  }
+}
+
+/**
+ * Run the Ruby compiler on an ANF IR JSON file.
+ */
+function runRubyCompiler(irFilePath: string): CompilerOutput {
+  if (!rubyScriptPath) return { hex: null, stderr: 'Ruby compiler not available' };
+  try {
+    const result = execSync(
+      `ruby "${rubyScriptPath}" --ir "${irFilePath}" --hex --disable-constant-folding`,
+      {
+        timeout: 60_000,
         stdio: ['pipe', 'pipe', 'pipe'],
         maxBuffer: 16 * 1024 * 1024,
       },
@@ -792,4 +905,130 @@ describe.skipIf(!hasGo || !hasRust || !rustBinaryPath)('Cross-compiler: all thre
     expect(rustHex.toLowerCase()).toBe(tsHex);
     expect(goHex.toLowerCase()).toBe(rustHex.toLowerCase());
   });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-compiler: TS IR -> Python Script
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!hasPython)('Cross-compiler: TS IR -> Python Script', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-python-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { name, source } of CONTRACT_SOURCES) {
+    // Python startup is slow compared to Go/Rust; lift the per-test
+    // timeout to 60s to absorb the interpreter cold-start.
+    it(`Python compiler accepts ${name} ANF IR and produces hex matching TS`, () => {
+      const tsResult = compile(source);
+      if (!tsResult.success) {
+        throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+      }
+
+      expect(tsResult.anf).not.toBeNull();
+      expect(typeof tsResult.scriptHex).toBe('string');
+      const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
+
+      const irJson = anfToJson(tsAnf);
+      const irPath = join(tempDir, `${name}.anf.json`);
+      writeFileSync(irPath, irJson);
+
+      const pyHex = requireHex(runPythonCompiler(irPath), 'Python', name);
+      expect(pyHex.toLowerCase()).toBe(tsHex.toLowerCase());
+    }, 60_000);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cross-compiler: TS IR -> Zig Script
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!zigBinaryPath)('Cross-compiler: TS IR -> Zig Script', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-zig-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { name, source } of CONTRACT_SOURCES) {
+    it(`Zig compiler accepts ${name} ANF IR and produces hex matching TS`, () => {
+      const tsResult = compile(source);
+      if (!tsResult.success) {
+        throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+      }
+
+      expect(tsResult.anf).not.toBeNull();
+      expect(typeof tsResult.scriptHex).toBe('string');
+      const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
+
+      const irJson = anfToJson(tsAnf);
+      const irPath = join(tempDir, `${name}.anf.json`);
+      writeFileSync(irPath, irJson);
+
+      const zigHex = requireHex(runZigCompiler(irPath), 'Zig', name);
+      expect(zigHex.toLowerCase()).toBe(tsHex.toLowerCase());
+    }, 60_000);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cross-compiler: TS IR -> Ruby Script
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!rubyScriptPath)('Cross-compiler: TS IR -> Ruby Script', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-ruby-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { name, source } of CONTRACT_SOURCES) {
+    // Ruby interpreter + gem load is slow; 60s per test.
+    it(`Ruby compiler accepts ${name} ANF IR and produces hex matching TS`, () => {
+      const tsResult = compile(source);
+      if (!tsResult.success) {
+        throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+      }
+
+      expect(tsResult.anf).not.toBeNull();
+      expect(typeof tsResult.scriptHex).toBe('string');
+      const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
+
+      const irJson = anfToJson(tsAnf);
+      const irPath = join(tempDir, `${name}.anf.json`);
+      writeFileSync(irPath, irJson);
+
+      const rubyHex = requireHex(runRubyCompiler(irPath), 'Ruby', name);
+      expect(rubyHex.toLowerCase()).toBe(tsHex.toLowerCase());
+    }, 60_000);
+  }
 });
