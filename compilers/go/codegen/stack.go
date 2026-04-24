@@ -52,6 +52,35 @@ type StackMethod struct {
 }
 
 // ---------------------------------------------------------------------------
+// State-property type classification
+// ---------------------------------------------------------------------------
+
+// isNumericStateType reports whether a state-property type is stored on the
+// stack as a Script number and therefore requires OP_BIN2NUM after extraction
+// from the scriptCode. RabinSig and RabinPubKey are bigint aliases and share
+// the 8-byte layout.
+func isNumericStateType(t string) bool {
+	switch t {
+	case "bigint", "boolean", "RabinSig", "RabinPubKey":
+		return true
+	}
+	return false
+}
+
+// isVariableLengthStateType reports whether a state-property type is stored
+// with a Bitcoin push-data length prefix and therefore requires the
+// `emitPushDataDecode` helper instead of a fixed OP_SPLIT. Sig and
+// SigHashPreimage are variable-length byte strings in the same shape as
+// ByteString.
+func isVariableLengthStateType(t string) bool {
+	switch t {
+	case "ByteString", "Sig", "SigHashPreimage":
+		return true
+	}
+	return false
+}
+
+// ---------------------------------------------------------------------------
 // Builtin function -> opcode mapping
 // ---------------------------------------------------------------------------
 
@@ -2127,17 +2156,31 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 		switch p.Type {
 		case "bigint":
 			sz = 8
+		// RabinSig / RabinPubKey are bigint aliases — same 8-byte layout.
+		case "RabinSig", "RabinPubKey":
+			sz = 8
 		case "boolean":
 			sz = 1
 		case "PubKey":
 			sz = 33
 		case "Addr":
 			sz = 20
+		// Ripemd160 is 20 bytes (same underlying type as Addr).
+		case "Ripemd160":
+			sz = 20
 		case "Sha256":
 			sz = 32
 		case "Point":
 			sz = 64
-		case "ByteString":
+		// P-256 point: x[32] || y[32] = 64 bytes (same shape as Point).
+		case "P256Point":
+			sz = 64
+		// P-384 point: x[48] || y[48] = 96 bytes.
+		case "P384Point":
+			sz = 96
+		// ByteString-typed variable-length fields — treated the same as
+		// ByteString (push-data-prefixed in state).
+		case "ByteString", "Sig", "SigHashPreimage":
 			sz = -1
 			hasVariableLength = true
 		default:
@@ -2383,7 +2426,7 @@ func (ctx *loweringContext) lowerDeserializeState(preimageRef string, bindingInd
 func (ctx *loweringContext) splitFixedStateFields(stateProps []ir.ANFProperty, propSizes []int) {
 	if len(stateProps) == 1 {
 		prop := stateProps[0]
-		if prop.Type == "bigint" || prop.Type == "boolean" {
+		if isNumericStateType(prop.Type) {
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 		}
 		ctx.sm.pop()
@@ -2401,7 +2444,7 @@ func (ctx *loweringContext) splitFixedStateFields(stateProps []ir.ANFProperty, p
 				ctx.sm.push("")
 				ctx.emitOp(StackOp{Op: "swap"})
 				ctx.sm.swap()
-				if prop.Type == "bigint" || prop.Type == "boolean" {
+				if isNumericStateType(prop.Type) {
 					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 				}
 				ctx.emitOp(StackOp{Op: "swap"})
@@ -2411,7 +2454,7 @@ func (ctx *loweringContext) splitFixedStateFields(stateProps []ir.ANFProperty, p
 				ctx.sm.push(prop.Name)
 				ctx.sm.push("")
 			} else {
-				if prop.Type == "bigint" || prop.Type == "boolean" {
+				if isNumericStateType(prop.Type) {
 					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 				}
 				ctx.sm.pop()
@@ -2421,16 +2464,19 @@ func (ctx *loweringContext) splitFixedStateFields(stateProps []ir.ANFProperty, p
 	}
 }
 
-// parseVariableLengthStateFields parses state fields left-to-right, handling ByteString.
+// parseVariableLengthStateFields parses state fields left-to-right, handling
+// the full set of variable-length byte types (ByteString, Sig,
+// SigHashPreimage).
 func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFProperty, propSizes []int) {
 	if len(stateProps) == 1 {
 		prop := stateProps[0]
-		if prop.Type == "ByteString" {
-			// Single ByteString field: decode push-data prefix, drop trailing empty
+		if isVariableLengthStateType(prop.Type) {
+			// Single variable-length byte-string: decode push-data
+			// prefix, drop trailing empty.
 			ctx.emitPushDataDecode() // [..., data, remaining]
 			ctx.emitOp(StackOp{Op: "drop"})
 			ctx.sm.pop()
-		} else if prop.Type == "bigint" || prop.Type == "boolean" {
+		} else if isNumericStateType(prop.Type) {
 			ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 		}
 		ctx.sm.pop()
@@ -2438,8 +2484,9 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 	} else {
 		for i, prop := range stateProps {
 			if i < len(stateProps)-1 {
-				if prop.Type == "ByteString" {
-					// ByteString: decode push-data prefix, extract data
+				if isVariableLengthStateType(prop.Type) {
+					// Variable-length byte-string: decode push-data
+					// prefix, extract data.
 					ctx.emitPushDataDecode() // [..., data, rest]
 					ctx.sm.pop(); ctx.sm.pop()
 					ctx.sm.push(prop.Name)
@@ -2452,7 +2499,7 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					ctx.sm.push(""); ctx.sm.push("")
 					ctx.emitOp(StackOp{Op: "swap"})
 					ctx.sm.swap()
-					if prop.Type == "bigint" || prop.Type == "boolean" {
+					if isNumericStateType(prop.Type) {
 						ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 					}
 					ctx.emitOp(StackOp{Op: "swap"})
@@ -2462,12 +2509,13 @@ func (ctx *loweringContext) parseVariableLengthStateFields(stateProps []ir.ANFPr
 					ctx.sm.push("")
 				}
 			} else {
-				if prop.Type == "ByteString" {
-					// Last ByteString: decode push-data prefix, drop trailing empty
+				if isVariableLengthStateType(prop.Type) {
+					// Last variable-length byte-string: decode
+					// push-data prefix, drop trailing empty.
 					ctx.emitPushDataDecode() // [..., data, remaining]
 					ctx.emitOp(StackOp{Op: "drop"})
 					ctx.sm.pop()
-				} else if prop.Type == "bigint" || prop.Type == "boolean" {
+				} else if isNumericStateType(prop.Type) {
 					ctx.emitOp(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
 				}
 				ctx.sm.pop()

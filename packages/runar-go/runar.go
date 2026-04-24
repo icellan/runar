@@ -109,6 +109,10 @@ type RabinSig = ByteString
 type RabinPubKey = ByteString
 
 // Point is a 64-byte EC point (x[32] || y[32], big-endian, no prefix).
+//
+// Note: P256Point (NIST P-256, 64 bytes) and P384Point (NIST P-384, 96 bytes)
+// are declared in `p256.go` and `p384.go` respectively, alongside their
+// off-chain helper code.
 type Point = ByteString
 
 // ---------------------------------------------------------------------------
