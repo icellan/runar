@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/sha256-finalize/Sha256FinalizeTest.runar.ts",
+    ".runar.sol": "../../../examples/sol/sha256-finalize/Sha256FinalizeTest.runar.sol",
+    ".runar.move": "../../../examples/move/sha256-finalize/Sha256FinalizeTest.runar.move",
+    ".runar.go": "../../../examples/go/sha256-finalize/Sha256FinalizeTest.runar.go",
+    ".runar.rs": "../../../examples/rust/sha256-finalize/Sha256FinalizeTest.runar.rs",
+    ".runar.py": "../../../examples/python/sha256-finalize/Sha256FinalizeTest.runar.py",
+    ".runar.rb": "Sha256FinalizeTest.runar.rb",
+    ".runar.zig": "Sha256FinalizeTest.runar.zig"
+  }
+}

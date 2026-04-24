@@ -153,7 +153,10 @@ function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
 
     execSync(
       `npx tsx ${shellEscape(resolve(__dirname, '../../packages/runar-cli/src/bin.ts'))} compile ${shellEscape(tmpFile)} --ir --disable-constant-folding -o ${shellEscape(artifactDir)}`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: resolve(__dirname, '../..') },
+      // 180_000ms: `npx tsx` pays a cold-start cost per invocation; the
+      // prior 30s budget tripped on arithmetic / blake3 / convergence-proof
+      // on slower hosts.
+      { timeout: 180_000, encoding: 'utf-8', cwd: resolve(__dirname, '../..') },
     );
 
     const baseName = basename(tmpFile, extname(tmpFile));

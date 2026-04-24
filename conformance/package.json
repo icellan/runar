@@ -11,7 +11,7 @@
     "test:filter": "tsx runner/index.ts --filter",
     "update-golden": "tsx runner/index.ts --update-golden",
     "fuzz": "tsx fuzzer/index.ts",
-    "fuzz:quick": "tsx fuzzer/index.ts --num 10 --verbose",
+    "fuzz:quick": "tsx fuzzer/index.ts --ir --compilers ts,go,rust,python,zig,ruby --num 20",
     "fuzz:property": "tsx fuzzer/index.ts --property",
     "sdk-output": "tsx sdk-output/runner/sdk-runner.ts"
   },

@@ -1,0 +1,12 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/sha256-compress/Sha256CompressTest.runar.ts",
+    ".runar.sol": "../../../examples/sol/sha256-compress/Sha256CompressTest.runar.sol",
+    ".runar.move": "../../../examples/move/sha256-compress/Sha256CompressTest.runar.move",
+    ".runar.go": "../../../examples/go/sha256-compress/Sha256CompressTest.runar.go",
+    ".runar.rs": "../../../examples/rust/sha256-compress/Sha256CompressTest.runar.rs",
+    ".runar.py": "../../../examples/python/sha256-compress/Sha256CompressTest.runar.py",
+    ".runar.rb": "Sha256CompressTest.runar.rb",
+    ".runar.zig": "Sha256CompressTest.runar.zig"
+  }
+}
