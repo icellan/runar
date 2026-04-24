@@ -334,6 +334,69 @@ RSpec.describe Runar::SDK::RunarContract do
   end
 
   # ---------------------------------------------------------------------------
+  # Deploy -> Call chain with MockProvider + MockSigner (stateful counter).
+  #
+  # Mirrors the TypeScript contract-lifecycle.test.ts pattern: deploy a stateful
+  # contract, retrieve the deploy UTXO, build + broadcast a call tx against it,
+  # and assert new state reflects the expected increment.
+  # ---------------------------------------------------------------------------
+
+  describe '#call after deploy' do
+    let(:provider) { mock_provider }
+    let(:signer)   { mock_signer }
+    let(:contract) { described_class.new(stateful_anf_artifact, [5]) }
+
+    before do
+      # Fund the signer address with a large P2PKH UTXO for deploy + call fees.
+      provider.add_utxo(
+        SAMPLE_ADDRESS,
+        make_utxo('ee' * 32, 1_000_000, script: '76a914' + SAMPLE_ADDRESS + '88ac')
+      )
+      contract.connect(provider, signer)
+    end
+
+    it 'broadcasts a call transaction after deploy and updates state' do
+      # Deploy: broadcasts 1 tx, tracks deploy UTXO.
+      deploy_txid, deploy_tx = contract.deploy
+      expect(deploy_txid).to be_a(String)
+      expect(deploy_tx).to be_a(Runar::SDK::Transaction)
+      expect(provider.get_broadcasted_txs.length).to eq(1)
+
+      # Retrieve the deploy UTXO: #get_utxo should track the contract UTXO.
+      deploy_utxo = contract.get_utxo
+      expect(deploy_utxo).not_to be_nil
+      expect(deploy_utxo.txid).to eq(deploy_txid)
+      expect(deploy_utxo.output_index).to eq(0)
+      expect(deploy_utxo.satoshis).to eq(10_000)
+
+      # Fund the call so the call builder has change-source UTXOs as well.
+      provider.add_utxo(
+        SAMPLE_ADDRESS,
+        make_utxo('ff' * 32, 1_000_000, script: '76a914' + SAMPLE_ADDRESS + '88ac')
+      )
+
+      # Call increment(): builds + broadcasts a call tx spending the deploy UTXO.
+      call_txid, call_tx = contract.call('increment', [])
+      expect(call_txid).to be_a(String)
+      expect(call_txid).not_to be_empty
+      expect(call_txid).not_to eq(deploy_txid)
+      expect(call_tx).to be_a(Runar::SDK::Transaction)
+
+      # Provider broadcast count: deploy + call = 2.
+      expect(provider.get_broadcasted_txs.length).to eq(2)
+
+      # State: ANF interpreter increments 'count' from 5 -> 6.
+      expect(contract.get_state).to eq('count' => 6)
+
+      # UTXO tracking: #get_utxo now points at the new (post-call) contract UTXO.
+      new_utxo = contract.get_utxo
+      expect(new_utxo).not_to be_nil
+      expect(new_utxo.txid).to eq(call_txid)
+      expect(new_utxo.txid).not_to eq(deploy_txid)
+    end
+  end
+
+  # ---------------------------------------------------------------------------
   # get_state / set_state
   # ---------------------------------------------------------------------------
 
