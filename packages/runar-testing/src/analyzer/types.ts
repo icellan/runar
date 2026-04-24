@@ -35,7 +35,9 @@ export type FindingCode =
   // Opcode concerns
   | 'CODESEPARATOR_PRESENT'
   | 'INEFFICIENT_PUSH'
-  | 'LARGE_SCRIPT';
+  | 'LARGE_SCRIPT'
+  // Analyzer capacity limits
+  | 'PATHS_TRUNCATED';
 
 export interface AnalysisFinding {
   /** Severity: error (definite bug), warning (likely problem), info (suggestion). */

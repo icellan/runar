@@ -277,8 +277,21 @@ export function analyzePaths(
       });
     }
   } else {
-    // Enumerate all 2^n combinations (up to MAX_PATHS)
-    const totalCombinations = Math.min(1 << numBranches, MAX_PATHS);
+    // Enumerate all 2^n combinations (up to MAX_PATHS). When we truncate,
+    // emit a finding so callers aren't silently looking at an incomplete
+    // analysis.
+    const requestedCombinations = 1 << numBranches;
+    const totalCombinations = Math.min(requestedCombinations, MAX_PATHS);
+    if (requestedCombinations > MAX_PATHS) {
+      findings.push({
+        severity: 'warning',
+        code: 'PATHS_TRUNCATED',
+        message:
+          `Script has ${numBranches} branch points (2^${numBranches} = ${requestedCombinations} paths); ` +
+          `analysis truncated to the first ${MAX_PATHS}. Consider reducing branching or ` +
+          `splitting the contract into smaller spending paths.`,
+      });
+    }
 
     for (let combo = 0; combo < totalCombinations; combo++) {
       // Build choices array from bit pattern

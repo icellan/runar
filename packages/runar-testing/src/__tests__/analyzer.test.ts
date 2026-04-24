@@ -231,6 +231,37 @@ describe('Analyzer: summary', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 4b. Path truncation
+// ---------------------------------------------------------------------------
+
+describe('Analyzer: path truncation', () => {
+  it('emits PATHS_TRUNCATED warning when paths exceed MAX_PATHS=256', () => {
+    // Construct a script with 9 sequential OP_IF/OP_ENDIF pairs.
+    // 2^9 = 512 > 256 (MAX_PATHS), so path enumeration must truncate and
+    // emit a single PATHS_TRUNCATED finding.
+    // Each branch: OP_1 (51) OP_IF (63) OP_ENDIF (68) = "516368"
+    const branchHex = '516368'.repeat(9);
+    const result = analyzeScript(branchHex);
+
+    const truncation = result.findings.filter(
+      (f) => f.code === 'PATHS_TRUNCATED' && f.severity === 'warning',
+    );
+    expect(truncation.length).toBe(1);
+    expect(truncation[0]!.message).toMatch(/truncated/i);
+    // Only MAX_PATHS paths should be enumerated.
+    expect(result.paths.length).toBe(256);
+  });
+
+  it('does not emit PATHS_TRUNCATED for a script with <= 8 branches', () => {
+    // 8 branches: 2^8 = 256 exactly == MAX_PATHS, no truncation.
+    const branchHex = '516368'.repeat(8);
+    const result = analyzeScript(branchHex);
+    const truncation = result.findings.filter((f) => f.code === 'PATHS_TRUNCATED');
+    expect(truncation).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. Edge cases
 // ---------------------------------------------------------------------------
 
