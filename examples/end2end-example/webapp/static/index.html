@@ -14,7 +14,52 @@
     </header>
 
     <div id="init-screen" class="init-screen">
-      <button id="btn-init" class="btn" onclick="initGame()">Initialize Game</button>
+      <div class="init-card">
+        <div class="lang-select-row">
+          <label class="lang-label" for="lang-select">Contract language</label>
+          <select id="lang-select" class="lang-select">
+            <option value="ts" selected>TypeScript (.runar.ts)</option>
+            <option value="sol">Solidity (.runar.sol)</option>
+            <option value="move">Move (.runar.move)</option>
+            <option value="go">Go (.runar.go)</option>
+            <option value="rs">Rust (.runar.rs)</option>
+            <option value="py">Python (.runar.py)</option>
+            <option value="rb">Ruby (.runar.rb)</option>
+            <option value="zig">Zig (.runar.zig)</option>
+            <option value="java">Java (.runar.java)</option>
+          </select>
+        </div>
+        <div class="init-hint" id="init-hint">PriceBet will be compiled from the selected source language. All variants compile to identical Bitcoin Script.</div>
+        <button id="btn-init" class="btn" onclick="initGame()">Initialize Game</button>
+        <button id="btn-toggle-playground" class="btn btn-ghost" onclick="togglePlayground()">Open Playground</button>
+      </div>
+    </div>
+
+    <div id="playground-screen" class="playground-screen hidden">
+      <div class="panel playground-panel">
+        <div class="playground-header">
+          <h2>Rúnar Playground</h2>
+          <div class="playground-controls">
+            <label class="lang-label" for="pg-lang-select">Language</label>
+            <select id="pg-lang-select" class="lang-select">
+              <option value="ts">TypeScript (.runar.ts)</option>
+              <option value="sol">Solidity (.runar.sol)</option>
+              <option value="move">Move (.runar.move)</option>
+              <option value="go">Go (.runar.go)</option>
+              <option value="rs">Rust (.runar.rs)</option>
+              <option value="py">Python (.runar.py)</option>
+              <option value="rb">Ruby (.runar.rb)</option>
+              <option value="zig">Zig (.runar.zig)</option>
+              <option value="java" selected>Java (.runar.java)</option>
+            </select>
+            <button class="btn btn-small" onclick="loadTemplate()">Load Template</button>
+            <button class="btn btn-small" onclick="compileSource()">Compile</button>
+            <button class="btn btn-ghost btn-small" onclick="togglePlayground()">Back</button>
+          </div>
+        </div>
+        <textarea id="pg-source" class="playground-source" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+        <div id="pg-result" class="playground-result"></div>
+      </div>
     </div>
 
     <div id="game-screen" class="hidden">

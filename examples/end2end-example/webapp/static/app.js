@@ -1,6 +1,167 @@
 let state = null;
 let busy = false;
 
+// ---------------------------------------------------------------------------
+// Language selection + playground (M17)
+// ---------------------------------------------------------------------------
+//
+// The backend dispatches Rúnar source parsing on the file extension, so the
+// frontend just passes the short language key through to /api/init and
+// /api/compile. The supported set matches compiler.go#sourceLangs:
+//   ts, sol, move, go, rs, py, rb, zig, java.
+//
+// Java is the newest addition (milestone M17). Its default template mirrors
+// examples/java/src/main/java/runar/examples/p2pkh/P2PKH.runar.java.
+
+const PLAYGROUND_TEMPLATES = {
+  java: [
+    'package runar.examples.p2pkh;',
+    '',
+    'import runar.lang.SmartContract;',
+    'import runar.lang.annotations.Public;',
+    'import runar.lang.annotations.Readonly;',
+    'import runar.lang.types.Addr;',
+    'import runar.lang.types.PubKey;',
+    'import runar.lang.types.Sig;',
+    '',
+    'import static runar.lang.Builtins.assertThat;',
+    'import static runar.lang.Builtins.checkSig;',
+    'import static runar.lang.Builtins.hash160;',
+    '',
+    '// Contract classes in .runar.java files are package-private so javac',
+    '// accepts the compound .runar.java suffix.',
+    'class P2PKH extends SmartContract {',
+    '',
+    '    @Readonly Addr pubKeyHash;',
+    '',
+    '    P2PKH(Addr pubKeyHash) {',
+    '        super(pubKeyHash);',
+    '        this.pubKeyHash = pubKeyHash;',
+    '    }',
+    '',
+    '    @Public',
+    '    void unlock(Sig sig, PubKey pubKey) {',
+    '        assertThat(hash160(pubKey).equals(pubKeyHash));',
+    '        assertThat(checkSig(sig, pubKey));',
+    '    }',
+    '}',
+    '',
+  ].join('\n'),
+  ts: [
+    "import { SmartContract, assert, PubKey, Sig, Addr, hash160, checkSig } from 'runar-lang';",
+    '',
+    'class P2PKH extends SmartContract {',
+    '  readonly pubKeyHash: Addr;',
+    '',
+    '  constructor(pubKeyHash: Addr) {',
+    '    super(pubKeyHash);',
+    '    this.pubKeyHash = pubKeyHash;',
+    '  }',
+    '',
+    '  public unlock(sig: Sig, pubKey: PubKey) {',
+    '    assert(hash160(pubKey) == this.pubKeyHash);',
+    '    assert(checkSig(sig, pubKey));',
+    '  }',
+    '}',
+    '',
+  ].join('\n'),
+};
+
+const LANG_FILENAMES = {
+  ts: 'P2PKH.runar.ts',
+  sol: 'P2PKH.runar.sol',
+  move: 'P2PKH.runar.move',
+  go: 'P2PKH.runar.go',
+  rs: 'P2PKH.runar.rs',
+  py: 'P2PKH.runar.py',
+  rb: 'P2PKH.runar.rb',
+  zig: 'P2PKH.runar.zig',
+  java: 'P2PKH.runar.java',
+};
+
+function selectedInitLang() {
+  const el = document.getElementById('lang-select');
+  return (el && el.value) || 'ts';
+}
+
+function selectedPlaygroundLang() {
+  const el = document.getElementById('pg-lang-select');
+  return (el && el.value) || 'java';
+}
+
+function togglePlayground() {
+  const init = document.getElementById('init-screen');
+  const pg = document.getElementById('playground-screen');
+  if (pg.classList.contains('hidden')) {
+    init.classList.add('hidden');
+    pg.classList.remove('hidden');
+    if (!document.getElementById('pg-source').value) {
+      loadTemplate();
+    }
+  } else {
+    pg.classList.add('hidden');
+    init.classList.remove('hidden');
+  }
+}
+
+function loadTemplate() {
+  const lang = selectedPlaygroundLang();
+  const ta = document.getElementById('pg-source');
+  ta.value = PLAYGROUND_TEMPLATES[lang] || PLAYGROUND_TEMPLATES.java;
+  const res = document.getElementById('pg-result');
+  while (res.firstChild) res.removeChild(res.firstChild);
+}
+
+function pgResultAppendLabel(parent, text) {
+  const d = document.createElement('div');
+  d.className = 'pg-label';
+  d.textContent = text;
+  parent.appendChild(d);
+}
+
+function pgResultAppendPre(parent, text, cls) {
+  const pre = document.createElement('pre');
+  pre.className = cls;
+  pre.textContent = text;
+  parent.appendChild(pre);
+}
+
+async function compileSource() {
+  const lang = selectedPlaygroundLang();
+  const source = document.getElementById('pg-source').value;
+  const resultEl = document.getElementById('pg-result');
+  while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+  const spinner = document.createElement('div');
+  spinner.className = 'pg-status';
+  const spinnerIcon = document.createElement('span');
+  spinnerIcon.className = 'loading';
+  spinner.appendChild(spinnerIcon);
+  spinner.appendChild(document.createTextNode(' Compiling ' + lang + '...'));
+  resultEl.appendChild(spinner);
+  try {
+    const data = await api('POST', '/api/compile', {
+      source,
+      lang,
+      filename: LANG_FILENAMES[lang] || '',
+    });
+    while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+    const ok = document.createElement('div');
+    ok.className = 'pg-ok';
+    ok.textContent = 'Compiled ' + data.filename;
+    resultEl.appendChild(ok);
+    pgResultAppendLabel(resultEl, 'Script hex (' + (data.scriptHex.length / 2) + ' bytes)');
+    pgResultAppendPre(resultEl, data.scriptHex, 'pg-hex');
+    pgResultAppendLabel(resultEl, 'Script asm');
+    pgResultAppendPre(resultEl, data.scriptAsm, 'pg-asm');
+  } catch (e) {
+    while (resultEl.firstChild) resultEl.removeChild(resultEl.firstChild);
+    const err = document.createElement('div');
+    err.className = 'pg-err';
+    err.textContent = 'Compile failed: ' + e.message;
+    resultEl.appendChild(err);
+  }
+}
+
 function setStatus(msg) {
   document.getElementById('status').textContent = msg;
 }
@@ -83,7 +244,7 @@ async function initGame() {
   btn.textContent = 'Initializing...';
 
   try {
-    state = await api('POST', '/api/init');
+    state = await api('POST', '/api/init', { lang: selectedInitLang() });
     document.getElementById('init-screen').classList.add('hidden');
     document.getElementById('game-screen').classList.remove('hidden');
     updateBalances();

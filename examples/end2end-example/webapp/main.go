@@ -48,6 +48,12 @@ type GameState struct {
 	AliceBalance int64 `json:"aliceBalance"`
 	BobBalance   int64 `json:"bobBalance"`
 
+	// Lang selects which PriceBet source variant the backend compiles when
+	// deploying the contract ("ts" (default), "sol", "move", "go", "rs",
+	// "py", "rb", "zig", or "java"). The Go compiler dispatches to the
+	// matching parser via the filename extension in compiler.go.
+	Lang string `json:"lang"`
+
 	AliceUTXO *UTXO `json:"-"`
 	BobUTXO   *UTXO `json:"-"`
 
@@ -70,6 +76,8 @@ func main() {
 	mux.HandleFunc("/api/round/new", handleNewRound)
 	mux.HandleFunc("/api/round/bet", handleBet)
 	mux.HandleFunc("/api/round/reveal", handleReveal)
+	mux.HandleFunc("/api/compile", handleCompile)
+	mux.HandleFunc("/api/lang", handleLang)
 
 	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +114,17 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Optional JSON body: { "lang": "ts" | "sol" | ... | "java" }. Missing
+	// or empty body falls through to the default (TypeScript).
+	var req struct {
+		Lang string `json:"lang"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
 	game.mu.Lock()
 	defer game.mu.Unlock()
+
+	game.Lang = normalizeLang(req.Lang)
 
 	alice, err := newWallet()
 	if err != nil {
@@ -295,7 +312,7 @@ func handleBet(w http.ResponseWriter, r *http.Request) {
 }
 
 func deployContract() error {
-	scriptHex, _, err := compilePriceBet(game.Alice.PubKeyHex, game.Bob.PubKeyHex, game.Threshold)
+	scriptHex, _, err := compilePriceBet(game.Lang, game.Alice.PubKeyHex, game.Bob.PubKeyHex, game.Threshold)
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
 	}
@@ -454,4 +471,117 @@ func handleReveal(w http.ResponseWriter, r *http.Request) {
 		"spendTx": spendTxid,
 		"state":   game,
 	})
+}
+
+// handleLang lets the frontend switch the active source language without
+// reinitialising wallets or the regtest state. Accepts POST with body
+// { "lang": "<key>" }. Also serves GET to report the current selection and
+// the full set of supported languages (useful for populating the UI).
+func handleLang(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		game.mu.Lock()
+		defer game.mu.Unlock()
+		jsonResponse(w, map[string]interface{}{
+			"lang":      normalizeLang(game.Lang),
+			"supported": supportedLangs(),
+		})
+	case "POST":
+		var req struct {
+			Lang string `json:"lang"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			jsonError(w, "bad request", 400)
+			return
+		}
+		game.mu.Lock()
+		defer game.mu.Unlock()
+		game.Lang = normalizeLang(req.Lang)
+		jsonResponse(w, map[string]string{"lang": game.Lang})
+	default:
+		jsonError(w, "GET or POST only", 405)
+	}
+}
+
+// handleCompile is the playground endpoint: it accepts arbitrary Rúnar
+// source for any supported input format and returns the compiled locking
+// script. The filename's extension drives parser dispatch (".runar.java"
+// selects the Java parser, ".runar.ts" the TypeScript parser, and so on).
+// No wallet state or regtest connectivity is required, so this path is
+// usable as an end-to-end smoke test of the Java language tier.
+func handleCompile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		jsonError(w, "POST only", 405)
+		return
+	}
+
+	var req struct {
+		Source   string `json:"source"`
+		Filename string `json:"filename"`
+		Lang     string `json:"lang"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonError(w, "bad request: "+err.Error(), 400)
+		return
+	}
+	if strings.TrimSpace(req.Source) == "" {
+		jsonError(w, "source required", 400)
+		return
+	}
+
+	// If the caller supplies an explicit filename we respect it (that's the
+	// canonical way to select a parser). Otherwise we derive one from the
+	// lang hint so a minimal client can just send { lang: "java", source }.
+	filename := strings.TrimSpace(req.Filename)
+	if filename == "" {
+		spec, ok := sourceLangs[normalizeLang(req.Lang)]
+		if !ok {
+			jsonError(w, "unknown lang", 400)
+			return
+		}
+		filename = spec.filename
+	}
+
+	scriptHex, scriptAsm, err := compileSource([]byte(req.Source), filename)
+	if err != nil {
+		jsonError(w, err.Error(), 400)
+		return
+	}
+
+	jsonResponse(w, map[string]string{
+		"scriptHex": scriptHex,
+		"scriptAsm": scriptAsm,
+		"filename":  filename,
+	})
+}
+
+// supportedLangs returns the language menu presented to the frontend. The
+// order is the canonical presentation order (TS first because it is the
+// default and the reference implementation for every fixture).
+func supportedLangs() []map[string]string {
+	order := []string{"ts", "sol", "move", "go", "rs", "py", "rb", "zig", "java"}
+	labels := map[string]string{
+		"ts":   "TypeScript",
+		"sol":  "Solidity",
+		"move": "Move",
+		"go":   "Go",
+		"rs":   "Rust",
+		"py":   "Python",
+		"rb":   "Ruby",
+		"zig":  "Zig",
+		"java": "Java",
+	}
+	out := make([]map[string]string, 0, len(order))
+	for _, k := range order {
+		spec, ok := sourceLangs[k]
+		if !ok {
+			continue
+		}
+		out = append(out, map[string]string{
+			"key":      k,
+			"label":    labels[k],
+			"filename": spec.filename,
+		})
+	}
+	return out
 }
