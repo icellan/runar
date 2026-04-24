@@ -26,6 +26,9 @@ pub const sdk_ordinals = @import("sdk_ordinals.zig");
 pub const sdk_script_utils = @import("sdk_script_utils.zig");
 pub const sdk_anf_interpreter = @import("sdk_anf_interpreter.zig");
 pub const sdk_wallet = @import("sdk_wallet.zig");
+pub const sdk_http_client = @import("sdk_http_client.zig");
+pub const CurlHttpTransport = sdk_http_client.CurlHttpTransport;
+pub const StdHttpTransport = sdk_http_client.StdHttpTransport;
 
 // SDK type re-exports
 pub const RunarArtifact = sdk_types.RunarArtifact;
@@ -229,6 +232,7 @@ test {
     _ = @import("sdk_token_wallet.zig");
     _ = @import("sdk_codegen.zig");
     _ = @import("sdk_wallet.zig");
+    _ = @import("sdk_http_client.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");
     }
