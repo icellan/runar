@@ -357,30 +357,60 @@ whitepaper's trust-model language (per handoff §3 step 3).
   byte-level mutation. The reference verifier is the off-chain
   ground truth the on-chain Bitcoin Script port mirrors.
 
-**Deferred to a dedicated codegen follow-up** (each sub-step has a
-named helper in `compilers/go/codegen/sp1_fri.go` with a Plonky3
-source reference plus a now-validated Go counterpart in
-`packages/runar-go/sp1fri/` to translate from):
+**Landed (Phase 2 — On-chain Bitcoin Script verifier algorithm):**
+- Every algorithm sub-step (1, 2-5, 6, 7, 8, 10 + 10A, 11) of the
+  on-chain SP1 FRI verifier is implemented in
+  `compilers/go/codegen/sp1_fri.go` as a standalone emit helper that
+  composes `KBTracker`, `FiatShamirState`, `EmitPoseidon2KBPermute/
+  Compress`, `EmitKBExt4Mul0..3`, `EmitKBExt4Inv0..3`, and the Ext4
+  macro layer at `compilers/go/codegen/sp1_fri_ext4.go`.
+- Each helper is validated **byte-identical** to the off-chain Go
+  reference at `packages/runar-go/sp1fri/` against the canonical
+  Plonky3 KoalaBear FRI fixture under the script VM
+  (`compilers/go/codegen/script_runner.go::BuildAndExecuteOps`).
+- `TestSp1FriVerifier_AcceptsMinimalGuestFixture` exercises the full
+  Steps 1+2-5+6+7+8+10+10A+11 emission against the real fixture and
+  the script VM accepts. On-chain alpha, zeta, alpha_fri, all betas,
+  query indexes, per-query reduced-opening accumulators, OOD equality,
+  and per-query Horner final-poly evaluations match the reference
+  byte-for-byte.
+- Two pre-existing critical bugs found and fixed during the port:
+  (a) `FiatShamirState::EmitSqueeze` read from the front of the rate
+  window — Plonky3 `DuplexChallenger::sample` pops from the back. Without
+  the fix every challenge derived on chain disagreed with the prover and
+  no FRI proof could ever have verified. (b) `emitFinalPolyEqualityCheck`
+  used `OP_EQUALVERIFY` (byte equality) instead of `OP_NUMEQUALVERIFY`;
+  KoalaBear small ints have multiple valid byte encodings, so equal
+  values could silently reject.
+- Compiled-script measurements on the 1589-byte fixture: 248,482 emit
+  ops, 283,285 bytes (~277 KB), peak named-stack ~135 elements. Well
+  under all script-size, stack-depth, and execution-time targets.
 
-- `emitAbsorbByteString` — SP1's byte-to-field packing convention for
-  public values. Ref: SP1 v6.0.2
-  `crates/stark/src/machine.rs::observe_public_values`.
-- Proof-blob push-and-hash binding emission (structural, not
-  algebraic). Ref: `docs/sp1-proof-format.md` §6.
-- `emitMerkleVerify` — per-step sibling-ordering + bit-shift ladder.
-  Uses existing `EmitPoseidon2KBCompress`. Ref: Plonky3
-  `commit/src/mmcs.rs::verify_batch`.
-- `emitSumcheckRound` — polynomial evaluation at 0, 1, β over
-  KoalaBear Ext4, claim update. Ref: Plonky3
-  `uni-stark/src/verifier.rs::verify_constraints`.
-- Quotient / constraint reconstruction. AIR-specific — ref: SP1
-  guest-program AIR definitions.
-- `emitFriColinearityFold` — Ext4 colinearity formula over KoalaBear.
-  Ref: Plonky3 `fri/src/fold_even_odd.rs`.
-- Final-polynomial reduction for `LogFinalPolyLen > 0` (Lagrange
-  eval). Phase-1 stub handles constant final poly.
-- Per-query orchestration that ties the above together. Ref: Plonky3
-  `fri/src/verifier.rs::verify_query`.
+**Deferred — dispatch wiring only** (algorithm is complete and
+validated; what remains is purely structural bridging from inline
+test orchestration to the contract dispatch path):
+
+- Extract `EmitFullSP1FriVerifierBody(emit, params)` from the
+  inline orchestration in
+  `compilers/go/codegen/sp1_fri_test.go::TestSp1FriVerifier_AcceptsMinimalGuestFixture`.
+  The extracted helper initialises a `KBTracker` with the canonical
+  pre-pushed-field names (deepest-to-top per §2.1 above) and runs
+  the validated Steps 1+2-5+6+7+8+10+10A+11 emission, but emits no
+  pushes itself — those move from the inline test setup into the
+  unlocking script of the deployed contract.
+- Wire `lowerVerifySP1FRI` (currently panics with a structured
+  message) to call `EmitFullSP1FriVerifierBody` after parking the
+  3 typed args (proofBlob, publicValues, sp1VKeyHash) on the
+  alt-stack so the unlocking-script field pushes sit contiguous
+  beneath them.
+- Flip `integration/go/sp1_fri_poc_test.go` from
+  `TestSp1FriVerifierPoc_CodegenRefuses` to
+  `TestSp1FriVerifierPoc_CodegenAccepts` with a host-side helper
+  that decodes the postcard fixture (via
+  `packages/runar-go/sp1fri.DecodeProof`) and emits the unlocking-
+  script field-push prelude in declaration order. Compile the
+  PoC contract, build the locking + unlocking script, run via the
+  go-sdk Bitcoin Script interpreter, assert acceptance.
 
 Fixture generation:
 - `tests/vectors/sp1/fri/minimal-guest/proof.bin` + `vk.bin` +

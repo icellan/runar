@@ -112,6 +112,19 @@ func DefaultSP1FriParams() SP1FriVerifierParams {
 //
 // The binding result is a boolean 1 on successful verification. The script
 // fails OP_VERIFY at the first detectable mismatch on an invalid proof.
+//
+// Status: the full Steps 1-11 verifier algorithm is implemented and
+// validated end-to-end in compilers/go/codegen/sp1_fri_test.go
+// (TestSp1FriVerifier_AcceptsMinimalGuestFixture exercises every emit
+// helper against the canonical Plonky3 KoalaBear FRI fixture; on-chain
+// alpha/zeta/alpha_fri/all-betas/query-indexes/per-query reduced-opening/
+// OOD-equality match the off-chain Go reference at
+// packages/runar-go/sp1fri/ byte-for-byte; the script VM accepts).
+//
+// The dispatch wiring (extracting an EmitFullSP1FriVerifierBody helper that
+// the loweringContext can drive without inline test-only push setup) is the
+// final architectural piece remaining — see "Wiring needed" in the panic
+// message below for the specific sub-tasks.
 func (ctx *loweringContext) lowerVerifySP1FRI(
 	bindingName string, args []string, bindingIndex int, lastUses map[string]int,
 ) {
@@ -129,7 +142,7 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 	// The panic message must contain both "verifySP1FRI" and
 	// "docs/sp1-fri-verifier.md" so the compiler-level guard test in
 	// integration/go/sp1_fri_poc_test.go (TestSp1FriVerifierPoc_CodegenRefuses)
-	// continues to pass until the body lands.
+	// continues to pass until the dispatch is wired.
 	emitSP1FriStructuralSkeleton(ctx, bindingName, args, bindingIndex, lastUses)
 }
 
@@ -171,27 +184,42 @@ func emitSP1FriStructuralSkeleton(
 	// because every other sub-step depends on having parsed field pushes
 	// available.
 	_ = params
-	// Step 1 emit helper now exists: see EmitProofBlobBindingHash below. It is
-	// validated end-to-end against the canonical fixture by
-	// `TestSp1FriVerifier_Step1_ProofBlobBinding_*` in sp1_fri_test.go. The
-	// remaining wiring work to land it inside this dispatch:
-	//   (a) bring publicValues + sp1VKeyHash to the alt-stack so they don't
-	//       interleave with the field pushes;
-	//   (b) compute the field count statically from the parameter set
-	//       (DefaultSP1FriParams + the fixture's degree_bits / num_queries /
-	//       commit_phase_commits.len / final_poly.len — see
-	//       packages/runar-go/sp1fri/decode.go:25-48 for the traversal);
-	//   (c) call EmitProofBlobBindingHash(emit, fieldCount).
-	// We leave the stub in place because the wiring is interlocked with the
-	// rest of the verifier: the field-count must match exactly what subsequent
-	// sub-steps consume, and steps 2-12 below are still stubs. See
-	// docs/sp1-fri-verifier.md §8 for the rollout plan.
-	panicSP1FriStub("proof-blob push-and-hash binding wiring",
-		"Helper EmitProofBlobBindingHash(emit, numFields) lands in this same file; "+
-			"the unlocking-script field layout it consumes is pinned in "+
+	// Every algorithmic sub-step (1, 2-5, 6, 7, 8, 10, 10A, 11) is implemented
+	// as a standalone emit helper below and validated byte-identical to the
+	// off-chain Go reference at packages/runar-go/sp1fri/ against the canonical
+	// Plonky3 KoalaBear FRI fixture. End-to-end orchestration runs in
+	// TestSp1FriVerifier_AcceptsMinimalGuestFixture in sp1_fri_test.go; the
+	// script VM accepts the compiled emission against the real proof.
+	//
+	// What remains for dispatch wiring:
+	//   (a) Extract EmitFullSP1FriVerifierBody(emit, params) — wraps a
+	//       KBTracker initialised with the canonical pre-pushed-field names
+	//       (deepest-to-top per docs/sp1-fri-verifier.md §2.1) and runs the
+	//       full Steps 1-11 orchestration. The acceptance test today inlines
+	//       the same orchestration with concrete pushes for testing; the
+	//       extraction must keep the algorithmic logic identical and only
+	//       remove the test-side pre-pushes (those move to the unlocking
+	//       script in the deployable form).
+	//   (b) Park publicValues + sp1VKeyHash on the alt-stack via
+	//       OP_TOALTSTACK so the unlocking-script field pushes sit contiguous
+	//       below proofBlob, then OP_FROMALTSTACK the typed args back where
+	//       the absorb steps need them.
+	//   (c) Replace this panic with a call to EmitFullSP1FriVerifierBody and
+	//       a terminal OP_1 push for the boolean binding result.
+	//   (d) Flip integration/go/sp1_fri_poc_test.go from
+	//       TestSp1FriVerifierPoc_CodegenRefuses to
+	//       TestSp1FriVerifierPoc_CodegenAccepts with an unlocking-script
+	//       prelude that pushes the parsed-fixture fields in declaration
+	//       order.
+	//
+	// This is purely structural bridging — the protocol algebra is done.
+	panicSP1FriStub("dispatch wiring (algorithm complete; bridge to loweringContext pending)",
+		"Helper EmitProofBlobBindingHash(emit, numFields) and the full Steps "+
+			"1-11 orchestration are validated end-to-end against the canonical "+
+			"fixture in sp1_fri_test.go::TestSp1FriVerifier_AcceptsMinimalGuestFixture. "+
+			"The unlocking-script field layout this dispatch consumes is pinned in "+
 			"docs/sp1-fri-verifier.md §2.1 (= packages/runar-go/sp1fri/decode.go:25-48 "+
-			"traversal order). Test coverage in sp1_fri_test.go validates the helper "+
-			"against the real fixture.",
+			"traversal order).",
 		"Wiring needed: (a) park publicValues + sp1VKeyHash on the alt-stack via "+
 			"OP_TOALTSTACK so the field pushes are contiguous below proofBlob; "+
 			"(b) compute fieldCount from the pinned PoC params using the "+
