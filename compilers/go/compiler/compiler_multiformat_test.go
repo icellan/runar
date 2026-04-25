@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,15 +30,38 @@ var multiFormats = []string{
 
 func readConformanceFormat(t *testing.T, testName, ext string) ([]byte, string) {
 	t.Helper()
+	// First try the legacy in-tree layout (conformance/tests/<name>/<name><ext>);
+	// fall back to source.json indirection used by post-migration fixtures.
 	fileName := filepath.Join(conformanceDir(), testName, testName+ext)
-	if _, err := os.Stat(fileName); os.IsNotExist(err) {
-		t.Skipf("source file not found: %s", fileName)
+	if _, err := os.Stat(fileName); err == nil {
+		source, err := os.ReadFile(fileName)
+		if err != nil {
+			t.Fatalf("failed to read %s: %v", fileName, err)
+		}
+		return source, fileName
 	}
-	source, err := os.ReadFile(fileName)
+
+	sourceJSON := filepath.Join(conformanceDir(), testName, "source.json")
+	data, err := os.ReadFile(sourceJSON)
 	if err != nil {
-		t.Fatalf("failed to read %s: %v", fileName, err)
+		t.Skipf("source file not found: neither %s nor %s exists", fileName, sourceJSON)
 	}
-	return source, fileName
+	var manifest struct {
+		Sources map[string]string `json:"sources"`
+	}
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("failed to parse %s: %v", sourceJSON, err)
+	}
+	ref, ok := manifest.Sources[ext]
+	if !ok {
+		t.Skipf("source.json for %s has no %s entry", testName, ext)
+	}
+	resolved := filepath.Join(conformanceDir(), testName, ref)
+	source, err := os.ReadFile(resolved)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", resolved, err)
+	}
+	return source, resolved
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +211,10 @@ func TestMultiFormat_TSCompileEndToEnd(t *testing.T) {
 
 	for _, dir := range testDirs {
 		t.Run(dir, func(t *testing.T) {
-			source := filepath.Join(conformanceDir(), dir, dir+".runar.ts")
+			source, ok := conformanceSourcePath(dir)
+			if !ok {
+				t.Skipf("%s: source not found", dir)
+			}
 			artifact, err := CompileFromSource(source)
 			if err != nil {
 				t.Fatalf("CompileFromSource failed: %v", err)

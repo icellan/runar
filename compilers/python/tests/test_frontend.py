@@ -18,32 +18,53 @@ from runar_compiler.frontend.anf_lower import lower_to_anf
 from conftest import conformance_dir
 
 
-def _read_source(test_name: str, ext: str) -> str:
-    """Read a conformance test source file."""
+def _resolve_source(test_name: str, ext: str):
+    """Resolve a conformance test source file path.
+
+    Tries the legacy in-tree layout (conformance/tests/<name>/<name><ext>)
+    first, then falls back to source.json indirection used by post-migration
+    fixtures that point into examples/.
+    """
     source_dir = conformance_dir() / test_name
-    # Source files are named like: basic-p2pkh.runar.ts
+    if not source_dir.is_dir():
+        return None
     for f in source_dir.iterdir():
         if f.name.endswith(ext):
-            return f.read_text(encoding="utf-8")
-    raise FileNotFoundError(f"No {ext} file in {source_dir}")
+            return f
+    manifest_path = source_dir / "source.json"
+    if not manifest_path.exists():
+        return None
+    import json
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    ref = manifest.get("sources", {}).get(ext)
+    if ref is None:
+        return None
+    resolved = (source_dir / ref).resolve()
+    return resolved if resolved.exists() else None
+
+
+def _read_source(test_name: str, ext: str) -> str:
+    """Read a conformance test source file."""
+    resolved = _resolve_source(test_name, ext)
+    if resolved is None:
+        raise FileNotFoundError(f"No {ext} file in conformance/tests/{test_name}")
+    return resolved.read_text(encoding="utf-8")
 
 
 def _source_path(test_name: str, ext: str) -> str:
     """Get path to a conformance test source file."""
-    source_dir = conformance_dir() / test_name
-    for f in source_dir.iterdir():
-        if f.name.endswith(ext):
-            return str(f)
-    raise FileNotFoundError(f"No {ext} file in {source_dir}")
+    resolved = _resolve_source(test_name, ext)
+    if resolved is None:
+        raise FileNotFoundError(f"No {ext} file in conformance/tests/{test_name}")
+    return str(resolved)
 
 
 def _file_name(test_name: str, ext: str) -> str:
     """Get the file name for a conformance test source."""
-    source_dir = conformance_dir() / test_name
-    for f in source_dir.iterdir():
-        if f.name.endswith(ext):
-            return f.name
-    raise FileNotFoundError(f"No {ext} file in {source_dir}")
+    resolved = _resolve_source(test_name, ext)
+    if resolved is None:
+        raise FileNotFoundError(f"No {ext} file in conformance/tests/{test_name}")
+    return resolved.name
 
 
 # ---------------------------------------------------------------------------

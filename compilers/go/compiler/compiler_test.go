@@ -894,7 +894,10 @@ func TestDeterministicOutput(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSourceCompile_P2PKH(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.runar.ts")
+	source, ok := conformanceSourcePath("basic-p2pkh")
+	if !ok {
+		t.Skip("basic-p2pkh source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -918,7 +921,10 @@ func TestSourceCompile_P2PKH(t *testing.T) {
 }
 
 func TestSourceCompile_Arithmetic(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "arithmetic", "arithmetic.runar.ts")
+	source, ok := conformanceSourcePath("arithmetic")
+	if !ok {
+		t.Skip("arithmetic source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -936,7 +942,10 @@ func TestSourceCompile_Arithmetic(t *testing.T) {
 }
 
 func TestSourceCompile_BooleanLogic(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "boolean-logic", "boolean-logic.runar.ts")
+	source, ok := conformanceSourcePath("boolean-logic")
+	if !ok {
+		t.Skip("boolean-logic source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -950,7 +959,10 @@ func TestSourceCompile_BooleanLogic(t *testing.T) {
 }
 
 func TestSourceCompile_IfElse(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "if-else", "if-else.runar.ts")
+	source, ok := conformanceSourcePath("if-else")
+	if !ok {
+		t.Skip("if-else source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -961,7 +973,10 @@ func TestSourceCompile_IfElse(t *testing.T) {
 }
 
 func TestSourceCompile_BoundedLoop(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "bounded-loop", "bounded-loop.runar.ts")
+	source, ok := conformanceSourcePath("bounded-loop")
+	if !ok {
+		t.Skip("bounded-loop source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -972,7 +987,10 @@ func TestSourceCompile_BoundedLoop(t *testing.T) {
 }
 
 func TestSourceCompile_MultiMethod(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "multi-method", "multi-method.runar.ts")
+	source, ok := conformanceSourcePath("multi-method")
+	if !ok {
+		t.Skip("multi-method source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -983,7 +1001,10 @@ func TestSourceCompile_MultiMethod(t *testing.T) {
 }
 
 func TestSourceCompile_Stateful(t *testing.T) {
-	source := filepath.Join(conformanceDir(), "stateful", "stateful.runar.ts")
+	source, ok := conformanceSourcePath("stateful")
+	if !ok {
+		t.Skip("stateful source not found")
+	}
 	artifact, err := CompileFromSource(source)
 	if err != nil {
 		t.Fatalf("source compilation failed: %v", err)
@@ -1091,7 +1112,10 @@ func TestSourceCompile_ExampleEscrow(t *testing.T) {
 func TestSourceCompile_IRvsSourceMatch(t *testing.T) {
 	// Compile from IR and from source, both should produce non-empty valid output
 	irPath := filepath.Join(conformanceDir(), "basic-p2pkh", "expected-ir.json")
-	sourcePath := filepath.Join(conformanceDir(), "basic-p2pkh", "basic-p2pkh.runar.ts")
+	sourcePath, ok := conformanceSourcePath("basic-p2pkh")
+	if !ok {
+		t.Skip("basic-p2pkh source not found")
+	}
 
 	irArtifact, err := CompileFromIR(irPath, CompileOptions{DisableConstantFolding: true})
 	if err != nil {
