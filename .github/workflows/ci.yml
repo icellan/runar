@@ -108,6 +108,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Java compiler
         run: cd compilers/java && gradle build --no-daemon
+      - name: Java compiler unit tests
+        run: cd compilers/java && gradle test --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: runar-java
@@ -282,11 +284,26 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: runar-zig
+      - uses: actions/download-artifact@v4
+        with:
+          name: runar-java
+          path: compilers/java/build/libs
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
       - run: chmod +x runar-go runar-compiler-rust runar-zig
+      - name: Locate Java compiler jar
+        id: java-jar
+        run: |
+          jar=$(ls compilers/java/build/libs/runar-java-compiler-*.jar | head -1)
+          echo "path=$jar" >> "$GITHUB_OUTPUT"
       - name: Run conformance tests
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: |
           fail=0
           for test in conformance/tests/*/expected-ir.json; do
@@ -298,6 +315,7 @@ jobs:
             zig_hex=$(./runar-zig compile-ir "$test" --hex 2>/dev/null | head -1 | tr -d '[:space:]')
             ruby_hex=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
             python_hex=$(cd compilers/python && python3 -m runar_compiler --ir "../$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
+            java_hex=$(java -jar "$JAVA_JAR" --ir "$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
             if [ "$go_hex" != "$rust_hex" ]; then
               echo "MISMATCH Go vs Rust"
               fail=1
@@ -309,6 +327,9 @@ jobs:
               fail=1
             elif [ -n "$python_hex" ] && [ "$go_hex" != "$python_hex" ]; then
               echo "MISMATCH Go vs Python"
+              fail=1
+            elif [ -n "$java_hex" ] && [ "$go_hex" != "$java_hex" ]; then
+              echo "MISMATCH Go vs Java"
               fail=1
             else
               echo "OK (${#go_hex} hex chars)"
@@ -441,6 +462,11 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
@@ -485,6 +511,10 @@ jobs:
       - name: Zig integration tests
         run: cd integration/zig && zig build test
         timeout-minutes: 5
+
+      - name: Java integration tests
+        run: cd integration/java && gradle test -Drunar.integration=true --no-daemon
+        timeout-minutes: 35
 
       - name: Ruby end-to-end example tests
         run: |

@@ -24,14 +24,15 @@ import runar.lang.types.Sig;
  *
  * <p>Math and ByteString operations are real. EC operations use
  * BouncyCastle's secp256k1 curve if the BC provider is on the classpath.
- * Post-quantum verifications (WOTS, SLH-DSA variants) always return true
- * — full off-chain implementations of 100+ KB signature schemes are out
- * of scope for the simulator.
+ * Post-quantum verifications (WOTS, SLH-DSA variants), SHA-256 partial
+ * compression (sha256Compress / sha256Finalize), and BN254 / Poseidon2
+ * primitives are not implemented in the simulator; calling them throws
+ * {@link UnsupportedOperationException}. Contracts that exercise those
+ * primitives should be unit-tested via the compiler+VM path rather than
+ * the simulator.
  *
- * <p>Poseidon2 / BabyBear / KoalaBear / BN254 field arithmetic is
- * stubbed at the "always-return-zero" level pending a standalone port.
- * Contracts that exercise proof-system primitives should be unit-tested
- * via the compiler+VM path rather than the simulator.
+ * <p>BabyBear and KoalaBear field arithmetic remain real (small primes,
+ * trivial BigInteger ports).
  */
 public final class MockCrypto {
 
@@ -119,15 +120,41 @@ public final class MockCrypto {
     }
 
     public static boolean verifyWOTS(ByteString msg, ByteString sig, ByteString pubKey) {
-        return true;
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifyWOTS is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
     }
 
-    public static boolean verifySLHDSA_SHA2_128s(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
-    public static boolean verifySLHDSA_SHA2_128f(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
-    public static boolean verifySLHDSA_SHA2_192s(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
-    public static boolean verifySLHDSA_SHA2_192f(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
-    public static boolean verifySLHDSA_SHA2_256s(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
-    public static boolean verifySLHDSA_SHA2_256f(ByteString msg, ByteString sig, ByteString pubKey) { return true; }
+    public static boolean verifySLHDSA_SHA2_128s(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_128s is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifySLHDSA_SHA2_128f(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_128f is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifySLHDSA_SHA2_192s(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_192s is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifySLHDSA_SHA2_192f(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_192f is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifySLHDSA_SHA2_256s(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_256s is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifySLHDSA_SHA2_256f(ByteString msg, ByteString sig, ByteString pubKey) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifySLHDSA_SHA2_256f is not implemented in the Java simulator — "
+            + "test post-quantum contracts via the compiler+VM path instead.");
+    }
 
     // =======================================================================
     // Math — real BigInteger implementations
@@ -519,13 +546,26 @@ public final class MockCrypto {
     public static BigInteger kbFieldMul(BigInteger a, BigInteger b) { return mod(a.multiply(b), KB_P); }
     public static BigInteger kbFieldInv(BigInteger a) { return a.modInverse(KB_P); }
 
-    // Poseidon2 / BN254 — stubbed (return zero). Full ports are out of
-    // scope for the simulator; proof-system circuits are not exercisable
-    // off-chain at byte-level fidelity.
-    public static BigInteger poseidon2Hash(BigInteger... inputs) { return BigInteger.ZERO; }
+    // Poseidon2 / BN254 — not implemented in the Java simulator. Full
+    // ports are out of scope; proof-system circuits are not exercisable
+    // off-chain at byte-level fidelity. Calls now fail loudly instead of
+    // silently returning zero.
+    public static BigInteger poseidon2Hash(BigInteger... inputs) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.poseidon2Hash is not implemented in the Java simulator — "
+            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+    }
 
-    public static BigInteger bn254FieldAdd(BigInteger a, BigInteger b) { return BigInteger.ZERO; }
-    public static BigInteger bn254FieldMul(BigInteger a, BigInteger b) { return BigInteger.ZERO; }
+    public static BigInteger bn254FieldAdd(BigInteger a, BigInteger b) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.bn254FieldAdd is not implemented in the Java simulator — "
+            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+    }
+    public static BigInteger bn254FieldMul(BigInteger a, BigInteger b) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.bn254FieldMul is not implemented in the Java simulator — "
+            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+    }
 
     // =======================================================================
     // Merkle proof verification — real (SHA-256 based)
@@ -559,23 +599,25 @@ public final class MockCrypto {
     }
 
     // =======================================================================
-    // SHA-256 compression primitives — stubbed
+    // SHA-256 compression primitives — not implemented
     // =======================================================================
     //
     // sha256Compress / sha256Finalize expose the compression function
     // directly to contracts that build partial SHA-256 inductively (Rabin,
     // WOTS). The simulator can't exercise them meaningfully without a
-    // real SHA-256 compression-function implementation, so we stub them;
-    // contracts relying on these builtins should be tested end-to-end
-    // via the compiler+VM path.
+    // real SHA-256 compression-function implementation; calls now fail
+    // loudly instead of silently returning the input state unchanged
+    // (which used to hide bugs in inductive-hash contracts).
     public static ByteString sha256Compress(ByteString state, ByteString block) {
-        // Return the input state unchanged — enough to let assertion
-        // tests that only compare hash equality (not derive it) pass.
-        return state;
+        throw new UnsupportedOperationException(
+            "MockCrypto.sha256Compress is not implemented in the Java simulator — "
+            + "test SHA-256-inductive contracts (Rabin, WOTS) via the compiler+VM path.");
     }
 
     public static ByteString sha256Finalize(ByteString state, ByteString remaining, BigInteger msgBitLen) {
-        return state;
+        throw new UnsupportedOperationException(
+            "MockCrypto.sha256Finalize is not implemented in the Java simulator — "
+            + "test SHA-256-inductive contracts (Rabin, WOTS) via the compiler+VM path.");
     }
 
     // =======================================================================

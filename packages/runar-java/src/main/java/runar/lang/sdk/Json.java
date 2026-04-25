@@ -23,10 +23,10 @@ import java.util.Map;
  * (does not support scientific notation or surrogate pairs in
  * escapes), which is all the artifact shape needs.
  */
-final class Json {
+public final class Json {
     private Json() {}
 
-    static Object parse(String input) {
+    public static Object parse(String input) {
         Parser p = new Parser(input);
         p.skipWs();
         Object result = p.readValue();

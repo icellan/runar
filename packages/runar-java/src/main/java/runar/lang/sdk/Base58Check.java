@@ -51,6 +51,28 @@ final class Base58Check {
         return h;
     }
 
+    /**
+     * Base58Check-decodes the input and returns the payload (the bytes preceding
+     * the trailing 4-byte SHA256d checksum). Throws if the checksum does not match
+     * or the encoded form is shorter than 4 bytes.
+     */
+    static byte[] decodeChecked(String input) {
+        byte[] decoded = decode(input);
+        if (decoded.length < 4) {
+            throw new IllegalArgumentException("Base58Check: input too short for checksum");
+        }
+        int payloadLen = decoded.length - 4;
+        byte[] payload = new byte[payloadLen];
+        System.arraycopy(decoded, 0, payload, 0, payloadLen);
+        byte[] checksum = Hash160.doubleSha256(payload);
+        for (int i = 0; i < 4; i++) {
+            if (checksum[i] != decoded[payloadLen + i]) {
+                throw new IllegalArgumentException("Base58Check: checksum mismatch");
+            }
+        }
+        return payload;
+    }
+
     private static String encode(byte[] input) {
         if (input.length == 0) return "";
         int zeros = 0;

@@ -7,13 +7,16 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import runar.compiler.canonical.Jcs;
-import runar.compiler.frontend.JavaParser;
+import runar.compiler.frontend.ParserDispatch;
 import runar.compiler.ir.anf.AnfProgram;
 import runar.compiler.ir.ast.ContractNode;
 import runar.compiler.ir.stack.StackProgram;
-import runar.compiler.passes.AnfLower;
 import runar.compiler.passes.AnfLoader;
+import runar.compiler.passes.AnfLower;
+import runar.compiler.passes.AnfOptimize;
+import runar.compiler.passes.ConstantFold;
 import runar.compiler.passes.Emit;
+import runar.compiler.passes.ExpandFixedArrays;
 import runar.compiler.passes.Peephole;
 import runar.compiler.passes.StackLower;
 import runar.compiler.passes.Typecheck;
@@ -100,8 +103,8 @@ public final class Cli {
 
         ContractNode contract;
         try {
-            contract = JavaParser.parse(source, filename);
-        } catch (JavaParser.ParseException e) {
+            contract = ParserDispatch.parse(source, filename);
+        } catch (ParserDispatch.ParseException e) {
             err.println("runar-java: parse error: " + e.getMessage());
             return 65;
         } catch (RuntimeException e) {
@@ -112,6 +115,15 @@ public final class Cli {
         try {
             Validate.run(contract);
         } catch (Validate.ValidationException e) {
+            for (String msg : e.errors()) {
+                err.println("runar-java: " + msg);
+            }
+            return 65;
+        }
+
+        try {
+            contract = ExpandFixedArrays.run(contract);
+        } catch (ExpandFixedArrays.ExpandException e) {
             for (String msg : e.errors()) {
                 err.println("runar-java: " + msg);
             }
@@ -132,6 +144,15 @@ public final class Cli {
             anf = AnfLower.run(contract);
         } catch (RuntimeException e) {
             err.println("runar-java: anf-lower error: " + e.getMessage());
+            return 70;
+        }
+
+        // Pass 4.25: constant folding (gated by --disable-constant-folding).
+        // Pass 4.5:  general ANF cleanup (always on, matches Python pipeline).
+        try {
+            anf = optimizeAnf(anf, parsed.disableConstantFolding);
+        } catch (RuntimeException e) {
+            err.println("runar-java: anf-optimize error: " + e.getMessage());
             return 70;
         }
 
@@ -168,6 +189,14 @@ public final class Cli {
             return 65;
         }
 
+        // Pass 4.25/4.5 — same optimizer wiring as the source path.
+        try {
+            anf = optimizeAnf(anf, parsed.disableConstantFolding);
+        } catch (RuntimeException e) {
+            err.println("runar-java: anf-optimize error: " + e.getMessage());
+            return 70;
+        }
+
         if (parsed.emitIr) {
             out.println(Jcs.stringify(anf));
             return 0;
@@ -179,6 +208,20 @@ public final class Cli {
 
         out.println(Jcs.stringify(anf));
         return 0;
+    }
+
+    /**
+     * Apply the post-ANF optimization passes (constant folding + general
+     * cleanup), respecting the {@code --disable-constant-folding} flag.
+     * Public so tests can drive the optimizer end-to-end without spinning
+     * up the whole CLI.
+     */
+    public static AnfProgram optimizeAnf(AnfProgram anf, boolean disableConstantFolding) {
+        if (!disableConstantFolding) {
+            anf = ConstantFold.run(anf);
+        }
+        anf = AnfOptimize.run(anf);
+        return anf;
     }
 
     private int emitHex(AnfProgram anf) {

@@ -21,6 +21,12 @@ class LocalSignerTest {
     // cross-implementation check: k*G for the key above.
     private static final String EXPECTED_COMPRESSED_PUB =
         "0250863ad64a87ae8a2fe83c1af1a8403cb53f53e486d8511dad8a04887e5b2352";
+    // Compressed mainnet WIF (version 0x80, suffix 0x01) for TEST_PRIVKEY.
+    private static final String TEST_WIF_COMPRESSED =
+        "Kx45GeUBSMPReYQwgXiKhG9FzNXrnCeutJp4yjTd5kKxCitadm3C";
+    // Uncompressed mainnet WIF (version 0x80, no suffix) for TEST_PRIVKEY.
+    private static final String TEST_WIF_UNCOMPRESSED =
+        "5J1F7GHadZG3sCCKHCwg8Jvys9xUbFsjLnGec4H125Ny1V9nR6V";
 
     @Test
     void pubKeyMatchesSecp256k1Scalar() {
@@ -96,6 +102,81 @@ class LocalSignerTest {
         ECDSASigner verifier = new ECDSASigner();
         verifier.init(false, new ECPublicKeyParameters(pub, LocalSigner.DOMAIN));
         assertTrue(verifier.verifySignature(sighash, rs[0], rs[1]));
+    }
+
+    @Test
+    void allSignaturesAreLowSAcrossManyDigests() throws Exception {
+        // BouncyCastle's ECDSASigner emits high-S signatures roughly half the
+        // time. BIP-146 / BSV mempool policy rejects high-S, so LocalSigner
+        // must normalise every signature to s <= N/2. Drive enough varied
+        // digests through the signer that we'd statistically expect both
+        // high and low raw outputs, and assert every emitted DER carries a
+        // low-S scalar.
+        LocalSigner signer = new LocalSigner(TEST_PRIVKEY);
+        BigInteger halfN = LocalSigner.DOMAIN.getN().shiftRight(1);
+
+        for (int i = 0; i < 256; i++) {
+            byte[] digest = new byte[32];
+            // Distinct, well-spread digest per iteration.
+            for (int j = 0; j < 32; j++) digest[j] = (byte) ((i * 31 + j * 7 + 13) & 0xff);
+
+            byte[] der = signer.sign(digest, null);
+            BigInteger s = decodeDer(der)[1];
+            assertTrue(
+                s.compareTo(halfN) <= 0,
+                "high-S leaked at iteration " + i + ": s=" + s.toString(16)
+            );
+        }
+    }
+
+    @Test
+    void fromWIFCompressedRoundTripsToHexPrivateKey() {
+        LocalSigner fromHex = new LocalSigner(TEST_PRIVKEY);
+        LocalSigner fromWif = LocalSigner.fromWIF(TEST_WIF_COMPRESSED);
+
+        assertArrayEquals(fromHex.pubKey(), fromWif.pubKey(),
+            "WIF-derived signer must produce the same compressed pubkey as the hex form");
+        assertEquals(fromHex.address(), fromWif.address(),
+            "WIF-derived signer must produce the same P2PKH address as the hex form");
+    }
+
+    @Test
+    void fromWIFUncompressedAlsoMatches() {
+        LocalSigner fromHex = new LocalSigner(TEST_PRIVKEY);
+        LocalSigner fromWif = LocalSigner.fromWIF(TEST_WIF_UNCOMPRESSED);
+
+        // We always emit a compressed pubkey, regardless of the WIF flavour —
+        // the scalar is what gets imported, the encoding flag is metadata.
+        assertArrayEquals(fromHex.pubKey(), fromWif.pubKey());
+        assertEquals(fromHex.address(), fromWif.address());
+    }
+
+    @Test
+    void fromWIFRejectsBadChecksum() {
+        // Flip the last char of a valid WIF — base58 alphabet still valid,
+        // but the checksum no longer matches.
+        String good = TEST_WIF_COMPRESSED;
+        char last = good.charAt(good.length() - 1);
+        char swap = last == 'C' ? 'D' : 'C';
+        String bad = good.substring(0, good.length() - 1) + swap;
+
+        IllegalArgumentException ex = assertThrows(
+            IllegalArgumentException.class,
+            () -> LocalSigner.fromWIF(bad)
+        );
+        assertTrue(
+            ex.getMessage().toLowerCase().contains("checksum"),
+            "expected checksum-related error, got: " + ex.getMessage()
+        );
+    }
+
+    @Test
+    void fromWIFRejectsNullEmptyAndGarbage() {
+        assertThrows(IllegalArgumentException.class, () -> LocalSigner.fromWIF(null));
+        assertThrows(IllegalArgumentException.class, () -> LocalSigner.fromWIF(""));
+        // Invalid base58 character ('0' is not in the alphabet).
+        assertThrows(IllegalArgumentException.class,
+            () -> LocalSigner.fromWIF("0000000000000000000000000000000000000000000000000000"));
     }
 
     private static BigInteger[] decodeDer(byte[] der) throws Exception {

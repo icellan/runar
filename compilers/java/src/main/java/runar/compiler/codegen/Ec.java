@@ -72,7 +72,7 @@ public final class Ec {
         return out;
     }
 
-    private static String hexOf(byte[] b) {
+    static String hexOf(byte[] b) {
         StringBuilder sb = new StringBuilder(b.length * 2);
         for (byte x : b) sb.append(String.format("%02x", x & 0xff));
         return sb.toString();
@@ -344,7 +344,7 @@ public final class Ec {
     // Point decompose / compose
     // ==================================================================
 
-    private static void emitReverse32(Consumer<StackOp> e) {
+    static void emitReverse32(Consumer<StackOp> e) {
         e.accept(new OpcodeOp("OP_0"));
         e.accept(new SwapOp());
         for (int i = 0; i < 32; i++) {

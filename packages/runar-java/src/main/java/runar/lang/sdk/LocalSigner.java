@@ -20,9 +20,11 @@ import org.bouncycastle.math.ec.ECPoint;
  * In-memory {@link Signer} backed by BouncyCastle. Parity with
  * {@code packages/runar-go/sdk_signer.go} {@code LocalSigner}.
  *
- * <p>Private key is a 32-byte hex string (64 hex chars) — WIF import
- * is not covered in M8 (see M9). The signer produces a deterministic
- * ECDSA signature per RFC 6979 with low-S normalisation.
+ * <p>Private key may be supplied either as a 64-char hex string (32 bytes)
+ * via the {@link #LocalSigner(String) constructor}, or as a base58check
+ * Wallet Import Format key via {@link #fromWIF(String)}. The signer produces
+ * a deterministic ECDSA signature per RFC 6979 with low-S normalisation
+ * (BIP-146 / BSV mempool policy).
  */
 public final class LocalSigner implements Signer {
 
@@ -49,6 +51,58 @@ public final class LocalSigner implements Signer {
         ECPoint pub = CURVE.getG().multiply(privKey).normalize();
         this.compressedPubKey = pub.getEncoded(true);
         this.address = Base58Check.encodeMainnetP2PKH(Hash160.hash160(compressedPubKey));
+    }
+
+    /**
+     * Constructs a {@link LocalSigner} from a Wallet Import Format (WIF) string.
+     *
+     * <p>WIF layout (after base58-decode + checksum verify):
+     * <ul>
+     *   <li>1 byte version: {@code 0x80} (mainnet) or {@code 0xef} (testnet)</li>
+     *   <li>32 bytes private key</li>
+     *   <li>optional 1 byte compression flag {@code 0x01} (compressed pubkey)</li>
+     *   <li>4 bytes SHA256d checksum (verified and stripped by Base58Check)</li>
+     * </ul>
+     * Both compressed (38-char decoded) and uncompressed (37-char decoded) forms
+     * are accepted; the resulting signer always emits compressed public keys.
+     *
+     * @throws IllegalArgumentException if the input is not a valid WIF for
+     *         mainnet or testnet (bad checksum, wrong version, wrong length,
+     *         or out-of-range scalar).
+     */
+    public static LocalSigner fromWIF(String wif) {
+        if (wif == null || wif.isEmpty()) {
+            throw new IllegalArgumentException("LocalSigner.fromWIF: input is null or empty");
+        }
+        byte[] payload;
+        try {
+            payload = Base58Check.decodeChecked(wif);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("LocalSigner.fromWIF: " + e.getMessage(), e);
+        }
+        if (payload.length != 33 && payload.length != 34) {
+            throw new IllegalArgumentException(
+                "LocalSigner.fromWIF: unexpected payload length " + payload.length
+                + " (want 33 uncompressed or 34 compressed)"
+            );
+        }
+        int version = payload[0] & 0xff;
+        if (version != 0x80 && version != 0xef) {
+            throw new IllegalArgumentException(
+                "LocalSigner.fromWIF: unsupported version byte 0x"
+                + String.format("%02x", version)
+                + " (want 0x80 mainnet or 0xef testnet)"
+            );
+        }
+        if (payload.length == 34 && (payload[33] & 0xff) != 0x01) {
+            throw new IllegalArgumentException(
+                "LocalSigner.fromWIF: compressed-suffix byte must be 0x01, got 0x"
+                + String.format("%02x", payload[33] & 0xff)
+            );
+        }
+        byte[] keyBytes = new byte[32];
+        System.arraycopy(payload, 1, keyBytes, 0, 32);
+        return new LocalSigner(HexFormat.of().formatHex(keyBytes));
     }
 
     public static LocalSigner random(SecureRandom rng) {

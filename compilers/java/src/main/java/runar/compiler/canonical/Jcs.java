@@ -104,7 +104,15 @@ public final class Jcs {
             return;
         }
 
+        if (value instanceof Integer || value instanceof Long || value instanceof Short || value instanceof Byte) {
+            sb.append(((Number) value).longValue());
+            return;
+        }
+
         if (value instanceof Number) {
+            // Only true floating-point types (Float, Double, BigDecimal) are
+            // rejected — JCS / RFC 8785 forbids non-integer numbers in this
+            // codebase's contract IR.
             throw new IllegalArgumentException(
                 "canonical JSON does not support floating-point numbers (" + value.getClass().getName() + ")"
             );

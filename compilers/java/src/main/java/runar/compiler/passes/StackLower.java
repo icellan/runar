@@ -758,6 +758,19 @@ public final class StackLower {
                 lowerEcBuiltin(bindingName, funcName, args, idx, lastUses);
                 return;
             }
+            if (runar.compiler.codegen.P256P384.isNistEcBuiltin(funcName)
+                || runar.compiler.codegen.P256P384.isVerifyEcdsaBuiltin(funcName)) {
+                lowerNistEcBuiltin(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
+            if (runar.compiler.codegen.Blake3.isBlake3Builtin(funcName)) {
+                lowerBlake3Builtin(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
+            if (runar.compiler.codegen.SlhDsa.isSlhDsaBuiltin(funcName)) {
+                lowerVerifySlhDsa(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
 
             // General builtin path
             for (String a : args) {
@@ -767,14 +780,8 @@ public final class StackLower {
 
             List<String> opcodes = BUILTIN_OPCODES.get(funcName);
             if (opcodes == null) {
-                // Unknown function — emit a single placeholder push. Matches
-                // Python's "emit 0" behaviour so the stack depth stays valid
-                // but the resulting script won't verify. This is a safety net
-                // for M5 scope: crypto builtins (EC, SHA-256, BN254, etc.)
-                // land in M6.
-                emitOp(new PushOp(PushValue.of(0)));
-                sm.push(bindingName);
-                return;
+                throw new IllegalStateException("unknown builtin: " + funcName
+                    + " — codegen module not implemented in Java tier");
             }
 
             for (String c : opcodes) emitOp(new OpcodeOp(c));
@@ -810,6 +817,26 @@ public final class StackLower {
             trackDepth();
         }
 
+        // verifySLHDSA_SHA2_*: 3-arg crypto builtin that emits a multi-hundred-KB
+        // verification script via the dedicated SLH-DSA codegen module.
+        void lowerVerifySlhDsa(String bindingName, String funcName, List<String> args,
+                               int idx, Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException(
+                    "verifySLHDSA requires 3 arguments: msg, sig, pubkey");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < 3; i++) sm.pop();
+
+            String paramKey = runar.compiler.codegen.SlhDsa.paramKey(funcName);
+            runar.compiler.codegen.SlhDsa.emitVerifySlhDsa(this::emitOp, paramKey);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
         // EC builtins: delegate to Ec.dispatch for secp256k1 primitives.
         void lowerEcBuiltin(String bindingName, String funcName, List<String> args,
                             int idx, Map<String, Integer> lastUses) {
@@ -819,6 +846,46 @@ public final class StackLower {
             for (int i = 0; i < args.size(); i++) sm.pop();
 
             runar.compiler.codegen.Ec.dispatch(funcName, this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // NIST EC builtins (P-256, P-384, verifyECDSA_*): delegate to P256P384.dispatch.
+        void lowerNistEcBuiltin(String bindingName, String funcName, List<String> args,
+                                int idx, Map<String, Integer> lastUses) {
+            if (runar.compiler.codegen.P256P384.isVerifyEcdsaBuiltin(funcName)
+                && args.size() < 3) {
+                throw new RuntimeException(
+                    funcName + " requires 3 arguments: msg, sig, pubkey");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < args.size(); i++) sm.pop();
+
+            runar.compiler.codegen.P256P384.dispatch(funcName, this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // BLAKE3 builtins: delegate to Blake3.dispatch.
+        // blake3Compress: [chainingValue, block] -> [hash].
+        // blake3Hash:     [message]              -> [hash].
+        void lowerBlake3Builtin(String bindingName, String funcName, List<String> args,
+                                int idx, Map<String, Integer> lastUses) {
+            int expected = "blake3Compress".equals(funcName) ? 2 : 1;
+            if (args.size() < expected) {
+                throw new RuntimeException(
+                    funcName + " requires " + expected + " argument" + (expected == 1 ? "" : "s"));
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < args.size(); i++) sm.pop();
+
+            runar.compiler.codegen.Blake3.dispatch(funcName, this::emitOp);
 
             sm.push(bindingName);
             trackDepth();
