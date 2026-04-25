@@ -52,11 +52,11 @@ type FunctionPatterns struct {
 // Deposit adds funds. Demonstrates calling a private method and a
 // standalone helper from a public method.
 func (c *FunctionPatterns) Deposit(sig runar.Sig, amount runar.Bigint) {
-	// Built-in: signature verification
+	// Private method: shared signature check
 	c.requireOwner(sig)
 
-	// Private method: positive-amount guard
-	runar.Assert(c.isPositive(amount))
+	// Built-in: assertion
+	runar.Assert(amount > 0)
 
 	// Update state
 	c.Balance = c.Balance + amount
@@ -129,12 +129,6 @@ func (c *FunctionPatterns) computeFee(amount runar.Bigint, feeBps runar.Bigint) 
 //
 // Use these for reusable math utilities, validation logic, or any
 // computation that doesn't need contract fields.
-
-// isPositive returns true if n > 0.
-// Demonstrates the simplest private method: a boolean predicate.
-func (c *FunctionPatterns) isPositive(n runar.Bigint) bool {
-	return n > 0
-}
 
 // scaleValue computes (value * numerator) / denominator safely.
 // Demonstrates a standalone helper using a built-in math function.

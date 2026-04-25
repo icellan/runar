@@ -165,22 +165,6 @@ func TestNormalize_ClampsUp(t *testing.T) {
 // Standalone helpers — unit tests
 // ---------------------------------------------------------------------------
 
-func TestIsPositive(t *testing.T) {
-	c := newContract()
-	if !c.isPositive(1) {
-		t.Error("expected true for 1")
-	}
-	if !c.isPositive(100) {
-		t.Error("expected true for 100")
-	}
-	if c.isPositive(0) {
-		t.Error("expected false for 0")
-	}
-	if c.isPositive(-5) {
-		t.Error("expected false for -5")
-	}
-}
-
 func TestScaleValue(t *testing.T) {
 	if v := scaleValue(1000, 3, 4); v != 750 {
 		t.Errorf("scaleValue(1000, 3, 4) = %d, want 750", v)
