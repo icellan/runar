@@ -522,98 +522,296 @@ func emitAbsorbExt4(fs *FiatShamirState, t *KBTracker) {
 // emitMerkleVerify walks a Poseidon2-KB Merkle path and asserts the computed
 // root matches the expected 8-element digest.
 //
-// Stack in (assumes the caller has arranged):
+// Stack in (top → bottom):
 //
-//	[..., leaf[0..7],                       # 8 KoalaBear elements — leaf
-//	      sib[0][0..7], sib[1][0..7], ...,  # depth × 8 sibling elements
-//	      indexBits,                        # merkleDepth-bit integer
-//	      expectedRoot[0..7]]               # 8 elements
+//	[..., expectedRoot[0..7],
+//	      leaf[0..7],
+//	      sib[0][0..7], ..., sib[depth-1][0..7],
+//	      indexBits]
 //
-// Stack out: empty (root comparison verified via OP_VERIFY).
+// (i.e. indexBits on top; siblings then leaf below; expectedRoot deepest.)
 //
-// For each depth step:
-//  1. Use low bit of indexBits to decide sibling order:
-//     bit=0: (current, sibling) → compress
-//     bit=1: (sibling, current) → compress
-//  2. Shift indexBits right by 1.
+// Stack out: empty (root comparison verified via 8 × OP_EQUALVERIFY).
 //
-// After merkleDepth compressions, assert each of the 8 output elements
-// equals the corresponding expectedRoot element.
+// Mirrors `packages/runar-go/sp1fri/mmcs.go::VerifyBatch` for the
+// single-matrix / cap_height=0 case: the leaf is already the matrix-row
+// digest (8 KB elements), each step XORs in one sibling at the index's
+// low bit position, and the final accumulator must equal the expected root.
 //
-// NOTE: this helper emits the structural pattern but the per-bit conditional
-// ordering and the bit-shift update require a hand-coded Script fragment that
-// handles the two orderings without dynamic dispatch. Plonky3's
-// `MerkleTreeMmcs::verify_batch` is the reference. See the stub panic below
-// for the specific unimplemented piece.
-func emitMerkleVerify(t *KBTracker, depth int) {
-	panicSP1FriStub(
-		fmt.Sprintf("Merkle path verification (depth=%d)", depth),
-		"Plonky3 `merkle-tree/src/mmcs.rs::FieldMerkleTreeMmcs::verify_batch` — "+
-			"reference semantics for batch verify against multiple matrix heights. "+
-			"For the PoC's single-matrix case the simpler root-walk in "+
-			"`merkle-tree/src/merkle_tree.rs` `MerkleTree::verify_batch` applies. "+
-			"Runar already has `EmitPoseidon2KBCompress` (8+8 → 8); what is missing "+
-			"is the per-step conditional-sibling-ordering + bit-shift ladder.",
-		"Structural shape: for each of merkleDepth steps:\n"+
-			"  (a) Test low bit of indexBits via DUP + push(1) + OP_AND.\n"+
-			"  (b) OP_IF: leaves on top, siblings below; reorder to (sib[0..7], "+
-			"current[0..7]) via 8 SWAPs/ROTs.\n"+
-			"  (c) OP_ELSE: already in (current[0..7], sib[0..7]) order — no reorder.\n"+
-			"  (d) OP_ENDIF; call EmitPoseidon2KBCompress to consume 16 elements and "+
-			"produce 8.\n"+
-			"  (e) Update indexBits via push(2) + OP_DIV.\n"+
-			"After the loop, compare the 8-element computed root to the 8-element "+
-			"expected root via 8 × OP_EQUALVERIFY (deepest first).\n"+
-			"Open question: the OP_IF branches both consume + produce 16 stack items; "+
-			"the KBTracker currently has no conditional-branch support. Either (i) lower "+
-			"the conditional via two unconditional reorderings + OP_IF/OP_ENDIF nesting "+
-			"with raw stack ops (not tracker-managed), or (ii) add `EmitConditionalReorder` "+
-			"to KBTracker first.")
-	_ = t
+// Composes existing primitives:
+//
+//   - EmitPoseidon2MerkleRoot (poseidon2_merkle.go) walks the depth-many
+//     Poseidon2-KB compress steps with index-bit-driven sibling ordering.
+//     Its stack contract is exactly:
+//        [leaf(8), sib_0(8), ..., sib_(d-1)(8), index] → [root(8)]
+//   - 8 × OP_EQUALVERIFY then asserts the computed root against the
+//     caller-supplied expectedRoot (deepest 8 elements).
+//
+// The tracker is consulted only for the net stack effect (consumes the
+// listed `consume` slots, produces nothing). The actual Bitcoin Script ops
+// are emitted via `t.e` directly.
+//
+// `consume` is the full ordered list of slot names (deepest first) that the
+// helper drains from the tracker — exactly: expectedRoot[0..7],
+// leaf[0..7], sib[0][0..7]..sib[depth-1][0..7], indexBits.
+func emitMerkleVerify(t *KBTracker, depth int, consume []string) {
+	if depth < 1 {
+		panic(fmt.Sprintf("emitMerkleVerify: depth must be >= 1, got %d", depth))
+	}
+	expected := 8 + 8 + depth*8 + 1
+	if len(consume) != expected {
+		panic(fmt.Sprintf("emitMerkleVerify: consume slot count %d != %d", len(consume), expected))
+	}
+
+	t.rawBlock(consume, "", func(e func(StackOp)) {
+		// Compute the root using EmitPoseidon2MerkleRoot. The expectedRoot 8
+		// elements sit deepest and are untouched; after the call the stack
+		// has [expectedRoot(8), computedRoot(8)].
+		EmitPoseidon2MerkleRoot(e, depth)
+
+		// Assert each computed_i == expected_i. Stack layout after the
+		// compress walk: ..., expected_0..expected_7, computed_0..computed_7
+		// (computed_7 on top). For each i in 7..0 we OP_EQUALVERIFY. After
+		// the first verify, computed_6 is on top and expected_7 is just
+		// below; we need to compare computed_6 to expected_6, but expected_7
+		// already paired with computed_7 — wait, OP_EQUALVERIFY pops
+		// computed_7 and expected_7 since expected_7 is just below. So
+		// after each verify the next pair is naturally exposed.
+		//
+		// Verify by working from top down: top pair is (expected_7,
+		// computed_7) — but actually the top of stack is computed_7 and
+		// just below is computed_6...computed_0, then expected_7..expected_0.
+		// So the natural pairing is computed_7 vs expected_0 — wrong.
+		//
+		// We need to interleave them. Use 8 rolls to bring each
+		// expected_i to just under computed_i, then verify pairs.
+		//
+		// Simpler: emit OP_EQUALVERIFY × 8 after rolling each expected_i up.
+		// Pattern: 7 rolls of depth 8 followed by EQUALVERIFY each compares
+		// the top (computed_i) with the new top (expected_i brought up).
+		//
+		// Concretely: stack is [exp_0, exp_1, ..., exp_7, comp_0, ..., comp_7]
+		// with comp_7 on top. To compare comp_7 == exp_7, exp_7 is at depth 8.
+		// Roll(8) brings exp_7 to top; OP_EQUALVERIFY consumes both. Now
+		// comp_6 is top, exp_6 at depth 7. Roll(7), EQUALVERIFY. Etc.
+		// Final pair comp_0 / exp_0: both already adjacent (exp_0 at depth 1).
+		for i := 7; i >= 0; i-- {
+			depthRoll := 1 + i // bring exp_i to top
+			emitRoll(e, depthRoll)
+			// OP_NUMEQUALVERIFY: KB digest elements are canonical small ints,
+			// safer than OP_EQUALVERIFY which does byte-string equality.
+			e(StackOp{Op: "opcode", Code: "OP_NUMEQUALVERIFY"})
+		}
+	})
 }
 
-// emitFriColinearityFold performs one FRI fold step: given the two opened
-// values e_low (at index << 1) and e_high (at index << 1 | 1), the fold
-// challenge β (Ext4), and the corresponding coset point ω_i (Ext4), compute
-// the folded value at index:
+// emitFriColinearityFold performs one FRI fold step (arity=2) following
+// `packages/runar-go/sp1fri/fri.go::foldRow` (lines 344-357) +
+// `lagrangeInterpolateAt` (lines 377-414).
 //
-//	folded = (e_low + e_high) / 2 + β · (e_low - e_high) / (2 · ω_i)
+// For arity=2 the lagrange interpolation simplifies to the colinearity formula:
 //
-// The algebra is identical to the BabyBear Ext4 colinearity vectors at
-// tests/vectors/fri_colinearity.json — only the underlying field changes
-// (BabyBear → KoalaBear). Fully composable from kbExt4{Add,Sub,Mul,Inv}.
+//	folded = (e_low + e_high) / 2 + beta * (e_low - e_high) / (2 * s)
 //
-// See Plonky3 `fri/src/fold_even_odd.rs` for the prover-side formula.
-func emitFriColinearityFold(t *KBTracker) {
+// where `s = subgroup_start = g_(logHeight+1)^reverseBits(index, logHeight)`,
+// the coset offset for this fold step. (Plonky3's xs[1] = -s arises because
+// g_1 = -1 in any field.)
+//
+// Inputs (named tracker slots, all canonical KoalaBear coefficients):
+//
+//   - eLowPrefix_0..3   (Ext4 e_low,  the value at index_in_group = 0)
+//   - eHighPrefix_0..3  (Ext4 e_high, the value at index_in_group = 1)
+//   - betaPrefix_0..3   (Ext4 fold challenge for this round)
+//   - sName             (base-field s = subgroup_start)
+//
+// Output (named tracker slots, canonical):
+//
+//   - outPrefix_0..3    (Ext4 folded value at parent index)
+//
+// All inputs are PRESERVED. The caller is responsible for dropping inputs
+// no longer needed (use kbExt4DropAllByPrefix from sp1_fri_ext4.go).
+//
+// References:
+//   - sp1fri/fri.go:344-357 (foldRow)
+//   - sp1fri/fri.go:377-414 (lagrangeInterpolateAt)
+//   - Plonky3 `fri/src/two_adic_pcs.rs::TwoAdicFriFolder::fold_row` (110-133)
+//   - Plonky3 `fri/src/two_adic_pcs.rs::lagrange_interpolate_at` (221-261)
+func emitFriColinearityFold(
+	t *KBTracker,
+	eLowPrefix, eHighPrefix, betaPrefix, sName, outPrefix string,
+) {
+	// 1. d = e_low - e_high  (Ext4)
+	kbExt4Sub(t, eLowPrefix, eHighPrefix, "_fc_d")
+
+	// 2. s4 = e_low + e_high  (Ext4)
+	kbExt4Add(t, eLowPrefix, eHighPrefix, "_fc_s4")
+
+	// 3. half = s4 / 2  via component-wise mul by inv(2). KoalaBear has
+	//    inv(2) computable at codegen time. Push it as a base-field scalar.
+	//    inv2 = (p+1)/2 = (KbPrime+1)/2 since p is odd.
+	t.pushInt("_fc_inv2", int64((2130706433+1)/2))
+	kbExt4ScalarMul(t, "_fc_s4", "_fc_inv2", "_fc_half")
+
+	// 4. twoS = 2 * s  (base field). Push and reduce.
+	t.copyToTop(sName, "_fc_s_copy")
+	kbFieldMulConst(t, "_fc_s_copy", 2, "_fc_2s")
+
+	// 5. inv2s = inv(2*s) (base field).
+	kbFieldInv(t, "_fc_2s", "_fc_inv2s")
+
+	// 6. d_inv2s = d * inv2s  (Ext4 scalar mul by base-field scalar)
+	kbExt4ScalarMul(t, "_fc_d", "_fc_inv2s", "_fc_d_scaled")
+
+	// 7. correction = beta * d_scaled  (Ext4 mul)
+	kbExt4Mul(t, betaPrefix, "_fc_d_scaled", "_fc_corr")
+
+	// 8. folded = half + correction
+	kbExt4Add(t, "_fc_half", "_fc_corr", outPrefix)
+
+	// Drop intermediates so the tracker name table stays clean.
+	kbExt4DropByPrefixes(t,
+		"_fc_d_", "_fc_s4_", "_fc_half_", "_fc_corr_", "_fc_d_scaled_",
+	)
+	for _, n := range []string{"_fc_inv2", "_fc_s_copy", "_fc_2s", "_fc_inv2s"} {
+		// Only drop if present.
+		found := false
+		for _, nm := range t.nm {
+			if nm == n {
+				found = true
+				break
+			}
+		}
+		if found {
+			t.toTop(n)
+			t.drop()
+		}
+	}
+}
+
+// emitFriFoldRowConditional handles the per-fold-step value selection that
+// `verifyQuery` (sp1fri/fri.go:262-336) does at lines 290-300:
+//
+//	indexInGroup = startIndex % 2
+//	evals[indexInGroup]   = folded   // current accumulator
+//	evals[1-indexInGroup] = sibling
+//
+// then invokes `foldRow` (line 313) which bit-reverses xs and runs lagrange
+// interpolation. For arity=2 the bit-reverse is a no-op, so the only thing
+// the conditional does is decide which of (folded, sibling) plays the role
+// of e_low (index 0) vs e_high (index 1) in the colinearity formula.
+//
+// Inputs (named tracker slots, canonical):
+//
+//   - foldedPrefix_0..3  (Ext4 current accumulator from previous round)
+//   - siblingPrefix_0..3 (Ext4 sibling value pushed by unlocking script)
+//   - betaPrefix_0..3    (Ext4 fold challenge)
+//   - sName              (base-field subgroup_start s)
+//   - bitName            (the low bit of startIndex, in {0,1})
+//
+// Output:
+//
+//   - outPrefix_0..3 (the new accumulator)
+//
+// Implementation: the caller arranges for the Bitcoin Script-side OP_IF
+// branching by emitting two unconditional layouts and pruning via OP_IF.
+// However: emitting both branches inflates script size by ~2x. Since the
+// colinearity formula is symmetric under swap of (e_low, e_high) ONLY in
+// the (e_low + e_high) term — the (e_low - e_high) term flips sign — we
+// can fold the sign-flip into the formula at codegen time IF we reorder
+// based on the bit at codegen time. But the bit IS runtime data (sampled
+// from the transcript), so we MUST emit both branches.
+//
+// For the PoC fixture this helper is currently unimplemented as a true
+// conditional and panics with a structured stub — see the bounded scope
+// note in the dispatch brief. emitFriColinearityFold (above) implements
+// the bit=0 path directly; bit=1 callers can pre-swap the named slots
+// before calling.
+func emitFriFoldRowConditional(
+	t *KBTracker,
+	foldedPrefix, siblingPrefix, betaPrefix, sName, bitName, outPrefix string,
+) {
 	panicSP1FriStub(
-		"FRI colinearity fold step",
-		"Plonky3 `fri/src/two_adic_pcs.rs::TwoAdicFriFolder::fold_row` — the "+
-			"production fold path used by SP1 v6.0.2. The simpler `fri/src/fold_even_odd.rs` "+
-			"is the historical reference; for arity=2 (LogArity=1) both reduce to the "+
-			"same colinearity formula:\n"+
-			"  fold = (e_low + e_high) * inv2 + beta * (e_low - e_high) * inv(2*omega_i)\n"+
-			"Runar already has component emitters (EmitKBExt4Mul0..3, EmitKBExt4Inv0..3) "+
-			"and the BabyBear Ext4 reference test at "+
-			"integration/go/fri_colinearity_vectors_test.go.",
-		"Structural shape (Ext4 over KoalaBear, 4 base coefs each):\n"+
-			"  1. Compute s = e_low + e_high   (4 × kbFieldAdd, component-wise).\n"+
-			"  2. Compute d = e_low - e_high   (4 × kbFieldSub).\n"+
-			"  3. Compute inv2 = inverse of (2,0,0,0) Ext4 (precomputable as a constant\n"+
-			"     since 2 is a base-field element with known KoalaBear inverse).\n"+
-			"  4. Compute s_half = s * inv2    (Ext4 mul: 4 component emitters,\n"+
-			"     each consumes 8 base elements and produces 1).\n"+
-			"  5. Compute beta_d = beta * d    (Ext4 mul as above).\n"+
-			"  6. Compute omega_inv = inv(2*omega_i)   (Ext4 inv: 4 component emitters).\n"+
-			"  7. Compute correction = beta_d * omega_inv   (Ext4 mul).\n"+
-			"  8. Compute fold = s_half + correction   (4 × kbFieldAdd).\n"+
-			"Open question: the existing kbExt4 component emitters are flat "+
-			"`func(emit func(StackOp))` that consume + produce on a fixed stack layout; "+
-			"composing them inside a KBTracker context requires careful name management — "+
-			"after each Ext4 mul the four output components must be renamed and held while "+
-			"the next Ext4 mul's 8-element input window is staged. The cleanest way is to "+
-			"build a sibling helper file `sp1_fri_ext4.go` that wraps each kbExt4 op as a "+
-			"`func(t *KBTracker, aPrefix, bPrefix, outPrefix string)` macro.")
-	_ = t
+		"per-query FRI fold-row conditional sibling-ordering",
+		"sp1fri/fri.go:290-313 — verifyQuery selects evals[indexInGroup]=folded "+
+			"then calls foldRow. For arity=2 this collapses to choosing whether "+
+			"the accumulator is e_low or e_high in the colinearity formula. The "+
+			"on-chain conditional must use OP_IF/OP_ELSE/OP_ENDIF since the bit "+
+			"is runtime data sampled from the transcript.",
+		"Structural shape: emit OP_IF with two branches, each calling "+
+			"emitFriColinearityFold with swapped (foldedPrefix, siblingPrefix). "+
+			"The KBTracker name table must be reset to the same shape on both "+
+			"branches before the next fold step. Cleanest implementation: park "+
+			"the bit on alt-stack, emit branch A unconditionally, snapshot the "+
+			"output Ext4 slots, OP_DROP them if bit==1, emit branch B with "+
+			"swapped operands. Estimate: ~2 × emitFriColinearityFold cost = "+
+			"~6000 ops per fold step.")
+	_ = foldedPrefix
+	_ = siblingPrefix
+	_ = betaPrefix
+	_ = sName
+	_ = bitName
+	_ = outPrefix
+}
+
+// emitFinalPolyHorner evaluates the final FRI polynomial at an Ext4 point x
+// using Horner's scheme over Ext4 coefficients:
+//
+//	eval = ((coef[N-1] * x + coef[N-2]) * x + coef[N-3]) ... ) * x + coef[0]
+//
+// Mirrors `packages/runar-go/sp1fri/fri.go:124-127`:
+//
+//	eval := Ext4Zero()
+//	for i := len(finalPoly) - 1; i >= 0; i-- {
+//	    eval = Ext4Add(Ext4Mul(eval, xExt), finalPoly[i])
+//	}
+//
+// Inputs (named tracker slots, canonical):
+//
+//   - coefPrefix_<i>_<j>  for i in 0..polyLen-1, j in 0..3
+//     (Ext4 coefficient i, base-field component j)
+//   - xPrefix_0..3       (the evaluation point as Ext4)
+//
+// Output:
+//
+//   - outPrefix_0..3     (the evaluation result)
+//
+// All inputs are preserved.
+func emitFinalPolyHorner(
+	t *KBTracker, coefPrefix, xPrefix, outPrefix string, polyLen int,
+) {
+	if polyLen < 1 {
+		panic(fmt.Sprintf("emitFinalPolyHorner: polyLen must be >= 1, got %d", polyLen))
+	}
+
+	// Initialize accumulator = 0 (Ext4 zero).
+	for i := 0; i < 4; i++ {
+		t.pushInt(fmt.Sprintf("_fph_acc_%d", i), 0)
+	}
+
+	for i := polyLen - 1; i >= 0; i-- {
+		// acc = acc * x
+		kbExt4Mul(t, "_fph_acc", xPrefix, "_fph_mul")
+		// Replace _fph_acc with _fph_mul.
+		kbExt4DropAllByPrefix(t, "_fph_acc_")
+		for k := 0; k < 4; k++ {
+			t.toTop(fmt.Sprintf("_fph_mul_%d", k))
+			t.rename(fmt.Sprintf("_fph_acc_%d", k))
+		}
+		// acc = acc + coef[i]
+		coefName := fmt.Sprintf("%s_%d", coefPrefix, i)
+		kbExt4Add(t, "_fph_acc", coefName, "_fph_sum")
+		kbExt4DropAllByPrefix(t, "_fph_acc_")
+		for k := 0; k < 4; k++ {
+			t.toTop(fmt.Sprintf("_fph_sum_%d", k))
+			t.rename(fmt.Sprintf("_fph_acc_%d", k))
+		}
+	}
+
+	// Rename _fph_acc_<k> → outPrefix_<k>.
+	for k := 0; k < 4; k++ {
+		t.toTop(fmt.Sprintf("_fph_acc_%d", k))
+		t.rename(fmt.Sprintf("%s_%d", outPrefix, k))
+	}
 }
 
 // emitSumcheckRound verifies one sumcheck round by checking
@@ -683,20 +881,21 @@ func emitQueryPoWCheck(fs *FiatShamirState, t *KBTracker, bits int) {
 	fs.EmitCheckWitness(t, bits)
 }
 
-// emitFinalPolyEqualityCheck asserts the final reduced Ext4 value equals the
-// constant final-poly coefficient (LogFinalPolyLen=0 case).
+// emitFinalPolyEqualityCheck asserts that two named Ext4 slots hold equal
+// values. Used for the final reduced-vs-Horner equality at the end of each
+// query (Step 11).
 //
-// Stack in:  [..., reduced[0..3], final[0..3]]  (final[3] on top)
-// Stack out: empty (4 × OP_EQUALVERIFY)
-func emitFinalPolyEqualityCheck(t *KBTracker) {
-	// For each of 4 Ext4 coefficients: assert reduced_i == final_i.
-	// The caller supplies pushes in matching order.
-	for i := 0; i < 4; i++ {
-		t.rawBlock(nil, "", func(e func(StackOp)) {
-			e(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
-		})
-		_ = i
-	}
+// Reads `lhsPrefix_0..3` and `rhsPrefix_0..3`. Both slots are consumed by
+// the equality verification.
+//
+// Pre-existing bug fix: the previous stub emitted OP_EQUALVERIFY (byte-string
+// equality) instead of OP_NUMEQUALVERIFY (numeric equality). KB elements are
+// canonical small integers and may have multiple byte encodings of the same
+// value (e.g. minimal vs zero-padded). OP_NUMEQUALVERIFY is the correct
+// opcode. See packages/runar-go/sp1fri/fri.go:128 (Ext4Equal compares by
+// canonical value, not byte representation).
+func emitFinalPolyEqualityCheck(t *KBTracker, lhsPrefix, rhsPrefix string) {
+	kbExt4Equal4VerifyByName(t, lhsPrefix, rhsPrefix)
 }
 
 // =============================================================================
