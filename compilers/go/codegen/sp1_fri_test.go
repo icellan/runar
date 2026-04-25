@@ -736,6 +736,106 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		assertEqualNamed(fmt.Sprintf("_fs_alpha_%d", i), alpha[i])
 	}
 
+	// === Steps 6 + 7 — AIR constraint reconstruction at zeta + quotient
+	// recompose + OOD equality (folded * inv_vanishing == quotient). Emitted
+	// in a fresh tracker context so the failure mode is locally diagnosable.
+	{
+		var sOps []StackOp
+		sTracker := NewKBTracker(nil, func(op StackOp) { sOps = append(sOps, op) })
+		alphaExt := sp1fri.Ext4{alpha[0], alpha[1], alpha[2], alpha[3]}
+		zetaExt := sp1fri.Ext4{zeta[0], zeta[1], zeta[2], zeta[3]}
+		pushExt4Named(sTracker, "alpha", alphaExt)
+		pushExt4Named(sTracker, "zeta", zetaExt)
+		for i := 0; i < 2; i++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("tl_%d_%d", i, j), int64(traceLocal[i][j]))
+			}
+		}
+		for i := 0; i < 2; i++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("tn_%d_%d", i, j), int64(traceNext[i][j]))
+			}
+		}
+		for e := 0; e < 4; e++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("ch_%d_%d", e, j), int64(quotChunks[0][e][j]))
+			}
+		}
+		sTracker.pushInt("pis_a", 0)
+		sTracker.pushInt("pis_b", 1)
+		sTracker.pushInt("pis_x", 21)
+
+		emitFibAirSelectorsAt(sTracker, "zeta", "sel", 3)
+		emitFibAirConstraintEval(
+			sTracker,
+			"alpha", "tl", "tn", "sel",
+			"pis_a", "pis_b", "pis_x",
+			"folded",
+		)
+		emitQuotientRecompose(sTracker, "ch", "quot")
+		kbExt4Mul(sTracker, "folded", "sel_invvan", "lhs")
+		kbExt4Equal4VerifyByName(sTracker, "lhs", "quot")
+		drainAllStack(sTracker, &sOps)
+		if err := buildAndExecute(t, sOps); err != nil {
+			t.Fatalf("Steps 6+7 OOD equality failed on canonical fixture: %v", err)
+		}
+		t.Logf("Steps 6+7 OOD equality accepted; |ops|=%d", len(sOps))
+	}
+
+	// === Step 10/A — reduced-opening accumulator on each query against the
+	// fixture's actual queried row evaluations. The on-chain accumulator is
+	// asserted against the off-chain reference inner loop.
+	for q := 0; q < params.NumQueries; q++ {
+		index := queryIndexes[q]
+		// Drive the trace-matrix per-query reduced opening (logHeight =
+		// logGlobalMaxHeight — the tallest matrix in this batch).
+		zetaExt := sp1fri.Ext4{zeta[0], zeta[1], zeta[2], zeta[3]}
+		alphaExt := sp1fri.Ext4{alpha[0], alpha[1], alpha[2], alpha[3]}
+
+		// Off-chain queried-base values from the fixture's input proof.
+		// proof.OpeningProof.QueryProofs[q].InputProof[0] is the BatchOpening
+		// for the trace commitment; OpenedValues[0] is the matrix-row Montgomery
+		// values for the trace matrix at the queried index.
+		batch := proof.OpeningProof.QueryProofs[q].InputProof[0]
+		queriedBase := make([]uint32, len(batch.OpenedValues[0]))
+		for k, v := range batch.OpenedValues[0] {
+			queriedBase[k] = v.Canonical()
+		}
+		want := referenceReducedOpeningSingle(
+			zetaExt, alphaExt,
+			[]sp1fri.Ext4{traceLocal[0], traceLocal[1]},
+			queriedBase, index, logGlobalMaxHeight,
+		)
+
+		var rOps []StackOp
+		rTracker := NewKBTracker(nil, func(op StackOp) { rOps = append(rOps, op) })
+		pushExt4Named(rTracker, "alpha", alphaExt)
+		pushExt4Named(rTracker, "zeta", zetaExt)
+		for col := 0; col < 2; col++ {
+			ext := traceLocal[col]
+			for j := 0; j < 4; j++ {
+				rTracker.pushInt(fmt.Sprintf("oz_%d_%d", col, j), int64(ext[j]))
+			}
+		}
+		for col, v := range queriedBase {
+			rTracker.pushInt(fmt.Sprintf("q_%d", col), int64(v))
+		}
+		rTracker.pushInt("idx", int64(index))
+		emitReducedOpeningAccumulator(
+			rTracker,
+			"alpha", "zeta", "oz", "q", "idx",
+			2, logGlobalMaxHeight, "ros",
+		)
+		assertExt4EqualsRef(t, rTracker, &rOps, "ros", want)
+		drainAllStack(rTracker, &rOps)
+		if err := buildAndExecute(t, rOps); err != nil {
+			t.Fatalf("query %d: on-chain reduced-opening accumulator disagrees with reference (want=%v): %v",
+				q, want, err)
+		}
+		t.Logf("query %d: reduced-opening accumulator matches reference; want=%v",
+			q, want)
+	}
+
 	// === Step 11 — final-poly Horner equality (per-query, using the
 	// off-chain-validated reduced + folded value as the LHS). Emitted
 	// inside a fresh tracker context so the harness assertion shape stays
@@ -786,9 +886,10 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		scriptBytes = len(result.ScriptHex) / 2
 	}
 
-	t.Logf("Steps 1 + 2-5 + 8 + 10 + 11 accepted canonical fixture; |proofBlob|=%d, |chunks|=%d, "+
-		"|step1 ops|=%d, numRounds=%d, finalPolyLen=%d, total ops in harness=%d, "+
-		"script bytes=%d, queryIndexes=%v, alpha=%v zeta=%v alphaFri=%v betas=%v",
+	t.Logf("Steps 1 + 2-5 + 6 + 7 + 8 + 10 + 10A + 11 accepted canonical fixture; "+
+		"|proofBlob|=%d, |chunks|=%d, |step1 ops|=%d, numRounds=%d, finalPolyLen=%d, "+
+		"total transcript-replay ops in harness=%d, transcript script bytes=%d, "+
+		"queryIndexes=%v, alpha=%v zeta=%v alphaFri=%v betas=%v",
 		len(bs), len(chunks), len(bindingOps), numRounds, len(finalPoly), len(ops),
 		scriptBytes, queryIndexes, alpha, zeta, alphaFri, betas)
 }
@@ -1411,11 +1512,10 @@ func TestSp1FriVerifier_QuotientReconstructionMatchesReference(t *testing.T) {
 		sels.IsFirstRow, sels.IsLastRow, sels.IsTransition, sels.InvVanishing,
 		folded, quotient, lhs)
 
-	t.Skip("on-chain Steps 6 (AIR constraint eval) + 7 (quotient recompose) " +
-		"are deferred behind refined panics in sp1_fri.go (emitFibAirConstraintEval, " +
-		"emitQuotientRecompose). When the Ext4 macro layer (sp1_fri_ext4.go) lands, " +
-		"this test will be expanded to drive the on-chain emission and assert " +
-		"byte-identity. Reference dump in test log above.")
+	// Reference Steps 6+7 are now also driven on-chain by the new helpers
+	// (emitFibAirSelectorsAt + emitFibAirConstraintEval + emitQuotientRecompose).
+	// See `TestSp1FriVerifier_OODEqualityHoldsOnFixture` for the byte-identity
+	// gate; this test continues to serve as the off-chain reference dump.
 }
 
 // TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference walks every query
@@ -1631,6 +1731,413 @@ func TestEmitFriFoldRowConditional_MatchesReference(t *testing.T) {
 					bit, want, err)
 			}
 			t.Logf("bit=%d: conditional fold matches reference; want=%v |ops|=%d", bit, want, len(ops))
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Step 6 — Fibonacci AIR selectors (Part B) byte-identity test.
+// ---------------------------------------------------------------------------
+
+// TestSp1FriVerifier_FibAirSelectorsMatchReference asserts that the on-chain
+// emission of `emitFibAirSelectorsAt` reproduces the off-chain
+// `sp1fri.SelectorsAtPoint` reference byte-identical for the canonical
+// fixture's zeta point at logSize = 3 (the PoC degreeBits).
+//
+// Mirrors `air_fib.go::SelectorsAtPoint` (lines 107-123).
+func TestSp1FriVerifier_FibAirSelectorsMatchReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+	pubVals := publicValuesPoCBytes()
+	_, zetaArr := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+	zeta := sp1fri.Ext4{zetaArr[0], zetaArr[1], zetaArr[2], zetaArr[3]}
+
+	logSize := 3 // PoC degreeBits
+	sels := sp1fri.SelectorsAtPoint(logSize, zeta)
+
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+	pushExt4Named(tracker, "z", zeta)
+
+	emitFibAirSelectorsAt(tracker, "z", "sel", logSize)
+
+	// Assert each of the 4 selectors matches the reference.
+	assertExt4EqualsRef(t, tracker, &ops, "sel_invvan", sels.InvVanishing)
+	assertExt4EqualsRef(t, tracker, &ops, "sel_last", sels.IsLastRow)
+	assertExt4EqualsRef(t, tracker, &ops, "sel_first", sels.IsFirstRow)
+	assertExt4EqualsRef(t, tracker, &ops, "sel_trans", sels.IsTransition)
+
+	drainAllStack(tracker, &ops)
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain Fib AIR selectors disagree with reference. zeta=%v sels=%+v: %v",
+			zeta, sels, err)
+	}
+	t.Logf("Fib AIR selectors match reference; zeta=%v |ops|=%d", zeta, len(ops))
+}
+
+// ---------------------------------------------------------------------------
+// Step 6 — Fibonacci AIR alpha-folded constraint accumulator (Part C).
+// ---------------------------------------------------------------------------
+
+// TestSp1FriVerifier_FibAirConstraintsMatchReference asserts that the on-chain
+// emission of `emitFibAirConstraintEval` reproduces the off-chain
+// `sp1fri.EvalFibonacciConstraints` reference byte-identical for the
+// canonical fixture's (alpha, zeta, trace_local, trace_next, public-values).
+//
+// Mirrors `air_fib.go::EvalFibonacciConstraints` (lines 41-82).
+func TestSp1FriVerifier_FibAirConstraintsMatchReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+	pubVals := publicValuesPoCBytes()
+	alphaArr, zetaArr := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+	alpha := sp1fri.Ext4{alphaArr[0], alphaArr[1], alphaArr[2], alphaArr[3]}
+	zeta := sp1fri.Ext4{zetaArr[0], zetaArr[1], zetaArr[2], zetaArr[3]}
+
+	pis := [3]uint32{0, 1, 21}
+	sels := sp1fri.SelectorsAtPoint(3, zeta)
+	want := sp1fri.EvalFibonacciConstraints(
+		[2]sp1fri.Ext4{traceLocal[0], traceLocal[1]},
+		[2]sp1fri.Ext4{traceNext[0], traceNext[1]},
+		pis, sels, alpha,
+	)
+
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+
+	pushExt4Named(tracker, "alpha", alpha)
+	// trace_local: 2 Ext4s named tl_0_c<j>, tl_1_c<j>.
+	for i := 0; i < 2; i++ {
+		ext := traceLocal[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("tl_%d_%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 2; i++ {
+		ext := traceNext[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("tn_%d_%d", i, j), int64(ext[j]))
+		}
+	}
+	// Selectors as Ext4s under sel_first/last/trans/invvan_<j>.
+	pushExt4Named(tracker, "sel_first", sels.IsFirstRow)
+	pushExt4Named(tracker, "sel_last", sels.IsLastRow)
+	pushExt4Named(tracker, "sel_trans", sels.IsTransition)
+	// invvan is part of the same prefix family but unused by the constraint
+	// evaluator (only used by Step 7's OOD check).
+	tracker.pushInt("pis_a", int64(pis[0]))
+	tracker.pushInt("pis_b", int64(pis[1]))
+	tracker.pushInt("pis_x", int64(pis[2]))
+
+	emitFibAirConstraintEval(
+		tracker,
+		"alpha", "tl", "tn", "sel",
+		"pis_a", "pis_b", "pis_x",
+		"folded",
+	)
+	assertExt4EqualsRef(t, tracker, &ops, "folded", want)
+	drainAllStack(tracker, &ops)
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain Fib AIR constraint accumulator disagrees with reference. "+
+			"want=%v: %v", want, err)
+	}
+	t.Logf("Fib AIR constraints match reference; folded=%v |ops|=%d", want, len(ops))
+}
+
+// ---------------------------------------------------------------------------
+// Step 7 — Quotient recompose (Part D) byte-identity test.
+// ---------------------------------------------------------------------------
+
+// TestSp1FriVerifier_QuotientRecomposeMatchesReference asserts that the
+// on-chain `emitQuotientRecompose` reproduces `sp1fri.recomposeQuotient`
+// byte-identical for the canonical fixture's single quotient chunk.
+//
+// Mirrors `verify.go::recomposeQuotient` (lines 243-283) for the
+// numQuotientChunks=1 specialisation: zps[0] = 1 (empty product), so the
+// recompose collapses to sum_e basisExt4(e) * chunk[e].
+func TestSp1FriVerifier_QuotientRecomposeMatchesReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	chunkExt4 := make([]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks[0]))
+	for i, e := range proof.OpenedValues.QuotientChunks[0] {
+		chunkExt4[i] = sp1fri.FromKbExt4(e)
+	}
+
+	// Reference: per the test scaffold in TestSp1FriVerifier_QuotientReconstructionMatchesReference,
+	// for a single chunk the recompose collapses to:
+	//   out = sum_e (X^e as Ext4) * chunk[e]
+	const W uint32 = 3
+	mulByX := func(a sp1fri.Ext4, k int) sp1fri.Ext4 {
+		switch k {
+		case 0:
+			return a
+		case 1:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[3]), a[0], a[1], a[2]}
+		case 2:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[2]), sp1fri.KbMul(W, a[3]), a[0], a[1]}
+		case 3:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[1]), sp1fri.KbMul(W, a[2]), sp1fri.KbMul(W, a[3]), a[0]}
+		}
+		t.Fatalf("invalid k=%d", k)
+		return sp1fri.Ext4{}
+	}
+	want := sp1fri.Ext4Zero()
+	for e := 0; e < 4; e++ {
+		want = sp1fri.Ext4Add(want, mulByX(chunkExt4[e], e))
+	}
+
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+	// Push chunk as ch_<e>_<j> in declaration order.
+	for e := 0; e < 4; e++ {
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("ch_%d_%d", e, j), int64(chunkExt4[e][j]))
+		}
+	}
+
+	emitQuotientRecompose(tracker, "ch", "out")
+
+	assertExt4EqualsRef(t, tracker, &ops, "out", want)
+	drainAllStack(tracker, &ops)
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain quotient recompose disagrees with reference. want=%v: %v",
+			want, err)
+	}
+	t.Logf("Quotient recompose matches reference; want=%v |ops|=%d", want, len(ops))
+}
+
+// ---------------------------------------------------------------------------
+// Step 6+7 end-to-end OOD equality on the canonical fixture.
+// ---------------------------------------------------------------------------
+
+// TestSp1FriVerifier_OODEqualityHoldsOnFixture exercises Steps 6 + 7 in
+// concert: emit selectors, emit the alpha-folded constraint accumulator,
+// emit the quotient recompose, then assert
+//
+//	folded * inv_vanishing == quotient
+//
+// using the on-chain Ext4 mul + Ext4-equal-verify primitives. This is the
+// holistic AIR-OOD check from `verify.go:172-174`.
+func TestSp1FriVerifier_OODEqualityHoldsOnFixture(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+	pubVals := publicValuesPoCBytes()
+	alphaArr, zetaArr := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+	alpha := sp1fri.Ext4{alphaArr[0], alphaArr[1], alphaArr[2], alphaArr[3]}
+	zeta := sp1fri.Ext4{zetaArr[0], zetaArr[1], zetaArr[2], zetaArr[3]}
+
+	pis := [3]uint32{0, 1, 21}
+
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+
+	pushExt4Named(tracker, "alpha", alpha)
+	pushExt4Named(tracker, "zeta", zeta)
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("tl_%d_%d", i, j), int64(traceLocal[i][j]))
+		}
+	}
+	for i := 0; i < 2; i++ {
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("tn_%d_%d", i, j), int64(traceNext[i][j]))
+		}
+	}
+	for e := 0; e < 4; e++ {
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("ch_%d_%d", e, j), int64(quotChunks[0][e][j]))
+		}
+	}
+	tracker.pushInt("pis_a", int64(pis[0]))
+	tracker.pushInt("pis_b", int64(pis[1]))
+	tracker.pushInt("pis_x", int64(pis[2]))
+
+	// Step 6a: selectors at zeta.
+	emitFibAirSelectorsAt(tracker, "zeta", "sel", 3)
+
+	// Step 6b: alpha-folded constraint accumulator.
+	emitFibAirConstraintEval(
+		tracker,
+		"alpha", "tl", "tn", "sel",
+		"pis_a", "pis_b", "pis_x",
+		"folded",
+	)
+
+	// Step 7: quotient recompose.
+	emitQuotientRecompose(tracker, "ch", "quot")
+
+	// folded * inv_vanishing == quotient (Ext4 mul + Ext4 equal).
+	kbExt4Mul(tracker, "folded", "sel_invvan", "lhs")
+	kbExt4Equal4VerifyByName(tracker, "lhs", "quot")
+
+	drainAllStack(tracker, &ops)
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain OOD equality (Steps 6+7) failed on canonical fixture: %v", err)
+	}
+	t.Logf("OOD equality (Steps 6+7) holds on canonical fixture; |ops|=%d", len(ops))
+}
+
+// ---------------------------------------------------------------------------
+// Step 10 — reduced-opening accumulator (Part A) byte-identity test.
+// ---------------------------------------------------------------------------
+
+// referenceReducedOpeningSingle replays the inner-loop body of
+// `openInput` (sp1fri/fri.go:228-242) for a single matrix at the maximum
+// height with two trace columns + a single opening point at zeta. Returns the
+// canonical Ext4 reduced-opening accumulator.
+func referenceReducedOpeningSingle(
+	zeta sp1fri.Ext4,
+	alpha sp1fri.Ext4,
+	openedAtZeta []sp1fri.Ext4, // per-column Ext4 evals at zeta (len = numCols)
+	queriedBase []uint32, // per-column base-field row values (len = numCols)
+	index uint64,
+	logMaxHeight int,
+) sp1fri.Ext4 {
+	revIdx := reverseBitsLenLocal(index, logMaxHeight)
+	gPow := sp1fri.KbPow(sp1fri.KbTwoAdicGenerator(logMaxHeight), revIdx)
+	const kbGenerator uint32 = 3
+	x := sp1fri.KbMul(kbGenerator, gPow)
+	xExt := sp1fri.Ext4FromBase(x)
+	quotient := sp1fri.Ext4Inv(sp1fri.Ext4Sub(zeta, xExt))
+
+	alphaPow := sp1fri.Ext4One()
+	ros := sp1fri.Ext4Zero()
+	for col := 0; col < len(openedAtZeta); col++ {
+		diff := sp1fri.Ext4Sub(openedAtZeta[col], sp1fri.Ext4FromBase(queriedBase[col]))
+		ros = sp1fri.Ext4Add(ros, sp1fri.Ext4Mul(alphaPow, sp1fri.Ext4Mul(diff, quotient)))
+		alphaPow = sp1fri.Ext4Mul(alphaPow, alpha)
+	}
+	return ros
+}
+
+// TestSp1FriVerifier_ReducedOpeningMatchesReference asserts that the on-chain
+// emission of `emitReducedOpeningAccumulator` reproduces the reference
+// inner-loop body of `openInput` (sp1fri/fri.go:228-242) byte-identical for
+// each query in the canonical fixture. The runtime exponent strategy is
+// validated with a real (transcript-derived) query index.
+func TestSp1FriVerifier_ReducedOpeningMatchesReference(t *testing.T) {
+	const logMaxHeight = 5 // PoC: degreeBits=3 + logBlowup=2 = 5
+
+	// Drive a few representative indexes (0, 1, 2, 17, 31) which together
+	// exercise every bit position of the 5-bit decomposition.
+	indexes := []uint64{0, 1, 2, 17, 31}
+
+	for _, index := range indexes {
+		t.Run(fmt.Sprintf("index=%d", index), func(t *testing.T) {
+			zeta := sp1fri.Ext4{1234, 5678, 91011, 121314}
+			alpha := sp1fri.Ext4{42, 99, 17, 1}
+			openedAtZeta := []sp1fri.Ext4{
+				{111, 222, 333, 444},
+				{555, 666, 777, 888},
+			}
+			queriedBase := []uint32{12345, 67890}
+
+			want := referenceReducedOpeningSingle(
+				zeta, alpha, openedAtZeta, queriedBase, index, logMaxHeight,
+			)
+
+			var ops []StackOp
+			tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+
+			pushExt4Named(tracker, "alpha", alpha)
+			pushExt4Named(tracker, "zeta", zeta)
+			// Opened-at-zeta naming: oz_<col>_<j>.
+			for col, ext := range openedAtZeta {
+				for j := 0; j < 4; j++ {
+					tracker.pushInt(fmt.Sprintf("oz_%d_%d", col, j), int64(ext[j]))
+				}
+			}
+			// Queried base values: q_<col>.
+			for col, v := range queriedBase {
+				tracker.pushInt(fmt.Sprintf("q_%d", col), int64(v))
+			}
+			tracker.pushInt("idx", int64(index))
+
+			emitReducedOpeningAccumulator(
+				tracker,
+				"alpha", "zeta", "oz", "q", "idx",
+				len(openedAtZeta), logMaxHeight, "ros",
+			)
+			assertExt4EqualsRef(t, tracker, &ops, "ros", want)
+			drainAllStack(tracker, &ops)
+
+			if err := buildAndExecute(t, ops); err != nil {
+				t.Fatalf("index=%d: on-chain reduced opening disagrees with reference. "+
+					"want=%v: %v", index, want, err)
+			}
+			t.Logf("index=%d: reduced opening matches reference; want=%v |ops|=%d",
+				index, want, len(ops))
 		})
 	}
 }

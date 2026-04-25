@@ -36,7 +36,10 @@
 // and mirrors Plonky3's bincode struct-declaration order.
 package codegen
 
-import "fmt"
+import (
+	"fmt"
+	"math/big"
+)
 
 // =============================================================================
 // Parameters
@@ -1424,57 +1427,298 @@ func emitFriCommitPhaseAbsorb(fs *FiatShamirState, t *KBTracker, params SP1FriVe
 }
 
 // =============================================================================
-// Step 6 — Fibonacci AIR symbolic constraint evaluator (refined stub)
+// Step 6 — Fibonacci AIR symbolic constraint evaluator
 // =============================================================================
 //
 // Mirrors `packages/runar-go/sp1fri/air_fib.go::EvalFibonacciConstraints` +
-// `SelectorsAtPoint`. Implementation is deferred behind a panic until the
-// Ext4 macro layer (sp1_fri_ext4.go) lands: each Ext4 mul/inv/sub composes
-// the existing flat `EmitKBExt4Mul0..3` / `EmitKBExt4Inv0..3` emitters with
-// careful 8-element input window staging via the tracker.
+// `SelectorsAtPoint`. Composes the Ext4 macro layer (`sp1_fri_ext4.go`)
+// with the existing kbField{Mul,Inv,Sub,Add} primitives.
 //
-// At entry the named slots present (from emitTranscriptInit + Step 8):
+// The selector emission (`emitFibAirSelectorsAt`) is split out so it can be
+// tested in isolation against the off-chain `SelectorsAtPoint` reference.
+// The constraint accumulator (`emitFibAirConstraintEval`) consumes those
+// selectors plus the trace openings + public values + alpha and produces
+// the alpha-folded constraint accumulator.
+
+// emitExt4PowPow2 squares an Ext4 element `k` times in place — i.e. computes
+// a^(2^k). Mirrors `Ext4PowPow2` (sp1fri/koalabear.go:217-223). Reads
+// `inPrefix_0..3`, writes `outPrefix_0..3`. Inputs preserved.
+func emitExt4PowPow2(t *KBTracker, inPrefix, outPrefix string, k int) {
+	if k < 0 {
+		panic(fmt.Sprintf("emitExt4PowPow2: k must be >= 0, got %d", k))
+	}
+	if k == 0 {
+		// Just copy the four coefficients into outPrefix slots.
+		for i := 0; i < 4; i++ {
+			t.copyToTop(fmt.Sprintf("%s_%d", inPrefix, i), fmt.Sprintf("%s_%d", outPrefix, i))
+		}
+		return
+	}
+	// First square: read from inPrefix, write to a scratch slot.
+	cur := "_e4pp_acc"
+	kbExt4Mul(t, inPrefix, inPrefix, cur)
+	for i := 1; i < k; i++ {
+		next := fmt.Sprintf("_e4pp_acc%d", i)
+		kbExt4Mul(t, cur, cur, next)
+		// Drop the previous accumulator to keep the name table clean.
+		kbExt4DropAllByPrefix(t, cur+"_")
+		cur = next
+	}
+	// Rename the final accumulator's coefficients into outPrefix slots.
+	for i := 0; i < 4; i++ {
+		t.toTop(fmt.Sprintf("%s_%d", cur, i))
+		t.rename(fmt.Sprintf("%s_%d", outPrefix, i))
+	}
+}
+
+// emitFibAirSelectorsAt computes the four Lagrange selectors at `pointPrefix`
+// (an Ext4) for the trace domain of size 2^logSize, with shift = 1.
 //
-//   - _fs_alpha_0.._fs_alpha_3       (outer-stark batch challenge)
-//   - _fs_zeta_0.._fs_zeta_3         (out-of-domain point)
-//   - _fs_alpha_fri_0.._fs_alpha_fri_3  (FRI batching scalar)
-//   - _fs_beta_<r>_<i>               (per-round FRI fold challenges)
-//   - _obs_open_tl_<i>_c<j>          (trace_local, 2 Ext4)
-//   - _obs_open_tn_<i>_c<j>          (trace_next, 2 Ext4)
-//   - _obs_open_qc_<i>_c<j>          (quotient_chunks, 4 Ext4)
+// Mirrors `SelectorsAtPoint` (sp1fri/air_fib.go:107-123):
 //
-// Public values [a, b, x] are not re-pushed — they were absorbed as bytes
-// in Step 4 but the constraint evaluator needs them as canonical KB ints.
-// Caller must push them through the tracker as `_pis_a`, `_pis_b`, `_pis_x`
-// (each as a base-field element lifted into Ext4 by setting only c0).
+//	h        = KbTwoAdicGenerator(logSize)            // base-field constant
+//	h_inv    = KbInv(h)                               // base-field constant
+//	z_h      = point^(2^logSize) - 1
+//	pmO      = point - 1
+//	pmHinv   = point - h_inv
+//	is_first_row  = z_h / pmO         (= z_h * inv(pmO))
+//	is_last_row   = z_h / pmHinv      (= z_h * inv(pmHinv))
+//	is_transition = pmHinv
+//	inv_vanishing = inv(z_h)
 //
-// At exit the alpha-folded constraint accumulator sits on top as
-// `_fold_acc_0`, `_fold_acc_1`, `_fold_acc_2`, `_fold_acc_3`.
-func emitFibAirConstraintEval(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
-	panicSP1FriStub(
-		"verifySP1FRI Step 6 (Fibonacci AIR constraint evaluation at zeta)",
-		"sp1fri/air_fib.go::EvalFibonacciConstraints + SelectorsAtPoint (lines 41-123). "+
-			"Selectors at zeta require Ext4 operations: z_h = zeta^|H| - 1 (logSize=3 squarings), "+
-			"is_first_row = z_h / (zeta - 1), is_last_row = z_h / (zeta - h_inv), "+
-			"is_transition = (zeta - h_inv), inv_vanishing = 1/z_h. The constraint folder "+
-			"runs 5 alpha-folds: acc = acc * alpha + selector * (left|right - target). Each "+
-			"Ext4 mul/inv composes 4 calls to EmitKBExt4Mul0..3 / EmitKBExt4Inv0..3.",
-		"Structural shape: implementable as a sequence of macro calls once the Ext4 macro "+
-			"layer (sp1_fri_ext4.go) lands. The macro `kbExt4MulMacro(t, aPrefix, bPrefix, outPrefix)` "+
-			"would: (a) for each component i in 0..3, copyToTop the 8 named inputs in canonical "+
-			"order (a0..a3, b0..b3), call EmitKBExt4Mul[i] which consumes 8 and produces 1, "+
-			"rename the result to outPrefix_<i>; (b) skip the cleanup-drop inside the existing "+
-			"helper since copyToTop preserves originals. Estimate: each Ext4 mul = ~4 × 800 = "+
-			"3200 ops; the 5-constraint Fib AIR eval needs ~10 Ext4 muls + 4 Ext4 invs + 4 Ext4 "+
-			"subs = ~50K ops + ~30K ops + 16 ops = ~80K ops added on top of the Step 8 "+
-			"baseline (~250K ops).")
-	_ = fs
-	_ = t
-	_ = params
+// Reads `pointPrefix_0..3`. Writes:
+//
+//	`<outPrefix>_first_<i>`        is_first_row
+//	`<outPrefix>_last_<i>`         is_last_row
+//	`<outPrefix>_trans_<i>`        is_transition
+//	`<outPrefix>_invvan_<i>`       inv_vanishing
+//
+// for i in 0..3. Inputs preserved.
+func emitFibAirSelectorsAt(t *KBTracker, pointPrefix, outPrefix string, logSize int) {
+	// h_inv as a base-field canonical KoalaBear element.
+	hInv := kbInvCanonical(kbTwoAdicGeneratorCanonical(logSize))
+
+	// z_h = point^(2^logSize) - 1
+	emitExt4PowPow2(t, pointPrefix, "_sel_zh_pre", logSize)
+	// Subtract 1 only from c0 component (Ext4 one = (1, 0, 0, 0)).
+	t.toTop("_sel_zh_pre_0")
+	t.rawBlock([]string{"_sel_zh_pre_0"}, "_sel_zh_c0_pre", func(e func(StackOp)) {
+		e(StackOp{Op: "push", Value: bigIntPush(1)})
+		e(StackOp{Op: "opcode", Code: "OP_SUB"})
+	})
+	kbFieldMod(t, "_sel_zh_c0_pre", "_sel_zh_0")
+	// Other coefficients copy through unchanged but we rename for naming uniformity.
+	for i := 1; i < 4; i++ {
+		t.toTop(fmt.Sprintf("_sel_zh_pre_%d", i))
+		t.rename(fmt.Sprintf("_sel_zh_%d", i))
+	}
+
+	// pmO = point - 1   (subtract 1 from c0 only)
+	t.copyToTop(fmt.Sprintf("%s_0", pointPrefix), "_sel_pmO_c0_pre")
+	t.rawBlock([]string{"_sel_pmO_c0_pre"}, "_sel_pmO_c0_pre2", func(e func(StackOp)) {
+		e(StackOp{Op: "push", Value: bigIntPush(1)})
+		e(StackOp{Op: "opcode", Code: "OP_SUB"})
+	})
+	kbFieldMod(t, "_sel_pmO_c0_pre2", "_sel_pmO_0")
+	for i := 1; i < 4; i++ {
+		t.copyToTop(fmt.Sprintf("%s_%d", pointPrefix, i), fmt.Sprintf("_sel_pmO_%d", i))
+	}
+
+	// pmHinv = point - h_inv   (subtract h_inv canonical from c0 only)
+	t.copyToTop(fmt.Sprintf("%s_0", pointPrefix), "_sel_pmH_c0_pre")
+	t.rawBlock([]string{"_sel_pmH_c0_pre"}, "_sel_pmH_c0_pre2", func(e func(StackOp)) {
+		e(StackOp{Op: "push", Value: bigIntPush(int64(hInv))})
+		e(StackOp{Op: "opcode", Code: "OP_SUB"})
+	})
+	kbFieldMod(t, "_sel_pmH_c0_pre2", fmt.Sprintf("%s_trans_0", outPrefix))
+	for i := 1; i < 4; i++ {
+		t.copyToTop(fmt.Sprintf("%s_%d", pointPrefix, i), fmt.Sprintf("%s_trans_%d", outPrefix, i))
+	}
+
+	// is_first_row = z_h * inv(pmO)
+	kbExt4Inv(t, "_sel_pmO", "_sel_inv_pmO")
+	kbExt4Mul(t, "_sel_zh", "_sel_inv_pmO", "_sel_first_tmp")
+	for i := 0; i < 4; i++ {
+		t.toTop(fmt.Sprintf("_sel_first_tmp_%d", i))
+		t.rename(fmt.Sprintf("%s_first_%d", outPrefix, i))
+	}
+
+	// is_last_row = z_h * inv(pmHinv)
+	// pmHinv lives at outPrefix_trans_*; invert + multiply.
+	kbExt4Inv(t, fmt.Sprintf("%s_trans", outPrefix), "_sel_inv_pmH")
+	kbExt4Mul(t, "_sel_zh", "_sel_inv_pmH", "_sel_last_tmp")
+	for i := 0; i < 4; i++ {
+		t.toTop(fmt.Sprintf("_sel_last_tmp_%d", i))
+		t.rename(fmt.Sprintf("%s_last_%d", outPrefix, i))
+	}
+
+	// inv_vanishing = inv(z_h)
+	kbExt4Inv(t, "_sel_zh", "_sel_invvan_tmp")
+	for i := 0; i < 4; i++ {
+		t.toTop(fmt.Sprintf("_sel_invvan_tmp_%d", i))
+		t.rename(fmt.Sprintf("%s_invvan_%d", outPrefix, i))
+	}
+
+	// Cleanup intermediates.
+	kbExt4DropByPrefixes(t,
+		"_sel_zh_pre_", "_sel_zh_", "_sel_pmO_", "_sel_inv_pmO_", "_sel_inv_pmH_",
+	)
+}
+
+// kbTwoAdicGeneratorCanonical computes a primitive 2^k-th root of unity in
+// canonical KoalaBear at codegen time. Mirrors `KbTwoAdicGenerator`
+// (sp1fri/koalabear.go:115). Static — computed once per call site.
+func kbTwoAdicGeneratorCanonical(k int) uint32 {
+	if k < 0 || k > 24 {
+		panic(fmt.Sprintf("kbTwoAdicGeneratorCanonical: k out of range: %d", k))
+	}
+	const kbPrime uint32 = 2130706433
+	const kbGenerator uint32 = 3
+	mul := func(a, b uint32) uint32 { return uint32((uint64(a) * uint64(b)) % uint64(kbPrime)) }
+	pow := func(base uint32, exp uint64) uint32 {
+		r := uint32(1)
+		b := base
+		for e := exp; e > 0; e >>= 1 {
+			if e&1 == 1 {
+				r = mul(r, b)
+			}
+			b = mul(b, b)
+		}
+		return r
+	}
+	g24 := pow(kbGenerator, 127) // (p-1)/2^24 = 127
+	g := g24
+	for i := 24; i > k; i-- {
+		g = mul(g, g)
+	}
+	return g
+}
+
+// kbInvCanonical computes a^{-1} mod KbPrime in canonical form.
+func kbInvCanonical(a uint32) uint32 {
+	if a == 0 {
+		panic("kbInvCanonical: zero")
+	}
+	const kbPrime uint32 = 2130706433
+	mul := func(x, y uint32) uint32 { return uint32((uint64(x) * uint64(y)) % uint64(kbPrime)) }
+	r := uint32(1)
+	b := a
+	e := uint64(kbPrime) - 2
+	for e > 0 {
+		if e&1 == 1 {
+			r = mul(r, b)
+		}
+		b = mul(b, b)
+		e >>= 1
+	}
+	return r
+}
+
+// emitFibAirConstraintEval evaluates the 5 Fibonacci AIR constraints at zeta
+// and produces the alpha-folded accumulator.
+//
+// Inputs (named tracker slots, all canonical KoalaBear):
+//
+//   - alphaPrefix_0..3                    outer-stark batch challenge
+//   - localPrefix_<i>_c<j> for i in 0..1   trace_local Ext4s (left, right)
+//   - nextPrefix_<i>_c<j>  for i in 0..1   trace_next Ext4s (left, right)
+//   - selPrefix_first_<j>, selPrefix_last_<j>, selPrefix_trans_<j>, selPrefix_invvan_<j>
+//   - pisName_a, pisName_b, pisName_x      base-field public values
+//
+// Output (named slots, canonical):
+//
+//   - outPrefix_0..3   alpha-folded constraint accumulator
+//
+// Mirrors `EvalFibonacciConstraints` (sp1fri/air_fib.go:41-82).
+func emitFibAirConstraintEval(
+	t *KBTracker,
+	alphaPrefix, localPrefix, nextPrefix, selPrefix string,
+	pisAName, pisBName, pisXName string,
+	outPrefix string,
+) {
+	// Lift public values into Ext4 (only c0 is non-zero).
+	liftBaseToExt4 := func(baseName, ext4Prefix string) {
+		t.copyToTop(baseName, fmt.Sprintf("%s_0", ext4Prefix))
+		for i := 1; i < 4; i++ {
+			t.pushInt(fmt.Sprintf("%s_%d", ext4Prefix, i), 0)
+		}
+	}
+	liftBaseToExt4(pisAName, "_fac_a")
+	liftBaseToExt4(pisBName, "_fac_b")
+	liftBaseToExt4(pisXName, "_fac_x")
+
+	left := fmt.Sprintf("%s_0", localPrefix)
+	right := fmt.Sprintf("%s_1", localPrefix)
+	nLeft := fmt.Sprintf("%s_0", nextPrefix)
+	nRight := fmt.Sprintf("%s_1", nextPrefix)
+
+	selFirst := fmt.Sprintf("%s_first", selPrefix)
+	selLast := fmt.Sprintf("%s_last", selPrefix)
+	selTrans := fmt.Sprintf("%s_trans", selPrefix)
+
+	// Initialize accumulator = 0.
+	for i := 0; i < 4; i++ {
+		t.pushInt(fmt.Sprintf("_fac_acc_%d", i), 0)
+	}
+
+	// fold(c): acc = acc * alpha + c
+	fold := func(cPrefix string) {
+		// tmp = acc * alpha
+		kbExt4Mul(t, "_fac_acc", alphaPrefix, "_fac_tmp")
+		// new_acc = tmp + c
+		kbExt4Add(t, "_fac_tmp", cPrefix, "_fac_new")
+		// Drop old acc + tmp; rename new -> acc.
+		kbExt4DropAllByPrefix(t, "_fac_acc_")
+		kbExt4DropAllByPrefix(t, "_fac_tmp_")
+		for i := 0; i < 4; i++ {
+			t.toTop(fmt.Sprintf("_fac_new_%d", i))
+			t.rename(fmt.Sprintf("_fac_acc_%d", i))
+		}
+	}
+
+	// Constraint 1: is_first_row * (left - a)
+	kbExt4Sub(t, left, "_fac_a", "_fac_diff1")
+	kbExt4Mul(t, selFirst, "_fac_diff1", "_fac_c1")
+	fold("_fac_c1")
+	kbExt4DropByPrefixes(t, "_fac_diff1_", "_fac_c1_")
+
+	// Constraint 2: is_first_row * (right - b)
+	kbExt4Sub(t, right, "_fac_b", "_fac_diff2")
+	kbExt4Mul(t, selFirst, "_fac_diff2", "_fac_c2")
+	fold("_fac_c2")
+	kbExt4DropByPrefixes(t, "_fac_diff2_", "_fac_c2_")
+
+	// Constraint 3: is_transition * (right - nLeft)
+	kbExt4Sub(t, right, nLeft, "_fac_diff3")
+	kbExt4Mul(t, selTrans, "_fac_diff3", "_fac_c3")
+	fold("_fac_c3")
+	kbExt4DropByPrefixes(t, "_fac_diff3_", "_fac_c3_")
+
+	// Constraint 4: is_transition * ((left + right) - nRight)
+	kbExt4Add(t, left, right, "_fac_sum4")
+	kbExt4Sub(t, "_fac_sum4", nRight, "_fac_diff4")
+	kbExt4Mul(t, selTrans, "_fac_diff4", "_fac_c4")
+	fold("_fac_c4")
+	kbExt4DropByPrefixes(t, "_fac_sum4_", "_fac_diff4_", "_fac_c4_")
+
+	// Constraint 5: is_last_row * (right - x)
+	kbExt4Sub(t, right, "_fac_x", "_fac_diff5")
+	kbExt4Mul(t, selLast, "_fac_diff5", "_fac_c5")
+	fold("_fac_c5")
+	kbExt4DropByPrefixes(t, "_fac_diff5_", "_fac_c5_")
+
+	// Drop the lifted public-value Ext4s.
+	kbExt4DropByPrefixes(t, "_fac_a_", "_fac_b_", "_fac_x_")
+
+	// Rename the accumulator to outPrefix.
+	for i := 0; i < 4; i++ {
+		t.toTop(fmt.Sprintf("_fac_acc_%d", i))
+		t.rename(fmt.Sprintf("%s_%d", outPrefix, i))
+	}
 }
 
 // =============================================================================
-// Step 7 — Quotient recompose + OOD constraint check (refined stub)
+// Step 7 — Quotient recompose
 // =============================================================================
 //
 // Mirrors `packages/runar-go/sp1fri/verify.go::recomposeQuotient` (lines 250-283)
@@ -1498,28 +1742,334 @@ func emitFibAirConstraintEval(fs *FiatShamirState, t *KBTracker, params SP1FriVe
 //
 // Which requires one full Ext4 mul (sum of 4 EmitKBExt4Mul calls) + 4 ×
 // OP_NUMEQUALVERIFY against the recomposed quotient.
-func emitQuotientRecompose(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
-	panicSP1FriStub(
-		"verifySP1FRI Step 7 (quotient recompose + OOD equality check)",
-		"sp1fri/verify.go::recomposeQuotient (lines 243-283) + final equality at 172-174. "+
-			"For numQuotientChunks=1 the recompose collapses to: "+
-			"quotient = chunk[0] + chunk[1]*X + chunk[2]*X^2 + chunk[3]*X^3 mod (X^4 - W) "+
-			"with W = 3. Each X^e multiplication is a pure permutation + scale-by-W on the "+
-			"4 Ext4 coefficients (no Ext4 mul needed for the recompose). The final equality "+
-			"check `folded * inv_vanishing == quotient` does need one full Ext4 mul.",
-		"Structural shape: (a) recompose is component-wise — for the 4 output coefficients, "+
-			"compute r0 = chunk[0]_c0 + W*chunk[1]_c3 + W*chunk[2]_c2 + W*chunk[3]_c1 (5 adds + 3 muls-by-3); "+
-			"r1 = chunk[0]_c1 + chunk[1]_c0 + W*chunk[2]_c3 + W*chunk[3]_c2 (5 adds + 2 muls-by-3); "+
-			"r2 = chunk[0]_c2 + chunk[1]_c1 + chunk[2]_c0 + W*chunk[3]_c3 (5 adds + 1 mul-by-3); "+
-			"r3 = chunk[0]_c3 + chunk[1]_c2 + chunk[2]_c1 + chunk[3]_c0 (5 adds). "+
-			"Each base-field add/mul-by-W goes through kbFieldAdd/kbFieldMulConst — "+
-			"~50 ops per coefficient, ~200 ops total for the recompose. (b) Ext4 mul of "+
-			"folded * inv_vanishing: 4 × kbExt4MulComponent ≈ 4 × 800 = 3200 ops. (c) Final "+
-			"equality: copyToTop each component pair, OP_NUMEQUAL + OP_VERIFY × 4. Total Step 7 "+
-			"~3500 ops added on top of Step 6 output.")
-	_ = fs
-	_ = t
-	_ = params
+// emitQuotientRecompose recomposes quotient(zeta) from a single quotient chunk
+// (numQuotientChunks=1 — the PoC fixture's shape).
+//
+// Mirrors `recomposeQuotient` (sp1fri/verify.go:243-283) specialised to the
+// single-chunk case where zps[0] = 1 (empty product). The recompose collapses
+// to a basis-element shift+sum:
+//
+//	out = sum over e in 0..3 of (X^e as Ext4) * chunk[e]
+//
+// In the binomial extension F[X]/(X^4 - W) with W = 3 this is:
+//
+//	(X^0): identity
+//	(X^1): (c0,c1,c2,c3) -> (W*c3, c0, c1, c2)
+//	(X^2): (c0,c1,c2,c3) -> (W*c2, W*c3, c0, c1)
+//	(X^3): (c0,c1,c2,c3) -> (W*c1, W*c2, W*c3, c0)
+//
+// then sum the four Ext4s component-wise.
+//
+// Inputs (named tracker slots):
+//
+//   - chunkPrefix_<e>_<j>  for e in 0..3 (the 4 Ext4 coefficients of the chunk)
+//                          and j in 0..3 (the 4 base-field components per Ext4)
+//
+// Output:
+//
+//   - outPrefix_0..3      reconstructed quotient(zeta) as Ext4
+//
+// Inputs preserved.
+func emitQuotientRecompose(t *KBTracker, chunkPrefix, outPrefix string) {
+	// Helper to copy chunk[e]_<j> to a scratch slot, optionally scaling by W.
+	scale := func(srcName, dstName string, byW bool) {
+		t.copyToTop(srcName, "_qr_tmp")
+		if byW {
+			kbFieldMulConst(t, "_qr_tmp", kbFieldW, dstName)
+		} else {
+			t.rename(dstName)
+		}
+	}
+
+	// out_0 = chunk[0]_c0 + W*chunk[1]_c3 + W*chunk[2]_c2 + W*chunk[3]_c1
+	scale(fmt.Sprintf("%s_0_0", chunkPrefix), "_qr_t00", false)
+	scale(fmt.Sprintf("%s_1_3", chunkPrefix), "_qr_t01", true)
+	scale(fmt.Sprintf("%s_2_2", chunkPrefix), "_qr_t02", true)
+	scale(fmt.Sprintf("%s_3_1", chunkPrefix), "_qr_t03", true)
+	kbFieldAdd(t, "_qr_t00", "_qr_t01", "_qr_s0a")
+	kbFieldAdd(t, "_qr_s0a", "_qr_t02", "_qr_s0b")
+	kbFieldAdd(t, "_qr_s0b", "_qr_t03", fmt.Sprintf("%s_0", outPrefix))
+
+	// out_1 = chunk[0]_c1 + chunk[1]_c0 + W*chunk[2]_c3 + W*chunk[3]_c2
+	scale(fmt.Sprintf("%s_0_1", chunkPrefix), "_qr_t10", false)
+	scale(fmt.Sprintf("%s_1_0", chunkPrefix), "_qr_t11", false)
+	scale(fmt.Sprintf("%s_2_3", chunkPrefix), "_qr_t12", true)
+	scale(fmt.Sprintf("%s_3_2", chunkPrefix), "_qr_t13", true)
+	kbFieldAdd(t, "_qr_t10", "_qr_t11", "_qr_s1a")
+	kbFieldAdd(t, "_qr_s1a", "_qr_t12", "_qr_s1b")
+	kbFieldAdd(t, "_qr_s1b", "_qr_t13", fmt.Sprintf("%s_1", outPrefix))
+
+	// out_2 = chunk[0]_c2 + chunk[1]_c1 + chunk[2]_c0 + W*chunk[3]_c3
+	scale(fmt.Sprintf("%s_0_2", chunkPrefix), "_qr_t20", false)
+	scale(fmt.Sprintf("%s_1_1", chunkPrefix), "_qr_t21", false)
+	scale(fmt.Sprintf("%s_2_0", chunkPrefix), "_qr_t22", false)
+	scale(fmt.Sprintf("%s_3_3", chunkPrefix), "_qr_t23", true)
+	kbFieldAdd(t, "_qr_t20", "_qr_t21", "_qr_s2a")
+	kbFieldAdd(t, "_qr_s2a", "_qr_t22", "_qr_s2b")
+	kbFieldAdd(t, "_qr_s2b", "_qr_t23", fmt.Sprintf("%s_2", outPrefix))
+
+	// out_3 = chunk[0]_c3 + chunk[1]_c2 + chunk[2]_c1 + chunk[3]_c0
+	scale(fmt.Sprintf("%s_0_3", chunkPrefix), "_qr_t30", false)
+	scale(fmt.Sprintf("%s_1_2", chunkPrefix), "_qr_t31", false)
+	scale(fmt.Sprintf("%s_2_1", chunkPrefix), "_qr_t32", false)
+	scale(fmt.Sprintf("%s_3_0", chunkPrefix), "_qr_t33", false)
+	kbFieldAdd(t, "_qr_t30", "_qr_t31", "_qr_s3a")
+	kbFieldAdd(t, "_qr_s3a", "_qr_t32", "_qr_s3b")
+	kbFieldAdd(t, "_qr_s3b", "_qr_t33", fmt.Sprintf("%s_3", outPrefix))
+}
+
+// =============================================================================
+// Step 10 — per-query reduced-opening accumulator (Part A)
+// =============================================================================
+//
+// Mirrors the inner per-query accumulator at `openInput` (sp1fri/fri.go:228-242):
+//
+//	x         = GENERATOR * g_logHeight^reverseBitsLen(index >> bitsReduced, logHeight)
+//	xExt      = Ext4FromBase(x)
+//	quotient  = (zeta - xExt)^{-1}
+//	for col in trace columns:
+//	    diff   = openValue_at_zeta[col] - openValue_at_x[col]      // Ext4 - base
+//	    ros   += alphaPow * diff * quotient                          // Ext4
+//	    alphaPow *= alpha                                            // Ext4
+//
+// For the PoC fixture there is exactly ONE matrix at the trace height
+// (logGlobalMaxHeight) with two trace columns + one opening point at zeta
+// (other points are absorbed in the same accumulator at lower heights —
+// not exercised by Part A; that's the per-fold-step roll-in handled in
+// `verifyQuery` lines 318-323, validated separately).
+//
+// Inputs (named tracker slots, all canonical KoalaBear):
+//
+//   - alphaPrefix_0..3                Ext4 batch challenge (preserved)
+//   - zetaPrefix_0..3                 Ext4 OOD point          (preserved)
+//   - openedAtZeta_<col>_c<j>         Ext4 opening at zeta for col in 0..numCols-1
+//   - queriedBase_<col>               base-field value at the queried row index
+//   - indexName                       runtime query index (low logMaxHeight bits)
+//
+// Output (named slots, canonical):
+//
+//   - outPrefix_0..3                  the reduced-opening accumulator (Ext4)
+//
+// `logMaxHeight` is the static log2 of the max matrix height (after blowup) —
+// for the PoC fixture this is `logGlobalMaxHeight = 5`. The runtime exponent
+// `reverseBitsLen(index, logMaxHeight)` is computed inline by walking the
+// 5 bits of `index` and conditionally multiplying precomputed g^(2^k) entries.
+// (Strategy (b) from the dispatch brief — cheaper than square-and-multiply for
+// small exponents. TODO for production logMaxHeight ~ 20: switch to a
+// codegen-time-unrolled square-and-multiply chain.)
+//
+// References:
+//   - sp1fri/fri.go:147-257 (openInput)
+//   - sp1fri/fri.go:228-242 (the per-matrix accumulator inner loop)
+//   - sp1fri/koalabear.go:115 (KbTwoAdicGenerator)
+func emitReducedOpeningAccumulator(
+	t *KBTracker,
+	alphaPrefix, zetaPrefix string,
+	openedAtZetaPrefix, queriedBasePrefix string,
+	indexName string,
+	numCols, logMaxHeight int,
+	outPrefix string,
+) {
+	if numCols < 1 {
+		panic(fmt.Sprintf("emitReducedOpeningAccumulator: numCols must be >= 1, got %d", numCols))
+	}
+	if logMaxHeight < 1 {
+		panic(fmt.Sprintf("emitReducedOpeningAccumulator: logMaxHeight must be >= 1, got %d", logMaxHeight))
+	}
+
+	// 1. Compute the runtime base-field x = GENERATOR * g^reverseBitsLen(index, logMaxHeight)
+	//    via bit-decomposition over the static lookup table.
+	//
+	// reverseBitsLen(index, logMaxHeight) treats `index`'s bit `i` (LSB=0) as
+	// the bit `(logMaxHeight-1-i)` (MSB) of the reversed value. So:
+	//
+	//    g^reverseBitsLen(index, n) = product over i in 0..n-1 of (g^(2^(n-1-i)))^bit_i(index)
+	//
+	// Precompute `gPow[i] = g_logMaxHeight^(2^(n-1-i))` for i in 0..n-1.
+	// Multiply these in conditionally based on the bits of `index`.
+	const kbGenerator uint32 = 3
+	g := kbTwoAdicGeneratorCanonical(logMaxHeight)
+	gPows := make([]uint32, logMaxHeight)
+	cur := g
+	for i := 0; i < logMaxHeight; i++ {
+		// gPow[n-1-i] = g^(2^i). Compute g^(2^i) by repeated squaring.
+		// We want gPows[k] = g^(2^(n-1-k)) so iterate k from n-1 down to 0
+		// while squaring `cur` each step.
+		gPows[logMaxHeight-1-i] = cur
+		cur = uint32((uint64(cur) * uint64(cur)) % uint64(2130706433))
+	}
+
+	// Initialize accumulator as canonical 1 in the base field.
+	t.pushInt("_ro_x", 1)
+	// Walk the bits of `indexName`. For each bit i (corresponding to gPows[i]),
+	// emit: copyToTop indexName, AND with mask, branch:
+	//   if bit set: multiply _ro_x by gPows[i] mod p.
+	//
+	// Implemented via OP_IF gating each multiplication.
+	for i := 0; i < logMaxHeight; i++ {
+		// bit_i = (indexName >> i) & 1
+		// Use OP_RSHIFTNUM (numeric right shift) since `index` is a script
+		// number, not a byte string. Pattern mirrors bn254.go:1146-1165.
+		t.copyToTop(indexName, "_ro_idx_copy")
+		if i == 0 {
+			// No shift needed; bit_0 = indexName mod 2.
+			t.rawBlock([]string{"_ro_idx_copy"}, "_ro_bit", func(e func(StackOp)) {
+				e(StackOp{Op: "push", Value: bigIntPush(2)})
+				e(StackOp{Op: "opcode", Code: "OP_MOD"})
+			})
+		} else if i == 1 {
+			// OP_2DIV (single-bit shift) then mod 2.
+			t.rawBlock([]string{"_ro_idx_copy"}, "_ro_shifted", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_2DIV"})
+			})
+			t.toTop("_ro_shifted")
+			t.rawBlock([]string{"_ro_shifted"}, "_ro_bit", func(e func(StackOp)) {
+				e(StackOp{Op: "push", Value: bigIntPush(2)})
+				e(StackOp{Op: "opcode", Code: "OP_MOD"})
+			})
+		} else {
+			t.pushInt("_ro_shift_amt", int64(i))
+			t.rawBlock([]string{"_ro_idx_copy", "_ro_shift_amt"}, "_ro_shifted", func(e func(StackOp)) {
+				e(StackOp{Op: "opcode", Code: "OP_RSHIFTNUM"})
+			})
+			t.toTop("_ro_shifted")
+			t.rawBlock([]string{"_ro_shifted"}, "_ro_bit", func(e func(StackOp)) {
+				e(StackOp{Op: "push", Value: bigIntPush(2)})
+				e(StackOp{Op: "opcode", Code: "OP_MOD"})
+			})
+		}
+		// If _ro_bit == 1, multiply _ro_x by gPows[i].
+		t.toTop("_ro_x")
+		t.toTop("_ro_bit")
+		t.rawBlock([]string{"_ro_x", "_ro_bit"}, "_ro_x", func(e func(StackOp)) {
+			e(StackOp{
+				Op: "if",
+				Then: []StackOp{
+					{Op: "push", Value: bigIntPush(int64(gPows[i]))},
+					{Op: "opcode", Code: "OP_MUL"},
+					{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(kbFieldP)}},
+					{Op: "opcode", Code: "OP_MOD"},
+				},
+				Else: []StackOp{},
+			})
+		})
+	}
+	// Multiply by GENERATOR=3 to get x = GENERATOR * g^reverseBits(index).
+	t.toTop("_ro_x")
+	t.rawBlock([]string{"_ro_x"}, "_ro_x_pre", func(e func(StackOp)) {
+		e(StackOp{Op: "push", Value: bigIntPush(int64(kbGenerator))})
+		e(StackOp{Op: "opcode", Code: "OP_MUL"})
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bigint", BigInt: new(big.Int).Set(kbFieldP)}})
+		e(StackOp{Op: "opcode", Code: "OP_MOD"})
+	})
+	t.rename("_ro_x_base")
+
+	// 2. Lift x into Ext4 (only c0 nonzero).
+	t.copyToTop("_ro_x_base", "_ro_xExt_0")
+	for j := 1; j < 4; j++ {
+		t.pushInt(fmt.Sprintf("_ro_xExt_%d", j), 0)
+	}
+
+	// 3. Compute quotient = (zeta - xExt)^{-1}  (Ext4)
+	kbExt4Sub(t, zetaPrefix, "_ro_xExt", "_ro_zmx")
+	kbExt4Inv(t, "_ro_zmx", "_ro_quot")
+
+	// 4. Initialize alphaPow = Ext4One, ros = Ext4Zero.
+	for j := 0; j < 4; j++ {
+		if j == 0 {
+			t.pushInt("_ro_apow_0", 1)
+		} else {
+			t.pushInt(fmt.Sprintf("_ro_apow_%d", j), 0)
+		}
+	}
+	for j := 0; j < 4; j++ {
+		t.pushInt(fmt.Sprintf("_ro_ros_%d", j), 0)
+	}
+
+	// 5. Per-column loop: ros += alphaPow * (opened_at_zeta - lift(queried)) * quotient
+	for col := 0; col < numCols; col++ {
+		zetaColPrefix := fmt.Sprintf("%s_%d", openedAtZetaPrefix, col)
+		queriedName := fmt.Sprintf("%s_%d", queriedBasePrefix, col)
+
+		// liftedQ = (queried, 0, 0, 0)
+		liftedPrefix := fmt.Sprintf("_ro_lq_%d", col)
+		t.copyToTop(queriedName, fmt.Sprintf("%s_0", liftedPrefix))
+		for j := 1; j < 4; j++ {
+			t.pushInt(fmt.Sprintf("%s_%d", liftedPrefix, j), 0)
+		}
+
+		// diff = opened_at_zeta - liftedQ   (Ext4)
+		diffPrefix := fmt.Sprintf("_ro_diff_%d", col)
+		kbExt4Sub(t, zetaColPrefix, liftedPrefix, diffPrefix)
+
+		// term0 = diff * quotient  (Ext4)
+		term0Prefix := fmt.Sprintf("_ro_t0_%d", col)
+		kbExt4Mul(t, diffPrefix, "_ro_quot", term0Prefix)
+
+		// term = alphaPow * term0   (Ext4)
+		termPrefix := fmt.Sprintf("_ro_term_%d", col)
+		kbExt4Mul(t, "_ro_apow", term0Prefix, termPrefix)
+
+		// ros += term
+		// Use distinct prefix shape ("_roupd_<col>_") so the cleanup-drop pass
+		// does not also delete the new slots (`_ro_ros_` is a prefix of both
+		// the old `_ro_ros_<i>` and any naïve `_ro_ros_new_*` naming).
+		newRosPrefix := fmt.Sprintf("_roupd_ros_%d", col)
+		kbExt4Add(t, "_ro_ros", termPrefix, newRosPrefix)
+		// Drop the OLD ros slots only.
+		for j := 0; j < 4; j++ {
+			t.toTop(fmt.Sprintf("_ro_ros_%d", j))
+			t.drop()
+		}
+		// Rename the new slots into the canonical _ro_ros_<j> names.
+		for j := 0; j < 4; j++ {
+			t.toTop(fmt.Sprintf("%s_%d", newRosPrefix, j))
+			t.rename(fmt.Sprintf("_ro_ros_%d", j))
+		}
+
+		// alphaPow *= alpha   (Ext4) — same prefix-collision protection.
+		newAPow := fmt.Sprintf("_roupd_apow_%d", col)
+		kbExt4Mul(t, "_ro_apow", alphaPrefix, newAPow)
+		for j := 0; j < 4; j++ {
+			t.toTop(fmt.Sprintf("_ro_apow_%d", j))
+			t.drop()
+		}
+		for j := 0; j < 4; j++ {
+			t.toTop(fmt.Sprintf("%s_%d", newAPow, j))
+			t.rename(fmt.Sprintf("_ro_apow_%d", j))
+		}
+
+		// Drop per-iteration scratch (lifted, diff, term0, term).
+		kbExt4DropByPrefixes(t,
+			liftedPrefix+"_", diffPrefix+"_", term0Prefix+"_", termPrefix+"_",
+		)
+	}
+
+	// Drop alphaPow + quotient + xExt + x_base + leftover scratch.
+	kbExt4DropAllByPrefix(t, "_ro_apow_")
+	kbExt4DropAllByPrefix(t, "_ro_quot_")
+	kbExt4DropAllByPrefix(t, "_ro_zmx_")
+	kbExt4DropAllByPrefix(t, "_ro_xExt_")
+	for _, n := range []string{"_ro_x_base"} {
+		// Drop if present.
+		found := false
+		for _, nm := range t.nm {
+			if nm == n {
+				found = true
+				break
+			}
+		}
+		if found {
+			t.toTop(n)
+			t.drop()
+		}
+	}
+
+	// Rename ros -> outPrefix.
+	for j := 0; j < 4; j++ {
+		t.toTop(fmt.Sprintf("_ro_ros_%d", j))
+		t.rename(fmt.Sprintf("%s_%d", outPrefix, j))
+	}
 }
 
 // =============================================================================
