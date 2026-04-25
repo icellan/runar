@@ -9,7 +9,7 @@ field SP1 v6.0.2 uses), config matching Plonky3's
 
 | File                   | Size       | Notes                                                     |
 |------------------------|------------|-----------------------------------------------------------|
-| `proof.postcard`       | 1596 bytes | postcard-encoded `p3_uni_stark::Proof<MyConfig>`          |
+| `proof.postcard`       | 1589 bytes | postcard-encoded `p3_uni_stark::Proof<MyConfig>`          |
 | `README.md`            | —          | this file                                                 |
 | `regen/Cargo.toml`     | —          | Rust fixture generator manifest (depends on Plonky3 main) |
 | `regen/src/main.rs`    | —          | Fibonacci AIR + KoalaBear config + postcard dump          |
@@ -35,6 +35,13 @@ fits comfortably under PoC script-size targets. Security is ~40 bits —
 sufficient for end-to-end correctness testing, **not** mainnet
 soundness. Production parameters land in Phase 2 with the `evm-guest`
 fixture.
+
+The Poseidon2 permutation uses the canonical published constants
+(`default_koalabear_poseidon2_16()`) so any verifier embedding the
+SP1 v6.0.2 `KOALABEAR_POSEIDON2_RC_16_*` tables can reproduce the
+permutation byte-for-byte. The off-chain Go reference verifier at
+`packages/runar-go/sp1fri/` accepts this fixture end-to-end (see
+`TestVerifyMinimalGuest`).
 
 ## AIR (matches Plonky3 `uni-stark/tests/fib_air.rs` port to KoalaBear)
 

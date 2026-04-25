@@ -772,11 +772,13 @@ func TestFiatShamirKB_Observe_Script(t *testing.T) {
 	//
 	// The sponge absorbs elements 1..8 into rate slots fs0..fs7 (replacing the
 	// initial zeros). The 8th observe fills the rate and triggers a permutation
-	// of [1,2,3,4,5,6,7,8, 0,0,0,0,0,0,0,0]. The squeeze then reads fs0
-	// from the post-permutation state.
+	// of [1,2,3,4,5,6,7,8, 0,0,0,0,0,0,0,0]. The squeeze then reads fs7
+	// (not fs0) from the post-permutation state — Plonky3 DuplexChallenger
+	// pops from the BACK of the rate window (challenger/src/duplex_challenger.rs
+	// lines 196-216, validated at sp1fri/challenger.go:103-112).
 	//
 	// The reference is a direct permutation of the same 16-element state,
-	// extracting element 0. Both computations run in the same Bitcoin Script
+	// extracting element 7. Both computations run in the same Bitcoin Script
 	// and the results are compared via OP_EQUALVERIFY.
 
 	// Phase 1: Build the sponge tracker ops (self-contained, starts from empty stack).
@@ -815,16 +817,23 @@ func TestFiatShamirKB_Observe_Script(t *testing.T) {
 	ops = append(ops, permuteOps...)
 
 	// Now: stack = [fs0, ..., fs15, squeezed, p2s0, p2s1, ..., p2s15]
-	// We want p2s0 (element 0 = deepest of the 16 permutation results).
-	// Drop the top 15 elements (p2s1..p2s15) to expose p2s0.
-	for i := 0; i < 15; i++ {
+	// We want p2s7 (element 7 — the back of the rate window, matching
+	// DuplexChallenger.Sample()). Drop the top 8 elements (p2s8..p2s15)
+	// to expose p2s7 on top.
+	for i := 0; i < 8; i++ {
 		ops = append(ops, opcode("OP_DROP"))
 	}
 
-	// Now: stack = [fs0, ..., fs15, squeezed, p2s0_ref]
-	// Compare squeezed (at depth 1) with p2s0_ref (on top).
-	ops = append(ops, opcode("OP_SWAP"))
+	// Now: stack = [fs0, ..., fs15, squeezed, p2s0..p2s7]
+	// p2s7 is on top, squeezed is at depth 8.
+	// Roll squeezed to top, then NUMEQUALVERIFY against p2s7.
+	ops = append(ops, pushInt64(8))
+	ops = append(ops, opcode("OP_ROLL"))
 	ops = append(ops, opcode("OP_EQUALVERIFY"))
+	// Drop the remaining p2s0..p2s6 (7 elements).
+	for i := 0; i < 7; i++ {
+		ops = append(ops, opcode("OP_DROP"))
+	}
 
 	// Clean up the 16 sponge state elements.
 	for i := 0; i < 16; i++ {
@@ -878,26 +887,32 @@ func TestFiatShamirKB_SqueezeExt4_Script(t *testing.T) {
 	ops = append(ops, permuteOps...)
 
 	// Stack: [..., ext4_0..ext4_3, ref0..ref15]
-	// Drop top 12 (ref4..ref15) to expose ref0..ref3.
-	for i := 0; i < 12; i++ {
+	// DuplexChallenger.Sample pops from the back: ext4_0 == ref7,
+	// ext4_1 == ref6, ext4_2 == ref5, ext4_3 == ref4 (Plonky3
+	// challenger/src/duplex_challenger.rs lines 196-216, validated at
+	// sp1fri/challenger.go:103-112).
+	//
+	// Drop ref8..ref15 (top 8). After this:
+	//   stack = [..., ext4_0, ext4_1, ext4_2, ext4_3, ref0..ref7]
+	for i := 0; i < 8; i++ {
 		ops = append(ops, opcode("OP_DROP"))
 	}
 
-	// Stack: [..., ext4_0, ext4_1, ext4_2, ext4_3, ref0, ref1, ref2, ref3]
-	// Compare pairs: roll depth decreases as pairs are consumed.
-	// i=3: ref3 on top, ext4_3 at depth 4 → ROLL(4), EQUALVERIFY
-	// i=2: ref2 on top, ext4_2 at depth 3 → ROLL(3), EQUALVERIFY
-	// i=1: ref1 on top, ext4_1 at depth 2 → ROLL(2), EQUALVERIFY
-	// i=0: ref0 on top, ext4_0 at depth 1 → SWAP, EQUALVERIFY
-	for i := 3; i >= 0; i-- {
-		depth := int64(i + 1)
-		if depth == 1 {
-			ops = append(ops, opcode("OP_SWAP"))
-		} else {
-			ops = append(ops, pushInt64(depth))
-			ops = append(ops, opcode("OP_ROLL"))
-		}
+	// Now compare each ext4_i against ref(7-i), top-down.
+	// k=0: ref7 on top (depth 0), ext4_0 at depth 11 → ROLL(11), EQUALVERIFY.
+	// k=1: ref6 on top, ext4_1 at depth 9 → ROLL(9), EQUALVERIFY.
+	// k=2: ref5 on top, ext4_2 at depth 7 → ROLL(7), EQUALVERIFY.
+	// k=3: ref4 on top, ext4_3 at depth 5 → ROLL(5), EQUALVERIFY.
+	// (Each EQUALVERIFY removes 2 stack slots, so depths decrement by 2.)
+	depths := []int64{11, 9, 7, 5}
+	for _, d := range depths {
+		ops = append(ops, pushInt64(d))
+		ops = append(ops, opcode("OP_ROLL"))
 		ops = append(ops, opcode("OP_EQUALVERIFY"))
+	}
+	// Drop the remaining ref0..ref3.
+	for i := 0; i < 4; i++ {
+		ops = append(ops, opcode("OP_DROP"))
 	}
 
 	// Clean up 16 sponge state elements.
@@ -949,19 +964,25 @@ func TestFiatShamirKB_SampleBits_Script(t *testing.T) {
 	}
 	ops = append(ops, permuteOps...)
 
-	// Drop top 15 to expose p2s0
-	for i := 0; i < 15; i++ {
+	// Drop top 8 (p2s8..p2s15) to expose p2s7 on top — DuplexChallenger
+	// pops from the back of the rate window.
+	for i := 0; i < 8; i++ {
 		ops = append(ops, opcode("OP_DROP"))
 	}
 
-	// Now: stack = [fs0..fs15, _fs_bits, p2s0_ref]
-	// Apply same mask: p2s0 % 256
+	// Now: stack = [fs0..fs15, _fs_bits, p2s0..p2s7]
+	// Apply same mask: p2s7 % 256
 	ops = append(ops, pushInt64(256))
 	ops = append(ops, opcode("OP_MOD"))
 
-	// Compare _fs_bits (at depth 1) with masked p2s0 (on top)
-	ops = append(ops, opcode("OP_SWAP"))
+	// Compare _fs_bits (at depth 8) with masked p2s7 (on top).
+	ops = append(ops, pushInt64(8))
+	ops = append(ops, opcode("OP_ROLL"))
 	ops = append(ops, opcode("OP_EQUALVERIFY"))
+	// Drop remaining p2s0..p2s6.
+	for i := 0; i < 7; i++ {
+		ops = append(ops, opcode("OP_DROP"))
+	}
 
 	// Clean up sponge state
 	for i := 0; i < 16; i++ {
@@ -1011,20 +1032,30 @@ func TestFiatShamirKB_SqueezeRateExhaustion_Script(t *testing.T) {
 	var ops []StackOp
 	ops = append(ops, spongeOps...)
 
-	// Reference: push zeros → permute → permute → extract element 0
+	// Reference: push zeros → permute → permute → extract element 7.
+	// The 9th squeeze is the first read after the 2nd permutation; under
+	// DuplexChallenger.Sample (sp1fri/challenger.go:103-112) it returns
+	// rate[rate-1] = rate[7].
 	permuteOps := gatherOps(EmitPoseidon2KBPermute)
 	for i := 0; i < 16; i++ {
 		ops = append(ops, pushInt64(0))
 	}
 	ops = append(ops, permuteOps...)
 	ops = append(ops, permuteOps...)
-	for i := 0; i < 15; i++ {
+	// Drop top 8 (p2s8..p2s15) to expose p2s7.
+	for i := 0; i < 8; i++ {
 		ops = append(ops, opcode("OP_DROP"))
 	}
 
-	// Stack: [fs0..fs15, _fs_squeezed, ref_double_perm_0]
-	ops = append(ops, opcode("OP_SWAP"))
+	// Stack: [fs0..fs15, _fs_squeezed, p2s0..p2s7]
+	// _fs_squeezed at depth 8, p2s7 on top.
+	ops = append(ops, pushInt64(8))
+	ops = append(ops, opcode("OP_ROLL"))
 	ops = append(ops, opcode("OP_EQUALVERIFY"))
+	// Drop the remaining p2s0..p2s6.
+	for i := 0; i < 7; i++ {
+		ops = append(ops, opcode("OP_DROP"))
+	}
 
 	// Clean up sponge state
 	for i := 0; i < 16; i++ {

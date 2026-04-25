@@ -1724,6 +1724,13 @@ func encodeArg(value interface{}) string {
 	case string:
 		// Assume hex-encoded data
 		return EncodePushData(v)
+	case []byte:
+		// Raw bytes — encode as a push of those bytes (hex-encoded for
+		// EncodePushData which takes a hex string). The empty slice
+		// (`[]byte{}` / `nil`) encodes to OP_0, matching the OP_0
+		// placeholder reserved by the codegen for ByteString
+		// constructor slots.
+		return EncodePushData(hex.EncodeToString(v))
 	default:
 		return EncodePushData(fmt.Sprintf("%v", v))
 	}

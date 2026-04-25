@@ -192,7 +192,12 @@ func (fs *FiatShamirState) EmitObserve(t *KBTracker) {
 //     permutation) or all rate elements have been consumed (squeezePos >= RATE),
 //     a permutation is emitted to produce fresh output.
 //  2. The element at the current squeeze position is copied to the top of
-//     the stack as "_fs_squeezed".
+//     the stack as "_fs_squeezed". Plonky3's `DuplexChallenger::sample`
+//     (challenger/src/duplex_challenger.rs lines 196-216, validated by the
+//     port at packages/runar-go/sp1fri/challenger.go:103-112) pops from the
+//     **back** of the rate window: outputBuffer[len-1], outputBuffer[len-2],
+//     ... So the i-th sample after a permutation is rate element
+//     `(rate-1) - i`, not rate element `i`.
 //  3. The squeeze position advances. Up to RATE (8) consecutive squeezes
 //     can be served from a single permutation.
 //
@@ -207,8 +212,9 @@ func (fs *FiatShamirState) EmitSqueeze(t *KBTracker) {
 		fs.outputValid = true
 	}
 
-	// Copy the current rate element to the top.
-	sourceName := fsSpongeStateName(fs.squeezePos)
+	// Copy the current rate element to the top. Sample order matches
+	// Plonky3 DuplexChallenger.Sample(): pop from the back of the rate window.
+	sourceName := fsSpongeStateName(fsSpongeRate - 1 - fs.squeezePos)
 	t.copyToTop(sourceName, "_fs_squeezed")
 
 	fs.squeezePos++

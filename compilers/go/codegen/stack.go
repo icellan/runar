@@ -348,6 +348,12 @@ type loweringContext struct {
 	// method body are treated as no-ops by lowerCall. The actual verifier
 	// ops were already emitted as a method-entry preamble.
 	skipGroth16WAMarker bool
+
+	// sp1FriParams is an optional override for the SP1 FRI verifier
+	// parameter tuple. nil falls back to DefaultSP1FriParams() (the
+	// validated PoC tuple). Set via LowerToStackOptions.SP1FriParams,
+	// which the compiler-level CompileOptions.SP1FriParams threads through.
+	sp1FriParams *SP1FriVerifierParams
 }
 
 func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringContext {
@@ -3749,6 +3755,20 @@ type LowerToStackOptions struct {
 	// depend on bn254witness because of an import cycle: bn254witness
 	// already imports codegen for the NAF table).
 	Groth16WAConfig *Groth16Config
+
+	// SP1FriParams is an optional override for the SP1 FRI verifier
+	// parameter tuple. When nil, `lowerVerifySP1FRI` falls back to
+	// `DefaultSP1FriParams()` (the validated PoC tuple). When non-nil,
+	// every `runar.VerifySP1FRI(...)` call in the compiled program is
+	// emitted at this parameter set, allowing production-scale
+	// (num_queries=100, log_blowup=1, log_final_poly_len=0, degreeBits=10,
+	// commit/query_pow_bits=16) deployment via the normal
+	// compiler.CompileFromSource path.
+	//
+	// The presets exposed via `compiler.SP1FriPreset(name)` cover the
+	// canonical `minimal-guest`, `evm-guest`, and `production-{100,64,16}`
+	// tuples; downstream consumers can supply arbitrary tuples directly.
+	SP1FriParams *SP1FriVerifierParams
 }
 
 // LowerToStack converts an ANF program to a slice of StackMethods.
@@ -3989,6 +4009,7 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 
 	ctx := newLoweringContext(paramNames, properties)
 	ctx.privateMethods = privateMethods
+	ctx.sp1FriParams = opts.SP1FriParams
 
 	// Mode 3: witness-assisted Groth16 verifier preamble. If the method
 	// body opens with a call to assertGroth16WitnessAssisted, emit the
