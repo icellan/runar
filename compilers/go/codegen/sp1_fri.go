@@ -149,20 +149,37 @@ func emitSP1FriStructuralSkeleton(
 	// because every other sub-step depends on having parsed field pushes
 	// available.
 	_ = params
-	panicSP1FriStub("proof-blob push-and-hash binding",
-		"Unlocking-script field layout pinned in docs/sp1-fri-verifier.md §2.1 "+
-			"(matches packages/runar-go/sp1fri/decode.go:25-48 traversal order).",
-		"Bitcoin Script emission: (a) bring proofBlob to top, OP_SHA256, save to alt-stack; "+
-			"(b) for the N pre-pushed fields use a known field-count derived from "+
-			"DefaultSP1FriParams + len(decodedFixture.AllFields()) — for the PoC fixture "+
-			"params (LogBlowup=2, NumQueries=2, MerkleDepth=4, LogFinalPolyLen=2, "+
-			"MaxLogArity=1) the static field count is computed in computeSP1FriFieldCount(); "+
-			"(c) initialize accumulator with the deepest field via OP_PICK + clone, then loop "+
-			"PICK(depth) + OP_CAT for the remaining N-1 fields; (d) OP_SHA256 the accumulator, "+
-			"OP_FROMALTSTACK, OP_EQUALVERIFY. Cost: O(|proof|) in SHA-256 block work + N PICKs. "+
-			"Open question: the field count must match the prover's chosen NumQueries / "+
-			"MerkleDepth / FinalPolyLen exactly; mismatched param sets produce different "+
-			"locking scripts. Each guest-program param tuple needs its own deployed verifier.")
+	// Step 1 emit helper now exists: see EmitProofBlobBindingHash below. It is
+	// validated end-to-end against the canonical fixture by
+	// `TestSp1FriVerifier_Step1_ProofBlobBinding_*` in sp1_fri_test.go. The
+	// remaining wiring work to land it inside this dispatch:
+	//   (a) bring publicValues + sp1VKeyHash to the alt-stack so they don't
+	//       interleave with the field pushes;
+	//   (b) compute the field count statically from the parameter set
+	//       (DefaultSP1FriParams + the fixture's degree_bits / num_queries /
+	//       commit_phase_commits.len / final_poly.len — see
+	//       packages/runar-go/sp1fri/decode.go:25-48 for the traversal);
+	//   (c) call EmitProofBlobBindingHash(emit, fieldCount).
+	// We leave the stub in place because the wiring is interlocked with the
+	// rest of the verifier: the field-count must match exactly what subsequent
+	// sub-steps consume, and steps 2-12 below are still stubs. See
+	// docs/sp1-fri-verifier.md §8 for the rollout plan.
+	panicSP1FriStub("proof-blob push-and-hash binding wiring",
+		"Helper EmitProofBlobBindingHash(emit, numFields) lands in this same file; "+
+			"the unlocking-script field layout it consumes is pinned in "+
+			"docs/sp1-fri-verifier.md §2.1 (= packages/runar-go/sp1fri/decode.go:25-48 "+
+			"traversal order). Test coverage in sp1_fri_test.go validates the helper "+
+			"against the real fixture.",
+		"Wiring needed: (a) park publicValues + sp1VKeyHash on the alt-stack via "+
+			"OP_TOALTSTACK so the field pushes are contiguous below proofBlob; "+
+			"(b) compute fieldCount from the pinned PoC params using the "+
+			"sp1fri Proof shape (Trace.cap=1, QuotientChunks.cap=1, OpenedValues "+
+			"shape from sp1fri/verify.go:48-62, FRI shape from sp1fri/fri.go:25-95) — "+
+			"this is mechanical but tedious; (c) call EmitProofBlobBindingHash; "+
+			"(d) OP_FROMALTSTACK twice to recover the two ByteString args. Each "+
+			"guest-program param tuple needs its own deployed verifier (different "+
+			"NumQueries / MerkleDepth / FinalPolyLen → different field count → "+
+			"different locking script).")
 
 	// Step 2 — Transcript init.
 	//
@@ -285,6 +302,75 @@ func emitSP1FriStructuralSkeleton(
 // SP1-specific algebra and are expected to stay stable across Plonky3 /
 // SP1 version bumps.
 
+// EmitProofBlobBindingHash emits the Step 1 proof-blob push-and-hash binding.
+//
+// Stack in (top → bottom):
+//
+//	proofBlob, fieldN-1, fieldN-2, ..., field1, field0
+//	(i.e. fields are deepest, with proofBlob on top — caller has already
+//	moved publicValues / sp1VKeyHash out of the way to the alt-stack).
+//
+// `numFields` is the number of pre-pushed field ByteString items, in the
+// declaration order of `docs/sp1-fri-verifier.md` §2.1 (mirroring the Go
+// reference decoder's traversal, `packages/runar-go/sp1fri/decode.go:25-48`).
+// At entry, field0 sits at depth `numFields` (just below the now-removed
+// proofBlob), with subsequent fields shallower.
+//
+// The emission sequence:
+//
+//  1. POP `proofBlob`, OP_SHA256, OP_TOALTSTACK — saves the canonical digest.
+//  2. PICK field0 (now at depth numFields-1) — start the accumulator.
+//  3. For i in 1..numFields-1: PICK field_i (depth numFields-1 always, because
+//     the accumulator stays on top), OP_CAT into the accumulator.
+//  4. OP_SHA256, OP_FROMALTSTACK, OP_EQUALVERIFY.
+//
+// Stack out: the original `numFields` field pushes, untouched. The proofBlob
+// has been consumed, but every field remains on the main stack in the same
+// declaration order ready to be drained by subsequent verifier steps.
+//
+// Cost: 1 SHA-256 over |proofBlob|, plus N PICKs + (N-1) CATs + 1 SHA-256
+// over the concatenated buffer. This is O(|proof|) in SHA-256 block work
+// and O(N) in opcode count — far below the O(N^2) cost of OP_SPLIT chain
+// parsing. See docs/sp1-fri-verifier.md §2 for the rationale.
+//
+// References:
+//   - docs/sp1-fri-verifier.md §2 + §2.1.
+//   - packages/runar-go/sp1fri/decode.go:25-48 (canonical traversal order).
+func EmitProofBlobBindingHash(emit func(StackOp), numFields int) {
+	if numFields < 1 {
+		panic(fmt.Sprintf("EmitProofBlobBindingHash: numFields must be >= 1, got %d", numFields))
+	}
+
+	// Step 1a: hash proofBlob (currently on top), park digest on alt-stack.
+	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})
+	emit(StackOp{Op: "opcode", Code: "OP_TOALTSTACK"})
+
+	// Step 1b: pick field0 to seed the accumulator. After the proofBlob pop,
+	// field0 is at the bottom; field_{numFields-1} is at depth 0 (top). So
+	// field0 is at depth numFields-1.
+	field0Depth := numFields - 1
+	emit(StackOp{Op: "push", Value: bigIntPush(int64(field0Depth))})
+	emit(StackOp{Op: "pick", Depth: field0Depth})
+
+	// Step 1c: walk forward through the fields, picking each and CAT-ing into
+	// the accumulator. With the accumulator sitting one slot above the
+	// original fields, the depth of field_i is (numFields-1-i) + 1 = numFields-i.
+	// OP_CAT pops the top two and pushes `deeper||shallower`; since we PICK
+	// field_i to the top after the accumulator, the result is acc || field_i,
+	// preserving canonical declaration order in the digest.
+	for i := 1; i < numFields; i++ {
+		depth := numFields - i
+		emit(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+		emit(StackOp{Op: "pick", Depth: depth})
+		emit(StackOp{Op: "opcode", Code: "OP_CAT"})
+	}
+
+	// Step 1d: hash the accumulator and assert against the saved proofBlob hash.
+	emit(StackOp{Op: "opcode", Code: "OP_SHA256"})
+	emit(StackOp{Op: "opcode", Code: "OP_FROMALTSTACK"})
+	emit(StackOp{Op: "opcode", Code: "OP_EQUALVERIFY"})
+}
+
 // emitAbsorbCommitment absorbs an 8-element Poseidon2-KB Merkle digest into
 // the Fiat-Shamir transcript. Used for trace, quotient-chunks, random, and
 // FRI fold-step commitments.
@@ -321,6 +407,98 @@ func emitAbsorbExt4(fs *FiatShamirState, t *KBTracker) {
 	}
 	_ = t
 }
+
+// (Refined Plonky3 / sp1fri pointers for downstream sub-step ports.)
+//
+// Step 2 (transcript init + outer SP1 absorbs):
+//   - sp1fri/verify.go:67-76 is the canonical observe order:
+//       chal.Observe(degreeBits)
+//       chal.Observe(baseDegreeBits)
+//       chal.Observe(preprocessedWidth)
+//       chal.ObserveDigest(canonicalKbDigest(commitments.trace[i]))
+//       chal.ObserveSlice(publicValues)
+//   - On-chain: FiatShamirState.EmitInit(t), then for the three usize-as-F
+//     observations push the canonical value (each is a small int <= p) and
+//     fs.EmitObserve(t). For the digest, the 8 base-field elements are
+//     pushed by the unlocking script in declaration order — call EmitObserve
+//     8 times. publicValues is already 3 base-field elements (3 u32 reduced
+//     mod p) — also 3 EmitObserve calls.
+//
+// Step 3 (alpha, quotient absorb):
+//   - sp1fri/verify.go:79-82.
+//   - On-chain: fs.EmitSqueezeExt4(t) for alpha, then 8 EmitObserves for the
+//     quotient_chunks digest.
+//
+// Step 4 (zeta + zeta_next):
+//   - sp1fri/verify.go:85-89.
+//   - On-chain: fs.EmitSqueezeExt4(t) for zeta. zeta_next is computed off-chain
+//     via Ext4ScalarMul(zeta, h) — for a STATELESS verifier, h is a constant
+//     derived from degree_bits (KbTwoAdicGenerator); this can be computed at
+//     codegen time and pushed as a constant.
+//
+// Step 5 (opened-values absorb):
+//   - sp1fri/verify.go:98-106.
+//   - Order: chal.ObserveExt4Slice(traceLocal); chal.ObserveExt4Slice(traceNext);
+//     for each quotient_chunk: chal.ObserveExt4Slice(quotChunks[i]).
+//   - On-chain: each Ext4 = 4 base elements; absorb in coefficient order
+//     c0..c3 — call fs.EmitObserve 4 times per Ext4.
+//
+// Step 6/7 (alpha-batched constraint reconstruction — NOT a sumcheck):
+//   - sp1fri/verify.go:144-176 (recomposeQuotient + EvalFibonacciConstraints).
+//   - Mirrors uni-stark/src/verifier.rs::verify_with_preprocessed lines 442-490.
+//   - AIR-specific. For the FibAir fixture: see sp1fri/air_fib.go for the
+//     exact constraint set (3 constraints over 2 columns) and the Lagrange
+//     selectors at zeta. The recompose helper is a single-chunk specialisation
+//     where zps[0] = 1 — reduces to a degree-3 polynomial sum over Ext4.
+//
+// Step 8 (FRI commit-phase absorb + fold challenge squeeze + commit-PoW):
+//   - sp1fri/fri.go:60-71. Per-round: 8 EmitObserves, then EmitCheckWitness
+//     (commit_pow_bits = 1 for the fixture), then EmitSqueezeExt4 for beta.
+//   - Then sp1fri/fri.go:73-79: assert finalPoly length, ObserveExt4Slice the
+//     final poly (4 ext4 elements for log_final_poly_len = 2).
+//
+// Step 9 (PoW witness for query phase):
+//   - sp1fri/fri.go:86-93. Observe each logArity, then EmitCheckWitness with
+//     query_pow_bits = 1.
+//
+// Step 10 (per-query loop — densest):
+//   - sp1fri/fri.go:97-131. For each of NumQueries queries:
+//       index = chal.SampleBits(logGlobalMaxHeight)            → EmitSampleBits
+//       openInput → reduced openings (sp1fri/fri.go:147-257)   → MMCS verify
+//       verifyQuery → fold chain (sp1fri/fri.go:262-336)       → MMCS verify
+//                                                                + foldRow
+//       final-poly Horner eval at x = g^revBits(domainIndex, logGlobalMaxHeight)
+//   - On-chain: this composes EmitPoseidon2KBCompress (per Merkle step) +
+//     EmitKBExt4Mul/Inv (for foldRow's lagrangeInterpolateAt) + 4×OP_NUMEQUALVERIFY
+//     for the final equality. The Merkle-step sibling-ordering ladder is
+//     emitMerkleVerify below.
+//
+// Step 11 (final-poly Horner eval):
+//   - sp1fri/fri.go:120-130. Embedded inside the per-query loop above.
+//
+// Step 12 — push OP_1 for the binding result.
+//
+// PRE-EXISTING DIVERGENCE FROM sp1fri REFERENCE — must be addressed before
+// any squeeze-using sub-step lands. See:
+//
+//   - Plonky3 challenger/src/duplex_challenger.rs CanSample::sample (lines
+//     196-216) and the validated port at sp1fri/challenger.go:103-112: each
+//     Sample() pops the **back** of the rate window (`outputBuffer[len-1]`),
+//     so the canonical squeeze order is rate[7], rate[6], ..., rate[0].
+//   - The on-chain FiatShamirState.EmitSqueeze (fiat_shamir_kb.go:201-215)
+//     reads from the **front** of the rate window (squeezePos starts at 0
+//     and increments), producing rate[0], rate[1], ..., rate[7].
+//
+// As a result, fs.EmitSqueezeExt4 currently produces (rate[0], rate[1], rate[2],
+// rate[3]) but the prover's transcript expects (rate[7], rate[6], rate[5], rate[4]).
+// Every alpha/zeta/beta/query-index challenge will therefore disagree with
+// the off-chain DuplexChallenger, breaking every downstream consistency
+// check. Fix by either (a) inverting the squeezePos walk inside
+// EmitSqueeze, or (b) inverting the rate-fill ordering inside emitPermute
+// — option (a) is local to fiat_shamir_kb.go and preserves test-vector
+// compatibility for any other consumer that has already pinned the wrong
+// order (none yet shipped — fiat_shamir_kb_test.go only checks counts and
+// stack manipulation, not concrete sponge outputs).
 
 // emitMerkleVerify walks a Poseidon2-KB Merkle path and asserts the computed
 // root matches the expected 8-element digest.
