@@ -1417,3 +1417,220 @@ func TestSp1FriVerifier_QuotientReconstructionMatchesReference(t *testing.T) {
 		"this test will be expanded to drive the on-chain emission and assert " +
 		"byte-identity. Reference dump in test log above.")
 }
+
+// TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference walks every query
+// in the canonical fixture and asserts emitFriFoldRowConditional reproduces
+// the off-chain foldRow output byte-identical when driven by the runtime
+// query-index bit (rather than a codegen-time-known bit). This is the per-
+// query end-to-end gate for Part A of the inner-loop wiring: it confirms
+// that for every observed indexInGroup the on-chain conditional emission
+// agrees with the validated lagrangeInterpolateAt.
+//
+// Mirrors the same per-query setup as TestSp1FriVerifier_PerQueryFoldsMatchReference
+// (which only exercises the unconditional bit=0 path of emitFriColinearityFold)
+// but switches the on-chain emission to the conditional variant.
+func TestSp1FriVerifier_PerQueryConditionalFoldsMatchReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	pubVals := []uint32{0, 1, 21}
+	if err := sp1fri.Verify(proof, pubVals); err != nil {
+		t.Fatalf("reference Verify rejected the canonical fixture: %v", err)
+	}
+
+	// Re-build the transcript through Step 8 to get betas + query indexes.
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+	pubBytes := publicValuesPoCBytes()
+
+	chal := sp1fri.NewDuplexChallenger()
+	absorbBytes := func(bs []byte) {
+		nChunks := (len(bs) + 3) / 4
+		for i := 0; i < nChunks; i++ {
+			start := i * 4
+			end := start + 4
+			if end > len(bs) {
+				end = len(bs)
+			}
+			var buf [4]byte
+			copy(buf[:], bs[start:end])
+			v := uint32(buf[0]) | uint32(buf[1])<<8 |
+				uint32(buf[2])<<16 | uint32(buf[3])<<24
+			chal.Observe(v)
+		}
+	}
+	chal.Observe(uint32(3))
+	chal.Observe(uint32(3))
+	chal.Observe(uint32(0))
+	chal.ObserveDigest(traceDigest)
+	absorbBytes(pubBytes)
+	_ = chal.SampleExt4()
+	chal.ObserveDigest(quotientDigest)
+	_ = chal.SampleExt4()
+	chal.ObserveExt4Slice(traceLocal)
+	chal.ObserveExt4Slice(traceNext)
+	for _, qc := range quotChunks {
+		chal.ObserveExt4Slice(qc)
+	}
+
+	_ = chal.SampleExt4() // alpha_fri
+	expectedRounds := len(proof.OpeningProof.CommitPhaseCommits)
+	betas := make([]sp1fri.Ext4, expectedRounds)
+	for r := 0; r < expectedRounds; r++ {
+		for _, d := range proof.OpeningProof.CommitPhaseCommits[r] {
+			chal.ObserveDigest(sp1fri.CanonicalDigest(d))
+		}
+		w := proof.OpeningProof.CommitPowWitnesses[r].Canonical()
+		if !chal.CheckWitness(1, w) {
+			t.Fatalf("ref: invalid commit-phase PoW witness at round %d", r)
+		}
+		bExt := chal.SampleExt4()
+		for i := 0; i < 4; i++ {
+			betas[r][i] = bExt[i]
+		}
+	}
+	finalPolyCanon := make([]sp1fri.Ext4, len(proof.OpeningProof.FinalPoly))
+	for i, e := range proof.OpeningProof.FinalPoly {
+		finalPolyCanon[i] = sp1fri.FromKbExt4(e)
+	}
+	chal.ObserveExt4Slice(finalPolyCanon)
+	logArities := make([]int, expectedRounds)
+	if len(proof.OpeningProof.QueryProofs) > 0 {
+		for r, op := range proof.OpeningProof.QueryProofs[0].CommitPhaseOpenings {
+			logArities[r] = int(op.LogArity)
+		}
+	}
+	for _, la := range logArities {
+		chal.Observe(uint32(la))
+	}
+	queryPow := proof.OpeningProof.QueryPowWitness.Canonical()
+	if !chal.CheckWitness(1, queryPow) {
+		t.Fatalf("ref: invalid query-phase PoW witness")
+	}
+
+	totalLogReduction := 0
+	for _, la := range logArities {
+		totalLogReduction += la
+	}
+	logGlobalMaxHeight := totalLogReduction + 2 + 2
+
+	for qi, qp := range proof.OpeningProof.QueryProofs {
+		index := chal.SampleBits(logGlobalMaxHeight)
+		op := qp.CommitPhaseOpenings[0]
+		logArity := int(op.LogArity)
+		arity := 1 << logArity
+		if arity != 2 {
+			t.Skipf("test only handles arity=2; got %d", arity)
+		}
+		bit := int(index % uint64(arity))
+
+		// Reference: place the synthetic "folded" placeholder + sibling per
+		// the bit-derived indexInGroup, then run the validated colinearity
+		// formula (off-chain).
+		placeholder := sp1fri.Ext4{1, 2, 3, 4}
+		sibling := sp1fri.FromKbExt4(op.SiblingValues[0])
+		var eLow, eHigh sp1fri.Ext4
+		if bit == 0 {
+			eLow, eHigh = placeholder, sibling
+		} else {
+			eLow, eHigh = sibling, placeholder
+		}
+		shiftedIndex := index >> uint(logArity)
+		logFoldedHeight := logGlobalMaxHeight - logArity
+		s := sp1fri.KbPow(
+			sp1fri.KbTwoAdicGenerator(logFoldedHeight+logArity),
+			reverseBitsLenLocal(shiftedIndex, logFoldedHeight),
+		)
+		want := referenceColinearityFold(eLow, eHigh, betas[0], s)
+
+		// On-chain: pass `placeholder` as `folded` + `sibling` as `sibling` +
+		// the runtime bit (which is what the per-query loop will sample from
+		// the transcript).
+		var ops []StackOp
+		tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+		pushExt4Named(tracker, "fld", placeholder)
+		pushExt4Named(tracker, "sib", sibling)
+		pushExt4Named(tracker, "beta", betas[0])
+		tracker.pushInt("s", int64(s))
+		tracker.pushInt("bit", int64(bit))
+
+		emitFriFoldRowConditional(tracker, "fld", "sib", "beta", "s", "bit", "out")
+		assertExt4EqualsRef(t, tracker, &ops, "out", want)
+		drainAllStack(tracker, &ops)
+
+		if err := buildAndExecute(t, ops); err != nil {
+			t.Fatalf("query %d (bit=%d): conditional fold disagrees with reference (want=%v): %v",
+				qi, bit, want, err)
+		}
+		t.Logf("query %d: index=%d bit=%d s=%d fold=%v |ops|=%d",
+			qi, index, bit, s, want, len(ops))
+	}
+}
+
+// TestEmitFriFoldRowConditional_MatchesReference validates the conditional
+// (bit-driven) fold-row emission for both bit values. Mirrors verifyQuery's
+// indexInGroup-based evals[] assignment (sp1fri/fri.go:290-300) followed by
+// foldRow (lines 344-357).
+//
+// For each bit ∈ {0, 1}:
+//   - Construct (folded, sibling) and derive (e_low, e_high) per the bit:
+//       bit==0 → (e_low, e_high) = (folded, sibling)
+//       bit==1 → (e_low, e_high) = (sibling, folded)
+//   - Compute reference fold via the validated lagrangeInterpolateAt.
+//   - Emit on-chain via emitFriFoldRowConditional with the runtime bit.
+//   - Assert on-chain Ext4 result matches the reference byte-identical.
+func TestEmitFriFoldRowConditional_MatchesReference(t *testing.T) {
+	folded := sp1fri.Ext4{42, 17, 99, 1}
+	sibling := sp1fri.Ext4{77, 28, 5, 1234}
+	beta := sp1fri.Ext4{555, 12345, 7, 88}
+	s := sp1fri.KbPow(sp1fri.KbTwoAdicGenerator(5), 3)
+
+	for _, bit := range []int{0, 1} {
+		t.Run(fmt.Sprintf("bit=%d", bit), func(t *testing.T) {
+			var eLow, eHigh sp1fri.Ext4
+			if bit == 0 {
+				eLow, eHigh = folded, sibling
+			} else {
+				eLow, eHigh = sibling, folded
+			}
+			want := referenceColinearityFold(eLow, eHigh, beta, s)
+
+			var ops []StackOp
+			tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+			pushExt4Named(tracker, "fld", folded)
+			pushExt4Named(tracker, "sib", sibling)
+			pushExt4Named(tracker, "beta", beta)
+			tracker.pushInt("s", int64(s))
+			tracker.pushInt("bit", int64(bit))
+
+			emitFriFoldRowConditional(tracker, "fld", "sib", "beta", "s", "bit", "out")
+
+			assertExt4EqualsRef(t, tracker, &ops, "out", want)
+			drainAllStack(tracker, &ops)
+
+			if err := buildAndExecute(t, ops); err != nil {
+				t.Fatalf("bit=%d: on-chain conditional fold disagrees with reference (want=%v): %v",
+					bit, want, err)
+			}
+			t.Logf("bit=%d: conditional fold matches reference; want=%v |ops|=%d", bit, want, len(ops))
+		})
+	}
+}

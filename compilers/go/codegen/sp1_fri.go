@@ -712,45 +712,105 @@ func emitFriColinearityFold(
 //
 //   - outPrefix_0..3 (the new accumulator)
 //
-// Implementation: the caller arranges for the Bitcoin Script-side OP_IF
-// branching by emitting two unconditional layouts and pruning via OP_IF.
-// However: emitting both branches inflates script size by ~2x. Since the
-// colinearity formula is symmetric under swap of (e_low, e_high) ONLY in
-// the (e_low + e_high) term — the (e_low - e_high) term flips sign — we
-// can fold the sign-flip into the formula at codegen time IF we reorder
-// based on the bit at codegen time. But the bit IS runtime data (sampled
-// from the transcript), so we MUST emit both branches.
+// Implementation strategy — exploit the algebraic symmetry of the colinearity
+// formula instead of emitting two full branches:
 //
-// For the PoC fixture this helper is currently unimplemented as a true
-// conditional and panics with a structured stub — see the bounded scope
-// note in the dispatch brief. emitFriColinearityFold (above) implements
-// the bit=0 path directly; bit=1 callers can pre-swap the named slots
-// before calling.
+//	folded_new = (e_low + e_high)/2 + beta * (e_low - e_high) / (2*s)
+//
+// The (e_low + e_high) term is symmetric under swap, so it equals (folded +
+// sibling) regardless of bit. The (e_low - e_high) term flips sign under swap,
+// so it equals (folded - sibling) when bit=0 and -(folded - sibling) when
+// bit=1. We compute `d = folded - sibling` unconditionally, then use OP_IF
+// to conditionally negate each Ext4 component when bit=1.
+//
+// This collapses the conditional from two ~6000-op branches to one ~3000-op
+// linear emission plus 4 cheap OP_IF/OP_NEGATE/OP_MOD blocks (~50 ops each).
+//
+// References:
+//   - sp1fri/fri.go:290-313 (verifyQuery's evals[] assignment + foldRow call)
+//   - sp1fri/fri.go:344-357 (foldRow's symmetric (e_low + e_high)/2 + beta term)
 func emitFriFoldRowConditional(
 	t *KBTracker,
 	foldedPrefix, siblingPrefix, betaPrefix, sName, bitName, outPrefix string,
 ) {
-	panicSP1FriStub(
-		"per-query FRI fold-row conditional sibling-ordering",
-		"sp1fri/fri.go:290-313 — verifyQuery selects evals[indexInGroup]=folded "+
-			"then calls foldRow. For arity=2 this collapses to choosing whether "+
-			"the accumulator is e_low or e_high in the colinearity formula. The "+
-			"on-chain conditional must use OP_IF/OP_ELSE/OP_ENDIF since the bit "+
-			"is runtime data sampled from the transcript.",
-		"Structural shape: emit OP_IF with two branches, each calling "+
-			"emitFriColinearityFold with swapped (foldedPrefix, siblingPrefix). "+
-			"The KBTracker name table must be reset to the same shape on both "+
-			"branches before the next fold step. Cleanest implementation: park "+
-			"the bit on alt-stack, emit branch A unconditionally, snapshot the "+
-			"output Ext4 slots, OP_DROP them if bit==1, emit branch B with "+
-			"swapped operands. Estimate: ~2 × emitFriColinearityFold cost = "+
-			"~6000 ops per fold step.")
-	_ = foldedPrefix
-	_ = siblingPrefix
-	_ = betaPrefix
-	_ = sName
-	_ = bitName
-	_ = outPrefix
+	// 1. sum = folded + sibling   (Ext4)
+	kbExt4Add(t, foldedPrefix, siblingPrefix, "_fcc_sum")
+
+	// 2. half = sum * inv(2)      (Ext4)
+	t.pushInt("_fcc_inv2", int64((2130706433+1)/2))
+	kbExt4ScalarMul(t, "_fcc_sum", "_fcc_inv2", "_fcc_half")
+
+	// 3. d_unsigned = folded - sibling   (Ext4)
+	kbExt4Sub(t, foldedPrefix, siblingPrefix, "_fcc_d_unsigned")
+
+	// 4. Conditional negation per component: d_signed_i = bit ? -d_unsigned_i : d_unsigned_i.
+	//
+	// For each i, bring d_unsigned_i to top, copy bitName to top, emit
+	// OP_IF { 0 SWAP OP_SUB } OP_ENDIF, then mod-reduce. The result is the
+	// signed difference component, named _fcc_d_signed_i.
+	for i := 0; i < 4; i++ {
+		dName := fmt.Sprintf("_fcc_d_unsigned_%d", i)
+		t.toTop(dName)               // d_unsigned_i on top
+		t.copyToTop(bitName, "_fcc_bit_copy")
+		// Emit the OP_IF block. Tracker net effect: consumes 1 (bit), value on
+		// top stays in same slot named dName (we do not produce a new slot here
+		// because the OP_IF leaves exactly one element on top either way).
+		t.rawBlock([]string{"_fcc_bit_copy"}, "", func(e func(StackOp)) {
+			// Inside Then: stack top is d_unsigned_i. Compute (0 - d_unsigned_i),
+			// which lands a possibly-negative value on top. We then mod-reduce
+			// (after OP_ENDIF) so both branches emerge with a canonical value.
+			// We do the mod reduction unconditionally below to keep the
+			// invariant uniform across both branches.
+			e(StackOp{
+				Op: "if",
+				Then: []StackOp{
+					{Op: "push", Value: bigIntPush(0)},
+					{Op: "swap"},
+					{Op: "opcode", Code: "OP_SUB"},
+				},
+				Else: []StackOp{
+					// bit == 0: leave d_unsigned_i untouched.
+				},
+			})
+		})
+		// Mod-reduce the (possibly-negative) value back to canonical KB.
+		// Rename the slot in-place to feed kbFieldMod.
+		t.rename("_fcc_d_pre_mod")
+		kbFieldMod(t, "_fcc_d_pre_mod", fmt.Sprintf("_fcc_d_signed_%d", i))
+	}
+
+	// 5. inv2s = inv(2 * s)       (base field)
+	t.copyToTop(sName, "_fcc_s_copy")
+	kbFieldMulConst(t, "_fcc_s_copy", 2, "_fcc_2s")
+	kbFieldInv(t, "_fcc_2s", "_fcc_inv2s")
+
+	// 6. d_scaled = d_signed * inv2s     (Ext4 scalar mul)
+	kbExt4ScalarMul(t, "_fcc_d_signed", "_fcc_inv2s", "_fcc_d_scaled")
+
+	// 7. correction = beta * d_scaled    (Ext4 mul)
+	kbExt4Mul(t, betaPrefix, "_fcc_d_scaled", "_fcc_corr")
+
+	// 8. out = half + correction         (Ext4)
+	kbExt4Add(t, "_fcc_half", "_fcc_corr", outPrefix)
+
+	// Cleanup intermediates so the tracker name table stays clean.
+	kbExt4DropByPrefixes(t,
+		"_fcc_sum_", "_fcc_half_", "_fcc_d_unsigned_", "_fcc_d_signed_",
+		"_fcc_d_scaled_", "_fcc_corr_",
+	)
+	for _, n := range []string{"_fcc_inv2", "_fcc_s_copy", "_fcc_2s", "_fcc_inv2s"} {
+		found := false
+		for _, nm := range t.nm {
+			if nm == n {
+				found = true
+				break
+			}
+		}
+		if found {
+			t.toTop(n)
+			t.drop()
+		}
+	}
 }
 
 // emitFinalPolyHorner evaluates the final FRI polynomial at an Ext4 point x
