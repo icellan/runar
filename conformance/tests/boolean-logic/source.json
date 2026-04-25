@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/boolean-logic/BooleanLogic.runar.ts",
+    ".runar.sol": "../../../examples/sol/boolean-logic/BooleanLogic.runar.sol",
+    ".runar.move": "../../../examples/move/boolean-logic/BooleanLogic.runar.move",
+    ".runar.go": "../../../examples/go/boolean-logic/BooleanLogic.runar.go",
+    ".runar.rs": "../../../examples/rust/boolean-logic/BooleanLogic.runar.rs",
+    ".runar.py": "../../../examples/python/boolean-logic/BooleanLogic.runar.py",
+    ".runar.zig": "../../../examples/zig/boolean-logic/BooleanLogic.runar.zig",
+    ".runar.rb": "../../../examples/ruby/boolean-logic/BooleanLogic.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/boolean-logic/BooleanLogic.runar.java"
+  }
+}

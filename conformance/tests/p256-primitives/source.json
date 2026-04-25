@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/p256-primitives/P256Primitives.runar.ts",
+    ".runar.sol": "../../../examples/sol/p256-primitives/P256Primitives.runar.sol",
+    ".runar.move": "../../../examples/move/p256-primitives/P256Primitives.runar.move",
+    ".runar.go": "../../../examples/go/p256-primitives/P256Primitives.runar.go",
+    ".runar.rs": "../../../examples/rust/p256-primitives/P256Primitives.runar.rs",
+    ".runar.py": "../../../examples/python/p256-primitives/P256Primitives.runar.py",
+    ".runar.zig": "../../../examples/zig/p256-primitives/P256Primitives.runar.zig",
+    ".runar.rb": "../../../examples/ruby/p256-primitives/P256Primitives.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/p256-primitives/P256Primitives.runar.java"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/post-quantum-wots/PostQuantumWOTS.runar.ts",
+    ".runar.sol": "../../../examples/sol/post-quantum-wots/PostQuantumWOTS.runar.sol",
+    ".runar.move": "../../../examples/move/post-quantum-wots/PostQuantumWOTS.runar.move",
+    ".runar.go": "../../../examples/go/post-quantum-wots/PostQuantumWOTS.runar.go",
+    ".runar.rs": "../../../examples/rust/post-quantum-wots/PostQuantumWOTS.runar.rs",
+    ".runar.py": "../../../examples/python/post-quantum-wots/PostQuantumWOTS.runar.py",
+    ".runar.zig": "../../../examples/zig/post-quantum-wots/PostQuantumWOTS.runar.zig",
+    ".runar.rb": "../../../examples/ruby/post-quantum-wots/PostQuantumWOTS.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/post-quantum-wots/PostQuantumWOTS.runar.java"
+  }
+}

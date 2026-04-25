@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/p384-primitives/P384Primitives.runar.ts",
+    ".runar.sol": "../../../examples/sol/p384-primitives/P384Primitives.runar.sol",
+    ".runar.move": "../../../examples/move/p384-primitives/P384Primitives.runar.move",
+    ".runar.go": "../../../examples/go/p384-primitives/P384Primitives.runar.go",
+    ".runar.rs": "../../../examples/rust/p384-primitives/P384Primitives.runar.rs",
+    ".runar.py": "../../../examples/python/p384-primitives/P384Primitives.runar.py",
+    ".runar.zig": "../../../examples/zig/p384-primitives/P384Primitives.runar.zig",
+    ".runar.rb": "../../../examples/ruby/p384-primitives/P384Primitives.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/p384-primitives/P384Primitives.runar.java"
+  }
+}

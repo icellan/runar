@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/if-without-else/IfWithoutElse.runar.ts",
+    ".runar.sol": "../../../examples/sol/if-without-else/IfWithoutElse.runar.sol",
+    ".runar.move": "../../../examples/move/if-without-else/IfWithoutElse.runar.move",
+    ".runar.go": "../../../examples/go/if-without-else/IfWithoutElse.runar.go",
+    ".runar.rs": "../../../examples/rust/if-without-else/IfWithoutElse.runar.rs",
+    ".runar.py": "../../../examples/python/if-without-else/IfWithoutElse.runar.py",
+    ".runar.zig": "../../../examples/zig/if-without-else/IfWithoutElse.runar.zig",
+    ".runar.rb": "../../../examples/ruby/if-without-else/IfWithoutElse.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/if-without-else/IfWithoutElse.runar.java"
+  }
+}

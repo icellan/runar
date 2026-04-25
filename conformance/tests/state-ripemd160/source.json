@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/state-ripemd160/HashRegistry.runar.ts",
+    ".runar.sol": "../../../examples/sol/state-ripemd160/HashRegistry.runar.sol",
+    ".runar.move": "../../../examples/move/state-ripemd160/HashRegistry.runar.move",
+    ".runar.go": "../../../examples/go/state-ripemd160/HashRegistry.runar.go",
+    ".runar.rs": "../../../examples/rust/state-ripemd160/HashRegistry.runar.rs",
+    ".runar.py": "../../../examples/python/state-ripemd160/HashRegistry.runar.py",
+    ".runar.zig": "../../../examples/zig/state-ripemd160/HashRegistry.runar.zig",
+    ".runar.rb": "../../../examples/ruby/state-ripemd160/HashRegistry.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/state-ripemd160/HashRegistry.runar.java"
+  }
+}

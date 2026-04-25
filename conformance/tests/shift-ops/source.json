@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/shift-ops/ShiftOps.runar.ts",
+    ".runar.sol": "../../../examples/sol/shift-ops/ShiftOps.runar.sol",
+    ".runar.move": "../../../examples/move/shift-ops/ShiftOps.runar.move",
+    ".runar.go": "../../../examples/go/shift-ops/ShiftOps.runar.go",
+    ".runar.rs": "../../../examples/rust/shift-ops/ShiftOps.runar.rs",
+    ".runar.py": "../../../examples/python/shift-ops/ShiftOps.runar.py",
+    ".runar.zig": "../../../examples/zig/shift-ops/ShiftOps.runar.zig",
+    ".runar.rb": "../../../examples/ruby/shift-ops/ShiftOps.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/shift-ops/ShiftOps.runar.java"
+  }
+}

@@ -307,6 +307,59 @@ public final class Builtins {
     }
 
     // ===================================================================
+    // NIST P-256 (secp256r1) EC operations — compile-time intrinsics.
+    // ===================================================================
+    //
+    // The Rúnar Java compiler emits real Bitcoin Script for these
+    // primitives via the P256P384 codegen module. Off-chain we do not yet
+    // ship a P-256 mock implementation, so calling these methods from
+    // Java throws {@code notInSimulator}. Surface-level instantiation
+    // tests (which never invoke the methods) work fine; richer simulator
+    // support is tracked in M19.
+
+    public static runar.lang.types.P256Point p256Add(runar.lang.types.P256Point a, runar.lang.types.P256Point b) {
+        throw notInSimulator("p256Add");
+    }
+    public static runar.lang.types.P256Point p256Mul(runar.lang.types.P256Point p, BigInteger k) {
+        throw notInSimulator("p256Mul");
+    }
+    public static runar.lang.types.P256Point p256MulGen(BigInteger k) {
+        throw notInSimulator("p256MulGen");
+    }
+    public static runar.lang.types.P256Point p256Negate(runar.lang.types.P256Point p) {
+        throw notInSimulator("p256Negate");
+    }
+    public static boolean p256OnCurve(runar.lang.types.P256Point p) {
+        throw notInSimulator("p256OnCurve");
+    }
+    public static ByteString p256EncodeCompressed(runar.lang.types.P256Point p) {
+        throw notInSimulator("p256EncodeCompressed");
+    }
+
+    // ===================================================================
+    // NIST P-384 (secp384r1) EC operations — compile-time intrinsics.
+    // ===================================================================
+
+    public static runar.lang.types.P384Point p384Add(runar.lang.types.P384Point a, runar.lang.types.P384Point b) {
+        throw notInSimulator("p384Add");
+    }
+    public static runar.lang.types.P384Point p384Mul(runar.lang.types.P384Point p, BigInteger k) {
+        throw notInSimulator("p384Mul");
+    }
+    public static runar.lang.types.P384Point p384MulGen(BigInteger k) {
+        throw notInSimulator("p384MulGen");
+    }
+    public static runar.lang.types.P384Point p384Negate(runar.lang.types.P384Point p) {
+        throw notInSimulator("p384Negate");
+    }
+    public static boolean p384OnCurve(runar.lang.types.P384Point p) {
+        throw notInSimulator("p384OnCurve");
+    }
+    public static ByteString p384EncodeCompressed(runar.lang.types.P384Point p) {
+        throw notInSimulator("p384EncodeCompressed");
+    }
+
+    // ===================================================================
     // Preimage (structured)
     // ===================================================================
 

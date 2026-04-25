@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/bounded-loop/BoundedLoop.runar.ts",
+    ".runar.sol": "../../../examples/sol/bounded-loop/BoundedLoop.runar.sol",
+    ".runar.move": "../../../examples/move/bounded-loop/BoundedLoop.runar.move",
+    ".runar.go": "../../../examples/go/bounded-loop/BoundedLoop.runar.go",
+    ".runar.rs": "../../../examples/rust/bounded-loop/BoundedLoop.runar.rs",
+    ".runar.py": "../../../examples/python/bounded-loop/BoundedLoop.runar.py",
+    ".runar.zig": "../../../examples/zig/bounded-loop/BoundedLoop.runar.zig",
+    ".runar.rb": "../../../examples/ruby/bounded-loop/BoundedLoop.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/bounded-loop/BoundedLoop.runar.java"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/multi-method/MultiMethod.runar.ts",
+    ".runar.sol": "../../../examples/sol/multi-method/MultiMethod.runar.sol",
+    ".runar.move": "../../../examples/move/multi-method/MultiMethod.runar.move",
+    ".runar.go": "../../../examples/go/multi-method/MultiMethod.runar.go",
+    ".runar.rs": "../../../examples/rust/multi-method/MultiMethod.runar.rs",
+    ".runar.py": "../../../examples/python/multi-method/MultiMethod.runar.py",
+    ".runar.zig": "../../../examples/zig/multi-method/MultiMethod.runar.zig",
+    ".runar.rb": "../../../examples/ruby/multi-method/MultiMethod.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/multi-method/MultiMethod.runar.java"
+  }
+}

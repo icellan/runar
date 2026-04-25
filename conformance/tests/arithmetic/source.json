@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/arithmetic/Arithmetic.runar.ts",
+    ".runar.sol": "../../../examples/sol/arithmetic/Arithmetic.runar.sol",
+    ".runar.move": "../../../examples/move/arithmetic/Arithmetic.runar.move",
+    ".runar.go": "../../../examples/go/arithmetic/Arithmetic.runar.go",
+    ".runar.rs": "../../../examples/rust/arithmetic/Arithmetic.runar.rs",
+    ".runar.py": "../../../examples/python/arithmetic/Arithmetic.runar.py",
+    ".runar.zig": "../../../examples/zig/arithmetic/Arithmetic.runar.zig",
+    ".runar.rb": "../../../examples/ruby/arithmetic/Arithmetic.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/arithmetic/Arithmetic.runar.java"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/property-initializers/PropertyInitializers.runar.ts",
+    ".runar.sol": "../../../examples/sol/property-initializers/PropertyInitializers.runar.sol",
+    ".runar.move": "../../../examples/move/property-initializers/PropertyInitializers.runar.move",
+    ".runar.go": "../../../examples/go/property-initializers/PropertyInitializers.runar.go",
+    ".runar.rs": "../../../examples/rust/property-initializers/PropertyInitializers.runar.rs",
+    ".runar.py": "../../../examples/python/property-initializers/PropertyInitializers.runar.py",
+    ".runar.zig": "../../../examples/zig/property-initializers/PropertyInitializers.runar.zig",
+    ".runar.rb": "../../../examples/ruby/property-initializers/PropertyInitializers.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/property-initializers/PropertyInitializers.runar.java"
+  }
+}

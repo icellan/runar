@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/post-quantum-slhdsa/PostQuantumSLHDSA.runar.ts",
+    ".runar.sol": "../../../examples/sol/post-quantum-slhdsa/PostQuantumSLHDSA.runar.sol",
+    ".runar.move": "../../../examples/move/post-quantum-slhdsa/PostQuantumSLHDSA.runar.move",
+    ".runar.go": "../../../examples/go/post-quantum-slhdsa/PostQuantumSLHDSA.runar.go",
+    ".runar.rs": "../../../examples/rust/post-quantum-slhdsa/PostQuantumSLHDSA.runar.rs",
+    ".runar.py": "../../../examples/python/post-quantum-slhdsa/PostQuantumSLHDSA.runar.py",
+    ".runar.zig": "../../../examples/zig/post-quantum-slhdsa/PostQuantumSLHDSA.runar.zig",
+    ".runar.rb": "../../../examples/ruby/post-quantum-slhdsa/PostQuantumSLHDSA.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/post-quantum-slhdsa/PostQuantumSLHDSA.runar.java"
+  }
+}

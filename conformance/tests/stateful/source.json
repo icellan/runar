@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/stateful/Stateful.runar.ts",
+    ".runar.sol": "../../../examples/sol/stateful/Stateful.runar.sol",
+    ".runar.move": "../../../examples/move/stateful/Stateful.runar.move",
+    ".runar.go": "../../../examples/go/stateful/Stateful.runar.go",
+    ".runar.rs": "../../../examples/rust/stateful/Stateful.runar.rs",
+    ".runar.py": "../../../examples/python/stateful/Stateful.runar.py",
+    ".runar.zig": "../../../examples/zig/stateful/Stateful.runar.zig",
+    ".runar.rb": "../../../examples/ruby/stateful/Stateful.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/stateful/Stateful.runar.java"
+  }
+}

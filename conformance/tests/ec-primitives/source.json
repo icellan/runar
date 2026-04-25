@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/ec-primitives/ECPrimitives.runar.ts",
+    ".runar.sol": "../../../examples/sol/ec-primitives/ECPrimitives.runar.sol",
+    ".runar.move": "../../../examples/move/ec-primitives/ECPrimitives.runar.move",
+    ".runar.go": "../../../examples/go/ec-primitives/ECPrimitives.runar.go",
+    ".runar.rs": "../../../examples/rust/ec-primitives/ECPrimitives.runar.rs",
+    ".runar.py": "../../../examples/python/ec-primitives/ECPrimitives.runar.py",
+    ".runar.zig": "../../../examples/zig/ec-primitives/ECPrimitives.runar.zig",
+    ".runar.rb": "../../../examples/ruby/ec-primitives/ECPrimitives.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/ec-primitives/ECPrimitives.runar.java"
+  }
+}

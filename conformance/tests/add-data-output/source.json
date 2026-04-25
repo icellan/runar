@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/add-data-output/DataOutputTest.runar.ts",
+    ".runar.sol": "../../../examples/sol/add-data-output/DataOutputTest.runar.sol",
+    ".runar.move": "../../../examples/move/add-data-output/DataOutputTest.runar.move",
+    ".runar.go": "../../../examples/go/add-data-output/DataOutputTest.runar.go",
+    ".runar.rs": "../../../examples/rust/add-data-output/DataOutputTest.runar.rs",
+    ".runar.py": "../../../examples/python/add-data-output/DataOutputTest.runar.py",
+    ".runar.zig": "../../../examples/zig/add-data-output/DataOutputTest.runar.zig",
+    ".runar.rb": "../../../examples/ruby/add-data-output/DataOutputTest.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/add-data-output/DataOutputTest.runar.java"
+  }
+}

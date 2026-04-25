@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/if-else/IfElse.runar.ts",
+    ".runar.sol": "../../../examples/sol/if-else/IfElse.runar.sol",
+    ".runar.move": "../../../examples/move/if-else/IfElse.runar.move",
+    ".runar.go": "../../../examples/go/if-else/IfElse.runar.go",
+    ".runar.rs": "../../../examples/rust/if-else/IfElse.runar.rs",
+    ".runar.py": "../../../examples/python/if-else/IfElse.runar.py",
+    ".runar.zig": "../../../examples/zig/if-else/IfElse.runar.zig",
+    ".runar.rb": "../../../examples/ruby/if-else/IfElse.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/if-else/IfElse.runar.java"
+  }
+}
