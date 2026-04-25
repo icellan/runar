@@ -332,8 +332,19 @@ func runReferenceTranscriptInit(
 	if absorbSP1VK {
 		absorbBytes(sp1VKeyHash)
 	}
-	absorbBytes(publicValues)
+	// Mirror sp1fri/verify.go:67-110 absorb order:
+	//   1. degreeBits, baseDegreeBits, preprocessedWidth (instance metadata)
+	//   2. trace digest
+	//   3. publicValues
+	//   4. SampleExt4 → alpha
+	//   5. quotient digest
+	//   6. SampleExt4 → zeta
+	//   7. opened values (trace_local, trace_next, each quotient chunk)
+	chal.Observe(uint32(3)) // degreeBits — minimalGuestConfig
+	chal.Observe(uint32(3)) // baseDegreeBits = degreeBits (is_zk = 0)
+	chal.Observe(uint32(0)) // preprocessedWidth
 	chal.ObserveDigest(traceDigest)
+	absorbBytes(publicValues)
 	a := chal.SampleExt4()
 	chal.ObserveDigest(quotientDigest)
 	z := chal.SampleExt4()
@@ -477,15 +488,13 @@ func TestSp1FriVerifier_TranscriptMatchesReference(t *testing.T) {
 }
 
 // TestSp1FriVerifier_AcceptsMinimalGuestFixture is the holistic acceptance
-// harness. It exercises Steps 1 + 2-5 sequentially: first the proof-blob
-// binding (Step 1) consumes proofBlob and verifies the field-push
-// reconstruction; then the transcript init (Steps 2-5) runs against
-// canonical-observation inputs.
+// harness. It exercises Steps 1 + 2-5 + 8 sequentially against the canonical
+// fixture: proof-blob binding consumes proofBlob (Step 1), transcript init
+// (Steps 2-5), then FRI commit-phase absorbs + beta squeezes (Step 8).
 //
-// The two halves are independent in this PR — Step 1 leaves the field
-// chunks on the stack; we drop them before running Steps 2-5, which
-// pushes its own observation inputs. The full pipeline-to-pipeline
-// wiring (where Step 1's leftover fields directly feed Step 2's
+// Step 1 leaves the field chunks on the stack; we drop them before running
+// Steps 2-5, which pushes its own observation inputs. The full pipeline-to-
+// pipeline wiring (Step 1's leftover fields directly feeding Step 2's
 // observations) lands in a follow-up that ports the per-field decoder.
 func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	bs := loadMinimalGuestProofBlob(t)
@@ -513,7 +522,7 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		ops = append(ops, opcode("OP_DROP"))
 	}
 
-	// === Steps 2-5 ===
+	// === Decode the verification inputs from the fixture (Steps 2-5 + 8). ===
 	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
 	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
 	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
@@ -531,22 +540,71 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 			quotChunks[k][i] = sp1fri.FromKbExt4(e)
 		}
 	}
+	numRounds := len(proof.OpeningProof.CommitPhaseCommits)
+	friCommitDigests := make([][8]uint32, numRounds)
+	for r, cap := range proof.OpeningProof.CommitPhaseCommits {
+		friCommitDigests[r] = sp1fri.CanonicalDigest(cap[0])
+	}
+	commitPowWitnesses := make([]uint32, numRounds)
+	for r, w := range proof.OpeningProof.CommitPowWitnesses {
+		commitPowWitnesses[r] = w.Canonical()
+	}
+	finalPoly := make([]sp1fri.Ext4, len(proof.OpeningProof.FinalPoly))
+	for i, e := range proof.OpeningProof.FinalPoly {
+		finalPoly[i] = sp1fri.FromKbExt4(e)
+	}
+	logArities := make([]int, numRounds)
+	if len(proof.OpeningProof.QueryProofs) > 0 {
+		for r, op := range proof.OpeningProof.QueryProofs[0].CommitPhaseOpenings {
+			logArities[r] = int(op.LogArity)
+		}
+	}
+	queryPowWitness := proof.OpeningProof.QueryPowWitness.Canonical()
+
 	pubVals := publicValuesPoCBytes()
+	commitPowBits := 1
+	queryPowBits := 1
 
 	alpha, zeta := runReferenceTranscriptInit(
 		t, nil, pubVals, traceDigest, quotientDigest,
 		traceLocal, traceNext, quotChunks, false,
 	)
+	alphaFri, betas := runReferenceFriCommitPhase(
+		t, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks,
+		friCommitDigests, commitPowWitnesses, finalPoly,
+		logArities, queryPowWitness,
+		commitPowBits, queryPowBits,
+	)
 
-	// Build a separate tracker for Steps 2-5 starting from an empty stack
-	// (the script is the same flat ops slice — the tracker just tracks the
-	// suffix of the stack we manage from this point on).
+	// === Push Steps 2-5 + 8 inputs ===
 	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
 	fs := NewFiatShamirState()
 	params := DefaultSP1FriParams()
 	params.PublicValuesByteSize = len(pubVals)
 	params.SP1VKeyHashByteSize = 0
+	params.CommitPoWBits = commitPowBits
+	params.QueryPoWBits = queryPowBits
 
+	// Step 8 inputs (deepest).
+	tracker.pushInt("_obs_fri_qpw", int64(queryPowWitness))
+	for r := numRounds - 1; r >= 0; r-- {
+		tracker.pushInt(fmt.Sprintf("_obs_fri_la_%d", r), int64(logArities[r]))
+	}
+	for i := 0; i < len(finalPoly); i++ {
+		ext := finalPoly[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_fri_fp_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for r := 0; r < numRounds; r++ {
+		for i := 0; i < 8; i++ {
+			tracker.pushInt(fmt.Sprintf("_obs_fri_dig_%d_%d", r, i), int64(friCommitDigests[r][i]))
+		}
+		tracker.pushInt(fmt.Sprintf("_obs_fri_cpw_%d", r), int64(commitPowWitnesses[r]))
+	}
+
+	// Steps 2-5 inputs (above Step 8 inputs).
 	for i := 0; i < 2; i++ {
 		ext := traceLocal[i]
 		for j := 0; j < 4; j++ {
@@ -574,13 +632,23 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	trackerPushBytes(tracker, "_obs_public_values", pubVals)
 
 	emitTranscriptInit(fs, tracker, params)
+	emitFriCommitPhaseAbsorb(fs, tracker, params, numRounds, len(finalPoly))
 
-	// Sanity-check alpha + zeta against the reference.
+	// Sanity-check alpha + zeta + alpha_fri + every beta against the reference.
 	assertEqualNamed := func(name string, ref uint32) {
 		tracker.toTop(name)
 		ops = append(ops, pushInt64(int64(ref)))
 		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
 		tracker.rawBlock([]string{name}, "", func(e func(StackOp)) {})
+	}
+	// Beta values per round (reverse round order to walk the stack top-down).
+	for r := numRounds - 1; r >= 0; r-- {
+		for i := 3; i >= 0; i-- {
+			assertEqualNamed(fmt.Sprintf("_fs_beta_%d_%d", r, i), betas[r][i])
+		}
+	}
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_alpha_fri_%d", i), alphaFri[i])
 	}
 	for i := 3; i >= 0; i-- {
 		assertEqualNamed(fmt.Sprintf("_fs_zeta_%d", i), zeta[i])
@@ -597,7 +665,7 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	ops = append(ops, opcode("OP_1"))
 
 	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("verifier rejected the canonical fixture (Step 1 + 2-5): %v", err)
+		t.Fatalf("verifier rejected the canonical fixture (Step 1 + 2-5 + 8): %v", err)
 	}
 
 	// Measure compiled script size in bytes for the brief's reporting.
@@ -608,8 +676,396 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		scriptBytes = len(result.ScriptHex) / 2
 	}
 
-	t.Logf("Steps 1 + 2-5 accepted canonical fixture; |proofBlob|=%d, |chunks|=%d, "+
-		"|step1 ops|=%d, total ops in harness=%d, script bytes=%d, "+
-		"alpha=%v zeta=%v",
-		len(bs), len(chunks), len(bindingOps), len(ops), scriptBytes, alpha, zeta)
+	t.Logf("Steps 1 + 2-5 + 8 accepted canonical fixture; |proofBlob|=%d, |chunks|=%d, "+
+		"|step1 ops|=%d, numRounds=%d, finalPolyLen=%d, total ops in harness=%d, "+
+		"script bytes=%d, alpha=%v zeta=%v alphaFri=%v betas=%v",
+		len(bs), len(chunks), len(bindingOps), numRounds, len(finalPoly), len(ops),
+		scriptBytes, alpha, zeta, alphaFri, betas)
+}
+
+// runReferenceFriCommitPhase extends runReferenceTranscriptInit through Step 8:
+// after the Steps 2-5 transcript, it replays `verifyFri` (sp1fri/fri.go:20-93)
+// against the off-chain DuplexChallenger and captures every Ext4 challenge
+// emitted (alpha_fri + per-round beta) plus the channel state needed to
+// validate downstream steps. Returns the captured challenges in declaration
+// order so the on-chain harness can assert byte-identity.
+func runReferenceFriCommitPhase(
+	t *testing.T,
+	publicValues []byte,
+	traceDigest [8]uint32,
+	quotientDigest [8]uint32,
+	traceLocal []sp1fri.Ext4,
+	traceNext []sp1fri.Ext4,
+	quotChunks [][]sp1fri.Ext4,
+	friCommitDigests [][8]uint32,
+	commitPowWitnesses []uint32,
+	finalPoly []sp1fri.Ext4,
+	logArities []int,
+	queryPowWitness uint32,
+	commitPowBits, queryPowBits int,
+) (alphaFri [4]uint32, betas [][4]uint32) {
+	t.Helper()
+	chal := sp1fri.NewDuplexChallenger()
+
+	// Steps 2-5 (no SP1 wrapper for the PoC).
+	absorbBytes := func(bs []byte) {
+		nChunks := (len(bs) + 3) / 4
+		for i := 0; i < nChunks; i++ {
+			start := i * 4
+			end := start + 4
+			if end > len(bs) {
+				end = len(bs)
+			}
+			var buf [4]byte
+			copy(buf[:], bs[start:end])
+			v := uint32(buf[0]) |
+				uint32(buf[1])<<8 |
+				uint32(buf[2])<<16 |
+				uint32(buf[3])<<24
+			chal.Observe(v)
+		}
+	}
+	// Mirror sp1fri/verify.go:67-110 absorb order (see runReferenceTranscriptInit).
+	chal.Observe(uint32(3))
+	chal.Observe(uint32(3))
+	chal.Observe(uint32(0))
+	chal.ObserveDigest(traceDigest)
+	absorbBytes(publicValues)
+	_ = chal.SampleExt4() // alpha (outer-stark)
+	chal.ObserveDigest(quotientDigest)
+	_ = chal.SampleExt4() // zeta
+	chal.ObserveExt4Slice(traceLocal)
+	chal.ObserveExt4Slice(traceNext)
+	for _, qc := range quotChunks {
+		chal.ObserveExt4Slice(qc)
+	}
+
+	// Step 8: mirror sp1fri/fri.go:20-93.
+	a := chal.SampleExt4()
+	for i := 0; i < 4; i++ {
+		alphaFri[i] = a[i]
+	}
+
+	betas = make([][4]uint32, len(friCommitDigests))
+	for r, d := range friCommitDigests {
+		chal.ObserveDigest(d)
+		if !chal.CheckWitness(commitPowBits, commitPowWitnesses[r]) {
+			t.Fatalf("reference: invalid commit-phase PoW witness at round %d", r)
+		}
+		bExt := chal.SampleExt4()
+		for i := 0; i < 4; i++ {
+			betas[r][i] = bExt[i]
+		}
+	}
+	chal.ObserveExt4Slice(finalPoly)
+	for _, la := range logArities {
+		chal.Observe(uint32(la))
+	}
+	if !chal.CheckWitness(queryPowBits, queryPowWitness) {
+		t.Fatalf("reference: invalid query PoW witness")
+	}
+	return
+}
+
+// TestSp1FriVerifier_FriCommitPhaseMatchesReference validates Step 8 — the
+// FRI commit-phase absorbs + beta squeezes + final-poly absorb + query-PoW
+// witness check. Asserts that on-chain alpha_fri and every per-round beta
+// match the off-chain DuplexChallenger byte-identical.
+func TestSp1FriVerifier_FriCommitPhaseMatchesReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+
+	// Decode the FRI commit-phase + final poly + query-pow inputs.
+	numRounds := len(proof.OpeningProof.CommitPhaseCommits)
+	if numRounds == 0 {
+		t.Fatal("fixture: no FRI commit-phase rounds")
+	}
+	friCommitDigests := make([][8]uint32, numRounds)
+	for r, cap := range proof.OpeningProof.CommitPhaseCommits {
+		// cap_height = 0 ⇒ exactly one digest per cap.
+		if len(cap) != 1 {
+			t.Fatalf("fixture: round %d cap len %d != 1", r, len(cap))
+		}
+		friCommitDigests[r] = sp1fri.CanonicalDigest(cap[0])
+	}
+	commitPowWitnesses := make([]uint32, numRounds)
+	for r, w := range proof.OpeningProof.CommitPowWitnesses {
+		commitPowWitnesses[r] = w.Canonical()
+	}
+	finalPoly := make([]sp1fri.Ext4, len(proof.OpeningProof.FinalPoly))
+	for i, e := range proof.OpeningProof.FinalPoly {
+		finalPoly[i] = sp1fri.FromKbExt4(e)
+	}
+	logArities := make([]int, numRounds)
+	if len(proof.OpeningProof.QueryProofs) > 0 {
+		for r, op := range proof.OpeningProof.QueryProofs[0].CommitPhaseOpenings {
+			logArities[r] = int(op.LogArity)
+		}
+	}
+	queryPowWitness := proof.OpeningProof.QueryPowWitness.Canonical()
+
+	pubVals := publicValuesPoCBytes()
+	commitPowBits := 1
+	queryPowBits := 1
+
+	alphaFri, betas := runReferenceFriCommitPhase(
+		t, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks,
+		friCommitDigests, commitPowWitnesses, finalPoly,
+		logArities, queryPowWitness,
+		commitPowBits, queryPowBits,
+	)
+
+	// Build the on-chain script.
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+	fs := NewFiatShamirState()
+	params := DefaultSP1FriParams()
+	params.PublicValuesByteSize = len(pubVals)
+	params.SP1VKeyHashByteSize = 0
+	params.CommitPoWBits = commitPowBits
+	params.QueryPoWBits = queryPowBits
+
+	// Push Step 8 inputs first (deepest), so Steps 2-5 inputs sit above and
+	// are consumed first.
+	//
+	// query_pow_witness deepest, then logArities (in reverse so r=0 is shallower
+	// — toTop walks names so the actual stack order doesn't matter, but we keep
+	// the canonical layout for readability).
+	tracker.pushInt("_obs_fri_qpw", int64(queryPowWitness))
+	for r := numRounds - 1; r >= 0; r-- {
+		tracker.pushInt(fmt.Sprintf("_obs_fri_la_%d", r), int64(logArities[r]))
+	}
+	// final_poly: 4 Ext4 elements, coefficients c0..c3.
+	for i := 0; i < len(finalPoly); i++ {
+		ext := finalPoly[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_fri_fp_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	// Per-round: digest 8 elements + commit_pow_witness.
+	for r := 0; r < numRounds; r++ {
+		for i := 0; i < 8; i++ {
+			tracker.pushInt(fmt.Sprintf("_obs_fri_dig_%d_%d", r, i), int64(friCommitDigests[r][i]))
+		}
+		tracker.pushInt(fmt.Sprintf("_obs_fri_cpw_%d", r), int64(commitPowWitnesses[r]))
+	}
+
+	// Steps 2-5 inputs (same layout as TestSp1FriVerifier_TranscriptMatchesReference).
+	for i := 0; i < 2; i++ {
+		ext := traceLocal[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tl_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 2; i++ {
+		ext := traceNext[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tn_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 4; i++ {
+		ext := quotChunks[0][i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_qc_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_qdig_%d", i), int64(quotientDigest[i]))
+	}
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_dig_%d", i), int64(traceDigest[i]))
+	}
+	trackerPushBytes(tracker, "_obs_public_values", pubVals)
+
+	emitTranscriptInit(fs, tracker, params)
+	emitFriCommitPhaseAbsorb(fs, tracker, params, numRounds, len(finalPoly))
+
+	// Assert alpha_fri matches the reference (deepest first, so we work top-down
+	// because squeezes named _fs_alpha_fri_3 sits at the top of the squeeze
+	// block, but we need to bring each by name to the top).
+	assertEqualNamed := func(name string, ref uint32) {
+		tracker.toTop(name)
+		ops = append(ops, pushInt64(int64(ref)))
+		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
+		tracker.rawBlock([]string{name}, "", func(e func(StackOp)) {})
+	}
+
+	// Beta values (per round) — assert in reverse-round order so we don't have
+	// to reorder named slots that survive across rounds.
+	for r := numRounds - 1; r >= 0; r-- {
+		for i := 3; i >= 0; i-- {
+			assertEqualNamed(fmt.Sprintf("_fs_beta_%d_%d", r, i), betas[r][i])
+		}
+	}
+	// alpha_fri.
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_alpha_fri_%d", i), alphaFri[i])
+	}
+
+	// Drain everything else off the stack.
+	for len(tracker.nm) > 0 {
+		ops = append(ops, opcode("OP_DROP"))
+		tracker.nm = tracker.nm[:len(tracker.nm)-1]
+	}
+	ops = append(ops, opcode("OP_1"))
+
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain Step 8 disagrees with the validated DuplexChallenger reference. "+
+			"Reference alphaFri=%v betas=%v. Script error: %v", alphaFri, betas, err)
+	}
+
+	// Measure script size for the brief's reporting.
+	method := StackMethod{Name: "test", Ops: ops}
+	result, emitErr := Emit([]StackMethod{method})
+	scriptBytes := -1
+	if emitErr == nil {
+		scriptBytes = len(result.ScriptHex) / 2
+	}
+
+	t.Logf("Step 8 matches reference; numRounds=%d, finalPolyLen=%d, "+
+		"alphaFri=%v, betas=%v, |ops|=%d, script bytes=%d",
+		numRounds, len(finalPoly), alphaFri, betas, len(ops), scriptBytes)
+}
+
+// TestSp1FriVerifier_QuotientReconstructionMatchesReference documents the
+// off-chain ground-truth values that on-chain Steps 6 (AIR constraint eval at
+// zeta) and 7 (quotient recompose + OOD equality) must reproduce once the
+// Ext4 macro layer (sp1_fri_ext4.go) lands.
+//
+// Steps 6 and 7 are deferred behind refined panics in sp1_fri.go (see
+// emitFibAirConstraintEval + emitQuotientRecompose). When those land, this
+// test will be expanded to also drive the on-chain emission and assert each
+// per-step intermediate scalar is byte-identical to the off-chain reference
+// computed below.
+//
+// Until then, this test serves as the canonical reference dump: alpha_folded,
+// quotient(zeta) recomposed, and the four-coordinate Ext4 equality relation
+// `folded * inv_vanishing == quotient`.
+func TestSp1FriVerifier_QuotientReconstructionMatchesReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	// Re-derive the same alpha + zeta the on-chain Steps 2-5 produce.
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+
+	pubVals := publicValuesPoCBytes()
+	alphaArr, zetaArr := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+	alpha := sp1fri.Ext4{alphaArr[0], alphaArr[1], alphaArr[2], alphaArr[3]}
+	zeta := sp1fri.Ext4{zetaArr[0], zetaArr[1], zetaArr[2], zetaArr[3]}
+
+	// Step 6: Lagrange selectors at zeta + AIR constraint folding.
+	pis := [3]uint32{0, 1, 21} // matches publicValuesPoCBytes
+	sels := sp1fri.SelectorsAtPoint(3, zeta)
+	folded := sp1fri.EvalFibonacciConstraints(
+		[2]sp1fri.Ext4{traceLocal[0], traceLocal[1]},
+		[2]sp1fri.Ext4{traceNext[0], traceNext[1]},
+		pis, sels, alpha,
+	)
+
+	// Step 7: quotient recompose. For the PoC's single chunk, zps[0] = 1
+	// (empty product over the other chunks), so:
+	//   quotient = sum over e in 0..3 of basisExt4(e) * chunk[0][e]
+	// = chunk[0]_0 + chunk[0]_1 * X + chunk[0]_2 * X^2 + chunk[0]_3 * X^3
+	// where X^4 = W = 3 in the binomial extension. Mirror the in-package
+	// helper sp1fri/verify.go::recomposeQuotient at lines 250-283.
+	const W uint32 = 3
+	mulByX := func(a sp1fri.Ext4, k int) sp1fri.Ext4 {
+		// (c0,c1,c2,c3) * X^k mod (X^4 - W)
+		switch k {
+		case 0:
+			return a
+		case 1:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[3]), a[0], a[1], a[2]}
+		case 2:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[2]), sp1fri.KbMul(W, a[3]), a[0], a[1]}
+		case 3:
+			return sp1fri.Ext4{sp1fri.KbMul(W, a[1]), sp1fri.KbMul(W, a[2]), sp1fri.KbMul(W, a[3]), a[0]}
+		default:
+			t.Fatalf("mulByX: invalid exponent %d", k)
+			return sp1fri.Ext4{}
+		}
+	}
+	// Single chunk: lift each Ext4 coefficient via X^e and sum.
+	quotient := sp1fri.Ext4Zero()
+	for e := 0; e < 4; e++ {
+		// Coefficient e of the chunk, lifted as a constant Ext4.
+		c := quotChunks[0][e]
+		// "Multiply" c (an Ext4 element) by basis element X^e: this is
+		// polynomial multiplication, which collapses to the four shift
+		// patterns above (since basis * X^e = X^e and Ext4 mul by a degree-0
+		// monomial is per-coefficient).
+		quotient = sp1fri.Ext4Add(quotient, mulByX(c, e))
+	}
+
+	// OOD equality: folded * inv_vanishing == quotient.
+	lhs := sp1fri.Ext4Mul(folded, sels.InvVanishing)
+	if !sp1fri.Ext4Equal(lhs, quotient) {
+		t.Fatalf("reference Steps 6+7 self-check failed:\n  alpha=%v zeta=%v\n  "+
+			"folded=%v\n  inv_vanishing=%v\n  lhs=%v\n  quotient=%v",
+			alpha, zeta, folded, sels.InvVanishing, lhs, quotient)
+	}
+
+	t.Logf("Reference Steps 6+7 self-check passed:\n"+
+		"  alpha           = %v\n"+
+		"  zeta            = %v\n"+
+		"  is_first_row    = %v\n"+
+		"  is_last_row     = %v\n"+
+		"  is_transition   = %v\n"+
+		"  inv_vanishing   = %v\n"+
+		"  alpha_folded    = %v\n"+
+		"  quotient(zeta)  = %v\n"+
+		"  folded*inv_van  = %v  (must == quotient)",
+		alpha, zeta,
+		sels.IsFirstRow, sels.IsLastRow, sels.IsTransition, sels.InvVanishing,
+		folded, quotient, lhs)
+
+	t.Skip("on-chain Steps 6 (AIR constraint eval) + 7 (quotient recompose) " +
+		"are deferred behind refined panics in sp1_fri.go (emitFibAirConstraintEval, " +
+		"emitQuotientRecompose). When the Ext4 macro layer (sp1_fri_ext4.go) lands, " +
+		"this test will be expanded to drive the on-chain emission and assert " +
+		"byte-identity. Reference dump in test log above.")
 }

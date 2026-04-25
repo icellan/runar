@@ -59,6 +59,17 @@ type SP1FriVerifierParams struct {
 	NumPolynomials       int // PoC 2; production: AIR trace width + quotient chunks
 	PublicValuesByteSize int // bytes; PoC 12 (= 3 × u32 LE for [a, b, fib_n]); SP1 EVM guest 32
 	SP1VKeyHashByteSize  int // bytes; 0 disables the outer-wrapper absorb (validated PoC reference); SP1 prod 32
+
+	// DegreeBits is the trace-domain log2-size. For the PoC Fibonacci AIR with
+	// 8-row trace this is 3. Observed verbatim into the transcript at the start
+	// of verify (sp1fri/verify.go:68-70).
+	DegreeBits int
+	// BaseDegreeBits is `degreeBits - is_zk` = `degreeBits` for non-ZK configs.
+	// Observed at verify.go:69.
+	BaseDegreeBits int
+	// PreprocessedWidth is 0 when there is no preprocessed trace (Fib AIR);
+	// observed at verify.go:70.
+	PreprocessedWidth int
 }
 
 // DefaultSP1FriParams returns the PoC-scale parameter set. Overridden when
@@ -77,6 +88,9 @@ func DefaultSP1FriParams() SP1FriVerifierParams {
 		NumPolynomials:       2,
 		PublicValuesByteSize: 12, // [0,1,21] u32-LE-packed = 12 bytes
 		SP1VKeyHashByteSize:  0,  // PoC fixture has no SP1 wrapper
+		DegreeBits:           3,  // matches sp1fri minimalGuestConfig.degreeBits
+		BaseDegreeBits:       3,  // = degreeBits - is_zk (= 0)
+		PreprocessedWidth:    0,  // no preprocessed trace
 	}
 }
 
@@ -946,13 +960,25 @@ func emitTranscriptInit(fs *FiatShamirState, t *KBTracker, params SP1FriVerifier
 		emitObserveByteString(fs, t, params.SP1VKeyHashByteSize)
 	}
 
-	// Step 3 — Absorb publicValues bytes (Plonky3 inner verifier per
-	// verifier.rs:367).
+	// Step 2c — Absorb instance metadata (sp1fri/verify.go:67-70). Each is a
+	// canonical KB element (small ints fit trivially). These are codegen-time
+	// constants for a given param tuple, so we push them inline. Without these
+	// the on-chain transcript diverges from the prover's at the very first
+	// SampleExt4, breaking all PoW witness checks downstream.
+	t.pushInt("_obs_meta_dbits", int64(params.DegreeBits))
+	fs.EmitObserve(t)
+	t.pushInt("_obs_meta_bdbits", int64(params.BaseDegreeBits))
+	fs.EmitObserve(t)
+	t.pushInt("_obs_meta_pwidth", int64(params.PreprocessedWidth))
+	fs.EmitObserve(t)
+
+	// Step 3 — Absorb the trace commitment (8-element Poseidon2 digest).
+	// Order matches verify.go:71-74 (digest BEFORE publicValues).
+	emitObserveDigest(fs, t)
+
+	// Step 4 — Absorb publicValues bytes (verify.go:76).
 	t.toTop("_obs_public_values")
 	emitObserveByteString(fs, t, params.PublicValuesByteSize)
-
-	// Step 4 — Absorb the trace commitment (8-element Poseidon2 digest).
-	emitObserveDigest(fs, t)
 
 	// Step 5 — Squeeze alpha (Ext4) — produces _fs_ext4_0.._fs_ext4_3 on top.
 	fs.EmitSqueezeExt4(t)
@@ -986,6 +1012,255 @@ func emitTranscriptInit(fs *FiatShamirState, t *KBTracker, params SP1FriVerifier
 
 	// Step 8 — Absorb opened values in Plonky3 emit order.
 	emitObserveOpenedValues(fs, t, params)
+}
+
+// =============================================================================
+// Step 8 — FRI commit-phase absorbs + beta squeezes + final-poly absorb +
+//          query-PoW witness check.
+// =============================================================================
+//
+// Mirrors `packages/runar-go/sp1fri/fri.go::verifyFri` (lines 20-93) for the
+// PoC minimal-guest config. Layout:
+//
+//   1. Squeeze alpha_fri (Ext4)                                  — fri.go:25
+//   2. For each FRI commit round r in 0..MerkleDepth (cap_height=0 → 1
+//      digest per round):
+//        a. ObserveDigest(commit[r])                              — fri.go:63-65
+//        b. Observe(commit_pow_witness[r]) + CheckWitness(commit_pow_bits)
+//                                                                 — fri.go:66-69
+//        c. Squeeze beta_r (Ext4)                                 — fri.go:70
+//   3. ObserveExt4Slice(final_poly)                              — fri.go:79
+//   4. For each round r: Observe(uint32(logArity_r))             — fri.go:87-89
+//   5. Observe(query_pow_witness) + CheckWitness(query_pow_bits) — fri.go:90-93
+//
+// The four fields with "(squeeze)" semantics are renamed into stable slot
+// names so subsequent steps (FRI per-query verify) can reference them.
+//
+// The unlocking script must have pre-pushed every absorbed value through the
+// tracker with the canonical naming scheme below; see the Step 8 test harness
+// for the layout the helper consumes.
+//
+// Naming scheme (mirrors emitObserveDigest / emitObserveExt4Named):
+//   - FRI digest at round r:   _obs_fri_dig_{r}_<i>        for i in 0..7
+//   - commit_pow_witness[r]:   _obs_fri_cpw_{r}
+//   - final_poly Ext4 i:       _obs_fri_fp_{i}_c<j>        for j in 0..3
+//   - logArity at round r:     _obs_fri_la_{r}
+//   - query_pow_witness:       _obs_fri_qpw
+//
+// Squeeze outputs (renamed onto stable slots above the sponge):
+//   - alpha_fri Ext4:          _fs_alpha_fri_<i>            for i in 0..3
+//   - beta at round r Ext4:    _fs_beta_{r}_<i>             for i in 0..3
+//
+// At entry the sponge state fs0..fs15 is on top of all caller-pushed slots,
+// and the caller has positioned every named field below. At exit, fs0..fs15
+// remains on top with all squeezed challenges renamed below it.
+
+// emitFriCommitPhaseAbsorb performs Step 8 of the SP1 FRI verifier.
+//
+// Mirrors `verifyFri` (sp1fri/fri.go:20-93). For the PoC minimal-guest config
+// `MerkleDepth` (= number of FRI commit-phase rounds) is determined by the
+// fixture's `total_log_reduction = sum(log_arity_r)`. With `LogFinalPolyLen=2`
+// and `LogBlowup=2` and trace `degreeBits=3`:
+//
+//   logGlobalMaxHeight = degreeBits + LogBlowup = 5
+//   logFinalHeight     = LogBlowup + LogFinalPolyLen = 4
+//   total_log_reduction = logGlobalMaxHeight - logFinalHeight = 1
+//
+// At max_log_arity = 1 (binary folding), total_log_reduction = 1 means there is
+// exactly ONE FRI commit-phase round.
+//
+// `numRounds` is the static count of commit-phase rounds (MerkleDepth here),
+// `finalPolyLen` is the static count of Ext4 coefficients in final_poly
+// (= 1 << LogFinalPolyLen). Both are codegen-time constants for a given param
+// tuple — they're plumbed in explicitly to keep the helper's stack contract
+// auditable.
+func emitFriCommitPhaseAbsorb(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams, numRounds, finalPolyLen int) {
+	if numRounds < 1 {
+		panic(fmt.Sprintf("emitFriCommitPhaseAbsorb: numRounds must be >= 1, got %d", numRounds))
+	}
+	if finalPolyLen < 1 {
+		panic(fmt.Sprintf("emitFriCommitPhaseAbsorb: finalPolyLen must be >= 1, got %d", finalPolyLen))
+	}
+
+	// 1. Squeeze alpha_fri (the per-height batching scalar inside FRI). This is
+	//    the SECOND Ext4 squeeze of the AIR/FRI verifier (the first was the
+	//    outer-stark `alpha` in Step 5). See sp1fri/fri.go:25.
+	fs.EmitSqueezeExt4(t)
+	t.rename("_fs_alpha_fri_3")
+	t.toTop("_fs_ext4_2")
+	t.rename("_fs_alpha_fri_2")
+	t.toTop("_fs_ext4_1")
+	t.rename("_fs_alpha_fri_1")
+	t.toTop("_fs_ext4_0")
+	t.rename("_fs_alpha_fri_0")
+
+	// 2. Per-round: digest absorb, PoW witness check, beta squeeze.
+	for r := 0; r < numRounds; r++ {
+		// 2a. ObserveDigest(commit[r]) — 8 base-field elements named
+		// _obs_fri_dig_{r}_<i>, absorbed in canonical i=0..7 order.
+		// Note: cap_height=0 ⇒ exactly one digest per MerkleCap.
+		for i := 0; i < 8; i++ {
+			t.toTop(fmt.Sprintf("_obs_fri_dig_%d_%d", r, i))
+			fs.EmitObserve(t)
+		}
+
+		// 2b. Observe(commit_pow_witness[r]) + CheckWitness(commit_pow_bits).
+		// EmitCheckWitness is a no-op when bits == 0 (handled by the caller's
+		// conditional below). For the PoC fixture commit_pow_bits = 1.
+		t.toTop(fmt.Sprintf("_obs_fri_cpw_%d", r))
+		if params.CommitPoWBits > 0 {
+			fs.EmitCheckWitness(t, params.CommitPoWBits)
+		} else {
+			// Even with no bits the witness must be observed (Plonky3's
+			// CheckWitness returns true immediately for bits=0 WITHOUT
+			// observing — sp1fri/challenger.go:144-146). So in the
+			// bits==0 case we must drop the pushed witness. To keep the
+			// helper's stack contract clean for both branches, callers
+			// should not push a witness when CommitPoWBits == 0; this
+			// branch panics defensively.
+			panic("emitFriCommitPhaseAbsorb: bits==0 path not exercised by PoC; " +
+				"unlocking script must omit _obs_fri_cpw_* pushes when CommitPoWBits == 0")
+		}
+
+		// 2c. Squeeze beta_r (Ext4) and rename into stable slots so later FRI
+		// per-query steps can reference _fs_beta_{r}_<i>.
+		fs.EmitSqueezeExt4(t)
+		t.rename(fmt.Sprintf("_fs_beta_%d_3", r))
+		t.toTop("_fs_ext4_2")
+		t.rename(fmt.Sprintf("_fs_beta_%d_2", r))
+		t.toTop("_fs_ext4_1")
+		t.rename(fmt.Sprintf("_fs_beta_%d_1", r))
+		t.toTop("_fs_ext4_0")
+		t.rename(fmt.Sprintf("_fs_beta_%d_0", r))
+	}
+
+	// 3. ObserveExt4Slice(final_poly). final_poly has finalPolyLen Ext4 elements
+	// (= 1 << LogFinalPolyLen for the PoC = 4). Each is absorbed coefficient-
+	// by-coefficient in canonical order; sp1fri/challenger.go:84-95.
+	for i := 0; i < finalPolyLen; i++ {
+		var names [4]string
+		for j := 0; j < 4; j++ {
+			names[j] = fmt.Sprintf("_obs_fri_fp_%d_c%d", i, j)
+		}
+		emitObserveExt4Named(fs, t, names)
+	}
+
+	// 4. For each round, Observe(uint32(logArity_r)). Mirrors sp1fri/fri.go:87-89.
+	// The logArity values are pushed by the unlocking script as canonical KB
+	// elements (any value <= max_log_arity = 1 fits trivially).
+	for r := 0; r < numRounds; r++ {
+		t.toTop(fmt.Sprintf("_obs_fri_la_%d", r))
+		fs.EmitObserve(t)
+	}
+
+	// 5. Observe(query_pow_witness) + CheckWitness(query_pow_bits). Same shape
+	// as step 2b. For the PoC fixture query_pow_bits = 1.
+	t.toTop("_obs_fri_qpw")
+	if params.QueryPoWBits > 0 {
+		fs.EmitCheckWitness(t, params.QueryPoWBits)
+	} else {
+		panic("emitFriCommitPhaseAbsorb: bits==0 path not exercised by PoC; " +
+			"unlocking script must omit _obs_fri_qpw push when QueryPoWBits == 0")
+	}
+}
+
+// =============================================================================
+// Step 6 — Fibonacci AIR symbolic constraint evaluator (refined stub)
+// =============================================================================
+//
+// Mirrors `packages/runar-go/sp1fri/air_fib.go::EvalFibonacciConstraints` +
+// `SelectorsAtPoint`. Implementation is deferred behind a panic until the
+// Ext4 macro layer (sp1_fri_ext4.go) lands: each Ext4 mul/inv/sub composes
+// the existing flat `EmitKBExt4Mul0..3` / `EmitKBExt4Inv0..3` emitters with
+// careful 8-element input window staging via the tracker.
+//
+// At entry the named slots present (from emitTranscriptInit + Step 8):
+//
+//   - _fs_alpha_0.._fs_alpha_3       (outer-stark batch challenge)
+//   - _fs_zeta_0.._fs_zeta_3         (out-of-domain point)
+//   - _fs_alpha_fri_0.._fs_alpha_fri_3  (FRI batching scalar)
+//   - _fs_beta_<r>_<i>               (per-round FRI fold challenges)
+//   - _obs_open_tl_<i>_c<j>          (trace_local, 2 Ext4)
+//   - _obs_open_tn_<i>_c<j>          (trace_next, 2 Ext4)
+//   - _obs_open_qc_<i>_c<j>          (quotient_chunks, 4 Ext4)
+//
+// Public values [a, b, x] are not re-pushed — they were absorbed as bytes
+// in Step 4 but the constraint evaluator needs them as canonical KB ints.
+// Caller must push them through the tracker as `_pis_a`, `_pis_b`, `_pis_x`
+// (each as a base-field element lifted into Ext4 by setting only c0).
+//
+// At exit the alpha-folded constraint accumulator sits on top as
+// `_fold_acc_0`, `_fold_acc_1`, `_fold_acc_2`, `_fold_acc_3`.
+func emitFibAirConstraintEval(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
+	panicSP1FriStub(
+		"verifySP1FRI Step 6 (Fibonacci AIR constraint evaluation at zeta)",
+		"sp1fri/air_fib.go::EvalFibonacciConstraints + SelectorsAtPoint (lines 41-123). "+
+			"Selectors at zeta require Ext4 operations: z_h = zeta^|H| - 1 (logSize=3 squarings), "+
+			"is_first_row = z_h / (zeta - 1), is_last_row = z_h / (zeta - h_inv), "+
+			"is_transition = (zeta - h_inv), inv_vanishing = 1/z_h. The constraint folder "+
+			"runs 5 alpha-folds: acc = acc * alpha + selector * (left|right - target). Each "+
+			"Ext4 mul/inv composes 4 calls to EmitKBExt4Mul0..3 / EmitKBExt4Inv0..3.",
+		"Structural shape: implementable as a sequence of macro calls once the Ext4 macro "+
+			"layer (sp1_fri_ext4.go) lands. The macro `kbExt4MulMacro(t, aPrefix, bPrefix, outPrefix)` "+
+			"would: (a) for each component i in 0..3, copyToTop the 8 named inputs in canonical "+
+			"order (a0..a3, b0..b3), call EmitKBExt4Mul[i] which consumes 8 and produces 1, "+
+			"rename the result to outPrefix_<i>; (b) skip the cleanup-drop inside the existing "+
+			"helper since copyToTop preserves originals. Estimate: each Ext4 mul = ~4 × 800 = "+
+			"3200 ops; the 5-constraint Fib AIR eval needs ~10 Ext4 muls + 4 Ext4 invs + 4 Ext4 "+
+			"subs = ~50K ops + ~30K ops + 16 ops = ~80K ops added on top of the Step 8 "+
+			"baseline (~250K ops).")
+	_ = fs
+	_ = t
+	_ = params
+}
+
+// =============================================================================
+// Step 7 — Quotient recompose + OOD constraint check (refined stub)
+// =============================================================================
+//
+// Mirrors `packages/runar-go/sp1fri/verify.go::recomposeQuotient` (lines 250-283)
+// + the final equality at lines 172-174. For the PoC's single quotient chunk
+// (numQuotientChunks=1), zps[0] = 1 (empty product), so the recompose collapses to:
+//
+//   quotient = sum over e in 0..3 of basisExt4(e) * chunk[e]
+//
+// Where basisExt4(e) is the e-th unit vector. This is just a polynomial-shift
+// (mul by X^e) followed by Ext4 sum. Because X^4 = W = 3 in the binomial
+// extension, mul-by-X^e is a pure permutation + scale-by-W:
+//
+//   chunk[0]: identity (no shift)
+//   chunk[1] * X:    (c0,c1,c2,c3) → (W*c3, c0, c1, c2)
+//   chunk[2] * X^2:  (c0,c1,c2,c3) → (W*c2, W*c3, c0, c1)
+//   chunk[3] * X^3:  (c0,c1,c2,c3) → (W*c1, W*c2, W*c3, c0)
+//
+// Sum 4 Ext4s component-wise. Then the final check:
+//
+//   assert(folded_constraints * inv_vanishing == quotient)   (Ext4 equality)
+//
+// Which requires one full Ext4 mul (sum of 4 EmitKBExt4Mul calls) + 4 ×
+// OP_NUMEQUALVERIFY against the recomposed quotient.
+func emitQuotientRecompose(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
+	panicSP1FriStub(
+		"verifySP1FRI Step 7 (quotient recompose + OOD equality check)",
+		"sp1fri/verify.go::recomposeQuotient (lines 243-283) + final equality at 172-174. "+
+			"For numQuotientChunks=1 the recompose collapses to: "+
+			"quotient = chunk[0] + chunk[1]*X + chunk[2]*X^2 + chunk[3]*X^3 mod (X^4 - W) "+
+			"with W = 3. Each X^e multiplication is a pure permutation + scale-by-W on the "+
+			"4 Ext4 coefficients (no Ext4 mul needed for the recompose). The final equality "+
+			"check `folded * inv_vanishing == quotient` does need one full Ext4 mul.",
+		"Structural shape: (a) recompose is component-wise — for the 4 output coefficients, "+
+			"compute r0 = chunk[0]_c0 + W*chunk[1]_c3 + W*chunk[2]_c2 + W*chunk[3]_c1 (5 adds + 3 muls-by-3); "+
+			"r1 = chunk[0]_c1 + chunk[1]_c0 + W*chunk[2]_c3 + W*chunk[3]_c2 (5 adds + 2 muls-by-3); "+
+			"r2 = chunk[0]_c2 + chunk[1]_c1 + chunk[2]_c0 + W*chunk[3]_c3 (5 adds + 1 mul-by-3); "+
+			"r3 = chunk[0]_c3 + chunk[1]_c2 + chunk[2]_c1 + chunk[3]_c0 (5 adds). "+
+			"Each base-field add/mul-by-W goes through kbFieldAdd/kbFieldMulConst — "+
+			"~50 ops per coefficient, ~200 ops total for the recompose. (b) Ext4 mul of "+
+			"folded * inv_vanishing: 4 × kbExt4MulComponent ≈ 4 × 800 = 3200 ops. (c) Final "+
+			"equality: copyToTop each component pair, OP_NUMEQUAL + OP_VERIFY × 4. Total Step 7 "+
+			"~3500 ops added on top of Step 6 output.")
+	_ = fs
+	_ = t
+	_ = params
 }
 
 // =============================================================================
