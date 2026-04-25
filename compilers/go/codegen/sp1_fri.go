@@ -150,11 +150,19 @@ func emitSP1FriStructuralSkeleton(
 	// available.
 	_ = params
 	panicSP1FriStub("proof-blob push-and-hash binding",
-		"Unlocking-script layout in docs/sp1-proof-format.md §6.",
-		"Bitcoin Script emission: emit OP_SHA256 on proofBlob, reconstruct "+
-			"the field concatenation via chained OP_CAT over the pre-pushed "+
-			"fields, emit OP_SHA256 on that, assert equality via OP_EQUALVERIFY. "+
-			"Cost: O(|proof|) in SHA-256 block work.")
+		"Unlocking-script field layout pinned in docs/sp1-fri-verifier.md §2.1 "+
+			"(matches packages/runar-go/sp1fri/decode.go:25-48 traversal order).",
+		"Bitcoin Script emission: (a) bring proofBlob to top, OP_SHA256, save to alt-stack; "+
+			"(b) for the N pre-pushed fields use a known field-count derived from "+
+			"DefaultSP1FriParams + len(decodedFixture.AllFields()) — for the PoC fixture "+
+			"params (LogBlowup=2, NumQueries=2, MerkleDepth=4, LogFinalPolyLen=2, "+
+			"MaxLogArity=1) the static field count is computed in computeSP1FriFieldCount(); "+
+			"(c) initialize accumulator with the deepest field via OP_PICK + clone, then loop "+
+			"PICK(depth) + OP_CAT for the remaining N-1 fields; (d) OP_SHA256 the accumulator, "+
+			"OP_FROMALTSTACK, OP_EQUALVERIFY. Cost: O(|proof|) in SHA-256 block work + N PICKs. "+
+			"Open question: the field count must match the prover's chosen NumQueries / "+
+			"MerkleDepth / FinalPolyLen exactly; mismatched param sets produce different "+
+			"locking scripts. Each guest-program param tuple needs its own deployed verifier.")
 
 	// Step 2 — Transcript init.
 	//
@@ -343,12 +351,27 @@ func emitAbsorbExt4(fs *FiatShamirState, t *KBTracker) {
 func emitMerkleVerify(t *KBTracker, depth int) {
 	panicSP1FriStub(
 		fmt.Sprintf("Merkle path verification (depth=%d)", depth),
-		"Plonky3 `commit/src/mmcs.rs::verify_batch` — reference semantics. "+
-			"Runar already has EmitPoseidon2KBCompress available; what is missing "+
-			"is the conditional-sibling-ordering + bit-shift ladder.",
-		"Structural shape: for each step emit (low-bit select of sibling order, "+
-			"EmitPoseidon2KBCompress, bit-shift update). Final 8-element root equality "+
-			"via 8 × OP_EQUALVERIFY.")
+		"Plonky3 `merkle-tree/src/mmcs.rs::FieldMerkleTreeMmcs::verify_batch` — "+
+			"reference semantics for batch verify against multiple matrix heights. "+
+			"For the PoC's single-matrix case the simpler root-walk in "+
+			"`merkle-tree/src/merkle_tree.rs` `MerkleTree::verify_batch` applies. "+
+			"Runar already has `EmitPoseidon2KBCompress` (8+8 → 8); what is missing "+
+			"is the per-step conditional-sibling-ordering + bit-shift ladder.",
+		"Structural shape: for each of merkleDepth steps:\n"+
+			"  (a) Test low bit of indexBits via DUP + push(1) + OP_AND.\n"+
+			"  (b) OP_IF: leaves on top, siblings below; reorder to (sib[0..7], "+
+			"current[0..7]) via 8 SWAPs/ROTs.\n"+
+			"  (c) OP_ELSE: already in (current[0..7], sib[0..7]) order — no reorder.\n"+
+			"  (d) OP_ENDIF; call EmitPoseidon2KBCompress to consume 16 elements and "+
+			"produce 8.\n"+
+			"  (e) Update indexBits via push(2) + OP_DIV.\n"+
+			"After the loop, compare the 8-element computed root to the 8-element "+
+			"expected root via 8 × OP_EQUALVERIFY (deepest first).\n"+
+			"Open question: the OP_IF branches both consume + produce 16 stack items; "+
+			"the KBTracker currently has no conditional-branch support. Either (i) lower "+
+			"the conditional via two unconditional reorderings + OP_IF/OP_ENDIF nesting "+
+			"with raw stack ops (not tracker-managed), or (ii) add `EmitConditionalReorder` "+
+			"to KBTracker first.")
 	_ = t
 }
 
@@ -367,12 +390,32 @@ func emitMerkleVerify(t *KBTracker, depth int) {
 func emitFriColinearityFold(t *KBTracker) {
 	panicSP1FriStub(
 		"FRI colinearity fold step",
-		"Plonky3 `fri/src/fold_even_odd.rs::fold_even_odd`. "+
-			"Runar already has KoalaBear Ext4 ops (kbExt4Mul0..3, kbExt4Inv0..3) "+
-			"and the BabyBear Ext4 reference test in "+
+		"Plonky3 `fri/src/two_adic_pcs.rs::TwoAdicFriFolder::fold_row` — the "+
+			"production fold path used by SP1 v6.0.2. The simpler `fri/src/fold_even_odd.rs` "+
+			"is the historical reference; for arity=2 (LogArity=1) both reduce to the "+
+			"same colinearity formula:\n"+
+			"  fold = (e_low + e_high) * inv2 + beta * (e_low - e_high) * inv(2*omega_i)\n"+
+			"Runar already has component emitters (EmitKBExt4Mul0..3, EmitKBExt4Inv0..3) "+
+			"and the BabyBear Ext4 reference test at "+
 			"integration/go/fri_colinearity_vectors_test.go.",
-		"Structural shape: 4 × kbExt4Mul for (β · Δ), 4 × kbExt4Inv for (2ω)^-1, "+
-			"then base-field combines for the average + correction.")
+		"Structural shape (Ext4 over KoalaBear, 4 base coefs each):\n"+
+			"  1. Compute s = e_low + e_high   (4 × kbFieldAdd, component-wise).\n"+
+			"  2. Compute d = e_low - e_high   (4 × kbFieldSub).\n"+
+			"  3. Compute inv2 = inverse of (2,0,0,0) Ext4 (precomputable as a constant\n"+
+			"     since 2 is a base-field element with known KoalaBear inverse).\n"+
+			"  4. Compute s_half = s * inv2    (Ext4 mul: 4 component emitters,\n"+
+			"     each consumes 8 base elements and produces 1).\n"+
+			"  5. Compute beta_d = beta * d    (Ext4 mul as above).\n"+
+			"  6. Compute omega_inv = inv(2*omega_i)   (Ext4 inv: 4 component emitters).\n"+
+			"  7. Compute correction = beta_d * omega_inv   (Ext4 mul).\n"+
+			"  8. Compute fold = s_half + correction   (4 × kbFieldAdd).\n"+
+			"Open question: the existing kbExt4 component emitters are flat "+
+			"`func(emit func(StackOp))` that consume + produce on a fixed stack layout; "+
+			"composing them inside a KBTracker context requires careful name management — "+
+			"after each Ext4 mul the four output components must be renamed and held while "+
+			"the next Ext4 mul's 8-element input window is staged. The cleanest way is to "+
+			"build a sibling helper file `sp1_fri_ext4.go` that wraps each kbExt4 op as a "+
+			"`func(t *KBTracker, aPrefix, bPrefix, outPrefix string)` macro.")
 	_ = t
 }
 
@@ -389,10 +432,28 @@ func emitFriColinearityFold(t *KBTracker) {
 func emitSumcheckRound(fs *FiatShamirState, t *KBTracker, round int) {
 	panicSP1FriStub(
 		fmt.Sprintf("sumcheck round %d", round),
-		"Plonky3 `uni-stark/src/verifier.rs::verify_constraints` — claim/poly update.",
-		"Structural shape: read 4 Ext4 coefficients for the round polynomial, "+
-			"evaluate at 0 and 1 and assert sum equals claim, squeeze β via "+
-			"EmitSqueezeExt4, evaluate at β via Ext4 Horner, overwrite claim.")
+		"Plonky3 `uni-stark/src/verifier.rs::verify_constraints` (lines 97-160) — "+
+			"recomposes the quotient polynomial at zeta from chunk openings + selector "+
+			"evaluations + the alpha-batched constraint folder. NOTE: Plonky3 uni-stark "+
+			"does NOT use a multi-round sumcheck — it reconstructs the quotient in a "+
+			"single algebraic step using the FRI-opened values. The Phase-1 skeleton's "+
+			"\"sumcheck\" naming is a misnomer inherited from the BSVM handoff text; it "+
+			"refers to the constraint-quotient consistency check at uni-stark/src/verifier.rs:150-160 "+
+			"(`Recompose the quotient` + `Check that constraints(zeta) / Z_H(zeta) == quotient(zeta)`).",
+		"Structural shape: NOT a per-round loop — a single Ext4 polynomial reconstruction:\n"+
+			"  1. Compute selector evaluations at zeta (Z_H, first/last selectors) over Ext4.\n"+
+			"  2. Run the AIR's symbolic constraint evaluator (Plonky3 `uni-stark/src/folder.rs`) "+
+			"with the opened trace_local + trace_next as input, producing a vector of "+
+			"constraint evaluations.\n"+
+			"  3. Linearly combine constraints via powers of alpha (Horner over alpha).\n"+
+			"  4. Recompose quotient(zeta) from chunk openings via "+
+			"`recompose_quotient_from_chunks` (uni-stark/src/verifier.rs:42-90).\n"+
+			"  5. Assert constraints(zeta) == quotient(zeta) * Z_H(zeta) (Ext4 equality, 4 × OP_NUMEQUALVERIFY).\n"+
+			"This step is AIR-specific — it depends on the guest program's constraint set. "+
+			"For the PoC Fibonacci AIR (Plonky3 `uni-stark/examples/fibonacci_air.rs`) the "+
+			"constraint count is small (~3 constraints over 2 columns); for the SP1 EVM guest "+
+			"it's hundreds of constraints over ~30+ columns. The codegen needs an AIR-description "+
+			"input parameter to emit the right symbolic-evaluator unrolling.")
 	_ = fs
 	_ = t
 }
@@ -460,13 +521,28 @@ func emitFinalPolyEqualityCheck(t *KBTracker) {
 func emitAbsorbByteString(fs *FiatShamirState, t *KBTracker) {
 	panicSP1FriStub(
 		"absorb-ByteString-as-field-elements",
-		"SP1 v6.0.2 `crates/stark/src/machine.rs::observe_public_values` — "+
-			"byte-to-field packing for public values and VK hash. Plonky3's "+
-			"upstream DuplexChallenger has observe_slice over F; SP1 wraps this "+
-			"with its own chunker.",
-		"Structural shape: OP_SPLIT the ByteString into 4-byte chunks, OP_BIN2NUM "+
-			"each, then fs.EmitObserve on each chunk. Tail handling matches SP1's "+
-			"zero-pad convention.")
+		"Two distinct conventions to disambiguate at port time:\n"+
+			"  (a) Plonky3 inner: `uni-stark/src/verifier.rs:367` calls "+
+			"`challenger.observe_slice(public_values)` where `public_values: &[Val]` is "+
+			"already a slice of base-field elements. NO byte-to-field chunking happens "+
+			"at this layer.\n"+
+			"  (b) SP1 outer wrapper: SP1 v6.0.2 `crates/stark/src/machine.rs` "+
+			"`MachineVerifier::observe_pv_digest` packs the keccak256(VK) digest into "+
+			"field elements as 8 u32 chunks (32 bytes / 4 bytes per chunk), each reduced "+
+			"mod p. The publicValues blob is similarly chunked when the guest program "+
+			"emits a Vec<u32> of public values.\n"+
+			"For the PoC `runar.VerifySP1FRI(proofBlob, publicValues, sp1VKeyHash)` "+
+			"intrinsic: sp1VKeyHash is a 32-byte ByteString → 8 × 4-byte LE chunks → "+
+			"each OP_BIN2NUM → each absorbed via fs.EmitObserve. publicValues uses "+
+			"the same 4-byte chunking with zero-padding for any tail bytes.",
+		"Structural shape: dup the ByteString, OP_SIZE, push(4), OP_DIV → chunk count. "+
+			"Loop chunkCount times: OP_PUSH(4), OP_SPLIT (yields prefix + suffix), SWAP, "+
+			"OP_BIN2NUM, fs.EmitObserve(t), continue with suffix. Tail handling: if the "+
+			"final remainder is < 4 bytes, OP_CAT a zero-pad-suffix before BIN2NUM (SP1 "+
+			"convention: low-order zero pad). At codegen time the byte-length is statically "+
+			"known for sp1VKeyHash (32) but variable for publicValues — for the PoC fixture "+
+			"the publicValues length is fixed at 12 bytes (3 × u32 for [0,1,21]), so the "+
+			"chunk loop unrolls to 3 iterations.")
 	_ = fs
 	_ = t
 }

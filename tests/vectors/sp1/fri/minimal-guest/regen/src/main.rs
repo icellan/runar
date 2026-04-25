@@ -6,13 +6,11 @@ use p3_dft::Radix2DitParallel;
 use p3_field::extension::BinomialExtensionField;
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
-use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear};
+use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear, default_koalabear_poseidon2_16};
 use p3_matrix::dense::RowMajorMatrix;
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::{StarkConfig, prove, verify};
-use rand::SeedableRng;
-use rand::rngs::SmallRng;
 
 const NUM_FIBONACCI_COLS: usize = 2;
 
@@ -75,8 +73,14 @@ type Pcs = TwoAdicFriPcs<Val, Dft, ValMmcs, ChallengeMmcs>;
 type MyConfig = StarkConfig<Pcs, Challenge, Challenger>;
 
 fn make_two_adic_config(log_final_poly_len: usize) -> MyConfig {
-    let mut rng = SmallRng::seed_from_u64(1);
-    let perm = Perm::new_from_rng_128(&mut rng);
+    // Use the canonical published Poseidon2-KoalaBear constants
+    // (KOALABEAR_POSEIDON2_RC_16_*) so the fixture is reproducible by any
+    // verifier that ships those tables. The earlier randomized variant
+    // (Perm::new_from_rng_128(SmallRng::seed_from_u64(1))) sampled all 28×16
+    // round constants from Xoshiro256++ and made the proof bytes specific
+    // to whichever side of the prove/verify boundary computed Xoshiro the
+    // same way.
+    let perm = default_koalabear_poseidon2_16();
     let hash = MyHash::new(perm.clone());
     let compress = MyCompress::new(perm.clone());
     let val_mmcs = ValMmcs::new(hash, compress, 0);
