@@ -1,0 +1,65 @@
+{
+  "_doc": "Cross-SDK runtime conformance vectors. Each SDK's test suite should load this file and assert its native runtime produces byte-identical output. All values are lowercase hex strings without 0x prefix. Update one place; every consumer SDK then has to match.",
+  "_consumers": [
+    "packages/runar-java/src/test/java/runar/lang/runtime/MockCryptoTest.java",
+    "(future) packages/runar-py/tests/test_runtime_vectors.py",
+    "(future) packages/runar-go/runtime_vectors_test.go",
+    "(future) packages/runar-rs/tests/runtime_vectors.rs",
+    "(future) packages/runar-zig/test/runtime_vectors.zig",
+    "(future) packages/runar-rb/test/runtime_vectors.rb",
+    "(future) packages/runar-testing/src/__tests__/runtime-vectors.test.ts"
+  ],
+  "constants": {
+    "sha256_iv": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+    "blake3_iv": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19"
+  },
+  "sha256_finalize": [
+    {
+      "name": "fips180-abc",
+      "state": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+      "remaining": "616263",
+      "msg_bit_len": 24,
+      "expected": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "name": "fips180-empty",
+      "state": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+      "remaining": "",
+      "msg_bit_len": 0,
+      "expected": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "fips180-56-byte-two-block",
+      "state": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+      "remaining": "6162636462636465636465666465666765666768666768696768696a68696a6b696a6b6c6a6b6c6d6b6c6d6e6c6d6e6f6d6e6f706e6f7071",
+      "msg_bit_len": 448,
+      "expected": "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+    }
+  ],
+  "blake3_hash": [
+    {
+      "name": "empty",
+      "input": "",
+      "expected": "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"
+    },
+    {
+      "name": "abc",
+      "input": "616263",
+      "expected": "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"
+    },
+    {
+      "name": "hello-world",
+      "input": "68656c6c6f20776f726c64",
+      "expected": "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"
+    }
+  ],
+  "blake3_compress": [
+    {
+      "name": "iv-abc-padded",
+      "_doc": "blake3Hash('abc') equivalent: blake3Compress(IV, 'abc' || zeropad to 64)",
+      "state": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",
+      "block": "61626300000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+      "expected": "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"
+    }
+  ]
+}
