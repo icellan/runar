@@ -14,14 +14,32 @@ import static runar.lang.Builtins.checkSig;
 /**
  * SimpleNFT -- a non-fungible token (NFT) represented as a single UTXO.
  *
- * <p>Unlike fungible tokens, an NFT is indivisible: the token IS the
- * UTXO. This contract demonstrates ownership transfer and burn via
- * {@code addOutput} (for state continuation) or nothing (for destruction).
+ * <p>Ports {@code examples/python/token-nft/NFTExample.runar.py} to Java.
+ * Unlike fungible tokens, an NFT is indivisible -- the token IS the UTXO.
+ * Demonstrates ownership transfer and burn (permanent destruction) of a
+ * unique digital asset, enforced entirely by Bitcoin Script.
  *
- * <p>Ports {@code examples/go/token-nft/NFTExample.runar.go} to Java.
- * Uses the {@link Bigint} wrapper for {@code outputSatoshis} so the
- * comparison {@code outputSatoshis.ge(Bigint.ONE)} lowers to the
- * canonical {@code BinaryExpr(GE)} AST.
+ * <h2>UTXO as NFT</h2>
+ * <p>Each NFT is a single UTXO carrying:
+ * <ul>
+ *   <li>{@code owner} (mutable): current owner's public key, updated on
+ *       transfer.</li>
+ *   <li>{@code tokenId} (readonly): unique identifier baked into the
+ *       locking script.</li>
+ *   <li>{@code metadata} (readonly): content hash or URI, also baked in
+ *       and immutable.</li>
+ * </ul>
+ *
+ * <h2>Operations</h2>
+ * <ul>
+ *   <li>{@code transfer} -- changes ownership; emits one continuation
+ *       UTXO via {@code addOutput}.</li>
+ *   <li>{@code burn} -- destroys the token permanently. No
+ *       {@code addOutput} = no successor = token ceases to exist.</li>
+ * </ul>
+ *
+ * <p>Authorization: both operations require the current owner's ECDSA
+ * signature via {@code checkSig}.
  */
 class SimpleNFT extends StatefulSmartContract {
 

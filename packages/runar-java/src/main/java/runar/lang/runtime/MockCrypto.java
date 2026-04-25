@@ -156,6 +156,28 @@ public final class MockCrypto {
             + "test post-quantum contracts via the compiler+VM path instead.");
     }
 
+    public static boolean verifyECDSA_P256(ByteString msg, ByteString sig, ByteString pk) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifyECDSA_P256 is not implemented in the Java simulator — "
+            + "test NIST-curve contracts via the compiler+VM path instead.");
+    }
+    public static boolean verifyECDSA_P384(ByteString msg, ByteString sig, ByteString pk) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.verifyECDSA_P384 is not implemented in the Java simulator — "
+            + "test NIST-curve contracts via the compiler+VM path instead.");
+    }
+
+    public static ByteString blake3Hash(ByteString data) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.blake3Hash is not implemented in the Java simulator — "
+            + "test Blake3 contracts via the compiler+VM path instead.");
+    }
+    public static ByteString blake3Compress(ByteString state, ByteString block) {
+        throw new UnsupportedOperationException(
+            "MockCrypto.blake3Compress is not implemented in the Java simulator — "
+            + "test Blake3-inductive contracts via the compiler+VM path instead.");
+    }
+
     // =======================================================================
     // Math — real BigInteger implementations
     // =======================================================================

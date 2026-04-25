@@ -11,8 +11,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Surface + simulator tests for SimpleNFT. Verifies that transfer emits
- * a single continuation output and burn is a terminal spend.
+ * Surface + simulator tests for SimpleNFT. Mirrors the Python
+ * {@code NFTExample} pytest suite. Verifies that transfer emits a single
+ * continuation output and burn is a terminal spend.
  */
 class SimpleNFTTest {
 

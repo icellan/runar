@@ -11,6 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+/**
+ * Surface + simulator tests for FungibleToken. Mirrors the Python
+ * {@code FungibleTokenExample} pytest suite.
+ */
 class FungibleTokenTest {
 
     private static final PubKey ALICE = PubKey.fromHex("020000000000000000000000000000000000000000000000000000000000000001");
@@ -20,14 +24,15 @@ class FungibleTokenTest {
 
     @Test
     void contractInstantiates() {
-        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), TOKEN_ID);
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), Bigint.ZERO, TOKEN_ID);
         assertNotNull(c);
         assertEquals(Bigint.of(1000), c.balance);
+        assertEquals(Bigint.ZERO, c.mergeBalance);
     }
 
     @Test
     void partialTransferEmitsTwoOutputs() {
-        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), TOKEN_ID);
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), Bigint.ZERO, TOKEN_ID);
         ContractSimulator sim = ContractSimulator.stateful(c);
         sim.call("transfer", SIG, BOB, Bigint.of(300), Bigint.of(1));
         assertEquals(2, sim.outputs().size());
@@ -35,7 +40,7 @@ class FungibleTokenTest {
 
     @Test
     void fullTransferEmitsOneOutput() {
-        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), TOKEN_ID);
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(1000), Bigint.ZERO, TOKEN_ID);
         ContractSimulator sim = ContractSimulator.stateful(c);
         sim.call("transfer", SIG, BOB, Bigint.of(1000), Bigint.of(1));
         assertEquals(1, sim.outputs().size());
@@ -43,7 +48,7 @@ class FungibleTokenTest {
 
     @Test
     void sendEmitsSingleOutput() {
-        FungibleToken c = new FungibleToken(ALICE, Bigint.of(500), TOKEN_ID);
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(500), Bigint.ZERO, TOKEN_ID);
         ContractSimulator sim = ContractSimulator.stateful(c);
         sim.call("send", SIG, BOB, Bigint.of(1));
         assertEquals(1, sim.outputs().size());
@@ -51,11 +56,20 @@ class FungibleTokenTest {
 
     @Test
     void transferRejectsOverdraft() {
-        FungibleToken c = new FungibleToken(ALICE, Bigint.of(100), TOKEN_ID);
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(100), Bigint.ZERO, TOKEN_ID);
         ContractSimulator sim = ContractSimulator.stateful(c);
         assertThrows(
             AssertionError.class,
             () -> sim.call("transfer", SIG, BOB, Bigint.of(200), Bigint.of(1))
         );
+    }
+
+    @Test
+    void transferConsidersMergeBalance() {
+        // Total available = balance + mergeBalance = 100 + 200 = 300.
+        FungibleToken c = new FungibleToken(ALICE, Bigint.of(100), Bigint.of(200), TOKEN_ID);
+        ContractSimulator sim = ContractSimulator.stateful(c);
+        sim.call("transfer", SIG, BOB, Bigint.of(250), Bigint.of(1));
+        assertEquals(2, sim.outputs().size());
     }
 }

@@ -133,6 +133,24 @@ public final class Builtins {
         return MockCrypto.verifySLHDSA_SHA2_256f(msg, sig, pk);
     }
 
+    public static boolean verifyECDSA_P256(ByteString msg, ByteString sig, ByteString pk) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("verifyECDSA_P256");
+        return MockCrypto.verifyECDSA_P256(msg, sig, pk);
+    }
+    public static boolean verifyECDSA_P384(ByteString msg, ByteString sig, ByteString pk) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("verifyECDSA_P384");
+        return MockCrypto.verifyECDSA_P384(msg, sig, pk);
+    }
+
+    public static ByteString blake3Hash(ByteString data) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("blake3Hash");
+        return MockCrypto.blake3Hash(data);
+    }
+    public static ByteString blake3Compress(ByteString state, ByteString block) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("blake3Compress");
+        return MockCrypto.blake3Compress(state, block);
+    }
+
     // ===================================================================
     // Math (BigInteger)
     // ===================================================================
