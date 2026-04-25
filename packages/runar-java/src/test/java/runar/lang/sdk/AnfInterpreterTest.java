@@ -139,10 +139,12 @@ class AnfInterpreterTest {
     }
 
     @Test
-    void unsupportedPostQuantumPrimitiveThrows() throws Exception {
-        // Build a tiny synthetic ANF that calls verifyWOTS — the interpreter
-        // must throw UnsupportedOperationException rather than silently
-        // returning truthy.
+    void unsupportedProofSystemPrimitiveThrows() throws Exception {
+        // Build a tiny synthetic ANF that calls poseidon2Hash — the
+        // interpreter must throw UnsupportedOperationException rather
+        // than silently returning truthy. Poseidon2 and BN254 are
+        // intentionally Go-only proof-system primitives that the Java
+        // simulator does not implement.
         String json = """
             {
               "contractName": "Synthetic",
@@ -153,11 +155,9 @@ class AnfInterpreterTest {
                   "params": [],
                   "isPublic": true,
                   "body": [
-                    { "name": "t0", "value": { "kind": "load_const", "value": "00" } },
-                    { "name": "t1", "value": { "kind": "load_const", "value": "00" } },
-                    { "name": "t2", "value": { "kind": "load_const", "value": "00" } },
-                    { "name": "t3", "value": { "kind": "call", "func": "verifyWOTS",
-                                               "args": ["t0", "t1", "t2"] } }
+                    { "name": "t0", "value": { "kind": "load_const", "value": "01" } },
+                    { "name": "t1", "value": { "kind": "call", "func": "poseidon2Hash",
+                                               "args": ["t0"] } }
                   ]
                 }
               ]

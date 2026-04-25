@@ -24,15 +24,14 @@ import runar.lang.types.Sig;
  *
  * <p>Math and ByteString operations are real. EC operations use
  * BouncyCastle's secp256k1 curve if the BC provider is on the classpath.
- * Post-quantum verifications (WOTS, SLH-DSA variants), SHA-256 partial
- * compression (sha256Compress / sha256Finalize), and BN254 / Poseidon2
- * primitives are not implemented in the simulator; calling them throws
- * {@link UnsupportedOperationException}. Contracts that exercise those
- * primitives should be unit-tested via the compiler+VM path rather than
- * the simulator.
+ * Post-quantum verifications (WOTS, SLH-DSA SHA-2 variants), Blake3,
+ * NIST P-256 / P-384 ECDSA verification, and SHA-256 partial compression
+ * (sha256Compress / sha256Finalize) are real implementations.
  *
  * <p>BabyBear and KoalaBear field arithmetic remain real (small primes,
- * trivial BigInteger ports).
+ * trivial BigInteger ports). BN254 and Poseidon2 are intentionally Go-only
+ * (proof-system primitives) and throw {@link UnsupportedOperationException};
+ * test contracts that exercise them via the compiler+VM path.
  */
 public final class MockCrypto {
 
@@ -119,63 +118,361 @@ public final class MockCrypto {
         return true;
     }
 
+    /**
+     * WOTS+ (Winternitz One-Time Signature) verification, RFC 8391
+     * compatible with tweakable hash {@code F(pubSeed, ADRS, M)}.
+     * Parameters: w=16, n=32 (SHA-256), len=67. Signature: 67 × 32 = 2144
+     * bytes. Public key: 64 bytes (pubSeed‖pkRoot).
+     *
+     * <p>Mirrors {@code packages/runar-py/runar/wots.py:wots_verify} and
+     * the Go reference at {@code packages/runar-go/wots.go}.
+     */
     public static boolean verifyWOTS(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifyWOTS is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        byte[] msgBytes = msg.toByteArray();
+        byte[] sigBytes = sig.toByteArray();
+        byte[] pkBytes = pubKey.toByteArray();
+        if (sigBytes.length != WOTS_LEN * WOTS_N) return false;
+        if (pkBytes.length != 2 * WOTS_N) return false;
+
+        byte[] pubSeed = Arrays.copyOfRange(pkBytes, 0, WOTS_N);
+        byte[] pkRoot = Arrays.copyOfRange(pkBytes, WOTS_N, 2 * WOTS_N);
+
+        byte[] msgHash = sha256(msgBytes);
+        int[] digits = wotsAllDigits(msgHash);
+
+        byte[] endpoints = new byte[WOTS_LEN * WOTS_N];
+        for (int i = 0; i < WOTS_LEN; i++) {
+            byte[] sigElement = Arrays.copyOfRange(sigBytes, i * WOTS_N, (i + 1) * WOTS_N);
+            int remaining = (WOTS_W - 1) - digits[i];
+            byte[] endpoint = wotsChain(sigElement, digits[i], remaining, pubSeed, i);
+            System.arraycopy(endpoint, 0, endpoints, i * WOTS_N, WOTS_N);
+        }
+
+        byte[] computedRoot = sha256(endpoints);
+        return Arrays.equals(computedRoot, pkRoot);
+    }
+
+    private static final int WOTS_W = 16;
+    private static final int WOTS_N = 32;
+    private static final int WOTS_LEN1 = 64; // ceil(8*N / log2(W))
+    private static final int WOTS_LEN2 = 3;  // floor(log2(LEN1*(W-1))/log2(W)) + 1
+    private static final int WOTS_LEN = WOTS_LEN1 + WOTS_LEN2; // 67
+
+    private static byte[] wotsF(byte[] pubSeed, int chainIdx, int stepIdx, byte[] msg) {
+        byte[] in = new byte[pubSeed.length + 2 + msg.length];
+        System.arraycopy(pubSeed, 0, in, 0, pubSeed.length);
+        in[pubSeed.length] = (byte) chainIdx;
+        in[pubSeed.length + 1] = (byte) stepIdx;
+        System.arraycopy(msg, 0, in, pubSeed.length + 2, msg.length);
+        return sha256(in);
+    }
+
+    private static byte[] wotsChain(byte[] x, int startStep, int steps, byte[] pubSeed, int chainIdx) {
+        byte[] current = x;
+        for (int j = startStep; j < startStep + steps; j++) {
+            current = wotsF(pubSeed, chainIdx, j, current);
+        }
+        return current;
+    }
+
+    /**
+     * WOTS+ keypair generation. Test-only helper that mirrors
+     * {@code packages/runar-py/runar/wots.py:wots_keygen}. Production
+     * contracts only need {@link #verifyWOTS}; this exists so tests can
+     * round-trip sign/verify without an external reference implementation.
+     */
+    public static byte[][] wotsKeygenDeterministic(byte[] seed, byte[] pubSeed) {
+        if (pubSeed.length != WOTS_N) throw new IllegalArgumentException("pubSeed must be 32 bytes");
+        byte[][] sk = new byte[WOTS_LEN][];
+        for (int i = 0; i < WOTS_LEN; i++) {
+            byte[] buf = new byte[seed.length + 4];
+            System.arraycopy(seed, 0, buf, 0, seed.length);
+            buf[seed.length]     = (byte) (i >>> 24);
+            buf[seed.length + 1] = (byte) (i >>> 16);
+            buf[seed.length + 2] = (byte) (i >>> 8);
+            buf[seed.length + 3] = (byte) i;
+            sk[i] = sha256(buf);
+        }
+        byte[] endpoints = new byte[WOTS_LEN * WOTS_N];
+        for (int i = 0; i < WOTS_LEN; i++) {
+            byte[] endpoint = wotsChain(sk[i], 0, WOTS_W - 1, pubSeed, i);
+            System.arraycopy(endpoint, 0, endpoints, i * WOTS_N, WOTS_N);
+        }
+        byte[] pkRoot = sha256(endpoints);
+        byte[] pk = new byte[2 * WOTS_N];
+        System.arraycopy(pubSeed, 0, pk, 0, WOTS_N);
+        System.arraycopy(pkRoot, 0, pk, WOTS_N, WOTS_N);
+        // Pack secret key elements into a contiguous buffer for return.
+        byte[] skFlat = new byte[WOTS_LEN * WOTS_N];
+        for (int i = 0; i < WOTS_LEN; i++) System.arraycopy(sk[i], 0, skFlat, i * WOTS_N, WOTS_N);
+        return new byte[][]{ skFlat, pk };
+    }
+
+    /** WOTS+ signing helper for tests. {@code skFlat} is 67 × 32 = 2144 bytes. */
+    public static byte[] wotsSign(byte[] msg, byte[] skFlat, byte[] pubSeed) {
+        if (skFlat.length != WOTS_LEN * WOTS_N) throw new IllegalArgumentException("sk must be 2144 bytes");
+        byte[] msgHash = sha256(msg);
+        int[] digits = wotsAllDigits(msgHash);
+        byte[] sig = new byte[WOTS_LEN * WOTS_N];
+        for (int i = 0; i < WOTS_LEN; i++) {
+            byte[] skElem = Arrays.copyOfRange(skFlat, i * WOTS_N, (i + 1) * WOTS_N);
+            byte[] elem = wotsChain(skElem, 0, digits[i], pubSeed, i);
+            System.arraycopy(elem, 0, sig, i * WOTS_N, WOTS_N);
+        }
+        return sig;
+    }
+
+    private static int[] wotsAllDigits(byte[] msgHash) {
+        int[] digits = new int[WOTS_LEN];
+        for (int i = 0; i < WOTS_LEN1 / 2; i++) {
+            int b = msgHash[i] & 0xff;
+            digits[2 * i] = (b >>> 4) & 0x0f;
+            digits[2 * i + 1] = b & 0x0f;
+        }
+        // Checksum (FIPS 8391 §3.5)
+        int total = 0;
+        for (int i = 0; i < WOTS_LEN1; i++) total += (WOTS_W - 1) - digits[i];
+        int remaining = total;
+        for (int i = WOTS_LEN2 - 1; i >= 0; i--) {
+            digits[WOTS_LEN1 + i] = remaining % WOTS_W;
+            remaining /= WOTS_W;
+        }
+        return digits;
     }
 
     public static boolean verifySLHDSA_SHA2_128s(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_128s is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_128s, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
     public static boolean verifySLHDSA_SHA2_128f(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_128f is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_128f, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
     public static boolean verifySLHDSA_SHA2_192s(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_192s is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_192s, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
     public static boolean verifySLHDSA_SHA2_192f(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_192f is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_192f, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
     public static boolean verifySLHDSA_SHA2_256s(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_256s is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_256s, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
     public static boolean verifySLHDSA_SHA2_256f(ByteString msg, ByteString sig, ByteString pubKey) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifySLHDSA_SHA2_256f is not implemented in the Java simulator — "
-            + "test post-quantum contracts via the compiler+VM path instead.");
+        return SlhDsa.verify(SlhDsa.SHA2_256f, msg.toByteArray(), sig.toByteArray(), pubKey.toByteArray());
     }
 
+    /**
+     * NIST P-256 ECDSA verification. Mirrors the on-chain codegen and the
+     * Python reference at {@code packages/runar-py/runar/builtins.py:verify_ecdsa_p256}.
+     *
+     * @param msg raw message (hashed internally with SHA-256).
+     * @param sig 64-byte raw signature: r[32] ‖ s[32] (big-endian).
+     * @param pk  33-byte compressed P-256 public key (0x02/0x03 prefix + x[32]).
+     */
     public static boolean verifyECDSA_P256(ByteString msg, ByteString sig, ByteString pk) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifyECDSA_P256 is not implemented in the Java simulator — "
-            + "test NIST-curve contracts via the compiler+VM path instead.");
-    }
-    public static boolean verifyECDSA_P384(ByteString msg, ByteString sig, ByteString pk) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.verifyECDSA_P384 is not implemented in the Java simulator — "
-            + "test NIST-curve contracts via the compiler+VM path instead.");
+        return verifyNistEcdsa(msg.toByteArray(), sig.toByteArray(), pk.toByteArray(), P256_PARAMS);
     }
 
-    public static ByteString blake3Hash(ByteString data) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.blake3Hash is not implemented in the Java simulator — "
-            + "test Blake3 contracts via the compiler+VM path instead.");
+    /**
+     * NIST P-384 ECDSA verification. Note: matches the on-chain codegen
+     * which hashes with SHA-256 (not SHA-384) for both P-256 and P-384 —
+     * this is intentional for Bitcoin Script compatibility.
+     *
+     * @param msg raw message (hashed internally with SHA-256).
+     * @param sig 96-byte raw signature: r[48] ‖ s[48] (big-endian).
+     * @param pk  49-byte compressed P-384 public key (0x02/0x03 prefix + x[48]).
+     */
+    public static boolean verifyECDSA_P384(ByteString msg, ByteString sig, ByteString pk) {
+        return verifyNistEcdsa(msg.toByteArray(), sig.toByteArray(), pk.toByteArray(), P384_PARAMS);
     }
+
+    private static final class NistCurve {
+        final BigInteger p, n, a, b, gx, gy;
+        final int byteLen;
+        NistCurve(BigInteger p, BigInteger n, BigInteger a, BigInteger b,
+                  BigInteger gx, BigInteger gy, int byteLen) {
+            this.p = p; this.n = n; this.a = a; this.b = b;
+            this.gx = gx; this.gy = gy; this.byteLen = byteLen;
+        }
+    }
+
+    private static final NistCurve P256_PARAMS = new NistCurve(
+        new BigInteger("FFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF", 16),
+        new BigInteger("FFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551", 16),
+        BigInteger.valueOf(-3),
+        new BigInteger("5AC635D8AA3A93E7B3EBBD55769886BC651D06B0CC53B0F63BCE3C3E27D2604B", 16),
+        new BigInteger("6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296", 16),
+        new BigInteger("4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5", 16),
+        32);
+
+    private static final NistCurve P384_PARAMS = new NistCurve(
+        new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFFFF0000000000000000FFFFFFFF", 16),
+        new BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFC7634D81F4372DDF581A0DB248B0A77AECEC196ACCC52973", 16),
+        BigInteger.valueOf(-3),
+        new BigInteger("B3312FA7E23EE7E4988E056BE3F82D19181D9C6EFE8141120314088F5013875AC656398D8A2ED19D2A85C8EDD3EC2AEF", 16),
+        new BigInteger("AA87CA22BE8B05378EB1C71EF320AD746E1D3B628BA79B9859F741E082542A385502F25DBF55296C3A545E3872760AB7", 16),
+        new BigInteger("3617DE4A96262C6F5D9E98BF9292DC29F8F41DBD289A147CE9DA3113B5F0B8C00A60B1CE1D7E819D7A431D7C90EA0E5F", 16),
+        48);
+
+    private static boolean verifyNistEcdsa(byte[] msg, byte[] sig, byte[] pk, NistCurve c) {
+        if (sig.length != 2 * c.byteLen) return false;
+        if (pk.length != 1 + c.byteLen) return false;
+        int prefix = pk[0] & 0xff;
+        if (prefix != 0x02 && prefix != 0x03) return false;
+
+        BigInteger pkx = new BigInteger(1, Arrays.copyOfRange(pk, 1, pk.length));
+        BigInteger A = mod(c.a, c.p);
+        BigInteger y2 = mod(pkx.modPow(BigInteger.valueOf(3), c.p)
+                .add(A.multiply(pkx)).add(c.b), c.p);
+        BigInteger y = y2.modPow(c.p.add(BigInteger.ONE).shiftRight(2), c.p);
+        if (!y.modPow(BigInteger.TWO, c.p).equals(y2)) return false;
+        if ((y.testBit(0) ? 1 : 0) != (prefix & 1)) y = c.p.subtract(y);
+
+        BigInteger r = new BigInteger(1, Arrays.copyOfRange(sig, 0, c.byteLen));
+        BigInteger s = new BigInteger(1, Arrays.copyOfRange(sig, c.byteLen, 2 * c.byteLen));
+        if (r.signum() <= 0 || s.signum() <= 0 || r.compareTo(c.n) >= 0 || s.compareTo(c.n) >= 0) return false;
+
+        BigInteger z = new BigInteger(1, sha256(msg));
+        BigInteger w = s.modInverse(c.n);
+        BigInteger u1 = z.multiply(w).mod(c.n);
+        BigInteger u2 = r.multiply(w).mod(c.n);
+
+        BigInteger[] gxgy = nistMul(c.gx, c.gy, u1, c);
+        BigInteger[] qxqy = nistMul(pkx, y, u2, c);
+        BigInteger[] sum = nistAdd(gxgy[0], gxgy[1], qxqy[0], qxqy[1], c);
+        if (sum[0] == null) return false;
+        return sum[0].mod(c.n).equals(r);
+    }
+
+    private static BigInteger[] nistAdd(BigInteger x1, BigInteger y1, BigInteger x2, BigInteger y2, NistCurve c) {
+        if (x1 == null) return new BigInteger[]{ x2, y2 };
+        if (x2 == null) return new BigInteger[]{ x1, y1 };
+        BigInteger lam;
+        if (x1.equals(x2)) {
+            if (!y1.equals(y2)) return new BigInteger[]{ null, null };
+            BigInteger num = BigInteger.valueOf(3).multiply(x1).multiply(x1).add(c.a);
+            lam = num.multiply(BigInteger.TWO.multiply(y1).modInverse(c.p)).mod(c.p);
+        } else {
+            lam = y2.subtract(y1).multiply(x2.subtract(x1).modInverse(c.p)).mod(c.p);
+        }
+        BigInteger x3 = lam.multiply(lam).subtract(x1).subtract(x2).mod(c.p);
+        BigInteger y3 = lam.multiply(x1.subtract(x3)).subtract(y1).mod(c.p);
+        return new BigInteger[]{ x3, y3 };
+    }
+
+    private static BigInteger[] nistMul(BigInteger x, BigInteger y, BigInteger k, NistCurve c) {
+        BigInteger rx = null, ry = null;
+        BigInteger qx = x, qy = y;
+        BigInteger scalar = k;
+        while (scalar.signum() > 0) {
+            if (scalar.testBit(0)) {
+                BigInteger[] sum = nistAdd(rx, ry, qx, qy, c);
+                rx = sum[0]; ry = sum[1];
+            }
+            BigInteger[] dbl = nistAdd(qx, qy, qx, qy, c);
+            qx = dbl[0]; qy = dbl[1];
+            scalar = scalar.shiftRight(1);
+        }
+        return new BigInteger[]{ rx, ry };
+    }
+
+    // BLAKE3 single-block compression. Mirrors the on-chain codegen
+    // (blockLen=64, counter=0, flags=11 = CHUNK_START | CHUNK_END | ROOT).
+    // This covers all single-block uses exercised by Rúnar contracts; the
+    // emitted Script can't express multi-block Blake3, so no multi-block
+    // path is needed.
+
+    private static final int[] BLAKE3_IV = {
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    };
+
+    /** 32-byte big-endian Blake3 IV bytes (compiler-side chaining-value seed). */
+    public static final byte[] BLAKE3_IV_BYTES = blake3IvBytes();
+
+    private static byte[] blake3IvBytes() {
+        byte[] out = new byte[32];
+        for (int i = 0; i < 8; i++) packBE32(out, i * 4, BLAKE3_IV[i]);
+        return out;
+    }
+
+    private static final int[] BLAKE3_MSG_PERM = {2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8};
+
+    private static void blake3G(int[] s, int a, int b, int c, int d, int mx, int my) {
+        s[a] = s[a] + s[b] + mx;
+        s[d] = rotr32(s[d] ^ s[a], 16);
+        s[c] = s[c] + s[d];
+        s[b] = rotr32(s[b] ^ s[c], 12);
+        s[a] = s[a] + s[b] + my;
+        s[d] = rotr32(s[d] ^ s[a], 8);
+        s[c] = s[c] + s[d];
+        s[b] = rotr32(s[b] ^ s[c], 7);
+    }
+
+    private static void blake3Round(int[] s, int[] m) {
+        blake3G(s, 0, 4, 8, 12, m[0], m[1]);
+        blake3G(s, 1, 5, 9, 13, m[2], m[3]);
+        blake3G(s, 2, 6, 10, 14, m[4], m[5]);
+        blake3G(s, 3, 7, 11, 15, m[6], m[7]);
+        blake3G(s, 0, 5, 10, 15, m[8], m[9]);
+        blake3G(s, 1, 6, 11, 12, m[10], m[11]);
+        blake3G(s, 2, 7, 8, 13, m[12], m[13]);
+        blake3G(s, 3, 4, 9, 14, m[14], m[15]);
+    }
+
+    /**
+     * BLAKE3 single-block compression with blockLen=64, counter=0,
+     * flags=11 (CHUNK_START | CHUNK_END | ROOT). Matches the on-chain
+     * codegen at {@code compilers/java/src/main/java/runar/compiler/codegen/Blake3.java}
+     * and the Python reference at {@code packages/runar-py/runar/builtins.py:_blake3_compress_impl}.
+     *
+     * @param state 32-byte chaining value (8 big-endian uint32s).
+     * @param block 64-byte input block.
+     */
     public static ByteString blake3Compress(ByteString state, ByteString block) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.blake3Compress is not implemented in the Java simulator — "
-            + "test Blake3-inductive contracts via the compiler+VM path instead.");
+        byte[] cv = state.toByteArray();
+        byte[] blk = block.toByteArray();
+        if (cv.length != 32) throw new IllegalArgumentException("blake3Compress: state must be 32 bytes, got " + cv.length);
+        if (blk.length != 64) throw new IllegalArgumentException("blake3Compress: block must be 64 bytes, got " + blk.length);
+
+        int[] h = new int[8];
+        for (int i = 0; i < 8; i++) h[i] = unpackBE32(cv, i * 4);
+        int[] m = new int[16];
+        for (int i = 0; i < 16; i++) m[i] = unpackBE32(blk, i * 4);
+
+        int[] s = new int[]{
+            h[0], h[1], h[2], h[3],
+            h[4], h[5], h[6], h[7],
+            BLAKE3_IV[0], BLAKE3_IV[1], BLAKE3_IV[2], BLAKE3_IV[3],
+            0, 0, 64, 11,
+        };
+
+        int[] msg = m.clone();
+        for (int r = 0; r < 7; r++) {
+            blake3Round(s, msg);
+            if (r < 6) {
+                int[] permuted = new int[16];
+                for (int i = 0; i < 16; i++) permuted[i] = msg[BLAKE3_MSG_PERM[i]];
+                msg = permuted;
+            }
+        }
+
+        byte[] out = new byte[32];
+        for (int i = 0; i < 8; i++) packBE32(out, i * 4, s[i] ^ s[i + 8]);
+        return new ByteString(out);
+    }
+
+    /**
+     * Single-block Blake3 hash for messages up to 64 bytes. Pads with
+     * zero bytes and feeds the IV as the chaining value, matching the
+     * compiler codegen and the TS interpreter reference.
+     */
+    public static ByteString blake3Hash(ByteString data) {
+        byte[] msg = data.toByteArray();
+        if (msg.length > 64) {
+            throw new IllegalArgumentException("blake3Hash: simulator supports messages ≤ 64 bytes, got " + msg.length);
+        }
+        byte[] padded = new byte[64];
+        System.arraycopy(msg, 0, padded, 0, msg.length);
+        return blake3Compress(new ByteString(BLAKE3_IV_BYTES), new ByteString(padded));
     }
 
     // =======================================================================
@@ -621,25 +918,150 @@ public final class MockCrypto {
     }
 
     // =======================================================================
-    // SHA-256 compression primitives — not implemented
+    // SHA-256 compression primitives — real (FIPS 180-4 §6.2.2)
     // =======================================================================
-    //
-    // sha256Compress / sha256Finalize expose the compression function
-    // directly to contracts that build partial SHA-256 inductively (Rabin,
-    // WOTS). The simulator can't exercise them meaningfully without a
-    // real SHA-256 compression-function implementation; calls now fail
-    // loudly instead of silently returning the input state unchanged
-    // (which used to hide bugs in inductive-hash contracts).
-    public static ByteString sha256Compress(ByteString state, ByteString block) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.sha256Compress is not implemented in the Java simulator — "
-            + "test SHA-256-inductive contracts (Rabin, WOTS) via the compiler+VM path.");
+
+    private static final int[] SHA256_K = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    };
+
+    /** SHA-256 IV (FIPS 180-4 §5.3.3). */
+    public static final byte[] SHA256_IV = sha256IvBytes();
+
+    private static byte[] sha256IvBytes() {
+        int[] iv = {
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        };
+        byte[] out = new byte[32];
+        for (int i = 0; i < 8; i++) packBE32(out, i * 4, iv[i]);
+        return out;
     }
 
+    private static int rotr32(int x, int n) {
+        return (x >>> n) | (x << (32 - n));
+    }
+
+    private static int unpackBE32(byte[] b, int off) {
+        return ((b[off] & 0xff) << 24)
+             | ((b[off + 1] & 0xff) << 16)
+             | ((b[off + 2] & 0xff) << 8)
+             | (b[off + 3] & 0xff);
+    }
+
+    private static void packBE32(byte[] b, int off, int v) {
+        b[off]     = (byte) (v >>> 24);
+        b[off + 1] = (byte) (v >>> 16);
+        b[off + 2] = (byte) (v >>> 8);
+        b[off + 3] = (byte) v;
+    }
+
+    /**
+     * SHA-256 single-block compression (FIPS 180-4 §6.2.2). Mirrors
+     * {@code sha256_compress} in {@code packages/runar-py/runar/builtins.py}
+     * and the on-chain Script codegen in
+     * {@code compilers/java/src/main/java/runar/compiler/codegen/Sha256.java}.
+     *
+     * @param state 32-byte intermediate hash state (8 big-endian uint32s).
+     *              Use {@link #SHA256_IV} for the first block.
+     * @param block 64-byte message block (512 bits).
+     * @return updated 32-byte state.
+     */
+    public static ByteString sha256Compress(ByteString state, ByteString block) {
+        byte[] s = state.toByteArray();
+        byte[] m = block.toByteArray();
+        if (s.length != 32) throw new IllegalArgumentException("sha256Compress: state must be 32 bytes, got " + s.length);
+        if (m.length != 64) throw new IllegalArgumentException("sha256Compress: block must be 64 bytes, got " + m.length);
+
+        int[] H = new int[8];
+        for (int i = 0; i < 8; i++) H[i] = unpackBE32(s, i * 4);
+
+        int[] W = new int[64];
+        for (int i = 0; i < 16; i++) W[i] = unpackBE32(m, i * 4);
+        for (int t = 16; t < 64; t++) {
+            int s0 = rotr32(W[t - 15], 7) ^ rotr32(W[t - 15], 18) ^ (W[t - 15] >>> 3);
+            int s1 = rotr32(W[t - 2], 17) ^ rotr32(W[t - 2], 19) ^ (W[t - 2] >>> 10);
+            W[t] = W[t - 16] + s0 + W[t - 7] + s1;
+        }
+
+        int a = H[0], b = H[1], c = H[2], d = H[3];
+        int e = H[4], f = H[5], g = H[6], h = H[7];
+
+        for (int t = 0; t < 64; t++) {
+            int S1 = rotr32(e, 6) ^ rotr32(e, 11) ^ rotr32(e, 25);
+            int ch = (e & f) ^ (~e & g);
+            int t1 = h + S1 + ch + SHA256_K[t] + W[t];
+            int S0 = rotr32(a, 2) ^ rotr32(a, 13) ^ rotr32(a, 22);
+            int maj = (a & b) ^ (a & c) ^ (b & c);
+            int t2 = S0 + maj;
+            h = g; g = f; f = e;
+            e = d + t1;
+            d = c; c = b; b = a;
+            a = t1 + t2;
+        }
+
+        byte[] out = new byte[32];
+        packBE32(out, 0, H[0] + a);
+        packBE32(out, 4, H[1] + b);
+        packBE32(out, 8, H[2] + c);
+        packBE32(out, 12, H[3] + d);
+        packBE32(out, 16, H[4] + e);
+        packBE32(out, 20, H[5] + f);
+        packBE32(out, 24, H[6] + g);
+        packBE32(out, 28, H[7] + h);
+        return new ByteString(out);
+    }
+
+    /**
+     * SHA-256 finalization with FIPS 180-4 padding. Appends the 0x80
+     * marker, zero-pads, and writes the 8-byte big-endian total bit
+     * length, then runs the final 1 or 2 compression rounds.
+     *
+     * @param state       intermediate state (use {@link #SHA256_IV} for
+     *                    a single-block message).
+     * @param remaining   trailing message bytes not yet compressed (0..119).
+     * @param msgBitLen   total message length in bits across all blocks.
+     */
     public static ByteString sha256Finalize(ByteString state, ByteString remaining, BigInteger msgBitLen) {
-        throw new UnsupportedOperationException(
-            "MockCrypto.sha256Finalize is not implemented in the Java simulator — "
-            + "test SHA-256-inductive contracts (Rabin, WOTS) via the compiler+VM path.");
+        byte[] rem = remaining.toByteArray();
+        if (rem.length > 119) {
+            throw new IllegalArgumentException("sha256Finalize: remaining must be 0..119 bytes, got " + rem.length);
+        }
+        long bitLen = msgBitLen.longValueExact();
+
+        // remaining || 0x80 || zero-pad || bitLen(8 bytes BE)
+        int padded1Len = rem.length + 1;
+        boolean twoBlocks = padded1Len + 8 > 64;
+        int totalLen = twoBlocks ? 128 : 64;
+        byte[] padded = new byte[totalLen];
+        System.arraycopy(rem, 0, padded, 0, rem.length);
+        padded[rem.length] = (byte) 0x80;
+        // bit length at last 8 bytes (big-endian).
+        for (int i = 0; i < 8; i++) {
+            padded[totalLen - 1 - i] = (byte) (bitLen >>> (8 * i));
+        }
+
+        ByteString s = state;
+        if (twoBlocks) {
+            s = sha256Compress(s, new ByteString(Arrays.copyOfRange(padded, 0, 64)));
+            return sha256Compress(s, new ByteString(Arrays.copyOfRange(padded, 64, 128)));
+        }
+        return sha256Compress(s, new ByteString(padded));
     }
 
     // =======================================================================

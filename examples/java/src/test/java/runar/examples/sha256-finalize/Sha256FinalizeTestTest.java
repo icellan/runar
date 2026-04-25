@@ -4,6 +4,7 @@ import java.math.BigInteger;
 
 import org.junit.jupiter.api.Test;
 import runar.lang.runtime.ContractSimulator;
+import runar.lang.runtime.MockCrypto;
 import runar.lang.types.ByteString;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -11,12 +12,13 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Surface tests for Sha256FinalizeTest. The {@code sha256Finalize}
- * builtin is not implemented in the Java simulator (it requires a
- * SHA-256 compression-function port). We confirm instantiation here
- * and that the simulator surfaces the unimplemented-builtin signal.
+ * Behavioural tests for {@link Sha256FinalizeTest}. The contract calls
+ * {@code sha256Finalize(state, remaining, msgBitLen)} and verifies the
+ * result equals an immutable {@code expected} digest.
  */
 class Sha256FinalizeTestTest {
+
+    private static final ByteString IV = new ByteString(MockCrypto.SHA256_IV);
 
     @Test
     void contractInstantiates() {
@@ -27,15 +29,21 @@ class Sha256FinalizeTestTest {
     }
 
     @Test
-    void simulatorSurfacesUnimplementedBuiltin() {
-        ByteString expected = ByteString.fromHex("00".repeat(32));
-        ByteString state = ByteString.fromHex("00".repeat(32));
-        ByteString remaining = ByteString.fromHex("00".repeat(16));
+    void verifyAcceptsCorrectFipsAbcDigest() {
+        // SHA-256("abc") = ba7816bf...20015ad. Single-block path: state=IV,
+        // remaining="abc", msgBitLen=24.
+        ByteString expected = ByteString.fromHex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         Sha256FinalizeTest c = new Sha256FinalizeTest(expected);
         ContractSimulator sim = ContractSimulator.stateless(c);
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> sim.call("verify", state, remaining, BigInteger.valueOf(128))
-        );
+        sim.call("verify", IV, new ByteString("abc".getBytes()), BigInteger.valueOf(24));
+    }
+
+    @Test
+    void verifyRejectsWrongExpected() {
+        ByteString wrong = ByteString.fromHex("00".repeat(32));
+        Sha256FinalizeTest c = new Sha256FinalizeTest(wrong);
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(AssertionError.class,
+            () -> sim.call("verify", IV, new ByteString("abc".getBytes()), BigInteger.valueOf(24)));
     }
 }

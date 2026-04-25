@@ -236,4 +236,271 @@ class MockCryptoTest {
         for (int i = 32; i < 64; i++) concat[i] = 1;
         assertEquals(HEX.formatHex(MockCrypto.sha256(concat)), root.toHex());
     }
+
+    // --- SHA-256 compression / finalization -----------------------------
+
+    @Test
+    void sha256FinalizeOfAbcMatchesFipsVector() {
+        // Single-block: "abc" → SHA-256 = ba7816bf...20015ad (FIPS 180-2 §B.1).
+        ByteString out = MockCrypto.sha256Finalize(
+            new ByteString(MockCrypto.SHA256_IV),
+            new ByteString("abc".getBytes()),
+            BigInteger.valueOf(24));
+        assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", out.toHex());
+    }
+
+    @Test
+    void sha256FinalizeOfEmptyMatchesFipsVector() {
+        // SHA-256("") = e3b0c442...b7852b855
+        ByteString out = MockCrypto.sha256Finalize(
+            new ByteString(MockCrypto.SHA256_IV),
+            new ByteString(new byte[0]),
+            BigInteger.ZERO);
+        assertEquals("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", out.toHex());
+    }
+
+    @Test
+    void sha256FinalizeTwoBlockPath() {
+        // 56-byte message — pad rolls into a second block (56 + 1 + 8 > 64).
+        // FIPS 180-4 §B.2: SHA-256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") =
+        // 248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1
+        byte[] msg = "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq".getBytes();
+        assertEquals(56, msg.length);
+        ByteString out = MockCrypto.sha256Finalize(
+            new ByteString(MockCrypto.SHA256_IV),
+            new ByteString(msg),
+            BigInteger.valueOf(msg.length * 8L));
+        assertEquals("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1", out.toHex());
+    }
+
+    @Test
+    void sha256CompressMultiBlockEqualsBuiltinSha256() {
+        // 119-byte message: 1 full compressed block + finalize-with-2-blocks path.
+        byte[] msg = new byte[119];
+        for (int i = 0; i < msg.length; i++) msg[i] = (byte) i;
+        // Compress first 64 bytes via sha256Compress, then finalize with the
+        // remaining 55 bytes — must match the JDK's SHA-256 over the whole
+        // 119-byte input.
+        ByteString first = MockCrypto.sha256Compress(
+            new ByteString(MockCrypto.SHA256_IV),
+            new ByteString(java.util.Arrays.copyOfRange(msg, 0, 64)));
+        ByteString out = MockCrypto.sha256Finalize(
+            first,
+            new ByteString(java.util.Arrays.copyOfRange(msg, 64, 119)),
+            BigInteger.valueOf(msg.length * 8L));
+        assertEquals(HEX.formatHex(MockCrypto.sha256(msg)), out.toHex());
+    }
+
+    @Test
+    void sha256CompressRejectsBadLengths() {
+        assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.sha256Compress(new ByteString(new byte[31]), new ByteString(new byte[64])));
+        assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.sha256Compress(new ByteString(new byte[32]), new ByteString(new byte[63])));
+    }
+
+    // --- Blake3 (cross-language pinned vectors from TS reference) -------
+
+    @Test
+    void blake3HashEmptyMatchesTsReference() {
+        ByteString out = MockCrypto.blake3Hash(new ByteString(new byte[0]));
+        assertEquals("7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86", out.toHex());
+    }
+
+    @Test
+    void blake3HashAbcMatchesTsReference() {
+        ByteString out = MockCrypto.blake3Hash(new ByteString("abc".getBytes()));
+        assertEquals("6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d", out.toHex());
+    }
+
+    @Test
+    void blake3HashHelloWorldMatchesTsReference() {
+        ByteString out = MockCrypto.blake3Hash(new ByteString("hello world".getBytes()));
+        assertEquals("47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc", out.toHex());
+    }
+
+    @Test
+    void blake3HashEqualsExplicitPaddedCompression() {
+        // blake3Hash(msg) ≡ blake3Compress(IV, msg || zero-pad(64 - |msg|))
+        byte[] msg = "abc".getBytes();
+        byte[] padded = new byte[64];
+        System.arraycopy(msg, 0, padded, 0, msg.length);
+        ByteString viaHash = MockCrypto.blake3Hash(new ByteString(msg));
+        ByteString viaCompress = MockCrypto.blake3Compress(
+            new ByteString(MockCrypto.BLAKE3_IV_BYTES),
+            new ByteString(padded));
+        assertEquals(viaCompress.toHex(), viaHash.toHex());
+    }
+
+    @Test
+    void blake3CompressDeterministic() {
+        ByteString out1 = MockCrypto.blake3Compress(
+            new ByteString(MockCrypto.BLAKE3_IV_BYTES),
+            new ByteString(new byte[64]));
+        ByteString out2 = MockCrypto.blake3Compress(
+            new ByteString(MockCrypto.BLAKE3_IV_BYTES),
+            new ByteString(new byte[64]));
+        assertEquals(out1.toHex(), out2.toHex());
+        // Real impl: must not be all zeros (would indicate a stub).
+        assertNotEquals("0000000000000000000000000000000000000000000000000000000000000000", out1.toHex());
+    }
+
+    @Test
+    void blake3CompressRejectsBadLengths() {
+        assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.blake3Compress(new ByteString(new byte[31]), new ByteString(new byte[64])));
+        assertThrows(IllegalArgumentException.class,
+            () -> MockCrypto.blake3Compress(new ByteString(new byte[32]), new ByteString(new byte[63])));
+    }
+
+    // --- WOTS+ round-trip ----------------------------------------------
+
+    @Test
+    void wotsRoundTripSucceeds() {
+        byte[] seed = "wots-test-seed-0001".getBytes();
+        byte[] pubSeed = new byte[32];
+        for (int i = 0; i < 32; i++) pubSeed[i] = (byte) i;
+        byte[][] keys = MockCrypto.wotsKeygenDeterministic(seed, pubSeed);
+        byte[] sk = keys[0];
+        byte[] pk = keys[1];
+
+        byte[] msg = "hello-runar-wots".getBytes();
+        byte[] sig = MockCrypto.wotsSign(msg, sk, pubSeed);
+        assertEquals(67 * 32, sig.length, "signature must be 67 × 32 = 2144 bytes");
+
+        assertTrue(MockCrypto.verifyWOTS(new ByteString(msg), new ByteString(sig), new ByteString(pk)));
+    }
+
+    @Test
+    void wotsVerifyFailsOnTamperedMessage() {
+        byte[] seed = "wots-test-seed-0002".getBytes();
+        byte[] pubSeed = new byte[32];
+        for (int i = 0; i < 32; i++) pubSeed[i] = (byte) (i + 1);
+        byte[][] keys = MockCrypto.wotsKeygenDeterministic(seed, pubSeed);
+
+        byte[] msg = "approved-payment".getBytes();
+        byte[] sig = MockCrypto.wotsSign(msg, keys[0], pubSeed);
+        byte[] tampered = "approved-payment-NOT".getBytes();
+        assertFalse(MockCrypto.verifyWOTS(new ByteString(tampered), new ByteString(sig), new ByteString(keys[1])));
+    }
+
+    @Test
+    void wotsVerifyRejectsBadSignatureLength() {
+        byte[] msg = "x".getBytes();
+        byte[] badSig = new byte[100];
+        byte[] pk = new byte[64];
+        assertFalse(MockCrypto.verifyWOTS(new ByteString(msg), new ByteString(badSig), new ByteString(pk)));
+    }
+
+    @Test
+    void wotsVerifyRejectsBadPubKeyLength() {
+        byte[] msg = "x".getBytes();
+        byte[] sig = new byte[67 * 32];
+        byte[] badPk = new byte[63];
+        assertFalse(MockCrypto.verifyWOTS(new ByteString(msg), new ByteString(sig), new ByteString(badPk)));
+    }
+
+    // --- NIST P-256 / P-384 ECDSA verification --------------------------
+
+    @Test
+    void p256VerifyAcceptsBouncyCastleSignature() throws Exception {
+        org.bouncycastle.jce.provider.BouncyCastleProvider bcp = new org.bouncycastle.jce.provider.BouncyCastleProvider();
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("EC", bcp);
+        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp256r1"), new java.security.SecureRandom("p256-fixed".getBytes()));
+        java.security.KeyPair kp = kpg.generateKeyPair();
+
+        byte[] msg = "p256 acceptance test".getBytes();
+        java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA", bcp);
+        signer.initSign(kp.getPrivate());
+        signer.update(msg);
+        byte[] derSig = signer.sign();
+
+        byte[] rawSig = derToRaw(derSig, 32);
+        byte[] compressedPk = ecPointCompress((java.security.interfaces.ECPublicKey) kp.getPublic(), 32);
+        assertTrue(MockCrypto.verifyECDSA_P256(new ByteString(msg), new ByteString(rawSig), new ByteString(compressedPk)));
+
+        byte[] tampered = "p256 acceptance test (modified)".getBytes();
+        assertFalse(MockCrypto.verifyECDSA_P256(new ByteString(tampered), new ByteString(rawSig), new ByteString(compressedPk)));
+    }
+
+    @Test
+    void p384VerifyAcceptsBouncyCastleSignature() throws Exception {
+        org.bouncycastle.jce.provider.BouncyCastleProvider bcp = new org.bouncycastle.jce.provider.BouncyCastleProvider();
+        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("EC", bcp);
+        kpg.initialize(new java.security.spec.ECGenParameterSpec("secp384r1"), new java.security.SecureRandom("p384-fixed".getBytes()));
+        java.security.KeyPair kp = kpg.generateKeyPair();
+
+        byte[] msg = "p384 acceptance test".getBytes();
+        // On-chain codegen uses SHA-256 for both curves; mirror that here.
+        java.security.Signature signer = java.security.Signature.getInstance("SHA256withECDSA", bcp);
+        signer.initSign(kp.getPrivate());
+        signer.update(msg);
+        byte[] derSig = signer.sign();
+
+        byte[] rawSig = derToRaw(derSig, 48);
+        byte[] compressedPk = ecPointCompress((java.security.interfaces.ECPublicKey) kp.getPublic(), 48);
+        assertTrue(MockCrypto.verifyECDSA_P384(new ByteString(msg), new ByteString(rawSig), new ByteString(compressedPk)));
+    }
+
+    @Test
+    void p256RejectsBadSignatureLength() {
+        byte[] msg = "x".getBytes();
+        byte[] badSig = new byte[63];
+        byte[] pk = new byte[33];
+        pk[0] = 0x02;
+        assertFalse(MockCrypto.verifyECDSA_P256(new ByteString(msg), new ByteString(badSig), new ByteString(pk)));
+    }
+
+    @Test
+    void p256RejectsZeroRorS() {
+        byte[] msg = "x".getBytes();
+        byte[] badSig = new byte[64]; // r=0, s=0
+        byte[] pk = new byte[33];
+        pk[0] = 0x02;
+        for (int i = 1; i < 33; i++) pk[i] = (byte) i;
+        assertFalse(MockCrypto.verifyECDSA_P256(new ByteString(msg), new ByteString(badSig), new ByteString(pk)));
+    }
+
+    /** Convert a DER-encoded ECDSA signature into raw r||s of fixed length. */
+    private static byte[] derToRaw(byte[] der, int half) {
+        // SEQUENCE { INTEGER r, INTEGER s }
+        int i = 0;
+        if (der[i++] != 0x30) throw new IllegalArgumentException("not a DER sequence");
+        int seqLen = der[i++] & 0xff;
+        if (der[i++] != 0x02) throw new IllegalArgumentException("expected INTEGER");
+        int rLen = der[i++] & 0xff;
+        byte[] r = java.util.Arrays.copyOfRange(der, i, i + rLen);
+        i += rLen;
+        if (der[i++] != 0x02) throw new IllegalArgumentException("expected INTEGER");
+        int sLen = der[i++] & 0xff;
+        byte[] s = java.util.Arrays.copyOfRange(der, i, i + sLen);
+
+        byte[] out = new byte[2 * half];
+        copyAlignedRight(r, out, 0, half);
+        copyAlignedRight(s, out, half, half);
+        return out;
+    }
+
+    private static void copyAlignedRight(byte[] src, byte[] dst, int dstOff, int width) {
+        int skip = 0;
+        // Strip leading sign-padding zero bytes if present.
+        while (skip < src.length && src.length - skip > width && src[skip] == 0) skip++;
+        int copyLen = src.length - skip;
+        if (copyLen > width) throw new IllegalArgumentException("integer too wide for raw encoding");
+        System.arraycopy(src, skip, dst, dstOff + (width - copyLen), copyLen);
+    }
+
+    /** Encode a JCE EC public key as compressed (1 + half bytes). */
+    private static byte[] ecPointCompress(java.security.interfaces.ECPublicKey pub, int half) {
+        byte[] x = pub.getW().getAffineX().toByteArray();
+        byte[] y = pub.getW().getAffineY().toByteArray();
+        byte[] out = new byte[1 + half];
+        out[0] = (byte) ((y[y.length - 1] & 0x01) == 0 ? 0x02 : 0x03);
+        // Right-align x into the last `half` bytes.
+        int skip = 0;
+        while (skip < x.length && x.length - skip > half && x[skip] == 0) skip++;
+        int copyLen = x.length - skip;
+        System.arraycopy(x, skip, out, 1 + (half - copyLen), copyLen);
+        return out;
+    }
 }

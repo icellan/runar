@@ -2,6 +2,7 @@ package runar.examples.sha256compress;
 
 import org.junit.jupiter.api.Test;
 import runar.lang.runtime.ContractSimulator;
+import runar.lang.runtime.MockCrypto;
 import runar.lang.types.ByteString;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -9,13 +10,16 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * Surface tests for Sha256CompressTest. The {@code sha256Compress}
- * builtin is not implemented in the Java simulator (it requires a
- * SHA-256 compression-function port; the contract is exercised via
- * the compiler+VM path instead). We confirm instantiation here and
- * that the simulator surfaces the unimplemented-builtin signal.
+ * Behavioural tests for {@link Sha256CompressTest}. The contract calls
+ * {@code sha256Compress(state, block)} and verifies the result equals
+ * an immutable {@code expected} value. Now that
+ * {@link MockCrypto#sha256Compress} is implemented, we exercise both
+ * the success and failure paths through the simulator.
  */
 class Sha256CompressTestTest {
+
+    private static final ByteString IV = new ByteString(MockCrypto.SHA256_IV);
+    private static final ByteString BLOCK_ZEROS = new ByteString(new byte[64]);
 
     @Test
     void contractInstantiates() {
@@ -26,16 +30,18 @@ class Sha256CompressTestTest {
     }
 
     @Test
-    void simulatorSurfacesUnimplementedBuiltin() {
-        ByteString expected = ByteString.fromHex("00".repeat(32));
-        ByteString state = ByteString.fromHex("00".repeat(32));
-        ByteString block = ByteString.fromHex("00".repeat(64));
-        Sha256CompressTest c = new Sha256CompressTest(expected);
+    void verifyAcceptsCorrectCompressionResult() {
+        ByteString actual = MockCrypto.sha256Compress(IV, BLOCK_ZEROS);
+        Sha256CompressTest c = new Sha256CompressTest(actual);
         ContractSimulator sim = ContractSimulator.stateless(c);
-        // MockCrypto.sha256Compress throws UnsupportedOperationException.
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> sim.call("verify", state, block)
-        );
+        sim.call("verify", IV, BLOCK_ZEROS);
+    }
+
+    @Test
+    void verifyRejectsWrongExpected() {
+        ByteString wrong = ByteString.fromHex("00".repeat(32));
+        Sha256CompressTest c = new Sha256CompressTest(wrong);
+        ContractSimulator sim = ContractSimulator.stateless(c);
+        assertThrows(AssertionError.class, () -> sim.call("verify", IV, BLOCK_ZEROS));
     }
 }

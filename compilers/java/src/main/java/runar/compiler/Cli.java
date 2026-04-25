@@ -35,9 +35,12 @@ import runar.compiler.passes.Validate;
  *   <li>{@code --version} &rarr; print {@code runar-java x.y.z}</li>
  * </ul>
  *
- * <p>M4: the parse/validate/typecheck/anf-lower pipeline is live; stack
- * lowering + emit land in M5 so {@code --hex} still short-circuits with
- * "not implemented".
+ * <p>The full pipeline (parse → validate → expand-fixed-arrays →
+ * typecheck → ANF lower → optional constant-fold → ANF cleanup → stack
+ * lower → peephole → emit) is wired end-to-end. {@code --emit-ir}
+ * produces canonical ANF JSON; {@code --hex} produces Bitcoin Script
+ * hex; both accept either a {@code --source} input in any of the 9
+ * supported formats or a pre-generated {@code --ir} ANF JSON.
  */
 public final class Cli {
 

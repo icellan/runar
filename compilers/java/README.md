@@ -7,10 +7,12 @@ compilers in this repository.
 
 ## Status
 
-**Phase 1 — skeleton.** CLI stub prints version and rejects flags with an
-explicit "not yet implemented" error. No pipeline passes are wired up
-yet; see [`docs/java-tier-plan.md`](../../docs/java-tier-plan.md) for the
-milestone sequence.
+**Production.** Full pipeline is wired (parse → validate → expand-fixed-arrays
+→ typecheck → ANF lower → optional constant-fold → ANF cleanup → stack lower
+→ peephole → emit). All 9 input formats parse via `ParserDispatch`. Conformance
+runner, fuzzer differential harness, and cross-compiler hex-equality tests
+include this binary alongside the other six tiers. See
+[`docs/java-tier-plan.md`](../../docs/java-tier-plan.md) for the milestone history.
 
 ## Requirements
 
@@ -35,10 +37,10 @@ gradle installDist        # produce an executable layout under build/install/
 ./build/install/runar-java-compiler/bin/runar-java --version
 ```
 
-## CLI Contract (target)
+## CLI Contract
 
 Every Rúnar compiler binary must accept the following flags. The Java
-CLI currently stubs all of these; real behavior lands in milestones 3–6.
+CLI implements all of these end-to-end.
 
 | Flag combination | Behavior |
 |---|---|
