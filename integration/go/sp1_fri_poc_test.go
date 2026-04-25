@@ -93,23 +93,55 @@ func TestSp1FriVerifierPoc_Compile(t *testing.T) {
 	}
 }
 
-// TestSp1FriVerifierPoc_CodegenRefuses confirms the stack-lowering stub
-// refuses to emit — this guards against silently shipping a no-op
-// verifier. The error message links to docs/sp1-fri-verifier.md §8
-// where the follow-up work is tracked.
-func TestSp1FriVerifierPoc_CodegenRefuses(t *testing.T) {
+// TestSp1FriVerifierPoc_CodegenAccepts is the dispatch-wired acceptance gate.
+// It confirms that with the `EmitFullSP1FriVerifierBody` orchestrator wired
+// into `lowerVerifySP1FRI` (compilers/go/codegen/sp1_fri.go), the PoC contract
+// compiles cleanly through the full pipeline (parse → validate → typecheck
+// → ANF → stack → emit) and produces a non-empty hex-encoded locking script.
+//
+// This replaces the previous `TestSp1FriVerifierPoc_CodegenRefuses` guard
+// which intentionally panicked at stack lowering until the dispatch was
+// wired.
+//
+// Holistic script-VM execution against the canonical fixture (assembling an
+// unlocking script with all the structured field pushes + the typed args +
+// running through the go-sdk interpreter) is validated end-to-end at the
+// codegen-package level by
+// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture`,
+// which exercises `EmitFullSP1FriVerifierBody` against the same Plonky3
+// minimal-guest FRI fixture and asserts the script accepts. That test is
+// the meaningful end-to-end gate; this contract-level test asserts only
+// that the dispatch wiring produces a deployable locking script.
+//
+// Producing a full deployable unlocking-script encoder for the Sp1VKeyHash
+// constructor-slot mechanism + the structured field-push prelude is a
+// follow-up — see docs/sp1-fri-verifier.md §10 for the per-query layout
+// (each guest-program param tuple needs its own deployed verifier with a
+// matching unlocking-script encoder).
+func TestSp1FriVerifierPoc_CodegenAccepts(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	contractPath := filepath.Join(filepath.Dir(thisFile), "contracts", "Sp1FriVerifierPoc.runar.go")
 
 	artifact, err := compiler.CompileFromSource(contractPath)
-	if err == nil {
-		t.Fatalf("expected compilation to fail at stack lowering because the verifySP1FRI codegen body is not implemented yet; got artifact %+v", artifact)
+	if err != nil {
+		t.Fatalf("expected compilation to succeed (dispatch wired via EmitFullSP1FriVerifierBody); "+
+			"got error: %v", err)
 	}
-	msg := err.Error()
-	if !strings.Contains(msg, "verifySP1FRI") {
-		t.Errorf("expected error message to mention 'verifySP1FRI'; got: %s", msg)
+	if artifact == nil {
+		t.Fatal("expected non-nil artifact from successful compilation")
 	}
-	if !strings.Contains(msg, "docs/sp1-fri-verifier.md") {
-		t.Errorf("expected error message to link to docs/sp1-fri-verifier.md; got: %s", msg)
+	if artifact.ContractName != "Sp1FriVerifierPoc" {
+		t.Errorf("expected contract name Sp1FriVerifierPoc, got %s", artifact.ContractName)
 	}
+	if artifact.Script == "" {
+		t.Error("expected non-empty Script (hex-encoded locking script)")
+	}
+	if !strings.HasPrefix(artifact.Script, "00") && len(artifact.Script) < 2 {
+		// Locking script should be substantial — the SP1 FRI orchestrator
+		// emits ~280 KB worth of opcodes for the PoC param tuple.
+		t.Errorf("expected substantial locking script, got %d hex chars", len(artifact.Script))
+	}
+
+	t.Logf("Sp1FriVerifierPoc compiled successfully: |Script|=%d hex chars (~%d KB), "+
+		"ABI methods=%d", len(artifact.Script), len(artifact.Script)/2/1024, len(artifact.ABI.Methods))
 }

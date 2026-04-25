@@ -488,14 +488,26 @@ func TestSp1FriVerifier_TranscriptMatchesReference(t *testing.T) {
 }
 
 // TestSp1FriVerifier_AcceptsMinimalGuestFixture is the holistic acceptance
-// harness. It exercises Steps 1 + 2-5 + 8 sequentially against the canonical
-// fixture: proof-blob binding consumes proofBlob (Step 1), transcript init
-// (Steps 2-5), then FRI commit-phase absorbs + beta squeezes (Step 8).
+// harness. It exercises the dispatch-wired `EmitFullSP1FriVerifierBody`
+// orchestrator end-to-end against the canonical Plonky3 KoalaBear minimal-guest
+// FRI fixture:
 //
-// Step 1 leaves the field chunks on the stack; we drop them before running
-// Steps 2-5, which pushes its own observation inputs. The full pipeline-to-
-// pipeline wiring (Step 1's leftover fields directly feeding Step 2's
-// observations) lands in a follow-up that ports the per-field decoder.
+//  1. The "unlocking" prelude pushes every fixture-derived field via raw
+//     OP_PUSH ops in the canonical declaration order pinned by
+//     `sp1FriPrePushedFieldNames` (deepest → top), then the typed args
+//     (proofBlob, publicValues, sp1VKeyHash if applicable).
+//  2. The "locking" body is generated via `EmitFullSP1FriVerifierBody` —
+//     the same orchestrator the dispatch path uses (Steps 1, 2-5, 8, and
+//     transcript-derived per-query Step 10 indexes).
+//  3. Concatenated [unlocking_prelude] + [locking_body] is run through
+//     buildAndExecute. The script must accept (Bitcoin Script VM returns
+//     no error).
+//
+// Steps 6+7 (AIR constraint + quotient recompose), 10A (reduced-opening
+// accumulator), and 11 (final-poly Horner) byte-identity gates against the
+// off-chain reference are validated in fresh-tracker sub-blocks below — those
+// are kept independent of the main orchestrator so any per-step regression
+// has a locally diagnosable failure mode.
 func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	bs := loadMinimalGuestProofBlob(t)
 	proof, err := sp1fri.DecodeProof(bs)
@@ -503,26 +515,9 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		t.Fatalf("decode fixture: %v", err)
 	}
 
-	chunks := chunkProof(t, bs, 8)
-
-	var ops []StackOp
-	for _, c := range chunks {
-		ops = append(ops, pushBytes(c))
-	}
-	ops = append(ops, pushBytes(bs)) // proofBlob
-
-	// === Step 1 ===
-	bindingOps := gatherOps(func(emit func(StackOp)) {
-		EmitProofBlobBindingHash(emit, len(chunks))
-	})
-	ops = append(ops, bindingOps...)
-
-	// Drain field chunks (full per-field decoding lands in a follow-up).
-	for i := 0; i < len(chunks); i++ {
-		ops = append(ops, opcode("OP_DROP"))
-	}
-
-	// === Decode the verification inputs from the fixture (Steps 2-5 + 8). ===
+	// === Decode the verification inputs from the fixture (used for the
+	// unlocking-script prelude AND the standalone Steps 6+7/10A/11 blocks
+	// below).
 	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
 	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
 	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
@@ -565,94 +560,148 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	commitPowBits := 1
 	queryPowBits := 1
 
-	alpha, zeta := runReferenceTranscriptInit(
-		t, nil, pubVals, traceDigest, quotientDigest,
-		traceLocal, traceNext, quotChunks, false,
-	)
-	alphaFri, betas := runReferenceFriCommitPhase(
-		t, pubVals, traceDigest, quotientDigest,
-		traceLocal, traceNext, quotChunks,
-		friCommitDigests, commitPowWitnesses, finalPoly,
-		logArities, queryPowWitness,
-		commitPowBits, queryPowBits,
-	)
-
-	// === Push Steps 2-5 + 8 inputs ===
-	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
-	fs := NewFiatShamirState()
 	params := DefaultSP1FriParams()
 	params.PublicValuesByteSize = len(pubVals)
 	params.SP1VKeyHashByteSize = 0
 	params.CommitPoWBits = commitPowBits
 	params.QueryPoWBits = queryPowBits
 
-	// Step 8 inputs (deepest).
-	tracker.pushInt("_obs_fri_qpw", int64(queryPowWitness))
+	// === Build the unlocking-script prelude. Order MUST match
+	// `sp1FriPrePushedFieldNames` byte-for-byte (deepest-first):
+	//   1. transcript-input slots (Step 8 inputs deepest, Steps 2-5 inputs
+	//      above, _obs_public_values shallowest of the field layer)
+	//   2. raw proof-body chunks (numChunks=8)
+	//   3. proofBlob (typed arg)
+	//   4. publicValues (typed arg)
+	//   5. sp1VKeyHash (typed arg; only when SP1VKeyHashByteSize > 0)
+	chunks := chunkProof(t, bs, 8)
+
+	var ops []StackOp
+
+	// 1a. Step 8 inputs (deepest of the transcript-input layer). Mirrors
+	// sp1_fri.go::sp1FriPrePushedFieldNames §1.
+	ops = append(ops, pushInt64(int64(queryPowWitness)))
 	for r := numRounds - 1; r >= 0; r-- {
-		tracker.pushInt(fmt.Sprintf("_obs_fri_la_%d", r), int64(logArities[r]))
+		ops = append(ops, pushInt64(int64(logArities[r])))
 	}
 	for i := 0; i < len(finalPoly); i++ {
 		ext := finalPoly[i]
 		for j := 0; j < 4; j++ {
-			tracker.pushInt(fmt.Sprintf("_obs_fri_fp_%d_c%d", i, j), int64(ext[j]))
+			ops = append(ops, pushInt64(int64(ext[j])))
 		}
 	}
 	for r := 0; r < numRounds; r++ {
 		for i := 0; i < 8; i++ {
-			tracker.pushInt(fmt.Sprintf("_obs_fri_dig_%d_%d", r, i), int64(friCommitDigests[r][i]))
+			ops = append(ops, pushInt64(int64(friCommitDigests[r][i])))
 		}
-		tracker.pushInt(fmt.Sprintf("_obs_fri_cpw_%d", r), int64(commitPowWitnesses[r]))
+		ops = append(ops, pushInt64(int64(commitPowWitnesses[r])))
 	}
 
-	// Steps 2-5 inputs (above Step 8 inputs).
+	// 1b. Steps 2-5 inputs (above Step 8 inputs). Mirrors
+	// sp1_fri.go::sp1FriPrePushedFieldNames §3.
 	for i := 0; i < 2; i++ {
 		ext := traceLocal[i]
 		for j := 0; j < 4; j++ {
-			tracker.pushInt(fmt.Sprintf("_obs_open_tl_%d_c%d", i, j), int64(ext[j]))
+			ops = append(ops, pushInt64(int64(ext[j])))
 		}
 	}
 	for i := 0; i < 2; i++ {
 		ext := traceNext[i]
 		for j := 0; j < 4; j++ {
-			tracker.pushInt(fmt.Sprintf("_obs_open_tn_%d_c%d", i, j), int64(ext[j]))
+			ops = append(ops, pushInt64(int64(ext[j])))
 		}
 	}
 	for i := 0; i < 4; i++ {
 		ext := quotChunks[0][i]
 		for j := 0; j < 4; j++ {
-			tracker.pushInt(fmt.Sprintf("_obs_open_qc_%d_c%d", i, j), int64(ext[j]))
+			ops = append(ops, pushInt64(int64(ext[j])))
 		}
 	}
 	for i := 0; i < 8; i++ {
-		tracker.pushInt(fmt.Sprintf("_obs_qdig_%d", i), int64(quotientDigest[i]))
+		ops = append(ops, pushInt64(int64(quotientDigest[i])))
 	}
 	for i := 0; i < 8; i++ {
-		tracker.pushInt(fmt.Sprintf("_obs_dig_%d", i), int64(traceDigest[i]))
+		ops = append(ops, pushInt64(int64(traceDigest[i])))
 	}
-	trackerPushBytes(tracker, "_obs_public_values", pubVals)
+	ops = append(ops, pushBytes(pubVals)) // _obs_public_values
 
-	emitTranscriptInit(fs, tracker, params)
-	emitFriCommitPhaseAbsorb(fs, tracker, params, numRounds, len(finalPoly))
-
-	// Sanity-check alpha + zeta + alpha_fri + every beta against the reference.
-	assertEqualNamed := func(name string, ref uint32) {
-		tracker.toTop(name)
-		ops = append(ops, pushInt64(int64(ref)))
-		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
-		tracker.rawBlock([]string{name}, "", func(e func(StackOp)) {})
+	// 2. Raw proof-body chunks (above transcript inputs).
+	for _, c := range chunks {
+		ops = append(ops, pushBytes(c))
 	}
 
-	// === Step 10 — derive query indexes from transcript, assert each
-	// matches the off-chain reference. The full per-query loop (input-batch
-	// MMCS verify + reduced-opening accumulation + per-fold-step MMCS
-	// verify + colinearity fold + final-poly Horner equality) is validated
-	// in TestSp1FriVerifier_PerQueryFoldsMatchReference / the standalone
-	// emit*FriColinearityFold + emitFinalPolyHorner tests; here we only
-	// thread the on-chain transcript-derived indexes back into Step 8's
-	// post-state to confirm Steps 8 → 10 sponge continuity.
+	// 3. proofBlob typed arg.
+	ops = append(ops, pushBytes(bs))
+
+	// 4. publicValues typed arg (re-pushed; the orchestrator discards this
+	// copy and uses the deeper _obs_public_values slot — see
+	// EmitFullSP1FriVerifierBody §1e for the rationale).
+	ops = append(ops, pushBytes(pubVals))
+
+	// 5. sp1VKeyHash typed arg — omitted because SP1VKeyHashByteSize=0 for
+	// the canonical PoC fixture (no SP1 outer wrapper).
+
+	prelude := len(ops)
+
+	// === Locking script body — emitted via the dispatch-wired orchestrator.
+	bodyOps := gatherOps(func(emit func(StackOp)) {
+		EmitFullSP1FriVerifierBody(emit, params)
+	})
+	ops = append(ops, bodyOps...)
+
+	// === Standalone Steps 6+7 OOD-equality gate (separate tracker, separate
+	// script). Independent of the main orchestrator so a regression here
+	// fails locally rather than as a generic main-script reject.
+	alpha, zeta := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+	{
+		var sOps []StackOp
+		sTracker := NewKBTracker(nil, func(op StackOp) { sOps = append(sOps, op) })
+		alphaExt := sp1fri.Ext4{alpha[0], alpha[1], alpha[2], alpha[3]}
+		zetaExt := sp1fri.Ext4{zeta[0], zeta[1], zeta[2], zeta[3]}
+		pushExt4Named(sTracker, "alpha", alphaExt)
+		pushExt4Named(sTracker, "zeta", zetaExt)
+		for i := 0; i < 2; i++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("tl_%d_%d", i, j), int64(traceLocal[i][j]))
+			}
+		}
+		for i := 0; i < 2; i++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("tn_%d_%d", i, j), int64(traceNext[i][j]))
+			}
+		}
+		for e := 0; e < 4; e++ {
+			for j := 0; j < 4; j++ {
+				sTracker.pushInt(fmt.Sprintf("ch_%d_%d", e, j), int64(quotChunks[0][e][j]))
+			}
+		}
+		sTracker.pushInt("pis_a", 0)
+		sTracker.pushInt("pis_b", 1)
+		sTracker.pushInt("pis_x", 21)
+
+		emitFibAirSelectorsAt(sTracker, "zeta", "sel", 3)
+		emitFibAirConstraintEval(
+			sTracker,
+			"alpha", "tl", "tn", "sel",
+			"pis_a", "pis_b", "pis_x",
+			"folded",
+		)
+		emitQuotientRecompose(sTracker, "ch", "quot")
+		kbExt4Mul(sTracker, "folded", "sel_invvan", "lhs")
+		kbExt4Equal4VerifyByName(sTracker, "lhs", "quot")
+		drainAllStack(sTracker, &sOps)
+		if err := buildAndExecute(t, sOps); err != nil {
+			t.Fatalf("Steps 6+7 OOD equality failed on canonical fixture: %v", err)
+		}
+		t.Logf("Steps 6+7 OOD equality accepted; |ops|=%d", len(sOps))
+	}
 
 	// Re-derive query indexes off-chain by extending the reference
-	// challenger past the FRI commit-phase.
+	// challenger past the FRI commit-phase. Used by the standalone Step
+	// 10A + Step 11 byte-identity blocks below.
 	refChal := sp1fri.NewDuplexChallenger()
 	{
 		absorbBytes := func(bs []byte) {
@@ -707,95 +756,13 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		queryIndexes[q] = refChal.SampleBits(logGlobalMaxHeight)
 	}
 
-	// On-chain: sample the index per query and assert it matches the
-	// reference. emitQueryIndexDerive composes EmitSampleBits.
-	for q := 0; q < params.NumQueries; q++ {
-		emitQueryIndexDerive(fs, tracker, logGlobalMaxHeight)
-		// _fs_bits is on top; rename to a per-query name so we can find it later.
-		tracker.rename(fmt.Sprintf("_qidx_%d", q))
-		// Assert the on-chain index equals the off-chain reference index.
-		tracker.toTop(fmt.Sprintf("_qidx_%d", q))
-		ops = append(ops, pushInt64(int64(queryIndexes[q])))
-		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
-		tracker.rawBlock([]string{fmt.Sprintf("_qidx_%d", q)}, "", func(e func(StackOp)) {})
-	}
-
-	// Beta values per round (reverse round order to walk the stack top-down).
-	for r := numRounds - 1; r >= 0; r-- {
-		for i := 3; i >= 0; i-- {
-			assertEqualNamed(fmt.Sprintf("_fs_beta_%d_%d", r, i), betas[r][i])
-		}
-	}
-	for i := 3; i >= 0; i-- {
-		assertEqualNamed(fmt.Sprintf("_fs_alpha_fri_%d", i), alphaFri[i])
-	}
-	for i := 3; i >= 0; i-- {
-		assertEqualNamed(fmt.Sprintf("_fs_zeta_%d", i), zeta[i])
-	}
-	for i := 3; i >= 0; i-- {
-		assertEqualNamed(fmt.Sprintf("_fs_alpha_%d", i), alpha[i])
-	}
-
-	// === Steps 6 + 7 — AIR constraint reconstruction at zeta + quotient
-	// recompose + OOD equality (folded * inv_vanishing == quotient). Emitted
-	// in a fresh tracker context so the failure mode is locally diagnosable.
-	{
-		var sOps []StackOp
-		sTracker := NewKBTracker(nil, func(op StackOp) { sOps = append(sOps, op) })
-		alphaExt := sp1fri.Ext4{alpha[0], alpha[1], alpha[2], alpha[3]}
-		zetaExt := sp1fri.Ext4{zeta[0], zeta[1], zeta[2], zeta[3]}
-		pushExt4Named(sTracker, "alpha", alphaExt)
-		pushExt4Named(sTracker, "zeta", zetaExt)
-		for i := 0; i < 2; i++ {
-			for j := 0; j < 4; j++ {
-				sTracker.pushInt(fmt.Sprintf("tl_%d_%d", i, j), int64(traceLocal[i][j]))
-			}
-		}
-		for i := 0; i < 2; i++ {
-			for j := 0; j < 4; j++ {
-				sTracker.pushInt(fmt.Sprintf("tn_%d_%d", i, j), int64(traceNext[i][j]))
-			}
-		}
-		for e := 0; e < 4; e++ {
-			for j := 0; j < 4; j++ {
-				sTracker.pushInt(fmt.Sprintf("ch_%d_%d", e, j), int64(quotChunks[0][e][j]))
-			}
-		}
-		sTracker.pushInt("pis_a", 0)
-		sTracker.pushInt("pis_b", 1)
-		sTracker.pushInt("pis_x", 21)
-
-		emitFibAirSelectorsAt(sTracker, "zeta", "sel", 3)
-		emitFibAirConstraintEval(
-			sTracker,
-			"alpha", "tl", "tn", "sel",
-			"pis_a", "pis_b", "pis_x",
-			"folded",
-		)
-		emitQuotientRecompose(sTracker, "ch", "quot")
-		kbExt4Mul(sTracker, "folded", "sel_invvan", "lhs")
-		kbExt4Equal4VerifyByName(sTracker, "lhs", "quot")
-		drainAllStack(sTracker, &sOps)
-		if err := buildAndExecute(t, sOps); err != nil {
-			t.Fatalf("Steps 6+7 OOD equality failed on canonical fixture: %v", err)
-		}
-		t.Logf("Steps 6+7 OOD equality accepted; |ops|=%d", len(sOps))
-	}
-
-	// === Step 10/A — reduced-opening accumulator on each query against the
-	// fixture's actual queried row evaluations. The on-chain accumulator is
-	// asserted against the off-chain reference inner loop.
+	// === Standalone Step 10A — reduced-opening accumulator on each query
+	// against the fixture's actual queried row evaluations.
 	for q := 0; q < params.NumQueries; q++ {
 		index := queryIndexes[q]
-		// Drive the trace-matrix per-query reduced opening (logHeight =
-		// logGlobalMaxHeight — the tallest matrix in this batch).
 		zetaExt := sp1fri.Ext4{zeta[0], zeta[1], zeta[2], zeta[3]}
 		alphaExt := sp1fri.Ext4{alpha[0], alpha[1], alpha[2], alpha[3]}
 
-		// Off-chain queried-base values from the fixture's input proof.
-		// proof.OpeningProof.QueryProofs[q].InputProof[0] is the BatchOpening
-		// for the trace commitment; OpenedValues[0] is the matrix-row Montgomery
-		// values for the trace matrix at the queried index.
 		batch := proof.OpeningProof.QueryProofs[q].InputProof[0]
 		queriedBase := make([]uint32, len(batch.OpenedValues[0]))
 		for k, v := range batch.OpenedValues[0] {
@@ -836,10 +803,7 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 			q, want)
 	}
 
-	// === Step 11 — final-poly Horner equality (per-query, using the
-	// off-chain-validated reduced + folded value as the LHS). Emitted
-	// inside a fresh tracker context so the harness assertion shape stays
-	// the same as Step 10's pure transcript replay above.
+	// === Standalone Step 11 — final-poly Horner equality (per-query).
 	for q := 0; q < params.NumQueries; q++ {
 		index := queryIndexes[q]
 		x := sp1fri.KbPow(
@@ -867,13 +831,7 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 		}
 	}
 
-	// Drain everything else off the stack.
-	for len(tracker.nm) > 0 {
-		ops = append(ops, opcode("OP_DROP"))
-		tracker.nm = tracker.nm[:len(tracker.nm)-1]
-	}
-	ops = append(ops, opcode("OP_1"))
-
+	// === Run the main script: [unlocking_prelude] + [locking_body].
 	if err := buildAndExecute(t, ops); err != nil {
 		t.Fatalf("verifier rejected the canonical fixture (Step 1 + 2-5 + 8 + 10): %v", err)
 	}
@@ -887,11 +845,11 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	}
 
 	t.Logf("Steps 1 + 2-5 + 6 + 7 + 8 + 10 + 10A + 11 accepted canonical fixture; "+
-		"|proofBlob|=%d, |chunks|=%d, |step1 ops|=%d, numRounds=%d, finalPolyLen=%d, "+
-		"total transcript-replay ops in harness=%d, transcript script bytes=%d, "+
-		"queryIndexes=%v, alpha=%v zeta=%v alphaFri=%v betas=%v",
-		len(bs), len(chunks), len(bindingOps), numRounds, len(finalPoly), len(ops),
-		scriptBytes, queryIndexes, alpha, zeta, alphaFri, betas)
+		"|proofBlob|=%d, |chunks|=%d, |unlocking prelude ops|=%d, |locking body ops|=%d, "+
+		"numRounds=%d, finalPolyLen=%d, total ops=%d, total script bytes=%d, "+
+		"queryIndexes=%v",
+		len(bs), len(chunks), prelude, len(bodyOps), numRounds, len(finalPoly),
+		len(ops), scriptBytes, queryIndexes)
 }
 
 // runReferenceFriCommitPhase extends runReferenceTranscriptInit through Step 8:
