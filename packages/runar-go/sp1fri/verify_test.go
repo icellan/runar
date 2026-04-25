@@ -50,7 +50,7 @@ func TestVerifyMinimalGuest(t *testing.T) {
 // TestVerifyEvmGuest is the production-scale acceptance test: a real Plonky3
 // Fibonacci STARK + FRI proof at the production parameter tuple
 // (num_queries=100, log_blowup=1, commit_pow=16, query_pow=16, degreeBits=10,
-// log_final_poly_len=9 — see `tests/vectors/sp1/fri/evm-guest/regen/src/main.rs`)
+// log_final_poly_len=0 — see `tests/vectors/sp1/fri/evm-guest/regen/src/main.rs`)
 // must verify against the same algorithm as `TestVerifyMinimalGuest`, only
 // with a different `FriVerifierConfig` (`evmGuestConfig`).
 //
@@ -82,7 +82,7 @@ func TestVerifyEvmGuest(t *testing.T) {
 			"`x_pub` recompute fib(1023) mod p)", err, len(bs))
 	}
 	t.Logf("evm-guest fixture accepted by reference verifier; proof size = %d bytes "+
-		"(num_queries=100, log_blowup=1, log_final_poly_len=9, degreeBits=10, "+
+		"(num_queries=100, log_blowup=1, log_final_poly_len=0, degreeBits=10, "+
 		"commit_pow=16, query_pow=16)", len(bs))
 }
 

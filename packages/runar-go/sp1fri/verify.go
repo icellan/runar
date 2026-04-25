@@ -223,17 +223,15 @@ var minimalGuestConfig = FriVerifierConfig{
 //   - log_blowup = 1 — production target (tighter blowup, more queries needed).
 //   - commit/query pow_bits = 16 — production target (16-bit grinding).
 //   - degreeBits = 10 — 1024-row Fibonacci trace (vs. 8 rows in the PoC).
-//   - logFinalPolyLen = 9 — pinned so total_log_reduction =
-//     degreeBits - logFinalPolyLen = 1, keeping the codegen helper's
-//     hard-coded `numRounds = 1` invariant satisfied
-//     (see `compilers/go/codegen/sp1_fri.go::EmitFullSP1FriVerifierBody`
-//     line 317). Bumping degreeBits without raising logFinalPolyLen in
-//     lockstep would require the codegen helper to compute numRounds from
-//     params.
+//   - logFinalPolyLen = 0 — natural production tuple from BSVM handoff §2.1.
+//     The codegen helper derives `numRounds = degreeBits - logFinalPolyLen`
+//     from params (B1 was fixed in compilers/go/codegen/sp1_fri.go), so this
+//     no longer needs the prior B1 workaround that pinned logFinalPolyLen=9
+//     to keep numRounds=1.
 var evmGuestConfig = FriVerifierConfig{
 	degreeBits:      10,
 	logBlowup:       1,
-	logFinalPolyLen: 9,
+	logFinalPolyLen: 0,
 	maxLogArity:     1,
 	numQueries:      100,
 	commitPowBits:   16,

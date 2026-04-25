@@ -176,7 +176,22 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 	// (proofBlob deepest, publicValues on top of the typed-args section).
 	// This keeps `EmitFullSP1FriVerifierBody` itself unchanged so all the
 	// existing standalone codegen tests keep passing.
-	params := DefaultSP1FriParams()
+	//
+	// Item 2 wiring: `ctx.sp1FriParams` is the per-compilation override
+	// threaded from `compiler.CompileOptions.SP1FriParams` through
+	// `LowerToStackOptions.SP1FriParams`. When nil (the typical case)
+	// every `runar.VerifySP1FRI(...)` call lowers at the validated PoC
+	// tuple. When set, every call in the program lowers at the override
+	// tuple — the natural way to compile a contract for production
+	// (num_queries=100, log_blowup=1, log_final_poly_len=0, ...) via the
+	// normal `compiler.CompileFromSource` path. See
+	// `compiler.SP1FriPreset(name)` for the canonical presets.
+	var params SP1FriVerifierParams
+	if ctx.sp1FriParams != nil {
+		params = *ctx.sp1FriParams
+	} else {
+		params = DefaultSP1FriParams()
+	}
 	if params.SP1VKeyHashByteSize == 0 {
 		ctx.emitOp(StackOp{Op: "drop"})
 	}
@@ -337,7 +352,26 @@ func EmitFullSP1FriVerifierBody(emit func(StackOp), params SP1FriVerifierParams)
 	// Static PoC layout — all derived from `params` plus the validated
 	// minimal-guest fixture shape (sp1fri/verify.go:48-62 + fri.go:25-95).
 	const numChunks = 8 // matches chunkProof(t, bs, 8) in the test harness
-	const numRounds = 1 // = total_log_reduction / max_log_arity for the PoC
+	// numRounds is derived from the FRI commit-phase recursion. For arity-2
+	// folding (max_log_arity = 1, total_log_reduction = sum(logArity_r) ⇒
+	// numRounds = total_log_reduction). The off-chain reference computes
+	// `logGlobalMaxHeight = totalLogReduction + logBlowup + logFinalPolyLen`
+	// (sp1fri/fri.go:60) and the prover invariant `log_min_height >
+	// log_final_poly_len + log_blowup` from Plonky3 fri/src/prover.rs:75
+	// fixes `numRounds = degreeBits - logFinalPolyLen` for max_log_arity=1.
+	// Verified against:
+	//   - PoC fixture: degreeBits=3, logFinalPolyLen=2 ⇒ numRounds = 1.
+	//     (matches `len(proof.OpeningProof.CommitPhaseCommits)` decoded from
+	//     `tests/vectors/sp1/fri/minimal-guest/proof.postcard`.)
+	//   - Production fixture (logFinalPolyLen=0): degreeBits=10 ⇒ numRounds=10.
+	// Production fixture with B1 workaround (logFinalPolyLen=9): numRounds=1.
+	numRounds := params.DegreeBits - params.LogFinalPolyLen
+	if numRounds < 1 {
+		panic(fmt.Sprintf("EmitFullSP1FriVerifierBody: derived numRounds=%d < 1 for "+
+			"DegreeBits=%d LogFinalPolyLen=%d — Plonky3 requires "+
+			"degreeBits > log_final_poly_len (fri/src/prover.rs:75)",
+			numRounds, params.DegreeBits, params.LogFinalPolyLen))
+	}
 	finalPolyLen := 1 << params.LogFinalPolyLen
 
 	// Validate the PoC param tuple. Production param tuples (NumQueries=100,

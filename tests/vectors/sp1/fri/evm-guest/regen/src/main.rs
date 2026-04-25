@@ -11,13 +11,22 @@
 //   query_pow_bits        = 16  (PoC: 1)   - proof-of-work grinding
 //   max_log_arity         = 1   (unchanged) - binary folding
 //   trace_height (degreeBits) = 10 (PoC: 3) - 1024-row Fibonacci trace
-//   log_final_poly_len    = 9   (PoC: 2)   - pinned so total_log_reduction =
-//                                            degree_bits - log_final_poly_len
-//                                            = 1, keeping the codegen
-//                                            helper's hard-coded numRounds=1
-//                                            invariant satisfied (see
-//                                            compilers/go/codegen/sp1_fri.go
-//                                            line 317).
+//   log_final_poly_len    = 0   (PoC: 2)   - natural production tuple from
+//                                            the BSVM handoff §2.1. Now
+//                                            tractable on-chain because the
+//                                            codegen helper derives numRounds
+//                                            from `degreeBits -
+//                                            log_final_poly_len` per Plonky3
+//                                            fri/src/prover.rs:75 (the previous
+//                                            B1 hardcode `numRounds = 1` is
+//                                            fixed in
+//                                            compilers/go/codegen/sp1_fri.go).
+//                                            With (degree_bits=10,
+//                                            log_blowup=1, log_final_poly_len=0,
+//                                            max_log_arity=1) this gives
+//                                            numRounds = 10 commit-phase
+//                                            rounds (1 final-poly Ext4
+//                                            coefficient instead of 512).
 //
 // AIR is unchanged: 2-column Fibonacci with public inputs `[a, b, fib(n-1)]`.
 // PIs for this fixture are `[0, 1, fib(1023) mod p]`.
@@ -38,7 +47,12 @@ use p3_uni_stark::{StarkConfig, prove, verify};
 
 const NUM_FIBONACCI_COLS: usize = 2;
 const LOG_TRACE_HEIGHT: usize = 10;
-const LOG_FINAL_POLY_LEN: usize = LOG_TRACE_HEIGHT - 1;
+// LOG_FINAL_POLY_LEN = 0: natural production tuple. Now valid because
+// `EmitFullSP1FriVerifierBody` derives numRounds = degreeBits -
+// log_final_poly_len from params (B1 fixed). For (degree_bits=10,
+// log_blowup=1, log_final_poly_len=0) the on-chain script unrolls
+// numRounds = 10 commit-phase rounds at arity 2.
+const LOG_FINAL_POLY_LEN: usize = 0;
 
 #[derive(Default)]
 pub struct FibonacciAir {}

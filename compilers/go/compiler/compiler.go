@@ -180,6 +180,12 @@ func CompileFromProgram(program *ir.ANFProgram, opts ...CompileOptions) (*Artifa
 		}
 		lowerOpts.Groth16WAConfig = &cfg
 	}
+	// SP1 FRI verifier param tuple override. nil falls back to
+	// codegen.DefaultSP1FriParams() (the validated PoC tuple). Use
+	// `compiler.SP1FriPreset(name)` for the canonical presets.
+	if o.SP1FriParams != nil {
+		lowerOpts.SP1FriParams = o.SP1FriParams
+	}
 
 	// Pass 5: Stack lowering
 	stackMethods, err := codegen.LowerToStack(program, lowerOpts)
@@ -592,7 +598,11 @@ func CompileFromSourceWithResult(sourcePath string, opts ...CompileOptions) *Com
 			}
 		}()
 		var stackErr error
-		stackMethods, stackErr = codegen.LowerToStack(result.ANF)
+		var lowerOpts codegen.LowerToStackOptions
+		if o.SP1FriParams != nil {
+			lowerOpts.SP1FriParams = o.SP1FriParams
+		}
+		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
 		if stackErr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
 				fmt.Sprintf("stack lowering: %s", stackErr),
@@ -731,7 +741,11 @@ func CompileFromSourceStrWithResult(source string, fileName string, opts ...Comp
 			}
 		}()
 		var stackErr error
-		stackMethods, stackErr = codegen.LowerToStack(result.ANF)
+		var lowerOpts codegen.LowerToStackOptions
+		if o.SP1FriParams != nil {
+			lowerOpts.SP1FriParams = o.SP1FriParams
+		}
+		stackMethods, stackErr = codegen.LowerToStack(result.ANF, lowerOpts)
 		if stackErr != nil {
 			result.Diagnostics = append(result.Diagnostics, frontend.MakeDiagnostic(
 				fmt.Sprintf("stack lowering: %s", stackErr),
