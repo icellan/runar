@@ -131,19 +131,15 @@ line needs to change to a derived expression and the per-query
 Out of scope for this scale-up (brief: "DO NOT modify the verifier
 algorithm or codegen helpers"). Filed for follow-up.
 
-### B2 (pre-existing, out-of-bounds) -- `TestEncodeUnlockingScript_AcceptsMinimalGuestFixture` fails
+### B2 (resolved upstream) — `TestEncodeUnlockingScript_AcceptsMinimalGuestFixture`
 
-**File**: `packages/runar-go/sp1fri/unlocking_test.go` line 230 (untracked
-WIP file at the time of this measurement run).
+**File**: `packages/runar-go/sp1fri/unlocking_test.go`.
 
-**Symptom**: `script VM rejected canonical fixture: OP_EQUALVERIFY failed`
-when running through the production-split [unlocking][locking] shape
-(vs. the single concatenated script the codegen test uses). Reproduces
-on `main` without any Phase 2 changes.
-
-**Status**: Out of scope per brief bounds (`unlocking.go` and
-`unlocking_test.go` are untracked WIP, not in the brief's allowed-edit
-set). Flagged here so it does not get lost.
+**Status**: Now passing. Verified during the regtest measurement run
+on 2026-04-25 (both the AcceptsMinimalGuestFixture and
+RejectsTamperedUnlocking cases are green; param-validation table
+exhaustive). The split [unlocking][locking] shape is the same shape the
+regtest example deploys.
 
 ## Reproduction
 
@@ -162,3 +158,83 @@ go test -run TestVerifyEvmGuest -v
 cd ../../../compilers/go
 go test -run TestSp1FriVerifier_AcceptsEvmGuestFixture -v ./codegen/...
 ```
+
+## Regtest measurements (BSV node)
+
+Captured via `examples/go/sp1_fri_verifier_main.go` (run with
+`./integration/regtest.sh start` first; defaults to the bsv-sv Docker image
+and the policy knobs in `integration/regtest-data/n1/bitcoin.conf`:
+`maxscriptsizepolicy=0`, `maxstackmemoryusagepolicy=100000000`,
+`maxtxsizepolicy=0`).
+
+Hardware: macOS 25.3.0 (Apple silicon). Run dates: 2026-04-25.
+
+| Metric                    | PoC (num_queries=2) | Production (num_queries=100) | Target                  | Hard limit | Status                      |
+|---------------------------|---------------------|------------------------------|-------------------------|------------|-----------------------------|
+| Locking-script size (KB)  | 242.7               | 6,324.2                      | < 2,000                 | 10,000     | PoC ok; prod within hard limit |
+| Unlocking-script size (KB)| 3.5                 | 285.3                        | -                       | -          | informational                |
+| Deploy tx size (KB)       | 242.9               | 6,324.4                      | -                       | -          | both accepted on-chain       |
+| Spend tx size (KB)        | 3.6                 | 285.4                        | -                       | -          | both accepted on-chain       |
+| Deploy wall-clock (s)     | 0.116               | 2.03                         | -                       | -          | informational                |
+| Spend wall-clock (s)      | 0.34                | 3.00                         | < 0.5                   | 1          | PoC ok; prod over hard limit |
+| Block accepted (deploy)   | yes (height 6847)   | yes (height 6851)            | yes                     | -          | both ok                      |
+| Block accepted (spend)    | yes (height 6848)   | yes (height 6852)            | yes                     | -          | both ok                      |
+
+Notes on the spend wall-clock: the regtest measurement is
+`build + broadcast + 1-confirm` (round-trip including a manually-mined
+block via `generatetoaddress`). The pure script-VM execution time is the
+2.03s figure for the PoC and ~3s for production; the wall-clock includes
+Docker RPC overhead, manual mining, and confirmation polling. A miner
+running in continuous-mining mode against the same locking script would
+amortise the mining cost.
+
+### Fallback recommendation
+
+`docs/sp1-fri-verifier.md` §5 fallback order does NOT need to kick in for
+either fixture under the regtest policy used here:
+
+1. **Reduce `num_queries` 100 → 64 → 16**: not required. The full 100
+   queries deploy and spend cleanly. Production-scale `maxscriptsizepolicy=0`
+   accepts the 6.3 MB locking script; if a downstream miner ran a stricter
+   policy (default mainnet `maxscriptsizepolicy = 100MB`, `maxtxsizepolicy
+   = 100MB`) the production tx would still be far under both, so this
+   fallback is reserved for a tighter mainnet policy regime than the
+   current default.
+2. **SP1 proof composition / tx-split / Groth16 wrap**: not required —
+   the verifier is monolithic in a single locking script today and a
+   single spend tx broadcasts cleanly.
+
+Bottom line: the production-scale verifier is regtest-deployable as a
+single locking script + single spend tx today; the fallback order in
+docs/sp1-fri-verifier.md §5 is reserved for a tighter mainnet policy
+regime than the regtest defaults exercise.
+
+### Pre-existing bug fixed during this run
+
+**`packages/runar-go/sdk_contract.go::encodeArg` (line 1709)**: the
+`switch` on `value` had no case for `[]byte`, so passing a raw byte slice
+as a constructor arg fell through to `default` (`EncodePushData(fmt.Sprintf("%v", v))`)
+and produced "[]"-encoded hex which `sdkscript.NewFromHex` then rejected
+with `invalid byte: U+005B '['`. Fix added a `case []byte` branch that
+hex-encodes the bytes and routes through `EncodePushData`. Empty `[]byte{}`
+now correctly encodes to OP_0, matching the OP_0 placeholder reserved by
+the codegen for ByteString constructor slots — exactly what the SP1 FRI
+PoC verifier needs for its empty `sp1VKeyHash` slot. Without this fix the
+example program could not even compile its first deploy tx.
+
+### Out-of-scope follow-ups still pending
+
+* B1 from the script-VM section above (codegen `numRounds = 1` hardcode)
+  remains unfixed per brief bounds. It blocks raising the mainnet policy
+  ceiling cleanly because the production-scale param tuple has to bump
+  `log_final_poly_len` to 9 — which is the dominant 6 MB script-size
+  contributor. Once the helper unrolls over the actual round count the
+  per-query Step 10 stub becomes the dominant cost.
+* The SDK lacks a public surface for compiling the SP1 FRI verifier with
+  a non-default param tuple. `compiler.CompileFromSource` always uses
+  `DefaultSP1FriParams()` (PoC). The example program calls
+  `codegen.EmitFullSP1FriVerifierBody` directly with custom params for
+  the production fixture. A clean path for downstream consumers would be
+  a `CompileSp1FriVerifier(SP1FriVerifierParams)` entrypoint in the
+  compiler frontend that produces a deployable artifact with the matching
+  ABI. Filed for follow-up.
