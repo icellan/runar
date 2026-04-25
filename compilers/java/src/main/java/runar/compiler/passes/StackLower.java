@@ -771,6 +771,31 @@ public final class StackLower {
                 lowerVerifySlhDsa(bindingName, funcName, args, idx, lastUses);
                 return;
             }
+            if (runar.compiler.codegen.Wots.isWotsBuiltin(funcName)) {
+                lowerWotsBuiltin(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
+            if (runar.compiler.codegen.Rabin.isRabinBuiltin(funcName)) {
+                lowerRabinBuiltin(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
+
+            // ------------------------------------------------------------------
+            // Math + ByteString builtins: substr, safediv, safemod, percentOf.
+            // Each emits a small fixed opcode sequence; mirror Python/Rust exactly.
+            // ------------------------------------------------------------------
+            if ("substr".equals(funcName)) {
+                lowerSubstr(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("safediv".equals(funcName) || "safemod".equals(funcName)) {
+                lowerSafeDivMod(bindingName, funcName, args, idx, lastUses);
+                return;
+            }
+            if ("percentOf".equals(funcName)) {
+                lowerPercentOf(bindingName, args, idx, lastUses);
+                return;
+            }
 
             // General builtin path
             for (String a : args) {
@@ -891,6 +916,44 @@ public final class StackLower {
             trackDepth();
         }
 
+        // verifyWOTS(msg, sig, pubkey) -> bool. Bring all three to the top in
+        // call order, drop them off the stack model (the emit sequence consumes
+        // them), let the codegen module emit the verifier opcodes, then push
+        // the resulting bool under the binding name.
+        void lowerWotsBuiltin(String bindingName, String funcName, List<String> args,
+                              int idx, Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException(funcName + " requires 3 arguments: msg, sig, pubkey");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < args.size(); i++) sm.pop();
+
+            runar.compiler.codegen.Wots.dispatch(funcName, this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // verifyRabinSig(msg, sig, padding, pubkey) -> bool.
+        void lowerRabinBuiltin(String bindingName, String funcName, List<String> args,
+                               int idx, Map<String, Integer> lastUses) {
+            if (args.size() < 4) {
+                throw new RuntimeException(
+                    funcName + " requires 4 arguments: msg, sig, padding, pubkey");
+            }
+            for (String a : args) {
+                bringToTop(a, isLastUse(a, idx, lastUses));
+            }
+            for (int i = 0; i < args.size(); i++) sm.pop();
+
+            runar.compiler.codegen.Rabin.dispatch(funcName, this::emitOp);
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
         // sha256Finalize: [state, remaining, msgBitLen] -> [hash].
         void lowerSha256Finalize(String bindingName, List<String> args, int idx,
                                  Map<String, Integer> lastUses) {
@@ -917,6 +980,125 @@ public final class StackLower {
             bringToTop(args.get(1), isLastUse(args.get(1), idx, lastUses));
             sm.pop(); sm.pop(); sm.pop();
             emitOp(new OpcodeOp("OP_CHECKMULTISIG"));
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // substr(data, start, length): two OP_SPLIT passes with a NIP and a
+        // DROP to extract the middle slice [start, start+length).
+        // Mirrors compilers/python/runar_compiler/codegen/stack.py:_lower_substr
+        // and compilers/rust/src/codegen/stack.rs::lower_substr.
+        // Emitted opcodes (after stack is set up):
+        //   OP_SPLIT OP_NIP OP_SPLIT OP_DROP
+        // ------------------------------------------------------------------
+        void lowerSubstr(String bindingName, List<String> args, int idx,
+                         Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException("substr requires 3 arguments");
+            }
+            String data = args.get(0);
+            String start = args.get(1);
+            String length = args.get(2);
+
+            bringToTop(data, isLastUse(data, idx, lastUses));
+            bringToTop(start, isLastUse(start, idx, lastUses));
+
+            // OP_SPLIT consumes [data, start] -> [left, right]
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.push(""); // left (will be discarded by NIP)
+            sm.push(""); // right (kept)
+
+            // NIP drops the left piece, leaving the right piece on top.
+            emitOp(new NipOp());
+            sm.pop();
+            String rightPart = sm.pop();
+            sm.push(rightPart);
+
+            bringToTop(length, isLastUse(length, idx, lastUses));
+
+            // OP_SPLIT consumes [right, length] -> [result, remainder]
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.push(""); // result (kept)
+            sm.push(""); // remainder (will be dropped)
+
+            // DROP the remainder.
+            emitOp(new DropOp());
+            sm.pop();
+            sm.pop();
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // safediv(a, b) / safemod(a, b): a / b (or a % b) with a runtime
+        // division-by-zero guard. Emits OP_DUP OP_0NOTEQUAL OP_VERIFY
+        // followed by OP_DIV (safediv) or OP_MOD (safemod).
+        // Matches compilers/python/runar_compiler/codegen/stack.py:_lower_safe_div_mod
+        // and compilers/rust/src/codegen/stack.rs::lower_safediv / lower_safemod.
+        // ------------------------------------------------------------------
+        void lowerSafeDivMod(String bindingName, String funcName, List<String> args,
+                             int idx, Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException(funcName + " requires 2 arguments");
+            }
+            String a = args.get(0);
+            String b = args.get(1);
+
+            bringToTop(a, isLastUse(a, idx, lastUses));
+            bringToTop(b, isLastUse(b, idx, lastUses));
+
+            // DUP b, assert b != 0, then divide / mod.
+            // Stack: a b -> a b b -> a b (b!=0) -> [verify pops] -> a b -> a/b or a%b
+            emitOp(new OpcodeOp("OP_DUP"));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_0NOTEQUAL"));
+            emitOp(new OpcodeOp("OP_VERIFY"));
+            sm.pop();
+
+            sm.pop();
+            sm.pop();
+            String opcode = "safediv".equals(funcName) ? "OP_DIV" : "OP_MOD";
+            emitOp(new OpcodeOp(opcode));
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // percentOf(amount, bps): basis-point scaling, (amount * bps) / 10000.
+        // Matches compilers/python/runar_compiler/codegen/stack.py:_lower_percent_of
+        // and compilers/rust/src/codegen/stack.rs::lower_percent_of.
+        // Emits: OP_MUL <10000> OP_DIV.
+        // ------------------------------------------------------------------
+        void lowerPercentOf(String bindingName, List<String> args, int idx,
+                            Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("percentOf requires 2 arguments");
+            }
+            String amount = args.get(0);
+            String bps = args.get(1);
+
+            bringToTop(amount, isLastUse(amount, idx, lastUses));
+            bringToTop(bps, isLastUse(bps, idx, lastUses));
+
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_MUL"));
+            sm.push(""); // amount * bps
+
+            emitOp(new PushOp(PushValue.of(10000)));
+            sm.push("");
+
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_DIV"));
+
             sm.push(bindingName);
             trackDepth();
         }
@@ -1770,16 +1952,179 @@ public final class StackLower {
             trackDepth();
         }
 
+        // BIP-143 sighash preimage field extractors. Each takes the preimage
+        // bytes on the stack and slices out the requested field. Direct port
+        // of compilers/python/runar_compiler/codegen/stack.py:_lower_call's
+        // extract* branches (lines 2451-2706 in Python).
+        //
+        // Field layout reference (BIP-143):
+        //   0    : nVersion (4 bytes)
+        //   4    : hashPrevouts (32 bytes)
+        //   36   : hashSequence (32 bytes)
+        //   68   : outpoint (36 bytes)
+        //   104  : scriptCode (varint length + bytes)
+        //   ...  : amount (8 bytes)
+        //   ...  : nSequence (4 bytes)
+        //   ...  : hashOutputs (32 bytes)
+        //   end-8: nLocktime (4 bytes)
+        //   end-4: sighashType (4 bytes)
         void lowerExtractor(String bindingName, String funcName, List<String> args,
                             int idx, Map<String, Integer> lastUses) {
-            // A minimal subset of preimage extractors — full coverage lives in M6.
             String arg = args.get(0);
             bringToTop(arg, isLastUse(arg, idx, lastUses));
             sm.pop();
-            // The only one we need here is a generic "extract N-byte field".
-            // Emit a no-op that keeps the preimage on the stack so the binding
-            // name resolves; actual field extraction lowering lives in M6.
+
+            switch (funcName) {
+                case "extractHashPrevouts":
+                    emitAbsoluteSplit(4, 32, false);
+                    break;
+                case "extractHashSequence":
+                    emitAbsoluteSplit(36, 32, false);
+                    break;
+                case "extractOutpoint":
+                    emitAbsoluteSplit(68, 36, false);
+                    break;
+                case "extractSigHashType":
+                    emitTrailingExtract(4, 0, true);
+                    break;
+                case "extractLocktime":
+                    emitTrailingExtract(8, 4, true);
+                    break;
+                case "extractOutputHash":
+                case "extractOutputs":
+                    emitTrailingExtract(40, 32, false);
+                    break;
+                case "extractAmount":
+                    emitTrailingExtract(52, 8, true);
+                    break;
+                case "extractSequence":
+                    emitTrailingExtract(44, 4, true);
+                    break;
+                case "extractScriptCode":
+                    emitScriptCodeExtract();
+                    break;
+                case "extractInputIndex":
+                    emitInputIndexExtract();
+                    break;
+                default:
+                    throw new RuntimeException("unknown extractor: " + funcName);
+            }
+
+            sm.pop();
             sm.push(bindingName);
+            trackDepth();
+        }
+
+        /**
+         * Slice the absolute byte range [start, start+length) out of the value
+         * on top of the stack. Sequence: push start; OP_SPLIT; OP_NIP; push
+         * length; OP_SPLIT; OP_DROP. The result is pushed under the empty
+         * slot (caller renames to the binding).
+         *
+         * @param emitBin2Num always pass {@code false} here — absolute splits
+         *                    keep the field as raw bytes; trailing extractors
+         *                    that want a number should call {@link #emitTrailingExtract}.
+         */
+        private void emitAbsoluteSplit(int start, int length, boolean emitBin2Num) {
+            emitOp(new PushOp(PushValue.of(start)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(length)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            if (emitBin2Num) {
+                emitOp(new OpcodeOp("OP_BIN2NUM"));
+            }
+        }
+
+        /**
+         * Extract a field whose offset is end-relative: OP_SIZE push offset
+         * OP_SUB OP_SPLIT OP_NIP, then optionally push length OP_SPLIT OP_DROP
+         * to truncate, then optionally OP_BIN2NUM.
+         */
+        private void emitTrailingExtract(int trailingOffset, int innerLength, boolean emitBin2Num) {
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push(""); sm.push("");
+            emitOp(new PushOp(PushValue.of(trailingOffset)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            if (innerLength > 0) {
+                emitOp(new PushOp(PushValue.of(innerLength)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_SPLIT"));
+                sm.pop(); sm.pop();
+                sm.push(""); sm.push("");
+                emitOp(new DropOp());
+                sm.pop();
+            }
+
+            if (emitBin2Num) {
+                emitOp(new OpcodeOp("OP_BIN2NUM"));
+            }
+        }
+
+        private void emitScriptCodeExtract() {
+            // skip first 104 bytes
+            emitOp(new PushOp(PushValue.of(104)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+            // trim trailing 52 bytes (amount + sequence + hashOutputs + locktime + sighashType)
+            emitOp(new OpcodeOp("OP_SIZE"));
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(52)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SUB"));
+            sm.pop(); sm.pop();
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+        }
+
+        private void emitInputIndexExtract() {
+            // skip first 100 bytes
+            emitOp(new PushOp(PushValue.of(100)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+            // take next 4 bytes
+            emitOp(new PushOp(PushValue.of(4)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
         }
 
         // ---------------- array_literal ----------------

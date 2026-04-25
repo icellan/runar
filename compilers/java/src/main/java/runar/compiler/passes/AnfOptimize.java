@@ -1,11 +1,14 @@
 package runar.compiler.passes;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import runar.compiler.ir.anf.AddDataOutput;
 import runar.compiler.ir.anf.AddOutput;
 import runar.compiler.ir.anf.AddRawOutput;
@@ -65,22 +68,305 @@ public final class AnfOptimize {
 
     private AnfOptimize() {}
 
+    /**
+     * EC algebraic optimizer (Pass 4.5). Mirrors
+     * {@code compilers/python/runar_compiler/frontend/anf_optimize.py}
+     * line-for-line: 12 algebraic-simplification rules over secp256k1
+     * intrinsic calls, iterated to a fixed point per method, followed by
+     * dead-binding elimination.
+     *
+     * <p>The pass is gated: programs with no EC calls are returned
+     * unchanged so non-EC fixtures remain byte-identical with the other
+     * tiers' canonical ANF.
+     */
     public static AnfProgram run(AnfProgram program) {
-        // The TypeScript / Python references do not run generic alias
-        // propagation or dead-binding elimination at this stage of the
-        // pipeline — local-name aliases (`result -> @ref:t2`) and unused
-        // bindings stay in the ANF IR until stack lowering handles them.
-        // Removing them here would diverge from the canonical ANF, so this
-        // pass is currently an identity transformation.
-        //
-        // The previously-implemented tautological-if collapse and alias
-        // propagation are intentionally disabled to preserve byte-identical
-        // ANF parity with the other tiers. The transformation helpers
-        // remain in this file for the future EC/optimizer pass that will
-        // mirror Python's `anf_optimize.py` (EC algebraic simplification),
-        // which is scoped behind the `--disable-constant-folding` flag and
-        // therefore inert under conformance runs.
-        return program;
+        boolean anyChanged = false;
+        for (AnfMethod m : program.methods()) {
+            if (hasEcCalls(m.body())) {
+                anyChanged = true;
+                break;
+            }
+        }
+        if (!anyChanged) return program;
+
+        List<AnfMethod> opts = new ArrayList<>(program.methods().size());
+        for (AnfMethod m : program.methods()) {
+            opts.add(optimizeEcMethod(m));
+        }
+        return new AnfProgram(program.contractName(), program.properties(), opts);
+    }
+
+    // ===================================================================
+    // EC algebraic optimizer (port of Python anf_optimize.py)
+    // ===================================================================
+
+    /** secp256k1 group order N. */
+    private static final BigInteger CURVE_N = new BigInteger(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16);
+    private static final BigInteger GEN_X = new BigInteger(
+        "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16);
+    private static final BigInteger GEN_Y = new BigInteger(
+        "483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8", 16);
+    private static final String INFINITY_HEX;
+    private static final String G_HEX;
+    static {
+        StringBuilder sb = new StringBuilder(128);
+        for (int i = 0; i < 128; i++) sb.append('0');
+        INFINITY_HEX = sb.toString();
+        G_HEX = pad64(GEN_X) + pad64(GEN_Y);
+    }
+
+    private static String pad64(BigInteger v) {
+        String hex = v.toString(16);
+        StringBuilder out = new StringBuilder(64);
+        for (int i = hex.length(); i < 64; i++) out.append('0');
+        out.append(hex);
+        return out.toString();
+    }
+
+    /** Module-level fresh-name counter; matches Python's global counter. */
+    private static final AtomicInteger FRESH_COUNTER = new AtomicInteger(0);
+
+    private static final Set<String> EC_FUNCS = Set.of(
+        "ecAdd", "ecMul", "ecMulGen", "ecNegate", "ecOnCurve",
+        "ecModReduce", "ecEncodeCompressed", "ecMakePoint", "ecPointX", "ecPointY"
+    );
+
+    private static boolean hasEcCalls(List<AnfBinding> body) {
+        for (AnfBinding b : body) {
+            if (b.value() instanceof Call c && EC_FUNCS.contains(c.func())) return true;
+            if (b.value() instanceof If ifv) {
+                if (hasEcCalls(orEmpty(ifv.thenBranch()))) return true;
+                if (hasEcCalls(orEmpty(ifv.elseBranch()))) return true;
+            }
+            if (b.value() instanceof Loop lp) {
+                if (hasEcCalls(orEmpty(lp.body()))) return true;
+            }
+        }
+        return false;
+    }
+
+    private static AnfMethod optimizeEcMethod(AnfMethod method) {
+        // Fixed-point: each pass may unblock further optimizations (e.g. one
+        // rule produces an aliased value that matches another rule).
+        List<AnfBinding> body = new ArrayList<>(method.body());
+        for (int iter = 0; iter < 64; iter++) {
+            // value_map maps binding name → its current ANFValue. We rebuild
+            // the body in order, allowing each subsequent binding to see the
+            // optimized form of earlier ones.
+            Map<String, AnfValue> valueMap = new LinkedHashMap<>();
+            List<AnfBinding> next = new ArrayList<>(body.size());
+            boolean changed = false;
+            for (AnfBinding b : body) {
+                AnfValue optimized = tryOptimize(b.value(), valueMap, next);
+                AnfBinding rebound = b;
+                if (optimized != null) {
+                    rebound = new AnfBinding(b.name(), optimized, b.sourceLoc());
+                    changed = true;
+                }
+                valueMap.put(rebound.name(), rebound.value());
+                next.add(rebound);
+            }
+            body = next;
+            if (!changed) break;
+        }
+        // Dead-binding elimination after fixed-point.
+        body = eliminateDead(body);
+        return new AnfMethod(method.name(), method.params(), body, method.isPublic());
+    }
+
+    /**
+     * Apply the 12 EC simplification rules. Returns the new value for the
+     * binding's RHS or {@code null} if no rule fired.
+     *
+     * <p>Some rules need to introduce a fresh constant binding (e.g. when
+     * combining two scalars into one). Those are appended to {@code prelude}
+     * so the rewritten call can reference them.
+     */
+    private static AnfValue tryOptimize(AnfValue v, Map<String, AnfValue> vm, List<AnfBinding> prelude) {
+        if (!(v instanceof Call call)) return null;
+        String func = call.func();
+        List<String> args = call.args();
+        if (func == null || args == null) return null;
+
+        // Rule 1: ecAdd(x, INFINITY) -> x
+        if ("ecAdd".equals(func) && args.size() == 2 && isInfinity(args.get(1), vm)) {
+            return makeRef(args.get(0));
+        }
+        // Rule 2: ecAdd(INFINITY, x) -> x
+        if ("ecAdd".equals(func) && args.size() == 2 && isInfinity(args.get(0), vm)) {
+            return makeRef(args.get(1));
+        }
+        // Rule 3: ecMul(x, 1) -> x
+        if ("ecMul".equals(func) && args.size() == 2 && isConstInt(args.get(1), BigInteger.ONE, vm)) {
+            return makeRef(args.get(0));
+        }
+        // Rule 4: ecMul(x, 0) -> INFINITY
+        if ("ecMul".equals(func) && args.size() == 2 && isConstInt(args.get(1), BigInteger.ZERO, vm)) {
+            return makeConstHex(INFINITY_HEX);
+        }
+        // Rule 5: ecMulGen(0) -> INFINITY
+        if ("ecMulGen".equals(func) && args.size() == 1 && isConstInt(args.get(0), BigInteger.ZERO, vm)) {
+            return makeConstHex(INFINITY_HEX);
+        }
+        // Rule 6: ecMulGen(1) -> G
+        if ("ecMulGen".equals(func) && args.size() == 1 && isConstInt(args.get(0), BigInteger.ONE, vm)) {
+            return makeConstHex(G_HEX);
+        }
+        // Rule 7: ecNegate(ecNegate(x)) -> x
+        if ("ecNegate".equals(func) && args.size() == 1) {
+            AnfValue inner = resolveValue(args.get(0), vm);
+            if (inner instanceof Call ic && "ecNegate".equals(ic.func()) && ic.args() != null && ic.args().size() == 1) {
+                return makeRef(ic.args().get(0));
+            }
+        }
+        // Rule 8: ecAdd(x, ecNegate(x)) -> INFINITY
+        if ("ecAdd".equals(func) && args.size() == 2) {
+            AnfValue neg = resolveValue(args.get(1), vm);
+            if (neg instanceof Call nc && "ecNegate".equals(nc.func()) && nc.args() != null && nc.args().size() == 1) {
+                if (sameBinding(args.get(0), nc.args().get(0), vm)) {
+                    return makeConstHex(INFINITY_HEX);
+                }
+            }
+        }
+        // Rule 9: ecMul(ecMul(p, k1), k2) -> ecMul(p, k1*k2 mod N)
+        if ("ecMul".equals(func) && args.size() == 2) {
+            AnfValue inner = resolveValue(args.get(0), vm);
+            BigInteger k2 = getConstInt(args.get(1), vm);
+            if (inner instanceof Call ic && "ecMul".equals(ic.func())
+                    && ic.args() != null && ic.args().size() == 2 && k2 != null) {
+                BigInteger k1 = getConstInt(ic.args().get(1), vm);
+                if (k1 != null) {
+                    BigInteger combined = k1.multiply(k2).mod(CURVE_N);
+                    String fresh = freshConstName(combined, vm, prelude);
+                    return new Call("ecMul", List.of(ic.args().get(0), fresh));
+                }
+            }
+        }
+        // Rule 10: ecAdd(ecMulGen(k1), ecMulGen(k2)) -> ecMulGen((k1+k2) mod N)
+        if ("ecAdd".equals(func) && args.size() == 2) {
+            AnfValue left = resolveValue(args.get(0), vm);
+            AnfValue right = resolveValue(args.get(1), vm);
+            if (left instanceof Call lc && "ecMulGen".equals(lc.func()) && lc.args() != null && lc.args().size() == 1
+                    && right instanceof Call rc && "ecMulGen".equals(rc.func()) && rc.args() != null && rc.args().size() == 1) {
+                BigInteger k1 = getConstInt(lc.args().get(0), vm);
+                BigInteger k2 = getConstInt(rc.args().get(0), vm);
+                if (k1 != null && k2 != null) {
+                    BigInteger combined = k1.add(k2).mod(CURVE_N);
+                    String fresh = freshConstName(combined, vm, prelude);
+                    return new Call("ecMulGen", List.of(fresh));
+                }
+            }
+        }
+        // Rule 11: ecAdd(ecMul(k1,p), ecMul(k2,p)) -> ecMul(p, k1+k2 mod N)
+        if ("ecAdd".equals(func) && args.size() == 2) {
+            AnfValue left = resolveValue(args.get(0), vm);
+            AnfValue right = resolveValue(args.get(1), vm);
+            if (left instanceof Call lc && "ecMul".equals(lc.func()) && lc.args() != null && lc.args().size() == 2
+                    && right instanceof Call rc && "ecMul".equals(rc.func()) && rc.args() != null && rc.args().size() == 2
+                    && sameBinding(lc.args().get(0), rc.args().get(0), vm)) {
+                BigInteger k1 = getConstInt(lc.args().get(1), vm);
+                BigInteger k2 = getConstInt(rc.args().get(1), vm);
+                if (k1 != null && k2 != null) {
+                    BigInteger combined = k1.add(k2).mod(CURVE_N);
+                    String fresh = freshConstName(combined, vm, prelude);
+                    return new Call("ecMul", List.of(lc.args().get(0), fresh));
+                }
+            }
+        }
+        // Rule 12: ecMul(G, k) -> ecMulGen(k)
+        if ("ecMul".equals(func) && args.size() == 2 && isGenerator(args.get(0), vm)) {
+            return new Call("ecMulGen", List.of(args.get(1)));
+        }
+        return null;
+    }
+
+    // ---------- value-inspection helpers (port of Python helpers) ----------
+
+    /**
+     * Resolve a binding name to its current ANFValue.
+     *
+     * <p>Match Python's narrow behavior: do NOT follow {@code @ref:} aliases
+     * (those are encoded as {@code load_const} in Java's ANF, and Python's
+     * {@code _resolve} only follows {@code load_param}-encoded aliases — which
+     * Java never emits). The optimizer therefore only fires when the literal
+     * value is directly bound to {@code name}, not when it's bound through
+     * an alias chain. This is what preserves byte-identical ANF parity with
+     * the canonical TS golden — the canonical pipeline does not eagerly
+     * collapse alias chains in the optimizer either.
+     */
+    private static AnfValue resolveValue(String name, Map<String, AnfValue> vm) {
+        return vm.get(name);
+    }
+
+    /**
+     * Canonical name for {@code sameBinding} comparisons. Matches
+     * {@link #resolveValue}'s narrow behavior: only follows {@code @ref:}
+     * aliases when they are encoded in the same load-param form Python's
+     * canonical pipeline produces (which Java never emits), so this reduces
+     * to identity in practice.
+     */
+    private static String canonical(String name, Map<String, AnfValue> vm) {
+        return name;
+    }
+
+    private static boolean sameBinding(String a, String b, Map<String, AnfValue> vm) {
+        return canonical(a, vm).equals(canonical(b, vm));
+    }
+
+    private static boolean isInfinity(String name, Map<String, AnfValue> vm) {
+        AnfValue val = resolveValue(name, vm);
+        return val instanceof LoadConst lc && lc.value() instanceof BytesConst bs
+            && INFINITY_HEX.equals(bs.hex());
+    }
+
+    private static boolean isGenerator(String name, Map<String, AnfValue> vm) {
+        AnfValue val = resolveValue(name, vm);
+        return val instanceof LoadConst lc && lc.value() instanceof BytesConst bs
+            && G_HEX.equals(bs.hex());
+    }
+
+    private static boolean isConstInt(String name, BigInteger n, Map<String, AnfValue> vm) {
+        AnfValue val = resolveValue(name, vm);
+        if (val instanceof LoadConst lc && lc.value() instanceof BigIntConst bc) {
+            return n.equals(bc.value());
+        }
+        return false;
+    }
+
+    private static BigInteger getConstInt(String name, Map<String, AnfValue> vm) {
+        AnfValue val = resolveValue(name, vm);
+        if (val instanceof LoadConst lc && lc.value() instanceof BigIntConst bc) {
+            return bc.value();
+        }
+        return null;
+    }
+
+    // ---------- value-construction helpers ----------
+
+    private static AnfValue makeRef(String name) {
+        return new LoadConst(new BytesConst("@ref:" + name));
+    }
+
+    private static AnfValue makeConstHex(String hex) {
+        return new LoadConst(new BytesConst(hex));
+    }
+
+    /**
+     * Produce a fresh `__ec_opt_N` binding holding the integer constant
+     * {@code value} and prepend it to {@code prelude} so the rewritten call
+     * can reference it. Returns the fresh binding name.
+     *
+     * <p>The counter is module-level (matches Python's global counter) so
+     * names are stable across method boundaries.
+     */
+    private static String freshConstName(BigInteger value, Map<String, AnfValue> vm, List<AnfBinding> prelude) {
+        int idx = FRESH_COUNTER.incrementAndGet();
+        String name = "__ec_opt_" + idx;
+        AnfValue v = new LoadConst(new BigIntConst(value));
+        vm.put(name, v);
+        prelude.add(new AnfBinding(name, v, null));
+        return name;
     }
 
     @SuppressWarnings("unused")
