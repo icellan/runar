@@ -3,6 +3,7 @@ package codegen
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -267,21 +268,232 @@ func TestFiatShamirKB_SqueezeMatchesReference(t *testing.T) {
 	t.Logf("FS sponge sample order matches reference: %v", want)
 }
 
-// TestSp1FriVerifier_AcceptsMinimalGuestFixture is the holistic acceptance
-// harness referenced by the porting brief. It currently exercises Step 1
-// only — the deeper steps still panic in `lowerVerifySP1FRI`, so the
-// holistic flow is gated to the binding sub-step until subsequent sub-step
-// implementations land.
+// publicValuesPoCBytes encodes the PoC fixture's public values
+// `[a=0, b=1, fib(7)=21]` as 12 bytes of little-endian u32s.
+func publicValuesPoCBytes() []byte {
+	return []byte{
+		0x00, 0x00, 0x00, 0x00,
+		0x01, 0x00, 0x00, 0x00,
+		0x15, 0x00, 0x00, 0x00,
+	}
+}
+
+// runReferenceTranscriptInit runs the off-chain Plonky3 DuplexChallenger
+// through the same observe/squeeze sequence emitted on-chain by
+// `emitTranscriptInit`. Returns alpha + zeta as canonical [4]uint32 and
+// the resulting permuted sponge state so tests can compare byte-for-byte.
 //
-// As each sub-step is filled in, this test should grow to invoke the
-// matching emit helpers in order. When all 12 steps land, replace the
-// inlined Step 1 call below with the top-level `lowerVerifySP1FRI` body.
+// Sequence (matches docs/sp1-fri-verifier.md §3 with sp1VKeyHash absorb
+// gated on absorbSP1VK):
+//
+//  1. (optional) chunk sp1VKeyHash into 4-byte LE u32s and observe each.
+//  2. chunk publicValues into 4-byte LE u32s and observe each.
+//  3. ObserveDigest(traceDigest).
+//  4. SampleExt4 → alpha.
+//  5. ObserveDigest(quotientDigest).
+//  6. SampleExt4 → zeta.
+//  7. ObserveExt4Slice(traceLocal); ObserveExt4Slice(traceNext);
+//     for each quotient chunk: ObserveExt4Slice(qcs[i]).
+func runReferenceTranscriptInit(
+	t *testing.T,
+	sp1VKeyHash []byte,
+	publicValues []byte,
+	traceDigest [8]uint32,
+	quotientDigest [8]uint32,
+	traceLocal []sp1fri.Ext4,
+	traceNext []sp1fri.Ext4,
+	quotChunks [][]sp1fri.Ext4,
+	absorbSP1VK bool,
+) (alpha, zeta [4]uint32) {
+	t.Helper()
+	chal := sp1fri.NewDuplexChallenger()
+
+	// Chunked-bytes absorb helper matching emitObserveByteString convention:
+	// little-endian unsigned u32 per 4-byte chunk; tail zero-padded if the
+	// length is not a multiple of 4.
+	absorbBytes := func(bs []byte) {
+		nChunks := (len(bs) + 3) / 4
+		for i := 0; i < nChunks; i++ {
+			start := i * 4
+			end := start + 4
+			if end > len(bs) {
+				end = len(bs)
+			}
+			var buf [4]byte
+			copy(buf[:], bs[start:end])
+			v := uint32(buf[0]) |
+				uint32(buf[1])<<8 |
+				uint32(buf[2])<<16 |
+				uint32(buf[3])<<24
+			chal.Observe(v)
+		}
+	}
+
+	if absorbSP1VK {
+		absorbBytes(sp1VKeyHash)
+	}
+	absorbBytes(publicValues)
+	chal.ObserveDigest(traceDigest)
+	a := chal.SampleExt4()
+	chal.ObserveDigest(quotientDigest)
+	z := chal.SampleExt4()
+	chal.ObserveExt4Slice(traceLocal)
+	chal.ObserveExt4Slice(traceNext)
+	for _, qc := range quotChunks {
+		chal.ObserveExt4Slice(qc)
+	}
+	for i := 0; i < 4; i++ {
+		alpha[i] = a[i]
+		zeta[i] = z[i]
+	}
+	return
+}
+
+// TestSp1FriVerifier_TranscriptMatchesReference is the byte-identity test
+// for Steps 2-5: the on-chain emission must reproduce the exact same
+// alpha + zeta canonical values as the off-chain DuplexChallenger fed
+// the same observe/squeeze sequence on the canonical fixture.
+//
+// The test path:
+//
+//  1. Decode the fixture, derive the canonical observation inputs.
+//  2. Run the reference DuplexChallenger to capture alpha + zeta.
+//  3. Build a Bitcoin Script that pushes the same inputs through the
+//     tracker and calls emitTranscriptInit.
+//  4. After emission, push the reference alpha + zeta and assert each
+//     element equals the on-chain value via OP_NUMEQUALVERIFY.
+//
+// A failure indicates a divergence between the codegen-emitted sponge
+// behaviour and the validated reference — the most common cause is an
+// observe/squeeze ordering bug in fiat_shamir_kb.go (see the duplex
+// fix at sp1fri/challenger.go:103).
+func TestSp1FriVerifier_TranscriptMatchesReference(t *testing.T) {
+	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+
+	pubVals := publicValuesPoCBytes()
+
+	alpha, zeta := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+
+	// Build the on-chain script.
+	var ops []StackOp
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+	fs := NewFiatShamirState()
+
+	params := DefaultSP1FriParams()
+	params.PublicValuesByteSize = len(pubVals)
+	params.SP1VKeyHashByteSize = 0 // PoC: no SP1 wrapper
+
+	// Push opened values first (deepest), in canonical order so the named
+	// slots survive subsequent toTop calls.
+	for i := 0; i < 2; i++ {
+		ext := traceLocal[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tl_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 2; i++ {
+		ext := traceNext[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tn_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 4; i++ {
+		ext := quotChunks[0][i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_qc_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+
+	// Push quotient digest (8 elements), named _obs_qdig_0..7 (qdig_0 deepest).
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_qdig_%d", i), int64(quotientDigest[i]))
+	}
+	// Push trace digest (8 elements), named _obs_dig_0..7.
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_dig_%d", i), int64(traceDigest[i]))
+	}
+	// Push publicValues bytes.
+	trackerPushBytes(tracker, "_obs_public_values", pubVals)
+
+	// === Steps 2-5 ===
+	emitTranscriptInit(fs, tracker, params)
+
+	// At this point the named alpha + zeta slots live above the sponge
+	// state (which sits above all originally-pushed values). Bring each
+	// alpha/zeta element to the top, push the reference value, and assert
+	// OP_NUMEQUALVERIFY.
+	assertEqualNamed := func(name string, ref uint32) {
+		tracker.toTop(name)
+		ops = append(ops, pushInt64(int64(ref)))
+		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
+		// NUMEQUALVERIFY consumed both operands.
+		tracker.rawBlock([]string{name}, "", func(e func(StackOp)) {})
+	}
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_zeta_%d", i), zeta[i])
+	}
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_alpha_%d", i), alpha[i])
+	}
+
+	// Drain everything else off the stack and end with OP_1.
+	for len(tracker.nm) > 0 {
+		ops = append(ops, opcode("OP_DROP"))
+		tracker.nm = tracker.nm[:len(tracker.nm)-1]
+	}
+	ops = append(ops, opcode("OP_1"))
+
+	if err := buildAndExecute(t, ops); err != nil {
+		t.Fatalf("on-chain transcript-init disagrees with the validated DuplexChallenger reference. "+
+			"Reference alpha=%v zeta=%v. Script error: %v", alpha, zeta, err)
+	}
+	t.Logf("Steps 2-5 transcript matches reference; alpha=%v zeta=%v; |ops|=%d",
+		alpha, zeta, len(ops))
+}
+
+// TestSp1FriVerifier_AcceptsMinimalGuestFixture is the holistic acceptance
+// harness. It exercises Steps 1 + 2-5 sequentially: first the proof-blob
+// binding (Step 1) consumes proofBlob and verifies the field-push
+// reconstruction; then the transcript init (Steps 2-5) runs against
+// canonical-observation inputs.
+//
+// The two halves are independent in this PR — Step 1 leaves the field
+// chunks on the stack; we drop them before running Steps 2-5, which
+// pushes its own observation inputs. The full pipeline-to-pipeline
+// wiring (where Step 1's leftover fields directly feed Step 2's
+// observations) lands in a follow-up that ports the per-field decoder.
 func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	bs := loadMinimalGuestProofBlob(t)
+	proof, err := sp1fri.DecodeProof(bs)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
 
-	// For now: split into 8 chunks and exercise only Step 1. As later steps
-	// land, append the Step 2..12 emit helpers here in declaration order
-	// (see emitSP1FriStructuralSkeleton in sp1_fri.go for the planned shape).
 	chunks := chunkProof(t, bs, 8)
 
 	var ops []StackOp
@@ -296,19 +508,108 @@ func TestSp1FriVerifier_AcceptsMinimalGuestFixture(t *testing.T) {
 	})
 	ops = append(ops, bindingOps...)
 
-	// === Steps 2-12 not yet emitted (panicSP1FriStub in sp1_fri.go). ===
-	// Drain leftover fields so the harness is self-contained.
+	// Drain field chunks (full per-field decoding lands in a follow-up).
 	for i := 0; i < len(chunks); i++ {
 		ops = append(ops, opcode("OP_DROP"))
+	}
+
+	// === Steps 2-5 ===
+	traceDigest := sp1fri.CanonicalDigest(proof.Commitments.Trace[0])
+	quotientDigest := sp1fri.CanonicalDigest(proof.Commitments.QuotientChunks[0])
+	traceLocal := make([]sp1fri.Ext4, len(proof.OpenedValues.TraceLocal))
+	for i, e := range proof.OpenedValues.TraceLocal {
+		traceLocal[i] = sp1fri.FromKbExt4(e)
+	}
+	traceNext := make([]sp1fri.Ext4, len(*proof.OpenedValues.TraceNext))
+	for i, e := range *proof.OpenedValues.TraceNext {
+		traceNext[i] = sp1fri.FromKbExt4(e)
+	}
+	quotChunks := make([][]sp1fri.Ext4, len(proof.OpenedValues.QuotientChunks))
+	for k, qc := range proof.OpenedValues.QuotientChunks {
+		quotChunks[k] = make([]sp1fri.Ext4, len(qc))
+		for i, e := range qc {
+			quotChunks[k][i] = sp1fri.FromKbExt4(e)
+		}
+	}
+	pubVals := publicValuesPoCBytes()
+
+	alpha, zeta := runReferenceTranscriptInit(
+		t, nil, pubVals, traceDigest, quotientDigest,
+		traceLocal, traceNext, quotChunks, false,
+	)
+
+	// Build a separate tracker for Steps 2-5 starting from an empty stack
+	// (the script is the same flat ops slice — the tracker just tracks the
+	// suffix of the stack we manage from this point on).
+	tracker := NewKBTracker(nil, func(op StackOp) { ops = append(ops, op) })
+	fs := NewFiatShamirState()
+	params := DefaultSP1FriParams()
+	params.PublicValuesByteSize = len(pubVals)
+	params.SP1VKeyHashByteSize = 0
+
+	for i := 0; i < 2; i++ {
+		ext := traceLocal[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tl_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 2; i++ {
+		ext := traceNext[i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_tn_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 4; i++ {
+		ext := quotChunks[0][i]
+		for j := 0; j < 4; j++ {
+			tracker.pushInt(fmt.Sprintf("_obs_open_qc_%d_c%d", i, j), int64(ext[j]))
+		}
+	}
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_qdig_%d", i), int64(quotientDigest[i]))
+	}
+	for i := 0; i < 8; i++ {
+		tracker.pushInt(fmt.Sprintf("_obs_dig_%d", i), int64(traceDigest[i]))
+	}
+	trackerPushBytes(tracker, "_obs_public_values", pubVals)
+
+	emitTranscriptInit(fs, tracker, params)
+
+	// Sanity-check alpha + zeta against the reference.
+	assertEqualNamed := func(name string, ref uint32) {
+		tracker.toTop(name)
+		ops = append(ops, pushInt64(int64(ref)))
+		ops = append(ops, opcode("OP_NUMEQUALVERIFY"))
+		tracker.rawBlock([]string{name}, "", func(e func(StackOp)) {})
+	}
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_zeta_%d", i), zeta[i])
+	}
+	for i := 3; i >= 0; i-- {
+		assertEqualNamed(fmt.Sprintf("_fs_alpha_%d", i), alpha[i])
+	}
+
+	// Drain everything else off the stack.
+	for len(tracker.nm) > 0 {
+		ops = append(ops, opcode("OP_DROP"))
+		tracker.nm = tracker.nm[:len(tracker.nm)-1]
 	}
 	ops = append(ops, opcode("OP_1"))
 
 	if err := buildAndExecute(t, ops); err != nil {
-		t.Fatalf("verifier rejected the canonical fixture (Step 1 only): %v", err)
+		t.Fatalf("verifier rejected the canonical fixture (Step 1 + 2-5): %v", err)
 	}
 
-	// Measurements (Step 1 in isolation).
-	t.Logf("Step 1 accepted canonical fixture; |proofBlob|=%d, |chunks|=%d, "+
-		"|step1 ops|=%d, total ops in harness=%d",
-		len(bs), len(chunks), len(bindingOps), len(ops))
+	// Measure compiled script size in bytes for the brief's reporting.
+	method := StackMethod{Name: "test", Ops: ops}
+	result, emitErr := Emit([]StackMethod{method})
+	scriptBytes := -1
+	if emitErr == nil {
+		scriptBytes = len(result.ScriptHex) / 2
+	}
+
+	t.Logf("Steps 1 + 2-5 accepted canonical fixture; |proofBlob|=%d, |chunks|=%d, "+
+		"|step1 ops|=%d, total ops in harness=%d, script bytes=%d, "+
+		"alpha=%v zeta=%v",
+		len(bs), len(chunks), len(bindingOps), len(ops), scriptBytes, alpha, zeta)
 }

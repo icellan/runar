@@ -48,30 +48,35 @@ import "fmt"
 // mirror Plonky3's `fib_air.rs` test config so the first end-to-end fixture
 // can be a Fibonacci AIR proof.
 type SP1FriVerifierParams struct {
-	LogBlowup        int // default 1; Plonky3 fib_air uses 2
-	NumQueries       int // PoC 2; production 100 (fallback 64 / 16)
-	MerkleDepth      int // PoC 4; production ~20
-	SumcheckRounds   int // PoC 4; production log2(trace_height)
-	LogFinalPolyLen  int // PoC 0 (constant final poly); Plonky3 fib_air 2
-	CommitPoWBits    int // PoC 0; production 16
-	QueryPoWBits     int // PoC 0; production 16
-	MaxLogArity      int // SP1/Plonky3 default: 1 (folding arity 2)
-	NumPolynomials   int // PoC 2; production: AIR trace width + quotient chunks
+	LogBlowup            int // default 1; Plonky3 fib_air uses 2
+	NumQueries           int // PoC 2; production 100 (fallback 64 / 16)
+	MerkleDepth          int // PoC 4; production ~20
+	SumcheckRounds       int // PoC 4; production log2(trace_height)
+	LogFinalPolyLen      int // PoC 0 (constant final poly); Plonky3 fib_air 2
+	CommitPoWBits        int // PoC 0; production 16
+	QueryPoWBits         int // PoC 0; production 16
+	MaxLogArity          int // SP1/Plonky3 default: 1 (folding arity 2)
+	NumPolynomials       int // PoC 2; production: AIR trace width + quotient chunks
+	PublicValuesByteSize int // bytes; PoC 12 (= 3 × u32 LE for [a, b, fib_n]); SP1 EVM guest 32
+	SP1VKeyHashByteSize  int // bytes; 0 disables the outer-wrapper absorb (validated PoC reference); SP1 prod 32
 }
 
 // DefaultSP1FriParams returns the PoC-scale parameter set. Overridden when
-// compiling against the EVM guest in Phase 2.
+// compiling against the EVM guest in Phase 2. Defaults match the validated
+// `packages/runar-go/sp1fri` minimal-guest fixture (no SP1 outer wrapper).
 func DefaultSP1FriParams() SP1FriVerifierParams {
 	return SP1FriVerifierParams{
-		LogBlowup:       1,
-		NumQueries:      2,
-		MerkleDepth:     4,
-		SumcheckRounds:  4,
-		LogFinalPolyLen: 0,
-		CommitPoWBits:   0,
-		QueryPoWBits:    0,
-		MaxLogArity:     1,
-		NumPolynomials:  2,
+		LogBlowup:            2, // matches sp1fri minimalGuestConfig.logBlowup
+		NumQueries:           2,
+		MerkleDepth:          4,
+		SumcheckRounds:       4,
+		LogFinalPolyLen:      2, // matches sp1fri minimalGuestConfig.logFinalPolyLen
+		CommitPoWBits:        1, // matches sp1fri minimalGuestConfig.commitPowBits
+		QueryPoWBits:         1, // matches sp1fri minimalGuestConfig.queryPowBits
+		MaxLogArity:          1,
+		NumPolynomials:       2,
+		PublicValuesByteSize: 12, // [0,1,21] u32-LE-packed = 12 bytes
+		SP1VKeyHashByteSize:  0,  // PoC fixture has no SP1 wrapper
 	}
 }
 
@@ -681,48 +686,327 @@ func emitFinalPolyEqualityCheck(t *KBTracker) {
 }
 
 // =============================================================================
-// Absorb-a-ByteString helper (SP1-specific encoding — stubbed)
+// Steps 2-5 emission — transcript init through opened-values absorb
+// =============================================================================
+//
+// These helpers translate the Go-reference verifier's transcript replay at
+// `packages/runar-go/sp1fri/verify.go:60-110` into Bitcoin Script. Each
+// helper is a thin codegen wrapper around the existing `FiatShamirState`
+// observe/squeeze primitives (`fiat_shamir_kb.go`).
+//
+// Stack convention (mirrors existing FS helpers):
+//
+//   - The 16-element sponge state lives on the main stack as fs0..fs15
+//     (fs0 deepest, fs15 just below any caller-pushed values). It is put
+//     there by `FiatShamirState.EmitInit`.
+//   - All caller-supplied values are pushed THROUGH the tracker so the
+//     tracker's name table stays in sync with the runtime stack. Raw
+//     `pushBytes` outside the tracker WILL desync the tracker; callers
+//     must use `t.pushInt` / `tracker.pushInt` for KB elements and the
+//     tracker-aware `trackerPushBytes` helper below for ByteString blobs.
+//   - During permutation (auto-fired by EmitObserve when the rate fills)
+//     the prime is parked on the alt-stack via PushPrimeCache. Any value
+//     that the caller has temporarily stashed on the alt-stack must be
+//     POPPED before the next observation. Helpers below stay on the main
+//     stack throughout.
+
+// trackerPushBytes pushes a raw byte literal through the tracker so the name
+// table stays in sync. Used for chunked-byte-string absorption tests where
+// the value originates as a ByteString rather than a KB element.
+func trackerPushBytes(t *KBTracker, name string, b []byte) {
+	t.e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: append([]byte(nil), b...)}})
+	t.nm = append(t.nm, name)
+}
+
+// trackerSplit performs OP_SPLIT on the top of the stack: consumes
+// [bytes, n] and produces [prefix, suffix] (suffix on top). Updates the
+// tracker name table accordingly.
+//
+// Mirrors the BSV semantics: OP_SPLIT pops the split-position `n` and
+// the byte string, pushes the first `n` bytes (prefix) deeper and the
+// remaining bytes (suffix) on top.
+func trackerSplit(t *KBTracker, prefixName, suffixName string) {
+	// Pop the integer split-position and the byte string from tracker.
+	if len(t.nm) >= 2 {
+		t.nm = t.nm[:len(t.nm)-2]
+	}
+	t.e(StackOp{Op: "opcode", Code: "OP_SPLIT"})
+	t.nm = append(t.nm, prefixName)
+	t.nm = append(t.nm, suffixName)
+}
+
+// emitObserveByteString absorbs a ByteString into the Fiat-Shamir transcript
+// by chunking it into KoalaBear field elements (4 bytes per field; tail
+// padded with low-order zero bytes if |bs| mod 4 != 0) and observing each
+// chunk in declaration (left-to-right) order.
+//
+// Used for absorbing `sp1VKeyHash` (32 bytes → 8 chunks) and `publicValues`
+// (variable length; for the PoC fixture 12 bytes → 3 chunks).
+//
+// Convention: matches the SP1 outer-wrapper byte-to-field packing per
+// `docs/sp1-fri-verifier.md` §3.1 — each 4-byte LE chunk is interpreted
+// as a little-endian unsigned u32 and absorbed as a base-field element.
+// Mirrors `packages/runar-go/sp1fri/challenger.go::ObserveSlice`
+// composed with the wrapper-layer u32 packing.
+//
+// Stack in:  [..., fs0..fs15, bs]      (bs is byteSize bytes long)
+// Stack out: [..., fs0'..fs15']         (bs and any chunks consumed)
+func emitObserveByteString(fs *FiatShamirState, t *KBTracker, byteSize int) {
+	if byteSize == 0 {
+		// Empty ByteString — drop and return; nothing to absorb.
+		t.drop()
+		return
+	}
+	if byteSize < 0 {
+		panic(fmt.Sprintf("emitObserveByteString: byteSize must be non-negative, got %d", byteSize))
+	}
+	numChunks := (byteSize + 3) / 4
+	tail := byteSize - 4*(numChunks-1) // bytes in the last chunk (1..4)
+
+	// Name the input so the tracker can track it through splits.
+	t.rename("_obs_bs_remain")
+
+	// Phase 1: extract the first numChunks-1 4-byte chunks as canonical u32s
+	// onto the stack, named _obs_chunk_0 ... _obs_chunk_{N-2}. After each
+	// extraction _obs_bs_remain is shorter by 4 bytes and stays on top.
+	for i := 0; i < numChunks-1; i++ {
+		// Push 4, OP_SPLIT → prefix(4), suffix(remain - 4).
+		t.pushInt("_obs_split_n", 4)
+		trackerSplit(t, fmt.Sprintf("_obs_chunk_%d_bytes", i), "_obs_bs_remain")
+
+		// Bring the prefix bytes to the top to convert.
+		t.toTop(fmt.Sprintf("_obs_chunk_%d_bytes", i))
+
+		// Pad with one zero byte (sign byte) and OP_BIN2NUM to interpret as
+		// LE unsigned. The 0x00 sign byte ensures values >= 2^31 are still
+		// treated as positive.
+		chunkName := fmt.Sprintf("_obs_chunk_%d", i)
+		t.rawBlock([]string{fmt.Sprintf("_obs_chunk_%d_bytes", i)}, chunkName, func(e func(StackOp)) {
+			e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: []byte{0x00}}})
+			e(StackOp{Op: "opcode", Code: "OP_CAT"})
+			e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+		})
+
+		// After the conversion the chunk number is on top; _obs_bs_remain is
+		// just below it. Swap so _obs_bs_remain is back on top for the next
+		// iteration. (For the final iteration we keep _obs_bs_remain below
+		// to convert it; see Phase 2.)
+		t.swap()
+	}
+
+	// Phase 2: convert the last chunk (_obs_bs_remain). If tail < 4, we pad
+	// the high bytes with zeros to make a 5-byte LE unsigned representation.
+	// SP1 convention: low-order zero pad in LE means HIGH-byte position
+	// (the bytes that come AFTER the actual data in LE order) gets zeros.
+	t.toTop("_obs_bs_remain")
+	chunkName := fmt.Sprintf("_obs_chunk_%d", numChunks-1)
+	t.rawBlock([]string{"_obs_bs_remain"}, chunkName, func(e func(StackOp)) {
+		// Pad bytes: (4 - tail) zero bytes to fill the chunk + 1 sign byte.
+		padLen := (4 - tail) + 1
+		pad := make([]byte, padLen)
+		e(StackOp{Op: "push", Value: PushValue{Kind: "bytes", Bytes: pad}})
+		e(StackOp{Op: "opcode", Code: "OP_CAT"})
+		e(StackOp{Op: "opcode", Code: "OP_BIN2NUM"})
+	})
+
+	// Phase 3: absorb the chunks in declaration order (chunk_0 first).
+	// Each EmitObserve consumes the top of the stack and may trigger a
+	// permutation (when absorbPos hits 8). Bring chunk_i to the top
+	// individually so we don't have to worry about which chunks remain
+	// after intermediate observations.
+	for i := 0; i < numChunks; i++ {
+		t.toTop(fmt.Sprintf("_obs_chunk_%d", i))
+		fs.EmitObserve(t)
+	}
+}
+
+// emitObserveDigest absorbs an 8-element Poseidon2-KB digest into the
+// transcript in canonical order (d0 first, d7 last).
+//
+// Mirrors `packages/runar-go/sp1fri/challenger.go::ObserveDigest`.
+//
+// Stack in:  [..., fs0..fs15, d0, d1, ..., d7]   (d7 on top, d0 deepest of
+//                                                 the digest block)
+// Stack out: [..., fs0'..fs15']                   (digest fully consumed)
+//
+// Caller must have pushed the 8 elements through the tracker with names
+// `digestNames[0..7]` so the tracker can locate each by name. We use a
+// fixed naming scheme to match the test harness: `_obs_dig_<i>`.
+func emitObserveDigest(fs *FiatShamirState, t *KBTracker) {
+	for i := 0; i < 8; i++ {
+		t.toTop(fmt.Sprintf("_obs_dig_%d", i))
+		fs.EmitObserve(t)
+	}
+}
+
+// emitObserveExt4 absorbs an Ext4 element (4 base coefficients) into the
+// transcript in coefficient order (c0 first, c3 last).
+//
+// Mirrors `packages/runar-go/sp1fri/challenger.go::ObserveExt4`.
+//
+// Stack in:  [..., fs0..fs15, c0, c1, c2, c3]   (c3 on top)
+// Stack out: [..., fs0'..fs15']
+//
+// Caller must have named the 4 coefficients via the `extNames` slice.
+func emitObserveExt4Named(fs *FiatShamirState, t *KBTracker, extNames [4]string) {
+	for i := 0; i < 4; i++ {
+		t.toTop(extNames[i])
+		fs.EmitObserve(t)
+	}
+}
+
+// emitObserveOpenedValues absorbs all opened values in the canonical
+// Plonky3 emit order. For the PoC minimal-guest fixture
+// (`packages/runar-go/sp1fri/verify.go:98-106`) this is:
+//   - 2 trace_local Ext4 elements
+//   - 2 trace_next Ext4 elements
+//   - 1 quotient_chunks batch of 1 chunk × 4 Ext4 elements
+//
+// (preprocessed_local/_next and random are typically None for the PoC.)
+//
+// All Ext4 elements use the same coefficient-order convention as
+// `emitObserveExt4Named`. The caller must have named them
+// `_obs_open_<group>_<idx>_c<coef>` per the scheme below.
+//
+// Naming scheme (matches the test harness pushOpenedValues):
+//   - trace_local Ext4 i (0..1):   _obs_open_tl_<i>_c<j>   for j in 0..3
+//   - trace_next  Ext4 i (0..1):   _obs_open_tn_<i>_c<j>
+//   - quotient_chunks Ext4 i (0..3): _obs_open_qc_<i>_c<j>
+//
+// Stack convention: caller has pushed all 4 + 4 + 4 = 12 Ext4 values =
+// 48 base-field KB elements ahead of this call. We absorb them in the
+// canonical order; the tracker's `toTop` finds each by name.
+func emitObserveOpenedValues(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
+	_ = params // PoC fixture is hard-coded; future versions parameterise.
+
+	// trace_local: 2 Ext4 elements.
+	for i := 0; i < 2; i++ {
+		var names [4]string
+		for j := 0; j < 4; j++ {
+			names[j] = fmt.Sprintf("_obs_open_tl_%d_c%d", i, j)
+		}
+		emitObserveExt4Named(fs, t, names)
+	}
+	// trace_next: 2 Ext4 elements.
+	for i := 0; i < 2; i++ {
+		var names [4]string
+		for j := 0; j < 4; j++ {
+			names[j] = fmt.Sprintf("_obs_open_tn_%d_c%d", i, j)
+		}
+		emitObserveExt4Named(fs, t, names)
+	}
+	// quotient_chunks: 1 batch × 4 Ext4 elements (Challenge::DIMENSION = 4).
+	for i := 0; i < 4; i++ {
+		var names [4]string
+		for j := 0; j < 4; j++ {
+			names[j] = fmt.Sprintf("_obs_open_qc_%d_c%d", i, j)
+		}
+		emitObserveExt4Named(fs, t, names)
+	}
+}
+
+// emitTranscriptInit orchestrates Steps 2-5 of the SP1 FRI verifier:
+// transcript initialisation, sp1VKeyHash absorb, publicValues absorb,
+// trace-commitment absorb, alpha squeeze, quotient-commitment absorb,
+// zeta squeeze, opened-values absorb.
+//
+// Mirrors the canonical Plonky3 + SP1-outer-wrapper sequence per
+// `docs/sp1-fri-verifier.md` §3 with the byte-to-field packing for
+// sp1VKeyHash and publicValues per §3.1. The validated Go-reference
+// `packages/runar-go/sp1fri/verify.go:60-110` is the post-wrapper
+// equivalent (the regen Rust binary does not produce a sp1VKeyHash so
+// the reference verifier omits it).
+//
+// Stack in (top → bottom): the caller has pushed every observed value
+// through the tracker with the canonical naming scheme:
+//
+//   - sp1VKeyHash (ByteString):           _obs_sp1_vk_hash
+//   - publicValues (ByteString):          _obs_public_values
+//   - trace digest (8 KB elements):       _obs_dig_0 .. _obs_dig_7
+//   - quotient digest (8 KB elements):    _obs_qdig_0 .. _obs_qdig_7
+//   - opened values (Ext4 components):    _obs_open_*_c*  (see
+//                                          emitObserveOpenedValues)
+//
+// The SP1FriVerifierParams.PublicValuesByteSize and SP1VKeyHashByteSize
+// fields control the chunking lengths.
+//
+// Stack out: the sponge state fs0..fs15 on top (with alpha + zeta values
+// also live as `_fs_alpha_<i>` / `_fs_zeta_<i>` named slots above the
+// sponge state). Subsequent Steps 6+ consume these.
+func emitTranscriptInit(fs *FiatShamirState, t *KBTracker, params SP1FriVerifierParams) {
+	// Step 2a — Initialise the sponge state on the main stack.
+	fs.EmitInit(t)
+
+	// Step 2b — Absorb sp1VKeyHash bytes (outer SP1 wrapper layer per
+	// docs/sp1-fri-verifier.md §3). Caller-supplied byte length controls
+	// the chunk count. For the canonical Plonky3 fixture (no SP1 wrapper)
+	// callers pass SP1VKeyHashByteSize=0 and the helper is a no-op.
+	if params.SP1VKeyHashByteSize > 0 {
+		t.toTop("_obs_sp1_vk_hash")
+		emitObserveByteString(fs, t, params.SP1VKeyHashByteSize)
+	}
+
+	// Step 3 — Absorb publicValues bytes (Plonky3 inner verifier per
+	// verifier.rs:367).
+	t.toTop("_obs_public_values")
+	emitObserveByteString(fs, t, params.PublicValuesByteSize)
+
+	// Step 4 — Absorb the trace commitment (8-element Poseidon2 digest).
+	emitObserveDigest(fs, t)
+
+	// Step 5 — Squeeze alpha (Ext4) — produces _fs_ext4_0.._fs_ext4_3 on top.
+	fs.EmitSqueezeExt4(t)
+	// Rename the 4 squeeze outputs so subsequent squeezes (e.g. zeta) don't
+	// overwrite the names.
+	t.rename("_fs_alpha_3")
+	t.toTop("_fs_ext4_2")
+	t.rename("_fs_alpha_2")
+	t.toTop("_fs_ext4_1")
+	t.rename("_fs_alpha_1")
+	t.toTop("_fs_ext4_0")
+	t.rename("_fs_alpha_0")
+
+	// Step 6 — Absorb the quotient_chunks commitment (8-element digest).
+	for i := 0; i < 8; i++ {
+		// Re-target the digest helper at the quotient-digest names.
+		// We inline rather than call emitObserveDigest because the names differ.
+		t.toTop(fmt.Sprintf("_obs_qdig_%d", i))
+		fs.EmitObserve(t)
+	}
+
+	// Step 7 — Squeeze zeta (Ext4).
+	fs.EmitSqueezeExt4(t)
+	t.rename("_fs_zeta_3")
+	t.toTop("_fs_ext4_2")
+	t.rename("_fs_zeta_2")
+	t.toTop("_fs_ext4_1")
+	t.rename("_fs_zeta_1")
+	t.toTop("_fs_ext4_0")
+	t.rename("_fs_zeta_0")
+
+	// Step 8 — Absorb opened values in Plonky3 emit order.
+	emitObserveOpenedValues(fs, t, params)
+}
+
+// =============================================================================
+// Absorb-a-ByteString helper (deprecated stub — superseded by
+// emitObserveByteString above; kept for documentation cross-reference).
 // =============================================================================
 
-// emitAbsorbByteString absorbs a ByteString into the Fiat-Shamir transcript
-// by chunking it into KoalaBear field elements (4 bytes per field; 3 bytes
-// for the tail if |bs| mod 4 != 0 using SP1's zero-pad convention) and
-// observing each chunk.
-//
-// Used for absorbing `publicValues` and `sp1VKeyHash`.
-//
-// The chunking convention is SP1-specific — Plonky3's DuplexChallenger
-// observes bytes via `observe_slice` but SP1 has its own byte-to-field
-// packing for public values. See
-// `crates/stark/src/machine.rs::observe_public_values` in SP1 v6.0.2 for
-// the authoritative sequence.
+// emitAbsorbByteString is the original, never-implemented stub. Use
+// emitObserveByteString instead. Kept only so the panic-string regression
+// tests that look for the old reference-pointer text still pass; will be
+// removed once all step ports are wired through emitObserveByteString.
 func emitAbsorbByteString(fs *FiatShamirState, t *KBTracker) {
-	panicSP1FriStub(
-		"absorb-ByteString-as-field-elements",
-		"Two distinct conventions to disambiguate at port time:\n"+
-			"  (a) Plonky3 inner: `uni-stark/src/verifier.rs:367` calls "+
-			"`challenger.observe_slice(public_values)` where `public_values: &[Val]` is "+
-			"already a slice of base-field elements. NO byte-to-field chunking happens "+
-			"at this layer.\n"+
-			"  (b) SP1 outer wrapper: SP1 v6.0.2 `crates/stark/src/machine.rs` "+
-			"`MachineVerifier::observe_pv_digest` packs the keccak256(VK) digest into "+
-			"field elements as 8 u32 chunks (32 bytes / 4 bytes per chunk), each reduced "+
-			"mod p. The publicValues blob is similarly chunked when the guest program "+
-			"emits a Vec<u32> of public values.\n"+
-			"For the PoC `runar.VerifySP1FRI(proofBlob, publicValues, sp1VKeyHash)` "+
-			"intrinsic: sp1VKeyHash is a 32-byte ByteString → 8 × 4-byte LE chunks → "+
-			"each OP_BIN2NUM → each absorbed via fs.EmitObserve. publicValues uses "+
-			"the same 4-byte chunking with zero-padding for any tail bytes.",
-		"Structural shape: dup the ByteString, OP_SIZE, push(4), OP_DIV → chunk count. "+
-			"Loop chunkCount times: OP_PUSH(4), OP_SPLIT (yields prefix + suffix), SWAP, "+
-			"OP_BIN2NUM, fs.EmitObserve(t), continue with suffix. Tail handling: if the "+
-			"final remainder is < 4 bytes, OP_CAT a zero-pad-suffix before BIN2NUM (SP1 "+
-			"convention: low-order zero pad). At codegen time the byte-length is statically "+
-			"known for sp1VKeyHash (32) but variable for publicValues — for the PoC fixture "+
-			"the publicValues length is fixed at 12 bytes (3 × u32 for [0,1,21]), so the "+
-			"chunk loop unrolls to 3 iterations.")
 	_ = fs
 	_ = t
+	panicSP1FriStub(
+		"absorb-ByteString-as-field-elements (legacy)",
+		"superseded by emitObserveByteString in this same file; see "+
+			"docs/sp1-fri-verifier.md §3.1 for the byte-to-field convention.",
+		"Caller migration: replace emitAbsorbByteString(fs, t) with "+
+			"emitObserveByteString(fs, t, byteSize) where byteSize is the "+
+			"static length of the ByteString.")
 }
 
 // =============================================================================
