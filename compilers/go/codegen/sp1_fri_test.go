@@ -2139,13 +2139,17 @@ func publicValuesEvmGuestBytes() []byte {
 // TestSp1FriVerifier_AcceptsEvmGuestFixture is the Phase 2 production-scale
 // acceptance harness: the same `EmitFullSP1FriVerifierBody` orchestrator,
 // the same Bitcoin Script VM, but at the production parameter tuple
-// (num_queries=100, log_blowup=1, log_final_poly_len=9, degreeBits=10,
+// (num_queries=100, log_blowup=1, log_final_poly_len=0, degreeBits=10,
 // commit_pow_bits=16, query_pow_bits=16) against the canonical Plonky3
 // KoalaBear evm-guest FRI fixture.
 //
-// The codegen-helper invariant `numRounds = 1` (sp1_fri.go:317) is preserved
-// by pinning `log_final_poly_len = degreeBits - 1`; the production tuple
-// otherwise matches `docs/sp1-fri-verifier.md` Section 4 exactly.
+// The codegen helper now derives `numRounds = degreeBits - logFinalPolyLen`
+// (sp1_fri.go:368) per the Plonky3 prover invariant
+// (fri/src/prover.rs:75: `log_min_height > log_final_poly_len + log_blowup`),
+// so the natural production tuple is `logFinalPolyLen=0` ⇒ `numRounds=10`.
+// The previous workaround pin (`logFinalPolyLen=9` ⇒ `numRounds=1`) is gone;
+// the production tuple now matches `docs/sp1-fri-verifier.md` Section 4
+// exactly with no degenerate parameter pinning.
 //
 // Captures the measurements requested in the brief:
 //   - total emit ops
@@ -2196,11 +2200,8 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 		}
 	}
 	numRounds := len(proof.OpeningProof.CommitPhaseCommits)
-	if numRounds != 1 {
-		t.Fatalf("evm-guest fixture has numRounds=%d but the codegen helper "+
-			"hard-codes numRounds=1 (sp1_fri.go:317). Either regenerate the "+
-			"fixture with degreeBits = log_final_poly_len + 1 or relax the "+
-			"helper to compute numRounds from params.", numRounds)
+	if numRounds < 1 {
+		t.Fatalf("evm-guest fixture has numRounds=%d (< 1)", numRounds)
 	}
 	friCommitDigests := make([][8]uint32, numRounds)
 	for r, capRow := range proof.OpeningProof.CommitPhaseCommits {
@@ -2227,7 +2228,7 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	const queryPowBits = 16
 	const degreeBits = 10
 	const logBlowup = 1
-	const logFinalPolyLen = 9
+	const logFinalPolyLen = 0
 	const numQueries = 100
 
 	if len(finalPoly) != 1<<logFinalPolyLen {
@@ -2255,7 +2256,9 @@ func TestSp1FriVerifier_AcceptsEvmGuestFixture(t *testing.T) {
 	// === Build the unlocking-script prelude. Order matches
 	// `sp1FriPrePushedFieldNames` byte-for-byte (deepest-first). Same
 	// structure as the PoC test (sp1_fri_test.go:583-643), only the
-	// finalPoly is much larger (512 Ext4 = 2048 base elements).
+	// per-round witness layer is wider (numRounds=10 commit digests +
+	// PoW witnesses + logArities) while the finalPoly itself is a single
+	// Ext4 element (logFinalPolyLen=0 ⇒ 1<<0 = 1 Ext4 = 4 base elements).
 	var ops []StackOp
 
 	// 1a. Step 8 inputs (deepest of the transcript-input layer).
