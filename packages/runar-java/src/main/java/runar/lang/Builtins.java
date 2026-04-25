@@ -6,6 +6,7 @@ import runar.lang.runtime.MockCrypto;
 import runar.lang.runtime.Preimage;
 import runar.lang.runtime.SimulatorContext;
 import runar.lang.types.Addr;
+import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
 import runar.lang.types.RabinPubKey;
@@ -425,5 +426,85 @@ public final class Builtins {
     public static boolean verifyRabinSig(ByteString msg, RabinSig sig, ByteString padding, RabinPubKey pubKey) {
         if (!SimulatorContext.isActive()) throw notInSimulator("verifyRabinSig");
         return MockCrypto.verifyRabinSig(msg, sig.value(), padding, pubKey.value());
+    }
+
+    // ===================================================================
+    // Baby Bear prime field arithmetic (Bigint-typed shims).
+    //
+    // The Rúnar Java compiler recognises these names as Go-only crypto
+    // builtins and emits no Stack-IR for them yet — but Rúnar contracts
+    // written in Java still need to call them through the canonical
+    // {@code Bigint}-typed surface so the source parses, validates, and
+    // typechecks cleanly. Each shim delegates to {@link MockCrypto} for
+    // off-chain simulation.
+    // ===================================================================
+
+    public static Bigint bbFieldAdd(Bigint a, Bigint b) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("bbFieldAdd");
+        return new Bigint(MockCrypto.bbFieldAdd(a.value(), b.value()));
+    }
+    public static Bigint bbFieldSub(Bigint a, Bigint b) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("bbFieldSub");
+        return new Bigint(MockCrypto.bbFieldSub(a.value(), b.value()));
+    }
+    public static Bigint bbFieldMul(Bigint a, Bigint b) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("bbFieldMul");
+        return new Bigint(MockCrypto.bbFieldMul(a.value(), b.value()));
+    }
+    public static Bigint bbFieldInv(Bigint a) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("bbFieldInv");
+        return new Bigint(MockCrypto.bbFieldInv(a.value()));
+    }
+
+    // ===================================================================
+    // Baby Bear Ext4 (quartic extension field) arithmetic — Go-only crypto
+    // family. The Rúnar Java compiler recognises these names as builtins
+    // (returning {@code bigint}) but no off-chain simulator implementation
+    // ships in {@link MockCrypto} yet. The shims are present so contracts
+    // referencing them parse + Java-compile; calling them at JVM runtime
+    // throws {@link UnsupportedOperationException}.
+    // ===================================================================
+
+    public static Bigint bbExt4Mul0(Bigint a0, Bigint a1, Bigint a2, Bigint a3,
+                                    Bigint b0, Bigint b1, Bigint b2, Bigint b3) {
+        throw notInSimulator("bbExt4Mul0");
+    }
+    public static Bigint bbExt4Mul1(Bigint a0, Bigint a1, Bigint a2, Bigint a3,
+                                    Bigint b0, Bigint b1, Bigint b2, Bigint b3) {
+        throw notInSimulator("bbExt4Mul1");
+    }
+    public static Bigint bbExt4Mul2(Bigint a0, Bigint a1, Bigint a2, Bigint a3,
+                                    Bigint b0, Bigint b1, Bigint b2, Bigint b3) {
+        throw notInSimulator("bbExt4Mul2");
+    }
+    public static Bigint bbExt4Mul3(Bigint a0, Bigint a1, Bigint a2, Bigint a3,
+                                    Bigint b0, Bigint b1, Bigint b2, Bigint b3) {
+        throw notInSimulator("bbExt4Mul3");
+    }
+    public static Bigint bbExt4Inv0(Bigint a0, Bigint a1, Bigint a2, Bigint a3) {
+        throw notInSimulator("bbExt4Inv0");
+    }
+    public static Bigint bbExt4Inv1(Bigint a0, Bigint a1, Bigint a2, Bigint a3) {
+        throw notInSimulator("bbExt4Inv1");
+    }
+    public static Bigint bbExt4Inv2(Bigint a0, Bigint a1, Bigint a2, Bigint a3) {
+        throw notInSimulator("bbExt4Inv2");
+    }
+    public static Bigint bbExt4Inv3(Bigint a0, Bigint a1, Bigint a2, Bigint a3) {
+        throw notInSimulator("bbExt4Inv3");
+    }
+
+    // ===================================================================
+    // Merkle proof verification — SHA-256 (STARK / FRI) and Hash256
+    // (Bitcoin). Bigint-typed shims delegate to {@link MockCrypto}.
+    // ===================================================================
+
+    public static ByteString merkleRootSha256(ByteString leaf, ByteString proof, Bigint index, Bigint depth) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("merkleRootSha256");
+        return MockCrypto.merkleRootSha256(leaf, proof, index.value(), depth.value());
+    }
+    public static ByteString merkleRootHash256(ByteString leaf, ByteString proof, Bigint index, Bigint depth) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("merkleRootHash256");
+        return MockCrypto.merkleRootHash256(leaf, proof, index.value(), depth.value());
     }
 }

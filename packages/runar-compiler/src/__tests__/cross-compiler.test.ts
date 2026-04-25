@@ -187,9 +187,60 @@ try {
   // ruby not installed
 }
 
+// ---------------------------------------------------------------------------
+// Java: invoke `java -jar compilers/java/build/libs/runar-java*.jar`.
+// Mirrors the binary-discovery pattern from conformance/runner/runner.ts
+// (findJavaBinary). If the jar is missing we attempt to build it via gradle
+// once; if gradle is unavailable or the build fails we skip with a warning.
+// ---------------------------------------------------------------------------
+const JAVA_COMPILER_DIR = join(__dirname, '..', '..', '..', '..', 'compilers', 'java');
+
+function findJavaJar(): string | null {
+  const libsDir = join(JAVA_COMPILER_DIR, 'build', 'libs');
+  const candidates: string[] = [];
+  const preferred = join(libsDir, 'runar-java.jar');
+  if (existsSync(preferred)) candidates.push(preferred);
+  if (existsSync(libsDir)) {
+    try {
+      for (const entry of readdirSync(libsDir)) {
+        if (entry.startsWith('runar-java-compiler-') && entry.endsWith('.jar')) {
+          candidates.push(join(libsDir, entry));
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return candidates.length > 0 ? candidates[0]! : null;
+}
+
+let javaJarPath: string | null = null;
+try {
+  execSync('java -version', { stdio: 'pipe' });
+  javaJarPath = findJavaJar();
+  if (!javaJarPath) {
+    // Attempt a one-shot gradle build. If gradle is missing or the build
+    // fails we leave javaJarPath null and skip the suite below.
+    try {
+      execSync('gradle --version', { stdio: 'pipe' });
+      execSync('gradle jar --no-daemon', {
+        cwd: JAVA_COMPILER_DIR,
+        timeout: 600_000,
+        stdio: 'pipe',
+      });
+      javaJarPath = findJavaJar();
+    } catch {
+      // gradle missing or build failed
+    }
+  }
+} catch {
+  // java not installed
+}
+
 if (!hasPython) console.warn('WARNING: Python compiler not found — skipping Python cross-compiler tests');
 if (!zigBinaryPath) console.warn('WARNING: Zig compiler binary not found — skipping Zig cross-compiler tests');
 if (!rubyScriptPath) console.warn('WARNING: Ruby compiler not found — skipping Ruby cross-compiler tests');
+if (!javaJarPath) console.warn('WARNING: Java compiler jar not found — skipping Java cross-compiler tests');
 
 // ---------------------------------------------------------------------------
 // Helper functions
@@ -344,6 +395,28 @@ function runRubyCompiler(irFilePath: string): CompilerOutput {
   try {
     const result = execSync(
       `ruby "${rubyScriptPath}" --ir "${irFilePath}" --hex --disable-constant-folding`,
+      {
+        timeout: 60_000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return { hex: result.toString().trim(), stderr: '' };
+  } catch (e: unknown) {
+    const stderr = (e as { stderr?: Buffer })?.stderr?.toString().trim() ?? '';
+    return { hex: null, stderr };
+  }
+}
+
+/**
+ * Run the Java compiler on an ANF IR JSON file. JVM startup is the dominant
+ * cost (~600ms cold) so timeouts are bumped to 60s to absorb it.
+ */
+function runJavaCompiler(irFilePath: string): CompilerOutput {
+  if (!javaJarPath) return { hex: null, stderr: 'Java compiler jar not available' };
+  try {
+    const result = execSync(
+      `java -jar "${javaJarPath}" --ir "${irFilePath}" --hex --disable-constant-folding`,
       {
         timeout: 60_000,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -1029,6 +1102,48 @@ describe.skipIf(!rubyScriptPath)('Cross-compiler: TS IR -> Ruby Script', () => {
 
       const rubyHex = requireHex(runRubyCompiler(irPath), 'Ruby', name);
       expect(rubyHex.toLowerCase()).toBe(tsHex.toLowerCase());
+    }, 60_000);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cross-compiler: TS IR -> Java Script
+// ---------------------------------------------------------------------------
+
+describe.skipIf(!javaJarPath)('Cross-compiler: TS IR -> Java Script', () => {
+  let tempDir: string;
+
+  beforeAll(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'runar-cross-java-'));
+  });
+
+  afterAll(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  for (const { name, source } of CONTRACT_SOURCES) {
+    // JVM startup is slow; 60s per test mirrors the Ruby/Python pattern.
+    it(`Java compiler accepts ${name} ANF IR and produces hex matching TS`, () => {
+      const tsResult = compile(source);
+      if (!tsResult.success) {
+        throw new Error(tsCompileErrors(name, tsResult.diagnostics));
+      }
+
+      expect(tsResult.anf).not.toBeNull();
+      expect(typeof tsResult.scriptHex).toBe('string');
+      const tsAnf = tsResult.anf!;
+      const tsHex = tsResult.scriptHex as string;
+
+      const irJson = anfToJson(tsAnf);
+      const irPath = join(tempDir, `${name}.anf.json`);
+      writeFileSync(irPath, irJson);
+
+      const javaHex = requireHex(runJavaCompiler(irPath), 'Java', name);
+      expect(javaHex.toLowerCase()).toBe(tsHex.toLowerCase());
     }, 60_000);
   }
 });

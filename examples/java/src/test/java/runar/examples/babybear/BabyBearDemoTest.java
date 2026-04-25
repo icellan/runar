@@ -1,18 +1,22 @@
 package runar.examples.babybear;
 
+import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
+import runar.lang.sdk.CompileCheck;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * Surface-level instantiation test for {@link BabyBearDemo}.
+ * Surface-level instantiation + Rúnar frontend round-trip for
+ * {@link BabyBearDemo}.
  *
- * <p>Baby Bear contracts unwrap {@code Bigint} arguments via {@code .value()}
- * to interop with {@link runar.lang.runtime.MockCrypto}'s {@code BigInteger}
- * signatures. The Rúnar Java frontend does not yet recognise {@code .value()}
- * on {@code Bigint}, so a {@link runar.lang.sdk.CompileCheck} round-trip is
- * skipped for now — end-to-end conformance is exercised via the Go / TS /
- * Rust / Python / Zig / Ruby compilers.
+ * <p>The contract is Rúnar-pure source: every argument flows as a
+ * {@code Bigint} through {@link runar.lang.Builtins} shims, so the Rúnar
+ * Java frontend (parse → validate → typecheck) accepts it via
+ * {@link CompileCheck#run(Path)}. Codegen-level conformance for the Baby
+ * Bear (Go-only) crypto family is exercised through the other compiler
+ * tiers.
  */
 class BabyBearDemoTest {
 
@@ -20,5 +24,14 @@ class BabyBearDemoTest {
     void contractInstantiates() {
         BabyBearDemo c = new BabyBearDemo();
         assertNotNull(c);
+    }
+
+    @Test
+    void compileCheck() {
+        Path source = Path.of(
+            "src", "main", "java", "runar", "examples", "babybear",
+            "BabyBearDemo.runar.java"
+        );
+        assertDoesNotThrow(() -> CompileCheck.run(source));
     }
 }

@@ -7,10 +7,10 @@ import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 
 import static runar.lang.Builtins.assertThat;
+import static runar.lang.Builtins.bbFieldMul;
 import static runar.lang.Builtins.cat;
 import static runar.lang.Builtins.hash256;
-import static runar.lang.runtime.MockCrypto.bbFieldMul;
-import static runar.lang.runtime.MockCrypto.merkleRootSha256;
+import static runar.lang.Builtins.merkleRootSha256;
 
 /**
  * StateCovenant -- a stateful UTXO chain covenant that guards a state
@@ -29,13 +29,14 @@ import static runar.lang.runtime.MockCrypto.merkleRootSha256;
  * verification, and {@code hash256} batch data binding -- without
  * implementing the full FRI verifier.
  *
- * <p><b>Note:</b> the Baby Bear and Merkle builtins are part of the
- * Go-only crypto family. The Java SDK exposes runtime implementations
- * via {@link runar.lang.runtime.MockCrypto} so the contract is
- * exercisable from the simulator, but the Rúnar Java compiler does not
- * yet ship Stack-IR codegen for them -- end-to-end conformance for this
- * fixture is exercised through the other compiler tiers via the shared
- * conformance suite.
+ * <p>Rúnar-pure source: every value flows as a {@link Bigint} or
+ * {@link ByteString} through {@link runar.lang.Builtins} shims, so the
+ * Rúnar Java frontend (parse → validate → typecheck) accepts it as a
+ * round-trip {@link runar.lang.sdk.CompileCheck} fixture. The Baby Bear
+ * and Merkle builtins are part of the Go-only crypto family — the Rúnar
+ * Java compiler does not yet ship Stack-IR codegen for them, so end-to-
+ * end conformance for this fixture is exercised through the other
+ * compiler tiers via the shared conformance suite.
  */
 class StateCovenant extends StatefulSmartContract {
 
@@ -74,11 +75,11 @@ class StateCovenant extends StatefulSmartContract {
         assertThat(preStateRoot.equals(this.stateRoot));
 
         // 3. Verify Baby Bear field multiplication (simplified proof check).
-        assertThat(bbFieldMul(proofFieldA.value(), proofFieldB.value()).equals(proofFieldC.value()));
+        assertThat(bbFieldMul(proofFieldA, proofFieldB).eq(proofFieldC));
 
         // 4. Verify Merkle commitment: the leaf must be in a SHA-256 tree
         //    whose root matches the verifying key hash.
-        ByteString computedRoot = merkleRootSha256(merkleLeaf, merkleProof, merkleIndex.value(), Bigint.of(4).value());
+        ByteString computedRoot = merkleRootSha256(merkleLeaf, merkleProof, merkleIndex, Bigint.of(4));
         assertThat(computedRoot.equals(this.verifyingKeyHash));
 
         // 5. Batch data hash binding: verify the caller provided the correct

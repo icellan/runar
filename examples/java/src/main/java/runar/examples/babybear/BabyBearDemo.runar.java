@@ -5,10 +5,10 @@ import runar.lang.annotations.Public;
 import runar.lang.types.Bigint;
 
 import static runar.lang.Builtins.assertThat;
-import static runar.lang.runtime.MockCrypto.bbFieldAdd;
-import static runar.lang.runtime.MockCrypto.bbFieldInv;
-import static runar.lang.runtime.MockCrypto.bbFieldMul;
-import static runar.lang.runtime.MockCrypto.bbFieldSub;
+import static runar.lang.Builtins.bbFieldAdd;
+import static runar.lang.Builtins.bbFieldInv;
+import static runar.lang.Builtins.bbFieldMul;
+import static runar.lang.Builtins.bbFieldSub;
 
 /**
  * BabyBearDemo -- demonstrates Baby Bear prime field arithmetic.
@@ -26,12 +26,14 @@ import static runar.lang.runtime.MockCrypto.bbFieldSub;
  *       inverse)</li>
  * </ul>
  *
- * <p><b>Note:</b> the Baby Bear builtins are part of the Go-only crypto
- * family. The Java {@link runar.lang.runtime.MockCrypto} runtime exposes
- * implementations so the contract can run inside the simulator, but the
- * Rúnar Java compiler does not yet ship Stack-IR codegen for these
- * operations -- end-to-end conformance for this fixture is exercised via
- * the Go / TS / Rust / Python / Zig / Ruby compilers.
+ * <p>This contract is Rúnar-pure source: every value flows as a
+ * {@link Bigint} through {@link runar.lang.Builtins} shims, so the
+ * Rúnar Java frontend (parse → validate → typecheck) accepts it as a
+ * round-trip {@link runar.lang.sdk.CompileCheck} fixture. The Baby Bear
+ * builtins are part of the Go-only crypto family — the Rúnar Java
+ * compiler does not yet ship Stack-IR codegen for them, so end-to-end
+ * conformance for this fixture is exercised via the Go / TS / Rust /
+ * Python / Zig / Ruby compilers.
  */
 class BabyBearDemo extends SmartContract {
 
@@ -42,41 +44,41 @@ class BabyBearDemo extends SmartContract {
     /** Verify field addition. */
     @Public
     void checkAdd(Bigint a, Bigint b, Bigint expected) {
-        assertThat(bbFieldAdd(a.value(), b.value()).equals(expected.value()));
+        assertThat(bbFieldAdd(a, b).eq(expected));
     }
 
     /** Verify field subtraction. */
     @Public
     void checkSub(Bigint a, Bigint b, Bigint expected) {
-        assertThat(bbFieldSub(a.value(), b.value()).equals(expected.value()));
+        assertThat(bbFieldSub(a, b).eq(expected));
     }
 
     /** Verify field multiplication. */
     @Public
     void checkMul(Bigint a, Bigint b, Bigint expected) {
-        assertThat(bbFieldMul(a.value(), b.value()).equals(expected.value()));
+        assertThat(bbFieldMul(a, b).eq(expected));
     }
 
     /** Verify field inversion: {@code a * inv(a) === 1}. */
     @Public
     void checkInv(Bigint a) {
-        java.math.BigInteger inv = bbFieldInv(a.value());
-        assertThat(bbFieldMul(a.value(), inv).equals(java.math.BigInteger.ONE));
+        Bigint inv = bbFieldInv(a);
+        assertThat(bbFieldMul(a, inv).eq(Bigint.ONE));
     }
 
     /** Verify subtraction is the inverse of addition: {@code (a + b) - b === a}. */
     @Public
     void checkAddSubRoundtrip(Bigint a, Bigint b) {
-        java.math.BigInteger sum = bbFieldAdd(a.value(), b.value());
-        java.math.BigInteger result = bbFieldSub(sum, b.value());
-        assertThat(result.equals(a.value()));
+        Bigint sum = bbFieldAdd(a, b);
+        Bigint result = bbFieldSub(sum, b);
+        assertThat(result.eq(a));
     }
 
     /** Verify the distributive law: {@code a * (b + c) === a*b + a*c}. */
     @Public
     void checkDistributive(Bigint a, Bigint b, Bigint c) {
-        java.math.BigInteger lhs = bbFieldMul(a.value(), bbFieldAdd(b.value(), c.value()));
-        java.math.BigInteger rhs = bbFieldAdd(bbFieldMul(a.value(), b.value()), bbFieldMul(a.value(), c.value()));
-        assertThat(lhs.equals(rhs));
+        Bigint lhs = bbFieldMul(a, bbFieldAdd(b, c));
+        Bigint rhs = bbFieldAdd(bbFieldMul(a, b), bbFieldMul(a, c));
+        assertThat(lhs.eq(rhs));
     }
 }

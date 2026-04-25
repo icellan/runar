@@ -2,12 +2,13 @@ package runar.examples.merkleproof;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 
 import static runar.lang.Builtins.assertThat;
-import static runar.lang.runtime.MockCrypto.merkleRootSha256;
-import static runar.lang.runtime.MockCrypto.merkleRootHash256;
+import static runar.lang.Builtins.merkleRootHash256;
+import static runar.lang.Builtins.merkleRootSha256;
 
 /**
  * MerkleProofDemo -- demonstrates Merkle proof verification in Bitcoin
@@ -36,16 +37,17 @@ import static runar.lang.runtime.MockCrypto.merkleRootHash256;
  * <p>The {@code depth} parameter is consumed at compile time -- the loop
  * is unrolled, producing ~15 opcodes per level. No runtime iteration.
  *
- * <p><b>Note:</b> the Merkle builtins are part of the Go-only crypto
- * family. The Java {@link runar.lang.runtime.MockCrypto} runtime provides
- * the implementations so the contract is exercisable from JUnit, but the
- * Rúnar Java compiler does not yet ship Stack-IR codegen for these
- * operations -- end-to-end conformance for this fixture is exercised via
- * the Go / TS / Rust / Python / Zig / Ruby compilers.
+ * <p>Rúnar-pure source: arguments flow as {@link Bigint} / {@link ByteString}
+ * through {@link runar.lang.Builtins} shims, so the Rúnar Java frontend
+ * (parse → validate → typecheck) accepts it as a round-trip
+ * {@link runar.lang.sdk.CompileCheck} fixture. The Merkle builtins are
+ * part of the Go-only crypto family — the Rúnar Java compiler does not
+ * yet ship Stack-IR codegen for them, so end-to-end conformance is
+ * exercised via the Go / TS / Rust / Python / Zig / Ruby compilers.
  */
 class MerkleProofDemo extends SmartContract {
 
-    ByteString expectedRoot;
+    @Readonly ByteString expectedRoot;
 
     MerkleProofDemo(ByteString expectedRoot) {
         super(expectedRoot);
@@ -55,14 +57,14 @@ class MerkleProofDemo extends SmartContract {
     /** Verify a SHA-256 Merkle proof at depth 4. */
     @Public
     void verifySha256(ByteString leaf, ByteString proof, Bigint index) {
-        ByteString root = merkleRootSha256(leaf, proof, index.value(), Bigint.of(4).value());
+        ByteString root = merkleRootSha256(leaf, proof, index, Bigint.of(4));
         assertThat(root.equals(this.expectedRoot));
     }
 
     /** Verify a Hash256 Merkle proof at depth 4. */
     @Public
     void verifyHash256(ByteString leaf, ByteString proof, Bigint index) {
-        ByteString root = merkleRootHash256(leaf, proof, index.value(), Bigint.of(4).value());
+        ByteString root = merkleRootHash256(leaf, proof, index, Bigint.of(4));
         assertThat(root.equals(this.expectedRoot));
     }
 }
