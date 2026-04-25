@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/stateful-counter/Counter.runar.ts",
+    ".runar.sol": "../../../examples/sol/stateful-counter/Counter.runar.sol",
+    ".runar.move": "../../../examples/move/stateful-counter/Counter.runar.move",
+    ".runar.go": "../../../examples/go/stateful-counter/Counter.runar.go",
+    ".runar.rs": "../../../examples/rust/stateful-counter/Counter.runar.rs",
+    ".runar.py": "../../../examples/python/stateful-counter/Counter.runar.py",
+    ".runar.zig": "../../../examples/zig/stateful-counter/Counter.runar.zig",
+    ".runar.rb": "../../../examples/ruby/stateful-counter/Counter.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/stateful-counter/Counter.runar.java"
+  }
+}

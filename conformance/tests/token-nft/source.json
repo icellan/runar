@@ -6,6 +6,8 @@
     ".runar.go": "../../../examples/go/token-nft/NFTExample.runar.go",
     ".runar.rs": "../../../examples/rust/token-nft/NFTExample.runar.rs",
     ".runar.py": "../../../examples/python/token-nft/NFTExample.runar.py",
-    ".runar.rb": "../../../examples/ruby/token-nft/NFTExample.runar.rb"
+    ".runar.zig": "../../../examples/zig/token-nft/NFTExample.runar.zig",
+    ".runar.rb": "../../../examples/ruby/token-nft/NFTExample.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/token-nft/NFTExample.runar.java"
   }
 }

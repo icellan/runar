@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/math-demo/MathDemo.runar.ts",
+    ".runar.sol": "../../../examples/sol/math-demo/MathDemo.runar.sol",
+    ".runar.move": "../../../examples/move/math-demo/MathDemo.runar.move",
+    ".runar.go": "../../../examples/go/math-demo/MathDemo.runar.go",
+    ".runar.rs": "../../../examples/rust/math-demo/MathDemo.runar.rs",
+    ".runar.py": "../../../examples/python/math-demo/MathDemo.runar.py",
+    ".runar.zig": "../../../examples/zig/math-demo/MathDemo.runar.zig",
+    ".runar.rb": "../../../examples/ruby/math-demo/MathDemo.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/math-demo/MathDemo.runar.java"
+  }
+}

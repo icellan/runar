@@ -6,6 +6,8 @@
     ".runar.go": "../../../examples/go/escrow/Escrow.runar.go",
     ".runar.rs": "../../../examples/rust/escrow/Escrow.runar.rs",
     ".runar.py": "../../../examples/python/escrow/Escrow.runar.py",
-    ".runar.rb": "../../../examples/ruby/escrow/Escrow.runar.rb"
+    ".runar.zig": "../../../examples/zig/escrow/Escrow.runar.zig",
+    ".runar.rb": "../../../examples/ruby/escrow/Escrow.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/escrow/Escrow.runar.java"
   }
 }

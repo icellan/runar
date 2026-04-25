@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/message-board/MessageBoard.runar.ts",
+    ".runar.sol": "../../../examples/sol/message-board/MessageBoard.runar.sol",
+    ".runar.move": "../../../examples/move/message-board/MessageBoard.runar.move",
+    ".runar.go": "../../../examples/go/message-board/MessageBoard.runar.go",
+    ".runar.rs": "../../../examples/rust/message-board/MessageBoard.runar.rs",
+    ".runar.py": "../../../examples/python/message-board/MessageBoard.runar.py",
+    ".runar.zig": "../../../examples/zig/message-board/MessageBoard.runar.zig",
+    ".runar.rb": "../../../examples/ruby/message-board/MessageBoard.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/message-board/MessageBoard.runar.java"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/p2pkh/P2PKH.runar.ts",
+    ".runar.sol": "../../../examples/sol/p2pkh/P2PKH.runar.sol",
+    ".runar.move": "../../../examples/move/p2pkh/P2PKH.runar.move",
+    ".runar.go": "../../../examples/go/p2pkh/P2PKH.runar.go",
+    ".runar.rs": "../../../examples/rust/p2pkh/P2PKH.runar.rs",
+    ".runar.py": "../../../examples/python/p2pkh/P2PKH.runar.py",
+    ".runar.zig": "../../../examples/zig/p2pkh/P2PKH.runar.zig",
+    ".runar.rb": "../../../examples/ruby/p2pkh/P2PKH.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/p2pkh/P2PKH.runar.java"
+  }
+}

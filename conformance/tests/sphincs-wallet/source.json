@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/sphincs-wallet/SPHINCSWallet.runar.ts",
+    ".runar.sol": "../../../examples/sol/sphincs-wallet/SPHINCSWallet.runar.sol",
+    ".runar.move": "../../../examples/move/sphincs-wallet/SPHINCSWallet.runar.move",
+    ".runar.go": "../../../examples/go/sphincs-wallet/SPHINCSWallet.runar.go",
+    ".runar.rs": "../../../examples/rust/sphincs-wallet/SPHINCSWallet.runar.rs",
+    ".runar.py": "../../../examples/python/sphincs-wallet/SPHINCSWallet.runar.py",
+    ".runar.zig": "../../../examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig",
+    ".runar.rb": "../../../examples/ruby/sphincs-wallet/SPHINCSWallet.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/sphincs-wallet/SPHINCSWallet.runar.java"
+  }
+}

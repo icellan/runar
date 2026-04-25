@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/convergence-proof/ConvergenceProof.runar.ts",
+    ".runar.sol": "../../../examples/sol/convergence-proof/ConvergenceProof.runar.sol",
+    ".runar.move": "../../../examples/move/convergence-proof/ConvergenceProof.runar.move",
+    ".runar.go": "../../../examples/go/convergence-proof/ConvergenceProof.runar.go",
+    ".runar.rs": "../../../examples/rust/convergence-proof/ConvergenceProof.runar.rs",
+    ".runar.py": "../../../examples/python/convergence-proof/ConvergenceProof.runar.py",
+    ".runar.zig": "../../../examples/zig/convergence-proof/ConvergenceProof.runar.zig",
+    ".runar.rb": "../../../examples/ruby/convergence-proof/ConvergenceProof.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/convergence-proof/ConvergenceProof.runar.java"
+  }
+}

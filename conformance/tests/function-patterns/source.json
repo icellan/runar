@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/function-patterns/FunctionPatterns.runar.ts",
+    ".runar.sol": "../../../examples/sol/function-patterns/FunctionPatterns.runar.sol",
+    ".runar.move": "../../../examples/move/function-patterns/FunctionPatterns.runar.move",
+    ".runar.go": "../../../examples/go/function-patterns/FunctionPatterns.runar.go",
+    ".runar.rs": "../../../examples/rust/function-patterns/FunctionPatterns.runar.rs",
+    ".runar.py": "../../../examples/python/function-patterns/FunctionPatterns.runar.py",
+    ".runar.zig": "../../../examples/zig/function-patterns/FunctionPatterns.runar.zig",
+    ".runar.rb": "../../../examples/ruby/function-patterns/FunctionPatterns.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/function-patterns/FunctionPatterns.runar.java"
+  }
+}

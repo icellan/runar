@@ -1,0 +1,10 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/p256-wallet/P256Wallet.runar.ts",
+    ".runar.go": "../../../examples/go/p256-wallet/P256Wallet.runar.go",
+    ".runar.rs": "../../../examples/rust/p256-wallet/P256Wallet.runar.rs",
+    ".runar.py": "../../../examples/python/p256-wallet/P256Wallet.runar.py",
+    ".runar.zig": "../../../examples/zig/p256-wallet/P256Wallet.runar.zig",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/p256-wallet/P256Wallet.runar.java"
+  }
+}

@@ -6,7 +6,8 @@
     ".runar.go": "../../../examples/go/babybear/BabyBearDemo.runar.go",
     ".runar.rs": "../../../examples/rust/babybear/BabyBearDemo.runar.rs",
     ".runar.py": "../../../examples/python/babybear/BabyBearDemo.runar.py",
+    ".runar.zig": "../../../examples/zig/babybear/BabyBearDemo.runar.zig",
     ".runar.rb": "../../../examples/ruby/babybear/BabyBearDemo.runar.rb",
-    ".runar.zig": "../../../examples/zig/babybear/BabyBearDemo.runar.zig"
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/babybear/BabyBearDemo.runar.java"
   }
 }

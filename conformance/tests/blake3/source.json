@@ -6,6 +6,8 @@
     ".runar.go": "../../../examples/go/blake3/Blake3Test.runar.go",
     ".runar.rs": "../../../examples/rust/blake3/Blake3Test.runar.rs",
     ".runar.py": "../../../examples/python/blake3/Blake3Test.runar.py",
-    ".runar.rb": "../../../examples/ruby/blake3/Blake3Test.runar.rb"
+    ".runar.zig": "../../../examples/zig/blake3/Blake3Test.runar.zig",
+    ".runar.rb": "../../../examples/ruby/blake3/Blake3Test.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/blake3/Blake3Test.runar.java"
   }
 }

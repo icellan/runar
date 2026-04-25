@@ -6,6 +6,8 @@
     ".runar.go": "../../../examples/go/auction/Auction.runar.go",
     ".runar.rs": "../../../examples/rust/auction/Auction.runar.rs",
     ".runar.py": "../../../examples/python/auction/Auction.runar.py",
-    ".runar.rb": "../../../examples/ruby/auction/Auction.runar.rb"
+    ".runar.zig": "../../../examples/zig/auction/Auction.runar.zig",
+    ".runar.rb": "../../../examples/ruby/auction/Auction.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/auction/Auction.runar.java"
   }
 }

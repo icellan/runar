@@ -6,6 +6,8 @@
     ".runar.go": "../../../examples/go/covenant-vault/CovenantVault.runar.go",
     ".runar.rs": "../../../examples/rust/covenant-vault/CovenantVault.runar.rs",
     ".runar.py": "../../../examples/python/covenant-vault/CovenantVault.runar.py",
-    ".runar.rb": "../../../examples/ruby/covenant-vault/CovenantVault.runar.rb"
+    ".runar.zig": "../../../examples/zig/covenant-vault/CovenantVault.runar.zig",
+    ".runar.rb": "../../../examples/ruby/covenant-vault/CovenantVault.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/covenant-vault/CovenantVault.runar.java"
   }
 }

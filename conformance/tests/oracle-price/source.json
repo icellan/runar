@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/oracle-price/OraclePriceFeed.runar.ts",
+    ".runar.sol": "../../../examples/sol/oracle-price/OraclePriceFeed.runar.sol",
+    ".runar.move": "../../../examples/move/oracle-price/OraclePriceFeed.runar.move",
+    ".runar.go": "../../../examples/go/oracle-price/OraclePriceFeed.runar.go",
+    ".runar.rs": "../../../examples/rust/oracle-price/OraclePriceFeed.runar.rs",
+    ".runar.py": "../../../examples/python/oracle-price/OraclePriceFeed.runar.py",
+    ".runar.zig": "../../../examples/zig/oracle-price/OraclePriceFeed.runar.zig",
+    ".runar.rb": "../../../examples/ruby/oracle-price/OraclePriceFeed.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/oracle-price/OraclePriceFeed.runar.java"
+  }
+}

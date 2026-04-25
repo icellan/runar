@@ -6,7 +6,8 @@
     ".runar.go": "../../../examples/go/cross-covenant/CrossCovenantRef.runar.go",
     ".runar.rs": "../../../examples/rust/cross-covenant/CrossCovenantRef.runar.rs",
     ".runar.py": "../../../examples/python/cross-covenant/CrossCovenantRef.runar.py",
+    ".runar.zig": "CrossCovenantRef.runar.zig",
     ".runar.rb": "../../../examples/ruby/cross-covenant/CrossCovenantRef.runar.rb",
-    ".runar.zig": "CrossCovenantRef.runar.zig"
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/cross-covenant/CrossCovenantRef.runar.java"
   }
 }
