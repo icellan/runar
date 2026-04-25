@@ -7,6 +7,7 @@
     ".runar.rs": "../../../examples/rust/add-raw-output/RawOutputTest.runar.rs",
     ".runar.py": "../../../examples/python/add-raw-output/RawOutputTest.runar.py",
     ".runar.rb": "../../../examples/ruby/add-raw-output/RawOutputTest.runar.rb",
-    ".runar.zig": "../../../examples/zig/add-raw-output/RawOutputTest.runar.zig"
+    ".runar.zig": "../../../examples/zig/add-raw-output/RawOutputTest.runar.zig",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/add-raw-output/RawOutputTest.runar.java"
   }
 }

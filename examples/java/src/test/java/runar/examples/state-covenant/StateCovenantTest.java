@@ -10,11 +10,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
  * Surface-level instantiation test for {@link StateCovenant}.
  *
  * <p>{@code advanceState} composes Baby Bear field multiplication and
- * SHA-256 Merkle root verification, both of which are part of the
- * Go-only crypto family. The Rúnar Java compiler does not yet ship
- * Stack-IR codegen for them, so a {@code CompileCheck} round-trip is
- * intentionally omitted here. End-to-end conformance is exercised via
- * the other compiler tiers.
+ * SHA-256 Merkle root verification (Go-only crypto family) and unwraps
+ * {@code Bigint} via {@code .value()}, which the Rúnar Java frontend
+ * does not yet recognise. A {@link runar.lang.sdk.CompileCheck} round-trip
+ * is skipped for now; codegen-level conformance is exercised via the
+ * other compiler tiers.
  */
 class StateCovenantTest {
 

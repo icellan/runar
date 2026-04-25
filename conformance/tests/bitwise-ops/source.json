@@ -7,6 +7,7 @@
     ".runar.rs": "../../../examples/rust/bitwise-ops/BitwiseOps.runar.rs",
     ".runar.py": "../../../examples/python/bitwise-ops/BitwiseOps.runar.py",
     ".runar.rb": "../../../examples/ruby/bitwise-ops/BitwiseOps.runar.rb",
-    ".runar.zig": "../../../examples/zig/bitwise-ops/BitwiseOps.runar.zig"
+    ".runar.zig": "../../../examples/zig/bitwise-ops/BitwiseOps.runar.zig",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/bitwise-ops/BitwiseOps.runar.java"
   }
 }

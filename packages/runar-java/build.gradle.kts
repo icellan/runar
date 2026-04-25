@@ -21,6 +21,12 @@ dependencies {
     // secp256k1 ECDSA + SHA-256 / RIPEMD-160 / BIP-143 sighash.
     api("org.bouncycastle:bcprov-jdk18on:1.78")
 
+    // Frontend-only access to the Rúnar Java compiler so CompileCheck can
+    // run parse → validate → expand-fixed-arrays → typecheck without
+    // shelling out. Composite-build via settings.gradle.kts pulls the sources
+    // from compilers/java in dev and CI.
+    implementation("build.runar:runar-java-compiler:0.4.4")
+
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")

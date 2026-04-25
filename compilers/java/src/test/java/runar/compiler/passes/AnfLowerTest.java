@@ -221,7 +221,6 @@ class AnfLowerTest {
         AnfBinding last = check.body().get(5);
         assertTrue(last.value() instanceof Assert a
             && a.value().equals(check.body().get(4).name()));
-        assertEquals("_", "_"); // placeholder for readability
     }
 
     // ---------------------------------------------------------------

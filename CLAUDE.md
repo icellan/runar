@@ -4,7 +4,7 @@
 
 Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless) or `StatefulSmartContract` (stateful), and the compiler produces Bitcoin Script locking scripts.
 
-Seven independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby, Java) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — all formats compile to the same AST and produce identical Bitcoin Script. (The Java compiler's cross-format parser dispatch is still in-flight; today it parses only `.runar.java`. The other six compilers all parse `.runar.java` already.)
+Seven independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby, Java) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — all formats compile to the same AST and produce identical Bitcoin Script. All seven compilers parse all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extensions.
 
 ## Repository Structure
 
@@ -95,7 +95,7 @@ Go, Rust, Python, Zig, Ruby, and Java compilers have their own parser dispatch:
 - Rust: `parser::parse_source()` handles `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.rs`, `.runar.py`, `.runar.java`
 - Python: `parse_source()` handles `.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.java`
 - Zig and Ruby: equivalent dispatchers covering the same set including `.runar.java`
-- Java: `JavaParser.parse()` is invoked directly from `compilers/java/src/main/java/runar/compiler/Cli.java`. It currently parses only `.runar.java`; cross-format parsers and a `ParserDispatch` helper are in-flight
+- Java: `ParserDispatch.parse()` (`compilers/java/src/main/java/runar/compiler/frontend/ParserDispatch.java`) routes by file extension across all 9 formats; `Cli.java` invokes it for both `--source` and `--ir` modes
 
 ## Key Conventions
 
@@ -253,7 +253,7 @@ All seven languages have equivalent deployment SDKs for interacting with compile
 
 **Ruby** (`packages/runar-rb/lib/runar/sdk/`): `RunarContract`, `MockProvider`, `LocalSigner`, `MockSigner`/`ExternalSigner`, deploy/call transaction builders, state serialization.
 
-**Java** (`packages/runar-java/src/main/java/runar/lang/sdk/`): `RunarContract`, `RunarArtifact`, `MockProvider`, `WalletProvider` (BRC-100 `BRC100Wallet`), `LocalSigner`/`MockSigner`/`ExternalSigner`, `TransactionBuilder`, `StateSerializer`, `UtxoSelector`, `FeeEstimator`, `CompileCheck`, multi-signer `PreparedCall` API, basic 1sat ordinals envelope (`Inscription`). Production providers (`RpcProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`), an ANF interpreter, and BSV-20/BSV-21 mint/transfer helpers are in-flight. The `integration/java/` harness ships its own `RpcProvider` helper that will be promoted into the SDK.
+**Java** (`packages/runar-java/src/main/java/runar/lang/sdk/`): `RunarContract`, `RunarArtifact`, `MockProvider`, `RpcProvider`, `WhatsOnChainProvider`, `GorillaPoolProvider`, `WalletProvider` (BRC-100 `BRC100Wallet`), `LocalSigner`/`MockSigner`/`ExternalSigner`, `TransactionBuilder`, `StateSerializer`, `UtxoSelector`, `FeeEstimator`, `CompileCheck` (frontend wrapper, throws `CompileException`), `AnfInterpreter`, multi-signer `PreparedCall` API, BSV-20/BSV-21 mint/transfer helpers (`ordinals/Bsv20.java`, `ordinals/Bsv21.java`, `ordinals/TokenWallet.java`), 1sat ordinals envelope (`Inscription`). Composite-builds the `compilers/java` Gradle project so `CompileCheck.run(Path)` and `CompileCheck.check(source, fileName)` invoke the real frontend.
 
 Key SDK concepts:
 - `RunarContract` wraps a compiled artifact + constructor args, manages state and UTXO tracking
@@ -287,7 +287,7 @@ Key SDK concepts:
 - `this.addRawOutput(satoshis, scriptBytes)` creates outputs with arbitrary script bytes (not stateful continuations)
 - OP_CODESEPARATOR is automatically inserted for stateful contracts; artifact includes `codeSeparatorIndex` and `codeSeparatorIndices` fields
 - Post-quantum signature verification (experimental): `verifyWOTS` (one-time, ~10 KB script), `verifySLHDSA_SHA2_*` (6 FIPS 205 parameter sets, 200-900 KB scripts)
-- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/codegen/slh_dsa.zig` (Zig), `compilers/ruby/lib/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java — in-flight, not yet present)
+- SLH-DSA codegen lives in a separate module: `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (TS), `compilers/go/codegen/slh_dsa.go` (Go), `compilers/rust/src/codegen/slh_dsa.rs` (Rust), `compilers/python/runar_compiler/codegen/slh_dsa.py` (Python), `compilers/zig/src/codegen/slh_dsa.zig` (Zig), `compilers/ruby/lib/codegen/slh_dsa.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/SlhDsa.java` (Java)
 - EC codegen lives in a separate module: `packages/runar-compiler/src/passes/ec-codegen.ts` (TS), `compilers/go/codegen/ec.go` (Go), `compilers/rust/src/codegen/ec.rs` (Rust), `compilers/python/runar_compiler/codegen/ec.py` (Python), `compilers/zig/src/codegen/ec.zig` (Zig), `compilers/ruby/lib/codegen/ec.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Ec.java` (Java)
 - SHA-256 codegen lives in a separate module: `packages/runar-compiler/src/passes/sha256-codegen.ts` (TS), `compilers/go/codegen/sha256.go` (Go), `compilers/rust/src/codegen/sha256.rs` (Rust), `compilers/python/runar_compiler/codegen/sha256.py` (Python), `compilers/zig/src/codegen/sha256.zig` (Zig), `compilers/ruby/lib/codegen/sha256.rb` (Ruby), `compilers/java/src/main/java/runar/compiler/codegen/Sha256.java` (Java)
-- NIST P-256 / P-384 codegen (`P256P384.java`) and Blake3 codegen (`Blake3.java`) under `compilers/java/src/main/java/runar/compiler/codegen/` are in-flight follow-ups; the corresponding modules already ship in the other six compilers.
+- NIST P-256 / P-384 codegen (`compilers/java/src/main/java/runar/compiler/codegen/P256P384.java`) and Blake3 codegen (`compilers/java/src/main/java/runar/compiler/codegen/Blake3.java`) ship alongside their 6 peer-compiler equivalents. WOTS+ (`Wots.java`) and Rabin (`Rabin.java`) codegen modules also ship for the Java tier.

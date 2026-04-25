@@ -796,6 +796,38 @@ public final class StackLower {
                 lowerPercentOf(bindingName, args, idx, lastUses);
                 return;
             }
+            if ("clamp".equals(funcName)) {
+                lowerClamp(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("pow".equals(funcName)) {
+                lowerPow(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("mulDiv".equals(funcName)) {
+                lowerMulDiv(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("sqrt".equals(funcName)) {
+                lowerSqrt(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("gcd".equals(funcName)) {
+                lowerGcd(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("divmod".equals(funcName)) {
+                lowerDivmod(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("log2".equals(funcName)) {
+                lowerLog2(bindingName, args, idx, lastUses);
+                return;
+            }
+            if ("sign".equals(funcName)) {
+                lowerSign(bindingName, args, idx, lastUses);
+                return;
+            }
 
             // General builtin path
             for (String a : args) {
@@ -1098,6 +1130,278 @@ public final class StackLower {
             sm.pop();
             sm.pop();
             emitOp(new OpcodeOp("OP_DIV"));
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // clamp(val, lo, hi): clamp value to [lo, hi].
+        // Mirrors compilers/go/codegen/stack.go::lowerClamp exactly.
+        // Stack: <val> <lo> -> OP_MAX -> max(val,lo); push hi -> OP_MIN.
+        // ------------------------------------------------------------------
+        void lowerClamp(String bindingName, List<String> args, int idx,
+                        Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException("clamp requires 3 arguments");
+            }
+            String val = args.get(0);
+            String lo = args.get(1);
+            String hi = args.get(2);
+
+            bringToTop(val, isLastUse(val, idx, lastUses));
+            bringToTop(lo, isLastUse(lo, idx, lastUses));
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_MAX"));
+            sm.push(""); // intermediate max(val, lo)
+
+            bringToTop(hi, isLastUse(hi, idx, lastUses));
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_MIN"));
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // pow(base, exp): exponentiation via 32-iteration conditional-multiply
+        // unrolled loop. Mirrors compilers/go/codegen/stack.go::lowerPow.
+        // Strategy: <base> <exp> swap, push 1; 32 rounds of:
+        //   push 2, OP_PICK (get exp), push i, OP_GREATERTHAN,
+        //   IF { over, OP_MUL }
+        // Then nip nip to drop exp + base, leaving result.
+        // ------------------------------------------------------------------
+        void lowerPow(String bindingName, List<String> args, int idx,
+                      Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("pow requires 2 arguments");
+            }
+            String base = args.get(0);
+            String exp = args.get(1);
+
+            bringToTop(base, isLastUse(base, idx, lastUses));
+            bringToTop(exp, isLastUse(exp, idx, lastUses));
+            sm.pop();
+            sm.pop();
+
+            emitOp(new SwapOp());                          // exp base
+            emitOp(new PushOp(PushValue.of(1)));           // exp base 1(acc)
+
+            final int maxPowIterations = 32;
+            for (int i = 0; i < maxPowIterations; i++) {
+                emitOp(new PushOp(PushValue.of(2)));
+                emitOp(new OpcodeOp("OP_PICK"));            // exp base acc exp
+                emitOp(new PushOp(PushValue.of(i)));
+                emitOp(new OpcodeOp("OP_GREATERTHAN"));     // exp base acc (exp>i)
+                List<StackOp> thenOps = new ArrayList<>();
+                thenOps.add(new OverOp());                  // exp base acc base
+                thenOps.add(new OpcodeOp("OP_MUL"));        // exp base (acc*base)
+                emitOp(new IfOp(thenOps));
+            }
+            emitOp(new NipOp()); // exp result
+            emitOp(new NipOp()); // result
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // mulDiv(a, b, c): (a * b) / c. Mirrors lowerMulDiv in Go.
+        // Stack: <a> <b> -> OP_MUL -> (a*b); push c -> OP_DIV.
+        // ------------------------------------------------------------------
+        void lowerMulDiv(String bindingName, List<String> args, int idx,
+                         Map<String, Integer> lastUses) {
+            if (args.size() < 3) {
+                throw new RuntimeException("mulDiv requires 3 arguments");
+            }
+            String a = args.get(0);
+            String b = args.get(1);
+            String c = args.get(2);
+
+            bringToTop(a, isLastUse(a, idx, lastUses));
+            bringToTop(b, isLastUse(b, idx, lastUses));
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_MUL"));
+            sm.push(""); // a*b
+
+            bringToTop(c, isLastUse(c, idx, lastUses));
+            sm.pop();
+            sm.pop();
+            emitOp(new OpcodeOp("OP_DIV"));
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // sqrt(n): integer square root via 16-iteration Newton's method.
+        // Mirrors lowerSqrt in Go: guarded for n == 0 (skip Newton, leave 0).
+        // OP_DUP IF { OP_DUP; 16x (over, over, OP_DIV, OP_ADD, push 2, OP_DIV); nip }
+        // ------------------------------------------------------------------
+        void lowerSqrt(String bindingName, List<String> args, int idx,
+                       Map<String, Integer> lastUses) {
+            if (args.size() < 1) {
+                throw new RuntimeException("sqrt requires 1 argument");
+            }
+            String n = args.get(0);
+
+            bringToTop(n, isLastUse(n, idx, lastUses));
+            sm.pop();
+
+            emitOp(new OpcodeOp("OP_DUP")); // n n
+
+            List<StackOp> newtonOps = new ArrayList<>();
+            newtonOps.add(new OpcodeOp("OP_DUP")); // n guess(=n)
+            final int sqrtIterations = 16;
+            for (int i = 0; i < sqrtIterations; i++) {
+                newtonOps.add(new OverOp());                       // n guess n
+                newtonOps.add(new OverOp());                       // n guess n guess
+                newtonOps.add(new OpcodeOp("OP_DIV"));             // n guess (n/guess)
+                newtonOps.add(new OpcodeOp("OP_ADD"));             // n (guess + n/guess)
+                newtonOps.add(new PushOp(PushValue.of(2)));        // n (guess + n/guess) 2
+                newtonOps.add(new OpcodeOp("OP_DIV"));             // n new_guess
+            }
+            newtonOps.add(new NipOp()); // result (drop n)
+
+            emitOp(new IfOp(newtonOps));
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // gcd(a, b): Euclidean algorithm, bounded to 256 iterations.
+        // Mirrors lowerGcd in Go. Both operands forced to absolute value
+        // first; each iteration: OP_DUP OP_0NOTEQUAL IF { OP_TUCK OP_MOD }
+        // Final OP_DROP removes the trailing zero.
+        // ------------------------------------------------------------------
+        void lowerGcd(String bindingName, List<String> args, int idx,
+                      Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("gcd requires 2 arguments");
+            }
+            String a = args.get(0);
+            String b = args.get(1);
+
+            bringToTop(a, isLastUse(a, idx, lastUses));
+            bringToTop(b, isLastUse(b, idx, lastUses));
+            sm.pop();
+            sm.pop();
+
+            // Stack: a b -> |a| swap |b| swap -> |a| |b|
+            emitOp(new OpcodeOp("OP_ABS"));
+            emitOp(new SwapOp());
+            emitOp(new OpcodeOp("OP_ABS"));
+            emitOp(new SwapOp());
+
+            final int gcdIterations = 256;
+            for (int i = 0; i < gcdIterations; i++) {
+                emitOp(new OpcodeOp("OP_DUP"));        // a b b
+                emitOp(new OpcodeOp("OP_0NOTEQUAL"));  // a b (b!=0)
+                List<StackOp> thenOps = new ArrayList<>();
+                thenOps.add(new OpcodeOp("OP_TUCK")); // b a b
+                thenOps.add(new OpcodeOp("OP_MOD"));   // b (a%b)
+                emitOp(new IfOp(thenOps));
+            }
+            emitOp(new DropOp()); // drop the trailing 0
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // divmod(a, b): returns quotient (drops remainder).
+        // Mirrors lowerDivmod in Go. OP_2DUP OP_DIV OP_ROT OP_ROT OP_MOD drop.
+        // ------------------------------------------------------------------
+        void lowerDivmod(String bindingName, List<String> args, int idx,
+                         Map<String, Integer> lastUses) {
+            if (args.size() < 2) {
+                throw new RuntimeException("divmod requires 2 arguments");
+            }
+            String a = args.get(0);
+            String b = args.get(1);
+
+            bringToTop(a, isLastUse(a, idx, lastUses));
+            bringToTop(b, isLastUse(b, idx, lastUses));
+            sm.pop();
+            sm.pop();
+
+            emitOp(new OpcodeOp("OP_2DUP")); // a b a b
+            emitOp(new OpcodeOp("OP_DIV"));  // a b (a/b)
+            emitOp(new OpcodeOp("OP_ROT"));  // b (a/b) a
+            emitOp(new OpcodeOp("OP_ROT"));  // (a/b) a b
+            emitOp(new OpcodeOp("OP_MOD"));  // (a/b) (a%b)
+            emitOp(new DropOp());            // (a/b)
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // log2(n): floor(log2(n)) via 64-iteration bit-scan.
+        // Mirrors lowerLog2 in Go. push 0 (counter); each iteration:
+        //   swap, OP_DUP, push 1, OP_GREATERTHAN,
+        //   IF { push 2, OP_DIV, swap, OP_1ADD, swap }, swap.
+        // Final OP_NIP drops the input, leaving counter.
+        // ------------------------------------------------------------------
+        void lowerLog2(String bindingName, List<String> args, int idx,
+                       Map<String, Integer> lastUses) {
+            if (args.size() < 1) {
+                throw new RuntimeException("log2 requires 1 argument");
+            }
+            String n = args.get(0);
+
+            bringToTop(n, isLastUse(n, idx, lastUses));
+            sm.pop();
+
+            emitOp(new PushOp(PushValue.of(0))); // n 0
+
+            final int log2Iterations = 64;
+            for (int i = 0; i < log2Iterations; i++) {
+                emitOp(new SwapOp());                  // counter input
+                emitOp(new OpcodeOp("OP_DUP"));        // counter input input
+                emitOp(new PushOp(PushValue.of(1)));   // counter input input 1
+                emitOp(new OpcodeOp("OP_GREATERTHAN")); // counter input (input>1)
+                List<StackOp> thenOps = new ArrayList<>();
+                thenOps.add(new PushOp(PushValue.of(2))); // counter input 2
+                thenOps.add(new OpcodeOp("OP_DIV"));   // counter (input/2)
+                thenOps.add(new SwapOp());             // (input/2) counter
+                thenOps.add(new OpcodeOp("OP_1ADD"));  // (input/2) (counter+1)
+                thenOps.add(new SwapOp());             // (counter+1) (input/2)
+                emitOp(new IfOp(thenOps));
+                emitOp(new SwapOp());                  // input counter
+            }
+            emitOp(new NipOp()); // counter
+
+            sm.push(bindingName);
+            trackDepth();
+        }
+
+        // ------------------------------------------------------------------
+        // sign(x): return -1/0/+1 without dividing by zero.
+        // Mirrors lowerSign in Go. OP_DUP IF { OP_DUP OP_ABS swap OP_DIV }
+        // For x == 0, the dup'd 0 is consumed by the IF and original 0 stays.
+        // ------------------------------------------------------------------
+        void lowerSign(String bindingName, List<String> args, int idx,
+                       Map<String, Integer> lastUses) {
+            if (args.size() < 1) {
+                throw new RuntimeException("sign requires 1 argument");
+            }
+            String x = args.get(0);
+
+            bringToTop(x, isLastUse(x, idx, lastUses));
+            sm.pop();
+
+            emitOp(new OpcodeOp("OP_DUP"));
+            List<StackOp> thenOps = new ArrayList<>();
+            thenOps.add(new OpcodeOp("OP_DUP"));
+            thenOps.add(new OpcodeOp("OP_ABS"));
+            thenOps.add(new SwapOp());
+            thenOps.add(new OpcodeOp("OP_DIV"));
+            emitOp(new IfOp(thenOps));
 
             sm.push(bindingName);
             trackDepth();

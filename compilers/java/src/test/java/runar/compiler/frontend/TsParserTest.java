@@ -50,28 +50,29 @@ class TsParserTest {
     // ---------------------------------------------------------------
 
     /**
-     * Locate the conformance/tests directory relative to the gradle CWD
-     * (compilers/java). All five sibling compilers parse this fixture
-     * tree; the Java port must too.
+     * Locate the canonical TypeScript contract for a conformance fixture.
+     * Since commit 4dc929c the fixtures point at {@code examples/ts/...} as
+     * the canonical source rather than carrying a per-fixture .runar.ts
+     * file, so this helper resolves the example path directly.
      */
-    private static Path conformanceFile(String fixture, String name) {
+    private static Path conformanceFile(String exampleDir, String name) {
         // Working directory at test time is compilers/java. Walk up to the repo root.
         Path repoRoot = Path.of("").toAbsolutePath().getParent().getParent();
-        return repoRoot.resolve("conformance/tests").resolve(fixture).resolve(name);
+        return repoRoot.resolve("examples/ts").resolve(exampleDir).resolve(name);
     }
 
-    private static String readFixture(String fixture, String name) throws IOException {
-        return Files.readString(conformanceFile(fixture, name));
+    private static String readFixture(String exampleDir, String name) throws IOException {
+        return Files.readString(conformanceFile(exampleDir, name));
     }
 
     @Test
     void parsesBasicP2pkhFixture() throws Exception {
-        String src = readFixture("basic-p2pkh", "basic-p2pkh.runar.ts");
-        ContractNode c = TsParser.parse(src, "basic-p2pkh.runar.ts");
+        String src = readFixture("p2pkh", "P2PKH.runar.ts");
+        ContractNode c = TsParser.parse(src, "P2PKH.runar.ts");
 
         assertEquals("P2PKH", c.name());
         assertEquals(ParentClass.SMART_CONTRACT, c.parentClass());
-        assertEquals("basic-p2pkh.runar.ts", c.sourceFile());
+        assertEquals("P2PKH.runar.ts", c.sourceFile());
         assertEquals(1, c.properties().size());
         assertEquals("pubKeyHash", c.properties().get(0).name());
         assertTrue(c.properties().get(0).readonly());
@@ -86,8 +87,8 @@ class TsParserTest {
 
     @Test
     void parsesArithmeticFixture() throws Exception {
-        String src = readFixture("arithmetic", "arithmetic.runar.ts");
-        ContractNode c = TsParser.parse(src, "arithmetic.runar.ts");
+        String src = readFixture("arithmetic", "Arithmetic.runar.ts");
+        ContractNode c = TsParser.parse(src, "Arithmetic.runar.ts");
         assertEquals("Arithmetic", c.name());
         assertEquals(ParentClass.SMART_CONTRACT, c.parentClass());
         assertEquals(1, c.properties().size());
@@ -104,8 +105,8 @@ class TsParserTest {
 
     @Test
     void parsesEscrowFixture() throws Exception {
-        String src = readFixture("escrow", "escrow.runar.ts");
-        ContractNode c = TsParser.parse(src, "escrow.runar.ts");
+        String src = readFixture("escrow", "Escrow.runar.ts");
+        ContractNode c = TsParser.parse(src, "Escrow.runar.ts");
         assertEquals("Escrow", c.name());
         assertEquals(ParentClass.SMART_CONTRACT, c.parentClass());
         assertEquals(3, c.properties().size());

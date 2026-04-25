@@ -7,6 +7,7 @@
     ".runar.rs": "../../../examples/rust/ec-unit/ECUnit.runar.rs",
     ".runar.py": "../../../examples/python/ec-unit/ECUnit.runar.py",
     ".runar.rb": "../../../examples/ruby/ec-unit/ECUnit.runar.rb",
-    ".runar.zig": "../../../examples/zig/ec-unit/ECUnit.runar.zig"
+    ".runar.zig": "../../../examples/zig/ec-unit/ECUnit.runar.zig",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/ec-unit/ECUnit.runar.java"
   }
 }
