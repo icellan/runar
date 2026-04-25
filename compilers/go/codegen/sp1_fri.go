@@ -157,7 +157,30 @@ func (ctx *loweringContext) lowerVerifySP1FRI(
 	// named-slot bookkeeping; it never touches `ctx.sm`. The pre-pushed
 	// parsed-proof fields below the 3 typed args are consumed by the helper
 	// in the canonical declaration order.
-	EmitFullSP1FriVerifierBody(ctx.emitOp, DefaultSP1FriParams())
+	//
+	// Pre-existing bug fix: `EmitFullSP1FriVerifierBody` is written assuming
+	// that when `SP1VKeyHashByteSize == 0` no sp1VKeyHash typed arg is on
+	// the data stack at all (see the body's §1a/1f conditional and the
+	// inline-prelude reference in `sp1_fri_test.go:641-642` which omits the
+	// push). The dispatch path, however, ALWAYS brings 3 args to top via
+	// the loop above, with sp1VKeyHash on top — including the empty-bytes
+	// placeholder push the locking script emits for the
+	// `Sp1VKeyHash runar.ByteString runar:"readonly"` property. The body
+	// then mistakenly parks publicValues' position (sp1VKeyHash) on the
+	// alt-stack and SHA-256-hashes publicValues instead of proofBlob,
+	// breaking the Step 1 binding. Surfaced by the deployable end-to-end
+	// gate `packages/runar-go/sp1fri.TestEncodeUnlockingScript_AcceptsMinimalGuestFixture`.
+	//
+	// Localised fix: when `SP1VKeyHashByteSize == 0`, drop the sp1VKeyHash
+	// typed arg here so the data stack matches the body's invariant
+	// (proofBlob deepest, publicValues on top of the typed-args section).
+	// This keeps `EmitFullSP1FriVerifierBody` itself unchanged so all the
+	// existing standalone codegen tests keep passing.
+	params := DefaultSP1FriParams()
+	if params.SP1VKeyHashByteSize == 0 {
+		ctx.emitOp(StackOp{Op: "drop"})
+	}
+	EmitFullSP1FriVerifierBody(ctx.emitOp, params)
 
 	// The helper leaves a single OP_1 on the stack as the binding result.
 	// Track it on the stack-machine so subsequent bindings see it.

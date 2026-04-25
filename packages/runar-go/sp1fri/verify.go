@@ -21,8 +21,17 @@ import (
 // All field elements are converted to canonical KoalaBear at the boundary;
 // internal arithmetic is canonical-form throughout.
 func Verify(proof *Proof, publicValues []uint32) error {
-	cfg := minimalGuestConfig
+	return VerifyWithConfig(proof, publicValues, minimalGuestConfig)
+}
 
+// VerifyWithConfig is the parameterised entry point: same algorithm as
+// `Verify`, but with the FRI / AIR config supplied by the caller. Used by the
+// production-scale `evm-guest` fixture (`tests/vectors/sp1/fri/evm-guest/`)
+// which uses a different `(degreeBits, log_blowup, log_final_poly_len,
+// num_queries, *_pow_bits)` tuple. The Fibonacci AIR shape (2 columns,
+// 3 public values, max_constraint_degree=2 → log_num_quotient_chunks=0) is
+// shared across both fixtures, so the rest of the verifier is parametric.
+func VerifyWithConfig(proof *Proof, publicValues []uint32, cfg FriVerifierConfig) error {
 	if uint64(cfg.numPublicValues) != uint64(len(publicValues)) {
 		return fmt.Errorf("verify: public values len mismatch: want %d got %d",
 			cfg.numPublicValues, len(publicValues))
@@ -137,7 +146,7 @@ func Verify(proof *Proof, publicValues []uint32) error {
 	}
 	quotRound := commitOpening{commit: proof.Commitments.QuotientChunks, matrices: qcMatrices}
 
-	if err := verifyFri(&proof.OpeningProof, chal, []commitOpening{traceRound, quotRound}); err != nil {
+	if err := verifyFriWithConfig(&proof.OpeningProof, chal, []commitOpening{traceRound, quotRound}, cfg); err != nil {
 		return fmt.Errorf("verify: FRI: %w", err)
 	}
 
@@ -176,26 +185,60 @@ func Verify(proof *Proof, publicValues []uint32) error {
 	return nil
 }
 
-// minimalGuestConfig captures the fixture's pinned config (see
+// FriVerifierConfig is the per-fixture STARK / FRI parameter tuple consumed by
+// `VerifyWithConfig` and `verifyFriWithConfig`. It carries no proof bytes —
+// only the prover-side parameters the verifier needs to reproduce challenges
+// and check shapes. Each guest-program fixture (minimal-guest, evm-guest, …)
+// pins its own config; mismatched config + proof always rejects at the first
+// shape check or transcript-driven sample.
+type FriVerifierConfig struct {
+	degreeBits      int
+	logBlowup       int
+	logFinalPolyLen int
+	maxLogArity     int
+	numQueries      int
+	commitPowBits   int
+	queryPowBits    int
+	numPublicValues int
+}
+
+// minimalGuestConfig captures the PoC fixture's pinned config (see
 // `tests/vectors/sp1/fri/minimal-guest/README.md`).
-var minimalGuestConfig = struct {
-	degreeBits        int
-	logBlowup         int
-	logFinalPolyLen   int
-	maxLogArity       int
-	numQueries        int
-	commitPowBits     int
-	queryPowBits      int
-	numPublicValues   int
-}{
-	degreeBits:        3,
-	logBlowup:         2,
-	logFinalPolyLen:   2,
-	maxLogArity:       1,
-	numQueries:        2,
-	commitPowBits:     1,
-	queryPowBits:      1,
-	numPublicValues:   3,
+var minimalGuestConfig = FriVerifierConfig{
+	degreeBits:      3,
+	logBlowup:       2,
+	logFinalPolyLen: 2,
+	maxLogArity:     1,
+	numQueries:      2,
+	commitPowBits:   1,
+	queryPowBits:    1,
+	numPublicValues: 3,
+}
+
+// evmGuestConfig captures the production-scale Phase 2 fixture's pinned
+// config (see `tests/vectors/sp1/fri/evm-guest/README.md`).
+//
+// Notes on chosen tuple:
+//   - num_queries = 100 — production target, ~100-bit FRI security.
+//   - log_blowup = 1 — production target (tighter blowup, more queries needed).
+//   - commit/query pow_bits = 16 — production target (16-bit grinding).
+//   - degreeBits = 10 — 1024-row Fibonacci trace (vs. 8 rows in the PoC).
+//   - logFinalPolyLen = 9 — pinned so total_log_reduction =
+//     degreeBits - logFinalPolyLen = 1, keeping the codegen helper's
+//     hard-coded `numRounds = 1` invariant satisfied
+//     (see `compilers/go/codegen/sp1_fri.go::EmitFullSP1FriVerifierBody`
+//     line 317). Bumping degreeBits without raising logFinalPolyLen in
+//     lockstep would require the codegen helper to compute numRounds from
+//     params.
+var evmGuestConfig = FriVerifierConfig{
+	degreeBits:      10,
+	logBlowup:       1,
+	logFinalPolyLen: 9,
+	maxLogArity:     1,
+	numQueries:      100,
+	commitPowBits:   16,
+	queryPowBits:    16,
+	numPublicValues: 3,
 }
 
 // canonicalKbDigest converts an 8-element KbDigest from Montgomery to canonical.

@@ -12,13 +12,20 @@ import (
 //
 // All field elements are canonical KoalaBear (uint32 / Ext4).
 
-// verifyFri runs the FRI verification protocol. Returns nil on success.
+// verifyFri runs the FRI verification protocol against the PoC minimal-guest
+// config. Thin wrapper around `verifyFriWithConfig` for backwards-compatible
+// callers.
+func verifyFri(proof *FriProof, chal *DuplexChallenger, input []commitOpening) error {
+	return verifyFriWithConfig(proof, chal, input, minimalGuestConfig)
+}
+
+// verifyFriWithConfig runs the FRI verification protocol with a caller-supplied
+// `FriVerifierConfig`. Returns nil on success.
 //
 // `input` is the ordered list of [trace, quotient_chunks] joint commitments
 // each with their per-matrix opened points and values. (No preprocessed,
-// no zk randomization in this fixture.)
-func verifyFri(proof *FriProof, chal *DuplexChallenger, input []commitOpening) error {
-	cfg := minimalGuestConfig
+// no zk randomization in either fixture.)
+func verifyFriWithConfig(proof *FriProof, chal *DuplexChallenger, input []commitOpening, cfg FriVerifierConfig) error {
 
 	// 1. Sample alpha for the per-height random linear combinations of the
 	//    quotient (f(z) - f(x)) / (z - x).
