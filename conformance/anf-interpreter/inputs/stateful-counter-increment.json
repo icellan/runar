@@ -1,0 +1,7 @@
+{
+  "case": "stateful-counter",
+  "methodName": "increment",
+  "currentState": { "count": "0n" },
+  "args": {},
+  "constructorArgs": []
+}

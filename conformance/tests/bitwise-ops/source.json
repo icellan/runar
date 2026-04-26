@@ -1,6 +1,6 @@
 {
   "sources": {
-    ".runar.ts": "bitwise-ops.runar.ts",
+    ".runar.ts": "../../../examples/ts/bitwise-ops/BitwiseOps.runar.ts",
     ".runar.sol": "../../../examples/sol/bitwise-ops/BitwiseOps.runar.sol",
     ".runar.move": "../../../examples/move/bitwise-ops/BitwiseOps.runar.move",
     ".runar.go": "../../../examples/go/bitwise-ops/BitwiseOps.runar.go",

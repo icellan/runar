@@ -1,0 +1,7 @@
+{
+  "case": "arithmetic",
+  "methodName": "verify",
+  "currentState": {},
+  "args": { "a": "5n", "b": "3n" },
+  "constructorArgs": ["42n"]
+}

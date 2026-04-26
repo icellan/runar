@@ -1,6 +1,6 @@
 {
   "sources": {
-    ".runar.ts": "ec-unit.runar.ts",
+    ".runar.ts": "../../../examples/ts/ec-unit/ECUnit.runar.ts",
     ".runar.sol": "../../../examples/sol/ec-unit/ECUnit.runar.sol",
     ".runar.move": "../../../examples/move/ec-unit/ECUnit.runar.move",
     ".runar.go": "../../../examples/go/ec-unit/ECUnit.runar.go",

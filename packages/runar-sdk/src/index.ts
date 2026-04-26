@@ -65,7 +65,8 @@ export type {
 } from './ordinals/index.js';
 
 // ANF interpreter (auto-compute state transitions)
-export { computeNewState } from './anf-interpreter.js';
+export { computeNewState, computeNewStateAndDataOutputs } from './anf-interpreter.js';
+export type { DataOutputEntry } from './anf-interpreter.js';
 
 // Re-export artifact types from runar-ir-schema for convenience
 export type {

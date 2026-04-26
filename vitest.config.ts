@@ -8,6 +8,7 @@ export default defineConfig({
       'runar-compiler': resolve(__dirname, 'packages/runar-compiler/src/index.ts'),
       'runar-ir-schema': resolve(__dirname, 'packages/runar-ir-schema/src/index.ts'),
       'runar-lang': resolve(__dirname, 'packages/runar-lang/src/index.ts'),
+      'runar-sdk': resolve(__dirname, 'packages/runar-sdk/src/index.ts'),
     },
   },
   test: {

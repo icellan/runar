@@ -1,0 +1,7 @@
+{
+  "case": "add-data-output",
+  "methodName": "publish",
+  "currentState": { "count": "0n" },
+  "args": { "payload": "deadbeef" },
+  "constructorArgs": []
+}

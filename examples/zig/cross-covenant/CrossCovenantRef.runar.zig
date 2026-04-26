@@ -3,9 +3,9 @@ const runar = @import("runar");
 pub const CrossCovenantRef = struct {
     pub const Contract = runar.SmartContract;
 
-    sourceScriptHash: runar.ByteString,
+    sourceScriptHash: runar.Sha256,
 
-    pub fn init(sourceScriptHash: runar.ByteString) CrossCovenantRef {
+    pub fn init(sourceScriptHash: runar.Sha256) CrossCovenantRef {
         return .{ .sourceScriptHash = sourceScriptHash };
     }
 

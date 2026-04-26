@@ -944,16 +944,17 @@ export async function updateGoldenFiles(testDir: string): Promise<void> {
 /**
  * Discover all input format source files in a test directory.
  *
- * Checks `source.json` for external references first, then scans for local
- * files. This allows tests to reference sources in `examples/` instead of
- * duplicating them.
+ * Sources MUST be declared in `source.json` via the `sources` map (or legacy
+ * `path` field). Conformance test directories are not allowed to host their
+ * own `*.runar.<ext>` source files — contracts live under `examples/` and
+ * `source.json` references them by relative path. Any orphan source file
+ * inside a case directory is a hard error so drift is caught immediately.
  *
  * Returns an array of { ext, sourceFile } for each format found.
  */
 function discoverFormats(testDir: string, testName: string): { ext: string; sourceFile: string }[] {
   const found: { ext: string; sourceFile: string }[] = [];
 
-  // Check source.json for external references
   const configFile = join(testDir, 'source.json');
   if (existsSync(configFile)) {
     const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
@@ -961,7 +962,6 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
       sources?: Record<string, string>;
     };
     if (config.sources) {
-      // Multi-format: { sources: { ".runar.ts": "path", ".runar.sol": "path", ... } }
       for (const [ext, relPath] of Object.entries(config.sources)) {
         const sourceFile = resolve(testDir, relPath);
         if (existsSync(sourceFile)) {
@@ -969,7 +969,6 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
         }
       }
     } else if (config.path) {
-      // Single-format: { path: "path/to/file.runar.ts" }
       const sourceFile = resolve(testDir, config.path);
       if (existsSync(sourceFile)) {
         const ext = INPUT_FORMATS.find(f => sourceFile.endsWith(f.ext))?.ext ?? '.runar.ts';
@@ -978,25 +977,25 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
     }
   }
 
-  // Also check local files (skip formats already found via source.json)
-  for (const { ext } of INPUT_FORMATS) {
-    if (found.some(f => f.ext === ext)) continue;
-    const sourceFile = join(testDir, `${testName}${ext}`);
-    if (existsSync(sourceFile)) {
-      found.push({ ext, sourceFile });
-    } else {
-      // Scan directory for any file with this extension (handles cases like
-      // P2PKH.runar.zig in the basic-p2pkh/ directory)
-      try {
-        const files = readdirSync(testDir);
-        const match = files.find(f => f.endsWith(ext));
-        if (match) {
-          found.push({ ext, sourceFile: join(testDir, match) });
-        }
-      } catch {
-        // Directory read failed, skip
+  // Defensive: reject orphan *.runar.<ext> files inside the case dir that aren't
+  // referenced by source.json. Forces contracts to live under examples/.
+  // Skips *.runar.json artifact fixtures (e.g. basic-p2pkh.runar.json).
+  try {
+    const referenced = new Set(found.map(f => resolve(f.sourceFile)));
+    for (const file of readdirSync(testDir)) {
+      const lower = file.toLowerCase();
+      if (!lower.includes('.runar.') || lower.endsWith('.runar.json')) continue;
+      const abs = resolve(join(testDir, file));
+      if (!referenced.has(abs)) {
+        throw new Error(
+          `Orphan source file in conformance test '${testName}': ${file}. ` +
+          `Move it under examples/ and reference it from source.json.`,
+        );
       }
     }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('Orphan source file')) throw err;
+    // Directory read failed for non-orphan reason; ignore.
   }
 
   return found;

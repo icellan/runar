@@ -275,7 +275,14 @@ get_state_script(24), method_call(9), add_output(7), if(5), unary_op(2),
 loop(1), add_raw_output(1), add_data_output(1), array_literal(0)
 ```
 
-Every constructor except `array_literal` is exercised. **`array_literal` is in the schema but no golden file uses it** (likely produced only for fixed-size array parameter passing, currently rarely needed). The Lean parser must still support it; the well-formedness predicate must include it; but there is no behavioral coverage from the goldens. Flagged for the team — this is the riskiest constructor for silent regressions.
+Every constructor except `array_literal` is exercised by the cross-compiler conformance goldens in `conformance/tests/`. `array_literal` is the only kind that is emitted exclusively from `[…]` syntax inside `checkMultiSig` arguments today, and only the TypeScript reference compiler (plus the TS-package's `.runar.sol` parser) accept that syntax — the six peer compilers (Go, Rust, Python, Zig, Ruby, Java) lower bracketed call arguments to a `FixedArray(...)` call rather than an `array_literal` ANF node. A cross-compiler conformance fixture is therefore not viable until those parsers are extended.
+
+What exists today as regression coverage for `array_literal`:
+
+- `packages/runar-compiler/src/__tests__/array-literal.test.ts` — five behavioural unit tests including a pinned ANF + script golden against `examples/ts/multisig-2of3/MultiSig2of3.runar.ts` (fixture lives at `packages/runar-compiler/src/__tests__/__fixtures__/array-literal/`). Locks the TS compiler's output byte-for-byte.
+- `examples/ts/multisig-2of3/` and `examples/sol/multisig-2of3/` — canonical 2-of-3 multisig developer examples with `vitest` peer tests.
+
+The Lean parser must still support `array_literal`; the well-formedness predicate must include it. Flagged for the team — extending peer-compiler parser support to remove the cross-compiler gap is a separate workstream.
 
 Operator coverage:
 

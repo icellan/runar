@@ -1,0 +1,7 @@
+{
+  "case": "if-else",
+  "methodName": "check",
+  "currentState": {},
+  "args": { "value": "5n", "mode": true },
+  "constructorArgs": ["3n"]
+}

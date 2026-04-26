@@ -1,6 +1,6 @@
 {
   "sources": {
-    ".runar.ts": "add-raw-output.runar.ts",
+    ".runar.ts": "../../../examples/ts/add-raw-output/RawOutputTest.runar.ts",
     ".runar.sol": "../../../examples/sol/add-raw-output/RawOutputTest.runar.sol",
     ".runar.move": "../../../examples/move/add-raw-output/RawOutputTest.runar.move",
     ".runar.go": "../../../examples/go/add-raw-output/RawOutputTest.runar.go",

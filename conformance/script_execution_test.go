@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"os"
@@ -25,22 +26,60 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
+// resolveTSSource reads the conformance test's source.json and returns the
+// repo-root-relative path to the .runar.ts source. Conformance no longer
+// hosts contract sources directly — they live under examples/ and are
+// referenced via source.json.
+func resolveTSSource(contractName string) (string, error) {
+	caseDir := filepath.Join("tests", contractName)
+	configPath := filepath.Join(caseDir, "source.json")
+	configBytes, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", configPath, err)
+	}
+	var cfg struct {
+		Path    string            `json:"path"`
+		Sources map[string]string `json:"sources"`
+	}
+	if err := json.Unmarshal(configBytes, &cfg); err != nil {
+		return "", fmt.Errorf("parse %s: %w", configPath, err)
+	}
+	rel, ok := cfg.Sources[".runar.ts"]
+	if !ok || rel == "" {
+		if cfg.Path != "" && strings.HasSuffix(cfg.Path, ".runar.ts") {
+			rel = cfg.Path
+		} else {
+			return "", fmt.Errorf("no .runar.ts source for %s", contractName)
+		}
+	}
+	// rel is relative to the source.json's directory (caseDir, which is
+	// "tests/<name>" relative to conformance/). Combine and normalize to a
+	// repo-root-relative path. The Node command runs with cwd = repo root.
+	combined := filepath.Clean(filepath.Join("conformance", caseDir, rel))
+	return combined, nil
+}
+
 // compileRúnar invokes the TypeScript compiler to produce hex for a conformance
 // contract with baked constructor args.  The args are passed as JSON.
 func compileRúnar(contractName string, argsJSON string) (string, error) {
+	srcRelPath, err := resolveTSSource(contractName)
+	if err != nil {
+		return "", err
+	}
+	fileName := filepath.Base(srcRelPath)
 	// Use node to invoke the compiler from the runar-testing package
 	// (where runar-compiler is a resolved dependency).
 	code := fmt.Sprintf(`
 (async () => {
 const { compile } = await import('./packages/runar-compiler/dist/index.js');
 const fs = require('fs');
-const src = fs.readFileSync('conformance/tests/%s/%s.runar.ts', 'utf-8');
+const src = fs.readFileSync('%s', 'utf-8');
 const args = JSON.parse('%s', (k,v) => typeof v === 'string' && /^-?\d+$/.test(v) ? BigInt(v) : v);
-const r = compile(src, { fileName: '%s.runar.ts', constructorArgs: args });
+const r = compile(src, { fileName: '%s', constructorArgs: args });
 if (!r.success || !r.scriptHex) { process.exit(1); }
 process.stdout.write(r.scriptHex);
 })();
-`, contractName, contractName, argsJSON, contractName)
+`, srcRelPath, argsJSON, fileName)
 
 	cmd := exec.Command("node", "-e", code)
 	cmd.Dir = ".." // project root

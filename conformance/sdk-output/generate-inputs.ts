@@ -1,16 +1,41 @@
 import { execFileSync } from 'child_process';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join, basename, dirname } from 'path';
+import { join, basename, dirname, resolve, relative } from 'path';
 import { fileURLToPath } from 'url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '../..');
 const TESTS_DIR = join(__dirname, 'tests');
+const CONFORMANCE_TESTS_DIR = join(ROOT, 'conformance/tests');
 
 interface TestSpec {
   name: string;
-  source: string; // relative to ROOT
+  /**
+   * Repo-root-relative path to a `.runar.ts` source. If omitted, resolved
+   * via conformance/tests/<name>/source.json's `.runar.ts` entry. Conformance
+   * cases no longer host their own contracts — they reference examples/.
+   */
+  source?: string;
   constructorArgs: Array<{ type: string; value: string }>;
+}
+
+/** Resolve a TestSpec's source path. Reads source.json when source is absent. */
+function resolveTestSource(spec: TestSpec): string {
+  if (spec.source) return spec.source;
+  const configPath = join(CONFORMANCE_TESTS_DIR, spec.name, 'source.json');
+  if (!existsSync(configPath)) {
+    throw new Error(`No source for spec '${spec.name}': missing ${configPath}`);
+  }
+  const cfg = JSON.parse(readFileSync(configPath, 'utf-8')) as {
+    sources?: Record<string, string>;
+    path?: string;
+  };
+  const tsRel = cfg.sources?.['.runar.ts'] ?? (cfg.path?.endsWith('.runar.ts') ? cfg.path : undefined);
+  if (!tsRel) {
+    throw new Error(`No .runar.ts source for spec '${spec.name}' in ${configPath}`);
+  }
+  const abs = resolve(dirname(configPath), tsRel);
+  return relative(ROOT, abs);
 }
 
 // Standard test values
@@ -263,65 +288,56 @@ const TEST_SPECS: TestSpec[] = [
     ],
   },
 
-  // ===== Conformance-only contracts =====
+  // ===== Conformance contracts (source resolved via source.json → examples/) =====
 
   {
     name: 'arithmetic',
-    source: 'conformance/tests/arithmetic/arithmetic.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '42' },
     ],
   },
   {
     name: 'babybear-ext4',
-    source: 'conformance/tests/babybear-ext4/babybear-ext4.runar.ts',
     constructorArgs: [],
   },
   {
     name: 'basic-p2pkh',
-    source: 'conformance/tests/basic-p2pkh/basic-p2pkh.runar.ts',
     constructorArgs: [
       { type: 'Addr', value: '89abcdefabbaabbaabbaabbaabbaabbaabbaabba' },
     ],
   },
   {
     name: 'boolean-logic',
-    source: 'conformance/tests/boolean-logic/boolean-logic.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '10' },
     ],
   },
   {
     name: 'bounded-loop',
-    source: 'conformance/tests/bounded-loop/bounded-loop.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '25' },
     ],
   },
   {
     name: 'ec-primitives',
-    source: 'conformance/tests/ec-primitives/ec-primitives.runar.ts',
     constructorArgs: [
       { type: 'Point', value: POINT },
     ],
   },
   {
     name: 'if-else',
-    source: 'conformance/tests/if-else/if-else.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '10' },
     ],
   },
   {
     name: 'if-without-else',
-    source: 'conformance/tests/if-without-else/if-without-else.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '5' },
     ],
   },
   {
     name: 'multi-method',
-    source: 'conformance/tests/multi-method/multi-method.runar.ts',
     constructorArgs: [
       { type: 'PubKey', value: PK },
       { type: 'PubKey', value: PK },
@@ -329,21 +345,18 @@ const TEST_SPECS: TestSpec[] = [
   },
   {
     name: 'post-quantum-slhdsa',
-    source: 'conformance/tests/post-quantum-slhdsa/post-quantum-slhdsa.runar.ts',
     constructorArgs: [
       { type: 'ByteString', value: HASH32 },
     ],
   },
   {
     name: 'post-quantum-wots',
-    source: 'conformance/tests/post-quantum-wots/post-quantum-wots.runar.ts',
     constructorArgs: [
       { type: 'ByteString', value: HASH32 },
     ],
   },
   {
     name: 'stateful',
-    source: 'conformance/tests/stateful/stateful.runar.ts',
     constructorArgs: [
       { type: 'bigint', value: '0' },
       { type: 'bigint', value: '100' },
@@ -351,7 +364,6 @@ const TEST_SPECS: TestSpec[] = [
   },
   {
     name: 'stateful-bytestring',
-    source: 'conformance/tests/stateful-bytestring/stateful-bytestring.runar.ts',
     constructorArgs: [
       { type: 'ByteString', value: HELLO },
       { type: 'PubKey', value: PK },
@@ -363,8 +375,15 @@ const TMP_DIR = join(__dirname, '.tmp');
 if (!existsSync(TMP_DIR)) mkdirSync(TMP_DIR, { recursive: true });
 
 for (const spec of TEST_SPECS) {
-  const sourcePath = join(ROOT, spec.source);
-  console.log(`Compiling ${spec.name}...`);
+  let sourceRel: string;
+  try {
+    sourceRel = resolveTestSource(spec);
+  } catch (err: any) {
+    console.error(`  ${err.message}`);
+    continue;
+  }
+  const sourcePath = join(ROOT, sourceRel);
+  console.log(`Compiling ${spec.name} (${sourceRel})...`);
   try {
     execFileSync(
       'npx',
@@ -376,7 +395,7 @@ for (const spec of TEST_SPECS) {
     continue;
   }
 
-  const sourceBase = basename(spec.source, '.ts');
+  const sourceBase = basename(sourceRel, '.ts');
   const artifactPath = join(TMP_DIR, `${sourceBase}.json`);
   if (!existsSync(artifactPath)) {
     console.error(`  No artifact found for ${spec.name} at ${artifactPath}`);

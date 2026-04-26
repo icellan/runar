@@ -10,10 +10,12 @@ pub const MerkleProofDemo = struct {
     }
 
     pub fn verifySha256(self: *const MerkleProofDemo, leaf: runar.ByteString, proof: runar.ByteString, index: i64) void {
-        runar.assert(runar.bytesEq(runar.merkleRootSha256(leaf, proof, index, 4), self.expectedRoot));
+        const root = runar.merkleRootSha256(leaf, proof, index, 4);
+        runar.assert(runar.bytesEq(root, self.expectedRoot));
     }
 
     pub fn verifyHash256(self: *const MerkleProofDemo, leaf: runar.ByteString, proof: runar.ByteString, index: i64) void {
-        runar.assert(runar.bytesEq(runar.merkleRootHash256(leaf, proof, index, 4), self.expectedRoot));
+        const root = runar.merkleRootHash256(leaf, proof, index, 4);
+        runar.assert(runar.bytesEq(root, self.expectedRoot));
     }
 };

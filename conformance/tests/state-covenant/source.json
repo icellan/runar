@@ -6,7 +6,7 @@
     ".runar.go": "../../../examples/go/state-covenant/StateCovenant.runar.go",
     ".runar.rs": "../../../examples/rust/state-covenant/StateCovenant.runar.rs",
     ".runar.py": "../../../examples/python/state-covenant/StateCovenant.runar.py",
-    ".runar.zig": "StateCovenant.runar.zig",
+    ".runar.zig": "../../../examples/zig/state-covenant/StateCovenant.runar.zig",
     ".runar.rb": "../../../examples/ruby/state-covenant/StateCovenant.runar.rb",
     ".runar.java": "../../../examples/java/src/main/java/runar/examples/state-covenant/StateCovenant.runar.java"
   }
