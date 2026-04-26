@@ -131,9 +131,11 @@ class TestJavaP2PKH:
         assert isinstance(first_stmt, ExpressionStmt)
         first_call = first_stmt.expr
         assert isinstance(first_call, CallExpr)
-        # assertThat(...) resolves as a free call — no receiver.
+        # assertThat(...) resolves as a free call — no receiver. The peer
+        # parser rewrites the static-imported `assertThat` to `assert` so the
+        # shared typechecker (which only knows `assert`) accepts the call.
         assert isinstance(first_call.callee, Identifier)
-        assert first_call.callee.name == "assertThat"
+        assert first_call.callee.name == "assert"
         assert len(first_call.args) == 1
 
         equals_call = first_call.args[0]

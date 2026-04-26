@@ -129,20 +129,22 @@ class P2PKH extends SmartContract {
 		t.Fatalf("expected 2 unlock body stmts, got %d", len(unlock.Body))
 	}
 
-	// First stmt: assertThat(hash160(pubKey).equals(pubKeyHash))
+	// First stmt: assertThat(hash160(pubKey).equals(pubKeyHash)). The peer
+	// parser rewrites the static-imported `assertThat` to `assert` so the
+	// shared typechecker (which only knows `assert`) accepts the call.
 	first, ok := unlock.Body[0].(ExpressionStmt)
 	if !ok {
 		t.Fatalf("unlock body[0] should be ExpressionStmt, got %T", unlock.Body[0])
 	}
 	assertCall, ok := first.Expr.(CallExpr)
 	if !ok {
-		t.Fatalf("expected assertThat call, got %T", first.Expr)
+		t.Fatalf("expected assert call, got %T", first.Expr)
 	}
-	if id, ok := assertCall.Callee.(Identifier); !ok || id.Name != "assertThat" {
-		t.Errorf("expected assertThat callee, got %+v", assertCall.Callee)
+	if id, ok := assertCall.Callee.(Identifier); !ok || id.Name != "assert" {
+		t.Errorf("expected assert callee, got %+v", assertCall.Callee)
 	}
 	if len(assertCall.Args) != 1 {
-		t.Fatalf("expected 1 assertThat arg, got %d", len(assertCall.Args))
+		t.Fatalf("expected 1 assert arg, got %d", len(assertCall.Args))
 	}
 	equalsCall, ok := assertCall.Args[0].(CallExpr)
 	if !ok {

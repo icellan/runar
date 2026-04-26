@@ -578,6 +578,26 @@ public final class JavaParser {
             && n.getValue() instanceof Number num) {
             return new BigIntLiteral(BigInteger.valueOf(num.longValue()));
         }
+        // Bigint.of(<arbitrary expression>) — wrapping a BigInteger-typed value
+        // (e.g. the result of a builtin like `percentOf` or `extractLocktime`)
+        // into a Bigint. At the Rúnar AST level Bigint and BigInteger collapse
+        // to the same BIGINT primitive, so the wrap is a no-op: lower to the
+        // inner expression. Mirrors how BigInteger.valueOf(<non-literal>) would
+        // also collapse (the JDK valueOf is identity at this layer).
+        if (callee instanceof MemberSelectTree ms
+            && ms.getExpression() instanceof IdentifierTree bi
+            && ((bi.getName().contentEquals("Bigint") && ms.getIdentifier().contentEquals("of"))
+                || (bi.getName().contentEquals("BigInteger") && ms.getIdentifier().contentEquals("valueOf")))
+            && mi.getArguments().size() == 1) {
+            return convertExpression(mi.getArguments().get(0), filename, cu);
+        }
+        // <bigint>.value() — unwrapping a Bigint back to its underlying
+        // BigInteger. Symmetric no-op to Bigint.of(...) above.
+        if (callee instanceof MemberSelectTree ms
+            && ms.getIdentifier().contentEquals("value")
+            && mi.getArguments().isEmpty()) {
+            return convertExpression(ms.getExpression(), filename, cu);
+        }
         // Recognise super(...) inside the constructor.
         if (callee instanceof IdentifierTree id && id.getName().contentEquals("super")) {
             List<Expression> args = convertArgs(mi, filename, cu);

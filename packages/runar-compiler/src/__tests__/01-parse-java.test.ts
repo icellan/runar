@@ -265,7 +265,10 @@ class C extends SmartContract {
 
       const first = unlock.body[0] as ExpressionStatement;
       const assertCall = first.expression as CallExpr;
-      expect((assertCall.callee as Identifier).name).toBe('assertThat');
+      // The peer parser rewrites the static-imported `assertThat` to
+      // `assert` so the shared typechecker (which only knows `assert`)
+      // accepts the call.
+      expect((assertCall.callee as Identifier).name).toBe('assert');
 
       // hash160(pubKey).equals(pubKeyHash) → call(MemberExpr(call(hash160,…),equals),…)
       const equalsCall = assertCall.args[0] as CallExpr;

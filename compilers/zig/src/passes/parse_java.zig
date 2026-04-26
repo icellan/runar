@@ -1422,11 +1422,14 @@ const Parser = struct {
                             else => {},
                         }
                     }
-                    // BigInteger.valueOf(<int literal>) → BigIntLiteral
-                    if (std.mem.eql(u8, member, "valueOf") and args.len == 1) {
+                    // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral
+                    if (args.len == 1) {
                         switch (expr) {
                             .identifier => |id| {
-                                if (std.mem.eql(u8, id, "BigInteger")) {
+                                const is_bigint_lit_call =
+                                    (std.mem.eql(u8, id, "BigInteger") and std.mem.eql(u8, member, "valueOf")) or
+                                    (std.mem.eql(u8, id, "Bigint") and std.mem.eql(u8, member, "of"));
+                                if (is_bigint_lit_call) {
                                     switch (args[0]) {
                                         .literal_int => |v| {
                                             expr = .{ .literal_int = v };
@@ -1438,6 +1441,61 @@ const Parser = struct {
                             },
                             else => {},
                         }
+                    }
+                    // Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
+                    // — identity at the Rúnar AST level. Bigint and BigInteger
+                    // collapse to the same BIGINT primitive, so the wrap is a
+                    // no-op: lower to the inner expression. Mirrors
+                    // JavaParser.java's identity branch.
+                    if (args.len == 1) {
+                        switch (expr) {
+                            .identifier => |id| {
+                                const is_bigint_identity =
+                                    (std.mem.eql(u8, id, "Bigint") and std.mem.eql(u8, member, "of")) or
+                                    (std.mem.eql(u8, id, "BigInteger") and std.mem.eql(u8, member, "valueOf"));
+                                if (is_bigint_identity) {
+                                    expr = args[0];
+                                    continue;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                    // <expr>.value() — unwrapping a Bigint back to its
+                    // underlying BigInteger. Symmetric no-op to Bigint.of(...)
+                    // above; we keep `expr` as the receiver and skip the
+                    // method-call construction.
+                    if (std.mem.eql(u8, member, "value") and args.len == 0) {
+                        continue;
+                    }
+
+                    // Bigint-wrapper arithmetic methods: `a.plus(b)` →
+                    // BinaryExpr(+, a, b), `a.neg()` → UnaryExpr(-, a),
+                    // `a.abs()` → CallExpr(abs, a). Matched by method name +
+                    // arity; receiver type is not consulted (parser has no
+                    // type info at this stage); the typechecker rejects
+                    // misuse. Mirrors JavaParser.tryLowerBigintMethod.
+                    if (args.len == 1) {
+                        if (bigintBinaryMethodOp(member)) |bin_op| {
+                            const bop = self.allocator.create(BinaryOp) catch return null;
+                            bop.* = .{ .op = bin_op, .left = expr, .right = args[0] };
+                            expr = .{ .binary_op = bop };
+                            continue;
+                        }
+                    }
+                    if (args.len == 0 and std.mem.eql(u8, member, "neg")) {
+                        const uop = self.allocator.create(UnaryOp) catch return null;
+                        uop.* = .{ .op = .negate, .operand = expr };
+                        expr = .{ .unary_op = uop };
+                        continue;
+                    }
+                    if (args.len == 0 and std.mem.eql(u8, member, "abs")) {
+                        var abs_args = self.allocator.alloc(Expression, 1) catch return null;
+                        abs_args[0] = expr;
+                        const call = self.allocator.create(CallExpr) catch return null;
+                        call.* = .{ .callee = "abs", .args = abs_args };
+                        expr = .{ .call = call };
+                        continue;
                     }
 
                     switch (expr) {
@@ -1460,10 +1518,13 @@ const Parser = struct {
                     }
                 } else {
                     // Property access
-                    // BigInteger.{ZERO,ONE,TWO,TEN} → literal
+                    // BigInteger.{ZERO,ONE,TWO,TEN} or Bigint.{ZERO,ONE,TWO,TEN}
+                    // → literal. The Bigint wrapper re-exports the same
+                    // constants so both spellings are accepted (matches
+                    // JavaParser.convertExpression).
                     switch (expr) {
                         .identifier => |id| {
-                            if (std.mem.eql(u8, id, "BigInteger")) {
+                            if (std.mem.eql(u8, id, "BigInteger") or std.mem.eql(u8, id, "Bigint")) {
                                 if (std.mem.eql(u8, member, "ZERO")) {
                                     expr = .{ .literal_int = 0 };
                                     continue;
@@ -1790,6 +1851,29 @@ fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
         .percent_eq => .mod,
         else => .add,
     };
+}
+
+/// Map a Bigint-wrapper method name to its canonical BinOperator. Mirrors
+/// JavaParser.BIGINT_BINARY_METHODS; unary `neg`/`abs` are handled at the
+/// call site. Receiver type is not consulted; the typechecker rejects misuse.
+fn bigintBinaryMethodOp(method: []const u8) ?BinOperator {
+    if (std.mem.eql(u8, method, "plus"))  return .add;
+    if (std.mem.eql(u8, method, "minus")) return .sub;
+    if (std.mem.eql(u8, method, "times")) return .mul;
+    if (std.mem.eql(u8, method, "div"))   return .div;
+    if (std.mem.eql(u8, method, "mod"))   return .mod;
+    if (std.mem.eql(u8, method, "shl"))   return .lshift;
+    if (std.mem.eql(u8, method, "shr"))   return .rshift;
+    if (std.mem.eql(u8, method, "and"))   return .bitand;
+    if (std.mem.eql(u8, method, "or"))    return .bitor;
+    if (std.mem.eql(u8, method, "xor"))   return .bitxor;
+    if (std.mem.eql(u8, method, "gt"))    return .gt;
+    if (std.mem.eql(u8, method, "lt"))    return .lt;
+    if (std.mem.eql(u8, method, "ge"))    return .gte;
+    if (std.mem.eql(u8, method, "le"))    return .lte;
+    if (std.mem.eql(u8, method, "eq"))    return .eq;
+    if (std.mem.eql(u8, method, "neq"))   return .neq;
+    return null;
 }
 
 // ============================================================================

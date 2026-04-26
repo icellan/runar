@@ -1707,13 +1707,13 @@ impl<'a> JavaParser<'a> {
 
                     if matches!(self.current().typ, TokenType::LParen) {
                         let args = self.parse_call_args();
-                        expr = Expression::CallExpr {
+                        expr = promote_literal_calls(Expression::CallExpr {
                             callee: Box::new(Expression::MemberExpr {
                                 object: Box::new(expr),
                                 property: prop,
                             }),
                             args,
-                        };
+                        });
                     } else {
                         expr = Expression::MemberExpr {
                             object: Box::new(expr),
@@ -1732,10 +1732,10 @@ impl<'a> JavaParser<'a> {
                 }
                 TokenType::LParen => {
                     let args = self.parse_call_args();
-                    expr = Expression::CallExpr {
+                    expr = promote_literal_calls(Expression::CallExpr {
                         callee: Box::new(expr),
                         args,
-                    };
+                    });
                 }
                 TokenType::PlusPlus => {
                     self.advance();
@@ -1904,9 +1904,13 @@ impl<'a> JavaParser<'a> {
             }
             TokenType::Ident(name) => {
                 self.advance();
-                // `BigInteger.ZERO/ONE/TWO/TEN` → BigIntLiteral. Match eagerly
+                // `BigInteger.ZERO/ONE/TWO/TEN` or `Bigint.ZERO/ONE/TWO/TEN`
+                // → BigIntLiteral. The Bigint wrapper re-exports the same
+                // constants so both spellings are accepted. Match eagerly
                 // before falling through to generic member-access parsing.
-                if name == "BigInteger" && matches!(self.current().typ, TokenType::Dot) {
+                if (name == "BigInteger" || name == "Bigint")
+                    && matches!(self.current().typ, TokenType::Dot)
+                {
                     let next_name = match self.peek_at(1).typ.clone() {
                         TokenType::Ident(n) => n,
                         _ => String::new(),
@@ -1960,9 +1964,19 @@ impl<'a> JavaParser<'a> {
 // Literal-call promotion
 // ---------------------------------------------------------------------------
 
-/// Recognise `<X>.fromHex("hex")` and `BigInteger.valueOf(<int>)` call shapes
-/// and promote them to `ByteStringLiteral` / `BigIntLiteral` nodes. This is
-/// the Rust analogue of the Java parser's `convertCall` helper.
+/// Recognise the literal-as-call and Bigint-wrapper identity shapes:
+///   - `<X>.fromHex("hex")`               → `ByteStringLiteral`
+///   - `BigInteger.valueOf(<int literal>)` → `BigIntLiteral`
+///   - `Bigint.of(<int literal>)`          → `BigIntLiteral`
+///   - `Bigint.of(<expr>)`                 → `<expr>` (identity wrap)
+///   - `BigInteger.valueOf(<expr>)`        → `<expr>` (identity wrap)
+///   - `<expr>.value()`                    → `<expr>` (identity unwrap)
+///   - `a.plus(b)` / `a.minus(b)` / ...    → `BinaryExpr` (Bigint arith)
+///   - `a.neg()`                           → `UnaryExpr(-)`
+///   - `a.abs()`                           → `CallExpr(abs, a)` (builtin)
+///   - `assertThat(c)`                     → `CallExpr(assert, c)`
+///
+/// This is the Rust analogue of the Java parser's `convertCall` helper.
 fn promote_literal_calls(expr: Expression) -> Expression {
     if let Expression::CallExpr { callee, args } = &expr {
         // X.fromHex("hex") → ByteStringLiteral(hex)
@@ -1978,22 +1992,109 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 }
             }
         }
-        // BigInteger.valueOf(<int literal>) → BigIntLiteral
+        // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral
         if args.len() == 1 {
             if let Expression::MemberExpr { object, property } = callee.as_ref() {
-                if property == "valueOf" {
-                    if let Expression::Identifier { name } = object.as_ref() {
-                        if name == "BigInteger" {
-                            if let Expression::BigIntLiteral { value } = &args[0] {
-                                return Expression::BigIntLiteral { value: *value };
-                            }
+                if let Expression::Identifier { name } = object.as_ref() {
+                    let is_bigint_literal_call = (name == "BigInteger" && property == "valueOf")
+                        || (name == "Bigint" && property == "of");
+                    if is_bigint_literal_call {
+                        if let Expression::BigIntLiteral { value } = &args[0] {
+                            return Expression::BigIntLiteral { value: *value };
                         }
                     }
                 }
             }
         }
+        // Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
+        // — identity at the Rúnar AST level. Bigint and BigInteger collapse to the
+        // same BIGINT primitive, so the wrap is a no-op: lower to the inner
+        // expression. Mirrors JavaParser.java's identity branch.
+        if args.len() == 1 {
+            if let Expression::MemberExpr { object, property } = callee.as_ref() {
+                if let Expression::Identifier { name } = object.as_ref() {
+                    let is_bigint_identity = (name == "Bigint" && property == "of")
+                        || (name == "BigInteger" && property == "valueOf");
+                    if is_bigint_identity {
+                        return args[0].clone();
+                    }
+                }
+            }
+        }
+        // <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
+        // Symmetric no-op to Bigint.of(...) above.
+        if args.is_empty() {
+            if let Expression::MemberExpr { object, property } = callee.as_ref() {
+                if property == "value" {
+                    return (**object).clone();
+                }
+            }
+        }
+        // Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
+        // `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
+        // method name + arity; receiver type is not consulted (parser has no
+        // type info at this stage); the typechecker rejects misuse. Mirrors
+        // JavaParser.tryLowerBigintMethod.
+        if let Expression::MemberExpr { object, property } = callee.as_ref() {
+            if args.len() == 1 {
+                if let Some(op) = bigint_binary_method_op(property) {
+                    return Expression::BinaryExpr {
+                        op,
+                        left: object.clone(),
+                        right: Box::new(args[0].clone()),
+                    };
+                }
+            }
+            if args.is_empty() && property == "neg" {
+                return Expression::UnaryExpr {
+                    op: UnaryOp::Neg,
+                    operand: object.clone(),
+                };
+            }
+            if args.is_empty() && property == "abs" {
+                return Expression::CallExpr {
+                    callee: Box::new(Expression::Identifier { name: "abs".to_string() }),
+                    args: vec![(**object).clone()],
+                };
+            }
+        }
+        // Static-imported `assertThat(cond)` is a builtin alias for `assert`
+        // in the canonical Java BuiltinRegistry. Peer typecheckers only know
+        // `assert`, so rewrite the callee here.
+        if let Expression::Identifier { name } = callee.as_ref() {
+            if name == "assertThat" {
+                return Expression::CallExpr {
+                    callee: Box::new(Expression::Identifier { name: "assert".to_string() }),
+                    args: args.clone(),
+                };
+            }
+        }
     }
     expr
+}
+
+/// Map a Bigint-wrapper method name to its canonical BinaryOp, mirroring
+/// JavaParser.BIGINT_BINARY_METHODS. Unary `neg`/`abs` are handled separately.
+fn bigint_binary_method_op(method: &str) -> Option<BinaryOp> {
+    match method {
+        "plus"  => Some(BinaryOp::Add),
+        "minus" => Some(BinaryOp::Sub),
+        "times" => Some(BinaryOp::Mul),
+        "div"   => Some(BinaryOp::Div),
+        "mod"   => Some(BinaryOp::Mod),
+        "shl"   => Some(BinaryOp::Shl),
+        "shr"   => Some(BinaryOp::Shr),
+        "and"   => Some(BinaryOp::BitAnd),
+        "or"    => Some(BinaryOp::BitOr),
+        "xor"   => Some(BinaryOp::BitXor),
+        "gt"    => Some(BinaryOp::Gt),
+        "lt"    => Some(BinaryOp::Lt),
+        "ge"    => Some(BinaryOp::Ge),
+        "le"    => Some(BinaryOp::Le),
+        "eq"    => Some(BinaryOp::StrictEq),
+        "neq"   => Some(BinaryOp::StrictNe),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2178,7 +2279,10 @@ mod tests {
 
         assert_eq!(unlock.body.len(), 2);
 
-        // First stmt: assertThat(hash160(pubKey).equals(pubKeyHash))
+        // First stmt: assertThat(hash160(pubKey).equals(pubKeyHash)). The
+        // peer parser rewrites the static-imported `assertThat` to `assert`
+        // so the shared typechecker (which only knows `assert`) accepts the
+        // call.
         let first = match &unlock.body[0] {
             Statement::ExpressionStatement { expression, .. } => expression,
             other => panic!("expected ExpressionStatement, got {:?}", other),
@@ -2186,8 +2290,8 @@ mod tests {
         let first_call = match first {
             Expression::CallExpr { callee, args } => {
                 match callee.as_ref() {
-                    Expression::Identifier { name } => assert_eq!(name, "assertThat"),
-                    other => panic!("expected assertThat, got {:?}", other),
+                    Expression::Identifier { name } => assert_eq!(name, "assert"),
+                    other => panic!("expected assert callee, got {:?}", other),
                 }
                 assert_eq!(args.len(), 1);
                 &args[0]

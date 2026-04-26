@@ -162,6 +162,30 @@ class Token:
 # Type mapping
 # ---------------------------------------------------------------------------
 
+# Bigint-wrapper method-name → canonical BinaryOp string. Mirrors
+# JavaParser.BIGINT_BINARY_METHODS; unary `neg`/`abs` are handled separately
+# at the call site. Receiver type is not consulted (parser has no type info
+# at this stage); the typechecker rejects misuse.
+_BIGINT_BINARY_METHODS: dict[str, str] = {
+    "plus":  "+",
+    "minus": "-",
+    "times": "*",
+    "div":   "/",
+    "mod":   "%",
+    "shl":   "<<",
+    "shr":   ">>",
+    "and":   "&",
+    "or":    "|",
+    "xor":   "^",
+    "gt":    ">",
+    "lt":    "<",
+    "ge":    ">=",
+    "le":    "<=",
+    "eq":    "===",
+    "neq":   "!==",
+}
+
+
 _TYPE_MAP: dict[str, str] = {
     # bigint aliases
     "BigInteger": "bigint",
@@ -1261,13 +1285,51 @@ class _JavaParser:
                 break
         self.expect(TOK_RPAREN, "')'")
 
-        # BigInteger.valueOf(<int literal>) → BigIntLiteral.
+        # BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral.
         if isinstance(callee, MemberExpr) \
-                and callee.property == "valueOf" \
                 and isinstance(callee.object, Identifier) \
-                and callee.object.name == "BigInteger" \
-                and len(args) == 1 and isinstance(args[0], BigIntLiteral):
+                and len(args) == 1 and isinstance(args[0], BigIntLiteral) \
+                and ((callee.object.name == "BigInteger" and callee.property == "valueOf")
+                     or (callee.object.name == "Bigint" and callee.property == "of")):
             return BigIntLiteral(value=args[0].value)
+
+        # Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
+        # — identity at the Rúnar AST level. Bigint and BigInteger collapse to
+        # the same BIGINT primitive, so the wrap is a no-op: lower to the inner
+        # expression. Mirrors JavaParser.java's identity branch.
+        if isinstance(callee, MemberExpr) \
+                and isinstance(callee.object, Identifier) \
+                and len(args) == 1 \
+                and ((callee.object.name == "Bigint" and callee.property == "of")
+                     or (callee.object.name == "BigInteger" and callee.property == "valueOf")):
+            return args[0]
+
+        # <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
+        # Symmetric no-op to Bigint.of(...) above.
+        if isinstance(callee, MemberExpr) \
+                and callee.property == "value" \
+                and len(args) == 0:
+            return callee.object
+
+        # Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
+        # `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
+        # method name + arity; receiver type is not consulted (parser has no
+        # type info at this stage); the typechecker rejects misuse. Mirrors
+        # JavaParser.tryLowerBigintMethod.
+        if isinstance(callee, MemberExpr):
+            if len(args) == 1 and callee.property in _BIGINT_BINARY_METHODS:
+                op = _BIGINT_BINARY_METHODS[callee.property]
+                return BinaryExpr(op=op, left=callee.object, right=args[0])
+            if len(args) == 0 and callee.property == "neg":
+                return UnaryExpr(op="-", operand=callee.object)
+            if len(args) == 0 and callee.property == "abs":
+                return CallExpr(callee=Identifier(name="abs"), args=[callee.object])
+
+        # Static-imported `assertThat(cond)` is a builtin alias for `assert`
+        # in the canonical Java BuiltinRegistry. Peer typecheckers only know
+        # `assert`, so rewrite the callee here.
+        if isinstance(callee, Identifier) and callee.name == "assertThat":
+            return CallExpr(callee=Identifier(name="assert"), args=args)
 
         return CallExpr(callee=callee, args=args)
 
@@ -1317,15 +1379,16 @@ class _JavaParser:
         if tok.kind == TOK_NEW:
             return self._parse_new()
 
-        # Special-case BigInteger.ZERO / ONE / TWO / TEN before we reach the
-        # member-access handler — this saves a later AST rewrite. We detect
-        # by spotting `BigInteger . <const>` and convert inline.
-        if tok.kind == TOK_IDENT and tok.value == "BigInteger" \
+        # Special-case BigInteger.ZERO/ONE/TWO/TEN or Bigint.ZERO/ONE/TWO/TEN
+        # before we reach the member-access handler. The Bigint wrapper
+        # re-exports BigInteger's constants so both spellings are accepted
+        # (matches JavaParser.convertExpression).
+        if tok.kind == TOK_IDENT and tok.value in ("BigInteger", "Bigint") \
                 and self.peek(1).kind == TOK_DOT and self.peek(2).kind == TOK_IDENT:
             tail = self.peek(2).value
             const_map = {"ZERO": 0, "ONE": 1, "TWO": 2, "TEN": 10}
             if tail in const_map and self.peek(3).kind != TOK_LPAREN:
-                self.advance()  # BigInteger
+                self.advance()  # BigInteger / Bigint
                 self.advance()  # .
                 self.advance()  # ZERO/ONE/TWO/TEN
                 return BigIntLiteral(value=const_map[tail])

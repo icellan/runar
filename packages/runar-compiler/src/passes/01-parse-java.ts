@@ -1127,8 +1127,12 @@ class JavaParser {
         const propName = propTok.value;
         if (expr.kind === 'identifier' && expr.name === 'this') {
           expr = { kind: 'property_access', property: propName };
-        } else if (expr.kind === 'identifier' && expr.name === 'BigInteger') {
-          // BigInteger.ZERO / ONE / TWO / TEN → BigIntLiteral
+        } else if (expr.kind === 'identifier'
+            && (expr.name === 'BigInteger' || expr.name === 'Bigint')) {
+          // BigInteger.{ZERO,ONE,TWO,TEN} or Bigint.{ZERO,ONE,TWO,TEN}
+          // → BigIntLiteral. The Bigint wrapper re-exports the same
+          // constants, so both spellings are accepted (matches
+          // JavaParser.convertExpression).
           const folded = foldBigIntegerConstant(propName);
           if (folded) {
             expr = folded;
@@ -1157,9 +1161,18 @@ class JavaParser {
   }
 
   /**
-   * Build a call expression, special-casing the two "call as literal" forms:
-   *   `X.fromHex("deadbeef")` → ByteStringLiteral("deadbeef")
-   *   `BigInteger.valueOf(7)` → BigIntLiteral(7n)
+   * Build a call expression, special-casing the "call as literal" forms and
+   * the Bigint wrapper identity transforms:
+   *   `X.fromHex("deadbeef")`       → ByteStringLiteral("deadbeef")
+   *   `BigInteger.valueOf(7)`       → BigIntLiteral(7n)  (literal arg)
+   *   `Bigint.of(7)`                → BigIntLiteral(7n)  (literal arg)
+   *   `Bigint.of(<expr>)`           → <expr>             (identity wrap)
+   *   `BigInteger.valueOf(<expr>)`  → <expr>             (identity wrap)
+   *   `<expr>.value()`              → <expr>             (identity unwrap)
+   *   `a.plus(b)`                   → BinaryExpr(+, a, b)  (Bigint arithmetic)
+   *   `a.neg()`                     → UnaryExpr(-, a)
+   *   `a.abs()`                     → CallExpr(abs, a)     (builtin)
+   *   `assertThat(c)`               → CallExpr(assert, c)  (builtin alias)
    */
   private buildCallExpr(callee: Expression, args: Expression[]): Expression {
     // X.fromHex("deadbeef") → ByteStringLiteral
@@ -1173,14 +1186,59 @@ class JavaParser {
       // the raw string content.
       return args[0]!;
     }
-    // BigInteger.valueOf(<int literal>) → BigIntLiteral
+    // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral
     if (callee.kind === 'member_expr'
-        && callee.property === 'valueOf'
         && callee.object.kind === 'identifier'
-        && callee.object.name === 'BigInteger'
         && args.length === 1
-        && args[0]!.kind === 'bigint_literal') {
+        && args[0]!.kind === 'bigint_literal'
+        && ((callee.object.name === 'BigInteger' && callee.property === 'valueOf')
+            || (callee.object.name === 'Bigint' && callee.property === 'of'))) {
       return args[0]!;
+    }
+    // Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
+    // — identity at the Rúnar AST level. Bigint and BigInteger collapse to the
+    // same BIGINT primitive, so the wrap is a no-op: lower to the inner
+    // expression. Mirrors JavaParser.java's `Bigint.of`/`BigInteger.valueOf`
+    // identity branch.
+    if (callee.kind === 'member_expr'
+        && callee.object.kind === 'identifier'
+        && args.length === 1
+        && ((callee.object.name === 'Bigint' && callee.property === 'of')
+            || (callee.object.name === 'BigInteger' && callee.property === 'valueOf'))) {
+      return args[0]!;
+    }
+    // <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
+    // Symmetric no-op to Bigint.of(...) above.
+    if (callee.kind === 'member_expr'
+        && callee.property === 'value'
+        && args.length === 0) {
+      return callee.object;
+    }
+    // Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
+    // `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
+    // method name + arity; receiver type is not consulted (typechecker
+    // catches misuse). Mirrors JavaParser.tryLowerBigintMethod.
+    if (callee.kind === 'member_expr') {
+      const binOp = BIGINT_BINARY_METHODS.get(callee.property);
+      if (binOp !== undefined && args.length === 1) {
+        return { kind: 'binary_expr', op: binOp, left: callee.object, right: args[0]! };
+      }
+      if (callee.property === 'neg' && args.length === 0) {
+        return { kind: 'unary_expr', op: '-', operand: callee.object };
+      }
+      if (callee.property === 'abs' && args.length === 0) {
+        return {
+          kind: 'call_expr',
+          callee: { kind: 'identifier', name: 'abs' },
+          args: [callee.object],
+        };
+      }
+    }
+    // Static-imported `assertThat(cond)` is registered as a builtin alias
+    // for `assert` in the canonical Java BuiltinRegistry. Peer typecheckers
+    // only know `assert`, so rewrite the callee here.
+    if (callee.kind === 'identifier' && callee.name === 'assertThat') {
+      return { kind: 'call_expr', callee: { kind: 'identifier', name: 'assert' }, args };
     }
     // Also accept `valueOf` on a PropertyAccessExpr (e.g., writing
     // `this.BigInteger.valueOf(...)`) — won't occur in practice, so no-op.
@@ -1354,6 +1412,32 @@ function isMemberModifier(t: TokenType): boolean {
   return t === 'public' || t === 'private' || t === 'protected'
       || t === 'final' || t === 'static' || t === 'abstract' || t === 'native';
 }
+
+// ---------------------------------------------------------------------------
+// Bigint-wrapper method-name → canonical BinaryOp table.
+// Mirrors JavaParser.BIGINT_BINARY_METHODS; unary `neg`/`abs` are handled
+// separately at the call site. Receiver type is not consulted; the typechecker
+// rejects misuse (e.g. `someBoolean.plus(other)`).
+// ---------------------------------------------------------------------------
+
+const BIGINT_BINARY_METHODS = new Map<string, BinaryOp>([
+  ['plus',  '+'],
+  ['minus', '-'],
+  ['times', '*'],
+  ['div',   '/'],
+  ['mod',   '%'],
+  ['shl',   '<<'],
+  ['shr',   '>>'],
+  ['and',   '&'],
+  ['or',    '|'],
+  ['xor',   '^'],
+  ['gt',    '>'],
+  ['lt',    '<'],
+  ['ge',    '>='],
+  ['le',    '<='],
+  ['eq',    '==='],
+  ['neq',   '!=='],
+]);
 
 // ---------------------------------------------------------------------------
 // BigInteger constant folding

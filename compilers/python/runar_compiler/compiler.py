@@ -136,10 +136,13 @@ def _parse_source(source: bytes, file_name: str) -> Any:
     elif lower.endswith(".runar.zig"):
         from runar_compiler.frontend.parser_zig import parse_zig
         return parse_zig(source, file_name)
+    elif lower.endswith(".runar.java"):
+        from runar_compiler.frontend.parser_java import parse_java
+        return parse_java(source, file_name)
     else:
         raise ValueError(
             f"Unsupported source format: {file_name}. "
-            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, or .runar.zig"
+            f"Expected .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.zig, or .runar.java"
         )
 
 

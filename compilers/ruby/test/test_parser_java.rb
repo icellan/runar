@@ -117,7 +117,9 @@ class TestParserJava < Minitest::Test
     assert_instance_of ExpressionStmt, first_stmt
     first_call = first_stmt.expr
     assert_instance_of CallExpr, first_call
-    assert_equal "assertThat", first_call.callee.name
+    # The peer parser rewrites the static-imported `assertThat` to `assert`
+    # so the shared typechecker (which only knows `assert`) accepts the call.
+    assert_equal "assert", first_call.callee.name
     assert_equal 1, first_call.args.length
 
     # Inner: hash160(pubKey).equals(pubKeyHash) -> CallExpr with MemberExpr callee

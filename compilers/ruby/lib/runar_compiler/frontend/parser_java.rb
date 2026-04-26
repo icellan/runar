@@ -1342,8 +1342,11 @@ module RunarCompiler
               next
             end
 
-            # Special-case BigInteger.ZERO/ONE/TWO/TEN -> BigIntLiteral.
-            if expr.is_a?(Identifier) && expr.name == "BigInteger"
+            # Special-case BigInteger.{ZERO,ONE,TWO,TEN} or
+            # Bigint.{ZERO,ONE,TWO,TEN} -> BigIntLiteral. The Bigint
+            # wrapper re-exports BigInteger's constants so both spellings
+            # are accepted (matches JavaParser.convertExpression).
+            if expr.is_a?(Identifier) && (expr.name == "BigInteger" || expr.name == "Bigint")
               big = case prop
                     when "ZERO" then 0
                     when "ONE"  then 1
@@ -1364,7 +1367,14 @@ module RunarCompiler
             end
           elsif check(TOK_LPAREN) && callable?(expr)
             args = parse_call_args
-            expr = CallExpr.new(callee: expr, args: args)
+            # Static-imported `assertThat(cond)` is a builtin alias for
+            # `assert` in the canonical Java BuiltinRegistry. Peer
+            # typecheckers only know `assert`, so rewrite the callee here.
+            if expr.is_a?(Identifier) && expr.name == "assertThat"
+              expr = CallExpr.new(callee: Identifier.new(name: "assert"), args: args)
+            else
+              expr = CallExpr.new(callee: expr, args: args)
+            end
           elsif match_tok(TOK_LBRACKET)
             index = parse_expression
             expect(TOK_RBRACKET, "']'")
@@ -1380,10 +1390,40 @@ module RunarCompiler
         expr
       end
 
+      # Bigint-wrapper method-name -> canonical Rúnar BinaryOp string. Mirrors
+      # JavaParser.BIGINT_BINARY_METHODS; unary +neg+/+abs+ are handled at the
+      # call site. Receiver type is not consulted; the typechecker rejects
+      # misuse.
+      BIGINT_BINARY_METHODS = {
+        "plus"  => "+",
+        "minus" => "-",
+        "times" => "*",
+        "div"   => "/",
+        "mod"   => "%",
+        "shl"   => "<<",
+        "shr"   => ">>",
+        "and"   => "&",
+        "or"    => "|",
+        "xor"   => "^",
+        "gt"    => ">",
+        "lt"    => "<",
+        "ge"    => ">=",
+        "le"    => "<=",
+        "eq"    => "===",
+        "neq"   => "!==",
+      }.freeze
+
       # Recognise special calls on a member:
-      #   xxx.fromHex("deadbeef") -> ByteStringLiteral("deadbeef")
-      #   BigInteger.valueOf(<int literal>) -> BigIntLiteral(n)
-      # Returns the lowered literal or nil if none applies.
+      #   xxx.fromHex("deadbeef")             -> ByteStringLiteral("deadbeef")
+      #   BigInteger.valueOf(<int literal>)   -> BigIntLiteral(n)
+      #   Bigint.of(<int literal>)            -> BigIntLiteral(n)
+      #   Bigint.of(<expr>)                   -> <expr>   (identity wrap)
+      #   BigInteger.valueOf(<expr>)          -> <expr>   (identity wrap)
+      #   <expr>.value()                      -> <expr>   (identity unwrap)
+      #   a.plus(b) / a.minus(b) / ...        -> BinaryExpr (Bigint arith)
+      #   a.neg()                             -> UnaryExpr(-)
+      #   a.abs()                             -> CallExpr(abs, a)
+      # Returns the lowered expression or nil if none applies.
       def try_lower_special_call(object, method_name, args)
         if method_name == "fromHex" && args.length == 1
           arg = args[0]
@@ -1393,10 +1433,40 @@ module RunarCompiler
           # fromHex with a non-literal string is not supported here; fall
           # through to a regular call expression.
         end
-        if method_name == "valueOf" &&
-           object.is_a?(Identifier) && object.name == "BigInteger" &&
-           args.length == 1 && args[0].is_a?(BigIntLiteral)
+        # BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) -> BigIntLiteral
+        if args.length == 1 && args[0].is_a?(BigIntLiteral) &&
+           object.is_a?(Identifier) &&
+           ((object.name == "BigInteger" && method_name == "valueOf") ||
+            (object.name == "Bigint" && method_name == "of"))
           return BigIntLiteral.new(value: args[0].value)
+        end
+        # Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
+        # — identity at the Rúnar AST level. Bigint and BigInteger collapse to
+        # the same BIGINT primitive, so the wrap is a no-op: lower to the
+        # inner expression. Mirrors JavaParser.java's identity branch.
+        if args.length == 1 && object.is_a?(Identifier) &&
+           ((object.name == "Bigint" && method_name == "of") ||
+            (object.name == "BigInteger" && method_name == "valueOf"))
+          return args[0]
+        end
+        # <expr>.value() — unwrapping a Bigint back to its underlying
+        # BigInteger. Symmetric no-op to Bigint.of(...) above.
+        if method_name == "value" && args.empty?
+          return object
+        end
+        # Bigint-wrapper arithmetic: a.plus(b) -> BinaryExpr(+, a, b),
+        # a.neg() -> UnaryExpr(-, a), a.abs() -> CallExpr(abs, a). Matched by
+        # method name + arity; receiver type is not consulted (parser has no
+        # type info at this stage); the typechecker rejects misuse. Mirrors
+        # JavaParser.tryLowerBigintMethod.
+        if args.length == 1 && (op = BIGINT_BINARY_METHODS[method_name])
+          return BinaryExpr.new(op: op, left: object, right: args[0])
+        end
+        if args.empty? && method_name == "neg"
+          return UnaryExpr.new(op: "-", operand: object)
+        end
+        if args.empty? && method_name == "abs"
+          return CallExpr.new(callee: Identifier.new(name: "abs"), args: [object])
         end
         nil
       end
