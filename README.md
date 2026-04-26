@@ -249,6 +249,26 @@ cd compilers/zig && zig build run -- compile ../../examples/zig/p2pkh/P2PKH.runa
 
 ---
 
+## SDKs & Deployment
+
+Rúnar ships seven deployment SDKs with equivalent capabilities. Each one wraps a compiled artifact, exposes pluggable `Provider` and `Signer` interfaces, deploys contracts on-chain, and calls public methods. Each SDK README is a complete, self-contained reference: install, quick start, core concepts, deploy, call, multi-signer flows, BRC-100 wallet signing, stateful contracts, UTXO and fee management, codegen, testing, provider configuration, full API reference, error handling.
+
+| Language | Package | Install | Reference |
+|----------|---------|---------|-----------|
+| TypeScript | [`runar-sdk`](packages/runar-sdk/) | `pnpm add runar-sdk` | [README](packages/runar-sdk/README.md) |
+| Go | [`runar-go`](packages/runar-go/) | `go get github.com/icellan/runar/packages/runar-go` | [README](packages/runar-go/README.md) |
+| Rust | [`runar-rs`](packages/runar-rs/) | `cargo add runar` | [README](packages/runar-rs/README.md) |
+| Python | [`runar-py`](packages/runar-py/) | `pip install runar-lang` | [README](packages/runar-py/README.md) |
+| Java | [`runar-java`](packages/runar-java/) | `implementation("build.runar:runar-java")` | [README](packages/runar-java/README.md) |
+| Ruby | [`runar-rb`](packages/runar-rb/) | `gem install runar-lang` | [README](packages/runar-rb/README.md) |
+| Zig | [`runar-zig`](packages/runar-zig/) | `zig fetch --save runar-zig` | [README](packages/runar-zig/README.md) |
+
+Each SDK's Quick Start deploys the same `Counter` contract (stateful, two methods, single `bigint` field) end-to-end, so a developer comparing languages sees identical functionality with idiomatic differences. SDK output is byte-identical across all seven — verified by [`conformance/sdk-output/`](conformance/sdk-output/).
+
+For an in-progress comparison of the codegen surface across SDKs, see [`RUNAR-SDK-PARITY.md`](RUNAR-SDK-PARITY.md).
+
+---
+
 ## Test Your Contracts
 
 The maintained frontends all have native test workflows. Go, Rust, and Python tests execute contract logic directly in the host language; Zig example tests live next to the contracts and combine compile checks, direct contract execution where the current Zig surface supports it, and Zig-native helper/runtime tests.
@@ -428,7 +448,7 @@ The Zig example tree is backed by `packages/runar-zig` and a shared runner at `e
 | [1sat Ordinals & Tokens](docs/ordinals-guide.md) | NFT inscriptions, BSV-20/BSV-21 fungible tokens |
 | [Integration Guide](docs/integration-guide.md) | Full lifecycle: local dev, deploy, interact on-chain |
 | [Testing Guide](docs/testing-guide.md) | TestContract, VM, fuzzer, cross-compiler testing |
-| [API Reference](docs/api-reference.md) | SDK classes, provider/signer interfaces |
+| [SDK READMEs](#sdks--deployment) | Per-language deployment SDK reference (TS, Go, Rust, Python, Java, Ruby, Zig) |
 
 ---
 
