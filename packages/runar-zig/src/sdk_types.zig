@@ -530,6 +530,98 @@ pub const StateValue = union(enum) {
 };
 
 // ---------------------------------------------------------------------------
+// PreparedCall — deferred-signing handoff for multi-signer flows
+// ---------------------------------------------------------------------------
+//
+// Returned by `RunarContract.prepareCall(...)`. Contains:
+//   - the prepared (unsigned-as-to-Sig-params) tx hex
+//   - one BIP-143 sighash per `Sig` placeholder, parallel to `sig_indices`
+//   - opaque internals consumed by `RunarContract.finalizeCall(...)`
+//
+// Mirrors Go `PreparedCall`, Rust `PreparedCall`, Java `PreparedCall`,
+// Python `PreparedCall`, Ruby `PreparedCall`. The opaque fields (after
+// the public coordination surface) are an intentionally-narrow subset of
+// what the corresponding Ruby/Go structs carry — Zig's prepareCall
+// initially supports stateless contracts only, where the only opaque
+// state needed at finalize time is the resolved-args list, the contract
+// utxo, and the prepared tx hex. Stateful prepareCall lands in a
+// follow-up alongside its OP_PUSH_TX preimage convergence.
+
+pub const PreparedCall = struct {
+    /// Tx hex with 72-byte zero-filled placeholders at every Sig slot.
+    /// Public so external signing UIs can display / inspect the tx.
+    tx_hex: []u8,
+    /// One 32-byte BIP-143 digest per `Sig` placeholder, parallel to
+    /// `sig_indices`. Each entry is hex-encoded (64 chars).
+    sighashes: [][]const u8,
+    /// User-arg index (in the user-visible parameter list) that each
+    /// sighash corresponds to. Same order as `sighashes`.
+    sig_indices: []usize,
+
+    // ------------------ opaque, consumed by finalizeCall -----------------
+    method_name: []u8,
+    /// Owned copies of resolved args (with placeholder Sigs).
+    resolved_args: []StateValue,
+    contract_utxo: UTXO,
+    is_stateful: bool,
+    /// New locking script for stateful continuation; empty for stateless.
+    new_locking_script: []u8,
+    new_satoshis: i64,
+
+    // -------- stateful-only opaque plumbing (zero-sized for stateless) ---
+    /// Hex-encoded k=1 OP_PUSH_TX signature, captured after preimage
+    /// convergence so finalizeCall can rebuild the stateful unlock with
+    /// the same OP_PUSH_TX evidence.
+    op_push_tx_sig: []u8 = &.{},
+    /// Hex-encoded BIP-143 preimage embedded in the stateful unlock.
+    preimage: []u8 = &.{},
+    /// Hex-encoded method-selector push (for multi-method stateful contracts);
+    /// empty when the contract has only one public method.
+    method_selector: []u8 = &.{},
+    /// True when the method's ABI declared a `_changePKH` parameter.
+    needs_change: bool = false,
+    /// Hex-encoded change-recipient PKH; null for terminal-stateful methods.
+    change_pkh: []u8 = &.{},
+    /// Change amount that was baked into the unlock script's
+    /// `_changeAmount` push during convergence.
+    change_amount: i64 = 0,
+    /// True when the method's ABI declared a `_newAmount` parameter.
+    needs_new_amount: bool = false,
+    /// OP_CODESEPARATOR byte offset, or -1 if absent. Needed at finalize
+    /// time so the rebuilt unlock keeps the same subscript boundary the
+    /// preimage was computed over.
+    code_sep_idx: i32 = -1,
+
+    pub fn deinit(self: *PreparedCall, allocator: std.mem.Allocator) void {
+        allocator.free(self.tx_hex);
+        for (self.sighashes) |sh| allocator.free(sh);
+        if (self.sighashes.len > 0) allocator.free(self.sighashes);
+        if (self.sig_indices.len > 0) allocator.free(self.sig_indices);
+        allocator.free(self.method_name);
+        for (self.resolved_args) |a| a.deinit(allocator);
+        if (self.resolved_args.len > 0) allocator.free(self.resolved_args);
+        var u = self.contract_utxo;
+        u.deinit(allocator);
+        if (self.new_locking_script.len > 0) allocator.free(self.new_locking_script);
+        if (self.op_push_tx_sig.len > 0) allocator.free(self.op_push_tx_sig);
+        if (self.preimage.len > 0) allocator.free(self.preimage);
+        if (self.method_selector.len > 0) allocator.free(self.method_selector);
+        if (self.change_pkh.len > 0) allocator.free(self.change_pkh);
+        self.* = .{
+            .tx_hex = &.{},
+            .sighashes = &.{},
+            .sig_indices = &.{},
+            .method_name = &.{},
+            .resolved_args = &.{},
+            .contract_utxo = .{ .txid = &.{}, .output_index = 0, .satoshis = 0, .script = &.{} },
+            .is_stateful = false,
+            .new_locking_script = &.{},
+            .new_satoshis = 0,
+        };
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

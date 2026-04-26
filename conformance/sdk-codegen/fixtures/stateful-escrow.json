@@ -1,0 +1,46 @@
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "Escrow",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "buyer", "type": "PubKey" },
+        { "name": "seller", "type": "PubKey" },
+        { "name": "amount", "type": "bigint" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "claim",
+        "params": [
+          { "name": "amountToClaim", "type": "bigint" },
+          { "name": "buyerSig", "type": "Sig" },
+          { "name": "txPreimage", "type": "SigHashPreimage" },
+          { "name": "_changePKH", "type": "ByteString" },
+          { "name": "_changeAmount", "type": "bigint" }
+        ],
+        "isPublic": true,
+        "isTerminal": false
+      },
+      {
+        "name": "release",
+        "params": [
+          { "name": "buyerSig", "type": "Sig" },
+          { "name": "sellerSig", "type": "Sig" },
+          { "name": "txPreimage", "type": "SigHashPreimage" }
+        ],
+        "isPublic": true,
+        "isTerminal": true
+      }
+    ]
+  },
+  "script": "76a9007c7c9c697c7cac",
+  "asm": "OP_DUP OP_HASH160 OP_0 OP_SWAP OP_SWAP OP_NUMEQUAL OP_VERIFY OP_SWAP OP_SWAP OP_CHECKSIG",
+  "buildTimestamp": "2026-04-26T00:00:00Z",
+  "stateFields": [
+    { "name": "amount", "type": "bigint", "index": 2 }
+  ],
+  "constructorSlots": [],
+  "codeSeparatorIndex": 4
+}

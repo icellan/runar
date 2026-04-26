@@ -369,6 +369,18 @@ module Runar
                 instance
               end
 
+              def self.from_utxo(artifact, utxo)
+                inner = Runar::SDK::RunarContract.from_utxo(artifact, utxo)
+                instance = allocate
+                instance.instance_variable_set(:@contract, inner)
+                instance
+              end
+
+              def attach_inscription(insc)
+                @contract.with_inscription(insc)
+                self
+              end
+
               def connect(provider, signer)
                 @contract.connect(provider, signer)
               end

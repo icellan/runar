@@ -1,0 +1,41 @@
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "Counter",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "count", "type": "bigint" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "increment",
+        "params": [
+          { "name": "amount", "type": "bigint" },
+          { "name": "txPreimage", "type": "SigHashPreimage" },
+          { "name": "_changePKH", "type": "ByteString" },
+          { "name": "_changeAmount", "type": "bigint" }
+        ],
+        "isPublic": true,
+        "isTerminal": false
+      },
+      {
+        "name": "reset",
+        "params": [
+          { "name": "txPreimage", "type": "SigHashPreimage" }
+        ],
+        "isPublic": true,
+        "isTerminal": true
+      }
+    ]
+  },
+  "script": "76009c63",
+  "asm": "OP_DUP OP_0 OP_NUMEQUAL OP_IF",
+  "buildTimestamp": "2026-04-26T00:00:00Z",
+  "stateFields": [
+    { "name": "count", "type": "bigint", "index": 0 }
+  ],
+  "constructorSlots": [],
+  "codeSeparatorIndex": 4
+}

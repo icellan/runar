@@ -293,6 +293,18 @@ RSpec.describe 'Runar::SDK::Codegen' do
       expect(code).to include('def self.from_txid(')
     end
 
+    it 'includes from_utxo class method' do
+      expect(code).to include('def self.from_utxo(')
+    end
+
+    it 'includes attach_inscription delegation' do
+      expect(code).to include('def attach_inscription(')
+    end
+
+    it 'includes get_locking_script delegation' do
+      expect(code).to include('def get_locking_script')
+    end
+
     it 'includes TerminalOutput for terminal methods' do
       expect(code).to include('TerminalOutput')
     end

@@ -174,6 +174,68 @@ class RunarContractTest {
         return RunarArtifact.fromJson(Files.readString(resource));
     }
 
+    // ------------------------------------------------------------------
+    // fromUtxo / fromTxId — re-attach helpers (parity with Ruby/Go/TS/Rust/Python)
+    // ------------------------------------------------------------------
+
+    @Test
+    void fromUtxoStatelessAttachesCurrentUtxo() throws Exception {
+        RunarArtifact artifact = loadArtifact("artifacts/basic-p2pkh.runar.json");
+        RunarContract template = new RunarContract(artifact, List.of("00".repeat(20)));
+        UTXO seed = new UTXO("11".repeat(32), 0, 7_500L, template.lockingScript());
+
+        RunarContract reattached = RunarContract.fromUtxo(artifact, seed);
+
+        assertNotNull(reattached.currentUtxo(), "fromUtxo must populate currentUtxo");
+        assertEquals(seed.txid(), reattached.currentUtxo().txid());
+        assertEquals(7_500L, reattached.currentUtxo().satoshis());
+        assertSame(artifact, reattached.artifact());
+    }
+
+    @Test
+    void fromUtxoStatefulReconstructsStateFromScript() throws Exception {
+        RunarArtifact artifact = loadArtifact("artifacts/stateful-counter.runar.json");
+        // Build a contract with state=42, render its locking script, then
+        // wrap that script in a UTXO and re-attach: the state field must
+        // come back as 42 (not whatever the constructor default is).
+        RunarContract original = new RunarContract(artifact, List.of(BigInteger.valueOf(42)));
+        UTXO seed = new UTXO("22".repeat(32), 0, 1_500L, original.lockingScript());
+
+        RunarContract reattached = RunarContract.fromUtxo(artifact, seed);
+
+        assertNotNull(reattached.currentUtxo());
+        // The stateful constructor seeds state from the constructor arg,
+        // so the easiest invariant to assert is round-trip: re-rendering
+        // the locking script from re-attached state must equal the seed.
+        assertEquals(seed.scriptHex(), reattached.lockingScript(),
+            "fromUtxo on stateful contract must reconstruct state so the "
+                + "rendered locking script round-trips to the seed UTXO");
+    }
+
+    @Test
+    void fromTxIdFetchesViaProviderAndDelegatesToFromUtxo() throws Exception {
+        RunarArtifact artifact = loadArtifact("artifacts/basic-p2pkh.runar.json");
+        RunarContract template = new RunarContract(artifact, List.of("00".repeat(20)));
+        UTXO seed = new UTXO("33".repeat(32), 1, 2_500L, template.lockingScript());
+        MockProvider provider = new MockProvider();
+        provider.addUtxo("ignored-address", seed);
+
+        RunarContract reattached = RunarContract.fromTxId(artifact, seed.txid(), 1, provider);
+
+        assertEquals(seed.txid(), reattached.currentUtxo().txid());
+        assertEquals(1, reattached.currentUtxo().outputIndex());
+        assertEquals(2_500L, reattached.currentUtxo().satoshis());
+    }
+
+    @Test
+    void fromTxIdThrowsWhenProviderHasNoSuchUtxo() throws Exception {
+        RunarArtifact artifact = loadArtifact("artifacts/basic-p2pkh.runar.json");
+        MockProvider provider = new MockProvider();
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+            () -> RunarContract.fromTxId(artifact, "ff".repeat(32), 0, provider));
+        assertTrue(ex.getMessage().contains("UTXO not found"));
+    }
+
     private static String p2pkhScriptFor(String address) {
         // Address is a Base58Check-encoded hash160 + version byte; for the
         // mock provider we only need a script the SDK's UtxoSelector can

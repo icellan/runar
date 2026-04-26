@@ -23,6 +23,9 @@ pub const ContractError = error{
     CallFailed,
     OutOfMemory,
     InsufficientFunds,
+    /// Number of signatures supplied to `finalizeCall` does not match the
+    /// number of `Sig` placeholders recorded in the `PreparedCall`.
+    SignatureCountMismatch,
 };
 
 /// RunarContract is a runtime wrapper for a compiled Runar contract. It handles
@@ -758,6 +761,588 @@ pub const RunarContract = struct {
         return txid;
     }
 
+    // ------------------------------------------------------------------
+    // Multi-signer API (prepareCall / finalizeCall)
+    // ------------------------------------------------------------------
+
+    /// Prepare a method call for external signing. Mirrors the Go SDK's
+    /// `PrepareCall`, the Ruby SDK's `prepare_call`, and Java's
+    /// `prepareCall`.
+    ///
+    /// Builds the call transaction with 72-byte zero-filled placeholders
+    /// at every `Sig` slot, signs all P2PKH funding inputs with the
+    /// connected signer, and returns a `PreparedCall` containing the
+    /// BIP-143 sighash(es) for an external signer to sign. Pass the
+    /// resulting DER signature(s) back via `finalizeCall`.
+    ///
+    /// Supports stateless contracts and stateful contracts that
+    /// expose `Sig` params on their public methods. Stateful
+    /// `prepareCall` runs the full OP_PUSH_TX preimage convergence
+    /// with 72-byte zero-filled Sig placeholders, captures the
+    /// converged preimage and the k=1 OP_PUSH_TX signature in the
+    /// returned `PreparedCall`, then computes the BIP-143 sighash
+    /// over the placeholder-sized tx. `finalizeCall` splices the
+    /// external signatures back into the same unlock script — BIP-143
+    /// excludes input scriptSigs from the sighash, so the externally
+    /// signed message remains valid even though the real DER sig may
+    /// be 1–2 bytes shorter than the placeholder. The miner sees a
+    /// marginally higher effective fee; the contract verifies cleanly.
+    pub fn prepareCall(
+        self: *RunarContract,
+        method_name: []const u8,
+        args: []const types.StateValue,
+        prov_arg: ?provider_mod.Provider,
+        signer_arg: ?signer_mod.Signer,
+        options: ?types.CallOptions,
+    ) !types.PreparedCall {
+        const prov = prov_arg orelse self.provider orelse return ContractError.NoProviderOrSigner;
+        const sign = signer_arg orelse self.signer orelse return ContractError.NoProviderOrSigner;
+
+        if (self.current_utxo == null) return ContractError.NotDeployed;
+        const contract_utxo = self.current_utxo.?;
+
+        const is_stateful = self.artifact.state_fields.len > 0;
+        if (is_stateful) {
+            return self.prepareCallStateful(method_name, args, prov, sign, options);
+        }
+
+        const abi_method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
+        if (args.len != abi_method.params.len) return ContractError.ArgCountMismatch;
+
+        // ---- Resolve user args ------------------------------------------
+        var resolved_args = try self.allocator.alloc(types.StateValue, args.len);
+        var resolved_filled: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < resolved_filled) : (i += 1) resolved_args[i].deinit(self.allocator);
+            self.allocator.free(resolved_args);
+        }
+
+        var sig_idx_list: std.ArrayListUnmanaged(usize) = .empty;
+        defer sig_idx_list.deinit(self.allocator);
+
+        for (args, 0..) |arg, i| {
+            const param_type = abi_method.params[i].type_name;
+            if (std.mem.eql(u8, param_type, "Sig") and arg == .int and arg.int == 0) {
+                try sig_idx_list.append(self.allocator, i);
+                resolved_args[i] = .{ .bytes = try self.allocator.dupe(u8, "00" ** 72) };
+            } else if (std.mem.eql(u8, param_type, "PubKey") and arg == .int and arg.int == 0) {
+                resolved_args[i] = .{ .bytes = try sign.getPublicKey(self.allocator) };
+            } else {
+                resolved_args[i] = try arg.clone(self.allocator);
+            }
+            resolved_filled = i + 1;
+        }
+
+        // ---- Funding UTXOs + change address -----------------------------
+        const address = try sign.getAddress(self.allocator);
+        defer self.allocator.free(address);
+        const change_address = if (options) |o| (o.change_address orelse address) else address;
+
+        const fee_rate = prov.getFeeRate() catch 100;
+        const all_utxos = prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
+        defer {
+            for (all_utxos) |*u| u.deinit(self.allocator);
+            self.allocator.free(all_utxos);
+        }
+
+        var additional_utxos: std.ArrayListUnmanaged(types.UTXO) = .empty;
+        defer additional_utxos.deinit(self.allocator);
+        for (all_utxos) |u| {
+            if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                try additional_utxos.append(self.allocator, u);
+            }
+        }
+
+        // ---- Build placeholder unlock + tx ------------------------------
+        const placeholder_unlock = try self.buildUnlockingScript(method_name, resolved_args);
+        defer self.allocator.free(placeholder_unlock);
+
+        var call_result = call_mod.buildCallTransaction(
+            self.allocator,
+            contract_utxo,
+            placeholder_unlock,
+            "",
+            0,
+            change_address,
+            additional_utxos.items,
+            fee_rate,
+            null,
+        ) catch return ContractError.CallFailed;
+        defer call_result.deinit(self.allocator);
+
+        // ---- Sign P2PKH funding inputs (so external signer only owns Sig) ----
+        var signed_tx = try self.allocator.dupe(u8, call_result.tx_hex);
+        errdefer self.allocator.free(signed_tx);
+
+        {
+            var inp_idx: usize = 1;
+            while (inp_idx < call_result.input_count) : (inp_idx += 1) {
+                const utxo_idx = inp_idx - 1;
+                if (utxo_idx >= additional_utxos.items.len) break;
+                const utxo = additional_utxos.items[utxo_idx];
+                const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
+                defer self.allocator.free(sig_val);
+                const pub_key = try sign.getPublicKey(self.allocator);
+                defer self.allocator.free(pub_key);
+                const sig_push = try state_mod.encodePushData(self.allocator, sig_val);
+                defer self.allocator.free(sig_push);
+                const pk_push = try state_mod.encodePushData(self.allocator, pub_key);
+                defer self.allocator.free(pk_push);
+                const p2pkh_unlock = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sig_push, pk_push });
+                defer self.allocator.free(p2pkh_unlock);
+                const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_unlock);
+                self.allocator.free(signed_tx);
+                signed_tx = new_tx;
+            }
+        }
+
+        // ---- Compute BIP-143 sighash for input 0 ------------------------
+        // BIP-143 is invariant under scriptSig contents (it hashes the
+        // *subscript* — the locking script of the input being signed —
+        // not the unlocking script). Every Sig placeholder in the same
+        // input therefore needs the same sighash, so we compute it once.
+        var sighashes = try self.allocator.alloc([]const u8, sig_idx_list.items.len);
+        var sighashes_filled: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < sighashes_filled) : (i += 1) self.allocator.free(@constCast(sighashes[i]));
+            if (sighashes.len > 0) self.allocator.free(sighashes);
+        }
+
+        if (sig_idx_list.items.len > 0) {
+            const sh_hex = try computeBip143Sighash(
+                self.allocator, signed_tx, 0, contract_utxo.script, contract_utxo.satoshis,
+            );
+            defer self.allocator.free(sh_hex);
+            for (sighashes, 0..) |_, i| {
+                sighashes[i] = try self.allocator.dupe(u8, sh_hex);
+                sighashes_filled = i + 1;
+            }
+        }
+
+        const sig_indices_owned = try self.allocator.dupe(usize, sig_idx_list.items);
+        const method_name_owned = try self.allocator.dupe(u8, method_name);
+        const utxo_owned = try contract_utxo.clone(self.allocator);
+
+        return types.PreparedCall{
+            .tx_hex = signed_tx,
+            .sighashes = sighashes,
+            .sig_indices = sig_indices_owned,
+            .method_name = method_name_owned,
+            .resolved_args = resolved_args,
+            .contract_utxo = utxo_owned,
+            .is_stateful = false,
+            .new_locking_script = &.{},
+            .new_satoshis = 0,
+        };
+    }
+
+    /// Stateful prepareCall — mirrors the OP_PUSH_TX two-pass convergence
+    /// in `call()` but stops short of signing the user-Sig parameters.
+    /// Captures the converged preimage and OP_PUSH_TX k=1 signature so
+    /// `finalizeCall` can rebuild the stateful unlock with the same
+    /// preimage-equality witness after splicing external Sigs.
+    ///
+    /// State auto-compute via the ANF interpreter is intentionally NOT
+    /// run here — for prepare/finalize flows the caller should pass
+    /// `options.new_state` explicitly so the prepared tx commits to a
+    /// known continuation. (The ANF interpreter requires the artifact's
+    /// `anfJson`, which most prepare/finalize callers do not have.)
+    fn prepareCallStateful(
+        self: *RunarContract,
+        method_name: []const u8,
+        args: []const types.StateValue,
+        prov: provider_mod.Provider,
+        sign: signer_mod.Signer,
+        options: ?types.CallOptions,
+    ) !types.PreparedCall {
+        const contract_utxo = self.current_utxo.?;
+
+        // ---- Method lookup + multi-method index --------------------------
+        const public_methods = try self.getPublicMethods();
+        defer self.allocator.free(public_methods);
+
+        var method_index: usize = 0;
+        if (public_methods.len > 1) {
+            for (public_methods, 0..) |m, i| {
+                if (std.mem.eql(u8, m.name, method_name)) {
+                    method_index = i;
+                    break;
+                }
+            }
+        }
+
+        const abi_method = self.findMethod(method_name) orelse return ContractError.MethodNotFound;
+
+        var needs_change = false;
+        var needs_new_amount = false;
+        for (abi_method.params) |p| {
+            if (std.mem.eql(u8, p.name, "_changePKH")) needs_change = true;
+            if (std.mem.eql(u8, p.name, "_newAmount")) needs_new_amount = true;
+        }
+
+        // ---- Filter user params ------------------------------------------
+        var user_param_count: usize = 0;
+        for (abi_method.params) |p| {
+            if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
+                !std.mem.eql(u8, p.name, "_changePKH") and
+                !std.mem.eql(u8, p.name, "_changeAmount") and
+                !std.mem.eql(u8, p.name, "_newAmount"))
+            {
+                user_param_count += 1;
+            }
+        }
+        if (args.len != user_param_count) return ContractError.ArgCountMismatch;
+
+        var user_params = try self.allocator.alloc(types.ABIParam, user_param_count);
+        defer self.allocator.free(user_params);
+        {
+            var idx: usize = 0;
+            for (abi_method.params) |p| {
+                if (!std.mem.eql(u8, p.type_name, "SigHashPreimage") and
+                    !std.mem.eql(u8, p.name, "_changePKH") and
+                    !std.mem.eql(u8, p.name, "_changeAmount") and
+                    !std.mem.eql(u8, p.name, "_newAmount"))
+                {
+                    user_params[idx] = p;
+                    idx += 1;
+                }
+            }
+        }
+
+        // ---- Resolve args (Sig → 72-byte placeholder) --------------------
+        var resolved_args = try self.allocator.alloc(types.StateValue, args.len);
+        var resolved_filled: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < resolved_filled) : (i += 1) resolved_args[i].deinit(self.allocator);
+            self.allocator.free(resolved_args);
+        }
+
+        var sig_idx_list: std.ArrayListUnmanaged(usize) = .empty;
+        defer sig_idx_list.deinit(self.allocator);
+
+        for (args, 0..) |arg, i| {
+            const param_type = user_params[i].type_name;
+            if (std.mem.eql(u8, param_type, "Sig") and arg == .int and arg.int == 0) {
+                try sig_idx_list.append(self.allocator, i);
+                resolved_args[i] = .{ .bytes = try self.allocator.dupe(u8, "00" ** 72) };
+            } else if (std.mem.eql(u8, param_type, "PubKey") and arg == .int and arg.int == 0) {
+                resolved_args[i] = .{ .bytes = try sign.getPublicKey(self.allocator) };
+            } else {
+                resolved_args[i] = try arg.clone(self.allocator);
+            }
+            resolved_filled = i + 1;
+        }
+
+        // ---- Funding UTXOs + change address ------------------------------
+        const address = try sign.getAddress(self.allocator);
+        defer self.allocator.free(address);
+        const change_address = if (options) |o| (o.change_address orelse address) else address;
+
+        const fee_rate = prov.getFeeRate() catch 100;
+        const all_utxos = prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
+        defer {
+            for (all_utxos) |*u| u.deinit(self.allocator);
+            self.allocator.free(all_utxos);
+        }
+
+        var additional_utxos: std.ArrayListUnmanaged(types.UTXO) = .empty;
+        defer additional_utxos.deinit(self.allocator);
+        for (all_utxos) |u| {
+            if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                try additional_utxos.append(self.allocator, u);
+            }
+        }
+
+        // ---- Apply explicit new_state (no ANF auto-compute in prepare) ---
+        var new_satoshis: i64 = contract_utxo.satoshis;
+        if (options) |o| {
+            if (o.satoshis > 0) new_satoshis = o.satoshis;
+            if (o.new_state) |ns| {
+                for (self.state) |*s| s.deinit(self.allocator);
+                if (self.state.len > 0) self.allocator.free(self.state);
+                var vals = try self.allocator.alloc(types.StateValue, ns.len);
+                for (ns, 0..) |s, i| vals[i] = try s.clone(self.allocator);
+                self.state = vals;
+            }
+        }
+
+        const new_locking_script = try self.getLockingScript();
+        errdefer self.allocator.free(new_locking_script);
+
+        // ---- Compute change PKH for stateful methods needing it ----------
+        var change_pkh_buf: []u8 = &.{};
+        errdefer if (change_pkh_buf.len > 0) self.allocator.free(change_pkh_buf);
+        if (needs_change) {
+            const pub_key_hex = try sign.getPublicKey(self.allocator);
+            defer self.allocator.free(pub_key_hex);
+            const pub_key_bytes = try state_mod.hexToBytes(self.allocator, pub_key_hex);
+            defer self.allocator.free(pub_key_bytes);
+            const ripe_hash = bsvz.crypto.hash.hash160(pub_key_bytes);
+            change_pkh_buf = try self.allocator.alloc(u8, 40);
+            _ = bsvz.primitives.hex.encodeLower(&ripe_hash.bytes, change_pkh_buf) catch {
+                self.allocator.free(change_pkh_buf);
+                return ContractError.CallFailed;
+            };
+        }
+
+        // ---- Method selector hex -----------------------------------------
+        var method_selector_buf: []u8 = &.{};
+        errdefer if (method_selector_buf.len > 0) self.allocator.free(method_selector_buf);
+        if (public_methods.len > 1) {
+            method_selector_buf = try state_mod.encodeScriptNumber(self.allocator, @intCast(method_index));
+        }
+
+        const code_sep_idx = (try self.getCodeSepIndex(method_index)) orelse -1;
+
+        // ---- Pass 1: placeholder unlock → tx → P2PKH sign → preimage -----
+        const change_pkh_opt: ?[]const u8 = if (change_pkh_buf.len > 0) change_pkh_buf else null;
+        const method_selector_opt: ?[]const u8 = if (method_selector_buf.len > 0) method_selector_buf else null;
+
+        const placeholder_unlock = try self.buildStatefulUnlockScript(
+            "00" ** 72, resolved_args,
+            needs_change, change_pkh_opt, 0,
+            needs_new_amount, new_satoshis,
+            "00" ** 181, method_selector_opt,
+        );
+        defer self.allocator.free(placeholder_unlock);
+
+        var call_result = call_mod.buildCallTransaction(
+            self.allocator, contract_utxo, placeholder_unlock,
+            new_locking_script, new_satoshis, change_address,
+            additional_utxos.items, fee_rate, null,
+        ) catch return ContractError.CallFailed;
+        defer call_result.deinit(self.allocator);
+
+        var change_amount = call_result.change_amount;
+
+        var signed_tx = try self.allocator.dupe(u8, call_result.tx_hex);
+        errdefer self.allocator.free(signed_tx);
+
+        try signFundingInputs(self, &signed_tx, sign, additional_utxos.items, call_result.input_count);
+
+        var ptx_result = oppushtx_mod.computeOpPushTx(
+            self.allocator, signed_tx, 0,
+            contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
+        ) catch return ContractError.CallFailed;
+
+        // ---- Pass 2: rebuild with real preimage + real change_amount -----
+        {
+            const first_unlock = try self.buildStatefulUnlockScript(
+                ptx_result.sig_hex, resolved_args,
+                needs_change, change_pkh_opt, change_amount,
+                needs_new_amount, new_satoshis,
+                ptx_result.preimage_hex, method_selector_opt,
+            );
+            errdefer self.allocator.free(first_unlock);
+
+            var rebuild_result = call_mod.buildCallTransaction(
+                self.allocator, contract_utxo, first_unlock,
+                new_locking_script, new_satoshis, change_address,
+                additional_utxos.items, fee_rate, null,
+            ) catch {
+                self.allocator.free(first_unlock);
+                ptx_result.deinit(self.allocator);
+                return ContractError.CallFailed;
+            };
+            change_amount = rebuild_result.change_amount;
+
+            self.allocator.free(signed_tx);
+            signed_tx = try self.allocator.dupe(u8, rebuild_result.tx_hex);
+            rebuild_result.deinit(self.allocator);
+            self.allocator.free(first_unlock);
+        }
+
+        try signFundingInputs(self, &signed_tx, sign, additional_utxos.items, 1 + additional_utxos.items.len);
+
+        // Recompute preimage on the final tx (depends on tx size).
+        ptx_result.deinit(self.allocator);
+        ptx_result = oppushtx_mod.computeOpPushTx(
+            self.allocator, signed_tx, 0,
+            contract_utxo.script, contract_utxo.satoshis, code_sep_idx,
+        ) catch return ContractError.CallFailed;
+        defer ptx_result.deinit(self.allocator);
+
+        // Insert the final placeholder unlock (real preimage + placeholder Sig)
+        // into the tx so finalizeCall just splices Sig and broadcasts.
+        const final_placeholder = try self.buildStatefulUnlockScript(
+            ptx_result.sig_hex, resolved_args,
+            needs_change, change_pkh_opt, change_amount,
+            needs_new_amount, new_satoshis,
+            ptx_result.preimage_hex, method_selector_opt,
+        );
+        defer self.allocator.free(final_placeholder);
+
+        const tx_with_final = try insertUnlockingScript(self.allocator, signed_tx, 0, final_placeholder);
+        self.allocator.free(signed_tx);
+        signed_tx = tx_with_final;
+
+        // ---- BIP-143 sighash for the contract input ---------------------
+        // Subscript honours the OP_CODESEPARATOR boundary: only the bytes
+        // after the separator participate in the sighash.
+        var sig_subscript: []const u8 = contract_utxo.script;
+        if (code_sep_idx >= 0) {
+            const hex_offset: usize = @intCast((@as(usize, @intCast(code_sep_idx)) + 1) * 2);
+            if (hex_offset <= sig_subscript.len) sig_subscript = sig_subscript[hex_offset..];
+        }
+
+        var sighashes = try self.allocator.alloc([]const u8, sig_idx_list.items.len);
+        var sighashes_filled: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < sighashes_filled) : (i += 1) self.allocator.free(@constCast(sighashes[i]));
+            if (sighashes.len > 0) self.allocator.free(sighashes);
+        }
+
+        if (sig_idx_list.items.len > 0) {
+            const sh_hex = try computeBip143Sighash(
+                self.allocator, signed_tx, 0, sig_subscript, contract_utxo.satoshis,
+            );
+            defer self.allocator.free(sh_hex);
+            for (sighashes, 0..) |_, i| {
+                sighashes[i] = try self.allocator.dupe(u8, sh_hex);
+                sighashes_filled = i + 1;
+            }
+        }
+
+        // Take ownership of opaque plumbing the finalize step needs.
+        const sig_indices_owned = try self.allocator.dupe(usize, sig_idx_list.items);
+        const method_name_owned = try self.allocator.dupe(u8, method_name);
+        const utxo_owned = try contract_utxo.clone(self.allocator);
+        const op_push_tx_sig_owned = try self.allocator.dupe(u8, ptx_result.sig_hex);
+        const preimage_owned = try self.allocator.dupe(u8, ptx_result.preimage_hex);
+
+        return types.PreparedCall{
+            .tx_hex = signed_tx,
+            .sighashes = sighashes,
+            .sig_indices = sig_indices_owned,
+            .method_name = method_name_owned,
+            .resolved_args = resolved_args,
+            .contract_utxo = utxo_owned,
+            .is_stateful = true,
+            .new_locking_script = new_locking_script,
+            .new_satoshis = new_satoshis,
+            .op_push_tx_sig = op_push_tx_sig_owned,
+            .preimage = preimage_owned,
+            .method_selector = method_selector_buf,
+            .needs_change = needs_change,
+            .change_pkh = change_pkh_buf,
+            .change_amount = change_amount,
+            .needs_new_amount = needs_new_amount,
+            .code_sep_idx = code_sep_idx,
+        };
+    }
+
+    /// Sign every P2PKH funding input on `tx_hex` (input 0 is the contract).
+    /// Mutates `tx_hex` in place by reallocating with each splice.
+    fn signFundingInputs(
+        self: *RunarContract,
+        tx_hex_inout: *[]u8,
+        sign: signer_mod.Signer,
+        additional_utxos: []const types.UTXO,
+        input_count: usize,
+    ) !void {
+        var inp_idx: usize = 1;
+        while (inp_idx < input_count) : (inp_idx += 1) {
+            const utxo_idx = inp_idx - 1;
+            if (utxo_idx >= additional_utxos.len) break;
+            const utxo = additional_utxos[utxo_idx];
+            const sig_val = try sign.sign(self.allocator, tx_hex_inout.*, inp_idx, utxo.script, utxo.satoshis, null);
+            defer self.allocator.free(sig_val);
+            const pub_key = try sign.getPublicKey(self.allocator);
+            defer self.allocator.free(pub_key);
+            const sig_push = try state_mod.encodePushData(self.allocator, sig_val);
+            defer self.allocator.free(sig_push);
+            const pk_push = try state_mod.encodePushData(self.allocator, pub_key);
+            defer self.allocator.free(pk_push);
+            const p2pkh_unlock = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sig_push, pk_push });
+            defer self.allocator.free(p2pkh_unlock);
+            const new_tx = try insertUnlockingScript(self.allocator, tx_hex_inout.*, inp_idx, p2pkh_unlock);
+            self.allocator.free(tx_hex_inout.*);
+            tx_hex_inout.* = new_tx;
+        }
+    }
+
+    /// Finalise a prepared call by splicing external DER signatures into
+    /// the unlocking script and broadcasting. Mirrors Go `FinalizeCall`,
+    /// Ruby `finalize_call`, and Java `finalizeCall`.
+    ///
+    /// `signatures` must be one entry per `prepared.sig_indices`, in the
+    /// same order. Each entry is a hex-encoded DER signature with the
+    /// `SIGHASH_ALL | FORKID` byte already appended (matching the format
+    /// returned by `Signer.sign`).
+    pub fn finalizeCall(
+        self: *RunarContract,
+        prepared: *types.PreparedCall,
+        signatures: []const []const u8,
+        prov_arg: ?provider_mod.Provider,
+    ) ![]u8 {
+        const prov = prov_arg orelse self.provider orelse return ContractError.NoProviderOrSigner;
+
+        if (signatures.len != prepared.sig_indices.len) {
+            return ContractError.SignatureCountMismatch;
+        }
+
+        // Splice each external signature into resolved_args at the
+        // recorded sig index (replacing the 72-byte zero placeholder).
+        for (signatures, 0..) |sig_hex, i| {
+            const idx = prepared.sig_indices[i];
+            prepared.resolved_args[idx].deinit(self.allocator);
+            prepared.resolved_args[idx] = .{ .bytes = try self.allocator.dupe(u8, sig_hex) };
+        }
+
+        // Rebuild the unlocking script. Stateful flow uses the saved
+        // OP_PUSH_TX sig + preimage (computed during prepareCall's
+        // convergence); stateless rebuilds from args alone.
+        const final_unlock = if (prepared.is_stateful) blk: {
+            const change_pkh_opt: ?[]const u8 = if (prepared.change_pkh.len > 0) prepared.change_pkh else null;
+            const method_selector_opt: ?[]const u8 = if (prepared.method_selector.len > 0) prepared.method_selector else null;
+            break :blk try self.buildStatefulUnlockScript(
+                prepared.op_push_tx_sig,
+                prepared.resolved_args,
+                prepared.needs_change,
+                change_pkh_opt,
+                prepared.change_amount,
+                prepared.needs_new_amount,
+                prepared.new_satoshis,
+                prepared.preimage,
+                method_selector_opt,
+            );
+        } else try self.buildUnlockingScript(prepared.method_name, prepared.resolved_args);
+        defer self.allocator.free(final_unlock);
+
+        const final_tx = try insertUnlockingScript(self.allocator, prepared.tx_hex, 0, final_unlock);
+        defer self.allocator.free(final_tx);
+
+        const txid = prov.broadcast(self.allocator, final_tx) catch return ContractError.CallFailed;
+        errdefer self.allocator.free(txid);
+
+        if (prepared.is_stateful) {
+            // Stateful: track the new contract continuation UTXO.
+            if (self.current_utxo) |*old| {
+                var mu = old.*;
+                mu.deinit(self.allocator);
+            }
+            self.current_utxo = .{
+                .txid = try self.allocator.dupe(u8, txid),
+                .output_index = 0,
+                .satoshis = prepared.new_satoshis,
+                .script = try self.allocator.dupe(u8, prepared.new_locking_script),
+            };
+        } else {
+            // Stateless: contract UTXO consumed.
+            if (self.current_utxo) |*old| {
+                var mu = old.*;
+                mu.deinit(self.allocator);
+            }
+            self.current_utxo = null;
+        }
+
+        return txid;
+    }
+
     /// Build the full stateful unlocking script:
     ///   [codePart] + opPushTxSig + args + [changePKH + changeAmount] + preimage + [methodSelector]
     fn buildStatefulUnlockScript(
@@ -1370,6 +1955,34 @@ fn parseInitialValue(allocator: std.mem.Allocator, init_str: []const u8, type_na
 // Helper: insert unlocking script into raw tx hex at given input index
 // ---------------------------------------------------------------------------
 
+/// Compute the BIP-143 sighash (SIGHASH_ALL | FORKID) for an input of a
+/// raw transaction. Returns the 32-byte digest as 64 lowercase hex chars
+/// (caller-owned). Used by `prepareCall` to hand external signers
+/// something well-defined to sign without exposing the private key.
+fn computeBip143Sighash(
+    allocator: std.mem.Allocator,
+    tx_hex: []const u8,
+    input_index: usize,
+    subscript_hex: []const u8,
+    satoshis: i64,
+) ![]u8 {
+    const tx_bytes = try bsvz.primitives.hex.decode(allocator, tx_hex);
+    defer allocator.free(tx_bytes);
+    var tx = try bsvz.transaction.Transaction.parse(allocator, tx_bytes);
+    defer tx.deinit(allocator);
+
+    const script_bytes = try bsvz.primitives.hex.decode(allocator, subscript_hex);
+    defer allocator.free(script_bytes);
+    const subscript = bsvz.script.Script.init(script_bytes);
+
+    const scope: u32 = bsvz.transaction.sighash.SigHashType.forkid | bsvz.transaction.sighash.SigHashType.all;
+    const digest_result = try bsvz.transaction.sighash.digest(allocator, &tx, input_index, subscript, satoshis, scope);
+
+    const out = try allocator.alloc(u8, 64);
+    _ = try bsvz.primitives.hex.encodeLower(&digest_result.bytes, out);
+    return out;
+}
+
 pub fn insertUnlockingScript(allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, unlock_script_hex: []const u8) ![]u8 {
     var pos: usize = 0;
 
@@ -1620,6 +2233,230 @@ test "RunarContract.withInscription on stateful contract injects between code an
     const envelope_pos = std.mem.indexOf(u8, ls, "0063036f726451").?;
     const op_return_pos = std.mem.lastIndexOf(u8, ls, "6a").?;
     try std.testing.expect(envelope_pos < op_return_pos);
+}
+
+// ---------------------------------------------------------------------------
+// prepareCall / finalizeCall round-trip — multi-signer support (parity with
+// Go/Ruby/Java/Rust/Python prepare_call / prepareCall).
+// ---------------------------------------------------------------------------
+
+test "prepareCall returns sighashes and sig_indices for stateless Sig param" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"unlock","params":[{"name":"sig","type":"Sig"},{"name":"pubKey","type":"PubKey"}],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+    const signer_iface = signer.signer();
+
+    // Pre-attach the contract UTXO so prepareCall doesn't fail with NotDeployed.
+    try contract.setCurrentUtxo(.{
+        .txid = "ab" ** 32,
+        .output_index = 0,
+        .satoshis = 10_000,
+        .script = "5151",
+    });
+
+    // Both Sig and PubKey are auto-resolved when passed as int(0).
+    const args = [_]types.StateValue{ .{ .int = 0 }, .{ .int = 0 } };
+    var prepared = try contract.prepareCall("unlock", &args, prov.provider(), signer_iface, null);
+    defer prepared.deinit(allocator);
+
+    // 1 Sig → 1 sighash, 1 sig_index pointing at arg position 0.
+    try std.testing.expectEqual(@as(usize, 1), prepared.sighashes.len);
+    try std.testing.expectEqual(@as(usize, 1), prepared.sig_indices.len);
+    try std.testing.expectEqual(@as(usize, 0), prepared.sig_indices[0]);
+    try std.testing.expectEqual(@as(usize, 64), prepared.sighashes[0].len);
+    try std.testing.expect(prepared.tx_hex.len > 0);
+    try std.testing.expectEqualStrings("unlock", prepared.method_name);
+    try std.testing.expect(!prepared.is_stateful);
+}
+
+test "prepareCall handles stateful contract with Sig param (full OP_PUSH_TX convergence)" {
+    const allocator = std.testing.allocator;
+    // Stateful counter with a Sig param on increment. Constructor has
+    // a single bigint state field (count). The OP_PUSH_TX convergence
+    // path runs end-to-end and returns one BIP-143 sighash.
+    const json =
+        \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "cd" ** 32,
+        .output_index = 0,
+        .satoshis = 1_000,
+        .script = "005100",
+    });
+
+    // Pass new_state explicitly — the prepareCall path does not run the
+    // ANF interpreter (this fixture has no anfJson anyway).
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+
+    const args = [_]types.StateValue{.{ .int = 0 }};
+    var prepared = try contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    try std.testing.expect(prepared.is_stateful);
+    try std.testing.expectEqual(@as(usize, 1), prepared.sig_indices.len);
+    try std.testing.expectEqual(@as(usize, 0), prepared.sig_indices[0]);
+    try std.testing.expectEqual(@as(usize, 64), prepared.sighashes[0].len);
+    // Continuation captured for finalizeCall to track the new UTXO.
+    try std.testing.expect(prepared.new_locking_script.len > 0);
+    try std.testing.expectEqual(@as(i64, 1_000), prepared.new_satoshis);
+    // OP_PUSH_TX evidence captured (sig + preimage are non-empty hex).
+    try std.testing.expect(prepared.op_push_tx_sig.len > 0);
+    try std.testing.expect(prepared.preimage.len > 0);
+    try std.testing.expectEqual(@as(i32, 2), prepared.code_sep_idx);
+}
+
+test "prepareCall → finalizeCall round-trip on stateful Sig-bearing contract" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"SignedCounter","version":"1","compilerVersion":"1.0","script":"005100","asm":"OP_0 OP_1 OP_0",
+        \\"abi":{"constructor":{"params":[{"name":"count","type":"int"}]},"methods":[{"name":"increment","params":[{"name":"sig","type":"Sig"},{"name":"txPreimage","type":"SigHashPreimage"}],"isPublic":true}]},
+        \\"stateFields":[{"name":"count","type":"int","index":0}],
+        \\"constructorSlots":[{"paramIndex":0,"byteOffset":0}],
+        \\"codeSeparatorIndex":2,"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &[_]types.StateValue{.{ .int = 0 }});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "ee" ** 32,
+        .output_index = 0,
+        .satoshis = 2_000,
+        .script = "005100",
+    });
+
+    const new_state = [_]types.StateValue{.{ .int = 1 }};
+    const opts = types.CallOptions{ .new_state = &new_state };
+
+    const args = [_]types.StateValue{.{ .int = 0 }};
+    var prepared = try contract.prepareCall("increment", &args, prov.provider(), signer.signer(), opts);
+    defer prepared.deinit(allocator);
+
+    // External signer would deliver a real DER sig; MockProvider does not
+    // validate scripts so a well-shaped placeholder suffices for the
+    // splice-and-broadcast path.
+    const fake_sig: []const u8 = "30" ++ "44" ++ "02" ++ "20" ++ ("11" ** 32) ++ "02" ++ "20" ++ ("22" ** 32) ++ "41";
+    const sigs = [_][]const u8{fake_sig};
+
+    const txid = try contract.finalizeCall(&prepared, &sigs, prov.provider());
+    defer allocator.free(txid);
+
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
+    // Stateful: tracked UTXO must point at the broadcast tx as the
+    // continuation output.
+    const utxo = contract.getCurrentUtxo().?;
+    try std.testing.expectEqualStrings(txid, utxo.txid);
+    try std.testing.expectEqual(@as(i32, 0), utxo.output_index);
+    try std.testing.expectEqual(@as(i64, 2_000), utxo.satoshis);
+}
+
+test "finalizeCall errors on signature count mismatch" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"unlock","params":[{"name":"sig","type":"Sig"},{"name":"pubKey","type":"PubKey"}],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "ef" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "5151",
+    });
+
+    const args = [_]types.StateValue{ .{ .int = 0 }, .{ .int = 0 } };
+    var prepared = try contract.prepareCall("unlock", &args, prov.provider(), signer.signer(), null);
+    defer prepared.deinit(allocator);
+
+    // 0 signatures supplied for 1 expected → SignatureCountMismatch.
+    const result = contract.finalizeCall(&prepared, &.{}, prov.provider());
+    try std.testing.expectError(ContractError.SignatureCountMismatch, result);
+}
+
+test "prepareCall → finalizeCall round-trip broadcasts a tx" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"contractName":"P2PKH","version":"1","compilerVersion":"1.0","script":"5151","asm":"OP_1 OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"unlock","params":[{"name":"sig","type":"Sig"},{"name":"pubKey","type":"PubKey"}],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "12" ** 32,
+        .output_index = 0,
+        .satoshis = 4_000,
+        .script = "5151",
+    });
+
+    const args = [_]types.StateValue{ .{ .int = 0 }, .{ .int = 0 } };
+    var prepared = try contract.prepareCall("unlock", &args, prov.provider(), signer.signer(), null);
+    defer prepared.deinit(allocator);
+
+    // External signer produces a 73-byte hex sig (DER ~71 + sighash byte = 144 hex).
+    // For round-trip verification we just need a well-shaped placeholder
+    // (MockProvider does not validate scripts on broadcast).
+    const fake_sig: []const u8 = "30" ++ "44" ++ "02" ++ "20" ++ ("11" ** 32) ++ "02" ++ "20" ++ ("22" ** 32) ++ "41";
+    const sigs = [_][]const u8{fake_sig};
+
+    const txid = try contract.finalizeCall(&prepared, &sigs, prov.provider());
+    defer allocator.free(txid);
+
+    // MockProvider mints a 64-char mock hash on broadcast.
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
+    // Stateless terminal call must clear currentUtxo.
+    try std.testing.expect(contract.getCurrentUtxo() == null);
 }
 
 test "RunarContract.fromUtxo detects inscription in code script" {

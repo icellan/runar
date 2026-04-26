@@ -1,0 +1,28 @@
+{
+  "version": "runar-v0.1.0",
+  "compilerVersion": "0.1.0",
+  "contractName": "InscribedHolder",
+  "abi": {
+    "constructor": {
+      "params": [
+        { "name": "owner", "type": "Addr" }
+      ]
+    },
+    "methods": [
+      {
+        "name": "transfer",
+        "params": [
+          { "name": "sig", "type": "Sig" },
+          { "name": "pubKey", "type": "PubKey" },
+          { "name": "newOwner", "type": "Addr" }
+        ],
+        "isPublic": true
+      }
+    ]
+  },
+  "script": "76a9007c7c9c69007c7cac",
+  "asm": "OP_DUP OP_HASH160 OP_0 OP_SWAP OP_SWAP OP_NUMEQUAL OP_VERIFY OP_0 OP_SWAP OP_SWAP OP_CHECKSIG",
+  "buildTimestamp": "2026-04-26T00:00:00Z",
+  "stateFields": [],
+  "constructorSlots": [{ "paramIndex": 0, "byteOffset": 3 }]
+}

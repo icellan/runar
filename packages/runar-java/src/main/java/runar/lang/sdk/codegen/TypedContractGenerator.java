@@ -15,20 +15,37 @@ import runar.lang.sdk.RunarArtifact.StateField;
  * Emits a typed Java wrapper class for a compiled {@link RunarArtifact}.
  *
  * <p>Parity target: the TypeScript {@code generateTypescript()} in
- * {@code packages/runar-sdk/src/codegen/gen-typescript.ts} and the Go
- * {@code GenerateGo()} in {@code packages/runar-go/sdk_codegen.go}.
+ * {@code packages/runar-sdk/src/codegen/gen-typescript.ts} and the Ruby
+ * {@code Runar::SDK::Codegen.generate_ruby} in
+ * {@code packages/runar-rb/lib/runar/sdk/codegen.rb}.
  *
- * <p>The generated class wraps {@link runar.lang.sdk.RunarContract} and exposes
- * typed constructor parameters, a {@code deploy(BigInteger satoshis)} helper,
- * one typed method per public ABI method, and typed {@code state()} accessors
- * per state field on stateful contracts. Sig and SigHashPreimage parameters
- * are elided from the user-facing method signature and auto-computed by the
- * underlying SDK at call time. Stateful (non-terminal) methods return the
- * broadcast txid as {@link String}; terminal methods return {@code void}.
+ * <p>The generated class wraps {@link runar.lang.sdk.RunarContract} and exposes:
+ * <ul>
+ *   <li>A typed constructor taking a {@code <Contract>ConstructorArgs} record</li>
+ *   <li>A {@code connect(Provider, Signer)} method to attach a deployment context</li>
+ *   <li>{@code static fromTxId(...)} and {@code static fromUtxo(...)} re-attach factories</li>
+ *   <li>{@code attachInscription(Inscription)} to splice a 1sat ordinals envelope</li>
+ *   <li>{@code getLockingScript()} delegating to the underlying contract</li>
+ *   <li>{@code deploy(BigInteger satoshis)} returning the {@code DeployOutcome}</li>
+ *   <li>One typed method per public ABI method, with {@code Sig} and
+ *       {@code SigHashPreimage} parameters elided (auto-computed by the SDK)</li>
+ *   <li>{@code prepare<Method>} / {@code finalize<Method>} companions for any
+ *       method that has at least one {@code Sig} parameter</li>
+ *   <li>A {@code <Contract>StatefulCallOptions} record for non-terminal stateful
+ *       methods, and a {@code TerminalOutput} record for terminal methods</li>
+ *   <li>Typed {@code state()} accessors per state field on stateful contracts</li>
+ * </ul>
  */
 public final class TypedContractGenerator {
 
+    private static final String DEFAULT_PACKAGE = "runar.generated.contracts";
+
     private TypedContractGenerator() {}
+
+    /** Generate using {@value #DEFAULT_PACKAGE} as the target package. */
+    public static String generate(RunarArtifact artifact) {
+        return generate(artifact, DEFAULT_PACKAGE);
+    }
 
     /**
      * Generate typed Java source for the given artifact under the target
@@ -41,116 +58,64 @@ public final class TypedContractGenerator {
             throw new IllegalArgumentException("packageName is null or blank");
         }
 
-        String name = artifact.contractName();
-        String className = name + "Wrapper";
+        String contractName = artifact.contractName();
+        String className = contractName + "Contract";
         boolean isStateful = artifact.isStateful();
         List<ABIMethod> publicMethods = publicMethods(artifact);
+
+        boolean hasStatefulMethods = isStateful && publicMethods.stream()
+            .anyMatch(m -> !isTerminal(m, isStateful));
+        boolean hasTerminalMethods = publicMethods.stream()
+            .anyMatch(m -> isTerminal(m, isStateful));
 
         Imports imports = new Imports();
         imports.add("java.math.BigInteger");
         imports.add("java.util.ArrayList");
         imports.add("java.util.List");
+        imports.add("runar.lang.sdk.Inscription");
+        imports.add("runar.lang.sdk.PreparedCall");
         imports.add("runar.lang.sdk.Provider");
         imports.add("runar.lang.sdk.RunarArtifact");
         imports.add("runar.lang.sdk.RunarContract");
+        imports.add("runar.lang.sdk.ScriptUtils");
         imports.add("runar.lang.sdk.Signer");
+        imports.add("runar.lang.sdk.UTXO");
+        if (hasStatefulMethods || hasTerminalMethods) {
+            imports.add("java.util.Map");
+        }
 
         StringBuilder body = new StringBuilder();
-        body.append("public final class ").append(className).append(" {\n");
-        body.append("    private final RunarContract inner;\n");
-        body.append("    private final Provider provider;\n");
-        body.append("    private final Signer signer;\n");
-        body.append("\n");
+        body.append("public final class ").append(className).append(" {\n\n");
 
-        // ---- Constructor -------------------------------------------------
+        emitNestedTypes(body, contractName, isStateful, hasStatefulMethods, hasTerminalMethods, imports);
+        emitFields(body);
+
         List<ABIParam> ctorParams = artifact.abi().constructor().params();
-        body.append("    public ").append(className).append("(RunarArtifact artifact");
-        for (ABIParam p : ctorParams) {
-            body.append(", ").append(javaType(p.type(), imports)).append(' ').append(p.name());
-        }
-        body.append(", Provider provider, Signer signer) {\n");
-        body.append("        List<Object> args = new ArrayList<>();\n");
-        for (ABIParam p : ctorParams) {
-            body.append("        args.add(").append(toSdkValue(p.name(), p.type())).append(");\n");
-        }
-        body.append("        this.inner = new RunarContract(artifact, args);\n");
-        body.append("        this.provider = provider;\n");
-        body.append("        this.signer = signer;\n");
-        body.append("    }\n");
-        body.append("\n");
+        emitConstructors(body, className, contractName, ctorParams, imports);
+        emitFromFactories(body, className);
+        emitConnect(body);
+        emitContractAccessor(body);
+        emitAttachInscription(body, className);
+        emitGetLockingScript(body);
+        emitDeploy(body);
 
-        // ---- contract() accessor -----------------------------------------
-        body.append("    /** Returns the underlying {@link RunarContract}. */\n");
-        body.append("    public RunarContract contract() {\n");
-        body.append("        return inner;\n");
-        body.append("    }\n");
-        body.append("\n");
-
-        // ---- deploy(BigInteger) ------------------------------------------
-        body.append("    /** Deploys the contract on-chain. Returns the broadcast txid. */\n");
-        body.append("    public String deploy(BigInteger satoshis) {\n");
-        body.append("        return inner.deploy(provider, signer, satoshis.longValueExact()).txid();\n");
-        body.append("    }\n");
-
-        // ---- Public methods ----------------------------------------------
-        for (ABIMethod m : publicMethods) {
-            body.append('\n');
-            boolean terminal = isTerminal(m, isStateful);
-            String returnType = terminal ? "void" : "String";
-            List<ClassifiedParam> classified = classify(m.params(), isStateful);
-
-            body.append("    /** ")
-                .append(terminal ? "Terminal" : "State-mutating")
-                .append(" method: ").append(m.name()).append(". */\n");
-            body.append("    public ").append(returnType).append(' ').append(safeMethodName(m.name())).append('(');
-            boolean first = true;
-            for (ClassifiedParam cp : classified) {
-                if (cp.hidden || cp.internal) continue;
-                if (!first) body.append(", ");
-                first = false;
-                body.append(javaType(cp.abiType, imports)).append(' ').append(cp.name);
-            }
-            body.append(") {\n");
-            body.append("        List<Object> callArgs = new ArrayList<>();\n");
-            for (ClassifiedParam cp : classified) {
-                if (cp.internal) continue;
-                if (cp.hidden) {
-                    body.append("        callArgs.add(null); // ").append(cp.abiType)
-                        .append(" auto-computed by SDK\n");
-                } else {
-                    body.append("        callArgs.add(").append(toSdkValue(cp.name, cp.abiType)).append(");\n");
-                }
-            }
-            if (terminal) {
-                body.append("        inner.call(\"").append(m.name()).append("\", callArgs, null, provider, signer);\n");
-            } else {
-                body.append("        return inner.call(\"").append(m.name()).append("\", callArgs, null, provider, signer).txid();\n");
-            }
-            body.append("    }\n");
+        for (ABIMethod method : publicMethods) {
+            emitMethod(body, contractName, method, isStateful, imports);
         }
 
-        // ---- State accessors ---------------------------------------------
         if (isStateful) {
-            for (StateField f : artifact.stateFields()) {
-                body.append('\n');
-                String javaT = javaType(f.type(), imports);
-                body.append("    /** Decoded state field {@code ").append(f.name()).append("}. */\n");
-                body.append("    public ").append(javaT).append(' ').append(safeMethodName(f.name())).append("() {\n");
-                body.append("        return (").append(javaT).append(") inner.state(\"").append(f.name()).append("\");\n");
-                body.append("    }\n");
+            for (StateField field : artifact.stateFields()) {
+                emitStateAccessor(body, field, imports);
             }
         }
 
         body.append("}\n");
 
-        // ---- Assemble file ----------------------------------------------
         StringBuilder out = new StringBuilder();
         out.append("// Generated by: runar codegen\n");
-        out.append("// Source: ").append(name).append("\n");
-        out.append("// Do not edit manually.\n");
-        out.append("\n");
-        out.append("package ").append(packageName).append(";\n");
-        out.append('\n');
+        out.append("// Source: ").append(contractName).append("\n");
+        out.append("// Do not edit manually.\n\n");
+        out.append("package ").append(packageName).append(";\n\n");
         for (String imp : imports.sorted()) {
             out.append("import ").append(imp).append(";\n");
         }
@@ -160,13 +125,353 @@ public final class TypedContractGenerator {
     }
 
     // ---------------------------------------------------------------------
-    // Helpers
+    // Emit helpers — one per top-level feature
+    // ---------------------------------------------------------------------
+
+    private static void emitNestedTypes(
+        StringBuilder b,
+        String contractName,
+        boolean isStateful,
+        boolean hasStatefulMethods,
+        boolean hasTerminalMethods,
+        Imports imports
+    ) {
+        // No nested types currently necessary for the constructor-args record
+        // when the constructor has no params. The actual record is emitted by
+        // emitConstructors() so its field list lines up with ctorParams.
+
+        if (hasStatefulMethods) {
+            b.append("    /** Options accepted by non-terminal stateful methods on ").append(contractName).append(". */\n");
+            b.append("    public record ").append(contractName).append("StatefulCallOptions(\n");
+            b.append("        BigInteger satoshis,\n");
+            b.append("        String changeAddress,\n");
+            b.append("        String changePubKey,\n");
+            b.append("        Map<String, Object> newState,\n");
+            b.append("        List<OutputSpec> outputs\n");
+            b.append("    ) {}\n\n");
+
+            b.append("    /** A single stateful continuation output (used inside StatefulCallOptions.outputs). */\n");
+            b.append("    public record OutputSpec(BigInteger satoshis, Map<String, Object> state) {}\n\n");
+        }
+
+        if (hasTerminalMethods) {
+            b.append("    /** Terminal output: provide either {@code address} (converted to P2PKH) or {@code scriptHex}. */\n");
+            b.append("    public record TerminalOutput(BigInteger satoshis, String address, String scriptHex) {}\n\n");
+        }
+    }
+
+    private static void emitFields(StringBuilder b) {
+        b.append("    private final RunarContract inner;\n");
+        b.append("    private Provider provider;\n");
+        b.append("    private Signer signer;\n\n");
+    }
+
+    private static void emitConstructors(
+        StringBuilder b,
+        String className,
+        String contractName,
+        List<ABIParam> ctorParams,
+        Imports imports
+    ) {
+        if (!ctorParams.isEmpty()) {
+            // Constructor-args record sits next to the class so callers
+            // can write `new CounterContract(artifact, new CounterContract.CounterConstructorArgs(...))`.
+            b.append("    /** Constructor arguments for ").append(contractName).append(". */\n");
+            b.append("    public record ").append(contractName).append("ConstructorArgs(\n");
+            for (int i = 0; i < ctorParams.size(); i++) {
+                ABIParam p = ctorParams.get(i);
+                b.append("        ").append(javaType(p.type(), imports)).append(' ').append(p.name());
+                if (i < ctorParams.size() - 1) b.append(',');
+                b.append('\n');
+            }
+            b.append("    ) {}\n\n");
+
+            b.append("    /** Constructs a wrapper around a fresh ").append(contractName).append(" contract. */\n");
+            b.append("    public ").append(className).append("(RunarArtifact artifact, ")
+                .append(contractName).append("ConstructorArgs args) {\n");
+            b.append("        List<Object> ctorArgs = new ArrayList<>();\n");
+            for (ABIParam p : ctorParams) {
+                b.append("        ctorArgs.add(").append(toSdkValue("args." + p.name() + "()", p.type())).append(");\n");
+            }
+            b.append("        this.inner = new RunarContract(artifact, ctorArgs);\n");
+            b.append("    }\n\n");
+        } else {
+            b.append("    /** Constructs a wrapper around a fresh ").append(contractName).append(" contract. */\n");
+            b.append("    public ").append(className).append("(RunarArtifact artifact) {\n");
+            b.append("        this.inner = new RunarContract(artifact, List.of());\n");
+            b.append("    }\n\n");
+        }
+
+        // Private constructor used by from-X factories.
+        b.append("    private ").append(className).append("(RunarContract inner) {\n");
+        b.append("        this.inner = inner;\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitFromFactories(StringBuilder b, String className) {
+        b.append("    /** Re-attaches to an existing on-chain contract by raw UTXO. */\n");
+        b.append("    public static ").append(className).append(" fromUtxo(RunarArtifact artifact, UTXO utxo) {\n");
+        b.append("        return new ").append(className).append("(RunarContract.fromUtxo(artifact, utxo));\n");
+        b.append("    }\n\n");
+
+        b.append("    /** Re-attaches by fetching the UTXO via {@code provider}. */\n");
+        b.append("    public static ").append(className)
+            .append(" fromTxId(RunarArtifact artifact, String txid, int outputIndex, Provider provider) {\n");
+        b.append("        return new ").append(className)
+            .append("(RunarContract.fromTxId(artifact, txid, outputIndex, provider));\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitConnect(StringBuilder b) {
+        b.append("    /** Attach a deployment context. Required before calling deploy() or any method. */\n");
+        b.append("    public void connect(Provider provider, Signer signer) {\n");
+        b.append("        this.provider = provider;\n");
+        b.append("        this.signer = signer;\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitContractAccessor(StringBuilder b) {
+        b.append("    /** Returns the underlying {@link RunarContract}. */\n");
+        b.append("    public RunarContract contract() {\n");
+        b.append("        return inner;\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitAttachInscription(StringBuilder b, String className) {
+        b.append("    /** Splices a 1sat ordinals envelope into the locking script. */\n");
+        b.append("    public ").append(className).append(" attachInscription(Inscription insc) {\n");
+        b.append("        inner.withInscription(insc);\n");
+        b.append("        return this;\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitGetLockingScript(StringBuilder b) {
+        b.append("    /** Returns the current rendered locking script hex. */\n");
+        b.append("    public String getLockingScript() {\n");
+        b.append("        return inner.lockingScript();\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitDeploy(StringBuilder b) {
+        b.append("    /** Deploys the contract on-chain. Requires {@link #connect}. */\n");
+        b.append("    public RunarContract.DeployOutcome deploy(BigInteger satoshis) {\n");
+        b.append("        return inner.deploy(provider, signer, satoshis.longValueExact());\n");
+        b.append("    }\n\n");
+    }
+
+    private static void emitMethod(
+        StringBuilder b,
+        String contractName,
+        ABIMethod method,
+        boolean isStateful,
+        Imports imports
+    ) {
+        boolean terminal = isTerminal(method, isStateful);
+        List<ClassifiedParam> classified = classify(method.params(), isStateful);
+        List<ClassifiedParam> userParams = classified.stream()
+            .filter(p -> !p.hidden && !p.internal)
+            .toList();
+        List<ClassifiedParam> sdkArgs = classified.stream()
+            .filter(p -> !p.internal)
+            .toList();
+        List<ClassifiedParam> sigParams = sdkArgs.stream()
+            .filter(p -> "Sig".equals(p.abiType))
+            .toList();
+
+        String safeName = safeMethodName(method.name());
+        String optionsParam = optionsParamFor(contractName, terminal, isStateful);
+        String optionsArgName = optionsArgName(terminal, isStateful);
+
+        // ---- Doc comment + main method ----------------------------------
+        b.append("    /** ").append(terminal ? "Terminal" : "State-mutating")
+            .append(" method: ").append(method.name()).append(". */\n");
+        b.append("    public RunarContract.CallOutcome ").append(safeName).append('(');
+        emitMethodSignatureParams(b, userParams, optionsParam, imports);
+        b.append(") {\n");
+        emitCallArgsBuilder(b, sdkArgs);
+        emitInnerCall(b, method.name(), terminal, isStateful, optionsArgName);
+        b.append("    }\n\n");
+
+        // Convenience overload without the options param (only when the
+        // options param is optional — i.e. *not* a stateful terminal).
+        if (!(terminal && isStateful)) {
+            b.append("    public RunarContract.CallOutcome ").append(safeName).append('(');
+            emitMethodSignatureParams(b, userParams, null, imports);
+            b.append(") {\n");
+            b.append("        return ").append(safeName).append('(');
+            emitOverloadDelegateArgs(b, userParams);
+            b.append("null);\n");
+            b.append("    }\n\n");
+        }
+
+        // ---- prepare<Method> / finalize<Method> -------------------------
+        if (!sigParams.isEmpty()) {
+            String capitalized = capitalize(safeName);
+            String prepareName = "prepare" + capitalized;
+            String finalizeName = "finalize" + capitalized;
+
+            // prepare: same signature minus Sig params (Sig is what's being deferred)
+            List<ClassifiedParam> prepareParams = userParams.stream()
+                .filter(p -> !"Sig".equals(p.abiType))
+                .toList();
+
+            b.append("    /** Prepares ").append(method.name())
+                .append(" for external signing — returns sighashes to sign. */\n");
+            b.append("    public PreparedCall ").append(prepareName).append('(');
+            emitMethodSignatureParams(b, prepareParams, optionsParam, imports);
+            b.append(") {\n");
+            emitCallArgsBuilder(b, sdkArgs);
+            emitInnerPrepareCall(b, method.name(), terminal, isStateful, optionsArgName);
+            b.append("    }\n\n");
+
+            if (!(terminal && isStateful)) {
+                b.append("    public PreparedCall ").append(prepareName).append('(');
+                emitMethodSignatureParams(b, prepareParams, null, imports);
+                b.append(") {\n");
+                b.append("        return ").append(prepareName).append('(');
+                emitOverloadDelegateArgs(b, prepareParams);
+                b.append("null);\n");
+                b.append("    }\n\n");
+            }
+
+            // finalize: takes prepared + one byte[] per Sig param, in order
+            b.append("    /** Finalises ")
+                .append(method.name())
+                .append(" by splicing external signatures into the unlocking script. */\n");
+            b.append("    public RunarContract.CallOutcome ").append(finalizeName).append('(');
+            b.append("PreparedCall prepared");
+            for (ClassifiedParam sp : sigParams) {
+                b.append(", byte[] ").append(sp.name);
+            }
+            b.append(") {\n");
+            b.append("        List<byte[]> sigs = new ArrayList<>();\n");
+            for (ClassifiedParam sp : sigParams) {
+                b.append("        sigs.add(").append(sp.name).append(");\n");
+            }
+            b.append("        return inner.finalizeCall(prepared, sigs, provider);\n");
+            b.append("    }\n\n");
+        }
+    }
+
+    private static void emitMethodSignatureParams(
+        StringBuilder b,
+        List<ClassifiedParam> userParams,
+        String optionsParam,
+        Imports imports
+    ) {
+        boolean first = true;
+        for (ClassifiedParam p : userParams) {
+            if (!first) b.append(", ");
+            first = false;
+            b.append(javaType(p.abiType, imports)).append(' ').append(p.name);
+        }
+        if (optionsParam != null) {
+            if (!first) b.append(", ");
+            b.append(optionsParam);
+        }
+    }
+
+    private static void emitOverloadDelegateArgs(StringBuilder b, List<ClassifiedParam> userParams) {
+        for (ClassifiedParam p : userParams) {
+            b.append(p.name).append(", ");
+        }
+    }
+
+    private static void emitCallArgsBuilder(StringBuilder b, List<ClassifiedParam> sdkArgs) {
+        b.append("        List<Object> callArgs = new ArrayList<>();\n");
+        for (ClassifiedParam p : sdkArgs) {
+            if (p.hidden) {
+                b.append("        callArgs.add(null); // ").append(p.abiType)
+                    .append(" auto-computed by SDK\n");
+            } else {
+                b.append("        callArgs.add(").append(toSdkValue(p.name, p.abiType)).append(");\n");
+            }
+        }
+    }
+
+    private static void emitInnerCall(
+        StringBuilder b,
+        String methodName,
+        boolean terminal,
+        boolean isStateful,
+        String optionsArgName
+    ) {
+        if (terminal && isStateful) {
+            b.append("        // outputs are accepted for parity with TS/Ruby/Go; the Java SDK\n");
+            b.append("        // does not yet thread terminalOutputs through call() — they are\n");
+            b.append("        // tracked here for forward compatibility.\n");
+            b.append("        java.util.Objects.requireNonNull(").append(optionsArgName)
+                .append(", \"terminal stateful method requires an outputs list\");\n");
+            b.append("        return inner.call(\"").append(methodName)
+                .append("\", callArgs, null, provider, signer);\n");
+        } else if (isStateful) {
+            b.append("        java.util.Map<String, Object> stateUpdates = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".newState() : null;\n");
+            b.append("        return inner.call(\"").append(methodName)
+                .append("\", callArgs, stateUpdates, provider, signer);\n");
+        } else {
+            b.append("        return inner.call(\"").append(methodName)
+                .append("\", callArgs, null, provider, signer);\n");
+        }
+    }
+
+    private static void emitInnerPrepareCall(
+        StringBuilder b,
+        String methodName,
+        boolean terminal,
+        boolean isStateful,
+        String optionsArgName
+    ) {
+        if (terminal && isStateful) {
+            b.append("        java.util.Objects.requireNonNull(").append(optionsArgName)
+                .append(", \"terminal stateful method requires an outputs list\");\n");
+            b.append("        return inner.prepareCall(\"").append(methodName)
+                .append("\", callArgs, null, provider, signer);\n");
+        } else if (isStateful) {
+            b.append("        java.util.Map<String, Object> stateUpdates = ")
+                .append(optionsArgName).append(" != null ? ")
+                .append(optionsArgName).append(".newState() : null;\n");
+            b.append("        return inner.prepareCall(\"").append(methodName)
+                .append("\", callArgs, stateUpdates, provider, signer);\n");
+        } else {
+            b.append("        return inner.prepareCall(\"").append(methodName)
+                .append("\", callArgs, null, provider, signer);\n");
+        }
+    }
+
+    private static String optionsParamFor(String contractName, boolean terminal, boolean isStateful) {
+        if (terminal && isStateful) {
+            return "List<TerminalOutput> outputs";
+        }
+        if (isStateful) {
+            return contractName + "StatefulCallOptions options";
+        }
+        return "List<TerminalOutput> outputs";
+    }
+
+    private static String optionsArgName(boolean terminal, boolean isStateful) {
+        if (terminal && isStateful) return "outputs";
+        if (isStateful) return "options";
+        return "outputs";
+    }
+
+    private static void emitStateAccessor(StringBuilder b, StateField field, Imports imports) {
+        String javaT = javaType(field.type(), imports);
+        b.append("    /** Decoded state field {@code ").append(field.name()).append("}. */\n");
+        b.append("    public ").append(javaT).append(' ').append(safeMethodName(field.name())).append("() {\n");
+        b.append("        return (").append(javaT).append(") inner.state(\"").append(field.name()).append("\");\n");
+        b.append("    }\n\n");
+    }
+
+    // ---------------------------------------------------------------------
+    // Helpers (preserved from previous implementation)
     // ---------------------------------------------------------------------
 
     /** Map an ABI type string to a Java type, adding the required import. */
     private static String javaType(String abiType, Imports imports) {
         return switch (abiType) {
-            case "bigint", "int" -> "BigInteger"; // already imported at top
+            case "bigint", "int" -> "BigInteger";
             case "boolean", "bool" -> "boolean";
             case "Sig" -> {
                 imports.add("runar.lang.types.Sig");
@@ -192,13 +497,12 @@ public final class TypedContractGenerator {
      * Expression converting a user-facing typed value into the raw
      * {@code Object} shape the SDK's call/ctor layer expects.
      */
-    private static String toSdkValue(String name, String abiType) {
+    private static String toSdkValue(String expr, String abiType) {
         return switch (abiType) {
-            case "bigint", "int" -> name;
-            case "boolean", "bool" -> name;
+            case "bigint", "int", "boolean", "bool" -> expr;
             case "Sig", "PubKey", "Addr", "ByteString", "Ripemd160", "Sha256", "Point", "SigHashPreimage" ->
-                name + ".toHex()";
-            default -> name;
+                expr + ".toHex()";
+            default -> expr;
         };
     }
 
@@ -237,7 +541,8 @@ public final class TypedContractGenerator {
     }
 
     private static final Set<String> RESERVED = Set.of(
-        "contract", "deploy", "provider", "signer", "inner", "state"
+        "contract", "deploy", "provider", "signer", "inner",
+        "state", "connect", "getLockingScript", "attachInscription"
     );
 
     /**
@@ -249,6 +554,11 @@ public final class TypedContractGenerator {
             return "call" + Character.toUpperCase(name.charAt(0)) + name.substring(1);
         }
         return name;
+    }
+
+    private static String capitalize(String s) {
+        if (s.isEmpty()) return s;
+        return Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
     // ---------------------------------------------------------------------

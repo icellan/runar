@@ -49,6 +49,64 @@ public final class RunarContract {
         }
     }
 
+    /**
+     * Internal constructor used by {@link #fromUtxo} / {@link #fromTxId}
+     * to re-attach to an existing on-chain UTXO without re-running the
+     * constructor-arg pipeline. Constructor args are intentionally
+     * empty: the deployed locking script already encodes them, and
+     * subsequent calls do not need them re-run through ContractScript.
+     */
+    private RunarContract(RunarArtifact artifact, UTXO utxo) {
+        this.artifact = artifact;
+        this.constructorArgs = List.of();
+        this.state = new HashMap<>();
+        this.currentUtxo = utxo;
+        if (artifact.isStateful()) {
+            // Re-extract state from the on-chain locking script so subsequent
+            // call() invocations see the same state the chain has.
+            Map<String, Object> extracted =
+                StateSerializer.extractFromScript(artifact, utxo.scriptHex());
+            if (extracted != null) state.putAll(extracted);
+        }
+    }
+
+    /**
+     * Re-attaches a {@link RunarContract} to an existing on-chain UTXO.
+     * Mirrors the Ruby/Go/TS/Rust/Python {@code from_utxo} factories.
+     *
+     * <p>For stateful contracts, state is reconstructed from the UTXO's
+     * locking script via {@link StateSerializer#extractFromScript}.
+     * Constructor args are not re-run — they were already baked into
+     * the locking script at deploy time.
+     */
+    public static RunarContract fromUtxo(RunarArtifact artifact, UTXO utxo) {
+        if (artifact == null) throw new IllegalArgumentException("artifact is null");
+        if (utxo == null) throw new IllegalArgumentException("utxo is null");
+        return new RunarContract(artifact, utxo);
+    }
+
+    /**
+     * Re-attaches a {@link RunarContract} by fetching the UTXO via
+     * {@code provider}. Throws {@link IllegalArgumentException} if the
+     * provider does not know the outpoint. Mirrors Ruby/Go/TS/Rust/Python
+     * {@code from_txid} / {@code fromTxId}.
+     */
+    public static RunarContract fromTxId(
+        RunarArtifact artifact,
+        String txid,
+        int outputIndex,
+        Provider provider
+    ) {
+        if (provider == null) throw new IllegalArgumentException("provider is null");
+        UTXO utxo = provider.getUtxo(txid, outputIndex);
+        if (utxo == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.fromTxId: UTXO not found at " + txid + ":" + outputIndex
+            );
+        }
+        return fromUtxo(artifact, utxo);
+    }
+
     public RunarArtifact artifact() { return artifact; }
 
     public Map<String, Object> state() {
