@@ -223,10 +223,13 @@ fn build_codegen_context(artifact: &RunarArtifact) -> CodegenContext {
 
     let mut has_big_int_params = ctor_params.iter().any(|p| p.param_type == "bigint");
 
-    // Constructor args expression (using SdkValue wrappers)
+    // Constructor args expression (using SdkValue wrappers). Each param
+    // is reachable inside `pub fn new(artifact, args: <Name>ConstructorArgs)`
+    // through `args.<field>`, not as a bare local — prefix with `args.` so
+    // the generated `vec![...]` compiles.
     let constructor_args_expr = constructor_params
         .iter()
-        .map(|p| rust_sdk_value_expr(&p.abi_type, &p.name))
+        .map(|p| rust_sdk_value_expr(&p.abi_type, &format!("args.{}", p.name)))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -1091,7 +1094,7 @@ mod tests {
         let output = generate_rust(&artifact);
         assert!(output.contains("pub struct P2PKHConstructorArgs"));
         assert!(output.contains("pub pub_key_hash: String"));
-        assert!(output.contains("SdkValue::Bytes(pub_key_hash)"));
+        assert!(output.contains("SdkValue::Bytes(args.pub_key_hash)"));
         assert!(output.contains("pub fn unlock("));
         // Sig params should generate prepare/finalize
         assert!(output.contains("pub fn prepare_unlock("));
@@ -1165,5 +1168,40 @@ mod tests {
         let output = generate_rust(&artifact);
         assert!(output.contains("pub fn call_connect("));
         assert!(output.contains("Call the connect method"));
+    }
+
+    /// Regression test: the generated constructor body must reference
+    /// `args.<field>` (not bare `<field>`) when building the `SdkValue`
+    /// vector, because the constructor signature is
+    /// `pub fn new(artifact, args: <Name>ConstructorArgs)` and the field
+    /// is only reachable through `args`. Bare `count` would be an
+    /// undefined-name compile error in the generated wrapper.
+    #[test]
+    fn test_constructor_body_uses_args_destructuring() {
+        let artifact = make_artifact(
+            "Counter",
+            vec![AbiParam {
+                name: "count".to_string(),
+                param_type: "bigint".to_string(),
+                fixed_array: None,
+            }],
+            vec![],
+            None,
+        );
+        let output = generate_rust(&artifact);
+
+        assert!(
+            output.contains("vec![SdkValue::BigInt(args.count)]"),
+            "constructor body must use `args.count` (not bare `count`).\n\
+             Generated source:\n{}",
+            output
+        );
+        assert!(
+            !output.contains("vec![SdkValue::BigInt(count)]"),
+            "constructor body must NOT use bare `count` — it is not in scope \
+             inside `pub fn new(artifact, args: CounterConstructorArgs)`.\n\
+             Generated source:\n{}",
+            output
+        );
     }
 }
