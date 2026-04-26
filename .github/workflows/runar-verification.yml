@@ -1,0 +1,53 @@
+name: runar-verification
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'runar-verification/**'
+      - 'conformance/tests/**'
+      - 'packages/runar-ir-schema/**'
+      - '.github/workflows/runar-verification.yml'
+  pull_request:
+    paths:
+      - 'runar-verification/**'
+      - 'conformance/tests/**'
+      - 'packages/runar-ir-schema/**'
+      - '.github/workflows/runar-verification.yml'
+
+jobs:
+  runar-verification:
+    name: runar-verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Cache elan and Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            runar-verification/.lake/build
+          key: runar-verification-${{ runner.os }}-${{ hashFiles('runar-verification/lean-toolchain', 'runar-verification/lakefile.lean', 'runar-verification/lake-manifest.json') }}
+          restore-keys: |
+            runar-verification-${{ runner.os }}-
+
+      - name: Build
+        working-directory: runar-verification
+        run: lake build
+
+      - name: Run GoldenLoad tests
+        working-directory: runar-verification
+        run: lake env lean --run tests/GoldenLoad.lean
+
+      - name: Run Roundtrip tests
+        working-directory: runar-verification
+        run: lake env lean --run tests/Roundtrip.lean
