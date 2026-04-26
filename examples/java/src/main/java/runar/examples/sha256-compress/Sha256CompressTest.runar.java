@@ -2,6 +2,7 @@ package runar.examples.sha256compress;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.types.ByteString;
 
 import static runar.lang.Builtins.assertThat;
@@ -26,7 +27,7 @@ import static runar.lang.Builtins.sha256Compress;
  */
 class Sha256CompressTest extends SmartContract {
 
-    ByteString expected;
+    @Readonly ByteString expected;
 
     Sha256CompressTest(ByteString expected) {
         super(expected);

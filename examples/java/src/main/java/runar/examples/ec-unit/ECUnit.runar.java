@@ -4,6 +4,7 @@ import java.math.BigInteger;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.runtime.MockCrypto.Point;
 import runar.lang.types.ByteString;
 
@@ -29,7 +30,7 @@ import static runar.lang.Builtins.len;
  */
 class ECUnit extends SmartContract {
 
-    ByteString pubKey;
+    @Readonly ByteString pubKey;
 
     ECUnit(ByteString pubKey) {
         super(pubKey);

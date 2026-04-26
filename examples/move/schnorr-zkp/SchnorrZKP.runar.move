@@ -2,7 +2,7 @@ module SchnorrZKP {
     use runar::types::{Point};
     use runar::crypto::{ecOnCurve, ecMulGen, ecMul, ecAdd, ecPointX, ecPointY, hash256, cat, bin2num};
 
-    resource struct SchnorrZKP {
+    struct SchnorrZKP {
         pub_key: Point,
     }
 

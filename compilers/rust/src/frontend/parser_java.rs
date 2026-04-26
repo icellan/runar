@@ -1548,11 +1548,7 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_relational()?;
-            left = Expression::BinaryExpr {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = fold_compare_to_zero(op, left, right);
         }
         Some(left)
     }
@@ -1575,11 +1571,7 @@ impl<'a> JavaParser<'a> {
             };
             self.advance();
             let right = self.parse_shift()?;
-            left = Expression::BinaryExpr {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = fold_compare_to_zero(op, left, right);
         }
         Some(left)
     }
@@ -1992,16 +1984,14 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 }
             }
         }
-        // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral
+        // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral.
+        // Both the bare `BigInteger.valueOf` and the fully-qualified
+        // `java.math.BigInteger.valueOf` spellings are accepted.
         if args.len() == 1 {
-            if let Expression::MemberExpr { object, property } = callee.as_ref() {
-                if let Expression::Identifier { name } = object.as_ref() {
-                    let is_bigint_literal_call = (name == "BigInteger" && property == "valueOf")
-                        || (name == "Bigint" && property == "of");
-                    if is_bigint_literal_call {
-                        if let Expression::BigIntLiteral { value } = &args[0] {
-                            return Expression::BigIntLiteral { value: *value };
-                        }
+            if let Expression::MemberExpr { .. } = callee.as_ref() {
+                if is_biginteger_value_of_callee(callee) || is_bigint_of_callee(callee) {
+                    if let Expression::BigIntLiteral { value } = &args[0] {
+                        return Expression::BigIntLiteral { value: *value };
                     }
                 }
             }
@@ -2009,15 +1999,12 @@ fn promote_literal_calls(expr: Expression) -> Expression {
         // Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
         // — identity at the Rúnar AST level. Bigint and BigInteger collapse to the
         // same BIGINT primitive, so the wrap is a no-op: lower to the inner
-        // expression. Mirrors JavaParser.java's identity branch.
+        // expression. Mirrors JavaParser.java's identity branch. Both bare and
+        // `java.math.BigInteger.valueOf` are accepted.
         if args.len() == 1 {
-            if let Expression::MemberExpr { object, property } = callee.as_ref() {
-                if let Expression::Identifier { name } = object.as_ref() {
-                    let is_bigint_identity = (name == "Bigint" && property == "of")
-                        || (name == "BigInteger" && property == "valueOf");
-                    if is_bigint_identity {
-                        return args[0].clone();
-                    }
+            if let Expression::MemberExpr { .. } = callee.as_ref() {
+                if is_biginteger_value_of_callee(callee) || is_bigint_of_callee(callee) {
+                    return args[0].clone();
                 }
             }
         }
@@ -2030,11 +2017,25 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 }
             }
         }
+        // <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+        // PubKey wrappers to their raw byte form. Rúnar Point is structurally a
+        // ByteString so the TS canonical sources pass Points directly to
+        // builtins like `cat`. Lower to a no-op (drop the call, keep the
+        // receiver) so the Java IR matches the canonical IR byte-for-byte.
+        if args.is_empty() {
+            if let Expression::MemberExpr { object, property } = callee.as_ref() {
+                if property == "toByteString" {
+                    return (**object).clone();
+                }
+            }
+        }
         // Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
         // `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
         // method name + arity; receiver type is not consulted (parser has no
         // type info at this stage); the typechecker rejects misuse. Mirrors
-        // JavaParser.tryLowerBigintMethod.
+        // JavaParser.tryLowerBigintMethod. The same table also accepts the JDK
+        // `BigInteger` spellings (`add`, `subtract`, `multiply`, `divide`,
+        // `shiftLeft`, `shiftRight`).
         if let Expression::MemberExpr { object, property } = callee.as_ref() {
             if args.len() == 1 {
                 if let Some(op) = bigint_binary_method_op(property) {
@@ -2045,9 +2046,18 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                     };
                 }
             }
-            if args.is_empty() && property == "neg" {
+            if args.is_empty() && (property == "neg" || property == "negate") {
                 return Expression::UnaryExpr {
                     op: UnaryOp::Neg,
+                    operand: object.clone(),
+                };
+            }
+            // `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not();
+            // the Bigint wrapper exposes the same method so Rúnar Java sources
+            // can use it natively.
+            if args.is_empty() && property == "not" {
+                return Expression::UnaryExpr {
+                    op: UnaryOp::BitNot,
                     operand: object.clone(),
                 };
             }
@@ -2055,6 +2065,16 @@ fn promote_literal_calls(expr: Expression) -> Expression {
                 return Expression::CallExpr {
                     callee: Box::new(Expression::Identifier { name: "abs".to_string() }),
                     args: vec![(**object).clone()],
+                };
+            }
+            // <expr>.equals(<expr>) — Java's value-equality method. Lower to
+            // the canonical BinaryExpr(===, a, b). Receiver type is not
+            // consulted; the typechecker rejects misuse.
+            if args.len() == 1 && property == "equals" {
+                return Expression::BinaryExpr {
+                    op: BinaryOp::StrictEq,
+                    left: object.clone(),
+                    right: Box::new(args[0].clone()),
                 };
             }
         }
@@ -2075,8 +2095,16 @@ fn promote_literal_calls(expr: Expression) -> Expression {
 
 /// Map a Bigint-wrapper method name to its canonical BinaryOp, mirroring
 /// JavaParser.BIGINT_BINARY_METHODS. Unary `neg`/`abs` are handled separately.
+///
+/// The map covers two spellings:
+///   - Bigint wrapper (`plus`, `minus`, `times`, `div`, `mod`, `shl`, `shr`, …)
+///   - JDK BigInteger (`add`, `subtract`, `multiply`, `divide`, `shiftLeft`,
+///     `shiftRight`)
+///
+/// Both lower to the same canonical BinaryExpr.
 fn bigint_binary_method_op(method: &str) -> Option<BinaryOp> {
     match method {
+        // Bigint wrapper spellings.
         "plus"  => Some(BinaryOp::Add),
         "minus" => Some(BinaryOp::Sub),
         "times" => Some(BinaryOp::Mul),
@@ -2093,8 +2121,105 @@ fn bigint_binary_method_op(method: &str) -> Option<BinaryOp> {
         "le"    => Some(BinaryOp::Le),
         "eq"    => Some(BinaryOp::StrictEq),
         "neq"   => Some(BinaryOp::StrictNe),
+        // JDK BigInteger spellings.
+        "add"        => Some(BinaryOp::Add),
+        "subtract"   => Some(BinaryOp::Sub),
+        "multiply"   => Some(BinaryOp::Mul),
+        "divide"     => Some(BinaryOp::Div),
+        "shiftLeft"  => Some(BinaryOp::Shl),
+        "shiftRight" => Some(BinaryOp::Shr),
         _ => None,
     }
+}
+
+/// True if `callee` names `BigInteger.valueOf` or the fully-qualified
+/// `java.math.BigInteger.valueOf`.
+fn is_biginteger_value_of_callee(callee: &Expression) -> bool {
+    let Expression::MemberExpr { object, property } = callee else { return false; };
+    if property != "valueOf" {
+        return false;
+    }
+    if let Expression::Identifier { name } = object.as_ref() {
+        if name == "BigInteger" {
+            return true;
+        }
+    }
+    // java.math.BigInteger
+    if let Expression::MemberExpr { object: outer, property: outer_prop } = object.as_ref() {
+        if outer_prop == "BigInteger" {
+            if let Expression::MemberExpr { object: base, property: mid_prop } = outer.as_ref() {
+                if mid_prop == "math" {
+                    if let Expression::Identifier { name } = base.as_ref() {
+                        if name == "java" {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// True if `callee` is `Bigint.of`.
+fn is_bigint_of_callee(callee: &Expression) -> bool {
+    if let Expression::MemberExpr { object, property } = callee {
+        if property == "of" {
+            if let Expression::Identifier { name } = object.as_ref() {
+                return name == "Bigint";
+            }
+        }
+    }
+    false
+}
+
+/// Fold `<a>.compareTo(<b>) <cmp> 0` to `<a> <cmp> <b>` (and the symmetric
+/// `0 <cmp> <a>.compareTo(<b>)` to `<b> <cmp> <a>`). Java's BigInteger.compareTo
+/// returns -1/0/1, so the comparison-against-zero idiom is the standard JDK
+/// spelling for ordered comparison on BigInteger; we collapse to a single
+/// BinaryExpr so the canonical Rúnar AST matches the IR produced by
+/// `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
+/// unknown call (which the typechecker rejects loudly).
+fn fold_compare_to_zero(op: BinaryOp, left: Expression, right: Expression) -> Expression {
+    if !is_comparison_op(op.clone()) {
+        return Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) };
+    }
+    if let Some((a, b)) = compare_to_receiver_arg(&left) {
+        if matches!(&right, Expression::BigIntLiteral { value } if *value == 0i128) {
+            return Expression::BinaryExpr {
+                op,
+                left: Box::new(a),
+                right: Box::new(b),
+            };
+        }
+    }
+    if let Some((a, b)) = compare_to_receiver_arg(&right) {
+        if matches!(&left, Expression::BigIntLiteral { value } if *value == 0i128) {
+            return Expression::BinaryExpr {
+                op,
+                left: Box::new(b),
+                right: Box::new(a),
+            };
+        }
+    }
+    Expression::BinaryExpr { op, left: Box::new(left), right: Box::new(right) }
+}
+
+fn compare_to_receiver_arg(e: &Expression) -> Option<(Expression, Expression)> {
+    let Expression::CallExpr { callee, args } = e else { return None; };
+    let Expression::MemberExpr { object, property } = callee.as_ref() else { return None; };
+    if property != "compareTo" || args.len() != 1 {
+        return None;
+    }
+    Some(((**object).clone(), args[0].clone()))
+}
+
+fn is_comparison_op(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+            | BinaryOp::StrictEq | BinaryOp::StrictNe
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2298,31 +2423,26 @@ mod tests {
             }
             other => panic!("expected CallExpr, got {:?}", other),
         };
-        let equals_call = match first_call {
-            Expression::CallExpr { callee, args } => {
-                match callee.as_ref() {
-                    Expression::MemberExpr { property, object } => {
-                        assert_eq!(property, "equals");
-                        match object.as_ref() {
-                            Expression::CallExpr { callee: inner, .. } => {
-                                match inner.as_ref() {
-                                    Expression::Identifier { name } => {
-                                        assert_eq!(name, "hash160")
-                                    }
-                                    other => panic!("expected hash160, got {:?}", other),
-                                }
-                            }
-                            other => panic!("expected hash160 call, got {:?}", other),
-                        }
-                    }
-                    other => panic!("expected .equals member, got {:?}", other),
+        // The native-Java `.equals(...)` value-equality method is lowered
+        // to a canonical BinaryExpr(StrictEq, ...) so cross-format
+        // compilation produces identical IR and script.
+        match first_call {
+            Expression::BinaryExpr { op, left, right } => {
+                assert_eq!(*op, BinaryOp::StrictEq);
+                match left.as_ref() {
+                    Expression::CallExpr { callee: inner, .. } => match inner.as_ref() {
+                        Expression::Identifier { name } => assert_eq!(name, "hash160"),
+                        other => panic!("expected hash160 callee, got {:?}", other),
+                    },
+                    other => panic!("expected hash160 call on LHS, got {:?}", other),
                 }
-                assert_eq!(args.len(), 1);
-                first_call
+                match right.as_ref() {
+                    Expression::Identifier { name } => assert_eq!(name, "pubKeyHash"),
+                    other => panic!("expected pubKeyHash identifier, got {:?}", other),
+                }
             }
-            other => panic!("expected .equals(...) CallExpr, got {:?}", other),
-        };
-        let _ = equals_call;
+            other => panic!("expected equals BinaryExpr, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2394,14 +2514,16 @@ mod tests {
             Expression::CallExpr { args, .. } => args,
             other => panic!("expected CallExpr, got {:?}", other),
         };
-        let equals_call = &equals_args[0];
-        let equals_inner = match equals_call {
-            Expression::CallExpr { args, .. } => args,
-            other => panic!("expected CallExpr, got {:?}", other),
-        };
-        match &equals_inner[0] {
-            Expression::ByteStringLiteral { value } => assert_eq!(value, "deadbeef"),
-            other => panic!("expected ByteStringLiteral, got {:?}", other),
+        // `.equals(...)` lowers to BinaryExpr(StrictEq, magic, fromHex(..)).
+        match &equals_args[0] {
+            Expression::BinaryExpr { op, right, .. } => {
+                assert_eq!(*op, BinaryOp::StrictEq);
+                match right.as_ref() {
+                    Expression::ByteStringLiteral { value } => assert_eq!(value, "deadbeef"),
+                    other => panic!("expected ByteStringLiteral on RHS, got {:?}", other),
+                }
+            }
+            other => panic!("expected equals BinaryExpr, got {:?}", other),
         }
     }
 

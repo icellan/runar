@@ -55,7 +55,8 @@ pub const ECDemo = struct {
     pub fn checkNegateRoundtrip(self: *const ECDemo) void {
         const neg1 = runar.ecNegate(self.pt);
         const neg2 = runar.ecNegate(neg1);
-        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(neg2), runar.ecEncodeCompressed(self.pt)));
+        runar.assert(runar.ecPointX(neg2) == runar.ecPointX(self.pt));
+        runar.assert(runar.ecPointY(neg2) == runar.ecPointY(self.pt));
     }
 
     pub fn checkModReduce(self: *const ECDemo, value: i64, modulus: i64, expected: i64) void {
@@ -64,20 +65,24 @@ pub const ECDemo = struct {
     }
 
     pub fn checkEncodeCompressed(self: *const ECDemo, expected: runar.ByteString) void {
-        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(self.pt), expected));
+        const compressed = runar.ecEncodeCompressed(self.pt);
+        runar.assert(runar.bytesEq(compressed, expected));
     }
 
     pub fn checkMulIdentity(self: *const ECDemo) void {
         const result = runar.ecMul(self.pt, 1);
-        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(result), runar.ecEncodeCompressed(self.pt)));
+        runar.assert(runar.ecPointX(result) == runar.ecPointX(self.pt));
+        runar.assert(runar.ecPointY(result) == runar.ecPointY(self.pt));
     }
 
     pub fn checkAddOnCurve(self: *const ECDemo, other: runar.Point) void {
-        runar.assert(runar.ecOnCurve(runar.ecAdd(self.pt, other)));
+        const result = runar.ecAdd(self.pt, other);
+        runar.assert(runar.ecOnCurve(result));
     }
 
     pub fn checkMulGenOnCurve(self: *const ECDemo, scalar: i64) void {
         _ = self;
-        runar.assert(runar.ecOnCurve(runar.ecMulGen(scalar)));
+        const result = runar.ecMulGen(scalar);
+        runar.assert(runar.ecOnCurve(result));
     }
 };

@@ -1005,9 +1005,14 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		}
 	}
 
-	// this.addOutput(satoshis, val1, val2, ...) -> special node
+	// this.addOutput(satoshis, val1, val2, ...) -> special node.
+	// Mirrors flattenAddOutputArgs in 04-anf-lower.ts: when addOutput is
+	// called as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface
+	// form Zig / Move tuple syntax produce), unwrap the trailing array
+	// literal so each element becomes an individual state value.
 	if pa, ok := callee.(PropertyAccessExpr); ok && pa.Property == "addOutput" {
-		argRefs := ctx.lowerArgs(e.Args)
+		flatArgs := flattenAddOutputArgs(e.Args)
+		argRefs := ctx.lowerArgs(flatArgs)
 		satoshis := argRefs[0]
 		stateValues := argRefs[1:]
 		ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
@@ -1016,7 +1021,8 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	}
 	if me, ok := callee.(MemberExpr); ok {
 		if id, ok := me.Object.(Identifier); ok && id.Name == "this" && me.Property == "addOutput" {
-			argRefs := ctx.lowerArgs(e.Args)
+			flatArgs := flattenAddOutputArgs(e.Args)
+			argRefs := ctx.lowerArgs(flatArgs)
 			satoshis := argRefs[0]
 			stateValues := argRefs[1:]
 			ref := ctx.emit(ir.ANFValue{Kind: "add_output", Satoshis: satoshis, StateValues: stateValues, Preimage: ""})
@@ -1317,6 +1323,22 @@ func exprMutatesState(expr Expression, mutableProps map[string]bool) bool {
 		}
 	}
 	return false
+}
+
+// flattenAddOutputArgs mirrors flattenAddOutputArgs in 04-anf-lower.ts:
+// when this.addOutput is called as `this.addOutput(satoshis, .{ v1, v2, ... })`
+// (the surface form Zig / Move tuple syntax produce), unwrap the trailing
+// array literal so each element becomes an individual state value.
+func flattenAddOutputArgs(args []Expression) []Expression {
+	if len(args) == 2 {
+		if al, ok := args[1].(ArrayLiteralExpr); ok {
+			out := make([]Expression, 0, 1+len(al.Elements))
+			out = append(out, args[0])
+			out = append(out, al.Elements...)
+			return out
+		}
+	}
+	return args
 }
 
 // ---------------------------------------------------------------------------

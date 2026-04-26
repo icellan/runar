@@ -4,8 +4,8 @@ import java.math.BigInteger;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.runtime.MockCrypto.Point;
-import runar.lang.types.ByteString;
 
 import static runar.lang.Builtins.assertThat;
 import static runar.lang.Builtins.bin2num;
@@ -39,7 +39,7 @@ import static runar.lang.Builtins.hash256;
  */
 class SchnorrZKP extends SmartContract {
 
-    Point pubKey;
+    @Readonly Point pubKey;
 
     SchnorrZKP(Point pubKey) {
         super(pubKey);
@@ -57,15 +57,13 @@ class SchnorrZKP extends SmartContract {
         // Verify R is on the curve.
         assertThat(ecOnCurve(rPoint));
 
-        // The Rúnar parser sees a Point passed where a ByteString is
-        // expected and treats the receiver as the underlying 64-byte
-        // encoding. Off-chain we hand the point's raw 64-byte form to
-        // cat(...) so the simulator's hash256 sees the same input.
-        ByteString rBytes = rPoint.toByteString();
-        ByteString pBytes = this.pubKey.toByteString();
-
-        // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P))
-        BigInteger e = bin2num(hash256(cat(rBytes, pBytes)));
+        // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P)).
+        // Rúnar Point is structurally a 64-byte ByteString (x[32] || y[32]);
+        // the canonical TS source passes Points directly to cat, and the
+        // Java {@link runar.lang.Builtins#cat(MockCrypto.Point,MockCrypto.Point)}
+        // overload coerces them to their raw 64-byte form so the IR produced
+        // by every frontend matches.
+        BigInteger e = bin2num(hash256(cat(rPoint, this.pubKey)));
 
         // Left side: s*G
         Point sG = ecMulGen(s);

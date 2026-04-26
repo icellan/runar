@@ -165,6 +165,10 @@ _MOVE_BUILTIN_MAP: dict[str, str] = {
     "p384_on_curve":          "p384OnCurve",
     "p384_encode_compressed": "p384EncodeCompressed",
     "verify_ecdsa_p384":      "verifyECDSA_P384",
+    # Pre-camelCased forms also accepted (matches the canonical TS Move parser,
+    # whose regex preserves the literal `_P` boundary).
+    "verifyECDSA_P256":        "verifyECDSA_P256",
+    "verifyECDSA_P384":        "verifyECDSA_P384",
 }
 
 

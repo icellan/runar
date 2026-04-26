@@ -804,6 +804,15 @@ const Parser = struct {
         // return ...;
         if (self.checkIdent("return")) return self.parseReturnStmt();
 
+        // `let Type name = expr;` — Rúnar-Solidity local variable declaration.
+        // The Sol surface syntax requires the explicit `let` keyword in front
+        // of the type so the parser can disambiguate against a free-standing
+        // call expression like `numToBin(...)`.
+        if (self.checkIdent("let")) {
+            _ = self.bump(); // consume 'let'
+            return self.parseSolVarDecl();
+        }
+
         // Variable declaration: Type name = expr;
         // We detect this by checking if current is a type identifier followed by another identifier
         if (self.current.kind == .ident and self.isTypeStart()) {

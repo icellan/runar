@@ -229,6 +229,17 @@ public final class Builtins {
         if (!SimulatorContext.isActive()) throw notInSimulator("cat");
         return MockCrypto.cat(a, b);
     }
+    /**
+     * Convenience overload accepting two {@link MockCrypto.Point}s — the
+     * Rúnar {@code Point} primitive is structurally a 64-byte ByteString
+     * (x[32] || y[32]); canonical TS sources pass Points directly to
+     * {@code cat}, and the off-chain simulator coerces each Point to its
+     * raw 64-byte form so the IR produced by every frontend matches.
+     */
+    public static ByteString cat(MockCrypto.Point a, MockCrypto.Point b) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("cat");
+        return MockCrypto.cat(a.toByteString(), b.toByteString());
+    }
     public static ByteString substr(ByteString bs, BigInteger start, BigInteger len) {
         if (!SimulatorContext.isActive()) throw notInSimulator("substr");
         return MockCrypto.substr(bs, start, len);
@@ -252,6 +263,24 @@ public final class Builtins {
     public static ByteString num2bin(BigInteger v, BigInteger len) {
         if (!SimulatorContext.isActive()) throw notInSimulator("num2bin");
         return MockCrypto.num2bin(v, len);
+    }
+    /**
+     * Convenience overload accepting {@link Bigint} for both arguments.
+     * Mirrors the BigInteger form so Rúnar Java sources can pass the
+     * wrapper type directly without unwrapping via {@code .value()}.
+     */
+    public static ByteString num2bin(Bigint v, Bigint len) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("num2bin");
+        return MockCrypto.num2bin(v.value(), len.value());
+    }
+    /**
+     * Mixed-arity convenience overload — receiver as {@link Bigint},
+     * length as {@link BigInteger}. Useful when the length is a literal
+     * {@code BigInteger.valueOf(8)} but the value is a contract field.
+     */
+    public static ByteString num2bin(Bigint v, BigInteger len) {
+        if (!SimulatorContext.isActive()) throw notInSimulator("num2bin");
+        return MockCrypto.num2bin(v.value(), len);
     }
     public static BigInteger bin2num(ByteString bs) {
         if (!SimulatorContext.isActive()) throw notInSimulator("bin2num");
@@ -409,7 +438,23 @@ public final class Builtins {
     public static BigInteger extractLocktime(SigHashPreimage p) { return Preimage.extractLocktime(resolvePreimage(p)); }
     public static BigInteger extractLocktime(Preimage p) { return Preimage.extractLocktime(p); }
 
-    public static ByteString extractOutputHash(SigHashPreimage p) { return Preimage.extractOutputHash(resolvePreimage(p)); }
+    public static ByteString extractOutputHash(SigHashPreimage p) {
+        // Mirror packages/runar-lang/src/runtime/preimage.ts: when the
+        // caller passes a SigHashPreimage whose first 32 bytes hold a
+        // synthetic outputs-hash (the standard test pattern — set the
+        // preimage to {@code hash256(expectedOutputs)}), echo those
+        // bytes directly so the contract assertion
+        // {@code hash256(outputs) === extractOutputHash(preimage)}
+        // round-trips under stateless calls. For stateful contracts the
+        // simulator threads a real {@link Preimage} via
+        // {@link SimulatorContext} — fall back to that when the
+        // SigHashPreimage parameter is empty.
+        if (p != null && p.length() >= 32) {
+            byte[] raw = p.toByteArray();
+            return new ByteString(java.util.Arrays.copyOfRange(raw, 0, 32));
+        }
+        return Preimage.extractOutputHash(resolvePreimage(p));
+    }
     public static ByteString extractOutputHash(Preimage p) { return Preimage.extractOutputHash(p); }
 
     public static BigInteger extractAmount(SigHashPreimage p) { return Preimage.extractAmount(resolvePreimage(p)); }

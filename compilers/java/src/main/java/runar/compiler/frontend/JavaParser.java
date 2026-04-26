@@ -486,6 +486,41 @@ public final class JavaParser {
         }
         if (e instanceof BinaryTree bt) {
             Expression.BinaryOp op = mapBinaryOp(bt.getKind(), filename);
+            // Fold `<a>.compareTo(<b>) <cmp> 0` → `<a> <cmp> <b>`. Java's
+            // BigInteger.compareTo returns -1/0/1, so the comparison-against-
+            // zero idiom is the standard Java spelling for ordered comparison
+            // on BigInteger. We rewrite at parse time so the canonical Rúnar
+            // AST sees a single BinaryExpr — avoiding a redundant SUB and
+            // matching the IR produced by `<a> <cmp> <b>` in other formats.
+            // The fold only triggers when the right operand is the literal 0
+            // and the operator is one of the six comparison ops; any other
+            // shape leaves compareTo as an Unknown call (which the typechecker
+            // will reject loudly).
+            if (isComparisonOp(op)
+                && bt.getRightOperand() instanceof LiteralTree zeroLit
+                && zeroLit.getValue() instanceof Number zn
+                && zn.longValue() == 0L
+                && bt.getLeftOperand() instanceof MethodInvocationTree leftMi
+                && leftMi.getMethodSelect() instanceof MemberSelectTree leftMs
+                && leftMs.getIdentifier().contentEquals("compareTo")
+                && leftMi.getArguments().size() == 1) {
+                Expression a = convertExpression(leftMs.getExpression(), filename, cu);
+                Expression b = convertExpression(leftMi.getArguments().get(0), filename, cu);
+                return new BinaryExpr(op, a, b);
+            }
+            // Symmetric: `0 <cmp> <a>.compareTo(<b>)` → `<b> <cmp> <a>`.
+            if (isComparisonOp(op)
+                && bt.getLeftOperand() instanceof LiteralTree zeroLit2
+                && zeroLit2.getValue() instanceof Number zn2
+                && zn2.longValue() == 0L
+                && bt.getRightOperand() instanceof MethodInvocationTree rightMi
+                && rightMi.getMethodSelect() instanceof MemberSelectTree rightMs
+                && rightMs.getIdentifier().contentEquals("compareTo")
+                && rightMi.getArguments().size() == 1) {
+                Expression a = convertExpression(rightMs.getExpression(), filename, cu);
+                Expression b = convertExpression(rightMi.getArguments().get(0), filename, cu);
+                return new BinaryExpr(op, b, a);
+            }
             return new BinaryExpr(op,
                 convertExpression(bt.getLeftOperand(), filename, cu),
                 convertExpression(bt.getRightOperand(), filename, cu)
@@ -568,11 +603,9 @@ public final class JavaParser {
         }
         // Recognise BigInteger.valueOf(<int literal>) → BigIntLiteral, and
         // Bigint.of(<int literal>) as the equivalent shorthand on the Bigint
-        // wrapper.
+        // wrapper. Also accept the fully-qualified java.math.BigInteger.valueOf.
         if (callee instanceof MemberSelectTree ms
-            && ms.getExpression() instanceof IdentifierTree bi
-            && ((bi.getName().contentEquals("BigInteger") && ms.getIdentifier().contentEquals("valueOf"))
-                || (bi.getName().contentEquals("Bigint") && ms.getIdentifier().contentEquals("of")))
+            && (isBigIntegerValueOf(ms) || isBigintOf(ms))
             && mi.getArguments().size() == 1
             && mi.getArguments().get(0) instanceof LiteralTree n
             && n.getValue() instanceof Number num) {
@@ -583,11 +616,11 @@ public final class JavaParser {
         // into a Bigint. At the Rúnar AST level Bigint and BigInteger collapse
         // to the same BIGINT primitive, so the wrap is a no-op: lower to the
         // inner expression. Mirrors how BigInteger.valueOf(<non-literal>) would
-        // also collapse (the JDK valueOf is identity at this layer).
+        // also collapse (the JDK valueOf is identity at this layer). Both the
+        // bare BigInteger.valueOf and the qualified java.math.BigInteger.valueOf
+        // forms are accepted.
         if (callee instanceof MemberSelectTree ms
-            && ms.getExpression() instanceof IdentifierTree bi
-            && ((bi.getName().contentEquals("Bigint") && ms.getIdentifier().contentEquals("of"))
-                || (bi.getName().contentEquals("BigInteger") && ms.getIdentifier().contentEquals("valueOf")))
+            && (isBigIntegerValueOf(ms) || isBigintOf(ms))
             && mi.getArguments().size() == 1) {
             return convertExpression(mi.getArguments().get(0), filename, cu);
         }
@@ -595,6 +628,16 @@ public final class JavaParser {
         // BigInteger. Symmetric no-op to Bigint.of(...) above.
         if (callee instanceof MemberSelectTree ms
             && ms.getIdentifier().contentEquals("value")
+            && mi.getArguments().isEmpty()) {
+            return convertExpression(ms.getExpression(), filename, cu);
+        }
+        // <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+        // PubKey wrappers to their raw byte form. Rúnar Point is structurally a
+        // ByteString so the TS canonical sources pass Points directly to
+        // builtins like `cat`. Lower to a no-op (drop the call, keep the
+        // receiver) so the Java IR matches the canonical IR byte-for-byte.
+        if (callee instanceof MemberSelectTree ms
+            && ms.getIdentifier().contentEquals("toByteString")
             && mi.getArguments().isEmpty()) {
             return convertExpression(ms.getExpression(), filename, cu);
         }
@@ -613,10 +656,62 @@ public final class JavaParser {
         if (lowered.isPresent()) {
             return lowered.get();
         }
+        // Recognise <expr>.equals(<expr>) — Java's value-equality method on
+        // ByteString/Addr/Sig/PubKey/etc. Java has no operator overloading, so
+        // contracts spell byte-string equality as a.equals(b). Lower to the
+        // canonical BinaryExpr(EQ, a, b). Matched by method name and arity;
+        // receiver type is not consulted (the typechecker rejects misuse).
+        if (callee instanceof MemberSelectTree ms
+            && ms.getIdentifier().contentEquals("equals")
+            && mi.getArguments().size() == 1) {
+            Expression receiver = convertExpression(ms.getExpression(), filename, cu);
+            Expression arg = convertExpression(mi.getArguments().get(0), filename, cu);
+            return new BinaryExpr(Expression.BinaryOp.EQ, receiver, arg);
+        }
         // General call: callee = expression, args = list.
         Expression calleeExpr = convertExpression(callee, filename, cu);
         List<Expression> args = convertArgs(mi, filename, cu);
         return new CallExpr(calleeExpr, args);
+    }
+
+    /**
+     * True if {@code ms} names {@code BigInteger.valueOf} or the
+     * fully-qualified {@code java.math.BigInteger.valueOf}.
+     */
+    private static boolean isBigIntegerValueOf(MemberSelectTree ms) {
+        if (!ms.getIdentifier().contentEquals("valueOf")) return false;
+        ExpressionTree receiver = ms.getExpression();
+        if (receiver instanceof IdentifierTree bi && bi.getName().contentEquals("BigInteger")) {
+            return true;
+        }
+        // java.math.BigInteger.valueOf — receiver is a MemberSelectTree whose
+        // identifier is "BigInteger" and whose own receiver is "java.math".
+        if (receiver instanceof MemberSelectTree outer
+            && outer.getIdentifier().contentEquals("BigInteger")
+            && outer.getExpression() instanceof MemberSelectTree mid
+            && mid.getIdentifier().contentEquals("math")
+            && mid.getExpression() instanceof IdentifierTree base
+            && base.getName().contentEquals("java")) {
+            return true;
+        }
+        return false;
+    }
+
+    /** True if {@code ms} names {@code Bigint.of}. */
+    private static boolean isBigintOf(MemberSelectTree ms) {
+        return ms.getIdentifier().contentEquals("of")
+            && ms.getExpression() instanceof IdentifierTree id
+            && id.getName().contentEquals("Bigint");
+    }
+
+    /** True if {@code op} is one of the six ordered comparison ops. */
+    private static boolean isComparisonOp(Expression.BinaryOp op) {
+        return op == Expression.BinaryOp.LT
+            || op == Expression.BinaryOp.LE
+            || op == Expression.BinaryOp.GT
+            || op == Expression.BinaryOp.GE
+            || op == Expression.BinaryOp.EQ
+            || op == Expression.BinaryOp.NEQ;
     }
 
     /**
@@ -655,9 +750,16 @@ public final class JavaParser {
             return Optional.of(new BinaryExpr(binOp, receiver, arg));
         }
 
-        if ("neg".equals(method) && mi.getArguments().isEmpty()) {
+        if (("neg".equals(method) || "negate".equals(method)) && mi.getArguments().isEmpty()) {
             Expression receiver = convertExpression(ms.getExpression(), filename, cu);
             return Optional.of(new UnaryExpr(Expression.UnaryOp.NEG, receiver));
+        }
+        // a.not() -> UnaryExpr(~). Mirrors java.math.BigInteger#not(); the
+        // Bigint wrapper exposes the same method so Rúnar Java sources can use
+        // it natively.
+        if ("not".equals(method) && mi.getArguments().isEmpty()) {
+            Expression receiver = convertExpression(ms.getExpression(), filename, cu);
+            return Optional.of(new UnaryExpr(Expression.UnaryOp.BIT_NOT, receiver));
         }
         if ("abs".equals(method) && mi.getArguments().isEmpty()) {
             // abs is a Rúnar builtin, not an operator: lower to CallExpr(abs, a).
@@ -668,8 +770,16 @@ public final class JavaParser {
         return Optional.empty();
     }
 
-    /** Bigint method-name → canonical BinaryOp table (unary ops handled separately). */
+    /**
+     * Bigint method-name → canonical BinaryOp table (unary ops handled
+     * separately). Both the Bigint-wrapper spellings ({@code plus},
+     * {@code minus}, ...) and the JDK {@link BigInteger} spellings
+     * ({@code add}, {@code subtract}, {@code shiftLeft}, ...) map to the
+     * same canonical BinaryOp. Receiver type is not consulted; the
+     * typechecker rejects misuse.
+     */
     private static final Map<String, Expression.BinaryOp> BIGINT_BINARY_METHODS = Map.ofEntries(
+        // Bigint wrapper spellings.
         Map.entry("plus",  Expression.BinaryOp.ADD),
         Map.entry("minus", Expression.BinaryOp.SUB),
         Map.entry("times", Expression.BinaryOp.MUL),
@@ -685,7 +795,14 @@ public final class JavaParser {
         Map.entry("ge",    Expression.BinaryOp.GE),
         Map.entry("le",    Expression.BinaryOp.LE),
         Map.entry("eq",    Expression.BinaryOp.EQ),
-        Map.entry("neq",   Expression.BinaryOp.NEQ)
+        Map.entry("neq",   Expression.BinaryOp.NEQ),
+        // JDK BigInteger spellings.
+        Map.entry("add",        Expression.BinaryOp.ADD),
+        Map.entry("subtract",   Expression.BinaryOp.SUB),
+        Map.entry("multiply",   Expression.BinaryOp.MUL),
+        Map.entry("divide",     Expression.BinaryOp.DIV),
+        Map.entry("shiftLeft",  Expression.BinaryOp.SHL),
+        Map.entry("shiftRight", Expression.BinaryOp.SHR)
     );
 
     private static List<Expression> convertArgs(MethodInvocationTree mi, String filename, CompilationUnitTree cu) {

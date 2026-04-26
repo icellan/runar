@@ -2,6 +2,7 @@ package runar.examples.postquantumwallet;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.types.Addr;
 import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
@@ -35,8 +36,8 @@ import static runar.lang.Builtins.verifyWOTS;
  */
 class PostQuantumWallet extends SmartContract {
 
-    Addr ecdsaPubKeyHash;
-    ByteString wotsPubKeyHash;
+    @Readonly Addr ecdsaPubKeyHash;
+    @Readonly ByteString wotsPubKeyHash;
 
     PostQuantumWallet(Addr ecdsaPubKeyHash, ByteString wotsPubKeyHash) {
         super(ecdsaPubKeyHash, wotsPubKeyHash);

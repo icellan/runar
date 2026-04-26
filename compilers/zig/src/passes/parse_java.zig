@@ -1113,8 +1113,17 @@ const Parser = struct {
         }
         _ = self.expect(.semicolon);
 
-        // Update: consume until `)`.
-        while (self.current.kind != .rparen and self.current.kind != .eof) {
+        // Update: consume until the matching `)` for the for-loop. Track nested
+        // parentheses so that `i = i.plus(Bigint.ONE)` does not terminate at
+        // the inner `)`.
+        var paren_depth: usize = 0;
+        while (self.current.kind != .eof) {
+            if (self.current.kind == .lparen) {
+                paren_depth += 1;
+            } else if (self.current.kind == .rparen) {
+                if (paren_depth == 0) break;
+                paren_depth -= 1;
+            }
             _ = self.bump();
         }
         _ = self.expect(.rparen);
@@ -1208,6 +1217,27 @@ const Parser = struct {
         return .{ .binary_op = bop };
     }
 
+    /// Fold `<a>.compareTo(<b>) <cmp> 0` to `<a> <cmp> <b>` (and the symmetric
+    /// `0 <cmp> <a>.compareTo(<b>)` to `<b> <cmp> <a>`). Java's BigInteger
+    /// .compareTo returns -1/0/1, so the comparison-against-zero idiom is the
+    /// standard JDK spelling for ordered comparison on BigInteger; we collapse
+    /// to a single BinaryExpr so the canonical Rúnar AST matches the IR
+    /// produced by `<a> <cmp> <b>` in other formats. Any other shape leaves
+    /// compareTo as an unknown call (which the typechecker rejects loudly).
+    fn makeComparisonBinaryExpr(self: *Parser, op: BinOperator, left: Expression, right: Expression) ?Expression {
+        if (compareToReceiverArg(left)) |pair| {
+            if (isLiteralZero(right)) {
+                return self.makeBinaryExpr(op, pair.receiver, pair.arg);
+            }
+        }
+        if (compareToReceiverArg(right)) |pair| {
+            if (isLiteralZero(left)) {
+                return self.makeBinaryExpr(op, pair.arg, pair.receiver);
+            }
+        }
+        return self.makeBinaryExpr(op, left, right);
+    }
+
     // ==================================================================
     // Expression parsing — precedence climbing
     // ==================================================================
@@ -1290,7 +1320,7 @@ const Parser = struct {
             const op: BinOperator = if (self.current.kind == .eqeq) .eq else .neq;
             _ = self.bump();
             const right = self.parseComparison() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.makeComparisonBinaryExpr(op, left, right) orelse return null;
         }
         return left;
     }
@@ -1309,7 +1339,7 @@ const Parser = struct {
             };
             _ = self.bump();
             const right = self.parseShift() orelse return null;
-            left = self.makeBinaryExpr(op, left, right) orelse return null;
+            left = self.makeComparisonBinaryExpr(op, left, right) orelse return null;
         }
         return left;
     }
@@ -1468,6 +1498,16 @@ const Parser = struct {
                     if (std.mem.eql(u8, member, "value") and args.len == 0) {
                         continue;
                     }
+                    // <expr>.toByteString() — Java-side coercion of Point /
+                    // Bigint / Sig / PubKey wrappers to their raw byte form.
+                    // Rúnar Point is structurally a ByteString so the TS
+                    // canonical sources pass Points directly to builtins
+                    // like `cat`. Lower to a no-op (drop the call, keep the
+                    // receiver) so the Java IR matches the canonical IR
+                    // byte-for-byte.
+                    if (std.mem.eql(u8, member, "toByteString") and args.len == 0) {
+                        continue;
+                    }
 
                     // Bigint-wrapper arithmetic methods: `a.plus(b)` →
                     // BinaryExpr(+, a, b), `a.neg()` → UnaryExpr(-, a),
@@ -1483,9 +1523,18 @@ const Parser = struct {
                             continue;
                         }
                     }
-                    if (args.len == 0 and std.mem.eql(u8, member, "neg")) {
+                    if (args.len == 0 and (std.mem.eql(u8, member, "neg") or std.mem.eql(u8, member, "negate"))) {
                         const uop = self.allocator.create(UnaryOp) catch return null;
                         uop.* = .{ .op = .negate, .operand = expr };
+                        expr = .{ .unary_op = uop };
+                        continue;
+                    }
+                    // `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not();
+                    // the Bigint wrapper exposes the same method so Rúnar Java
+                    // sources can use it natively.
+                    if (args.len == 0 and std.mem.eql(u8, member, "not")) {
+                        const uop = self.allocator.create(UnaryOp) catch return null;
+                        uop.* = .{ .op = .bitnot, .operand = expr };
                         expr = .{ .unary_op = uop };
                         continue;
                     }
@@ -1495,6 +1544,15 @@ const Parser = struct {
                         const call = self.allocator.create(CallExpr) catch return null;
                         call.* = .{ .callee = "abs", .args = abs_args };
                         expr = .{ .call = call };
+                        continue;
+                    }
+                    // <expr>.equals(<expr>) — Java's value-equality method.
+                    // Lower to the canonical BinaryExpr(eq, a, b). Receiver
+                    // type is not consulted; the typechecker rejects misuse.
+                    if (args.len == 1 and std.mem.eql(u8, member, "equals")) {
+                        const bop = self.allocator.create(BinaryOp) catch return null;
+                        bop.* = .{ .op = .eq, .left = expr, .right = args[0] };
+                        expr = .{ .binary_op = bop };
                         continue;
                     }
 
@@ -1547,6 +1605,20 @@ const Parser = struct {
                             } else {
                                 expr = .{ .property_access = .{ .object = id, .property = member } };
                             }
+                        },
+                        .property_access => |pa| {
+                            // Collapse `java.math.BigInteger` to a bare identifier
+                            // so the downstream `valueOf(...)` handler still
+                            // matches. Other chained property accesses are not
+                            // supported in the Rúnar Java subset.
+                            if (std.mem.eql(u8, pa.object, "java")
+                                and std.mem.eql(u8, pa.property, "math")
+                                and std.mem.eql(u8, member, "BigInteger"))
+                            {
+                                expr = .{ .identifier = "BigInteger" };
+                                continue;
+                            }
+                            expr = .{ .property_access = .{ .object = "unknown", .property = member } };
                         },
                         else => {
                             expr = .{ .property_access = .{ .object = "unknown", .property = member } };
@@ -1853,10 +1925,41 @@ fn binOpFromCompoundAssign(k: TokenKind) BinOperator {
     };
 }
 
+const CompareToPair = struct { receiver: Expression, arg: Expression };
+
+/// Recognise `<receiver>.compareTo(<arg>)` shapes left in the AST after parse.
+/// Matches both `MethodCall` (where the receiver collapsed to an identifier
+/// string) and any call-shaped node that survived the call-site rewrites
+/// without a special case. Returns `null` for any other shape.
+fn compareToReceiverArg(e: Expression) ?CompareToPair {
+    return switch (e) {
+        .method_call => |mc| blk: {
+            if (!std.mem.eql(u8, mc.method, "compareTo") or mc.args.len != 1) break :blk null;
+            const receiver: Expression = .{ .identifier = mc.object };
+            break :blk .{ .receiver = receiver, .arg = mc.args[0] };
+        },
+        else => null,
+    };
+}
+
+/// True if `e` is an integer literal whose value is exactly 0.
+fn isLiteralZero(e: Expression) bool {
+    return switch (e) {
+        .literal_int => |v| v == 0,
+        else => false,
+    };
+}
+
 /// Map a Bigint-wrapper method name to its canonical BinOperator. Mirrors
 /// JavaParser.BIGINT_BINARY_METHODS; unary `neg`/`abs` are handled at the
 /// call site. Receiver type is not consulted; the typechecker rejects misuse.
+///
+/// The map covers two spellings:
+///   - Bigint wrapper (plus, minus, times, div, mod, shl, shr, ...)
+///   - JDK BigInteger (add, subtract, multiply, divide, shiftLeft, shiftRight)
+/// Both lower to the same canonical BinaryExpr.
 fn bigintBinaryMethodOp(method: []const u8) ?BinOperator {
+    // Bigint wrapper spellings.
     if (std.mem.eql(u8, method, "plus"))  return .add;
     if (std.mem.eql(u8, method, "minus")) return .sub;
     if (std.mem.eql(u8, method, "times")) return .mul;
@@ -1873,6 +1976,13 @@ fn bigintBinaryMethodOp(method: []const u8) ?BinOperator {
     if (std.mem.eql(u8, method, "le"))    return .lte;
     if (std.mem.eql(u8, method, "eq"))    return .eq;
     if (std.mem.eql(u8, method, "neq"))   return .neq;
+    // JDK BigInteger spellings.
+    if (std.mem.eql(u8, method, "add"))         return .add;
+    if (std.mem.eql(u8, method, "subtract"))    return .sub;
+    if (std.mem.eql(u8, method, "multiply"))    return .mul;
+    if (std.mem.eql(u8, method, "divide"))      return .div;
+    if (std.mem.eql(u8, method, "shiftLeft"))   return .lshift;
+    if (std.mem.eql(u8, method, "shiftRight"))  return .rshift;
     return null;
 }
 
@@ -2080,17 +2190,16 @@ test "ByteString.fromHex literal (Java)" {
     try std.testing.expectEqual(@as(usize, 1), c.methods.len);
     const body = c.methods[0].body;
     try std.testing.expectEqual(@as(usize, 1), body.len);
-    // assertThat(magic.equals(ByteString.fromHex("deadbeef"))) — the
-    // parser rewrites `fromHex(...)` with a single string argument into a
-    // bytes literal. Walk down to find it.
+    // assertThat(magic.equals(ByteString.fromHex("deadbeef"))) — the parser
+    // lowers `<a>.equals(<b>)` to BinaryExpr(eq, <a>, <b>) and rewrites
+    // `ByteString.fromHex("...")` into a bytes literal.
     const outer = body[0].expr_stmt;
     const outer_call = outer.call.*; // assertThat(...) → call("assert", [arg])
     try std.testing.expectEqualStrings("assert", outer_call.callee);
-    const equals_call = outer_call.args[0].method_call.*;
-    try std.testing.expectEqualStrings("equals", equals_call.method);
-    // The single arg must be a bytes literal with the hex payload.
-    const lit = equals_call.args[0];
-    switch (lit) {
+    const eq_op = outer_call.args[0].binary_op.*;
+    try std.testing.expectEqual(BinOperator.eq, eq_op.op);
+    // Right operand must be a bytes literal with the hex payload.
+    switch (eq_op.right) {
         .literal_bytes => |raw| try std.testing.expectEqualStrings("deadbeef", raw),
         else => return error.ExpectedByteStringLiteral,
     }

@@ -806,9 +806,17 @@ class _ZigParser:
 
             if is_receiver:
                 receiver_name = param_name
+            elif parsed_type[1] == "StatefulContext":
+                # Zig stateful contracts thread an explicit StatefulContext
+                # parameter through every state-mutating method body
+                # (e.g. `ctx.txPreimage`, `ctx.addOutput(...)`). The compiler
+                # re-injects this context when lowering, so the parameter is
+                # dropped from the canonical IR -- matching the Zig compiler's
+                # own parse_zig.zig behavior. Recording the binding name lets
+                # later passes rewrite `ctx.txPreimage` -> `this.txPreimage`
+                # and `ctx.addOutput(...)` -> `this.addOutput(...)`.
+                stateful_ctx_names.add(param_name)
             else:
-                if parsed_type[1] == "StatefulContext":
-                    stateful_ctx_names.add(param_name)
                 params.append(ParamNode(
                     name=param_name,
                     type=parsed_type[0],

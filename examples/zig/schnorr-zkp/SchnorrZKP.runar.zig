@@ -10,13 +10,21 @@ pub const SchnorrZKP = struct {
     }
 
     pub fn verify(self: *const SchnorrZKP, rPoint: runar.Point, s: runar.Bigint) void {
+        // Verify R is on the curve.
         runar.assert(runar.ecOnCurve(rPoint));
 
+        // Derive challenge via Fiat-Shamir: e = bin2num(hash256(R || P)).
         const e = runar.bin2num(runar.hash256(runar.cat(rPoint, self.pubKey)));
+
+        // Left side: s*G.
         const sG = runar.ecMulGen(s);
+
+        // Right side: R + e*P.
         const eP = runar.ecMul(self.pubKey, e);
         const rhs = runar.ecAdd(rPoint, eP);
 
-        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(sG), runar.ecEncodeCompressed(rhs)));
+        // Verify equality via coordinate comparison (matches the TS canonical).
+        runar.assert(runar.ecPointX(sG) == runar.ecPointX(rhs));
+        runar.assert(runar.ecPointY(sG) == runar.ecPointY(rhs));
     }
 };

@@ -662,6 +662,8 @@ fn rbMapTypeName(name: []const u8) []const u8 {
         .{ "RabinSig", "RabinSig" },
         .{ "RabinPubKey", "RabinPubKey" },
         .{ "Point", "Point" },
+        .{ "P256Point", "P256Point" },
+        .{ "P384Point", "P384Point" },
     });
     return map.get(name) orelse types.runarTypeToString(.unknown);
 }

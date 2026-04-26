@@ -24,8 +24,8 @@ module MessageBoard {
     use runar::crypto::{check_sig};
 
     resource struct MessageBoard {
-        message: ByteString,   // mutable (stateful, persists across transactions)
-        owner: PubKey,         // readonly -- baked into the locking script
+        message: &mut ByteString,   // mutable (stateful, persists across transactions)
+        owner: PubKey,              // readonly -- baked into the locking script
     }
 
     // Post a new message, replacing the current one. Anyone can call.

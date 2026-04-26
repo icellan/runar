@@ -122,14 +122,16 @@ class TestParserJava < Minitest::Test
     assert_equal "assert", first_call.callee.name
     assert_equal 1, first_call.args.length
 
-    # Inner: hash160(pubKey).equals(pubKeyHash) -> CallExpr with MemberExpr callee
-    equals_call = first_call.args[0]
-    assert_instance_of CallExpr, equals_call
-    assert_instance_of MemberExpr, equals_call.callee
-    assert_equal "equals", equals_call.callee.property
-    hash160_call = equals_call.callee.object
+    # Inner: hash160(pubKey).equals(pubKeyHash) lowers to BinaryExpr(===, ...)
+    # so cross-format compilation produces identical IR and script.
+    equals_cmp = first_call.args[0]
+    assert_instance_of BinaryExpr, equals_cmp
+    assert_equal "===", equals_cmp.op
+    hash160_call = equals_cmp.left
     assert_instance_of CallExpr, hash160_call
     assert_equal "hash160", hash160_call.callee.name
+    assert_instance_of Identifier, equals_cmp.right
+    assert_equal "pubKeyHash", equals_cmp.right.name
   end
 
   # -------------------------------------------------------------------
@@ -238,9 +240,12 @@ class TestParserJava < Minitest::Test
     stmt = check.body[0]
     assert_instance_of ExpressionStmt, stmt
     assert_call = stmt.expr
-    equals_call = assert_call.args[0]
-    # equals_call.args[0] is the fromHex literal argument
-    lit = equals_call.args[0]
+    # `.equals(...)` lowers to BinaryExpr(===, ...) with a ByteStringLiteral
+    # (from fromHex) on the right.
+    equals_cmp = assert_call.args[0]
+    assert_instance_of BinaryExpr, equals_cmp
+    assert_equal "===", equals_cmp.op
+    lit = equals_cmp.right
     assert_instance_of ByteStringLiteral, lit
     assert_equal "deadbeef", lit.value
   end

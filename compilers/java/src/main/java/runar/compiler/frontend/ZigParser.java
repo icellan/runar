@@ -762,10 +762,17 @@ public final class ZigParser {
                 boolean isReceiver = (index == 0 && contractName.equals(pt.rawName));
                 if (isReceiver) {
                     receiverName = paramName;
+                } else if ("StatefulContext".equals(pt.rawName)) {
+                    // Zig stateful contracts thread an explicit StatefulContext
+                    // parameter through every state-mutating method body
+                    // (e.g. `ctx.txPreimage`, `ctx.addOutput(...)`). The compiler
+                    // re-injects this context when lowering, so the parameter is
+                    // dropped from the canonical IR -- matching the Zig compiler's
+                    // own parse_zig.zig behavior. Recording the binding name lets
+                    // later passes rewrite `ctx.txPreimage` -> `this.txPreimage`
+                    // and `ctx.addOutput(...)` -> `this.addOutput(...)`.
+                    statefulCtx.add(paramName);
                 } else {
-                    if ("StatefulContext".equals(pt.rawName)) {
-                        statefulCtx.add(paramName);
-                    }
                     params.add(new ParamNode(paramName, pt.type));
                 }
                 index++;

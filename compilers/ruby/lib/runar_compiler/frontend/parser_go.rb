@@ -126,6 +126,9 @@ module RunarCompiler
       "VerifySLHDSA_SHA2_192f" => "verifySLHDSA_SHA2_192f",
       "VerifySLHDSA_SHA2_256s" => "verifySLHDSA_SHA2_256s",
       "VerifySLHDSA_SHA2_256f" => "verifySLHDSA_SHA2_256f",
+      # NIST EC curves
+      "VerifyECDSAP256" => "verifyECDSA_P256",
+      "VerifyECDSAP384" => "verifyECDSA_P384",
       # Byte operations
       "Num2Bin" => "num2bin", "Bin2Num" => "bin2num", "Int2Str" => "int2str",
       "Cat" => "cat", "Substr" => "substr", "Split" => "split",

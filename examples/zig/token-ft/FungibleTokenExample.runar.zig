@@ -1,6 +1,6 @@
 const runar = @import("runar");
 
-pub const FungibleTokenExample = struct {
+pub const FungibleToken = struct {
     pub const Contract = runar.StatefulSmartContract;
 
     owner: runar.PubKey = "000000000000000000000000000000000000000000000000000000000000000000",
@@ -8,7 +8,7 @@ pub const FungibleTokenExample = struct {
     mergeBalance: i64 = 0,
     tokenId: runar.ByteString,
 
-    pub fn init(owner: runar.PubKey, balance: i64, mergeBalance: i64, tokenId: runar.ByteString) FungibleTokenExample {
+    pub fn init(owner: runar.PubKey, balance: i64, mergeBalance: i64, tokenId: runar.ByteString) FungibleToken {
         return .{
             .owner = owner,
             .balance = balance,
@@ -18,7 +18,7 @@ pub const FungibleTokenExample = struct {
     }
 
     pub fn transfer(
-        self: *FungibleTokenExample,
+        self: *FungibleToken,
         ctx: runar.StatefulContext,
         sig: runar.Sig,
         to: runar.PubKey,
@@ -37,14 +37,14 @@ pub const FungibleTokenExample = struct {
         }
     }
 
-    pub fn send(self: *FungibleTokenExample, ctx: runar.StatefulContext, sig: runar.Sig, to: runar.PubKey, outputSatoshis: i64) void {
+    pub fn send(self: *FungibleToken, ctx: runar.StatefulContext, sig: runar.Sig, to: runar.PubKey, outputSatoshis: i64) void {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(outputSatoshis >= 1);
         ctx.addOutput(outputSatoshis, .{ to, self.balance + self.mergeBalance, 0 });
     }
 
     pub fn merge(
-        self: *FungibleTokenExample,
+        self: *FungibleToken,
         ctx: runar.StatefulContext,
         sig: runar.Sig,
         otherBalance: i64,

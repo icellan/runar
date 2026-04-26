@@ -363,6 +363,9 @@ function mapBuiltinName(name: string): string {
     'verify_slh_dsa_sha2_256s': 'verifySLHDSA_SHA2_256s',
     'verify_slh_dsa_sha2_256f': 'verifySLHDSA_SHA2_256f',
     'verify_rabin_sig': 'verifyRabinSig',
+    // NIST EC curves -- snake_case forms used in Ruby contracts.
+    'verify_ecdsa_p256': 'verifyECDSA_P256',
+    'verify_ecdsa_p384': 'verifyECDSA_P384',
     'check_sig': 'checkSig',
     'check_multi_sig': 'checkMultiSig',
     'check_preimage': 'checkPreimage',
@@ -458,7 +461,8 @@ function mapRbType(name: string): string {
 
 const PRIMITIVE_TYPES = new Set<string>([
   'bigint', 'boolean', 'ByteString', 'PubKey', 'Sig', 'Sha256',
-  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point', 'void',
+  'Ripemd160', 'Addr', 'SigHashPreimage', 'RabinSig', 'RabinPubKey', 'Point',
+  'P256Point', 'P384Point', 'void',
 ]);
 
 function makePrimitiveOrCustom(name: string): TypeNode {

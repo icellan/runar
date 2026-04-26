@@ -84,16 +84,10 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     def self.move_snake_to_camel(name)
-      parts = name.split("_")
-      return name if parts.length <= 1
-
-      result = parts[0]
-      parts[1..].each do |part|
-        next if part.empty?
-
-        result += part[0].upcase + part[1..]
-      end
-      result
+      # Mirror the canonical TS Move parser regex `/_([a-z0-9])/g`: only
+      # collapse `_<lowercase|digit>` — preserve `_<uppercase>` boundaries
+      # (e.g. `verifyECDSA_P256`) so cross-format identifiers stay intact.
+      name.gsub(/_([a-z0-9])/) { ::Regexp.last_match(1).upcase }
     end
 
     # -------------------------------------------------------------------

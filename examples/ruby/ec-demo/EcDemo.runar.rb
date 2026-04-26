@@ -38,7 +38,7 @@ require 'runar'
 # spending condition. No signature checks are performed -- the focus is purely
 # on demonstrating EC operations.
 
-class EcDemo < Runar::SmartContract
+class ECDemo < Runar::SmartContract
   # A curve point stored as a contract property. Used as input to most methods.
   prop :pt, Point
 

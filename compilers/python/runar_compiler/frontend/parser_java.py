@@ -166,7 +166,13 @@ class Token:
 # JavaParser.BIGINT_BINARY_METHODS; unary `neg`/`abs` are handled separately
 # at the call site. Receiver type is not consulted (parser has no type info
 # at this stage); the typechecker rejects misuse.
+#
+# The map covers two spellings:
+#   * Bigint wrapper (plus, minus, times, div, mod, shl, shr, ...)
+#   * JDK BigInteger (add, subtract, multiply, divide, shiftLeft, shiftRight)
+# Both lower to the same canonical BinaryExpr.
 _BIGINT_BINARY_METHODS: dict[str, str] = {
+    # Bigint wrapper spellings.
     "plus":  "+",
     "minus": "-",
     "times": "*",
@@ -183,6 +189,13 @@ _BIGINT_BINARY_METHODS: dict[str, str] = {
     "le":    "<=",
     "eq":    "===",
     "neq":   "!==",
+    # JDK BigInteger spellings.
+    "add":        "+",
+    "subtract":   "-",
+    "multiply":   "*",
+    "divide":     "/",
+    "shiftLeft":  "<<",
+    "shiftRight": ">>",
 }
 
 
@@ -1151,10 +1164,10 @@ class _JavaParser:
         while True:
             if self.match_tok(TOK_EQEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="===", left=left, right=right)
+                left = _fold_compare_to_zero("===", left, right)
             elif self.match_tok(TOK_BANGEQ):
                 right = self._parse_comparison()
-                left = BinaryExpr(op="!==", left=left, right=right)
+                left = _fold_compare_to_zero("!==", left, right)
             else:
                 break
         return left
@@ -1164,16 +1177,16 @@ class _JavaParser:
         while True:
             if self.match_tok(TOK_LT):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<", left=left, right=right)
+                left = _fold_compare_to_zero("<", left, right)
             elif self.match_tok(TOK_LTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op="<=", left=left, right=right)
+                left = _fold_compare_to_zero("<=", left, right)
             elif self.match_tok(TOK_GT):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">", left=left, right=right)
+                left = _fold_compare_to_zero(">", left, right)
             elif self.match_tok(TOK_GTEQ):
                 right = self._parse_shift()
-                left = BinaryExpr(op=">=", left=left, right=right)
+                left = _fold_compare_to_zero(">=", left, right)
             else:
                 break
         return left
@@ -1286,22 +1299,21 @@ class _JavaParser:
         self.expect(TOK_RPAREN, "')'")
 
         # BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral.
+        # Both the bare `BigInteger.valueOf` and the fully-qualified
+        # `java.math.BigInteger.valueOf` spellings are accepted.
         if isinstance(callee, MemberExpr) \
-                and isinstance(callee.object, Identifier) \
                 and len(args) == 1 and isinstance(args[0], BigIntLiteral) \
-                and ((callee.object.name == "BigInteger" and callee.property == "valueOf")
-                     or (callee.object.name == "Bigint" and callee.property == "of")):
+                and (_is_biginteger_value_of_callee(callee) or _is_bigint_of_callee(callee)):
             return BigIntLiteral(value=args[0].value)
 
         # Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
         # — identity at the Rúnar AST level. Bigint and BigInteger collapse to
         # the same BIGINT primitive, so the wrap is a no-op: lower to the inner
-        # expression. Mirrors JavaParser.java's identity branch.
+        # expression. Mirrors JavaParser.java's identity branch. Both bare and
+        # `java.math.BigInteger.valueOf` are accepted.
         if isinstance(callee, MemberExpr) \
-                and isinstance(callee.object, Identifier) \
                 and len(args) == 1 \
-                and ((callee.object.name == "Bigint" and callee.property == "of")
-                     or (callee.object.name == "BigInteger" and callee.property == "valueOf")):
+                and (_is_biginteger_value_of_callee(callee) or _is_bigint_of_callee(callee)):
             return args[0]
 
         # <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
@@ -1310,20 +1322,41 @@ class _JavaParser:
                 and callee.property == "value" \
                 and len(args) == 0:
             return callee.object
+        # <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+        # PubKey wrappers to their raw byte form. Rúnar Point is structurally
+        # a ByteString so the TS canonical sources pass Points directly to
+        # builtins like `cat`. Lower to a no-op (drop the call, keep the
+        # receiver) so the Java IR matches the canonical IR byte-for-byte.
+        if isinstance(callee, MemberExpr) \
+                and callee.property == "toByteString" \
+                and len(args) == 0:
+            return callee.object
 
         # Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
         # `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
         # method name + arity; receiver type is not consulted (parser has no
         # type info at this stage); the typechecker rejects misuse. Mirrors
-        # JavaParser.tryLowerBigintMethod.
+        # JavaParser.tryLowerBigintMethod. The same table also accepts the JDK
+        # `BigInteger` spellings (`add`, `subtract`, `multiply`, `divide`,
+        # `shiftLeft`, `shiftRight`).
         if isinstance(callee, MemberExpr):
             if len(args) == 1 and callee.property in _BIGINT_BINARY_METHODS:
                 op = _BIGINT_BINARY_METHODS[callee.property]
                 return BinaryExpr(op=op, left=callee.object, right=args[0])
-            if len(args) == 0 and callee.property == "neg":
+            if len(args) == 0 and callee.property in ("neg", "negate"):
                 return UnaryExpr(op="-", operand=callee.object)
+            # `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not();
+            # the Bigint wrapper exposes the same method so Rúnar Java sources
+            # can use it natively.
+            if len(args) == 0 and callee.property == "not":
+                return UnaryExpr(op="~", operand=callee.object)
             if len(args) == 0 and callee.property == "abs":
                 return CallExpr(callee=Identifier(name="abs"), args=[callee.object])
+            # <expr>.equals(<expr>) — Java's value-equality method. Lower to
+            # the canonical BinaryExpr(===, a, b). Receiver type is not
+            # consulted; the typechecker rejects misuse.
+            if len(args) == 1 and callee.property == "equals":
+                return BinaryExpr(op="===", left=callee.object, right=args[0])
 
         # Static-imported `assertThat(cond)` is a builtin alias for `assert`
         # in the canonical Java BuiltinRegistry. Peer typecheckers only know
@@ -1450,6 +1483,77 @@ class _JavaParser:
             f"line {type_tok.line}:{type_tok.col}: only `new T[]{{ ... }}` is supported in "
             f"{self.file_name}"
         )
+
+
+# ---------------------------------------------------------------------------
+# BigInteger / Bigint callee shape recognisers
+# ---------------------------------------------------------------------------
+
+
+def _is_biginteger_value_of_callee(callee: Expression) -> bool:
+    """True if `callee` is `BigInteger.valueOf` or `java.math.BigInteger.valueOf`."""
+    if not isinstance(callee, MemberExpr) or callee.property != "valueOf":
+        return False
+    obj = callee.object
+    if isinstance(obj, Identifier) and obj.name == "BigInteger":
+        return True
+    # java.math.BigInteger
+    if isinstance(obj, MemberExpr) and obj.property == "BigInteger" \
+            and isinstance(obj.object, MemberExpr) and obj.object.property == "math" \
+            and isinstance(obj.object.object, Identifier) \
+            and obj.object.object.name == "java":
+        return True
+    return False
+
+
+def _is_bigint_of_callee(callee: Expression) -> bool:
+    """True if `callee` is `Bigint.of`."""
+    return (
+        isinstance(callee, MemberExpr)
+        and callee.property == "of"
+        and isinstance(callee.object, Identifier)
+        and callee.object.name == "Bigint"
+    )
+
+
+# ---------------------------------------------------------------------------
+# compareTo folding: `a.compareTo(b) <cmp> 0` → `a <cmp> b`.
+# Java's BigInteger.compareTo returns -1/0/1, so the comparison-against-zero
+# idiom is the standard JDK spelling for ordered comparison on BigInteger.
+# We rewrite at parse time so the canonical Rúnar AST sees a single
+# BinaryExpr — avoiding a redundant SUB and matching the IR produced by
+# `a <cmp> b` in other formats. The fold only triggers when one side is the
+# literal 0 and the operator is one of the six comparison ops; any other
+# shape leaves compareTo as an unknown call (which the typechecker rejects
+# loudly).
+# ---------------------------------------------------------------------------
+
+
+_COMPARISON_OPS = frozenset({"<", "<=", ">", ">=", "===", "!=="})
+
+
+def _fold_compare_to_zero(op: str, left: Expression, right: Expression) -> Expression:
+    if op not in _COMPARISON_OPS:
+        return BinaryExpr(op=op, left=left, right=right)
+    pair = _compare_to_receiver_arg(left)
+    if pair is not None and isinstance(right, BigIntLiteral) and right.value == 0:
+        a, b = pair
+        return BinaryExpr(op=op, left=a, right=b)
+    pair = _compare_to_receiver_arg(right)
+    if pair is not None and isinstance(left, BigIntLiteral) and left.value == 0:
+        a, b = pair
+        return BinaryExpr(op=op, left=b, right=a)
+    return BinaryExpr(op=op, left=left, right=right)
+
+
+def _compare_to_receiver_arg(e: Expression):
+    if not isinstance(e, CallExpr):
+        return None
+    if not isinstance(e.callee, MemberExpr):
+        return None
+    if e.callee.property != "compareTo" or len(e.args) != 1:
+        return None
+    return (e.callee.object, e.args[0])
 
 
 # ---------------------------------------------------------------------------

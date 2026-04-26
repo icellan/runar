@@ -2,7 +2,7 @@ module ConvergenceProof {
     use runar::types::{Point};
     use runar::crypto::{ecOnCurve, ecAdd, ecNegate, ecMulGen, ecPointX, ecPointY};
 
-    resource struct ConvergenceProof {
+    struct ConvergenceProof {
         r_a: Point,
         r_b: Point,
     }

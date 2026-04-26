@@ -1225,9 +1225,9 @@ module RunarCompiler
         left = parse_comparison
         loop do
           if match_tok(TOK_EQEQ)
-            left = BinaryExpr.new(op: "===", left: left, right: parse_comparison)
+            left = fold_compare_to_zero("===", left, parse_comparison)
           elsif match_tok(TOK_BANGEQ)
-            left = BinaryExpr.new(op: "!==", left: left, right: parse_comparison)
+            left = fold_compare_to_zero("!==", left, parse_comparison)
           else
             break
           end
@@ -1239,18 +1239,47 @@ module RunarCompiler
         left = parse_shift
         loop do
           if match_tok(TOK_LT)
-            left = BinaryExpr.new(op: "<", left: left, right: parse_shift)
+            left = fold_compare_to_zero("<", left, parse_shift)
           elsif match_tok(TOK_LTEQ)
-            left = BinaryExpr.new(op: "<=", left: left, right: parse_shift)
+            left = fold_compare_to_zero("<=", left, parse_shift)
           elsif match_tok(TOK_GT)
-            left = BinaryExpr.new(op: ">", left: left, right: parse_shift)
+            left = fold_compare_to_zero(">", left, parse_shift)
           elsif match_tok(TOK_GTEQ)
-            left = BinaryExpr.new(op: ">=", left: left, right: parse_shift)
+            left = fold_compare_to_zero(">=", left, parse_shift)
           else
             break
           end
         end
         left
+      end
+
+      # Fold +<a>.compareTo(<b>) <cmp> 0+ to +<a> <cmp> <b>+ (and the
+      # symmetric +0 <cmp> <a>.compareTo(<b>)+ to +<b> <cmp> <a>+). Java's
+      # +BigInteger#compareTo+ returns -1/0/1, so the comparison-against-zero
+      # idiom is the standard JDK spelling for ordered comparison on
+      # BigInteger; we collapse to a single BinaryExpr so the canonical
+      # Rúnar AST matches the IR produced by +<a> <cmp> <b>+ in other
+      # formats. Any other shape leaves +compareTo+ as an unknown call
+      # (which the typechecker rejects loudly).
+      def fold_compare_to_zero(op, left, right)
+        if left_pair = compare_to_receiver_arg(left)
+          if right.is_a?(BigIntLiteral) && right.value == 0
+            return BinaryExpr.new(op: op, left: left_pair[0], right: left_pair[1])
+          end
+        end
+        if right_pair = compare_to_receiver_arg(right)
+          if left.is_a?(BigIntLiteral) && left.value == 0
+            return BinaryExpr.new(op: op, left: right_pair[1], right: right_pair[0])
+          end
+        end
+        BinaryExpr.new(op: op, left: left, right: right)
+      end
+
+      def compare_to_receiver_arg(e)
+        return nil unless e.is_a?(CallExpr)
+        return nil unless e.callee.is_a?(MemberExpr)
+        return nil unless e.callee.property == "compareTo" && e.args.length == 1
+        [e.callee.object, e.args[0]]
       end
 
       def parse_shift
@@ -1394,7 +1423,13 @@ module RunarCompiler
       # JavaParser.BIGINT_BINARY_METHODS; unary +neg+/+abs+ are handled at the
       # call site. Receiver type is not consulted; the typechecker rejects
       # misuse.
+      #
+      # The map covers two spellings:
+      # * Bigint wrapper (plus, minus, times, div, mod, shl, shr, ...)
+      # * JDK BigInteger (add, subtract, multiply, divide, shiftLeft, shiftRight)
+      # Both lower to the same canonical BinaryExpr.
       BIGINT_BINARY_METHODS = {
+        # Bigint wrapper spellings.
         "plus"  => "+",
         "minus" => "-",
         "times" => "*",
@@ -1411,6 +1446,13 @@ module RunarCompiler
         "le"    => "<=",
         "eq"    => "===",
         "neq"   => "!==",
+        # JDK BigInteger spellings.
+        "add"        => "+",
+        "subtract"   => "-",
+        "multiply"   => "*",
+        "divide"     => "/",
+        "shiftLeft"  => "<<",
+        "shiftRight" => ">>",
       }.freeze
 
       # Recognise special calls on a member:
@@ -1433,25 +1475,35 @@ module RunarCompiler
           # fromHex with a non-literal string is not supported here; fall
           # through to a regular call expression.
         end
-        # BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) -> BigIntLiteral
+        # BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) -> BigIntLiteral.
+        # Both the bare `BigInteger.valueOf` and the fully-qualified
+        # `java.math.BigInteger.valueOf` spellings are accepted.
         if args.length == 1 && args[0].is_a?(BigIntLiteral) &&
-           object.is_a?(Identifier) &&
-           ((object.name == "BigInteger" && method_name == "valueOf") ||
-            (object.name == "Bigint" && method_name == "of"))
+           (java_biginteger_value_of?(object, method_name) ||
+            java_bigint_of?(object, method_name))
           return BigIntLiteral.new(value: args[0].value)
         end
         # Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
         # — identity at the Rúnar AST level. Bigint and BigInteger collapse to
         # the same BIGINT primitive, so the wrap is a no-op: lower to the
-        # inner expression. Mirrors JavaParser.java's identity branch.
-        if args.length == 1 && object.is_a?(Identifier) &&
-           ((object.name == "Bigint" && method_name == "of") ||
-            (object.name == "BigInteger" && method_name == "valueOf"))
+        # inner expression. Mirrors JavaParser.java's identity branch. Both
+        # bare and `java.math.BigInteger.valueOf` are accepted.
+        if args.length == 1 &&
+           (java_biginteger_value_of?(object, method_name) ||
+            java_bigint_of?(object, method_name))
           return args[0]
         end
         # <expr>.value() — unwrapping a Bigint back to its underlying
         # BigInteger. Symmetric no-op to Bigint.of(...) above.
         if method_name == "value" && args.empty?
+          return object
+        end
+        # <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+        # PubKey wrappers to their raw byte form. Runar Point is structurally
+        # a ByteString so the TS canonical sources pass Points directly to
+        # builtins like `cat`. Lower to a no-op (drop the call, keep the
+        # receiver) so the Java IR matches the canonical IR byte-for-byte.
+        if method_name == "toByteString" && args.empty?
           return object
         end
         # Bigint-wrapper arithmetic: a.plus(b) -> BinaryExpr(+, a, b),
@@ -1462,13 +1514,41 @@ module RunarCompiler
         if args.length == 1 && (op = BIGINT_BINARY_METHODS[method_name])
           return BinaryExpr.new(op: op, left: object, right: args[0])
         end
-        if args.empty? && method_name == "neg"
+        if args.empty? && (method_name == "neg" || method_name == "negate")
           return UnaryExpr.new(op: "-", operand: object)
+        end
+        # a.not() -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not(); the
+        # Bigint wrapper exposes the same method so Runar Java sources can use
+        # it natively.
+        if args.empty? && method_name == "not"
+          return UnaryExpr.new(op: "~", operand: object)
         end
         if args.empty? && method_name == "abs"
           return CallExpr.new(callee: Identifier.new(name: "abs"), args: [object])
         end
+        # <expr>.equals(<expr>) — Java's value-equality method. Lower to the
+        # canonical BinaryExpr(===, a, b). Receiver type is not consulted; the
+        # typechecker rejects misuse.
+        if args.length == 1 && method_name == "equals"
+          return BinaryExpr.new(op: "===", left: object, right: args[0])
+        end
         nil
+      end
+
+      # True if +object+/+method+ name +BigInteger.valueOf+ or the
+      # fully-qualified +java.math.BigInteger.valueOf+.
+      def java_biginteger_value_of?(object, method_name)
+        return false unless method_name == "valueOf"
+        return true if object.is_a?(Identifier) && object.name == "BigInteger"
+        # java.math.BigInteger
+        return false unless object.is_a?(MemberExpr) && object.property == "BigInteger"
+        return false unless object.object.is_a?(MemberExpr) && object.object.property == "math"
+        object.object.object.is_a?(Identifier) && object.object.object.name == "java"
+      end
+
+      # True if +object+/+method+ name +Bigint.of+.
+      def java_bigint_of?(object, method_name)
+        method_name == "of" && object.is_a?(Identifier) && object.name == "Bigint"
       end
 
       def callable?(expr)

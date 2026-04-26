@@ -408,7 +408,11 @@ public final class MoveParser {
         Map.entry("p384_negate",            "p384Negate"),
         Map.entry("p384_on_curve",          "p384OnCurve"),
         Map.entry("p384_encode_compressed", "p384EncodeCompressed"),
-        Map.entry("verify_ecdsa_p384",      "verifyECDSA_P384")
+        Map.entry("verify_ecdsa_p384",      "verifyECDSA_P384"),
+        // Pre-camelCased forms also accepted (matches the canonical TS Move
+        // parser, whose regex preserves the literal `_P` boundary).
+        Map.entry("verifyECDSA_P256",       "verifyECDSA_P256"),
+        Map.entry("verifyECDSA_P384",       "verifyECDSA_P384")
     );
 
     private static String mapBuiltin(String name) {

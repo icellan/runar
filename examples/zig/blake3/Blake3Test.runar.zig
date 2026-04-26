@@ -10,10 +10,12 @@ pub const Blake3Test = struct {
     }
 
     pub fn verifyCompress(self: *const Blake3Test, chainingValue: runar.ByteString, block: runar.ByteString) void {
-        runar.assert(runar.bytesEq(runar.blake3Compress(chainingValue, block), self.expected));
+        const result = runar.blake3Compress(chainingValue, block);
+        runar.assert(runar.bytesEq(result, self.expected));
     }
 
     pub fn verifyHash(self: *const Blake3Test, message: runar.ByteString) void {
-        runar.assert(runar.bytesEq(runar.blake3Hash(message), self.expected));
+        const result = runar.blake3Hash(message);
+        runar.assert(runar.bytesEq(result, self.expected));
     }
 };

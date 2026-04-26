@@ -2,6 +2,7 @@ package runar.examples.convergenceproof;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.runtime.MockCrypto;
 import runar.lang.types.Bigint;
 
@@ -42,8 +43,8 @@ import static runar.lang.Builtins.ecPointY;
  */
 class ConvergenceProof extends SmartContract {
 
-    MockCrypto.Point rA;
-    MockCrypto.Point rB;
+    @Readonly MockCrypto.Point rA;
+    @Readonly MockCrypto.Point rB;
 
     ConvergenceProof(MockCrypto.Point rA, MockCrypto.Point rB) {
         super(rA, rB);

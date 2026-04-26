@@ -14,7 +14,7 @@
 // math operations with authentication logic.
 module MathDemo {
     resource struct MathDemo {
-        value: bigint,
+        value: &mut bigint,
     }
 
     // Safe division — divides the stored value by `divisor`, asserting that

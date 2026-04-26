@@ -114,6 +114,9 @@ module RunarCompiler
       "verify_slh_dsa_sha2_192f"   => "verifySLHDSA_SHA2_192f",
       "verify_slh_dsa_sha2_256s"   => "verifySLHDSA_SHA2_256s",
       "verify_slh_dsa_sha2_256f"   => "verifySLHDSA_SHA2_256f",
+      # NIST EC curves -- snake_case forms used in Rust contracts.
+      "verify_ecdsa_p256"           => "verifyECDSA_P256",
+      "verify_ecdsa_p384"           => "verifyECDSA_P384",
       "bin_2_num"                   => "bin2num",
       "int_2_str"                   => "int2str",
       "to_byte_string"              => "toByteString",

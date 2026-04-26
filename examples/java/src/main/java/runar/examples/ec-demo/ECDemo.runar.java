@@ -4,6 +4,7 @@ import java.math.BigInteger;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.runtime.MockCrypto.Point;
 import runar.lang.types.ByteString;
 
@@ -41,7 +42,7 @@ import static runar.lang.Builtins.ecPointY;
  */
 class ECDemo extends SmartContract {
 
-    Point pt;
+    @Readonly Point pt;
 
     ECDemo(Point pt) {
         super(pt);

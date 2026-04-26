@@ -98,17 +98,20 @@ class JavaParserTest {
 
         assertEquals(2, unlock.body().size());
 
-        // assertThat(hash160(pubKey).equals(pubKeyHash))
+        // assertThat(hash160(pubKey).equals(pubKeyHash)) — the parser lowers
+        // the native-Java `.equals(...)` value-equality method to the canonical
+        // BinaryExpr(EQ, ...), so cross-format compilation produces identical
+        // IR and script.
         var firstAssert = (ExpressionStatement) unlock.body().get(0);
         var firstCall = (CallExpr) firstAssert.expression();
         assertEquals("assertThat", ((Identifier) firstCall.callee()).name());
         assertEquals(1, firstCall.args().size());
 
-        var equalsCall = (CallExpr) firstCall.args().get(0);
-        var equalsCallee = (MemberExpr) equalsCall.callee();
-        assertEquals("equals", equalsCallee.property());
-        var hash160Call = (CallExpr) equalsCallee.object();
+        var equalsCmp = (BinaryExpr) firstCall.args().get(0);
+        assertEquals(Expression.BinaryOp.EQ, equalsCmp.op());
+        var hash160Call = (CallExpr) equalsCmp.left();
         assertEquals("hash160", ((Identifier) hash160Call.callee()).name());
+        assertEquals("pubKeyHash", ((Identifier) equalsCmp.right()).name());
     }
 
     @Test
@@ -198,10 +201,12 @@ class JavaParserTest {
         ContractNode c = JavaParser.parse(src, "C.runar.java");
         var stmt = (ExpressionStatement) c.methods().get(0).body().get(0);
         var assertCall = (CallExpr) stmt.expression();
-        var equalsCall = (CallExpr) assertCall.args().get(0);
-        var magicEqualsArg = equalsCall.args().get(0);
-        assertInstanceOf(runar.compiler.ir.ast.ByteStringLiteral.class, magicEqualsArg);
-        var lit = (runar.compiler.ir.ast.ByteStringLiteral) magicEqualsArg;
+        // `.equals(...)` is now lowered to a canonical BinaryExpr(EQ, ...)
+        // with a ByteStringLiteral on the right (via fromHex).
+        var equalsCmp = (BinaryExpr) assertCall.args().get(0);
+        assertEquals(Expression.BinaryOp.EQ, equalsCmp.op());
+        assertInstanceOf(runar.compiler.ir.ast.ByteStringLiteral.class, equalsCmp.right());
+        var lit = (runar.compiler.ir.ast.ByteStringLiteral) equalsCmp.right();
         assertEquals("deadbeef", lit.value());
     }
 
@@ -345,9 +350,11 @@ class JavaParserTest {
     }
 
     @Test
-    void preservesByteStringEqualsAsMemberCall() {
-        // Regression: Bigint.eq lowering must not swallow the native-Java
-        // .equals() member-access pattern on ByteString-family receivers.
+    void lowersByteStringEqualsToCanonicalBinaryExpr() {
+        // The native-Java `.equals(...)` value-equality method on ByteString-
+        // family receivers is lowered to a canonical BinaryExpr(EQ, ...) so
+        // cross-format compilation produces identical IR and script. The
+        // typechecker rejects misuse (e.g. equality on incompatible types).
         String src = """
             class C extends SmartContract {
                 @Readonly Addr a;
@@ -360,8 +367,9 @@ class JavaParserTest {
         ContractNode c = JavaParser.parse(src, "C.runar.java");
         var stmt = (ExpressionStatement) c.methods().get(0).body().get(0);
         var assertCall = (CallExpr) stmt.expression();
-        var equalsCall = (CallExpr) assertCall.args().get(0);
-        var callee = (MemberExpr) equalsCall.callee();
-        assertEquals("equals", callee.property());
+        var equalsCmp = (BinaryExpr) assertCall.args().get(0);
+        assertEquals(Expression.BinaryOp.EQ, equalsCmp.op());
+        assertEquals("other", ((Identifier) equalsCmp.left()).name());
+        assertEquals("a", ((PropertyAccessExpr) equalsCmp.right()).property());
     }
 }

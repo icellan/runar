@@ -138,15 +138,18 @@ class TestJavaP2PKH:
         assert first_call.callee.name == "assert"
         assert len(first_call.args) == 1
 
-        equals_call = first_call.args[0]
-        assert isinstance(equals_call, CallExpr)
-        equals_callee = equals_call.callee
-        assert isinstance(equals_callee, MemberExpr)
-        assert equals_callee.property == "equals"
-        hash_call = equals_callee.object
+        # The native-Java `.equals(...)` value-equality method is lowered to
+        # the canonical BinaryExpr(===, ...) so cross-format compilation
+        # produces identical IR and script.
+        equals_cmp = first_call.args[0]
+        assert isinstance(equals_cmp, BinaryExpr)
+        assert equals_cmp.op == "==="
+        hash_call = equals_cmp.left
         assert isinstance(hash_call, CallExpr)
         assert isinstance(hash_call.callee, Identifier)
         assert hash_call.callee.name == "hash160"
+        assert isinstance(equals_cmp.right, Identifier)
+        assert equals_cmp.right.name == "pubKeyHash"
 
 
 # ---------------------------------------------------------------------------
@@ -341,9 +344,12 @@ class TestLiteralPromotion:
         assert isinstance(stmt, ExpressionStmt)
         assert_call = stmt.expr
         assert isinstance(assert_call, CallExpr)
-        equals_call = assert_call.args[0]
-        assert isinstance(equals_call, CallExpr)
-        arg = equals_call.args[0]
+        # `.equals(...)` lowers to a canonical BinaryExpr(===, ...) with the
+        # ByteStringLiteral (from fromHex) on the right.
+        equals_cmp = assert_call.args[0]
+        assert isinstance(equals_cmp, BinaryExpr)
+        assert equals_cmp.op == "==="
+        arg = equals_cmp.right
         assert isinstance(arg, ByteStringLiteral)
         assert arg.value == "deadbeef"
 

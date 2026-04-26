@@ -14,12 +14,18 @@ pub const ConvergenceProof = struct {
     }
 
     pub fn proveConvergence(self: *const ConvergenceProof, deltaO: i64) void {
+        // Verify both committed points are on the curve.
         runar.assert(runar.ecOnCurve(self.rA));
         runar.assert(runar.ecOnCurve(self.rB));
 
+        // R_A - R_B (point subtraction = addition with negated second operand).
         const diff = runar.ecAdd(self.rA, runar.ecNegate(self.rB));
+
+        // delta_o * G (scalar multiplication of generator).
         const expected = runar.ecMulGen(deltaO);
 
-        runar.assert(runar.bytesEq(runar.ecEncodeCompressed(diff), runar.ecEncodeCompressed(expected)));
+        // Assert point equality via coordinate comparison (matches the TS canonical).
+        runar.assert(runar.ecPointX(diff) == runar.ecPointX(expected));
+        runar.assert(runar.ecPointY(diff) == runar.ecPointY(expected));
     }
 };

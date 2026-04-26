@@ -97,6 +97,11 @@ public final class Bigint {
 
     public Bigint neg() { return new Bigint(value.negate()); }
     public Bigint abs() { return new Bigint(value.abs()); }
+    /**
+     * Bitwise NOT (one's complement). Mirrors {@code java.math.BigInteger#not()}
+     * and lowers to the Rúnar {@code ~} unary operator in every frontend parser.
+     */
+    public Bigint not() { return new Bigint(value.not()); }
 
     // -----------------------------------------------------------------
     // Value semantics

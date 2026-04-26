@@ -495,6 +495,10 @@ fn mapBuiltin(allocator: Allocator, name: []const u8) []const u8 {
         .{ "exit", "exit" },
         .{ "int2str", "int2str" },
         .{ "bool", "bool" },
+        // Pre-camelCased forms also accepted (matches the canonical TS Move
+        // parser, whose regex preserves the literal `_<uppercase>` boundary).
+        .{ "verifyECDSA_P256", "verifyECDSA_P256" },
+        .{ "verifyECDSA_P384", "verifyECDSA_P384" },
     });
     if (map.get(name)) |mapped| return mapped;
     return snakeToCamel(allocator, name);

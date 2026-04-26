@@ -4,6 +4,7 @@ import java.math.BigInteger;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.types.ByteString;
 
 import static runar.lang.Builtins.assertThat;
@@ -32,7 +33,7 @@ import static runar.lang.Builtins.sha256Finalize;
  */
 class Sha256FinalizeTest extends SmartContract {
 
-    ByteString expected;
+    @Readonly ByteString expected;
 
     Sha256FinalizeTest(ByteString expected) {
         super(expected);

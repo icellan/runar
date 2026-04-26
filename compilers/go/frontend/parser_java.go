@@ -1486,7 +1486,7 @@ func (p *javaParser) parseEquality() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseComparison()}
+		left = foldJavaCompareToZero(op, left, p.parseComparison())
 	}
 }
 
@@ -1507,7 +1507,7 @@ func (p *javaParser) parseComparison() Expression {
 			return left
 		}
 		p.advance()
-		left = BinaryExpr{Op: op, Left: left, Right: p.parseShift()}
+		left = foldJavaCompareToZero(op, left, p.parseShift())
 	}
 }
 
@@ -1660,27 +1660,24 @@ func (p *javaParser) recogniseLiteralCall(callee Expression, args []Expression) 
 			return ByteStringLiteral{Value: bs.Value}
 		}
 	}
-	// BigInteger.valueOf(<intlit>) / Bigint.of(<intlit>) → BigIntLiteral
+	// BigInteger.valueOf(<intlit>) / Bigint.of(<intlit>) → BigIntLiteral.
+	// Both the bare `BigInteger.valueOf` and the fully-qualified
+	// `java.math.BigInteger.valueOf` spellings are accepted.
 	if me, ok := callee.(MemberExpr); ok && len(args) == 1 {
-		if id, ok := me.Object.(Identifier); ok {
-			if (id.Name == "BigInteger" && me.Property == "valueOf") ||
-				(id.Name == "Bigint" && me.Property == "of") {
-				if lit, ok := args[0].(BigIntLiteral); ok {
-					return BigIntLiteral{Value: new(big.Int).Set(lit.Value)}
-				}
+		if isJavaBigIntegerValueOfCallee(me) || isJavaBigintOfCallee(me) {
+			if lit, ok := args[0].(BigIntLiteral); ok {
+				return BigIntLiteral{Value: new(big.Int).Set(lit.Value)}
 			}
 		}
 	}
 	// Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
 	// — identity at the Rúnar AST level. Bigint and BigInteger collapse to the
 	// same BIGINT primitive, so the wrap is a no-op: lower to the inner
-	// expression. Mirrors JavaParser.java's identity branch.
+	// expression. Mirrors JavaParser.java's identity branch. Both bare and
+	// `java.math.BigInteger.valueOf` are accepted.
 	if me, ok := callee.(MemberExpr); ok && len(args) == 1 {
-		if id, ok := me.Object.(Identifier); ok {
-			if (id.Name == "Bigint" && me.Property == "of") ||
-				(id.Name == "BigInteger" && me.Property == "valueOf") {
-				return args[0]
-			}
+		if isJavaBigIntegerValueOfCallee(me) || isJavaBigintOfCallee(me) {
+			return args[0]
 		}
 	}
 	// <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
@@ -1688,19 +1685,41 @@ func (p *javaParser) recogniseLiteralCall(callee Expression, args []Expression) 
 	if me, ok := callee.(MemberExpr); ok && me.Property == "value" && len(args) == 0 {
 		return me.Object
 	}
+	// <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+	// PubKey wrappers to their raw byte form. Rúnar Point is structurally a
+	// ByteString so the TS canonical sources pass Points directly to
+	// builtins like `cat`. Lower to a no-op (drop the call, keep the
+	// receiver) so the Java IR matches the canonical IR byte-for-byte.
+	if me, ok := callee.(MemberExpr); ok && me.Property == "toByteString" && len(args) == 0 {
+		return me.Object
+	}
 	// Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
 	// `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
 	// method name + arity; receiver type is not consulted (the typechecker
-	// catches misuse). Mirrors JavaParser.tryLowerBigintMethod.
+	// catches misuse). Mirrors JavaParser.tryLowerBigintMethod. The same
+	// table also accepts the JDK `BigInteger` spellings (`add`, `subtract`,
+	// `multiply`, `divide`, `shiftLeft`, `shiftRight`).
 	if me, ok := callee.(MemberExpr); ok {
 		if op, ok := javaBigintBinaryMethods[me.Property]; ok && len(args) == 1 {
 			return BinaryExpr{Op: op, Left: me.Object, Right: args[0]}
 		}
-		if me.Property == "neg" && len(args) == 0 {
+		if (me.Property == "neg" || me.Property == "negate") && len(args) == 0 {
 			return UnaryExpr{Op: "-", Operand: me.Object}
+		}
+		// `a.not()` -> UnaryExpr(~, a). Mirrors java.math.BigInteger#not(); the
+		// Bigint wrapper exposes the same method so Rúnar Java sources can use
+		// it natively.
+		if me.Property == "not" && len(args) == 0 {
+			return UnaryExpr{Op: "~", Operand: me.Object}
 		}
 		if me.Property == "abs" && len(args) == 0 {
 			return CallExpr{Callee: Identifier{Name: "abs"}, Args: []Expression{me.Object}}
+		}
+		// <expr>.equals(<expr>) — Java's value-equality method. Lower to the
+		// canonical BinaryExpr(===, a, b). Receiver type is not consulted; the
+		// typechecker rejects misuse.
+		if me.Property == "equals" && len(args) == 1 {
+			return BinaryExpr{Op: "===", Left: me.Object, Right: args[0]}
 		}
 	}
 	// Static-imported `assertThat(cond)` is a builtin alias for `assert` in
@@ -1717,7 +1736,14 @@ func (p *javaParser) recogniseLiteralCall(callee Expression, args []Expression) 
 // `neg`/`abs` are handled separately at the call site. Receiver type is not
 // consulted (parser has no type info at this stage); the typechecker rejects
 // misuse (e.g. `someBoolean.plus(other)`).
+//
+// The map covers two spellings:
+//   - Bigint wrapper (plus, minus, times, div, mod, shl, shr, ...)
+//   - JDK BigInteger (add, subtract, multiply, divide, shiftLeft, shiftRight)
+//
+// Both lower to the same canonical BinaryExpr.
 var javaBigintBinaryMethods = map[string]string{
+	// Bigint wrapper spellings.
 	"plus":  "+",
 	"minus": "-",
 	"times": "*",
@@ -1734,6 +1760,91 @@ var javaBigintBinaryMethods = map[string]string{
 	"le":    "<=",
 	"eq":    "===",
 	"neq":   "!==",
+	// JDK BigInteger spellings.
+	"add":        "+",
+	"subtract":   "-",
+	"multiply":   "*",
+	"divide":     "/",
+	"shiftLeft":  "<<",
+	"shiftRight": ">>",
+}
+
+// isJavaBigIntegerValueOfCallee reports whether `me` is `BigInteger.valueOf`
+// or the fully-qualified `java.math.BigInteger.valueOf`.
+func isJavaBigIntegerValueOfCallee(me MemberExpr) bool {
+	if me.Property != "valueOf" {
+		return false
+	}
+	if id, ok := me.Object.(Identifier); ok && id.Name == "BigInteger" {
+		return true
+	}
+	// java.math.BigInteger.valueOf — receiver chain is
+	// MemberExpr{Object: MemberExpr{Object: Identifier("java"), Property: "math"},
+	//            Property: "BigInteger"}.
+	if outer, ok := me.Object.(MemberExpr); ok && outer.Property == "BigInteger" {
+		if mid, ok := outer.Object.(MemberExpr); ok && mid.Property == "math" {
+			if base, ok := mid.Object.(Identifier); ok && base.Name == "java" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isJavaBigintOfCallee reports whether `me` is `Bigint.of`.
+func isJavaBigintOfCallee(me MemberExpr) bool {
+	if me.Property != "of" {
+		return false
+	}
+	id, ok := me.Object.(Identifier)
+	return ok && id.Name == "Bigint"
+}
+
+// foldJavaCompareToZero rewrites `<a>.compareTo(<b>) <cmp> 0` to `<a> <cmp> <b>`
+// (and the symmetric `0 <cmp> <a>.compareTo(<b>)` to `<b> <cmp> <a>`). Java's
+// BigInteger.compareTo returns -1/0/1, so the comparison-against-zero idiom is
+// the standard JDK spelling for ordered comparison on BigInteger; we collapse
+// to a single BinaryExpr so the canonical Rúnar AST matches the IR produced by
+// `<a> <cmp> <b>` in other formats. Any other shape leaves compareTo as an
+// unknown call (which the typechecker rejects loudly).
+func foldJavaCompareToZero(op string, left, right Expression) Expression {
+	if !isJavaComparisonOp(op) {
+		return BinaryExpr{Op: op, Left: left, Right: right}
+	}
+	if a, b, ok := compareToReceiverArg(left); ok {
+		if lit, ok := right.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
+			return BinaryExpr{Op: op, Left: a, Right: b}
+		}
+	}
+	if a, b, ok := compareToReceiverArg(right); ok {
+		if lit, ok := left.(BigIntLiteral); ok && lit.Value.Sign() == 0 {
+			return BinaryExpr{Op: op, Left: b, Right: a}
+		}
+	}
+	return BinaryExpr{Op: op, Left: left, Right: right}
+}
+
+func compareToReceiverArg(e Expression) (Expression, Expression, bool) {
+	call, ok := e.(CallExpr)
+	if !ok {
+		return nil, nil, false
+	}
+	me, ok := call.Callee.(MemberExpr)
+	if !ok {
+		return nil, nil, false
+	}
+	if me.Property != "compareTo" || len(call.Args) != 1 {
+		return nil, nil, false
+	}
+	return me.Object, call.Args[0], true
+}
+
+func isJavaComparisonOp(op string) bool {
+	switch op {
+	case "<", "<=", ">", ">=", "===", "!==":
+		return true
+	}
+	return false
 }
 
 func (p *javaParser) parsePrimary() Expression {

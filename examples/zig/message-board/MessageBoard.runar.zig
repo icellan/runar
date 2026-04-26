@@ -15,7 +15,6 @@ pub const MessageBoard = struct {
 
     pub fn post(self: *MessageBoard, newMessage: runar.ByteString) void {
         self.message = newMessage;
-        runar.assert(true);
     }
 
     pub fn burn(self: *const MessageBoard, sig: runar.Sig) void {

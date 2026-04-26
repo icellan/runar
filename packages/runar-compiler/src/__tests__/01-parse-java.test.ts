@@ -270,12 +270,14 @@ class C extends SmartContract {
       // accepts the call.
       expect((assertCall.callee as Identifier).name).toBe('assert');
 
-      // hash160(pubKey).equals(pubKeyHash) → call(MemberExpr(call(hash160,…),equals),…)
-      const equalsCall = assertCall.args[0] as CallExpr;
-      const equalsCallee = equalsCall.callee as MemberExpr;
-      expect(equalsCallee.property).toBe('equals');
-      const hash160Call = equalsCallee.object as CallExpr;
+      // hash160(pubKey).equals(pubKeyHash) lowers to BinaryExpr(===, ...)
+      // so cross-format compilation produces identical IR and script.
+      const equalsCmp = assertCall.args[0] as BinaryExpr;
+      expect(equalsCmp.kind).toBe('binary_expr');
+      expect(equalsCmp.op).toBe('===');
+      const hash160Call = equalsCmp.left as CallExpr;
       expect((hash160Call.callee as Identifier).name).toBe('hash160');
+      expect((equalsCmp.right as Identifier).name).toBe('pubKeyHash');
     });
   });
 
@@ -355,8 +357,12 @@ class C extends SmartContract {
       const method = result.contract!.methods[0]!;
       const stmt = method.body[0] as ExpressionStatement;
       const assertCall = stmt.expression as CallExpr;
-      const equalsCall = assertCall.args[0] as CallExpr;
-      const arg = equalsCall.args[0] as ByteStringLiteral;
+      // `.equals(...)` lowers to BinaryExpr(===, ...) with the
+      // ByteStringLiteral (from fromHex) on the right.
+      const equalsCmp = assertCall.args[0] as BinaryExpr;
+      expect(equalsCmp.kind).toBe('binary_expr');
+      expect(equalsCmp.op).toBe('===');
+      const arg = equalsCmp.right as ByteStringLiteral;
       expect(arg.kind).toBe('bytestring_literal');
       expect(arg.value).toBe('deadbeef');
     });

@@ -146,23 +146,25 @@ class P2PKH extends SmartContract {
 	if len(assertCall.Args) != 1 {
 		t.Fatalf("expected 1 assert arg, got %d", len(assertCall.Args))
 	}
-	equalsCall, ok := assertCall.Args[0].(CallExpr)
+	// The native-Java `.equals(...)` value-equality method is lowered to
+	// the canonical BinaryExpr(===, ...) so cross-format compilation
+	// produces identical IR and script.
+	equalsCmp, ok := assertCall.Args[0].(BinaryExpr)
 	if !ok {
-		t.Fatalf("expected equals call arg, got %T", assertCall.Args[0])
+		t.Fatalf("expected equals BinaryExpr, got %T", assertCall.Args[0])
 	}
-	equalsCallee, ok := equalsCall.Callee.(MemberExpr)
+	if equalsCmp.Op != "===" {
+		t.Errorf("expected === op, got %s", equalsCmp.Op)
+	}
+	hash160Call, ok := equalsCmp.Left.(CallExpr)
 	if !ok {
-		t.Fatalf("expected MemberExpr callee, got %T", equalsCall.Callee)
-	}
-	if equalsCallee.Property != "equals" {
-		t.Errorf("expected .equals, got .%s", equalsCallee.Property)
-	}
-	hash160Call, ok := equalsCallee.Object.(CallExpr)
-	if !ok {
-		t.Fatalf("expected hash160 call receiver, got %T", equalsCallee.Object)
+		t.Fatalf("expected hash160 call receiver, got %T", equalsCmp.Left)
 	}
 	if id, ok := hash160Call.Callee.(Identifier); !ok || id.Name != "hash160" {
 		t.Errorf("expected hash160 callee, got %+v", hash160Call.Callee)
+	}
+	if id, ok := equalsCmp.Right.(Identifier); !ok || id.Name != "pubKeyHash" {
+		t.Errorf("expected pubKeyHash identifier, got %+v", equalsCmp.Right)
 	}
 }
 
@@ -327,16 +329,18 @@ class C extends SmartContract {
 	if !ok {
 		t.Fatalf("expected CallExpr, got %T", stmt.Expr)
 	}
-	equalsCall, ok := assertCall.Args[0].(CallExpr)
+	// `.equals(...)` lowers to a canonical BinaryExpr(===, ...) with the
+	// ByteStringLiteral (from fromHex) on the right.
+	equalsCmp, ok := assertCall.Args[0].(BinaryExpr)
 	if !ok {
-		t.Fatalf("expected equalsCall, got %T", assertCall.Args[0])
+		t.Fatalf("expected equals BinaryExpr, got %T", assertCall.Args[0])
 	}
-	if len(equalsCall.Args) != 1 {
-		t.Fatalf("expected 1 arg to equals(), got %d", len(equalsCall.Args))
+	if equalsCmp.Op != "===" {
+		t.Errorf("expected === op, got %s", equalsCmp.Op)
 	}
-	lit, ok := equalsCall.Args[0].(ByteStringLiteral)
+	lit, ok := equalsCmp.Right.(ByteStringLiteral)
 	if !ok {
-		t.Fatalf("expected ByteStringLiteral, got %T", equalsCall.Args[0])
+		t.Fatalf("expected ByteStringLiteral on RHS, got %T", equalsCmp.Right)
 	}
 	if lit.Value != "deadbeef" {
 		t.Errorf("expected deadbeef, got %q", lit.Value)
@@ -417,11 +421,14 @@ class C extends SmartContract {
 	}
 	stmt, _ := c.Methods[0].Body[0].(ExpressionStmt)
 	assertCall, _ := stmt.Expr.(CallExpr)
-	equalsCall, _ := assertCall.Args[0].(CallExpr)
-	equalsCallee, _ := equalsCall.Callee.(MemberExpr)
-	hash160Call, ok := equalsCallee.Object.(CallExpr)
+	// `.equals(...)` lowers to BinaryExpr(===, hash160(pk), h).
+	equalsCmp, ok := assertCall.Args[0].(BinaryExpr)
 	if !ok {
-		t.Fatalf("expected hash160 call, got %T", equalsCallee.Object)
+		t.Fatalf("expected equals BinaryExpr, got %T", assertCall.Args[0])
+	}
+	hash160Call, ok := equalsCmp.Left.(CallExpr)
+	if !ok {
+		t.Fatalf("expected hash160 call, got %T", equalsCmp.Left)
 	}
 	// Key assertion: static-imported hash160 resolves as a bare Identifier
 	// call (like every other parser does), not a MemberExpr call.

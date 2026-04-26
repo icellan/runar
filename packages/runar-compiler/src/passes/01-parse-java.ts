@@ -1035,7 +1035,7 @@ class JavaParser {
     let left = this.parseComparison();
     while (this.current().type === '==' || this.current().type === '!=') {
       const op: BinaryOp = this.advance().type === '==' ? '===' : '!==';
-      left = { kind: 'binary_expr', op, left, right: this.parseComparison() };
+      left = foldCompareToZero(op, left, this.parseComparison());
     }
     return left;
   }
@@ -1044,7 +1044,7 @@ class JavaParser {
     let left = this.parseShift();
     while (['<', '<=', '>', '>='].includes(this.current().type)) {
       const op = this.advance().value as BinaryOp;
-      left = { kind: 'binary_expr', op, left, right: this.parseShift() };
+      left = foldCompareToZero(op, left, this.parseShift());
     }
     return left;
   }
@@ -1186,25 +1186,24 @@ class JavaParser {
       // the raw string content.
       return args[0]!;
     }
-    // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral
+    // BigInteger.valueOf(<int literal>) / Bigint.of(<int literal>) → BigIntLiteral.
+    // Both the bare `BigInteger.valueOf` and the fully-qualified
+    // `java.math.BigInteger.valueOf` spellings are accepted.
     if (callee.kind === 'member_expr'
-        && callee.object.kind === 'identifier'
         && args.length === 1
         && args[0]!.kind === 'bigint_literal'
-        && ((callee.object.name === 'BigInteger' && callee.property === 'valueOf')
-            || (callee.object.name === 'Bigint' && callee.property === 'of'))) {
+        && (isBigIntegerValueOfCallee(callee) || isBigintOfCallee(callee))) {
       return args[0]!;
     }
     // Bigint.of(<arbitrary expression>) / BigInteger.valueOf(<arbitrary expression>)
     // — identity at the Rúnar AST level. Bigint and BigInteger collapse to the
     // same BIGINT primitive, so the wrap is a no-op: lower to the inner
     // expression. Mirrors JavaParser.java's `Bigint.of`/`BigInteger.valueOf`
-    // identity branch.
+    // identity branch. Both bare and `java.math.BigInteger.valueOf` are
+    // accepted.
     if (callee.kind === 'member_expr'
-        && callee.object.kind === 'identifier'
         && args.length === 1
-        && ((callee.object.name === 'Bigint' && callee.property === 'of')
-            || (callee.object.name === 'BigInteger' && callee.property === 'valueOf'))) {
+        && (isBigIntegerValueOfCallee(callee) || isBigintOfCallee(callee))) {
       return args[0]!;
     }
     // <expr>.value() — unwrapping a Bigint back to its underlying BigInteger.
@@ -1214,17 +1213,35 @@ class JavaParser {
         && args.length === 0) {
       return callee.object;
     }
+    // <expr>.toByteString() — Java-side coercion of Point / Bigint / Sig /
+    // PubKey wrappers to their raw byte form. Rúnar Point is structurally a
+    // ByteString so the TS canonical sources pass Points directly to
+    // builtins like `cat`. Lower to a no-op (drop the call, keep the
+    // receiver) so the Java IR matches the canonical IR byte-for-byte.
+    if (callee.kind === 'member_expr'
+        && callee.property === 'toByteString'
+        && args.length === 0) {
+      return callee.object;
+    }
     // Bigint-wrapper arithmetic methods: `a.plus(b)` → BinaryExpr(+, a, b),
     // `a.neg()` → UnaryExpr(-, a), `a.abs()` → CallExpr(abs, a). Matched by
     // method name + arity; receiver type is not consulted (typechecker
-    // catches misuse). Mirrors JavaParser.tryLowerBigintMethod.
+    // catches misuse). Mirrors JavaParser.tryLowerBigintMethod. The same
+    // table also accepts the JDK `BigInteger` spellings (`add`, `subtract`,
+    // `multiply`, `divide`, `shiftLeft`, `shiftRight`).
     if (callee.kind === 'member_expr') {
       const binOp = BIGINT_BINARY_METHODS.get(callee.property);
       if (binOp !== undefined && args.length === 1) {
         return { kind: 'binary_expr', op: binOp, left: callee.object, right: args[0]! };
       }
-      if (callee.property === 'neg' && args.length === 0) {
+      if ((callee.property === 'neg' || callee.property === 'negate') && args.length === 0) {
         return { kind: 'unary_expr', op: '-', operand: callee.object };
+      }
+      // `a.not()` → UnaryExpr(~, a). Mirrors java.math.BigInteger#not(); the
+      // Bigint wrapper exposes the same method so Rúnar Java sources can use
+      // it natively.
+      if (callee.property === 'not' && args.length === 0) {
+        return { kind: 'unary_expr', op: '~', operand: callee.object };
       }
       if (callee.property === 'abs' && args.length === 0) {
         return {
@@ -1232,6 +1249,12 @@ class JavaParser {
           callee: { kind: 'identifier', name: 'abs' },
           args: [callee.object],
         };
+      }
+      // <expr>.equals(<expr>) — Java's value-equality method. Lower to the
+      // canonical BinaryExpr(===, a, b). Receiver type is not consulted; the
+      // typechecker rejects misuse (e.g. equality on incompatible types).
+      if (callee.property === 'equals' && args.length === 1) {
+        return { kind: 'binary_expr', op: '===', left: callee.object, right: args[0]! };
       }
     }
     // Static-imported `assertThat(cond)` is registered as a builtin alias
@@ -1421,6 +1444,7 @@ function isMemberModifier(t: TokenType): boolean {
 // ---------------------------------------------------------------------------
 
 const BIGINT_BINARY_METHODS = new Map<string, BinaryOp>([
+  // Bigint-wrapper spellings.
   ['plus',  '+'],
   ['minus', '-'],
   ['times', '*'],
@@ -1437,7 +1461,89 @@ const BIGINT_BINARY_METHODS = new Map<string, BinaryOp>([
   ['le',    '<='],
   ['eq',    '==='],
   ['neq',   '!=='],
+  // JDK BigInteger spellings.
+  ['add',        '+'],
+  ['subtract',   '-'],
+  ['multiply',   '*'],
+  ['divide',     '/'],
+  ['shiftLeft',  '<<'],
+  ['shiftRight', '>>'],
 ]);
+
+// ---------------------------------------------------------------------------
+// compareTo folding: `a.compareTo(b) <cmp> 0` → `a <cmp> b`.
+// Java's BigInteger.compareTo returns -1/0/1, so the comparison-against-zero
+// idiom is the standard JDK spelling for ordered comparison on BigInteger.
+// We rewrite at parse time so the canonical Rúnar AST sees a single
+// BinaryExpr — avoiding a redundant SUB and matching the IR produced by
+// `a <cmp> b` in other formats. The fold only triggers when one side is the
+// literal 0 and the operator is one of the six comparison ops; any other
+// shape leaves compareTo as an unknown call (which the typechecker rejects
+// loudly).
+// ---------------------------------------------------------------------------
+
+function foldCompareToZero(op: BinaryOp, left: Expression, right: Expression): Expression {
+  if (!isComparisonOp(op)) {
+    return { kind: 'binary_expr', op, left, right };
+  }
+  const leftPair = compareToReceiverArg(left);
+  if (leftPair && right.kind === 'bigint_literal' && right.value === 0n) {
+    return { kind: 'binary_expr', op, left: leftPair[0], right: leftPair[1] };
+  }
+  const rightPair = compareToReceiverArg(right);
+  if (rightPair && left.kind === 'bigint_literal' && left.value === 0n) {
+    // 0 <cmp> a.compareTo(b)  ⇔  b <cmp> a
+    return { kind: 'binary_expr', op, left: rightPair[1], right: rightPair[0] };
+  }
+  return { kind: 'binary_expr', op, left, right };
+}
+
+function compareToReceiverArg(e: Expression): [Expression, Expression] | null {
+  if (e.kind !== 'call_expr') return null;
+  if (e.callee.kind !== 'member_expr') return null;
+  if (e.callee.property !== 'compareTo') return null;
+  if (e.args.length !== 1) return null;
+  return [e.callee.object, e.args[0]!];
+}
+
+function isComparisonOp(op: BinaryOp): boolean {
+  return op === '<' || op === '<=' || op === '>' || op === '>='
+      || op === '===' || op === '!==';
+}
+
+// ---------------------------------------------------------------------------
+// BigInteger / Bigint callee shape recognisers
+// ---------------------------------------------------------------------------
+
+/**
+ * True if `callee` is a `member_expr` whose property is `valueOf` and whose
+ * object is either the bare `BigInteger` identifier or the fully-qualified
+ * `java.math.BigInteger` member chain.
+ */
+function isBigIntegerValueOfCallee(callee: Expression): boolean {
+  if (callee.kind !== 'member_expr') return false;
+  if (callee.property !== 'valueOf') return false;
+  const obj = callee.object;
+  if (obj.kind === 'identifier' && obj.name === 'BigInteger') return true;
+  // java.math.BigInteger
+  if (obj.kind === 'member_expr'
+      && obj.property === 'BigInteger'
+      && obj.object.kind === 'member_expr'
+      && obj.object.property === 'math'
+      && obj.object.object.kind === 'identifier'
+      && obj.object.object.name === 'java') {
+    return true;
+  }
+  return false;
+}
+
+/** True if `callee` is `Bigint.of(...)`. */
+function isBigintOfCallee(callee: Expression): boolean {
+  return callee.kind === 'member_expr'
+    && callee.property === 'of'
+    && callee.object.kind === 'identifier'
+    && callee.object.name === 'Bigint';
+}
 
 // ---------------------------------------------------------------------------
 // BigInteger constant folding

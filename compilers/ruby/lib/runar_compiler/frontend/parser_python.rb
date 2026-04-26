@@ -100,6 +100,9 @@ module RunarCompiler
       "verify_slh_dsa_sha2_256s"     => "verifySLHDSA_SHA2_256s",
       "verify_slh_dsa_sha2_256f"     => "verifySLHDSA_SHA2_256f",
       "verify_rabin_sig"             => "verifyRabinSig",
+      # NIST EC curves -- snake_case forms used in Python contracts.
+      "verify_ecdsa_p256"            => "verifyECDSA_P256",
+      "verify_ecdsa_p384"            => "verifyECDSA_P384",
       "ec_add"                       => "ecAdd",
       "ec_mul"                       => "ecMul",
       "ec_mul_gen"                   => "ecMulGen",

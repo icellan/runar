@@ -810,10 +810,17 @@ module RunarCompiler
 
           if is_receiver
             receiver_name = param_name
+          elsif parsed_type[:raw_name] == "StatefulContext"
+            # Zig stateful contracts thread an explicit StatefulContext
+            # parameter through every state-mutating method body
+            # (e.g. `ctx.txPreimage`, `ctx.addOutput(...)`). The compiler
+            # re-injects this context when lowering, so the parameter is
+            # dropped from the canonical IR -- matching the Zig compiler's
+            # own parse_zig.zig behavior. Recording the binding name lets
+            # later passes rewrite `ctx.txPreimage` -> `this.txPreimage`
+            # and `ctx.addOutput(...)` -> `this.addOutput(...)`.
+            stateful_context_names.add(param_name)
           else
-            if parsed_type[:raw_name] == "StatefulContext"
-              stateful_context_names.add(param_name)
-            end
             params << ParamNode.new(name: param_name, type: parsed_type[:type])
           end
 

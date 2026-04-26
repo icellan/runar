@@ -45,15 +45,15 @@ class BitwiseOps extends SmartContract {
         Bigint andResult = this.a.and(this.b);
         Bigint orResult = this.a.or(this.b);
         Bigint xorResult = this.a.xor(this.b);
-        // NOT is a unary operator; the parser lowers `x.neg()` to UnaryExpr(NEG).
-        // Bigint does not expose `.not()` (bitwise NOT on arbitrary-precision
-        // integers has no well-defined result in two's complement), so we
-        // exercise the unary negation path here instead.
-        Bigint negResult = this.a.neg();
+        // Bitwise NOT (~). Mirrors java.math.BigInteger#not(); the Bigint
+        // wrapper exposes the same method, and every frontend lowers
+        // `x.not()` to UnaryExpr(BIT_NOT, x), matching the canonical TS
+        // contract's `~this.a`.
+        Bigint notResult = this.a.not();
         assertThat(andResult.ge(Bigint.ZERO) || andResult.lt(Bigint.ZERO));
         assertThat(orResult.ge(Bigint.ZERO) || orResult.lt(Bigint.ZERO));
         assertThat(xorResult.ge(Bigint.ZERO) || xorResult.lt(Bigint.ZERO));
-        assertThat(negResult.ge(Bigint.ZERO) || negResult.lt(Bigint.ZERO));
+        assertThat(notResult.ge(Bigint.ZERO) || notResult.lt(Bigint.ZERO));
         assertThat(true);
     }
 }

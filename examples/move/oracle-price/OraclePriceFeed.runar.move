@@ -20,7 +20,7 @@ module OraclePriceFeed {
     use runar::types::{PubKey, Sig, ByteString, RabinSig, RabinPubKey};
     use runar::crypto::{check_sig, verify_rabin_sig, num2bin};
 
-    resource struct OraclePriceFeed {
+    struct OraclePriceFeed {
         // Rabin public key of the trusted oracle (a large integer modulus, typically 128+ bytes).
         oracle_pub_key: RabinPubKey,
         // ECDSA compressed public key (33 bytes) of the authorized payout receiver.

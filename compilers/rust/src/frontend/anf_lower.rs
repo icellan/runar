@@ -87,6 +87,24 @@ fn i128_to_json(v: i128) -> serde_json::Value {
     }
 }
 
+/// Mirrors `flattenAddOutputArgs` in `04-anf-lower.ts`: when
+/// `this.addOutput` is called as `this.addOutput(satoshis, .{ v1, v2, ... })`
+/// (the surface form Zig / Move tuple syntax produce), unwrap the trailing
+/// array literal so each element becomes an individual state value.
+fn flatten_add_output_args(args: &[Expression]) -> Vec<Expression> {
+    if args.len() == 2 {
+        if let Expression::ArrayLiteral { elements } = &args[1] {
+            let mut out = Vec::with_capacity(1 + elements.len());
+            out.push(args[0].clone());
+            for el in elements {
+                out.push(el.clone());
+            }
+            return out;
+        }
+    }
+    args.to_vec()
+}
+
 fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
     match expr {
         Expression::BigIntLiteral { value } => Some(i128_to_json(*value)),
@@ -1068,10 +1086,15 @@ fn lower_call_expr(
         }
     }
 
-    // this.addOutput(satoshis, val1, val2, ...) -> special node (via PropertyAccess)
+    // this.addOutput(satoshis, val1, val2, ...) -> special node.
+    // Mirrors flattenAddOutputArgs in 04-anf-lower.ts: when addOutput is
+    // called as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface
+    // form Zig / Move tuple syntax produce), unwrap the trailing array
+    // literal so each element becomes an individual state value.
     if let Expression::PropertyAccess { property } = callee {
         if property == "addOutput" {
-            let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+            let flat_args = flatten_add_output_args(args);
+            let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
             let satoshis = arg_refs.first().cloned().unwrap_or_default();
             let state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
             let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });
@@ -1083,7 +1106,8 @@ fn lower_call_expr(
     if let Expression::MemberExpr { object, property } = callee {
         if let Expression::Identifier { name } = object.as_ref() {
             if name == "this" && property == "addOutput" {
-                let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+                let flat_args = flatten_add_output_args(args);
+                let arg_refs: Vec<String> = flat_args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
                 let satoshis = arg_refs.first().cloned().unwrap_or_default();
                 let state_values = if arg_refs.len() > 1 { arg_refs[1..].to_vec() } else { Vec::new() };
                 let r = ctx.emit(ANFValue::AddOutput { satoshis, state_values, preimage: String::new() });

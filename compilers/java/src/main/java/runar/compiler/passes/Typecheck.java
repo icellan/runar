@@ -649,7 +649,21 @@ public final class Typecheck {
                 return "ByteString";
             }
             if ("addOutput".equals(prop) || "addRawOutput".equals(prop) || "addDataOutput".equals(prop)) {
-                for (Expression a : args) inferExpr(a, env);
+                // Mirror flattenAddOutputArgs in AnfLower: when addOutput is
+                // called as `this.addOutput(satoshis, .{ v1, v2, ... })`
+                // (the surface form Zig / Move tuple syntax produce), unwrap
+                // the trailing array literal so each element is type-checked
+                // individually instead of triggering ArrayLiteralExpr's
+                // homogeneous-element rule (state values intentionally have
+                // heterogeneous types — owner: PubKey, balance: bigint, ...).
+                if ("addOutput".equals(prop)
+                        && args.size() == 2
+                        && args.get(1) instanceof ArrayLiteralExpr al) {
+                    inferExpr(args.get(0), env);
+                    for (Expression el : al.elements()) inferExpr(el, env);
+                } else {
+                    for (Expression a : args) inferExpr(a, env);
+                }
                 return "void";
             }
             if (methodSigs.containsKey(prop)) {

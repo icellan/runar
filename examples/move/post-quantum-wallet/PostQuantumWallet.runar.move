@@ -2,7 +2,7 @@ module PostQuantumWallet {
     use runar::types::{Addr, Sig, PubKey, ByteString};
     use runar::crypto::{hash160, check_sig, verifyWOTS};
 
-    resource struct PostQuantumWallet {
+    struct PostQuantumWallet {
         ecdsa_pub_key_hash: Addr,
         wots_pub_key_hash: ByteString,
     }

@@ -19,8 +19,11 @@ pub const CovenantVault = struct {
         runar.assert(runar.checkSig(sig, self.owner));
         runar.assert(runar.checkPreimage(txPreimage));
 
-        const expectedOutput = runar.buildChangeOutput(self.recipient, self.minAmount);
-
+        // Construct expected P2PKH output and verify against hashOutputs.
+        // Bare hex string literals are interpreted as ByteString constants by
+        // every Rúnar Zig-format parser (see parse_zig.zig literal_bytes handling).
+        const p2pkhScript = runar.cat(runar.cat("1976a914", self.recipient), "88ac");
+        const expectedOutput = runar.cat(runar.num2bin(self.minAmount, 8), p2pkhScript);
         runar.assert(runar.bytesEq(runar.hash256(expectedOutput), runar.extractOutputHash(txPreimage)));
     }
 };

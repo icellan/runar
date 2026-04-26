@@ -5,13 +5,18 @@ import runar.lang.annotations.Public;
 import runar.lang.annotations.Readonly;
 import runar.lang.types.Addr;
 import runar.lang.types.Bigint;
+import runar.lang.types.ByteString;
 import runar.lang.types.PubKey;
 import runar.lang.types.Sig;
 import runar.lang.types.SigHashPreimage;
 
 import static runar.lang.Builtins.assertThat;
+import static runar.lang.Builtins.cat;
 import static runar.lang.Builtins.checkPreimage;
 import static runar.lang.Builtins.checkSig;
+import static runar.lang.Builtins.extractOutputHash;
+import static runar.lang.Builtins.hash256;
+import static runar.lang.Builtins.num2bin;
 
 /**
  * CovenantVault -- stateless Bitcoin covenant contract.
@@ -57,11 +62,13 @@ class CovenantVault extends SmartContract {
     void spend(Sig sig, SigHashPreimage txPreimage) {
         assertThat(checkSig(sig, this.owner));
         assertThat(checkPreimage(txPreimage));
-        // The full on-chain covenant also constructs the expected P2PKH
-        // output and verifies its hash against extractOutputHash. Under
-        // the simulator checkPreimage is a no-op and extractOutputHash
-        // returns the caller-supplied digest, so the additional step
-        // lives in the Rúnar compile pipeline (exercised via the
-        // conformance suite) rather than here.
+
+        // Construct the expected P2PKH output on-chain:
+        //   <8-byte LE amount> <varint(25)> <OP_DUP OP_HASH160 OP_PUSH(20) recipient OP_EQUALVERIFY OP_CHECKSIG>
+        ByteString p2pkhScript = cat(cat(ByteString.fromHex("1976a914"), this.recipient), ByteString.fromHex("88ac"));
+        ByteString expectedOutput = cat(num2bin(this.minAmount, Bigint.of(8)), p2pkhScript);
+
+        // Verify the transaction's outputs match exactly.
+        assertThat(hash256(expectedOutput).equals(extractOutputHash(txPreimage)));
     }
 }

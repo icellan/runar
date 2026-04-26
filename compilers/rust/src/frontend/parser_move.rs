@@ -121,6 +121,10 @@ fn map_builtin_name(name: &str) -> String {
         "p384_on_curve" => "p384OnCurve".to_string(),
         "p384_encode_compressed" => "p384EncodeCompressed".to_string(),
         "verify_ecdsa_p384" => "verifyECDSA_P384".to_string(),
+        // Pre-camelCased forms also accepted (matches the canonical TS Move
+        // parser, whose regex preserves the literal `_P` boundary).
+        "verifyECDSA_P256" => "verifyECDSA_P256".to_string(),
+        "verifyECDSA_P384" => "verifyECDSA_P384".to_string(),
         _ => snake_to_camel(name),
     }
 }

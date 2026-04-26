@@ -206,6 +206,17 @@ def _lower_properties(contract: ContractNode) -> list[ANFProperty]:
     return result
 
 
+def _flatten_add_output_args(args: list[Expression]) -> list[Expression]:
+    """Mirror flattenAddOutputArgs in 04-anf-lower.ts: when this.addOutput is
+    called as ``this.addOutput(satoshis, .{ v1, v2, ... })`` (the surface
+    form Zig / Move tuple syntax produce), unwrap the trailing array
+    literal so each element becomes an individual state value.
+    """
+    if len(args) == 2 and isinstance(args[1], ArrayLiteralExpr):
+        return [args[0], *args[1].elements]
+    return args
+
+
 def _extract_literal_value(expr: Expression) -> str | int | bool | None:
     """Extract a literal value from an expression for property initializers."""
     if isinstance(expr, BigIntLiteral):
@@ -800,9 +811,14 @@ class _LowerCtx:
                 preimage_ref = self.lower_expr_to_ref(e.args[0])
                 return self.emit(ANFValue(kind="check_preimage", preimage=preimage_ref))
 
-        # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr
+        # this.addOutput(satoshis, val1, val2, ...) via PropertyAccessExpr.
+        # Mirrors flattenAddOutputArgs in 04-anf-lower.ts: when addOutput is
+        # called as `this.addOutput(satoshis, .{ v1, v2, ... })` (the surface
+        # form Zig / Move tuple syntax produce), unwrap the trailing array
+        # literal so each element becomes an individual state value.
         if isinstance(callee, PropertyAccessExpr) and callee.property == "addOutput":
-            arg_refs = self._lower_args(e.args)
+            flat_args = _flatten_add_output_args(e.args)
+            arg_refs = self._lower_args(flat_args)
             satoshis = arg_refs[0]
             state_values = arg_refs[1:]
             ref = self.emit(ANFValue(kind="add_output", satoshis=satoshis, state_values=state_values, preimage=""))

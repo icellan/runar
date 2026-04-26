@@ -9,6 +9,7 @@ const parse_go = @import("passes/parse_go.zig");
 const parse_rust = @import("passes/parse_rust.zig");
 const parse_python = @import("passes/parse_python.zig");
 const parse_ruby = @import("passes/parse_ruby.zig");
+const parse_java = @import("passes/parse_java.zig");
 const validate_pass = @import("passes/validate.zig");
 const typecheck_pass = @import("passes/typecheck.zig");
 const expand_fixed_arrays = @import("passes/expand_fixed_arrays.zig");
@@ -146,7 +147,7 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(1);
 }
 
-const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, anf_json, unknown };
+const FileFormat = enum { runar_zig, runar_ts, runar_sol, runar_move, runar_go, runar_rs, runar_py, runar_rb, runar_java, anf_json, unknown };
 
 fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.zig")) return .runar_zig;
@@ -157,6 +158,7 @@ fn detectFormat(path: []const u8) FileFormat {
     if (std.mem.endsWith(u8, path, ".runar.rs")) return .runar_rs;
     if (std.mem.endsWith(u8, path, ".runar.py")) return .runar_py;
     if (std.mem.endsWith(u8, path, ".runar.rb")) return .runar_rb;
+    if (std.mem.endsWith(u8, path, ".runar.java")) return .runar_java;
     if (std.mem.endsWith(u8, path, ".json")) return .anf_json;
     return .unknown;
 }
@@ -176,7 +178,7 @@ fn printUsage() void {
         \\  --hex                     Output script hex only (no artifact JSON)
         \\  --disable-constant-folding  Skip constant folding pass
         \\
-        \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .json
+        \\Formats: .runar.zig, .runar.ts, .runar.sol, .runar.move, .runar.go, .runar.rs, .runar.py, .runar.rb, .runar.java, .json
         \\
     , .{});
 }
@@ -312,6 +314,14 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         },
         .runar_rb => blk: {
             const r = parse_ruby.parseRuby(work_allocator, source, path);
+            if (r.errors.len > 0) {
+                for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
+                return error.ParseFailed;
+            }
+            break :blk r.contract orelse return error.ParseFailed;
+        },
+        .runar_java => blk: {
+            const r = parse_java.parseJava(work_allocator, source, path);
             if (r.errors.len > 0) {
                 for (r.errors) |err| std.debug.print("  parse error: {s}\n", .{err});
                 return error.ParseFailed;

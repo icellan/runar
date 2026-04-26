@@ -2,6 +2,7 @@ package runar.examples.crosscovenant;
 
 import runar.lang.SmartContract;
 import runar.lang.annotations.Public;
+import runar.lang.annotations.Readonly;
 import runar.lang.types.Bigint;
 import runar.lang.types.ByteString;
 import runar.lang.types.Sha256;
@@ -39,7 +40,7 @@ import static runar.lang.Builtins.substr;
  */
 class CrossCovenantRef extends SmartContract {
 
-    Sha256 sourceScriptHash;
+    @Readonly Sha256 sourceScriptHash;
 
     CrossCovenantRef(Sha256 sourceScriptHash) {
         super(sourceScriptHash);

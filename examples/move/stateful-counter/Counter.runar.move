@@ -23,7 +23,7 @@
 // control.
 module Counter {
     resource struct Counter {
-        count: bigint, // mutable (stateful, persists across transactions)
+        count: &mut bigint, // mutable (stateful, persists across transactions)
     }
 
     // Increments count by 1. Anyone can call this function.

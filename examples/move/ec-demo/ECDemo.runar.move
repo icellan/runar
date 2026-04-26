@@ -23,7 +23,7 @@ module ECDemo {
     use runar::types::{Point, ByteString};
     use runar::crypto::{ecPointX, ecPointY, ecMakePoint, ecOnCurve, ecAdd, ecMul, ecMulGen, ecNegate, ecModReduce, ecEncodeCompressed};
 
-    resource struct ECDemo {
+    struct ECDemo {
         pt: Point,
     }
 
