@@ -96,6 +96,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
     // Lower constructor (the TS reference includes the constructor in output)
     let mut ctor_ctx = LoweringContext::new(contract);
+    ctor_ctx.set_method_param_types(&contract.constructor.params);
     lower_statements(&contract.constructor.body, &mut ctor_ctx);
     result.push(ANFMethod {
         name: "constructor".to_string(),
@@ -107,6 +108,7 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     // Lower each method (including private methods as separate entries)
     for method in &contract.methods {
         let mut method_ctx = LoweringContext::new(contract);
+        method_ctx.set_method_param_types(&method.params);
 
         if contract.parent_class == "StatefulSmartContract"
             && method.visibility == Visibility::Public
@@ -311,6 +313,11 @@ struct LoweringContext<'a> {
     counter: usize,
     contract: &'a ContractNode,
     param_names: HashSet<String>,
+    /// Type table for the CURRENT method's parameters. Method-scoped
+    /// (not contract-scoped) so a parameter named `x` in one method
+    /// doesn't bleed into byte-typed analysis of a different method
+    /// that uses `x` as a local. See issue #34.
+    method_param_types: HashMap<String, String>,
     local_names: HashSet<String>,
     add_output_refs: Vec<String>,
     /// Maps local variable names to their current ANF binding name.
@@ -330,11 +337,23 @@ impl<'a> LoweringContext<'a> {
             counter: 0,
             contract,
             param_names: HashSet::new(),
+            method_param_types: HashMap::new(),
             local_names: HashSet::new(),
             add_output_refs: Vec::new(),
             local_aliases: HashMap::new(),
             local_byte_vars: HashSet::new(),
             current_source_loc: None,
+        }
+    }
+
+    /// Populate the method-scoped param-type table for the current method
+    /// (or constructor). Called at the start of each method's lowering.
+    /// See issue #34.
+    fn set_method_param_types(&mut self, params: &[ParamNode]) {
+        self.method_param_types.clear();
+        for p in params {
+            self.method_param_types
+                .insert(p.name.clone(), type_node_to_string(&p.param_type));
         }
     }
 
@@ -404,6 +423,7 @@ impl<'a> LoweringContext<'a> {
         let mut sub = LoweringContext::new(self.contract);
         sub.counter = self.counter;
         sub.param_names = self.param_names.clone();
+        sub.method_param_types = self.method_param_types.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();
         sub.local_byte_vars = self.local_byte_vars.clone();
@@ -1287,23 +1307,10 @@ fn is_byte_typed_expr(expr: &Expression, ctx: &LoweringContext) -> bool {
     }
 }
 
-/// Look up the type of a method parameter by name across all contract methods.
+/// Look up the type of a parameter in the CURRENT method (method-scoped).
+/// See issue #34.
 fn get_param_type(name: &str, ctx: &LoweringContext) -> Option<String> {
-    // Check constructor params
-    for p in &ctx.contract.constructor.params {
-        if p.name == name {
-            return Some(type_node_to_string(&p.param_type));
-        }
-    }
-    // Check method params
-    for method in &ctx.contract.methods {
-        for p in &method.params {
-            if p.name == name {
-                return Some(type_node_to_string(&p.param_type));
-            }
-        }
-    }
-    None
+    ctx.method_param_types.get(name).cloned()
 }
 
 /// Look up the type of a contract property by name.
