@@ -25,7 +25,16 @@ function privKey(hex: string): PrivateKey {
 const CONFORMANCE = resolve(__dirname, '../../../../conformance/tests');
 
 function readContract(name: string): string {
-  return readFileSync(resolve(CONFORMANCE, name, `${name}.runar.ts`), 'utf8');
+  // Resolve the .runar.ts source via the fixture's source.json (the actual
+  // contract lives under examples/ts/<name>/<Name>.runar.ts, not directly
+  // inside the conformance dir).
+  const manifestPath = resolve(CONFORMANCE, name, 'source.json');
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    sources: Record<string, string>;
+  };
+  const tsRel = manifest.sources['.runar.ts'];
+  if (!tsRel) throw new Error(`No .runar.ts source for fixture ${name}`);
+  return readFileSync(resolve(CONFORMANCE, name, tsRel), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
@@ -234,4 +243,77 @@ describe('Script execution: interpreter vs compiled agreement', () => {
       expect(scriptResult.success).toBe(false);
     });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Issue #34 regression: hand-unrolled `if` + multi `let` reassignment
+//   https://github.com/icellan/runar/issues/34
+// Compiled bytecode previously diverged from the interpreter when an outer
+// `if` body contained both a nested `if (cond) { local = expr; }` AND a
+// subsequent `let p = ...` reassignment. The post-ENDIF stale-copy cleanup
+// only handled ONE reassigned local (`break;` after first match), so the
+// second reassignment left a stale stack item that shifted depths for the
+// next `OP_PICK` in the next outer-if's bound check.
+// ---------------------------------------------------------------------------
+
+describe('Script execution: issue #34 — nested-if multi-reassign parity', () => {
+  const src = readFileSync(
+    resolve(__dirname, '../../../../examples/ts/nested-if-multi-reassign/StackTrackerRepro.runar.ts'),
+    'utf8',
+  );
+  const fileName = 'StackTrackerRepro.runar.ts';
+
+  // Single-record buf: byte 0 = 0x05 (length prefix), bytes 1..5 = 0xaa*5 (payload).
+  // Bytes 6..15 = 0xbb*10 (would parse as negative-length record; iter 1+ MUST be skipped).
+  const BUF = '05aaaaaaaaaabbbbbbbbbbbbbbbbbbbb';
+  const TARGET_ITER0 = '05aaaaaaaaaa';
+
+  it('count=1 with target matching iter 0: interpreter and compiled agree (success)', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 1n, target: TARGET_ITER0 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 1n, TARGET_ITER0]);
+
+    expect(interpResult.success).toBe(true);
+    expect(scriptResult.success).toBe(true);
+  });
+
+  it('count=0: both fail (found stays false, assert(found) aborts)', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 0n, target: TARGET_ITER0 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 0n, TARGET_ITER0]);
+
+    expect(interpResult.success).toBe(false);
+    expect(scriptResult.success).toBe(false);
+  });
+
+  it('count=1 with non-matching target: both fail', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 1n, target: '05bbbbbbbbbb' });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 1n, '05bbbbbbbbbb']);
+
+    expect(interpResult.success).toBe(false);
+    expect(scriptResult.success).toBe(false);
+  });
+
+  it('count=8 with 8 valid records: interpreter and compiled agree (full unroll, target on iter 7)', () => {
+    // 8 single-byte-payload records: each is 0x01<XX>. High bit of XX kept clear
+    // so bin2num doesn't parse a negative length. 8 records × 2 bytes = 16 bytes.
+    const buf8 = '0111' + '0122' + '0133' + '0144' + '0155' + '0166' + '0177' + '0178';
+    const targetIter7 = '0178';
+
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: buf8, count: 8n, target: targetIter7 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [buf8, 8n, targetIter7]);
+
+    expect(interpResult.success).toBe(true);
+    expect(scriptResult.success).toBe(true);
+  });
 });
