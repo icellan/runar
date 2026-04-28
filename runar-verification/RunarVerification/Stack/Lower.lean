@@ -1828,6 +1828,399 @@ def removePropEntryOps (sm : StackMap) (propName : String) :
       let (ops, rest') := removePropEntryAux propName 1 rest
       (ops, top :: rest')
 
+/-! ## SHA-256 partial-block codegen (Phase 4-D)
+
+Mirrors the TypeScript reference at
+`packages/runar-compiler/src/passes/sha256-codegen.ts`. The TS reference
+implements `sha256Compress(state, block)` (one-block compression, no
+padding) and `sha256Finalize(state, remaining, msgBitLen)` (padding +
+1-or-2-block compression behind an OP_IF/OP_ELSE branch).
+
+The TS `Emitter` tracks main- and alt-stack depth at codegen time,
+emitting `pushI(BigInt(d))` + a `pick`/`roll` op pair for non-trivial
+depths. Lean's `StackOp.pick d` / `StackOp.roll d` already encode the
+depth-push during the `Emit` pass, so a single Lean StackOp corresponds
+to a TS `pushI` + `pick` pair. Depth tracking in Lean is therefore not
+needed inside these helpers — the bodies are pure StackOp lists.
+
+The codegen produces byte-identical output to the TS reference. The
+sub-helpers (`sha_*`) follow the TS naming and structure 1:1; readers
+should consult `sha256-codegen.ts` for high-level semantics. -/
+
+/-- TS `oc(code)` — single opcode StackOp. -/
+@[inline] private def shaOpc (s : String) : StackOp := .opcode s
+/-- TS `pushI(BigInt n)` — single bigint push. -/
+@[inline] private def shaPushI (n : Int) : StackOp := .push (.bigint n)
+/-- TS `pushB(u32ToLE n)` — encode 32-bit `n` as 4 LE bytes and push.
+The cast `n.toUInt32` truncates to 32 bits (matching JS bitwise ops). -/
+@[inline] private def shaPushU32LE (n : UInt32) : StackOp :=
+  let b0 : UInt8 := (n &&& 0xff).toUInt8
+  let b1 : UInt8 := ((n >>> 8) &&& 0xff).toUInt8
+  let b2 : UInt8 := ((n >>> 16) &&& 0xff).toUInt8
+  let b3 : UInt8 := ((n >>> 24) &&& 0xff).toUInt8
+  .push (.bytes (ByteArray.mk #[b0, b1, b2, b3]))
+
+/-- Emit `pick(d)` per TS Emitter: 0 → dup, 1 → over, else `pick d`. -/
+@[inline] private def shaPick (d : Nat) : List StackOp :=
+  match d with
+  | 0     => [.dup]
+  | 1     => [.over]
+  | n + 2 => [.pick (n + 2)]
+
+/-- Emit `roll(d)` per TS Emitter: 0 → [], 1 → swap, 2 → rot, else `roll d`. -/
+@[inline] private def shaRoll (d : Nat) : List StackOp :=
+  match d with
+  | 0     => []
+  | 1     => [.swap]
+  | 2     => [.rot]
+  | n + 3 => [.roll (n + 3)]
+
+/-- Reverse 4 bytes on TOS (LE↔BE conversion). 12 ops. Mirrors
+TS `Emitter.reverseBytes4`. -/
+private def shaReverseBytes4 : List StackOp :=
+  [ shaPushI 1, shaOpc "OP_SPLIT"
+  , shaPushI 1, shaOpc "OP_SPLIT"
+  , shaPushI 1, shaOpc "OP_SPLIT"
+  , .swap, shaOpc "OP_CAT"
+  , .swap, shaOpc "OP_CAT"
+  , .swap, shaOpc "OP_CAT" ]
+
+/-- LE → numeric. 3 ops. -/
+private def shaLe2Num : List StackOp :=
+  [ .push (.bytes (ByteArray.mk #[0x00]))
+  , shaOpc "OP_CAT"
+  , shaOpc "OP_BIN2NUM" ]
+
+/-- numeric → 4-byte LE. 5 ops. -/
+private def shaNum2Le : List StackOp :=
+  [ shaPushI 5, shaOpc "OP_NUM2BIN"
+  , shaPushI 4, shaOpc "OP_SPLIT", .drop ]
+
+/-- ROTR(x, n) on a 4-byte BE value. 7 ops. -/
+private def shaRotrBE (n : Nat) : List StackOp :=
+  [ .dup
+  , shaPushI (Int.ofNat n), shaOpc "OP_RSHIFT"
+  , .swap
+  , shaPushI (Int.ofNat (32 - n)), shaOpc "OP_LSHIFT"
+  , shaOpc "OP_OR" ]
+
+/-- SHR(x, n) on a 4-byte BE value. 2 ops. -/
+private def shaShrBE (n : Nat) : List StackOp :=
+  [ shaPushI (Int.ofNat n), shaOpc "OP_RSHIFT" ]
+
+/-- 32-bit add on LE values. Net: -1. 13 ops. -/
+private def shaAdd32 : List StackOp :=
+  shaLe2Num ++ [.swap] ++ shaLe2Num ++ [shaOpc "OP_ADD"] ++ shaNum2Le
+
+/-- Add N LE values: top N are converted, summed, packed back. -/
+private def shaAddNAux : Nat → List StackOp
+  | 0     => []
+  | n + 1 => [.swap] ++ shaLe2Num ++ [shaOpc "OP_ADD"] ++ shaAddNAux n
+
+private def shaAddN (n : Nat) : List StackOp :=
+  if n < 2 then []
+  else shaLe2Num ++ shaAddNAux (n - 1) ++ shaNum2Le
+
+/-- TS `bigSigma0` Σ0(a) = ROTR(2)^ROTR(13)^ROTR(22). [a(LE)] → [Σ0(LE)]. -/
+private def shaBigSigma0 : List StackOp :=
+  shaReverseBytes4
+  ++ [.dup, .dup]
+  ++ shaRotrBE 2 ++ [.swap] ++ shaRotrBE 13
+  ++ [shaOpc "OP_XOR"]
+  ++ [.swap] ++ shaRotrBE 22
+  ++ [shaOpc "OP_XOR"]
+  ++ shaReverseBytes4
+
+/-- TS `bigSigma1` Σ1(e) = ROTR(6)^ROTR(11)^ROTR(25). -/
+private def shaBigSigma1 : List StackOp :=
+  shaReverseBytes4
+  ++ [.dup, .dup]
+  ++ shaRotrBE 6 ++ [.swap] ++ shaRotrBE 11
+  ++ [shaOpc "OP_XOR"]
+  ++ [.swap] ++ shaRotrBE 25
+  ++ [shaOpc "OP_XOR"]
+  ++ shaReverseBytes4
+
+/-- TS `smallSigma0` σ0(x) = ROTR(7)^ROTR(18)^SHR(3). -/
+private def shaSmallSigma0 : List StackOp :=
+  shaReverseBytes4
+  ++ [.dup, .dup]
+  ++ shaRotrBE 7 ++ [.swap] ++ shaRotrBE 18
+  ++ [shaOpc "OP_XOR"]
+  ++ [.swap] ++ shaShrBE 3
+  ++ [shaOpc "OP_XOR"]
+  ++ shaReverseBytes4
+
+/-- TS `smallSigma1` σ1(x) = ROTR(17)^ROTR(19)^SHR(10). -/
+private def shaSmallSigma1 : List StackOp :=
+  shaReverseBytes4
+  ++ [.dup, .dup]
+  ++ shaRotrBE 17 ++ [.swap] ++ shaRotrBE 19
+  ++ [shaOpc "OP_XOR"]
+  ++ [.swap] ++ shaShrBE 10
+  ++ [shaOpc "OP_XOR"]
+  ++ shaReverseBytes4
+
+/-- TS `ch` Ch(e,f,g) = (e&f)^(~e&g). [e, f, g] (g=TOS) → [Ch(LE)]. Net: -2. -/
+private def shaCh : List StackOp :=
+  [ .rot, .dup, shaOpc "OP_INVERT", .rot
+  , shaOpc "OP_AND", shaOpc "OP_TOALTSTACK"
+  , shaOpc "OP_AND", shaOpc "OP_FROMALTSTACK"
+  , shaOpc "OP_XOR" ]
+
+/-- TS `maj` Maj(a,b,c) = (a&b)|(c&(a^b)). [a, b, c] (c=TOS) → [Maj(LE)]. Net: -2. -/
+private def shaMaj : List StackOp :=
+  [ shaOpc "OP_TOALTSTACK", shaOpc "OP_2DUP"
+  , shaOpc "OP_AND", shaOpc "OP_TOALTSTACK"
+  , shaOpc "OP_XOR", shaOpc "OP_FROMALTSTACK"
+  , .swap, shaOpc "OP_FROMALTSTACK"
+  , shaOpc "OP_AND", shaOpc "OP_OR" ]
+
+/-- N-fold concat helper for `beWordsToLE` — emit N×(reverseBytes4 ++ TOALT)
+followed by N×FROMALT. Order-preserving alt round-trip. -/
+private def shaBeWordsToLEAux1 : Nat → List StackOp
+  | 0     => []
+  | n + 1 => shaReverseBytes4 ++ [shaOpc "OP_TOALTSTACK"] ++ shaBeWordsToLEAux1 n
+
+private def shaBeWordsToLEAux2 : Nat → List StackOp
+  | 0     => []
+  | n + 1 => [shaOpc "OP_FROMALTSTACK"] ++ shaBeWordsToLEAux2 n
+
+private def shaBeWordsToLE (n : Nat) : List StackOp :=
+  shaBeWordsToLEAux1 n ++ shaBeWordsToLEAux2 n
+
+/-- Convert 8 BE words to LE AND reverse order. TS `beWordsToLEReversed8`.
+For i = 7 .. 0: roll i, reverseBytes4, TOALT. Then 8× FROMALT. -/
+private def shaBeWordsToLEReversed8Phase1 : Nat → List StackOp
+  | 0     => shaRoll 0 ++ shaReverseBytes4 ++ [shaOpc "OP_TOALTSTACK"]
+  | n + 1 =>
+      shaBeWordsToLEReversed8Phase1 n ++
+      shaRoll (n + 1) ++ shaReverseBytes4 ++ [shaOpc "OP_TOALTSTACK"]
+
+-- Note: TS iterates `for i = 7; i >= 0; i--`. So order is roll(7), roll(6), ..., roll(0).
+-- Our recursive Aux1 above iterates `0 .. n` which gives the *reverse* order — wrong.
+-- Define the correct recursion: take the count `n+1` and emit roll(n), then count down.
+
+/-- Phase 1 (correct order): roll(7), roll(6), ..., roll(0). -/
+private def shaBeWordsToLEReversed8P1 : Nat → List StackOp
+  | 0     => shaRoll 0 ++ shaReverseBytes4 ++ [shaOpc "OP_TOALTSTACK"]
+  | n + 1 =>
+      shaRoll (n + 1) ++ shaReverseBytes4 ++ [shaOpc "OP_TOALTSTACK"] ++
+      shaBeWordsToLEReversed8P1 n
+
+private def shaBeWordsToLEReversed8 : List StackOp :=
+  shaBeWordsToLEReversed8P1 7 ++ shaBeWordsToLEAux2 8
+
+/-- SHA-256 round constant K[t] for t < 64. Values match FIPS 180-4. -/
+private def shaK : Nat → UInt32
+  | 0  => 0x428a2f98 | 1  => 0x71374491 | 2  => 0xb5c0fbcf | 3  => 0xe9b5dba5
+  | 4  => 0x3956c25b | 5  => 0x59f111f1 | 6  => 0x923f82a4 | 7  => 0xab1c5ed5
+  | 8  => 0xd807aa98 | 9  => 0x12835b01 | 10 => 0x243185be | 11 => 0x550c7dc3
+  | 12 => 0x72be5d74 | 13 => 0x80deb1fe | 14 => 0x9bdc06a7 | 15 => 0xc19bf174
+  | 16 => 0xe49b69c1 | 17 => 0xefbe4786 | 18 => 0x0fc19dc6 | 19 => 0x240ca1cc
+  | 20 => 0x2de92c6f | 21 => 0x4a7484aa | 22 => 0x5cb0a9dc | 23 => 0x76f988da
+  | 24 => 0x983e5152 | 25 => 0xa831c66d | 26 => 0xb00327c8 | 27 => 0xbf597fc7
+  | 28 => 0xc6e00bf3 | 29 => 0xd5a79147 | 30 => 0x06ca6351 | 31 => 0x14292967
+  | 32 => 0x27b70a85 | 33 => 0x2e1b2138 | 34 => 0x4d2c6dfc | 35 => 0x53380d13
+  | 36 => 0x650a7354 | 37 => 0x766a0abb | 38 => 0x81c2c92e | 39 => 0x92722c85
+  | 40 => 0xa2bfe8a1 | 41 => 0xa81a664b | 42 => 0xc24b8b70 | 43 => 0xc76c51a3
+  | 44 => 0xd192e819 | 45 => 0xd6990624 | 46 => 0xf40e3585 | 47 => 0x106aa070
+  | 48 => 0x19a4c116 | 49 => 0x1e376c08 | 50 => 0x2748774c | 51 => 0x34b0bcb5
+  | 52 => 0x391c0cb3 | 53 => 0x4ed8aa4a | 54 => 0x5b9cca4f | 55 => 0x682e6ff3
+  | 56 => 0x748f82ee | 57 => 0x78a5636f | 58 => 0x84c87814 | 59 => 0x8cc70208
+  | 60 => 0x90befffa | 61 => 0xa4506ceb | 62 => 0xbef9a3f7 | 63 => 0xc67178f2
+  | _  => 0
+
+/-- One SHA-256 compression round at index `t`. Stack: [W0..W63, a..h] (a=TOS).
+Net: 0. Mirrors TS `emitRound` (`sha256-codegen.ts:314-365`). -/
+private def shaEmitRound (t : Nat) : List StackOp :=
+  -- T1 = Σ1(e) + Ch(e,f,g) + h + K[t] + W[t]
+  shaPick 4 ++ shaBigSigma1
+  ++ shaPick 5 ++ shaPick 7 ++ shaPick 9 ++ shaCh
+  ++ shaPick 9
+  ++ [shaPushU32LE (shaK t)]
+  ++ shaPick (75 - t)
+  ++ shaAddN 5
+  -- T2 = Σ0(a) + Maj(a,b,c); first save a copy of T1 to alt
+  ++ [.dup, shaOpc "OP_TOALTSTACK"]
+  ++ shaPick 1 ++ shaBigSigma0
+  ++ shaPick 2 ++ shaPick 4 ++ shaPick 6 ++ shaMaj
+  ++ shaAdd32
+  -- new_a = T1 + T2; pull T1 back from alt
+  ++ [shaOpc "OP_FROMALTSTACK"]
+  ++ [.swap] ++ shaAdd32
+  -- new_e = d + T1
+  ++ [.swap] ++ shaRoll 5 ++ shaAdd32
+  -- drop h
+  ++ shaRoll 8 ++ [.drop]
+  -- rotate: [ne,na,a,b,c,e,f,g] → [na,a,b,c,ne,e,f,g]
+  ++ [.swap] ++ shaRoll 4 ++ shaRoll 4 ++ shaRoll 4 ++ shaRoll 3
+
+/-- Unroll W expansion: for t = 16..63 emit
+    over;σ1; pick(7); pick(16);σ0; pick(18); addN(4) -/
+private def shaWExpand : Nat → List StackOp
+  | 0     => []   -- t = 16: handled in helper below
+  | _     => []
+
+private def shaWExpandFromTo (t : Nat) (count : Nat) : List StackOp :=
+  match count with
+  | 0     => []
+  | n + 1 =>
+      ([.over] ++ shaSmallSigma1
+        ++ shaPick (6 + 1)
+        ++ shaPick (14 + 2) ++ shaSmallSigma0
+        ++ shaPick (15 + 3)
+        ++ shaAddN 4)
+      ++ shaWExpandFromTo (t + 1) n
+
+/-- Unrolled SHA-256 round loop t = 0..63. -/
+private def shaRoundsFromTo (t : Nat) (count : Nat) : List StackOp :=
+  match count with
+  | 0     => []
+  | n + 1 => shaEmitRound t ++ shaRoundsFromTo (t + 1) n
+
+/-- Final-add helper: 8 iterations of (roll(8-i); add32; TOALT) for i = 0..7. -/
+private def shaFinalAdd (i : Nat) : List StackOp :=
+  match i with
+  | 0     => shaRoll 8 ++ shaAdd32 ++ [shaOpc "OP_TOALTSTACK"]
+  | n + 1 =>
+      shaRoll (8 - (n + 1)) ++ shaAdd32 ++ [shaOpc "OP_TOALTSTACK"]
+      ++ shaFinalAdd n
+
+private def shaFinalAddSeq : List StackOp :=
+  -- TS: for (let i = 0; i < 8; i++) { roll(8-i); add32; TOALT; }
+  -- Indices: i=0..7 ⇒ rolls 8,7,6,5,4,3,2,1.
+  let mk (i : Nat) := shaRoll (8 - i) ++ shaAdd32 ++ [shaOpc "OP_TOALTSTACK"]
+  mk 0 ++ mk 1 ++ mk 2 ++ mk 3 ++ mk 4 ++ mk 5 ++ mk 6 ++ mk 7
+
+/-- Final pack helper: for i = 1..7 emit FROMALT, reverseBytes4, swap, OP_CAT. -/
+private def shaFinalPack : Nat → List StackOp
+  | 0     => []
+  | n + 1 =>
+      [shaOpc "OP_FROMALTSTACK"] ++ shaReverseBytes4 ++ [.swap, shaOpc "OP_CAT"]
+      ++ shaFinalPack n
+
+/-- Drop 64 leftover items from the W array: 64×(swap; drop). -/
+private def shaDropN : Nat → List StackOp
+  | 0     => []
+  | n + 1 => [.swap, .drop] ++ shaDropN n
+
+/-- Repeat `split4` (push 4; OP_SPLIT) `n` times. -/
+private def shaSplit4N : Nat → List StackOp
+  | 0     => []
+  | n + 1 => [shaPushI 4, shaOpc "OP_SPLIT"] ++ shaSplit4N n
+
+/-- Full SHA-256 compression op list. Stack on entry: [..., state(32 BE), block(64 BE)].
+Stack on exit: [..., newState(32 BE)]. Mirrors TS `generateCompressOps`. -/
+private def shaCompressOps : List StackOp :=
+  -- Phase 1: save initial state to alt, unpack block to 16 LE words
+  [.swap, .dup, shaOpc "OP_TOALTSTACK", shaOpc "OP_TOALTSTACK"]
+  ++ shaSplit4N 15
+  ++ shaBeWordsToLE 16
+  -- Phase 2: W expansion (t = 16..63 ⇒ 48 iterations)
+  ++ shaWExpandFromTo 16 48
+  -- Phase 3: unpack state into 8 LE working vars
+  ++ [shaOpc "OP_FROMALTSTACK"]
+  ++ shaSplit4N 7
+  ++ shaBeWordsToLEReversed8
+  -- Phase 4: 64 compression rounds
+  ++ shaRoundsFromTo 0 64
+  -- Phase 5: add initial state, pack result
+  ++ [shaOpc "OP_FROMALTSTACK"]
+  ++ shaSplit4N 7
+  ++ shaBeWordsToLEReversed8
+  ++ shaFinalAddSeq
+  -- pack: pull from alt, reverse, build result
+  ++ [shaOpc "OP_FROMALTSTACK"]
+  ++ shaReverseBytes4
+  ++ shaFinalPack 7
+  -- drop the 64 W slots remaining below the result
+  ++ shaDropN 64
+
+/-- TS `emitSha256Compress` entry point. -/
+private def shaEmitCompress : List StackOp := shaCompressOps
+
+/-- TS `emitSha256Finalize` op list. Stack on entry:
+[..., state(32 BE), remaining(var len), msgBitLen(bigint)].
+Stack on exit: [..., hash(32 BE)]. Mirrors TS `emitSha256Finalize`. -/
+private def shaEmitFinalize : List StackOp :=
+  -- Step 1: convert msgBitLen → 8-byte BE; save to alt
+  [ shaPushI 9, shaOpc "OP_NUM2BIN"
+  , shaPushI 8, shaOpc "OP_SPLIT", .drop
+  , shaPushI 4, shaOpc "OP_SPLIT" ]
+  ++ shaReverseBytes4
+  ++ [.swap]
+  ++ shaReverseBytes4
+  ++ [ shaOpc "OP_CAT", shaOpc "OP_TOALTSTACK" ]
+  -- Step 2: pad remaining with 0x80
+  ++ [ .push (.bytes (ByteArray.mk #[0x80])), shaOpc "OP_CAT" ]
+  -- Get padded length
+  ++ [ shaOpc "OP_SIZE" ]
+  -- Branch on paddedLen < 57
+  ++ [ .dup, shaPushI 57, shaOpc "OP_LESSTHAN" ]
+  ++ [ shaOpc "OP_IF" ]
+  -- 1-block path: pad to 56 bytes
+  ++ [ shaPushI 56, .swap, shaOpc "OP_SUB"
+     , shaPushI 0, .swap, shaOpc "OP_NUM2BIN"
+     , shaOpc "OP_CAT"
+     , shaOpc "OP_FROMALTSTACK", shaOpc "OP_CAT" ]
+  ++ shaCompressOps
+  ++ [ shaOpc "OP_ELSE" ]
+  -- 2-block path: pad to 120 bytes
+  ++ [ shaPushI 120, .swap, shaOpc "OP_SUB"
+     , shaPushI 0, .swap, shaOpc "OP_NUM2BIN"
+     , shaOpc "OP_CAT"
+     , shaOpc "OP_FROMALTSTACK", shaOpc "OP_CAT"
+     , shaPushI 64, shaOpc "OP_SPLIT", shaOpc "OP_TOALTSTACK" ]
+  ++ shaCompressOps
+  ++ [ shaOpc "OP_FROMALTSTACK" ]
+  ++ shaCompressOps
+  ++ [ shaOpc "OP_ENDIF" ]
+
+/-- Lowering for `sha256Compress(state, block)`. The TS reference loads
+both args (PICK-style for non-last-uses, ROLL for last-uses) then splices
+`shaEmitCompress`. We mirror with `loadRefLive` / `loadRefLiveCopy` so
+the Lean output matches TS hex for fixtures with consume semantics. -/
+def lowerSha256CompressOpsLive (sm : StackMap) (bindingName : String)
+    (state block : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadState, sm1) := loadRefLive sm state currentIndex lastUses outerProtected
+  let (loadBlock, sm2) := loadRefLive sm1 block currentIndex lastUses outerProtected
+  -- After compress: pop state+block (2 slots) and push the new state
+  -- (named under `bindingName`). The compress body is depth-neutral: -1.
+  let smFinal := (sm2.popN 2).push bindingName
+  (loadState ++ loadBlock ++ shaEmitCompress, smFinal)
+
+/-- Non-liveness variant: PICK-style copies for both args. -/
+def lowerSha256CompressOps (sm : StackMap) (bindingName : String)
+    (state block : String) : (List StackOp × StackMap) :=
+  let s1 := loadRef sm state
+  let s2 := loadRef (sm.push state) block
+  let smFinal := sm.push bindingName
+  (s1 ++ s2 ++ shaEmitCompress, smFinal)
+
+/-- Lowering for `sha256Finalize(state, remaining, msgBitLen)`. -/
+def lowerSha256FinalizeOpsLive (sm : StackMap) (bindingName : String)
+    (state remaining msgBitLen : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadState, sm1) := loadRefLive sm state currentIndex lastUses outerProtected
+  let (loadRem, sm2)   := loadRefLive sm1 remaining currentIndex lastUses outerProtected
+  let (loadBits, sm3)  := loadRefLive sm2 msgBitLen currentIndex lastUses outerProtected
+  -- After finalize: pop 3 args, push 1 result.
+  let smFinal := (sm3.popN 3).push bindingName
+  (loadState ++ loadRem ++ loadBits ++ shaEmitFinalize, smFinal)
+
+/-- Non-liveness variant. -/
+def lowerSha256FinalizeOps (sm : StackMap) (bindingName : String)
+    (state remaining msgBitLen : String) : (List StackOp × StackMap) :=
+  let s1 := loadRef sm state
+  let s2 := loadRef (sm.push state) remaining
+  let s3 := loadRef ((sm.push state).push remaining) msgBitLen
+  let smFinal := sm.push bindingName
+  (s1 ++ s2 ++ s3 ++ shaEmitFinalize, smFinal)
+
 /-! ## Mutual lowering
 
 `lowerValue` and `lowerBindings` recurse via the `ifVal` and `loop`
@@ -2212,6 +2605,26 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                 currentIndex lastUses outerProtected
         | _ =>
             ([.opcode "OP_RUNAR_VERIFYRABINSIG_ARITY"], sm.push bindingName, localBindings)
+      else if func = "sha256Compress" then
+        -- Phase 4-D: dedicated lowering (mirrors TS `emitSha256Compress`
+        -- at `sha256-codegen.ts:217-219`).
+        match args with
+        | [state, block] =>
+            withLB <|
+              lowerSha256CompressOpsLive sm bindingName state block
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_SHA256COMPRESS_ARITY"], sm.push bindingName, localBindings)
+      else if func = "sha256Finalize" then
+        -- Phase 4-D: dedicated lowering (mirrors TS `emitSha256Finalize`
+        -- at `sha256-codegen.ts:229-311`).
+        match args with
+        | [state, remaining, msgBitLen] =>
+            withLB <|
+              lowerSha256FinalizeOpsLive sm bindingName state remaining msgBitLen
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_SHA256FINALIZE_ARITY"], sm.push bindingName, localBindings)
       else
         let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
         let opcodeOps := (builtinOpcode func).map (.opcode)
