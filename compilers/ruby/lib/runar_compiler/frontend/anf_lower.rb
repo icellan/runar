@@ -147,6 +147,7 @@ module RunarCompiler
 
       # Lower constructor
       ctor_ctx = LoweringContext.new(contract)
+      ctor_ctx.set_method_param_types(contract.constructor.params)
       ctor_ctx.lower_statements(contract.constructor.body)
       result << IR::ANFMethod.new(
         name: "constructor",
@@ -158,6 +159,7 @@ module RunarCompiler
       # Lower each method
       contract.methods.each do |method|
         method_ctx = LoweringContext.new(contract)
+        method_ctx.set_method_param_types(method.params)
 
         if contract.parent_class == "StatefulSmartContract" && method.visibility == "public"
           # Determine if this method verifies hashOutputs (needs change output support).
@@ -299,10 +301,24 @@ module RunarCompiler
         @contract = contract
         @local_names = Set.new
         @param_names = Set.new
+        # Type table for the CURRENT method's parameters. Method-scoped
+        # (not contract-scoped) so a parameter named `x` in one method
+        # doesn't bleed into byte-typed analysis of a different method
+        # that uses `x` as a local. See issue #34.
+        @method_param_types = {}
         @add_output_refs = []
         @local_aliases = {}
         @local_byte_vars = Set.new
         @current_source_loc = nil
+      end
+
+      # Populate the method-scoped param-type table. Called at the start
+      # of each method (and the constructor). See issue #34.
+      def set_method_param_types(params)
+        @method_param_types = {}
+        params.each do |p|
+          @method_param_types[p.name] = Frontend._type_node_to_string(p.type)
+        end
       end
 
       # Generate a fresh temp name.
@@ -379,18 +395,11 @@ module RunarCompiler
         @contract.properties.any? { |p| p.name == name }
       end
 
-      # Look up a parameter type by name across constructor and methods.
+      # Look up the type of a parameter in the CURRENT method. Method-scoped
+      # — see issue #34.
       # @return [String, nil]
       def get_param_type(name)
-        @contract.constructor.params.each do |p|
-          return Frontend._type_node_to_string(p.type) if p.name == name
-        end
-        @contract.methods.each do |m|
-          m.params.each do |p|
-            return Frontend._type_node_to_string(p.type) if p.name == name
-          end
-        end
-        nil
+        @method_param_types[name]
       end
 
       # Look up a property type by name.
@@ -417,6 +426,7 @@ module RunarCompiler
         sub.instance_variable_set(:@counter, @counter)
         sub.instance_variable_set(:@local_names, @local_names.dup)
         sub.instance_variable_set(:@param_names, @param_names.dup)
+        sub.instance_variable_set(:@method_param_types, @method_param_types.dup)
         sub.instance_variable_set(:@local_aliases, @local_aliases.dup)
         sub.instance_variable_set(:@local_byte_vars, @local_byte_vars.dup)
         sub
