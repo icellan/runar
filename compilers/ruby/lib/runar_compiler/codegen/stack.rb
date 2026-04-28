@@ -1918,6 +1918,17 @@ module RunarCompiler::Codegen
       emit_op({ op: "push", value: { kind: "bigint", big_int: 1 } })  # exp base 1(acc)
 
       max_pow_iterations = 32
+
+      # Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+      # Bitcoin Script can't loop, so the iteration count is fixed at
+      # compile time. Without this guard, exp > MAX would silently
+      # saturate at base^MAX (issue #34). Script aborts cleanly now.
+      emit_op({ op: "push", value: { kind: "bigint", big_int: 2 } })
+      emit_op({ op: "pick" })
+      emit_op({ op: "push", value: { kind: "bigint", big_int: max_pow_iterations } })
+      emit_opcode("OP_LESSTHANOREQUAL")
+      emit_opcode("OP_VERIFY")
+
       max_pow_iterations.times do |i|
         emit_op({ op: "push", value: { kind: "bigint", big_int: 2 } })
         emit_op({ op: "pick" })
