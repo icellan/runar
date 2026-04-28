@@ -165,6 +165,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 	// Lower constructor (the TS reference includes the constructor in output)
 	ctorCtx := newLowerCtx(contract)
+	ctorCtx.setMethodParamTypes(contract.Constructor.Params)
 	ctorCtx.lowerStatements(contract.Constructor.Body)
 	result = append(result, ir.ANFMethod{
 		Name:     "constructor",
@@ -176,6 +177,7 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	// Lower each method (including private methods as separate entries)
 	for _, method := range contract.Methods {
 		methodCtx := newLowerCtx(contract)
+		methodCtx.setMethodParamTypes(method.Params)
 
 		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
 			// Determine if this method verifies hashOutputs (needs change output support).
@@ -318,6 +320,11 @@ type lowerCtx struct {
 	contract         *ContractNode
 	localNames       map[string]bool   // tracks variable names registered via addLocal
 	paramNames       map[string]bool   // tracks parameter names registered via addParam
+	// methodParamTypes is the type table for the CURRENT method's parameters.
+	// Method-scoped (not contract-scoped) so a parameter named `x` in one
+	// method doesn't bleed into byte-typed analysis of a different method
+	// that uses `x` as a local. See issue #34.
+	methodParamTypes map[string]string
 	addOutputRefs    []string          // tracks addOutput binding refs for multi-output continuation
 	localAliases     map[string]string // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
 	localByteVars    map[string]bool   // tracks local variables known to be byte-typed
@@ -326,11 +333,24 @@ type lowerCtx struct {
 
 func newLowerCtx(contract *ContractNode) *lowerCtx {
 	return &lowerCtx{
-		contract:      contract,
-		localNames:    make(map[string]bool),
-		paramNames:    make(map[string]bool),
-		localAliases:  make(map[string]string),
-		localByteVars: make(map[string]bool),
+		contract:         contract,
+		localNames:       make(map[string]bool),
+		paramNames:       make(map[string]bool),
+		methodParamTypes: make(map[string]string),
+		localAliases:     make(map[string]string),
+		localByteVars:    make(map[string]bool),
+	}
+}
+
+// setMethodParamTypes populates the method-scoped param-type table for the
+// current method (or constructor). Called at the start of each method's
+// lowering. See issue #34.
+func (ctx *lowerCtx) setMethodParamTypes(params []ParamNode) {
+	for k := range ctx.methodParamTypes {
+		delete(ctx.methodParamTypes, k)
+	}
+	for _, p := range params {
+		ctx.methodParamTypes[p.Name] = typeNodeToString(p.Type)
 	}
 }
 
@@ -411,20 +431,11 @@ func (ctx *lowerCtx) isProperty(name string) bool {
 	return false
 }
 
+// getParamType returns the type of a parameter in the CURRENT method.
+// Method-scoped — see issue #34.
 func (ctx *lowerCtx) getParamType(name string) (string, bool) {
-	for _, p := range ctx.contract.Constructor.Params {
-		if p.Name == name {
-			return typeNodeToString(p.Type), true
-		}
-	}
-	for _, method := range ctx.contract.Methods {
-		for _, p := range method.Params {
-			if p.Name == name {
-				return typeNodeToString(p.Type), true
-			}
-		}
-	}
-	return "", false
+	t, ok := ctx.methodParamTypes[name]
+	return t, ok
 }
 
 func (ctx *lowerCtx) getPropertyType(name string) (string, bool) {
@@ -440,12 +451,13 @@ func (ctx *lowerCtx) getPropertyType(name string) (string, bool) {
 // The counter continues from the parent. Local names and param names are shared.
 func (ctx *lowerCtx) subContext() *lowerCtx {
 	sub := &lowerCtx{
-		contract:      ctx.contract,
-		counter:       ctx.counter,
-		localNames:    make(map[string]bool),
-		paramNames:    make(map[string]bool),
-		localAliases:  make(map[string]string),
-		localByteVars: make(map[string]bool),
+		contract:         ctx.contract,
+		counter:          ctx.counter,
+		localNames:       make(map[string]bool),
+		paramNames:       make(map[string]bool),
+		methodParamTypes: make(map[string]string),
+		localAliases:     make(map[string]string),
+		localByteVars:    make(map[string]bool),
 	}
 	// Share local name set
 	for k := range ctx.localNames {
@@ -454,6 +466,10 @@ func (ctx *lowerCtx) subContext() *lowerCtx {
 	// Share param name set
 	for k := range ctx.paramNames {
 		sub.paramNames[k] = true
+	}
+	// Share method-scoped param types
+	for k, v := range ctx.methodParamTypes {
+		sub.methodParamTypes[k] = v
 	}
 	// Share local byte var set
 	for k := range ctx.localByteVars {
