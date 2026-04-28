@@ -223,10 +223,15 @@ The verification lead should refine these by:
 namespace Crypto
 
 -- Hashes
-axiom sha256          : ByteArray → ByteArray
-axiom ripemd160       : ByteArray → ByteArray
-axiom hash160         : ByteArray → ByteArray
-axiom hash256         : ByteArray → ByteArray
+-- Five hashes used by Bitcoin Script opcodes (`OP_SHA256`, `OP_HASH160`, etc.)
+-- are declared as `opaque` rather than `axiom` so the Stack VM in
+-- `RunarVerification.Stack.Eval` can call them without becoming noncomputable.
+-- Mathematically the two forms are equivalent: `opaque f := stub` exposes only
+-- the type signature, the body is hidden from proofs (the stub is unobservable).
+opaque sha256 (_ : ByteArray) : ByteArray := ByteArray.empty
+opaque ripemd160 (_ : ByteArray) : ByteArray := ByteArray.empty
+opaque hash160 (_ : ByteArray) : ByteArray := ByteArray.empty
+opaque hash256 (_ : ByteArray) : ByteArray := ByteArray.empty
 axiom sha256Compress  : ByteArray → ByteArray → ByteArray
 axiom sha256Finalize  : ByteArray → ByteArray → Int → ByteArray
 axiom blake3Compress  : ByteArray → ByteArray → ByteArray
@@ -294,7 +299,7 @@ axiom extractSigHashType   : ByteArray → Int
 -- Signature & preimage verifiers (the two are mocked-true in the TS interpreters,
 -- but for the Lean model we leave them axiomatized so a future
 -- behavioural-soundness theorem can quantify over preimage validity.)
-axiom checkSig         : ByteArray → ByteArray → Bool
+opaque checkSig (_ _ : ByteArray) : Bool := false
 axiom checkMultiSig    : List ByteArray → List ByteArray → Bool
 /--
 `checkPreimage` decides whether the given byte-string is a valid

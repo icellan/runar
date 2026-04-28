@@ -370,6 +370,52 @@ jobs:
           done
           exit $fail
 
+  runar-verification:
+    name: Runar Verification (Lean 4)
+    needs:
+      - ts-compiler
+      - go-compiler
+      - rust-compiler
+      - python-compiler
+      - zig-compiler
+      - ruby-compiler
+      - java-compiler
+      - go-sdk
+      - rust-sdk
+      - python-sdk
+      - zig-sdk
+      - ruby-sdk
+      - java-sdk
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Cache elan and Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            runar-verification/.lake/build
+          key: runar-verification-${{ runner.os }}-${{ hashFiles('runar-verification/lean-toolchain', 'runar-verification/lakefile.lean', 'runar-verification/lake-manifest.json') }}
+          restore-keys: |
+            runar-verification-${{ runner.os }}-
+      - name: Build
+        working-directory: runar-verification
+        run: lake build
+      - name: Run GoldenLoad tests
+        working-directory: runar-verification
+        run: lake env lean --run tests/GoldenLoad.lean
+      - name: Run Roundtrip tests
+        working-directory: runar-verification
+        run: lake env lean --run tests/Roundtrip.lean
+      - name: Run PipelineGolden tests
+        working-directory: runar-verification
+        run: lake env lean --run tests/PipelineGolden.lean
+
   sdk-conformance:
     name: SDK Output Conformance
     needs: [ts-compiler, go-sdk, rust-sdk, python-sdk, zig-sdk, ruby-sdk, java-sdk]

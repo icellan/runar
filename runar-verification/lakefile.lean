@@ -18,3 +18,7 @@ lean_exe goldenLoad where
 lean_exe roundtrip where
   root := `tests.Roundtrip
   supportInterpreter := true
+
+lean_exe pipelineGolden where
+  root := `tests.PipelineGolden
+  supportInterpreter := true
