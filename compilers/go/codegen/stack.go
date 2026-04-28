@@ -3474,6 +3474,18 @@ func (ctx *loweringContext) lowerPow(bindingName string, args []string, bindingI
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(1)})    // exp base 1(acc)
 
 	const maxPowIterations = 32
+
+	// Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+	// Bitcoin Script can't loop, so the iteration count is fixed at compile
+	// time. Without this guard, exp > maxPowIterations would silently
+	// saturate at base^maxPowIterations — a quiet correctness bug
+	// (issue #34). Script aborts cleanly on larger exponents now.
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_PICK"}) // exp base acc exp
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(maxPowIterations))})
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_LESSTHANOREQUAL"}) // exp base acc (exp <= MAX)
+	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_VERIFY"})
+
 	for i := 0; i < maxPowIterations; i++ {
 		// Stack: exp base acc
 		ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(2)})

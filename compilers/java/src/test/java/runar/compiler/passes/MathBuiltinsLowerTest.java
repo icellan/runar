@@ -166,13 +166,18 @@ class MathBuiltinsLowerTest {
         );
         // Each round emits an IfOp with {OVER, OP_MUL}. Count IfOps at the
         // call site — there's exactly one outer IF per round (32 rounds).
-        // Also one initial OP_PICK per round.
-        assertEquals(32, countOpcode(ops, "OP_PICK"),
-            "pow must emit exactly 32 OP_PICK opcodes (one per loop iteration)");
+        // Also one initial OP_PICK per round, plus ONE extra OP_PICK for
+        // the runtime exp<=32 guard added in issue #34.
+        assertEquals(33, countOpcode(ops, "OP_PICK"),
+            "pow must emit 33 OP_PICK opcodes (32 loop iterations + 1 guard)");
         assertEquals(32, countOpcode(ops, "OP_GREATERTHAN"),
             "pow must emit exactly 32 OP_GREATERTHAN opcodes");
         assertEquals(32, countOpcode(ops, "OP_MUL"),
             "pow must emit exactly 32 OP_MUL opcodes (one inside each IF branch)");
+        assertEquals(1, countOpcode(ops, "OP_LESSTHANOREQUAL"),
+            "pow must emit a single OP_LESSTHANOREQUAL guard (issue #34)");
+        assertEquals(1, countOpcode(ops, "OP_VERIFY"),
+            "pow must emit a single OP_VERIFY guard (issue #34)");
     }
 
     @Test

@@ -1190,6 +1190,18 @@ public final class StackLower {
             emitOp(new PushOp(PushValue.of(1)));           // exp base 1(acc)
 
             final int maxPowIterations = 32;
+
+            // Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+            // Bitcoin Script can't loop, so the iteration count is fixed at
+            // compile time. Without this guard, exp > maxPowIterations
+            // would silently saturate at base^maxPowIterations (issue #34).
+            // Script aborts cleanly on larger exponents now.
+            emitOp(new PushOp(PushValue.of(2)));
+            emitOp(new OpcodeOp("OP_PICK"));               // exp base acc exp
+            emitOp(new PushOp(PushValue.of(maxPowIterations)));
+            emitOp(new OpcodeOp("OP_LESSTHANOREQUAL"));    // exp base acc (exp <= MAX)
+            emitOp(new OpcodeOp("OP_VERIFY"));
+
             for (int i = 0; i < maxPowIterations; i++) {
                 emitOp(new PushOp(PushValue.of(2)));
                 emitOp(new OpcodeOp("OP_PICK"));            // exp base acc exp

@@ -2103,6 +2103,17 @@ const LowerCtx = struct {
 
         try self.emitOp(.op_swap);
         try self.emitPushInt(1);
+
+        // Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+        // Bitcoin Script can't loop, so the iteration count is fixed at
+        // compile time. Without this guard, exp > 32 would silently
+        // saturate at base^32 (issue #34). Script aborts cleanly now.
+        try self.emitPushInt(2);
+        try self.emitOp(.op_pick);
+        try self.emitPushInt(32);
+        try self.emitOp(.op_lessthanorequal);
+        try self.emitOp(.op_verify);
+
         var iter: u32 = 0;
         while (iter < 32) : (iter += 1) {
             try self.emitPushInt(2);
