@@ -12,7 +12,6 @@ import type {
   ForStatement,
   Identifier,
   IfStatement,
-  MemberExpr,
   PropertyAccessExpr,
   ReturnStatement,
   TernaryExpr,

@@ -40,7 +40,13 @@ const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
 // TS examples that don't yet have a Zig port. Empty today; kept as an
 // explicit hook so future TS-only landings can be tracked here rather
 // than silently dropped from parity.
-const ZIG_PORT_PENDING: readonly string[] = [];
+const ZIG_PORT_PENDING: readonly string[] = [
+  // Zig parser does not yet support array literal expressions
+  // (checkMultiSig signature).
+  'multisig-2of3/MultiSig2of3.runar.zig',
+  // Issue #34 regression fixture — TS-only initially; Zig port to follow.
+  'nested-if-multi-reassign/StackTrackerRepro.runar.zig',
+];
 
 describe('Zig parser: example inventory', () => {
   it('ships a Zig example for every native example contract (minus known pending ports)', () => {
