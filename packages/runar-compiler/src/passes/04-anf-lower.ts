@@ -106,6 +106,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
 
   // Lower constructor
   const ctorCtx = new LoweringContext(contract);
+  ctorCtx.setMethodParamTypes(contract.constructor.params);
   lowerStatements(contract.constructor.body, ctorCtx);
   result.push({
     name: 'constructor',
@@ -117,6 +118,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
   // Lower each method
   for (const method of contract.methods) {
     const methodCtx = new LoweringContext(contract);
+    methodCtx.setMethodParamTypes(method.params);
 
     if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
       // Determine if this method verifies hashOutputs (needs change output support).
@@ -126,16 +128,16 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
 
       // Register implicit parameters
       if (needsChangeOutput) {
-        methodCtx.addParam('_changePKH');
-        methodCtx.addParam('_changeAmount');
+        methodCtx.addParam('_changePKH', 'Ripemd160');
+        methodCtx.addParam('_changeAmount', 'bigint');
       }
       // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
       // Multi-output (addOutput) methods already specify amounts explicitly per output.
       const needsNewAmount = methodMutatesState(method, contract) && !methodHasAddOutput(method);
       if (needsNewAmount) {
-        methodCtx.addParam('_newAmount');
+        methodCtx.addParam('_newAmount', 'bigint');
       }
-      methodCtx.addParam('txPreimage');
+      methodCtx.addParam('txPreimage', 'SigHashPreimage');
 
       // Inject checkPreimage(txPreimage) at the start
       const preimageRef = methodCtx.emit({ kind: 'load_param', name: 'txPreimage' });
@@ -240,6 +242,13 @@ class LoweringContext {
   private counter = 0;
   private readonly contract: ContractNode;
   private readonly paramNames: Set<string> = new Set();
+  /**
+   * Param types for the CURRENT method being lowered, keyed by name.
+   * Method-scoped (not contract-scoped) so a parameter named `x` in one
+   * method doesn't bleed into byte-typed analysis of a different method
+   * that uses `x` as a local. See issue #34.
+   */
+  private readonly methodParamTypes: Map<string, string> = new Map();
   private readonly localNames: Set<string> = new Set();
   private readonly localByteVars: Set<string> = new Set();
   private readonly _addOutputRefs: string[] = [];
@@ -275,8 +284,21 @@ class LoweringContext {
   }
 
   /** Record a parameter name so we know to use load_param for it. */
-  addParam(name: string): void {
+  addParam(name: string, type?: string): void {
     this.paramNames.add(name);
+    if (type !== undefined) this.methodParamTypes.set(name, type);
+  }
+
+  /** Record the current method's parameter types in a method-scoped table.
+   * Only updates the type table — does NOT add to `paramNames`, since
+   * historical behavior for constructors (which don't call addParam) is
+   * preserved by the `isParam` check.
+   * Use `addParam(name, type)` to register a name AND its type. */
+  setMethodParamTypes(params: ParamNode[]): void {
+    this.methodParamTypes.clear();
+    for (const p of params) {
+      this.methodParamTypes.set(p.name, typeNodeToString(p.type));
+    }
   }
 
   /** Record a local variable name so we know it's a local ref. */
@@ -331,17 +353,13 @@ class LoweringContext {
     return this._addOutputRefs;
   }
 
-  /** Look up the type of a method parameter by name. Returns the type string or null. */
+  /** Look up the type of a method parameter by name. Returns the type string or null.
+   * Restricted to the CURRENT method's parameters — see issue #34.
+   * Cross-method lookup poisoned the byte-type analysis when two methods
+   * shared a parameter name (e.g. one method's local `x: bigint` collided
+   * with another method's `x: ByteString` parameter). */
   getParamType(name: string): string | null {
-    // Search all methods' params for a matching name
-    for (const method of [this.contract.constructor, ...this.contract.methods]) {
-      for (const p of method.params) {
-        if (p.name === name) {
-          return typeNodeToString(p.type);
-        }
-      }
-    }
-    return null;
+    return this.methodParamTypes.get(name) ?? null;
   }
 
   isStatefulContextParam(name: string): boolean {
@@ -364,6 +382,7 @@ class LoweringContext {
     sub.counter = this.counter;
     // Share the parameter, local name sets, and aliases
     for (const p of this.paramNames) sub.paramNames.add(p);
+    for (const [k, v] of this.methodParamTypes) sub.methodParamTypes.set(k, v);
     for (const l of this.localNames) sub.localNames.add(l);
     for (const b of this.localByteVars) sub.localByteVars.add(b);
     for (const [k, v] of this.localAliases) sub.localAliases.set(k, v);
