@@ -88,6 +88,7 @@ test {
     _ = @import("./math-demo/MathDemo_test.zig");
     _ = @import("./merkle-proof/MerkleProofDemo_test.zig");
     _ = @import("./message-board/MessageBoard_test.zig");
+    _ = @import("./multisig-2of3/MultiSig2of3_test.zig");
     _ = @import("./oracle-price/OraclePriceFeed_test.zig");
     _ = @import("./ordinal-nft/OrdinalNFT_test.zig");
     _ = @import("./p2blake3pkh/P2Blake3PKH_test.zig");
@@ -110,4 +111,19 @@ test {
     _ = @import("./fixed-array-nested/Grid2x2_test.zig");
     _ = @import("./p256-wallet/P256Wallet_test.zig");
     _ = @import("./p384-wallet/P384Wallet_test.zig");
+    _ = @import("./add-data-output/DataOutputTest_test.zig");
+    _ = @import("./arithmetic/Arithmetic_test.zig");
+    _ = @import("./boolean-logic/BooleanLogic_test.zig");
+    _ = @import("./bounded-loop/BoundedLoop_test.zig");
+    _ = @import("./ec-primitives/ECPrimitives_test.zig");
+    _ = @import("./if-else/IfElse_test.zig");
+    _ = @import("./if-without-else/IfWithoutElse_test.zig");
+    _ = @import("./multi-method/MultiMethod_test.zig");
+    _ = @import("./p256-primitives/P256Primitives_test.zig");
+    _ = @import("./p384-primitives/P384Primitives_test.zig");
+    _ = @import("./shift-ops/ShiftOps_test.zig");
+    _ = @import("./state-ripemd160/HashRegistry_test.zig");
+    _ = @import("./stateful/Stateful_test.zig");
+    _ = @import("./post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure_test.zig");
+    _ = @import("./post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.zig");
 }

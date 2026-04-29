@@ -14,10 +14,12 @@ import static runar.lang.Builtins.hash160;
 import static runar.lang.Builtins.verifySLHDSA_SHA2_128s;
 
 /**
- * Hybrid ECDSA + SLH-DSA-SHA2-128s (SPHINCS+) post-quantum wallet.
+ * SPHINCSWallet -- Hybrid ECDSA + SLH-DSA-SHA2-128s (SPHINCS+) post-quantum
+ * wallet.
  *
- * <p>Ports {@code examples/python/sphincs-wallet/SPHINCSWallet.runar.py}
- * to Java.
+ * <p>Ports {@code examples/go/sphincs-wallet/SPHINCSWallet.runar.go} (the
+ * language gold-standard reference) and
+ * {@code examples/python/sphincs-wallet/SPHINCSWallet.runar.py} to Java.
  *
  * <h2>Security model: two-layer authentication</h2>
  * <ol>
@@ -36,6 +38,41 @@ import static runar.lang.Builtins.verifySLHDSA_SHA2_128s;
  *
  * <p>Unlike WOTS+ (one-time), SLH-DSA is stateless and the same keypair
  * can sign many messages -- it is NIST FIPS 205 standardized.
+ *
+ * <h2>Constructor</h2>
+ * <ul>
+ *   <li>{@code ecdsaPubKeyHash} ({@link Addr}, readonly) -- HASH160 of the
+ *       compressed ECDSA public key (20 bytes).</li>
+ *   <li>{@code slhdsaPubKeyHash} ({@link ByteString}, readonly) -- HASH160
+ *       of the 32-byte SLH-DSA public key (20 bytes).</li>
+ * </ul>
+ *
+ * <h2>Locking script layout (~200 KB)</h2>
+ * <pre>
+ *   Unlocking: &lt;slhdsaSig(7856B)&gt; &lt;slhdsaPubKey(32B)&gt; &lt;ecdsaSig(~72B)&gt; &lt;ecdsaPubKey(33B)&gt;
+ *
+ *   Locking:
+ *     // --- ECDSA verification (P2PKH) ---
+ *     OP_OVER OP_TOALTSTACK
+ *     OP_DUP OP_HASH160 &lt;ecdsaPubKeyHash(20B)&gt; OP_EQUALVERIFY OP_CHECKSIG OP_VERIFY
+ *     // --- SLH-DSA pubkey commitment ---
+ *     OP_DUP OP_HASH160 &lt;slhdsaPubKeyHash(20B)&gt; OP_EQUALVERIFY
+ *     // --- SLH-DSA verification ---
+ *     OP_FROMALTSTACK OP_ROT OP_ROT
+ *     &lt;verifySLHDSA ~200KB inline&gt;
+ * </pre>
+ *
+ * <h2>Parameter sizes</h2>
+ * <ul>
+ *   <li>{@code slhdsaSig}: 7,856 bytes (SLH-DSA-SHA2-128s signature).</li>
+ *   <li>{@code slhdsaPubKey}: 32 bytes ({@code PK.seed || PK.root}).</li>
+ *   <li>{@code ecdsaSig}: ~72 bytes (DER-encoded ECDSA + sighash flag).</li>
+ *   <li>{@code ecdsaPubKey}: 33 bytes (compressed secp256k1 public key).</li>
+ * </ul>
+ *
+ * <p>Peer to {@link runar.examples.postquantumwallet.PostQuantumWallet} (WOTS+),
+ * {@link runar.examples.p256wallet.P256Wallet}, and
+ * {@link runar.examples.p384wallet.P384Wallet}.
  */
 class SPHINCSWallet extends SmartContract {
 

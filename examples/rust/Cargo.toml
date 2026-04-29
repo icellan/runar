@@ -152,3 +152,63 @@ path = "ec-unit/ECUnit_test.rs"
 [[test]]
 name = "add_raw_output"
 path = "add-raw-output/RawOutputTest_test.rs"
+
+[[test]]
+name = "stateful"
+path = "stateful/Stateful_test.rs"
+
+[[test]]
+name = "state_ripemd160_hash_registry"
+path = "state-ripemd160/HashRegistry_test.rs"
+
+[[test]]
+name = "multi_method"
+path = "multi-method/MultiMethod_test.rs"
+
+[[test]]
+name = "arithmetic"
+path = "arithmetic/Arithmetic_test.rs"
+
+[[test]]
+name = "boolean_logic"
+path = "boolean-logic/BooleanLogic_test.rs"
+
+[[test]]
+name = "bounded_loop"
+path = "bounded-loop/BoundedLoop_test.rs"
+
+[[test]]
+name = "if_else"
+path = "if-else/IfElse_test.rs"
+
+[[test]]
+name = "if_without_else"
+path = "if-without-else/IfWithoutElse_test.rs"
+
+[[test]]
+name = "shift_ops"
+path = "shift-ops/ShiftOps_test.rs"
+
+[[test]]
+name = "add_data_output"
+path = "add-data-output/DataOutputTest_test.rs"
+
+[[test]]
+name = "ec_primitives"
+path = "ec-primitives/ECPrimitives_test.rs"
+
+[[test]]
+name = "p256_primitives"
+path = "p256-primitives/P256Primitives_test.rs"
+
+[[test]]
+name = "p384_primitives"
+path = "p384-primitives/P384Primitives_test.rs"
+
+[[test]]
+name = "post_quantum_slhdsa_naive_insecure"
+path = "post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure_test.rs"
+
+[[test]]
+name = "post_quantum_wots_naive_insecure"
+path = "post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure_test.rs"
