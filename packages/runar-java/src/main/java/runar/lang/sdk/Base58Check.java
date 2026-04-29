@@ -29,7 +29,14 @@ final class Base58Check {
         return encode(full);
     }
 
-    /** Returns the 20-byte pubkey hash from a mainnet P2PKH address. */
+    /**
+     * Returns the 20-byte pubkey hash from a P2PKH address. Accepts both
+     * mainnet (version byte 0x00, addresses starting with `1`) and
+     * testnet/regtest (version byte 0x6f, addresses starting with `m`/`n`)
+     * encodings. The SDK and integration tests both call into here, and
+     * regtest-backed integration suites need the testnet form to match
+     * what `importaddress` / `listunspent` use on the node.
+     */
     static byte[] decodeP2PKH(String address) {
         byte[] decoded = decode(address);
         if (decoded.length != 25) {
@@ -43,8 +50,11 @@ final class Base58Check {
                 throw new IllegalArgumentException("Base58Check: checksum mismatch");
             }
         }
-        if (payload[0] != 0x00) {
-            throw new IllegalArgumentException("Base58Check: not a mainnet P2PKH address");
+        byte version = payload[0];
+        if (version != 0x00 && version != 0x6f) {
+            throw new IllegalArgumentException(
+                "Base58Check: unsupported P2PKH version byte 0x"
+                    + String.format("%02x", version & 0xff));
         }
         byte[] h = new byte[20];
         System.arraycopy(payload, 1, h, 0, 20);
