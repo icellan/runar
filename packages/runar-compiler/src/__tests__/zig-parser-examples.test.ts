@@ -37,10 +37,17 @@ const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
   .map((file) => file.replace(/\.runar\.ts$/, '.runar.zig'))
   .sort();
 
-// TS examples that don't yet have a Zig port. Empty today; kept as an
-// explicit hook so future TS-only landings can be tracked here rather
-// than silently dropped from parity.
-const ZIG_PORT_PENDING: readonly string[] = [];
+// TS examples that don't yet have a Zig port. Listed explicitly so future
+// TS-only landings can be tracked here rather than silently dropped from
+// parity.
+//
+// multisig-2of3: Zig's `&.{sig1, sig2}` slice-coercion form for
+// `checkMultiSig` is not yet handled by `01-parse-zig.ts`'s expression
+// grammar (no `&` unary, no `[_]T{…}` typed literal). Pending an extension
+// to the relaxed parser; tracked here until a Zig port lands.
+const ZIG_PORT_PENDING: readonly string[] = [
+  'multisig-2of3/MultiSig2of3.runar.zig',
+];
 
 describe('Zig parser: example inventory', () => {
   it('ships a Zig example for every native example contract (minus known pending ports)', () => {
