@@ -1,5 +1,6 @@
 package runar.lang.sdk;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -174,4 +175,120 @@ public final class TransactionBuilder {
     }
 
     public record CallResult(String txHex, String newLockingScriptHex) {}
+
+    // ------------------------------------------------------------------
+    // Full call-tx layout (OP_PUSH_TX flow)
+    // ------------------------------------------------------------------
+
+    /**
+     * Builds a call transaction that funds the fee from a list of P2PKH
+     * UTXOs owned by the signer. Used by {@link RunarContract#call} for
+     * stateful contracts and stateless OP_PUSH_TX contracts.
+     *
+     * <p>Layout:
+     * <ul>
+     *   <li>Input 0: {@code currentUtxo} with the supplied unlocking script.</li>
+     *   <li>Inputs 1..n: P2PKH funding UTXOs from {@code additionalUtxos}
+     *       (left empty here; the caller signs them after the layout
+     *       settles).</li>
+     *   <li>Output 0 (optional): contract continuation with
+     *       {@code newLockingScriptHex} and {@code newSatoshis} sats.</li>
+     *   <li>Output 1 (optional): P2PKH change to the signer's address.</li>
+     * </ul>
+     *
+     * <p>Returns the {@link RawTx} (mutable, for splice-in) plus the
+     * computed change amount that must be encoded inside the unlocking
+     * script's {@code _changeAmount} push.
+     */
+    public static CallTxResult buildCallTransactionFull(
+        UTXO currentUtxo,
+        String unlockingScriptHex,
+        String newLockingScriptHex,
+        long newSatoshis,
+        List<UTXO> additionalUtxos,
+        String changeAddress,
+        long feeRate
+    ) {
+        long rate = feeRate > 0 ? feeRate : FeeEstimator.DEFAULT_FEE_RATE;
+
+        // Greedy largest-first selection of P2PKH funding UTXOs to cover
+        // the fee. Stateful contracts forward all contract sats to the
+        // continuation, so the funding inputs alone pay the fee.
+        List<UTXO> sortedFunding = new ArrayList<>(additionalUtxos);
+        sortedFunding.sort((a, b) -> Long.compare(b.satoshis(), a.satoshis()));
+
+        long contractIn = currentUtxo.satoshis();
+        long contractOutSats = newLockingScriptHex == null
+            ? 0
+            : (newSatoshis > 0 ? newSatoshis : currentUtxo.satoshis());
+
+        // Always emit a P2PKH change output for the signer; this is the
+        // only sink for the funding UTXOs' surplus and matches the Go
+        // SDK's stateful-call layout.
+        String changeScript = ScriptUtils.buildP2PKHScript(changeAddress);
+        int contractInputScriptLen = unlockingScriptHex.length() / 2;
+        int[] contractOutputLens = newLockingScriptHex == null
+            ? new int[0]
+            : new int[] { newLockingScriptHex.length() / 2 };
+
+        List<UTXO> selected = new ArrayList<>();
+        long totalFunding = 0;
+        long fee;
+        long change;
+        // Iterate: add UTXOs until inputs cover the contract output +
+        // estimated fee with positive change.
+        int i = 0;
+        while (true) {
+            fee = FeeEstimator.estimateCallFee(
+                contractInputScriptLen, 0, selected.size(),
+                contractOutputLens, /*withChange*/ true, rate
+            );
+            change = contractIn + totalFunding - contractOutSats - fee;
+            if (change >= 0 || i >= sortedFunding.size()) break;
+            UTXO next = sortedFunding.get(i++);
+            selected.add(next);
+            totalFunding += next.satoshis();
+        }
+        if (change < 0) {
+            throw new IllegalStateException(
+                "TransactionBuilder.buildCallTransactionFull: insufficient funds: "
+                    + "need fee " + fee + " + contract output " + contractOutSats
+                    + ", have contract " + contractIn + " + funding " + totalFunding
+            );
+        }
+
+        RawTx tx = new RawTx();
+        tx.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), unlockingScriptHex);
+        for (UTXO f : selected) {
+            tx.addInput(f.txid(), f.outputIndex(), "");
+        }
+        if (newLockingScriptHex != null) {
+            tx.addOutput(contractOutSats, newLockingScriptHex);
+        }
+        if (change > 0) {
+            tx.addOutput(change, changeScript);
+        }
+        return new CallTxResult(tx, change, selected);
+    }
+
+    /**
+     * Result of {@link #buildCallTransactionFull}. {@link #tx()} is
+     * mutable so callers can splice in real signatures and unlocking
+     * scripts after they've been computed against the laid-out tx.
+     */
+    public static final class CallTxResult {
+        private final RawTx tx;
+        private final long changeAmount;
+        private final List<UTXO> fundingUtxos;
+
+        CallTxResult(RawTx tx, long changeAmount, List<UTXO> fundingUtxos) {
+            this.tx = tx;
+            this.changeAmount = changeAmount;
+            this.fundingUtxos = List.copyOf(fundingUtxos);
+        }
+
+        RawTx tx() { return tx; }
+        public long changeAmount() { return changeAmount; }
+        public List<UTXO> fundingUtxos() { return fundingUtxos; }
+    }
 }

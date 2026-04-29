@@ -25,7 +25,8 @@ public record RunarArtifact(
     List<ConstructorSlot> constructorSlots,
     List<CodeSepIndexSlot> codeSepIndexSlots,
     Integer codeSeparatorIndex,
-    List<Integer> codeSeparatorIndices
+    List<Integer> codeSeparatorIndices,
+    Map<String, Object> anf
 ) {
 
     public RunarArtifact {
@@ -33,6 +34,28 @@ public record RunarArtifact(
         constructorSlots = constructorSlots == null ? List.of() : Collections.unmodifiableList(constructorSlots);
         codeSepIndexSlots = codeSepIndexSlots == null ? List.of() : Collections.unmodifiableList(codeSepIndexSlots);
         codeSeparatorIndices = codeSeparatorIndices == null ? List.of() : Collections.unmodifiableList(codeSeparatorIndices);
+    }
+
+    /** Backwards-compatible constructor without {@code anf} (defaults to {@code null}). */
+    public RunarArtifact(
+        String version,
+        String compilerVersion,
+        String contractName,
+        ABI abi,
+        String scriptHex,
+        String asm,
+        String buildTimestamp,
+        List<StateField> stateFields,
+        List<ConstructorSlot> constructorSlots,
+        List<CodeSepIndexSlot> codeSepIndexSlots,
+        Integer codeSeparatorIndex,
+        List<Integer> codeSeparatorIndices
+    ) {
+        this(
+            version, compilerVersion, contractName, abi, scriptHex, asm, buildTimestamp,
+            stateFields, constructorSlots, codeSepIndexSlots,
+            codeSeparatorIndex, codeSeparatorIndices, null
+        );
     }
 
     public boolean isStateful() {
@@ -88,6 +111,11 @@ public record RunarArtifact(
             for (Object o : cil) codeSepIndices.add(Json.asInt(o));
         }
 
+        Map<String, Object> anfMap = null;
+        if (m.get("anf") instanceof Map<?, ?> rawAnf) {
+            anfMap = Json.asObject(rawAnf);
+        }
+
         return new RunarArtifact(
             version,
             compilerVersion,
@@ -100,7 +128,8 @@ public record RunarArtifact(
             cs,
             cssi,
             codeSep,
-            codeSepIndices
+            codeSepIndices,
+            anfMap
         );
     }
 

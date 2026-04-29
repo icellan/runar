@@ -1,6 +1,7 @@
 package runar.lang.sdk;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
 
 /**
  * OP_PUSHTX (sighash-injection) helper for {@code checkPreimage()}-style
@@ -170,6 +171,49 @@ final class OpPushTx {
 
     /** Result of {@link #prepare}: the BIP-143 preimage and the single-push unlocking script. */
     record PushTxResult(byte[] preimage, byte[] unlockingScript) {}
+
+    // ------------------------------------------------------------------
+    // OP_PUSH_TX signature (k = 1, d = 1)
+    // ------------------------------------------------------------------
+
+    /** secp256k1 group order. */
+    private static final BigInteger CURVE_N = new BigInteger(
+        "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16);
+    /** secp256k1 generator x-coordinate (= r when k = 1). */
+    private static final BigInteger CURVE_GX = new BigInteger(
+        "79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798", 16);
+    private static final BigInteger HALF_N = CURVE_N.shiftRight(1);
+
+    /**
+     * Computes the OP_PUSH_TX DER signature + sighash byte for the given
+     * input. Mirrors {@code packages/runar-py/runar/sdk/oppushtx.py} and
+     * {@code packages/runar-go/sdk_oppushtx.go}.
+     *
+     * <p>Uses fixed private key d = 1 (so pubkey = generator G) and fixed
+     * nonce k = 1. r = G.x mod n, s = (z + r) mod n. Low-S normalised.
+     * The returned bytes include the trailing {@code SIGHASH_ALL | FORKID}
+     * flag byte ready for splicing into the unlocking script.
+     */
+    static byte[] computePushTxSig(RawTx tx, int inputIndex, byte[] scriptCode, long satoshis) {
+        byte[] preimageBytes = preimage(tx, inputIndex, scriptCode, satoshis, SIGHASH_ALL_FORKID);
+        byte[] sighash = Hash160.doubleSha256(preimageBytes);
+        BigInteger z = new BigInteger(1, sighash);
+        BigInteger r = CURVE_GX.mod(CURVE_N);
+        BigInteger s = z.add(r).mod(CURVE_N);
+        if (s.compareTo(HALF_N) > 0) {
+            s = CURVE_N.subtract(s);
+        }
+        byte[] der = LocalSigner.derEncode(r, s);
+        byte[] out = new byte[der.length + 1];
+        System.arraycopy(der, 0, out, 0, der.length);
+        out[der.length] = (byte) SIGHASH_ALL_FORKID;
+        return out;
+    }
+
+    /** Convenience overload that takes a hex-encoded scriptCode. */
+    static byte[] computePushTxSig(RawTx tx, int inputIndex, String scriptCodeHex, long satoshis) {
+        return computePushTxSig(tx, inputIndex, ScriptUtils.hexToBytes(scriptCodeHex), satoshis);
+    }
 
     // ------------------------------------------------------------------
     // Local byte-stream helpers (avoid round-tripping through hex).
