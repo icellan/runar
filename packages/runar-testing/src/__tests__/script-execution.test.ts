@@ -248,12 +248,19 @@ describe('Script execution: interpreter vs compiled agreement', () => {
 // ---------------------------------------------------------------------------
 // Issue #34 regression: hand-unrolled `if` + multi `let` reassignment
 //   https://github.com/icellan/runar/issues/34
-// Compiled bytecode previously diverged from the interpreter when an outer
-// `if` body contained both a nested `if (cond) { local = expr; }` AND a
-// subsequent `let p = ...` reassignment. The post-ENDIF stale-copy cleanup
-// only handled ONE reassigned local (`break;` after first match), so the
-// second reassignment left a stale stack item that shifted depths for the
-// next `OP_PICK` in the next outer-if's bound check.
+//
+// Root cause (commit 1176179c): `getParamType` in 04-anf-lower.ts searched
+// every method's params and returned the first name match. With sibling
+// methods `walk(buf, count, target)` and `other(x: ByteString)`, the local
+// `x = bin2num(...)` inside `walk` (a bigint) was mis-typed as ByteString
+// because `other`'s `x: ByteString` parameter happened to match by name.
+// The downstream `1n + x` then got `result_type: 'bytes'` and lowered to
+// OP_CAT instead of OP_ADD, corrupting the length operand of a subsequent
+// OP_SPLIT — surfacing only after the inner-if + let-reassign body shifted
+// the stack enough to make the failure look like a depth-tracking bug.
+//
+// Fix: scope getParamType to the current method's params via a per-method
+// `methodParamTypes` table, populated at the start of each method.
 // ---------------------------------------------------------------------------
 
 describe('Script execution: issue #34 — nested-if multi-reassign parity', () => {
@@ -315,5 +322,54 @@ describe('Script execution: issue #34 — nested-if multi-reassign parity', () =
 
     expect(interpResult.success).toBe(true);
     expect(scriptResult.success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #34 secondary: pow(base, exp) runtime guard
+//   https://github.com/icellan/runar/issues/34
+// `pow` is unrolled to a fixed 32-iteration loop because Bitcoin Script
+// can't loop. Without a runtime guard, `exp > 32` would silently saturate
+// at base^32 — a quiet correctness bug. The compiler now emits
+//   <exp> 32 OP_LESSTHANOREQUAL OP_VERIFY
+// at the start of the unrolled loop so the script aborts cleanly.
+// ---------------------------------------------------------------------------
+
+describe('Script execution: issue #34 — pow exponent runtime guard', () => {
+  const POW_SOURCE = `
+    import { SmartContract, assert, pow } from 'runar-lang';
+
+    class PowDemo extends SmartContract {
+      constructor() { super(); }
+
+      public check(base: bigint, exp: bigint, expected: bigint) {
+        assert(pow(base, exp) === expected);
+      }
+    }
+
+    export default PowDemo;
+  `;
+  const fileName = 'PowDemo.runar.ts';
+
+  it('exp = 32 succeeds (boundary case)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    // 2^32 = 4294967296
+    const result = compiled.execute('check', [2n, 32n, 4294967296n]);
+    expect(result.success).toBe(true);
+  });
+
+  it('exp = 33 aborts via OP_VERIFY (does not silently saturate at base^32)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    // Without the guard, this would compute 2^32 = 4294967296 and the check
+    // against expected=2^32 would pass — a silent wrong answer for 2^33.
+    // With the guard, OP_VERIFY aborts before the loop runs.
+    const result = compiled.execute('check', [2n, 33n, 4294967296n]);
+    expect(result.success).toBe(false);
+  });
+
+  it('exp = 100 aborts via OP_VERIFY (well past the cap)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    const result = compiled.execute('check', [2n, 100n, 0n]);
+    expect(result.success).toBe(false);
   });
 });

@@ -227,7 +227,7 @@ Key SDK concepts:
 - Public methods are spending entry points; private methods are inlined helpers
 - `assert()` is the primary control mechanism — scripts fail if any assert is false
 - Only Rúnar built-in functions are allowed — no arbitrary function calls (Math, console, etc.)
-- Built-in math functions: `abs`, `min`, `max`, `within`, `safediv`, `safemod`, `clamp`, `sign`, `pow`, `mulDiv`, `percentOf`, `sqrt`, `gcd`, `divmod`, `log2`, `bool`
+- Built-in math functions: `abs`, `min`, `max`, `within`, `safediv`, `safemod`, `clamp`, `sign`, `pow`, `mulDiv`, `percentOf`, `sqrt`, `gcd`, `divmod`, `log2`, `bool`. `pow(base, exp)` is unrolled to a fixed 32-iteration loop (Bitcoin Script can't loop), and emits a runtime guard `<exp> 32 OP_LESSTHANOREQUAL OP_VERIFY` that aborts the script when `exp > 32` rather than silently saturating at `base^32` (issue #34).
 - Built-in EC (secp256k1) functions: `ecAdd`, `ecMul`, `ecMulGen`, `ecNegate`, `ecOnCurve`, `ecModReduce`, `ecEncodeCompressed`, `ecMakePoint`, `ecPointX`, `ecPointY`
 - `Point` type: 64-byte ByteString subtype (x[32] || y[32], big-endian unsigned, no prefix byte). EC constants: `EC_P`, `EC_N`, `EC_G` (from `runar-lang/src/ec.ts`)
 - Shift operators `<<` and `>>` compile to `OP_LSHIFT` and `OP_RSHIFT`
