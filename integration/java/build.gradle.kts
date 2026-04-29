@@ -1,3 +1,5 @@
+import java.time.Duration
+
 // Rúnar Java integration tests (M13).
 //
 // End-to-end tests that deploy compiled contracts to a running Bitcoin SV
@@ -50,7 +52,7 @@ tasks.named<Test>("test") {
 
     // Long-running (multi-minute) tests: broadcasting SPHINCS+ ~200 KB
     // scripts can take several minutes per tx on a loaded runner.
-    timeout.set(java.time.Duration.ofMinutes(30))
+    timeout.set(Duration.ofMinutes(30))
 
     // Surface JUnit output so flaky nodes are debuggable from CI logs.
     testLogging {
