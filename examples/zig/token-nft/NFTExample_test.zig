@@ -2,7 +2,7 @@ const std = @import("std");
 
 const root = @import("../examples_test.zig");
 const runar = @import("runar");
-const NFTExample = @import("NFTExample.runar.zig").NFTExample;
+const NFTExample = @import("NFTExample.runar.zig").SimpleNFT;
 
 const contract_source = @embedFile("NFTExample.runar.zig");
 

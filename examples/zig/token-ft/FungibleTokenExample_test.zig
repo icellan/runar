@@ -2,7 +2,7 @@ const std = @import("std");
 
 const root = @import("../examples_test.zig");
 const runar = @import("runar");
-const FungibleTokenExample = @import("FungibleTokenExample.runar.zig").FungibleTokenExample;
+const FungibleTokenExample = @import("FungibleTokenExample.runar.zig").FungibleToken;
 
 const contract_source = @embedFile("FungibleTokenExample.runar.zig");
 
