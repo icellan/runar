@@ -25,7 +25,16 @@ function privKey(hex: string): PrivateKey {
 const CONFORMANCE = resolve(__dirname, '../../../../conformance/tests');
 
 function readContract(name: string): string {
-  return readFileSync(resolve(CONFORMANCE, name, `${name}.runar.ts`), 'utf8');
+  // Conformance fixtures store sources in language-specific examples/ trees
+  // and reference them via a per-fixture source.json manifest.
+  const manifest = JSON.parse(
+    readFileSync(resolve(CONFORMANCE, name, 'source.json'), 'utf8'),
+  ) as { sources: Record<string, string> };
+  const tsRel = manifest.sources['.runar.ts'];
+  if (!tsRel) {
+    throw new Error(`Fixture ${name} has no .runar.ts source mapping`);
+  }
+  return readFileSync(resolve(CONFORMANCE, name, tsRel), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
