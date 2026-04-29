@@ -82,6 +82,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Build Rust compiler (for cross-compiler tests)
         run: cd compilers/rust && cargo build --release
+      - name: Warm Go build cache (for cross-compiler tests)
+        run: cd compilers/go && go build ./...
       - name: Build Zig compiler (for cross-compiler tests)
         run: cd compilers/zig && zig build -Doptimize=ReleaseSafe
       - name: Build Java compiler jar (for cross-compiler tests)
