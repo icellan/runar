@@ -56,8 +56,12 @@ tasks.named<Test>("test") {
 
     // Surface JUnit output so flaky nodes are debuggable from CI logs.
     testLogging {
-        events("passed", "skipped", "failed")
+        events("passed", "skipped", "failed", "standardError")
         showStandardStreams = true
+        showExceptions = true
+        showCauses = true
+        showStackTraces = true
+        exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
 
     // Forward the gating property so `@EnabledIfSystemProperty` is
