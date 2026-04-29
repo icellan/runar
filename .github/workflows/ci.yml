@@ -372,20 +372,10 @@ jobs:
 
   runar-verification:
     name: Runar Verification (Lean 4)
-    needs:
-      - ts-compiler
-      - go-compiler
-      - rust-compiler
-      - python-compiler
-      - zig-compiler
-      - ruby-compiler
-      - java-compiler
-      - go-sdk
-      - rust-sdk
-      - python-sdk
-      - zig-sdk
-      - ruby-sdk
-      - java-sdk
+    # Self-contained — only runs `lake build` + Lean tests against the
+    # in-repo conformance fixtures. No artifacts consumed from upstream
+    # compiler/SDK jobs, so we don't gate it on their (sometimes flaky,
+    # sometimes pre-existing) failures.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
