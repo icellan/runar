@@ -59,7 +59,7 @@ test "Compile_FungibleToken" {
         return;
     };
     defer artifact.deinit();
-    try std.testing.expectEqualStrings("FungibleTokenExample", artifact.contract_name);
+    try std.testing.expectEqualStrings("FungibleToken", artifact.contract_name);
     try std.testing.expect(artifact.isStateful());
 }
 
@@ -70,7 +70,7 @@ test "Compile_NFTExample" {
         return;
     };
     defer artifact.deinit();
-    try std.testing.expectEqualStrings("NFTExample", artifact.contract_name);
+    try std.testing.expectEqualStrings("SimpleNFT", artifact.contract_name);
     try std.testing.expect(artifact.isStateful());
 }
 

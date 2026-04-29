@@ -24,7 +24,7 @@ test "NFT_Compile" {
     };
     defer artifact.deinit();
 
-    try std.testing.expectEqualStrings("NFTExample", artifact.contract_name);
+    try std.testing.expectEqualStrings("SimpleNFT", artifact.contract_name);
     try std.testing.expect(artifact.isStateful());
     std.log.info("NFTExample compiled: {d} bytes", .{artifact.script.len / 2});
 }
