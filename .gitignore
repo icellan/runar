@@ -44,5 +44,9 @@ zig-pkg/
 
 # Gradle / Java build outputs
 .gradle/
+compilers/java/build/
+packages/runar-java/build/
+examples/java/build/
+integration/java/build/
 conformance/sdk-output/tools/java-driver/build/
 
