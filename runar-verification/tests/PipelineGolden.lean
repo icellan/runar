@@ -58,20 +58,10 @@ def main : IO Unit := do
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
-            -- Skip fixtures whose expected hex exceeds 10 KB.
-            -- The TR-shadowed peephole pass (Stack/Peephole.lean —
-            -- `@[implemented_by applyXxx.tr]` on every rule) lifts the prior
-            -- stack-overflow bound, so larger fixtures no longer crash. They
-            -- still run impractically slowly under the Lean bytecode
-            -- interpreter (~50–100× slower than native), and the
-            -- `lake build pipelineGolden` native exe cannot run on macOS
-            -- yet (dyld __DATA_CONST issue, HANDOFF §6). Once CI runs the
-            -- native exe on Linux this guard can be raised.
-            if expected.length ≤ 10000 then
-              let actual := compileHex p
-              if expected == actual then
-                matched := matched + 1
-                matchedNames := e.fileName :: matchedNames
+            let actual := compileHex p
+            if expected == actual then
+              matched := matched + 1
+              matchedNames := e.fileName :: matchedNames
         | _ => pure ()
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"

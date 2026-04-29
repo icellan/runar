@@ -405,16 +405,21 @@ jobs:
             runar-verification-${{ runner.os }}-
       - name: Build
         working-directory: runar-verification
-        run: lake build
+        run: lake build && lake build pipelineGolden
       - name: Run GoldenLoad tests
         working-directory: runar-verification
         run: lake env lean --run tests/GoldenLoad.lean
       - name: Run Roundtrip tests
         working-directory: runar-verification
         run: lake env lean --run tests/Roundtrip.lean
-      - name: Run PipelineGolden tests
+      - name: Run PipelineGolden tests (native exe)
         working-directory: runar-verification
-        run: lake env lean --run tests/PipelineGolden.lean
+        # Linux has no dyld __DATA_CONST check, so the native exe runs
+        # directly here (it cannot run locally on macOS — see HANDOFF §6).
+        # Native is ~50–100× faster than the interpreter, which makes the
+        # multi-MB crypto fixtures (post-quantum-slhdsa, p384-*, ec-demo,
+        # schnorr-zkp) practical for the 15-min CI timeout.
+        run: lake env ./.lake/build/bin/pipelineGolden
 
   sdk-conformance:
     name: SDK Output Conformance
