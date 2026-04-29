@@ -1,5 +1,0 @@
-{
-  "sources": {
-    ".runar.ts": "../../../examples/ts/nested-if-multi-reassign/StackTrackerRepro.runar.ts"
-  }
-}
