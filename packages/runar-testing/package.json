@@ -1,6 +1,6 @@
 {
   "name": "runar-testing",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "description": "Rúnar test framework: Bitcoin Script VM, reference interpreter, and fuzzer",
   "main": "dist/index.js",

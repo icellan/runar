@@ -1,6 +1,6 @@
 {
   "name": "runar",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "private": true,
   "description": "TypeScript-to-Bitcoin Script compiler for BSV smart contracts",

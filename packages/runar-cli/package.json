@@ -1,6 +1,6 @@
 {
   "name": "runar-cli",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "type": "module",
   "description": "Rúnar CLI: compile, test, deploy, and manage smart contracts",
   "main": "dist/index.js",

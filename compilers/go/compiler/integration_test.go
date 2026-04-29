@@ -68,8 +68,8 @@ func TestTStoGoIntegration(t *testing.T) {
 			if artifact.ContractName == "" {
 				t.Errorf("expected non-empty contractName for %s", dir)
 			}
-			if artifact.Version != "runar-v0.4.4" {
-				t.Errorf("expected version runar-v0.4.4, got %s", artifact.Version)
+			if artifact.Version != "runar-v0.4.5" {
+				t.Errorf("expected version runar-v0.4.5, got %s", artifact.Version)
 			}
 
 			t.Logf("OK: %s -> %s (hex=%d bytes)", dir, artifact.ContractName, len(artifact.Script)/2)
