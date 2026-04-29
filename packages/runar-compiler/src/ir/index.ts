@@ -81,6 +81,12 @@ export type {
   PlaceholderOp,
 } from './stack-ir.js';
 
+// SX IR types
+export type {
+  SXEmitResult,
+  SXSection,
+} from './sx-ir.js';
+
 // Artifact types
 export type {
   ABIParam,

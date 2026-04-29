@@ -10,6 +10,7 @@ interface CompileOptions {
   output: string;
   ir?: boolean;
   asm?: boolean;
+  sx?: boolean;
   disableConstantFolding?: boolean;
 }
 
@@ -56,7 +57,7 @@ export async function compileCommand(
 
   // Dynamically import the compiler to avoid hard failures if it's not
   // yet fully built (the compiler package may still be under development).
-  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean }) => unknown;
+  type CompileFn = (source: string, options?: { fileName?: string; disableConstantFolding?: boolean; emitSX?: boolean }) => unknown;
   let compile: CompileFn | null = null;
   try {
     // In monorepo/dev mode, prefer the source entry so conformance and CLI
@@ -111,7 +112,7 @@ export async function compileCommand(
 
     let compileResult: CompileResultLike;
     try {
-      compileResult = compile(source, { fileName: resolvedPath, disableConstantFolding: options.disableConstantFolding }) as CompileResultLike;
+      compileResult = compile(source, { fileName: resolvedPath, disableConstantFolding: options.disableConstantFolding, emitSX: options.sx }) as CompileResultLike;
     } catch (err) {
       console.error(`  Compilation error: ${(err as Error).message}`);
       errorCount++;
@@ -153,6 +154,13 @@ export async function compileCommand(
       jsonWithBigInt(artifact) + '\n',
     );
     console.log(`  Artifact written: ${artifactPath}`);
+
+    // Write SX file if requested
+    if (options.sx && typeof artifact['sx'] === 'string') {
+      const sxPath = path.join(outputDir, `${baseName}.sx`);
+      fs.writeFileSync(sxPath, artifact['sx'] + '\n');
+      console.log(`  SX written: ${sxPath}`);
+    }
 
     // Print ASM if requested
     if (options.asm && typeof artifact['asm'] === 'string') {
