@@ -15,6 +15,7 @@ require_relative 'runar/ecdsa'
 require_relative 'runar/rabin_sig'
 require_relative 'runar/wots'
 require_relative 'runar/slh_dsa'
+require_relative 'runar/nist_ecdsa'
 require_relative 'runar/test_keys'
 require_relative 'runar/compile_check'
 
@@ -156,6 +157,15 @@ module Kernel
 
   def verify_slh_dsa_sha2_256f(msg, sig, pubkey)
     Runar.verify_slh_dsa_sha2_256f(msg, sig, pubkey)
+  end
+
+  # NIST P-256 / P-384 ECDSA verification (real, via OpenSSL).
+  def verify_ecdsa_p256(msg, sig, pubkey)
+    Runar.verify_ecdsa_p256(msg, sig, pubkey)
+  end
+
+  def verify_ecdsa_p384(msg, sig, pubkey)
+    Runar.verify_ecdsa_p384(msg, sig, pubkey)
   end
 
   def sha256_compress(state, block)

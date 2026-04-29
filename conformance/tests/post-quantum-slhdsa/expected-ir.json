@@ -1,5 +1,5 @@
 {
-  "contractName": "PostQuantumSLHDSA",
+  "contractName": "PostQuantumSLHDSANaiveInsecure",
   "methods": [
     {
       "body": [

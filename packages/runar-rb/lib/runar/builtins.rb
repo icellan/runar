@@ -11,6 +11,7 @@ require_relative 'ecdsa'
 require_relative 'rabin_sig'
 require_relative 'wots'
 require_relative 'slh_dsa'
+require_relative 'nist_ecdsa'
 
 module Runar
   module Builtins
@@ -96,6 +97,20 @@ module Runar
 
     def verify_slh_dsa_sha2_256f(msg, sig, pubkey)
       Runar::SLHDSA.verify(Runar::SLHDSA::PARAM_SETS[:sha2_256f], msg, sig, pubkey)
+    end
+
+    # Real NIST P-256 ECDSA verification using OpenSSL (prime256v1).
+    # Used by hybrid wallets that gate spending on a P-256 (WebAuthn / TPM) key.
+    # All inputs are hex-encoded strings; sig is raw 64-byte r||s.
+    def verify_ecdsa_p256(msg, sig, pubkey)
+      Runar::NistECDSA.p256_verify(msg, sig, pubkey)
+    end
+
+    # Real NIST P-384 ECDSA verification using OpenSSL (secp384r1).
+    # Used by hybrid wallets that gate spending on a P-384 (FIPS HSM) key.
+    # All inputs are hex-encoded strings; sig is raw 96-byte r||s.
+    def verify_ecdsa_p384(msg, sig, pubkey)
+      Runar::NistECDSA.p384_verify(msg, sig, pubkey)
     end
 
     # -- SHA-256 Compression (real implementation, FIPS 180-4) ----------------

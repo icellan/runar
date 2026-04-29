@@ -321,7 +321,7 @@ class TestFormatSpecificParsing:
     def test_parse_ruby_post_quantum_wots(self):
         program = _parse_and_lower("post-quantum-wots", ".runar.rb")
 
-        assert program.contract_name == "PostQuantumWOTS"
+        assert program.contract_name == "PostQuantumWOTSNaiveInsecure"
         spend = [m for m in program.methods if m.name == "spend"][0]
         # verifyWOTS should appear in the ANF bindings (``call`` nodes have a ``func`` field)
         funcs = [b.value.func for b in spend.body if b.value.kind == "call"]
@@ -330,7 +330,7 @@ class TestFormatSpecificParsing:
     def test_parse_ruby_post_quantum_slhdsa(self):
         program = _parse_and_lower("post-quantum-slhdsa", ".runar.rb")
 
-        assert program.contract_name == "PostQuantumSLHDSA"
+        assert program.contract_name == "PostQuantumSLHDSANaiveInsecure"
         spend = [m for m in program.methods if m.name == "spend"][0]
         funcs = [b.value.func for b in spend.body if b.value.kind == "call"]
         assert "verifySLHDSA_SHA2_128s" in funcs

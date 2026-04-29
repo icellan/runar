@@ -954,7 +954,7 @@ end
 
 `compile_check` requires the `runar_compiler` gem (see [Section 5](#5-compiling)).
 
-The full set of off-chain testing patterns is shown across the `examples/ruby/` directory: stateful (`stateful-counter`, `auction`, `tic-tac-toe`), stateless (`p2pkh`, `escrow`), and post-quantum (`post-quantum-wots`, `post-quantum-wallet`).
+The full set of off-chain testing patterns is shown across the `examples/ruby/` directory: stateful (`stateful-counter`, `auction`, `tic-tac-toe`), stateless (`p2pkh`, `escrow`), and post-quantum (`post-quantum-wallet`; the `post-quantum-wots-naive-INSECURE` directory is an INSECURE pedagogical fixture only).
 
 ### 11b. Integration testing against a regtest node
 
@@ -1553,7 +1553,7 @@ Each `examples/ruby/<name>/` directory contains a `.runar.rb` source plus an RSp
 | [`schnorr-zkp/`](../../examples/ruby/schnorr-zkp/)                                     | EC primitives — `ec_mul_gen`, `ec_add`, `ec_encode_compressed`                |
 | [`merkle-proof/`](../../examples/ruby/merkle-proof/)                                   | `merkle_root_sha256` / `merkle_root_hash256`, on-chain proof verification     |
 | [`p2blake3pkh/`](../../examples/ruby/p2blake3pkh/)                                     | BLAKE3 hash — `blake3_compress`, `blake3_hash`                                |
-| [`post-quantum-wots/`](../../examples/ruby/post-quantum-wots/)                         | WOTS+ one-time signatures — `verify_wots`                                     |
+| [`post-quantum-wots-naive-INSECURE/`](../../examples/ruby/post-quantum-wots-naive-INSECURE/) | INSECURE pedagogical: raw `verify_wots` with no transaction binding (do NOT use in production; see `post-quantum-wallet` for the correct pattern) |
 | [`post-quantum-wallet/`](../../examples/ruby/post-quantum-wallet/)                     | SLH-DSA (FIPS 205) — `verify_slh_dsa_sha2_*`                                  |
 | [`add-raw-output/`](../../examples/ruby/add-raw-output/)                               | `add_raw_output` — output with caller-specified script bytes                  |
 | [`state-covenant/`](../../examples/ruby/state-covenant/)                               | Covenant pattern — restricts how the contract can be spent                    |
