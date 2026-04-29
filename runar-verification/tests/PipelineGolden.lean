@@ -42,7 +42,10 @@ def baselineMatches : List String := [
 ]
 
 def main : IO Unit := do
-  let dir := "/Users/siggioskarsson/gitcheckout/runar/conformance/tests"
+  -- Resolve relative to the repo root. CI runs us from `runar-verification/`
+  -- via `lake env`, so the conformance tree sits one level up. Local macOS
+  -- runs via `lake env lean --run tests/PipelineGolden.lean` set the same cwd.
+  let dir := "../conformance/tests"
   let entries ← System.FilePath.readDir dir
   let mut total := 0
   let mut matched := 0
