@@ -2,6 +2,7 @@ name: CI
 on:
   push:
     branches: [main, 'release/v*']
+    tags: ['v*']
   pull_request:
     branches: [main, 'release/v*']
 
