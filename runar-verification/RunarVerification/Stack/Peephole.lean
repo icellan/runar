@@ -8561,6 +8561,303 @@ theorem peepholePassFullPlus_sound :
     (hSound7.trans (hSound6.trans (hSound5.trans (hSound4.trans
       (hSound3.trans (hSound2.trans (hSound1.trans hSound0))))))))))
 
+/-! ## Tail-recursive runtime implementations (Phase 4-D)
+
+The structural-recursive `apply*` definitions above keep their auto-generated
+`.eq_*` and `.induct` equation lemmas — which the soundness proofs in this
+file directly reference — but they are NOT tail-recursive. The
+non-tail recursive `op :: applyXxx rest` form builds `cons` frames on
+the way back up the call stack, which overflows the Lean interpreter's
+per-thread stack on op lists with tens of thousands of entries (e.g.
+SHA-256 partial-block codegen produces ~70K-op lists).
+
+We provide a tail-recursive runtime twin for each `apply*` rule and
+attach it via `@[implemented_by]`. Both compiled native code AND the
+Lean bytecode interpreter (`lean --run`) use the TR implementation,
+while definitional unfolding, `simp`, and proof-side reasoning still
+see the original structural definition. The TR implementations are
+provably equal to the originals, but we don't need the equality at the
+proof level — only at runtime.
+
+Each TR shadow uses the standard accumulator-then-reverse pattern:
+walk the input list with a tail call, prepending to an accumulator,
+and reverse the accumulator on the empty tail.
+
+These shadows are placed BEFORE `peepholePassAllFlat` (and any caller
+of the rules) so that when the compiler emits C code for the chain, it
+substitutes the TR implementation at each call site. Placing the
+attribute declarations after `peepholePassAllFlat` would leave the
+already-emitted C code calling the structural-recursive original. -/
+
+private def applyDropAfterPush.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | (.push _) :: .drop :: rest, acc => applyDropAfterPush.tr.go rest acc
+  | op :: rest, acc => applyDropAfterPush.tr.go rest (op :: acc)
+
+@[inline] private def applyDropAfterPush.tr (ops : List StackOp) : List StackOp :=
+  applyDropAfterPush.tr.go ops []
+
+attribute [implemented_by applyDropAfterPush.tr] applyDropAfterPush
+
+private def applyDupDrop.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .dup :: .drop :: rest, acc => applyDupDrop.tr.go rest acc
+  | op :: rest, acc => applyDupDrop.tr.go rest (op :: acc)
+
+@[inline] private def applyDupDrop.tr (ops : List StackOp) : List StackOp :=
+  applyDupDrop.tr.go ops []
+
+attribute [implemented_by applyDupDrop.tr] applyDupDrop
+
+private def applyDoubleSwap.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .swap :: .swap :: rest, acc => applyDoubleSwap.tr.go rest acc
+  | op :: rest, acc => applyDoubleSwap.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleSwap.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleSwap.tr.go ops []
+
+attribute [implemented_by applyDoubleSwap.tr] applyDoubleSwap
+
+private def applyEqualVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_EQUAL" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyEqualVerifyFuse.tr.go rest (.opcode "OP_EQUALVERIFY" :: acc)
+  | op :: rest, acc => applyEqualVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyEqualVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyEqualVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyEqualVerifyFuse.tr] applyEqualVerifyFuse
+
+private def applyCheckSigVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_CHECKSIG" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyCheckSigVerifyFuse.tr.go rest (.opcode "OP_CHECKSIGVERIFY" :: acc)
+  | op :: rest, acc => applyCheckSigVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyCheckSigVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyCheckSigVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyCheckSigVerifyFuse.tr] applyCheckSigVerifyFuse
+
+private def applyNumEqualVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyNumEqualVerifyFuse.tr.go rest (.opcode "OP_NUMEQUALVERIFY" :: acc)
+  | op :: rest, acc => applyNumEqualVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyNumEqualVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyNumEqualVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyNumEqualVerifyFuse.tr] applyNumEqualVerifyFuse
+
+private def applyDoubleNot.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NOT" :: .opcode "OP_NOT" :: rest, acc => applyDoubleNot.tr.go rest acc
+  | op :: rest, acc => applyDoubleNot.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleNot.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleNot.tr.go ops []
+
+attribute [implemented_by applyDoubleNot.tr] applyDoubleNot
+
+private def applyDoubleNegate.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NEGATE" :: .opcode "OP_NEGATE" :: rest, acc => applyDoubleNegate.tr.go rest acc
+  | op :: rest, acc => applyDoubleNegate.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleNegate.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleNegate.tr.go ops []
+
+attribute [implemented_by applyDoubleNegate.tr] applyDoubleNegate
+
+private def applyAddZero.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_ADD" :: rest, acc => applyAddZero.tr.go rest acc
+  | op :: rest, acc => applyAddZero.tr.go rest (op :: acc)
+
+@[inline] private def applyAddZero.tr (ops : List StackOp) : List StackOp :=
+  applyAddZero.tr.go ops []
+
+attribute [implemented_by applyAddZero.tr] applyAddZero
+
+private def applyOneAdd.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .opcode "OP_ADD" :: rest, acc =>
+      applyOneAdd.tr.go rest (.opcode "OP_1ADD" :: acc)
+  | op :: rest, acc => applyOneAdd.tr.go rest (op :: acc)
+
+@[inline] private def applyOneAdd.tr (ops : List StackOp) : List StackOp :=
+  applyOneAdd.tr.go ops []
+
+attribute [implemented_by applyOneAdd.tr] applyOneAdd
+
+private def applySubZero.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_SUB" :: rest, acc => applySubZero.tr.go rest acc
+  | op :: rest, acc => applySubZero.tr.go rest (op :: acc)
+
+@[inline] private def applySubZero.tr (ops : List StackOp) : List StackOp :=
+  applySubZero.tr.go ops []
+
+attribute [implemented_by applySubZero.tr] applySubZero
+
+private def applyDoubleSha256.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_SHA256" :: .opcode "OP_SHA256" :: rest, acc =>
+      applyDoubleSha256.tr.go rest (.opcode "OP_HASH256" :: acc)
+  | op :: rest, acc => applyDoubleSha256.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleSha256.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleSha256.tr.go ops []
+
+attribute [implemented_by applyDoubleSha256.tr] applyDoubleSha256
+
+private def applyOneSub.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .opcode "OP_SUB" :: rest, acc =>
+      applyOneSub.tr.go rest (.opcode "OP_1SUB" :: acc)
+  | op :: rest, acc => applyOneSub.tr.go rest (op :: acc)
+
+@[inline] private def applyOneSub.tr (ops : List StackOp) : List StackOp :=
+  applyOneSub.tr.go ops []
+
+attribute [implemented_by applyOneSub.tr] applyOneSub
+
+private def applyDoubleOver.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .over :: .over :: rest, acc =>
+      applyDoubleOver.tr.go rest (.opcode "OP_2DUP" :: acc)
+  | op :: rest, acc => applyDoubleOver.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleOver.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleOver.tr.go ops []
+
+attribute [implemented_by applyDoubleOver.tr] applyDoubleOver
+
+private def applyDoubleDrop.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .drop :: .drop :: rest, acc =>
+      applyDoubleDrop.tr.go rest (.opcode "OP_2DROP" :: acc)
+  | op :: rest, acc => applyDoubleDrop.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleDrop.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleDrop.tr.go ops []
+
+attribute [implemented_by applyDoubleDrop.tr] applyDoubleDrop
+
+private def applyZeroNumEqual.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest, acc =>
+      applyZeroNumEqual.tr.go rest (.opcode "OP_NOT" :: acc)
+  | op :: rest, acc => applyZeroNumEqual.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroNumEqual.tr (ops : List StackOp) : List StackOp :=
+  applyZeroNumEqual.tr.go ops []
+
+attribute [implemented_by applyZeroNumEqual.tr] applyZeroNumEqual
+
+private def applyPushPushAdd.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_ADD" :: rest, acc =>
+      applyPushPushAdd.tr.go rest (.push (.bigint (a + b)) :: acc)
+  | op :: rest, acc => applyPushPushAdd.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushAdd.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushAdd.tr.go ops []
+
+attribute [implemented_by applyPushPushAdd.tr] applyPushPushAdd
+
+private def applyPushPushSub.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_SUB" :: rest, acc =>
+      applyPushPushSub.tr.go rest (.push (.bigint (a - b)) :: acc)
+  | op :: rest, acc => applyPushPushSub.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushSub.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushSub.tr.go ops []
+
+attribute [implemented_by applyPushPushSub.tr] applyPushPushSub
+
+private def applyPushPushMul.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_MUL" :: rest, acc =>
+      applyPushPushMul.tr.go rest (.push (.bigint (a * b)) :: acc)
+  | op :: rest, acc => applyPushPushMul.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushMul.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushMul.tr.go ops []
+
+attribute [implemented_by applyPushPushMul.tr] applyPushPushMul
+
+private def applyCheckMultiSigVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyCheckMultiSigVerifyFuse.tr.go rest (.opcode "OP_CHECKMULTISIGVERIFY" :: acc)
+  | op :: rest, acc => applyCheckMultiSigVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyCheckMultiSigVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyCheckMultiSigVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyCheckMultiSigVerifyFuse.tr] applyCheckMultiSigVerifyFuse
+
+private def applyZeroRoll0.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .roll 0 :: rest, acc => applyZeroRoll0.tr.go rest acc
+  | op :: rest, acc => applyZeroRoll0.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroRoll0.tr (ops : List StackOp) : List StackOp :=
+  applyZeroRoll0.tr.go ops []
+
+attribute [implemented_by applyZeroRoll0.tr] applyZeroRoll0
+
+private def applyOneRoll1.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .roll 1 :: rest, acc =>
+      applyOneRoll1.tr.go rest (.swap :: acc)
+  | op :: rest, acc => applyOneRoll1.tr.go rest (op :: acc)
+
+@[inline] private def applyOneRoll1.tr (ops : List StackOp) : List StackOp :=
+  applyOneRoll1.tr.go ops []
+
+attribute [implemented_by applyOneRoll1.tr] applyOneRoll1
+
+private def applyTwoRoll2.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 2) :: .roll 2 :: rest, acc =>
+      applyTwoRoll2.tr.go rest (.rot :: acc)
+  | op :: rest, acc => applyTwoRoll2.tr.go rest (op :: acc)
+
+@[inline] private def applyTwoRoll2.tr (ops : List StackOp) : List StackOp :=
+  applyTwoRoll2.tr.go ops []
+
+attribute [implemented_by applyTwoRoll2.tr] applyTwoRoll2
+
+private def applyZeroPick0.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .pick 0 :: rest, acc =>
+      applyZeroPick0.tr.go rest (.dup :: acc)
+  | op :: rest, acc => applyZeroPick0.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroPick0.tr (ops : List StackOp) : List StackOp :=
+  applyZeroPick0.tr.go ops []
+
+attribute [implemented_by applyZeroPick0.tr] applyZeroPick0
+
+private def applyOnePick1.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .pick 1 :: rest, acc =>
+      applyOnePick1.tr.go rest (.over :: acc)
+  | op :: rest, acc => applyOnePick1.tr.go rest (op :: acc)
+
+@[inline] private def applyOnePick1.tr (ops : List StackOp) : List StackOp :=
+  applyOnePick1.tr.go ops []
+
+attribute [implemented_by applyOnePick1.tr] applyOnePick1
+
+/-! ## End of tail-recursive runtime implementations. -/
+
 /-- All 19 proven peephole rules applied in TS-reference order.
 
 Used by `Pipeline.peepholeProgram` to maximize byte-exact match against

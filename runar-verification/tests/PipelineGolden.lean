@@ -58,13 +58,15 @@ def main : IO Unit := do
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
-            -- Skip compilation for fixtures with very large expected output.
-            -- The Lean interpreter's structural-recursive peephole pass blows
-            -- the stack on op lists with tens of thousands of entries (heavy
-            -- crypto codegen — SHA-256 partial blocks, EC, P-256/P-384, etc.).
-            -- Such fixtures were already non-matching before crypto codegen
-            -- helpers landed and remain out-of-scope for the verified pipeline
-            -- gate. Tail-recursive peephole would lift this bound.
+            -- Skip fixtures whose expected hex exceeds 10 KB.
+            -- The TR-shadowed peephole pass (Stack/Peephole.lean —
+            -- `@[implemented_by applyXxx.tr]` on every rule) lifts the prior
+            -- stack-overflow bound, so larger fixtures no longer crash. They
+            -- still run impractically slowly under the Lean bytecode
+            -- interpreter (~50–100× slower than native), and the
+            -- `lake build pipelineGolden` native exe cannot run on macOS
+            -- yet (dyld __DATA_CONST issue, HANDOFF §6). Once CI runs the
+            -- native exe on Linux this guard can be raised.
             if expected.length ≤ 10000 then
               let actual := compileHex p
               if expected == actual then
