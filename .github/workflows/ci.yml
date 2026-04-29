@@ -27,6 +27,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build Rust compiler (for cross-compiler tests)
         run: cd compilers/rust && cargo build --release
+      - name: Warm Go build cache (for cross-compiler tests)
+        run: cd compilers/go && go build ./...
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test
