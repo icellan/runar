@@ -25,16 +25,22 @@ function privKey(hex: string): PrivateKey {
 const CONFORMANCE = resolve(__dirname, '../../../../conformance/tests');
 
 function readContract(name: string): string {
-  // Resolve the .runar.ts source via the fixture's source.json (the actual
-  // contract lives under examples/ts/<name>/<Name>.runar.ts, not directly
-  // inside the conformance dir).
+  // Most v0.4.x fixtures store their `.runar.ts` source directly inside the
+  // conformance dir (`<name>/<name>.runar.ts`). Fixtures backported from
+  // later versions instead reference an examples/ts/ path through a
+  // `source.json` manifest. Try the manifest first, fall back to the
+  // direct path.
   const manifestPath = resolve(CONFORMANCE, name, 'source.json');
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
-    sources: Record<string, string>;
-  };
-  const tsRel = manifest.sources['.runar.ts'];
-  if (!tsRel) throw new Error(`No .runar.ts source for fixture ${name}`);
-  return readFileSync(resolve(CONFORMANCE, name, tsRel), 'utf8');
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+      sources: Record<string, string>;
+    };
+    const tsRel = manifest.sources['.runar.ts'];
+    if (tsRel) return readFileSync(resolve(CONFORMANCE, name, tsRel), 'utf8');
+  } catch {
+    // No manifest — fall through to the direct path.
+  }
+  return readFileSync(resolve(CONFORMANCE, name, `${name}.runar.ts`), 'utf8');
 }
 
 // ---------------------------------------------------------------------------
