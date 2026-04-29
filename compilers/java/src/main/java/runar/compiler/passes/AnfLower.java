@@ -163,6 +163,7 @@ public final class AnfLower {
         // Constructor
         if (contract.constructor() != null) {
             LowerCtx ctx = new LowerCtx(contract);
+            ctx.setMethodParamTypes(contract.constructor().params());
             ctx.lowerStatements(contract.constructor().body());
             out.add(new AnfMethod(
                 "constructor",
@@ -175,6 +176,7 @@ public final class AnfLower {
         // Methods
         for (MethodNode method : contract.methods()) {
             LowerCtx ctx = new LowerCtx(contract);
+            ctx.setMethodParamTypes(method.params());
 
             boolean isStatefulPublic = contract.parentClass() == ParentClass.STATEFUL_SMART_CONTRACT
                 && method.visibility() == Visibility.PUBLIC;
@@ -296,6 +298,11 @@ public final class AnfLower {
         final ContractNode contract;
         final Set<String> localNames = new HashSet<>();
         final Set<String> paramNames = new HashSet<>();
+        /** Type table for the CURRENT method's parameters. Method-scoped
+         *  (not contract-scoped) so a parameter named `x` in one method
+         *  doesn't bleed into byte-typed analysis of a different method
+         *  that uses `x` as a local. See issue #34. */
+        final Map<String, String> methodParamTypes = new HashMap<>();
         final List<String> addOutputRefs = new ArrayList<>();
         final List<String> addDataOutputRefs = new ArrayList<>();
         final Map<String, String> localAliases = new HashMap<>();
@@ -303,6 +310,15 @@ public final class AnfLower {
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
+        }
+
+        /** Populate the method-scoped param-type table for the current method
+         *  (or constructor). See issue #34. */
+        void setMethodParamTypes(List<ParamNode> params) {
+            methodParamTypes.clear();
+            for (ParamNode p : params) {
+                methodParamTypes.put(p.name(), typeToString(p.type()));
+            }
         }
 
         String freshTemp() {
@@ -351,17 +367,8 @@ public final class AnfLower {
         }
 
         String getParamType(String name) {
-            if (contract.constructor() != null) {
-                for (ParamNode p : contract.constructor().params()) {
-                    if (p.name().equals(name)) return typeToString(p.type());
-                }
-            }
-            for (MethodNode m : contract.methods()) {
-                for (ParamNode p : m.params()) {
-                    if (p.name().equals(name)) return typeToString(p.type());
-                }
-            }
-            return null;
+            // Method-scoped lookup. See issue #34.
+            return methodParamTypes.get(name);
         }
 
         String getPropertyType(String name) {
@@ -376,6 +383,7 @@ public final class AnfLower {
             sub.counter = this.counter;
             sub.localNames.addAll(this.localNames);
             sub.paramNames.addAll(this.paramNames);
+            sub.methodParamTypes.putAll(this.methodParamTypes);
             sub.localAliases.putAll(this.localAliases);
             sub.localByteVars.addAll(this.localByteVars);
             return sub;

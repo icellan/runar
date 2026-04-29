@@ -244,3 +244,132 @@ describe('Script execution: interpreter vs compiled agreement', () => {
     });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Issue #34 regression: hand-unrolled `if` + multi `let` reassignment
+//   https://github.com/icellan/runar/issues/34
+//
+// Root cause (commit 1176179c): `getParamType` in 04-anf-lower.ts searched
+// every method's params and returned the first name match. With sibling
+// methods `walk(buf, count, target)` and `other(x: ByteString)`, the local
+// `x = bin2num(...)` inside `walk` (a bigint) was mis-typed as ByteString
+// because `other`'s `x: ByteString` parameter happened to match by name.
+// The downstream `1n + x` then got `result_type: 'bytes'` and lowered to
+// OP_CAT instead of OP_ADD, corrupting the length operand of a subsequent
+// OP_SPLIT — surfacing only after the inner-if + let-reassign body shifted
+// the stack enough to make the failure look like a depth-tracking bug.
+//
+// Fix: scope getParamType to the current method's params via a per-method
+// `methodParamTypes` table, populated at the start of each method.
+// ---------------------------------------------------------------------------
+
+describe('Script execution: issue #34 — nested-if multi-reassign parity', () => {
+  const src = readFileSync(
+    resolve(__dirname, '../../../../examples/ts/nested-if-multi-reassign/StackTrackerRepro.runar.ts'),
+    'utf8',
+  );
+  const fileName = 'StackTrackerRepro.runar.ts';
+
+  // Single-record buf: byte 0 = 0x05 (length prefix), bytes 1..5 = 0xaa*5 (payload).
+  // Bytes 6..15 = 0xbb*10 (would parse as negative-length record; iter 1+ MUST be skipped).
+  const BUF = '05aaaaaaaaaabbbbbbbbbbbbbbbbbbbb';
+  const TARGET_ITER0 = '05aaaaaaaaaa';
+
+  it('count=1 with target matching iter 0: interpreter and compiled agree (success)', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 1n, target: TARGET_ITER0 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 1n, TARGET_ITER0]);
+
+    expect(interpResult.success).toBe(true);
+    expect(scriptResult.success).toBe(true);
+  });
+
+  it('count=0: both fail (found stays false, assert(found) aborts)', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 0n, target: TARGET_ITER0 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 0n, TARGET_ITER0]);
+
+    expect(interpResult.success).toBe(false);
+    expect(scriptResult.success).toBe(false);
+  });
+
+  it('count=1 with non-matching target: both fail', () => {
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: BUF, count: 1n, target: '05bbbbbbbbbb' });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [BUF, 1n, '05bbbbbbbbbb']);
+
+    expect(interpResult.success).toBe(false);
+    expect(scriptResult.success).toBe(false);
+  });
+
+  it('count=8 with 8 valid records: interpreter and compiled agree (full unroll, target on iter 7)', () => {
+    // 8 single-byte-payload records: each is 0x01<XX>. High bit of XX kept clear
+    // so bin2num doesn't parse a negative length. 8 records × 2 bytes = 16 bytes.
+    const buf8 = '0111' + '0122' + '0133' + '0144' + '0155' + '0166' + '0177' + '0178';
+    const targetIter7 = '0178';
+
+    const interp = TestContract.fromSource(src, {}, fileName);
+    const interpResult = interp.call('walk', { buf: buf8, count: 8n, target: targetIter7 });
+
+    const compiled = ScriptExecutionContract.fromSource(src, {}, fileName);
+    const scriptResult = compiled.execute('walk', [buf8, 8n, targetIter7]);
+
+    expect(interpResult.success).toBe(true);
+    expect(scriptResult.success).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #34 secondary: pow(base, exp) runtime guard
+//   https://github.com/icellan/runar/issues/34
+// `pow` is unrolled to a fixed 32-iteration loop because Bitcoin Script
+// can't loop. Without a runtime guard, `exp > 32` would silently saturate
+// at base^32 — a quiet correctness bug. The compiler now emits
+//   <exp> 32 OP_LESSTHANOREQUAL OP_VERIFY
+// at the start of the unrolled loop so the script aborts cleanly.
+// ---------------------------------------------------------------------------
+
+describe('Script execution: issue #34 — pow exponent runtime guard', () => {
+  const POW_SOURCE = `
+    import { SmartContract, assert, pow } from 'runar-lang';
+
+    class PowDemo extends SmartContract {
+      constructor() { super(); }
+
+      public check(base: bigint, exp: bigint, expected: bigint) {
+        assert(pow(base, exp) === expected);
+      }
+    }
+
+    export default PowDemo;
+  `;
+  const fileName = 'PowDemo.runar.ts';
+
+  it('exp = 32 succeeds (boundary case)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    // 2^32 = 4294967296
+    const result = compiled.execute('check', [2n, 32n, 4294967296n]);
+    expect(result.success).toBe(true);
+  });
+
+  it('exp = 33 aborts via OP_VERIFY (does not silently saturate at base^32)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    // Without the guard, this would compute 2^32 = 4294967296 and the check
+    // against expected=2^32 would pass — a silent wrong answer for 2^33.
+    // With the guard, OP_VERIFY aborts before the loop runs.
+    const result = compiled.execute('check', [2n, 33n, 4294967296n]);
+    expect(result.success).toBe(false);
+  });
+
+  it('exp = 100 aborts via OP_VERIFY (well past the cap)', () => {
+    const compiled = ScriptExecutionContract.fromSource(POW_SOURCE, {}, fileName);
+    const result = compiled.execute('check', [2n, 100n, 0n]);
+    expect(result.success).toBe(false);
+  });
+});

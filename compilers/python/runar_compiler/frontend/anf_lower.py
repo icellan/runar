@@ -240,6 +240,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
 
     # Lower constructor
     ctor_ctx = _LowerCtx(contract)
+    ctor_ctx.set_method_param_types(contract.constructor.params)
     ctor_ctx.lower_statements(contract.constructor.body)
     result.append(ANFMethod(
         name="constructor",
@@ -251,6 +252,7 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
     # Lower each method
     for method in contract.methods:
         method_ctx = _LowerCtx(contract)
+        method_ctx.set_method_param_types(method.params)
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
             # Determine if this method verifies hashOutputs (needs change output support).
@@ -407,11 +409,24 @@ class _LowerCtx:
         self._contract: ContractNode = contract
         self._local_names: set[str] = set()
         self._param_names: set[str] = set()
+        # Type table for the CURRENT method's parameters. Method-scoped
+        # (not contract-scoped) so a parameter named `x` in one method
+        # doesn't bleed into byte-typed analysis of a different method
+        # that uses `x` as a local. See issue #34.
+        self._method_param_types: dict[str, str] = {}
         self._add_output_refs: list[str] = []
         self._add_data_output_refs: list[str] = []
         self._local_aliases: dict[str, str] = {}
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
+
+    def set_method_param_types(self, params) -> None:
+        """Populate the method-scoped param-type table for the current
+        method (or constructor). See issue #34.
+        """
+        self._method_param_types = {
+            p.name: _type_node_to_string(p.type) for p in params
+        }
 
     def fresh_temp(self) -> str:
         name = f"t{self._counter}"
@@ -478,14 +493,8 @@ class _LowerCtx:
         return False
 
     def get_param_type(self, name: str) -> str | None:
-        for p in self._contract.constructor.params:
-            if p.name == name:
-                return _type_node_to_string(p.type)
-        for method in self._contract.methods:
-            for p in method.params:
-                if p.name == name:
-                    return _type_node_to_string(p.type)
-        return None
+        # Method-scoped lookup. See issue #34.
+        return self._method_param_types.get(name)
 
     def get_property_type(self, name: str) -> str | None:
         for p in self._contract.properties:
@@ -503,6 +512,7 @@ class _LowerCtx:
         sub._counter = self._counter
         sub._local_names = set(self._local_names)
         sub._param_names = set(self._param_names)
+        sub._method_param_types = dict(self._method_param_types)
         sub._local_aliases = dict(self._local_aliases)
         sub._local_byte_vars = set(self._local_byte_vars)
         return sub

@@ -3030,6 +3030,17 @@ class _LoweringContext:
         self.emit_op(StackOp(op="push", value=big_int_push(1)))   # exp base 1(acc)
 
         MAX_POW_ITERATIONS = 32
+
+        # Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+        # Bitcoin Script can't loop, so the iteration count is fixed at
+        # compile time. Without this guard, exp > MAX would silently
+        # saturate at base^MAX (issue #34). Script aborts cleanly now.
+        self.emit_op(StackOp(op="push", value=big_int_push(2)))
+        self.emit_op(StackOp(op="opcode", code="OP_PICK"))            # exp base acc exp
+        self.emit_op(StackOp(op="push", value=big_int_push(MAX_POW_ITERATIONS)))
+        self.emit_op(StackOp(op="opcode", code="OP_LESSTHANOREQUAL")) # exp base acc (exp <= MAX)
+        self.emit_op(StackOp(op="opcode", code="OP_VERIFY"))
+
         for i in range(MAX_POW_ITERATIONS):
             self.emit_op(StackOp(op="push", value=big_int_push(2)))
             self.emit_op(StackOp(op="opcode", code="OP_PICK"))

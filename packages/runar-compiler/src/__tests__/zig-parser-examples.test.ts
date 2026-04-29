@@ -45,8 +45,12 @@ const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
 // `checkMultiSig` is not yet handled by `01-parse-zig.ts`'s expression
 // grammar (no `&` unary, no `[_]T{…}` typed literal). Pending an extension
 // to the relaxed parser; tracked here until a Zig port lands.
+//
+// nested-if-multi-reassign: issue #34 regression fixture — TS-only
+// initially; Zig port to follow.
 const ZIG_PORT_PENDING: readonly string[] = [
   'multisig-2of3/MultiSig2of3.runar.zig',
+  'nested-if-multi-reassign/StackTrackerRepro.runar.zig',
 ];
 
 describe('Zig parser: example inventory', () => {

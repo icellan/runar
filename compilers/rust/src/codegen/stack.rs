@@ -4250,7 +4250,18 @@ impl LoweringContext {
         self.emit_op(StackOp::Swap);                                  // exp base
         self.emit_op(StackOp::Push(PushValue::Int(1)));               // exp base 1(acc)
 
-        for i in 0..32 {
+        // Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+        // Bitcoin Script can't loop, so the iteration count is fixed at
+        // compile time. Without this guard, `exp > 32` would silently
+        // saturate at base^32 (issue #34). Script aborts cleanly now.
+        const MAX_POW_ITERATIONS: i128 = 32;
+        self.emit_op(StackOp::Push(PushValue::Int(2)));
+        self.emit_op(StackOp::Opcode("OP_PICK".to_string()));         // exp base acc exp
+        self.emit_op(StackOp::Push(PushValue::Int(MAX_POW_ITERATIONS)));
+        self.emit_op(StackOp::Opcode("OP_LESSTHANOREQUAL".to_string())); // exp base acc (exp <= MAX)
+        self.emit_op(StackOp::Opcode("OP_VERIFY".to_string()));
+
+        for i in 0..MAX_POW_ITERATIONS {
             // Stack: exp base acc
             self.emit_op(StackOp::Push(PushValue::Int(2)));
             self.emit_op(StackOp::Opcode("OP_PICK".to_string()));     // exp base acc exp

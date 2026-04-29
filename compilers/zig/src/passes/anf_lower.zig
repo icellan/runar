@@ -120,22 +120,12 @@ fn isByteTypedExpr(expr: Expression, ctx: *const LowerCtx) bool {
             }
             // Check local byte vars
             if (ctx.local_byte_vars.get(name) != null) return true;
-            // Mirror TS reference: getParamType walks ALL methods' params
-            // (and the constructor) and returns the first match by name.
-            // This means a param name shared across methods inherits the
-            // type from whichever method declared it first in source order.
-            // See packages/runar-compiler/src/passes/04-anf-lower.ts getParamType.
-            for (ctx.contract.constructor.params) |p| {
-                if (std.mem.eql(u8, p.name, name)) {
-                    return isByteType(p.type_info);
-                }
-            }
-            for (ctx.contract.methods) |m| {
-                for (m.params) |p| {
-                    if (std.mem.eql(u8, p.name, name)) {
-                        return isByteType(p.type_info);
-                    }
-                }
+            // Method-scoped param-type lookup. See issue #34 — previously
+            // walked ALL methods' params, which let a param named `x` in
+            // one method poison byte-type analysis of an unrelated `x`
+            // local in a different method.
+            if (ctx.method_param_types.get(name)) |t| {
+                return isByteType(t);
             }
             return false;
         },
@@ -225,6 +215,7 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
     {
         var ctor_ctx = LowerCtx.init(allocator, contract);
         defer ctor_ctx.deinit();
+        ctor_ctx.setMethodParamTypes(contract.constructor.params);
         for (contract.constructor.params) |param| {
             if (isByteType(param.type_info)) ctor_ctx.markByteTyped(param.name);
         }
@@ -245,6 +236,7 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
         defer method_ctx.deinit();
         // Use the method's source location as default for all bindings in the method.
         method_ctx.current_source_loc = method.source_loc;
+        method_ctx.setMethodParamTypes(method.params);
         for (method.params) |param| {
             method_ctx.addParam(param.name);
             if (isByteType(param.type_info)) method_ctx.markByteTyped(param.name);
@@ -494,6 +486,10 @@ const LowerCtx = struct {
     counter: u32,
     local_names: std.StringHashMapUnmanaged(void),
     param_names: std.StringHashMapUnmanaged(void),
+    /// Method-scoped param-type table populated at the start of each method
+    /// (and the constructor). Replaces a contract-wide search that bled
+    /// param types across method scopes. See issue #34.
+    method_param_types: std.StringHashMapUnmanaged(RunarType),
     local_aliases: std.StringHashMapUnmanaged([]const u8),
     local_byte_vars: std.StringHashMapUnmanaged(void),
     add_output_refs: std.ArrayListUnmanaged([]const u8),
@@ -511,11 +507,19 @@ const LowerCtx = struct {
             .counter = 0,
             .local_names = .empty,
             .param_names = .empty,
+            .method_param_types = .empty,
             .local_aliases = .empty,
             .local_byte_vars = .empty,
             .add_output_refs = .empty,
             .add_data_output_refs = .empty,
         };
+    }
+
+    fn setMethodParamTypes(self: *LowerCtx, params: []const ParamNode) void {
+        self.method_param_types.clearRetainingCapacity();
+        for (params) |p| {
+            self.method_param_types.put(self.allocator, p.name, p.type_info) catch {};
+        }
     }
 
     fn freshTemp(self: *LowerCtx) ![]const u8 {
@@ -601,6 +605,11 @@ const LowerCtx = struct {
         while (param_it.next()) |entry| {
             sub.param_names.put(self.allocator, entry.key_ptr.*, {}) catch {};
         }
+        // Copy method-scoped param types (issue #34)
+        var mpt_it = self.method_param_types.iterator();
+        while (mpt_it.next()) |entry| {
+            sub.method_param_types.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
         // Copy local aliases
         var alias_it = self.local_aliases.iterator();
         while (alias_it.next()) |entry| {
@@ -623,6 +632,7 @@ const LowerCtx = struct {
     fn deinit(self: *LowerCtx) void {
         self.local_names.deinit(self.allocator);
         self.param_names.deinit(self.allocator);
+        self.method_param_types.deinit(self.allocator);
         self.local_aliases.deinit(self.allocator);
         self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);

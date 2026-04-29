@@ -3452,13 +3452,28 @@ class LoweringContext {
     // After all iterations: <exp> <base> <result>
     // OP_NIP OP_NIP → <result>
     //
-    // Wait, this multiplies unconditionally for each step where exp > i.
-    // That gives base^min(exp, 32). That's correct!
+    // Bitcoin Script can't loop, so the iteration count is fixed at compile
+    // time. Without a runtime guard, exp > MAX_POW_ITERATIONS would silently
+    // saturate to base^MAX_POW_ITERATIONS — a quiet correctness bug. Issue
+    // #34 (the GitHub ticket that prompted this audit) flagged the silent
+    // cap. Fix: emit a runtime guard at the start of the loop that
+    // verifies `exp <= MAX_POW_ITERATIONS`. Script aborts cleanly on
+    // larger exponents instead of silently producing the wrong number.
 
     this.emitOp({ op: 'swap' });     // exp base
     this.emitOp({ op: 'push', value: 1n }); // exp base 1
 
     const MAX_POW_ITERATIONS = 32;
+
+    // Runtime guard: <exp> <MAX> OP_LESSTHANOREQUAL OP_VERIFY.
+    // Stack before: [..., exp, base, acc=1]. After: same (guard doesn't
+    // alter the working set on success; OP_VERIFY aborts on failure).
+    this.emitOp({ op: 'push', value: 2n });
+    this.emitOp({ op: 'opcode', code: 'OP_PICK' }); // exp base acc exp
+    this.emitOp({ op: 'push', value: BigInt(MAX_POW_ITERATIONS) });
+    this.emitOp({ op: 'opcode', code: 'OP_LESSTHANOREQUAL' }); // exp base acc (exp <= MAX)
+    this.emitOp({ op: 'opcode', code: 'OP_VERIFY' });
+
     for (let i = 0; i < MAX_POW_ITERATIONS; i++) {
       // Stack: exp base acc
       this.emitOp({ op: 'push', value: 2n });
