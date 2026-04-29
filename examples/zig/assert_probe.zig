@@ -23,8 +23,8 @@ const sphincs_fixtures = @import("sphincs-wallet/fixtures.zig");
 const SPHINCSWallet = @import("sphincs-wallet/SPHINCSWallet.runar.zig").SPHINCSWallet;
 const Counter = @import("stateful-counter/Counter.runar.zig").Counter;
 const TicTacToe = @import("tic-tac-toe/TicTacToe.runar.zig").TicTacToe;
-const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleTokenExample;
-const NFTExample = @import("token-nft/NFTExample.runar.zig").NFTExample;
+const FungibleTokenExample = @import("token-ft/FungibleTokenExample.runar.zig").FungibleToken;
+const NFTExample = @import("token-nft/NFTExample.runar.zig").SimpleNFT;
 
 pub const assert_panic_tag = "RUNAR_ASSERT_PANIC";
 

@@ -8,7 +8,7 @@ require_relative 'EcDemo.runar'
 # We use k=7 (a small scalar) as the test point so computations are fast
 # but the point is a genuine curve point. A second point (k=13) is used
 # for addition tests.
-RSpec.describe EcDemo do
+RSpec.describe ECDemo do
   # Build test points from small scalars so values are deterministic.
   let(:k)    { 7 }
   let(:pt)   { ec_mul_gen(k) }
@@ -26,31 +26,31 @@ RSpec.describe EcDemo do
 
   describe 'check_x (ec_point_x)' do
     it 'extracts the x-coordinate from the stored point' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_x(pt_x) }.not_to raise_error
     end
 
     it 'fails with wrong x-coordinate' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_x(pt_x + 1) }.to raise_error(RuntimeError)
     end
   end
 
   describe 'check_y (ec_point_y)' do
     it 'extracts the y-coordinate from the stored point' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_y(pt_y) }.not_to raise_error
     end
   end
 
   describe 'check_make_point (ec_make_point)' do
     it 'constructs a point from coordinates and verifies them' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_make_point(pt_x, pt_y, pt_x, pt_y) }.not_to raise_error
     end
 
     it 'constructs a different point from different coordinates' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_make_point(pt2_x, pt2_y, pt2_x, pt2_y) }.not_to raise_error
     end
   end
@@ -61,13 +61,13 @@ RSpec.describe EcDemo do
 
   describe 'check_on_curve (ec_on_curve)' do
     it 'accepts a valid curve point' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_on_curve }.not_to raise_error
     end
 
     it 'accepts the generator point G itself' do
       g = ec_mul_gen(1)
-      c = EcDemo.new(g)
+      c = ECDemo.new(g)
       expect { c.check_on_curve }.not_to raise_error
     end
   end
@@ -82,7 +82,7 @@ RSpec.describe EcDemo do
       expected_x = ec_point_x(expected)
       expected_y = ec_point_y(expected)
 
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_add(pt2, expected_x, expected_y) }.not_to raise_error
     end
   end
@@ -94,7 +94,7 @@ RSpec.describe EcDemo do
       expected_x = ec_point_x(expected)
       expected_y = ec_point_y(expected)
 
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mul(scalar, expected_x, expected_y) }.not_to raise_error
     end
   end
@@ -106,7 +106,7 @@ RSpec.describe EcDemo do
       expected_x = ec_point_x(expected)
       expected_y = ec_point_y(expected)
 
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mul_gen(scalar, expected_x, expected_y) }.not_to raise_error
     end
 
@@ -128,7 +128,7 @@ RSpec.describe EcDemo do
       neg       = ec_negate(pt)
       expected_y = ec_point_y(neg)
 
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_negate(expected_y) }.not_to raise_error
     end
 
@@ -141,7 +141,7 @@ RSpec.describe EcDemo do
 
   describe 'check_negate_roundtrip' do
     it 'double negation returns the original point' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_negate_roundtrip }.not_to raise_error
     end
   end
@@ -152,18 +152,18 @@ RSpec.describe EcDemo do
 
   describe 'check_mod_reduce (ec_mod_reduce)' do
     it 'reduces a positive value' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mod_reduce(17, 5, 2) }.not_to raise_error
     end
 
     it 'reduces a negative value to a non-negative result' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mod_reduce(-3, 5, 2) }.not_to raise_error
     end
 
     it 'reduces a value larger than EC_N using the curve order' do
       large = EC_N + 42
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mod_reduce(large, EC_N, 42) }.not_to raise_error
     end
   end
@@ -175,7 +175,7 @@ RSpec.describe EcDemo do
   describe 'check_encode_compressed (ec_encode_compressed)' do
     it 'compresses the stored point to 33-byte public key format' do
       expected = ec_encode_compressed(pt)
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_encode_compressed(expected) }.not_to raise_error
     end
 
@@ -193,26 +193,26 @@ RSpec.describe EcDemo do
 
   describe 'check_mul_identity' do
     it '1 * P equals P' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mul_identity }.not_to raise_error
     end
   end
 
   describe 'check_add_on_curve' do
     it 'sum of two valid points lies on the curve' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_add_on_curve(pt2) }.not_to raise_error
     end
   end
 
   describe 'check_mul_gen_on_curve' do
     it 'any scalar multiple of G lies on the curve' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mul_gen_on_curve(12_345) }.not_to raise_error
     end
 
     it 'large scalar multiples of G also lie on the curve' do
-      c = EcDemo.new(pt)
+      c = ECDemo.new(pt)
       expect { c.check_mul_gen_on_curve(EC_N - 1) }.not_to raise_error
     end
   end

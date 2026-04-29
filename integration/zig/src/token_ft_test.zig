@@ -24,7 +24,7 @@ test "FungibleToken_Compile" {
     };
     defer artifact.deinit();
 
-    try std.testing.expectEqualStrings("FungibleTokenExample", artifact.contract_name);
+    try std.testing.expectEqualStrings("FungibleToken", artifact.contract_name);
     try std.testing.expect(artifact.isStateful());
     std.log.info("FungibleTokenExample compiled: {d} bytes", .{artifact.script.len / 2});
 }

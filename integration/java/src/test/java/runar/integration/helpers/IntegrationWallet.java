@@ -24,19 +24,25 @@ public final class IntegrationWallet {
     );
 
     private final String privKeyHex;
-    private final LocalSigner signer;
+    private final Signer signer;
     private final String pubKeyHex;
     private final String pubKeyHash;
     private final String address;
 
-    private IntegrationWallet(String privKeyHex, LocalSigner signer) {
+    private IntegrationWallet(String privKeyHex, LocalSigner local) {
         this.privKeyHex = privKeyHex;
-        this.signer = signer;
-        byte[] pub = signer.pubKey();
+        byte[] pub = local.pubKey();
         this.pubKeyHex = toHex(pub);
         this.pubKeyHash = hash160Hex(pub);
-        // Regtest P2PKH uses the testnet version byte 0x6f.
+        // Regtest P2PKH uses the testnet version byte 0x6f. The SDK's
+        // LocalSigner reports a mainnet (0x00) address, which doesn't match
+        // what the regtest node tracks via importaddress / listunspent. Wrap
+        // it so the SDK queries UTXOs under the regtest form. Mirrors
+        // integration/go/helpers/sdk_provider.go's `SDKSignerFromWallet`
+        // (uses ExternalSigner) and integration/python/conftest.py's
+        // `create_funded_wallet` (uses ExternalSigner).
         this.address = regtestP2PKHAddress(pubKeyHash);
+        this.signer = new RegtestSigner(local, address);
     }
 
     public String privKeyHex() { return privKeyHex; }
@@ -50,6 +56,35 @@ public final class IntegrationWallet {
         long idx = COUNTER.incrementAndGet();
         String hex = String.format("%064x", idx);
         return new IntegrationWallet(hex, new LocalSigner(hex));
+    }
+
+    /**
+     * Wrapper Signer that delegates sign / pubKey to a backing
+     * {@link LocalSigner} but reports the regtest-formatted address.
+     */
+    private static final class RegtestSigner implements Signer {
+        private final LocalSigner inner;
+        private final String regtestAddress;
+
+        RegtestSigner(LocalSigner inner, String regtestAddress) {
+            this.inner = inner;
+            this.regtestAddress = regtestAddress;
+        }
+
+        @Override
+        public byte[] sign(byte[] sighash, String derivationKey) {
+            return inner.sign(sighash, derivationKey);
+        }
+
+        @Override
+        public byte[] pubKey() {
+            return inner.pubKey();
+        }
+
+        @Override
+        public String address() {
+            return regtestAddress;
+        }
     }
 
     /**

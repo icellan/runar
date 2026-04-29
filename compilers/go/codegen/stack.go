@@ -343,6 +343,7 @@ type loweringContext struct {
 	insideBranch       bool            // true when executing inside an if-branch; update_prop skips old-value removal
 	currentSourceLoc   *ir.SourceLocation // Debug: source location to attach to next emitted StackOps
 	constValues        map[string]*big.Int // compile-time constant values tracked for extraction (e.g., Merkle depth)
+	arrayLengths       map[string]int      // element counts for array_literal bindings (used by checkMultiSig)
 
 	// Mode 3: when true, calls to assertGroth16WitnessAssisted in the
 	// method body are treated as no-ops by lowerCall. The actual verifier
@@ -363,6 +364,7 @@ func newLoweringContext(params []string, properties []ir.ANFProperty) *loweringC
 		privateMethods: make(map[string]*ir.ANFMethod),
 		localBindings:  make(map[string]bool),
 		constValues:    make(map[string]*big.Int),
+		arrayLengths:   make(map[string]int),
 	}
 	ctx.trackDepth()
 	return ctx
@@ -2678,20 +2680,23 @@ func (ctx *loweringContext) lowerAddRawOutput(bindingName, satoshis, scriptBytes
 }
 
 func (ctx *loweringContext) lowerArrayLiteral(bindingName string, elements []string, bindingIndex int, lastUses map[string]int) {
-	// An array_literal brings each element to the top of the stack.
-	// The elements remain as individual stack entries — the binding name tracks
-	// the last element so that callers (e.g. checkMultiSig) can find them.
+	// An array_literal brings each element to the top of the stack in order.
+	// On the stack-map we collapse the N elements into a single logical slot
+	// labelled with the binding name; consumers (e.g. checkMultiSig) treat the
+	// whole array as one stack item so depths line up with the TS reference.
 	for _, elem := range elements {
 		isLast := ctx.isLastUse(elem, bindingIndex, lastUses)
 		ctx.bringToTop(elem, isLast)
-		ctx.sm.pop()
-		ctx.sm.push("") // anonymous stack entry for intermediate elements
 	}
-	// Rename the topmost entry to the binding name
-	if len(elements) > 0 {
+	// Pop all elements from the stack map (they're consumed into the array)
+	for i := 0; i < len(elements); i++ {
 		ctx.sm.pop()
 	}
+	// Push a single entry representing the whole array
 	ctx.sm.push(bindingName)
+	// Record the array length so checkMultiSig can emit the correct nSigs/nPKs
+	// count pushes between bringing the sigs and pks arrays to the top.
+	ctx.arrayLengths[bindingName] = len(elements)
 	ctx.trackDepth()
 }
 
@@ -2704,25 +2709,46 @@ func (ctx *loweringContext) lowerCheckMultiSig(bindingName string, args []string
 	// already placed its individual elements on the stack. Here we:
 	// 1. Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
 	// 2. Bring the sigs ref to top
-	// 3. Bring the pks ref to top
-	// 4. Emit OP_CHECKMULTISIG
+	// 3. Push <nSigs>
+	// 4. Bring the pks ref to top
+	// 5. Push <nPKs>
+	// 6. Emit OP_CHECKMULTISIG
 
-	// Push OP_0 dummy
+	sigsRef := args[0]
+	pksRef := args[1]
+	nSigs, ok := ctx.arrayLengths[sigsRef]
+	if !ok {
+		nSigs = 1
+	}
+	nPKs, ok := ctx.arrayLengths[pksRef]
+	if !ok {
+		nPKs = 1
+	}
+
+	// Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
 	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(0)})
 	ctx.sm.push("")
 
-	// Bring sigs array ref to top
-	sigsIsLast := ctx.isLastUse(args[0], bindingIndex, lastUses)
-	ctx.bringToTop(args[0], sigsIsLast)
+	// Bring sigs array ref to top (the individual elements are treated as one item)
+	sigsIsLast := ctx.isLastUse(sigsRef, bindingIndex, lastUses)
+	ctx.bringToTop(sigsRef, sigsIsLast)
 
-	// Bring pks array ref to top
-	pksIsLast := ctx.isLastUse(args[1], bindingIndex, lastUses)
-	ctx.bringToTop(args[1], pksIsLast)
+	// Push nSigs count
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(nSigs))})
+	ctx.sm.push("")
 
-	// Pop all args + dummy
-	ctx.sm.pop() // pks
-	ctx.sm.pop() // sigs
-	ctx.sm.pop() // OP_0 dummy
+	// Bring pubkeys array ref to top
+	pksIsLast := ctx.isLastUse(pksRef, bindingIndex, lastUses)
+	ctx.bringToTop(pksRef, pksIsLast)
+
+	// Push nPKs count
+	ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(nPKs))})
+	ctx.sm.push("")
+
+	// Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
+	for i := 0; i < 5; i++ {
+		ctx.sm.pop()
+	}
 
 	ctx.emitOp(StackOp{Op: "opcode", Code: "OP_CHECKMULTISIG"})
 	ctx.sm.push(bindingName)

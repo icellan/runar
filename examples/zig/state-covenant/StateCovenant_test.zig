@@ -11,5 +11,5 @@ test "advanceState increments block number" {
     var c = StateCovenant.init(root1, 0, vk_hash);
     _ = &c;
     // Business logic test: block number must increase
-    std.testing.expect(c.block_number == 0) catch unreachable;
+    std.testing.expect(c.blockNumber == 0) catch unreachable;
 }

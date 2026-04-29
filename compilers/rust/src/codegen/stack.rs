@@ -407,6 +407,8 @@ struct LoweringContext {
     current_source_loc: Option<crate::ir::SourceLocation>,
     /// Tracks compile-time constant values by binding name (for Merkle depth extraction, etc.).
     const_values: HashMap<String, ConstValue>,
+    /// Element counts for array_literal bindings (used by checkMultiSig).
+    array_lengths: HashMap<String, usize>,
 }
 
 impl LoweringContext {
@@ -423,6 +425,7 @@ impl LoweringContext {
             inside_branch: false,
             current_source_loc: None,
             const_values: HashMap::new(),
+            array_lengths: HashMap::new(),
         };
         ctx.track_depth();
         ctx
@@ -2374,20 +2377,24 @@ impl LoweringContext {
         binding_index: usize,
         last_uses: &HashMap<String, usize>,
     ) {
-        // An array_literal brings each element to the top of the stack.
-        // The elements remain as individual stack entries; the binding name tracks
-        // the last element so that callers (e.g. checkMultiSig) can find them.
+        // An array_literal brings each element to the top of the stack in order.
+        // On the stack-map we collapse the N elements into a single logical slot
+        // labelled with the binding name; consumers (e.g. checkMultiSig) treat
+        // the whole array as one stack item so depths line up with TS.
         for elem in elements {
             let is_last = self.is_last_use(elem, binding_index, last_uses);
             self.bring_to_top(elem, is_last);
-            self.sm.pop();
-            self.sm.push(""); // anonymous stack entry for intermediate elements
         }
-        // Rename the topmost entry to the binding name
-        if !elements.is_empty() {
+        // Pop all elements from the stack map (they're consumed into the array)
+        for _ in 0..elements.len() {
             self.sm.pop();
         }
+        // Push a single entry representing the whole array
         self.sm.push(binding_name);
+        // Record the array length so checkMultiSig can emit the correct
+        // nSigs/nPKs count pushes between bringing the sigs and pks arrays.
+        self.array_lengths
+            .insert(binding_name.to_string(), elements.len());
         self.track_depth();
     }
 
@@ -2405,22 +2412,35 @@ impl LoweringContext {
         // The two args reference array_literal bindings whose individual elements
         // are already on the stack.
 
+        let sigs_ref = &args[0];
+        let pks_ref = &args[1];
+        let n_sigs = *self.array_lengths.get(sigs_ref).unwrap_or(&1);
+        let n_pks = *self.array_lengths.get(pks_ref).unwrap_or(&1);
+
         // Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
         self.emit_op(StackOp::Push(PushValue::Int(0)));
         self.sm.push("");
 
-        // Bring sigs array ref to top
-        let sigs_is_last = self.is_last_use(&args[0], binding_index, last_uses);
-        self.bring_to_top(&args[0], sigs_is_last);
+        // Bring sigs array ref to top (the individual elements are treated as one item)
+        let sigs_is_last = self.is_last_use(sigs_ref, binding_index, last_uses);
+        self.bring_to_top(sigs_ref, sigs_is_last);
 
-        // Bring pks array ref to top
-        let pks_is_last = self.is_last_use(&args[1], binding_index, last_uses);
-        self.bring_to_top(&args[1], pks_is_last);
+        // Push nSigs count
+        self.emit_op(StackOp::Push(PushValue::Int(n_sigs as i128)));
+        self.sm.push("");
 
-        // Pop all args + dummy
-        self.sm.pop(); // pks
-        self.sm.pop(); // sigs
-        self.sm.pop(); // OP_0 dummy
+        // Bring pubkeys array ref to top
+        let pks_is_last = self.is_last_use(pks_ref, binding_index, last_uses);
+        self.bring_to_top(pks_ref, pks_is_last);
+
+        // Push nPKs count
+        self.emit_op(StackOp::Push(PushValue::Int(n_pks as i128)));
+        self.sm.push("");
+
+        // Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
+        for _ in 0..5 {
+            self.sm.pop();
+        }
 
         self.emit_op(StackOp::Opcode("OP_CHECKMULTISIG".to_string()));
         self.sm.push(binding_name);

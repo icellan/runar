@@ -372,20 +372,10 @@ jobs:
 
   runar-verification:
     name: Runar Verification (Lean 4)
-    needs:
-      - ts-compiler
-      - go-compiler
-      - rust-compiler
-      - python-compiler
-      - zig-compiler
-      - ruby-compiler
-      - java-compiler
-      - go-sdk
-      - rust-sdk
-      - python-sdk
-      - zig-sdk
-      - ruby-sdk
-      - java-sdk
+    # Self-contained — only runs `lake build` + Lean tests against the
+    # in-repo conformance fixtures. No artifacts consumed from upstream
+    # compiler/SDK jobs, so we don't gate it on their (sometimes flaky,
+    # sometimes pre-existing) failures.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -405,16 +395,21 @@ jobs:
             runar-verification-${{ runner.os }}-
       - name: Build
         working-directory: runar-verification
-        run: lake build
+        run: lake build && lake build pipelineGolden
       - name: Run GoldenLoad tests
         working-directory: runar-verification
         run: lake env lean --run tests/GoldenLoad.lean
       - name: Run Roundtrip tests
         working-directory: runar-verification
         run: lake env lean --run tests/Roundtrip.lean
-      - name: Run PipelineGolden tests
+      - name: Run PipelineGolden tests (native exe)
         working-directory: runar-verification
-        run: lake env lean --run tests/PipelineGolden.lean
+        # Linux has no dyld __DATA_CONST check, so the native exe runs
+        # directly here (it cannot run locally on macOS — see HANDOFF §6).
+        # Native is ~50–100× faster than the interpreter, which makes the
+        # multi-MB crypto fixtures (post-quantum-slhdsa, p384-*, ec-demo,
+        # schnorr-zkp) practical for the 15-min CI timeout.
+        run: lake env ./.lake/build/bin/pipelineGolden
 
   sdk-conformance:
     name: SDK Output Conformance

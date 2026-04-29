@@ -7837,6 +7837,636 @@ as a separate hypothesis (alongside `wellTypedRun ops s` and
 front-end whose stack typing is provided externally, this is a thin
 extra obligation; the sound theorem is otherwise unchanged. -/
 
+/-! ### Phase 4-C — `wellTypedRun` preservation for the 7 Phase-3u rules.
+
+These are the 7 rules added in Phase 3u that didn't carry preservation
+lemmas yet. The recipe mirrors the existing 12 (Phase 3r/3s):
+* Identity rules (none here): post-rule state = `s`.
+* Non-identity 2-op rules (`oneSub`, `doubleOver`, `doubleDrop`,
+  `zeroNumEqual`): the post-output-op state on `s` equals the post-2-op
+  state on `s`, derived from the rule's `_extends` lemma.
+* 3-op constant folds (`pushPushAdd`/`Sub`/`Mul`): output is a single
+  `.push`. Push has no precondition, and the post-push state is
+  `s.push (.vBigint result)`, which equals the post-3-op state. -/
+
+/-- `applyOneSub` preserves `wellTypedRun`. Non-identity rule
+`[push 1, OP_SUB] → [OP_1SUB]`. Mirror of `applyOneAdd_preserves_wellTypedRun`. -/
+theorem applyOneSub_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyOneSub ops) s := by
+  intro ops
+  induction ops using applyOneSub.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint 1) :: .opcode "OP_SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have hStepPush : stepNonIf (.push (.bigint 1)) s = .ok (s.push (.vBigint 1)) :=
+      stepNonIf_push_bigint s 1
+    have hWellSub : wellTypedRun (.opcode "OP_SUB" :: rest') (s.push (.vBigint 1)) :=
+      hCont _ hStepPush
+    have ⟨hPrecondSub, hContSub⟩ := wellTypedRun_cons _ _ _ |>.mp hWellSub
+    obtain ⟨a, b, rest_stack, hStackPush⟩ :=
+      precondMet_twoInts_extract _ hPrecondSub
+    have hPushStack : (s.push (.vBigint 1)).stack = .vBigint 1 :: s.stack := by
+      unfold StackState.push; simp
+    have hStackEq : .vBigint 1 :: s.stack = .vBigint b :: .vBigint a :: rest_stack := by
+      rw [← hPushStack]; exact hStackPush
+    have hSStack : s.stack = .vBigint a :: rest_stack :=
+      List.tail_eq_of_cons_eq hStackEq
+    have hStackForSub : (s.push (.vBigint 1)).stack
+                      = .vBigint 1 :: .vBigint a :: rest_stack := by
+      rw [hPushStack, hSStack]
+    -- Output: .opcode "OP_1SUB" :: applyOneSub rest'.
+    show wellTypedRun (.opcode "OP_1SUB" :: applyOneSub rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · show precondMet .bigint s
+      simp [precondMet, hSStack]
+    · intro s' hStep1SUB
+      have hStepDef : stepNonIf (.opcode "OP_1SUB") s
+                    = .ok (({ s with stack := rest_stack } : StackState).push (.vBigint (a - 1))) := by
+        rw [stepNonIf_opcode, runOpcode_1SUB_def]
+        unfold liftIntUnary StackState.pop?
+        rw [hSStack]
+        simp [asInt?, StackState.push]
+      have hSEq : s' = ({ s with stack := rest_stack } : StackState).push (.vBigint (a - 1)) := by
+        rw [hStepDef] at hStep1SUB
+        exact ((Except.ok.injEq _ _).mp hStep1SUB).symm
+      have hStepSub : stepNonIf (.opcode "OP_SUB") (s.push (.vBigint 1)) = .ok s' := by
+        rw [stepNonIf_opcode]
+        rw [runOpcode_sub_int_concrete (s.push (.vBigint 1)) a 1 rest_stack hStackForSub]
+        rw [hSEq]
+        cases s
+        simp_all [StackState.push]
+      have hWellRest : wellTypedRun rest' s' := hContSub s' hStepSub
+      exact ih hRest' s' hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyOneSub (op :: rest')
+        = op :: applyOneSub rest' :=
+      applyOneSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyOneSub rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
+/-- `applyDoubleOver` preserves `wellTypedRun`. Non-identity rule
+`[over, over] → [OP_2DUP]`. Both produce the same post state from
+`a :: b :: rest_top`: `a :: b :: a :: b :: rest_top`. -/
+theorem applyDoubleOver_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyDoubleOver ops) s := by
+  intro ops
+  induction ops using applyDoubleOver.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.over :: .over :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨hPrecond, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    obtain ⟨a, b, rest_top, hStack⟩ := precondMet_twoElems_extract s hPrecond
+    let s1 : StackState := { s with stack := b :: a :: b :: rest_top }
+    have hs1stack : s1.stack = b :: a :: b :: rest_top := rfl
+    have hStepOver1 : stepNonIf .over s = .ok s1 := by
+      rw [stepNonIf_over_def]; exact applyOver_cons2 s a b rest_top hStack
+    have hWell1 : wellTypedRun (.over :: rest') s1 := hCont s1 hStepOver1
+    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+    let s2 : StackState := { s with stack := a :: b :: a :: b :: rest_top }
+    have hStepOver2 : stepNonIf .over s1 = .ok s2 := by
+      rw [stepNonIf_over_def]
+      rw [applyOver_cons2 s1 b a (b :: rest_top) hs1stack]
+    have hWellRest : wellTypedRun rest' s2 := hCont1 s2 hStepOver2
+    -- Output: .opcode "OP_2DUP" :: applyDoubleOver rest'.
+    show wellTypedRun (.opcode "OP_2DUP" :: applyDoubleOver rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · -- OP_2DUP's opPrecondition falls through to .none.
+      show precondMet .none s
+      exact True.intro
+    · intro s' hStep2DUP
+      have hStepDef : stepNonIf (.opcode "OP_2DUP") s = .ok s2 := by
+        rw [stepNonIf_opcode, runOpcode_2DUP_def]
+        rw [applyOver_cons2 s a b rest_top hStack]
+        show applyOver ({ s with stack := b :: a :: b :: rest_top } : StackState) = Except.ok s2
+        rw [applyOver_cons2 _ b a (b :: rest_top) hs1stack]
+      have hSEq : s' = s2 := by
+        rw [hStepDef] at hStep2DUP
+        exact ((Except.ok.injEq _ _).mp hStep2DUP).symm
+      rw [hSEq]
+      exact ih hRest' s2 hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyDoubleOver (op :: rest')
+        = op :: applyDoubleOver rest' :=
+      applyDoubleOver.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyDoubleOver rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
+/-- `applyDoubleDrop` preserves `wellTypedRun`. Non-identity rule
+`[drop, drop] → [OP_2DROP]`. Both produce the same post state. -/
+theorem applyDoubleDrop_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyDoubleDrop ops) s := by
+  intro ops
+  induction ops using applyDoubleDrop.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.drop :: .drop :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨hPrecond1, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    obtain ⟨a, rest_after_one, hStack1⟩ := precondMet_nonEmpty_extract s hPrecond1
+    let s1 : StackState := { s with stack := rest_after_one }
+    have hStepDrop1 : stepNonIf .drop s = .ok s1 := by
+      rw [stepNonIf_drop]; exact applyDrop_cons s a rest_after_one hStack1
+    have hWell1 : wellTypedRun (.drop :: rest') s1 := hCont s1 hStepDrop1
+    have ⟨hPrecond2, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+    have hs1stack : s1.stack = rest_after_one := rfl
+    obtain ⟨b, rest_top, hStack2⟩ := precondMet_nonEmpty_extract s1 hPrecond2
+    have hRestEq : rest_after_one = b :: rest_top := by
+      rw [← hs1stack]; exact hStack2
+    have hStackOrig : s.stack = a :: b :: rest_top := by
+      rw [hStack1, hRestEq]
+    let s2 : StackState := { s with stack := rest_top }
+    have hStepDrop2 : stepNonIf .drop s1 = .ok s2 := by
+      rw [stepNonIf_drop]
+      rw [applyDrop_cons s1 b rest_top hStack2]
+    have hWellRest : wellTypedRun rest' s2 := hCont1 s2 hStepDrop2
+    -- Output: .opcode "OP_2DROP" :: applyDoubleDrop rest'.
+    show wellTypedRun (.opcode "OP_2DROP" :: applyDoubleDrop rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · -- OP_2DROP's opPrecondition falls through to .none.
+      show precondMet .none s
+      exact True.intro
+    · intro s' hStep2DROP
+      have hStepDef : stepNonIf (.opcode "OP_2DROP") s = .ok s2 := by
+        rw [stepNonIf_opcode, runOpcode_2DROP_def]
+        rw [applyDrop_cons s a (b :: rest_top) hStackOrig]
+        have hs1' : ({ s with stack := b :: rest_top } : StackState).stack = b :: rest_top := rfl
+        show applyDrop ({ s with stack := b :: rest_top } : StackState) = Except.ok s2
+        rw [applyDrop_cons _ b rest_top hs1']
+      have hSEq : s' = s2 := by
+        rw [hStepDef] at hStep2DROP
+        exact ((Except.ok.injEq _ _).mp hStep2DROP).symm
+      rw [hSEq]
+      exact ih hRest' s2 hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyDoubleDrop (op :: rest')
+        = op :: applyDoubleDrop rest' :=
+      applyDoubleDrop.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyDoubleDrop rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
+/-! ### Note: `applyZeroNumEqual_preserves_wellTypedRun` is NOT provable.
+
+The rule `[push 0, OP_NUMEQUAL] → [OP_NOT]` rewrites a 2-op chain into a
+single OP_NOT. The post-rewrite output's precondition is `precondMet .bool`,
+which strictly requires `.vBool _ :: _`, but the input firing position has
+`.vBigint a :: _` on top (since OP_NUMEQUAL's twoInts precond was met).
+`asBool?` accepts `.vBigint` (so the runOps semantics line up), but
+`precondMet .bool` does not — so the wellTypedRun predicate is strictly
+**stronger** for the output than the input.
+
+This is the same situation as `equalVerifyFuse` (Phase 3t pragmatic fallback),
+and the same pragmatic fix applies: when chaining `applyZeroNumEqual` into
+`peepholePassAll_sound`, we apply it **outermost** and take the post-rewrite
+`wellTypedRun` as an external precondition supplied by the caller.
+
+`pushPushAdd`/`pushPushSub`/`pushPushMul` produce `.push` outputs (precond
+`.none`) so their wellTypedRun preservation IS provable — see below. -/
+
+/-! ### Phase 4-C — `noIfOp` preservation for the 7 Phase-3u rules.
+
+Each rule's `_preserves_noIfOp` follows the same recipe as the Phase 3r/3s
+preservation lemmas: induct on the rule's `apply.induct`, dispatch on the
+fire/no-fire case, and observe that no `.ifOp` is ever introduced. -/
+
+theorem applyOneSub_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyOneSub ops) := by
+  intro ops
+  induction ops using applyOneSub.induct with
+  | case1 => intro _; exact True.intro
+  | case2 rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint 1) :: .opcode "OP_SUB" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyOneSub rest') := ih hRest'
+    show noIfOp (.opcode "OP_1SUB" :: applyOneSub rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyOneSub rest') := ih hRest'
+    have hRewrite :
+        applyOneSub (op :: rest')
+        = op :: applyOneSub rest' :=
+      applyOneSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyDoubleOver_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyDoubleOver ops) := by
+  intro ops
+  induction ops using applyDoubleOver.induct with
+  | case1 => intro _; exact True.intro
+  | case2 rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.over :: .over :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyDoubleOver rest') := ih hRest'
+    show noIfOp (.opcode "OP_2DUP" :: applyDoubleOver rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyDoubleOver rest') := ih hRest'
+    have hRewrite :
+        applyDoubleOver (op :: rest')
+        = op :: applyDoubleOver rest' :=
+      applyDoubleOver.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyDoubleDrop_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyDoubleDrop ops) := by
+  intro ops
+  induction ops using applyDoubleDrop.induct with
+  | case1 => intro _; exact True.intro
+  | case2 rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.drop :: .drop :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyDoubleDrop rest') := ih hRest'
+    show noIfOp (.opcode "OP_2DROP" :: applyDoubleDrop rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyDoubleDrop rest') := ih hRest'
+    have hRewrite :
+        applyDoubleDrop (op :: rest')
+        = op :: applyDoubleDrop rest' :=
+      applyDoubleDrop.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyZeroNumEqual_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyZeroNumEqual ops) := by
+  intro ops
+  induction ops using applyZeroNumEqual.induct with
+  | case1 => intro _; exact True.intro
+  | case2 rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyZeroNumEqual rest') := ih hRest'
+    show noIfOp (.opcode "OP_NOT" :: applyZeroNumEqual rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyZeroNumEqual rest') := ih hRest'
+    have hRewrite :
+        applyZeroNumEqual (op :: rest')
+        = op :: applyZeroNumEqual rest' :=
+      applyZeroNumEqual.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyPushPushAdd_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushPushAdd ops) := by
+  intro ops
+  induction ops using applyPushPushAdd.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a b rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_ADD" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyPushPushAdd rest') := ih hRest'
+    show noIfOp (.push (.bigint (a + b)) :: applyPushPushAdd rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyPushPushAdd rest') := ih hRest'
+    have hRewrite :
+        applyPushPushAdd (op :: rest')
+        = op :: applyPushPushAdd rest' :=
+      applyPushPushAdd.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyPushPushSub_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushPushSub ops) := by
+  intro ops
+  induction ops using applyPushPushSub.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a b rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_SUB" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyPushPushSub rest') := ih hRest'
+    show noIfOp (.push (.bigint (a - b)) :: applyPushPushSub rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyPushPushSub rest') := ih hRest'
+    have hRewrite :
+        applyPushPushSub (op :: rest')
+        = op :: applyPushPushSub rest' :=
+      applyPushPushSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+theorem applyPushPushMul_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (applyPushPushMul ops) := by
+  intro ops
+  induction ops using applyPushPushMul.induct with
+  | case1 => intro _; exact True.intro
+  | case2 a b rest' ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_MUL" :: rest') at h
+      change noIfOp rest'
+      exact h
+    have ihRes : noIfOp (applyPushPushMul rest') := ih hRest'
+    show noIfOp (.push (.bigint (a * b)) :: applyPushPushMul rest')
+    simpa [noIfOp] using ihRes
+  | case3 op rest' h_no_match ih =>
+    intro h
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd h (by simp [noIfOp])
+      | _ => simpa [noIfOp] using h
+    have ihRes : noIfOp (applyPushPushMul rest') := ih hRest'
+    have hRewrite :
+        applyPushPushMul (op :: rest')
+        = op :: applyPushPushMul rest' :=
+      applyPushPushMul.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    cases op with
+    | ifOp _ _ => exact absurd h (by simp [noIfOp])
+    | _ => simpa [noIfOp] using ihRes
+
+/-! ### Phase 4-C — `wellTypedRun` preservation for the 3-op constant folds.
+
+`pushPushAdd`/`pushPushSub`/`pushPushMul` rewrite `[push a, push b, OP_X]`
+to `[push (a OP b)]`. The output is a single `.push`, whose precondition
+falls through to `.none` (trivially met), and the post-push state is
+`s.push (.vBigint result)`, which equals the post-3-op state on `s`. -/
+
+theorem applyPushPushAdd_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyPushPushAdd ops) s := by
+  intro ops
+  induction ops using applyPushPushAdd.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_ADD" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+      stepNonIf_push_bigint s a
+    have hWell1 : wellTypedRun (.push (.bigint b) :: .opcode "OP_ADD" :: rest')
+                    (s.push (.vBigint a)) := hCont _ hStepPushA
+    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+    have hStepPushB : stepNonIf (.push (.bigint b)) (s.push (.vBigint a))
+                    = .ok ((s.push (.vBigint a)).push (.vBigint b)) :=
+      stepNonIf_push_bigint _ b
+    have hWell2 : wellTypedRun (.opcode "OP_ADD" :: rest')
+                    ((s.push (.vBigint a)).push (.vBigint b)) := hCont1 _ hStepPushB
+    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell2
+    have hPostStack : ((s.push (.vBigint a)).push (.vBigint b)).stack
+                    = .vBigint b :: .vBigint a :: s.stack := by
+      unfold StackState.push; simp
+    have hStepAdd : stepNonIf (.opcode "OP_ADD") ((s.push (.vBigint a)).push (.vBigint b))
+                  = .ok (s.push (.vBigint (a + b))) := by
+      rw [stepNonIf_opcode]
+      rw [runOpcode_add_int_concrete _ a b s.stack hPostStack]
+      cases s
+      simp [StackState.push]
+    have hWellRest : wellTypedRun rest' (s.push (.vBigint (a + b))) := hCont2 _ hStepAdd
+    show wellTypedRun (.push (.bigint (a + b)) :: applyPushPushAdd rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · show precondMet .none s
+      exact True.intro
+    · intro s' hStepPush
+      have hStepDef : stepNonIf (.push (.bigint (a + b))) s = .ok (s.push (.vBigint (a + b))) :=
+        stepNonIf_push_bigint s (a + b)
+      have hSEq : s' = s.push (.vBigint (a + b)) := by
+        rw [hStepDef] at hStepPush
+        exact ((Except.ok.injEq _ _).mp hStepPush).symm
+      rw [hSEq]
+      exact ih hRest' _ hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyPushPushAdd (op :: rest')
+        = op :: applyPushPushAdd rest' :=
+      applyPushPushAdd.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyPushPushAdd rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
+theorem applyPushPushSub_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyPushPushSub ops) s := by
+  intro ops
+  induction ops using applyPushPushSub.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_SUB" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+      stepNonIf_push_bigint s a
+    have hWell1 : wellTypedRun (.push (.bigint b) :: .opcode "OP_SUB" :: rest')
+                    (s.push (.vBigint a)) := hCont _ hStepPushA
+    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+    have hStepPushB : stepNonIf (.push (.bigint b)) (s.push (.vBigint a))
+                    = .ok ((s.push (.vBigint a)).push (.vBigint b)) :=
+      stepNonIf_push_bigint _ b
+    have hWell2 : wellTypedRun (.opcode "OP_SUB" :: rest')
+                    ((s.push (.vBigint a)).push (.vBigint b)) := hCont1 _ hStepPushB
+    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell2
+    have hPostStack : ((s.push (.vBigint a)).push (.vBigint b)).stack
+                    = .vBigint b :: .vBigint a :: s.stack := by
+      unfold StackState.push; simp
+    have hStepSub : stepNonIf (.opcode "OP_SUB") ((s.push (.vBigint a)).push (.vBigint b))
+                  = .ok (s.push (.vBigint (a - b))) := by
+      rw [stepNonIf_opcode]
+      rw [runOpcode_sub_int_concrete _ a b s.stack hPostStack]
+      cases s
+      simp [StackState.push]
+    have hWellRest : wellTypedRun rest' (s.push (.vBigint (a - b))) := hCont2 _ hStepSub
+    show wellTypedRun (.push (.bigint (a - b)) :: applyPushPushSub rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · show precondMet .none s
+      exact True.intro
+    · intro s' hStepPush
+      have hStepDef : stepNonIf (.push (.bigint (a - b))) s = .ok (s.push (.vBigint (a - b))) :=
+        stepNonIf_push_bigint s (a - b)
+      have hSEq : s' = s.push (.vBigint (a - b)) := by
+        rw [hStepDef] at hStepPush
+        exact ((Except.ok.injEq _ _).mp hStepPush).symm
+      rw [hSEq]
+      exact ih hRest' _ hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyPushPushSub (op :: rest')
+        = op :: applyPushPushSub rest' :=
+      applyPushPushSub.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyPushPushSub rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
+theorem applyPushPushMul_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyPushPushMul ops) s := by
+  intro ops
+  induction ops using applyPushPushMul.induct with
+  | case1 => intro _ s _; exact True.intro
+  | case2 a b rest' ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      change noIfOp (.push (.bigint a) :: .push (.bigint b) :: .opcode "OP_MUL" :: rest') at hNoIf
+      change noIfOp rest'
+      exact hNoIf
+    have ⟨_, hCont⟩ := wellTypedRun_cons _ _ _ |>.mp hWT
+    have hStepPushA : stepNonIf (.push (.bigint a)) s = .ok (s.push (.vBigint a)) :=
+      stepNonIf_push_bigint s a
+    have hWell1 : wellTypedRun (.push (.bigint b) :: .opcode "OP_MUL" :: rest')
+                    (s.push (.vBigint a)) := hCont _ hStepPushA
+    have ⟨_, hCont1⟩ := wellTypedRun_cons _ _ _ |>.mp hWell1
+    have hStepPushB : stepNonIf (.push (.bigint b)) (s.push (.vBigint a))
+                    = .ok ((s.push (.vBigint a)).push (.vBigint b)) :=
+      stepNonIf_push_bigint _ b
+    have hWell2 : wellTypedRun (.opcode "OP_MUL" :: rest')
+                    ((s.push (.vBigint a)).push (.vBigint b)) := hCont1 _ hStepPushB
+    have ⟨_, hCont2⟩ := wellTypedRun_cons _ _ _ |>.mp hWell2
+    have hPostStack : ((s.push (.vBigint a)).push (.vBigint b)).stack
+                    = .vBigint b :: .vBigint a :: s.stack := by
+      unfold StackState.push; simp
+    have hStepMul : stepNonIf (.opcode "OP_MUL") ((s.push (.vBigint a)).push (.vBigint b))
+                  = .ok (s.push (.vBigint (a * b))) := by
+      rw [stepNonIf_opcode]
+      rw [runOpcode_mul_int_concrete _ a b s.stack hPostStack]
+      cases s
+      simp [StackState.push]
+    have hWellRest : wellTypedRun rest' (s.push (.vBigint (a * b))) := hCont2 _ hStepMul
+    show wellTypedRun (.push (.bigint (a * b)) :: applyPushPushMul rest') s
+    refine (wellTypedRun_cons _ _ _).mpr ⟨?_, ?_⟩
+    · show precondMet .none s
+      exact True.intro
+    · intro s' hStepPush
+      have hStepDef : stepNonIf (.push (.bigint (a * b))) s = .ok (s.push (.vBigint (a * b))) :=
+        stepNonIf_push_bigint s (a * b)
+      have hSEq : s' = s.push (.vBigint (a * b)) := by
+        rw [hStepDef] at hStepPush
+        exact ((Except.ok.injEq _ _).mp hStepPush).symm
+      rw [hSEq]
+      exact ih hRest' _ hWellRest
+  | case3 op rest' h_no_match ih =>
+    intro hNoIf s hWT
+    have hRest' : noIfOp rest' := by
+      cases op with
+      | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+      | _ => simpa [noIfOp] using hNoIf
+    have hRewrite :
+        applyPushPushMul (op :: rest')
+        = op :: applyPushPushMul rest' :=
+      applyPushPushMul.eq_3 op rest' h_no_match
+    rw [hRewrite]
+    exact wellTypedRun_cons_via_ih op rest' (applyPushPushMul rest') s hWT
+      (fun s' _ hWTRest => ih hRest' s' hWTRest)
+
 /-! ## Phase 3t — `peepholePassFullPlus` composition (12 rules)
 
 `applyEqualVerifyFuse` is applied **first** (innermost) so that its
@@ -7931,6 +8561,303 @@ theorem peepholePassFullPlus_sound :
     (hSound7.trans (hSound6.trans (hSound5.trans (hSound4.trans
       (hSound3.trans (hSound2.trans (hSound1.trans hSound0))))))))))
 
+/-! ## Tail-recursive runtime implementations (Phase 4-D)
+
+The structural-recursive `apply*` definitions above keep their auto-generated
+`.eq_*` and `.induct` equation lemmas — which the soundness proofs in this
+file directly reference — but they are NOT tail-recursive. The
+non-tail recursive `op :: applyXxx rest` form builds `cons` frames on
+the way back up the call stack, which overflows the Lean interpreter's
+per-thread stack on op lists with tens of thousands of entries (e.g.
+SHA-256 partial-block codegen produces ~70K-op lists).
+
+We provide a tail-recursive runtime twin for each `apply*` rule and
+attach it via `@[implemented_by]`. Both compiled native code AND the
+Lean bytecode interpreter (`lean --run`) use the TR implementation,
+while definitional unfolding, `simp`, and proof-side reasoning still
+see the original structural definition. The TR implementations are
+provably equal to the originals, but we don't need the equality at the
+proof level — only at runtime.
+
+Each TR shadow uses the standard accumulator-then-reverse pattern:
+walk the input list with a tail call, prepending to an accumulator,
+and reverse the accumulator on the empty tail.
+
+These shadows are placed BEFORE `peepholePassAllFlat` (and any caller
+of the rules) so that when the compiler emits C code for the chain, it
+substitutes the TR implementation at each call site. Placing the
+attribute declarations after `peepholePassAllFlat` would leave the
+already-emitted C code calling the structural-recursive original. -/
+
+private def applyDropAfterPush.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | (.push _) :: .drop :: rest, acc => applyDropAfterPush.tr.go rest acc
+  | op :: rest, acc => applyDropAfterPush.tr.go rest (op :: acc)
+
+@[inline] private def applyDropAfterPush.tr (ops : List StackOp) : List StackOp :=
+  applyDropAfterPush.tr.go ops []
+
+attribute [implemented_by applyDropAfterPush.tr] applyDropAfterPush
+
+private def applyDupDrop.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .dup :: .drop :: rest, acc => applyDupDrop.tr.go rest acc
+  | op :: rest, acc => applyDupDrop.tr.go rest (op :: acc)
+
+@[inline] private def applyDupDrop.tr (ops : List StackOp) : List StackOp :=
+  applyDupDrop.tr.go ops []
+
+attribute [implemented_by applyDupDrop.tr] applyDupDrop
+
+private def applyDoubleSwap.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .swap :: .swap :: rest, acc => applyDoubleSwap.tr.go rest acc
+  | op :: rest, acc => applyDoubleSwap.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleSwap.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleSwap.tr.go ops []
+
+attribute [implemented_by applyDoubleSwap.tr] applyDoubleSwap
+
+private def applyEqualVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_EQUAL" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyEqualVerifyFuse.tr.go rest (.opcode "OP_EQUALVERIFY" :: acc)
+  | op :: rest, acc => applyEqualVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyEqualVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyEqualVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyEqualVerifyFuse.tr] applyEqualVerifyFuse
+
+private def applyCheckSigVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_CHECKSIG" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyCheckSigVerifyFuse.tr.go rest (.opcode "OP_CHECKSIGVERIFY" :: acc)
+  | op :: rest, acc => applyCheckSigVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyCheckSigVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyCheckSigVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyCheckSigVerifyFuse.tr] applyCheckSigVerifyFuse
+
+private def applyNumEqualVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NUMEQUAL" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyNumEqualVerifyFuse.tr.go rest (.opcode "OP_NUMEQUALVERIFY" :: acc)
+  | op :: rest, acc => applyNumEqualVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyNumEqualVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyNumEqualVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyNumEqualVerifyFuse.tr] applyNumEqualVerifyFuse
+
+private def applyDoubleNot.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NOT" :: .opcode "OP_NOT" :: rest, acc => applyDoubleNot.tr.go rest acc
+  | op :: rest, acc => applyDoubleNot.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleNot.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleNot.tr.go ops []
+
+attribute [implemented_by applyDoubleNot.tr] applyDoubleNot
+
+private def applyDoubleNegate.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_NEGATE" :: .opcode "OP_NEGATE" :: rest, acc => applyDoubleNegate.tr.go rest acc
+  | op :: rest, acc => applyDoubleNegate.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleNegate.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleNegate.tr.go ops []
+
+attribute [implemented_by applyDoubleNegate.tr] applyDoubleNegate
+
+private def applyAddZero.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_ADD" :: rest, acc => applyAddZero.tr.go rest acc
+  | op :: rest, acc => applyAddZero.tr.go rest (op :: acc)
+
+@[inline] private def applyAddZero.tr (ops : List StackOp) : List StackOp :=
+  applyAddZero.tr.go ops []
+
+attribute [implemented_by applyAddZero.tr] applyAddZero
+
+private def applyOneAdd.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .opcode "OP_ADD" :: rest, acc =>
+      applyOneAdd.tr.go rest (.opcode "OP_1ADD" :: acc)
+  | op :: rest, acc => applyOneAdd.tr.go rest (op :: acc)
+
+@[inline] private def applyOneAdd.tr (ops : List StackOp) : List StackOp :=
+  applyOneAdd.tr.go ops []
+
+attribute [implemented_by applyOneAdd.tr] applyOneAdd
+
+private def applySubZero.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_SUB" :: rest, acc => applySubZero.tr.go rest acc
+  | op :: rest, acc => applySubZero.tr.go rest (op :: acc)
+
+@[inline] private def applySubZero.tr (ops : List StackOp) : List StackOp :=
+  applySubZero.tr.go ops []
+
+attribute [implemented_by applySubZero.tr] applySubZero
+
+private def applyDoubleSha256.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_SHA256" :: .opcode "OP_SHA256" :: rest, acc =>
+      applyDoubleSha256.tr.go rest (.opcode "OP_HASH256" :: acc)
+  | op :: rest, acc => applyDoubleSha256.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleSha256.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleSha256.tr.go ops []
+
+attribute [implemented_by applyDoubleSha256.tr] applyDoubleSha256
+
+private def applyOneSub.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .opcode "OP_SUB" :: rest, acc =>
+      applyOneSub.tr.go rest (.opcode "OP_1SUB" :: acc)
+  | op :: rest, acc => applyOneSub.tr.go rest (op :: acc)
+
+@[inline] private def applyOneSub.tr (ops : List StackOp) : List StackOp :=
+  applyOneSub.tr.go ops []
+
+attribute [implemented_by applyOneSub.tr] applyOneSub
+
+private def applyDoubleOver.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .over :: .over :: rest, acc =>
+      applyDoubleOver.tr.go rest (.opcode "OP_2DUP" :: acc)
+  | op :: rest, acc => applyDoubleOver.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleOver.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleOver.tr.go ops []
+
+attribute [implemented_by applyDoubleOver.tr] applyDoubleOver
+
+private def applyDoubleDrop.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .drop :: .drop :: rest, acc =>
+      applyDoubleDrop.tr.go rest (.opcode "OP_2DROP" :: acc)
+  | op :: rest, acc => applyDoubleDrop.tr.go rest (op :: acc)
+
+@[inline] private def applyDoubleDrop.tr (ops : List StackOp) : List StackOp :=
+  applyDoubleDrop.tr.go ops []
+
+attribute [implemented_by applyDoubleDrop.tr] applyDoubleDrop
+
+private def applyZeroNumEqual.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .opcode "OP_NUMEQUAL" :: rest, acc =>
+      applyZeroNumEqual.tr.go rest (.opcode "OP_NOT" :: acc)
+  | op :: rest, acc => applyZeroNumEqual.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroNumEqual.tr (ops : List StackOp) : List StackOp :=
+  applyZeroNumEqual.tr.go ops []
+
+attribute [implemented_by applyZeroNumEqual.tr] applyZeroNumEqual
+
+private def applyPushPushAdd.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_ADD" :: rest, acc =>
+      applyPushPushAdd.tr.go rest (.push (.bigint (a + b)) :: acc)
+  | op :: rest, acc => applyPushPushAdd.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushAdd.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushAdd.tr.go ops []
+
+attribute [implemented_by applyPushPushAdd.tr] applyPushPushAdd
+
+private def applyPushPushSub.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_SUB" :: rest, acc =>
+      applyPushPushSub.tr.go rest (.push (.bigint (a - b)) :: acc)
+  | op :: rest, acc => applyPushPushSub.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushSub.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushSub.tr.go ops []
+
+attribute [implemented_by applyPushPushSub.tr] applyPushPushSub
+
+private def applyPushPushMul.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint a) :: .push (.bigint b) :: .opcode "OP_MUL" :: rest, acc =>
+      applyPushPushMul.tr.go rest (.push (.bigint (a * b)) :: acc)
+  | op :: rest, acc => applyPushPushMul.tr.go rest (op :: acc)
+
+@[inline] private def applyPushPushMul.tr (ops : List StackOp) : List StackOp :=
+  applyPushPushMul.tr.go ops []
+
+attribute [implemented_by applyPushPushMul.tr] applyPushPushMul
+
+private def applyCheckMultiSigVerifyFuse.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .opcode "OP_CHECKMULTISIG" :: .opcode "OP_VERIFY" :: rest, acc =>
+      applyCheckMultiSigVerifyFuse.tr.go rest (.opcode "OP_CHECKMULTISIGVERIFY" :: acc)
+  | op :: rest, acc => applyCheckMultiSigVerifyFuse.tr.go rest (op :: acc)
+
+@[inline] private def applyCheckMultiSigVerifyFuse.tr (ops : List StackOp) : List StackOp :=
+  applyCheckMultiSigVerifyFuse.tr.go ops []
+
+attribute [implemented_by applyCheckMultiSigVerifyFuse.tr] applyCheckMultiSigVerifyFuse
+
+private def applyZeroRoll0.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .roll 0 :: rest, acc => applyZeroRoll0.tr.go rest acc
+  | op :: rest, acc => applyZeroRoll0.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroRoll0.tr (ops : List StackOp) : List StackOp :=
+  applyZeroRoll0.tr.go ops []
+
+attribute [implemented_by applyZeroRoll0.tr] applyZeroRoll0
+
+private def applyOneRoll1.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .roll 1 :: rest, acc =>
+      applyOneRoll1.tr.go rest (.swap :: acc)
+  | op :: rest, acc => applyOneRoll1.tr.go rest (op :: acc)
+
+@[inline] private def applyOneRoll1.tr (ops : List StackOp) : List StackOp :=
+  applyOneRoll1.tr.go ops []
+
+attribute [implemented_by applyOneRoll1.tr] applyOneRoll1
+
+private def applyTwoRoll2.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 2) :: .roll 2 :: rest, acc =>
+      applyTwoRoll2.tr.go rest (.rot :: acc)
+  | op :: rest, acc => applyTwoRoll2.tr.go rest (op :: acc)
+
+@[inline] private def applyTwoRoll2.tr (ops : List StackOp) : List StackOp :=
+  applyTwoRoll2.tr.go ops []
+
+attribute [implemented_by applyTwoRoll2.tr] applyTwoRoll2
+
+private def applyZeroPick0.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 0) :: .pick 0 :: rest, acc =>
+      applyZeroPick0.tr.go rest (.dup :: acc)
+  | op :: rest, acc => applyZeroPick0.tr.go rest (op :: acc)
+
+@[inline] private def applyZeroPick0.tr (ops : List StackOp) : List StackOp :=
+  applyZeroPick0.tr.go ops []
+
+attribute [implemented_by applyZeroPick0.tr] applyZeroPick0
+
+private def applyOnePick1.tr.go : List StackOp → List StackOp → List StackOp
+  | [], acc => acc.reverse
+  | .push (.bigint 1) :: .pick 1 :: rest, acc =>
+      applyOnePick1.tr.go rest (.over :: acc)
+  | op :: rest, acc => applyOnePick1.tr.go rest (op :: acc)
+
+@[inline] private def applyOnePick1.tr (ops : List StackOp) : List StackOp :=
+  applyOnePick1.tr.go ops []
+
+attribute [implemented_by applyOnePick1.tr] applyOnePick1
+
+/-! ## End of tail-recursive runtime implementations. -/
+
 /-- All 19 proven peephole rules applied in TS-reference order.
 
 Used by `Pipeline.peepholeProgram` to maximize byte-exact match against
@@ -7961,20 +8888,460 @@ def peepholePassAllFlat (ops : List StackOp) : List StackOp :=
                    applyDupDrop <|
                     applyDropAfterPush ops
 
-/-- Recursive peephole: applies `peepholePassAllFlat` to each method's
-ops list AND recurses into the branches of every `.ifOp`. Mirrors TS
-`peephole.ts:467-479`. -/
-def peepholePassAll : List StackOp → List StackOp
+/-! ### Recursive peephole driver
+
+`peepholePassAll` applies `peepholePassAllFlat` to each method's ops
+list AND recurses into the branches of every `.ifOp`. Mirrors TS
+`peephole.ts:467-479`.
+
+The naive structural recursion is non-tail-recursive at runtime: each
+step waits for the recursive result before calling
+`peepholePassAllFlat`. For very long op lists (e.g. the ~140k-byte
+`sha256-finalize` fixture) the Lean **interpreter** overflows its
+per-thread stack.
+
+We restructure as two passes that each remain stack-bounded:
+
+1. `preprocessIfOps`: walk the list once, recursing only into `.ifOp`
+   branches (depth = `ifOp` nesting, small in practice).
+2. `peepholePassAllTRgo`: tail-recursive foldl on the reversed list
+   that re-applies `peepholePassAllFlat` to each cons. Constant stack.
+
+Right-fold semantics:
+  `peepholePassAll [a₀,…,aₙ] = flat(a₀' :: flat(a₁' :: … flat(aₙ' :: [])))`
+where `aᵢ'` is `aᵢ` with `ifOp` branches recursively descended. -/
+
+/-- Tail-recursive linear fold helper: walks reversed input `xs` and
+applies the flat pass to each cons. Branches must already be processed
+by the caller. -/
+private def peepholePassAllTRgo : List StackOp → List StackOp → List StackOp
+  | [],          acc => acc
+  | op :: rest,  acc =>
+      peepholePassAllTRgo rest (peepholePassAllFlat (op :: acc))
+
+mutual
+
+/-- One step of branch processing: rewrite a single op, descending
+recursively only into `.ifOp` branches. Recursion depth = `ifOp` nesting
+(small). The outer list traversal is delegated to a tail-recursive
+helper. -/
+private def preprocessOp : StackOp → StackOp
+  | .ifOp thn els =>
+      let thn' := peepholePassAllTRgo (preprocessOpListReversedAux thn []) []
+      let els' : Option (List StackOp) :=
+        match els with
+        | some e => some (peepholePassAllTRgo (preprocessOpListReversedAux e []) [])
+        | none   => none
+      .ifOp thn' els'
+  | other => other
+
+/-- Tail-recursive list traversal that applies `preprocessOp` to each
+element and prepends to the accumulator. The result comes back in
+**reverse order**, which is exactly what `peepholePassAllTRgo`
+consumes — so callers can skip a separate `.reverse`. -/
+private def preprocessOpListReversedAux : List StackOp → List StackOp → List StackOp
+  | [], acc          => acc
+  | op :: rest, acc  => preprocessOpListReversedAux rest (preprocessOp op :: acc)
+
+end
+
+/-- Forward-order branch processor: walks `ops` left-to-right with a
+tail-recursive accumulator, descending recursively only into `.ifOp`
+branches. -/
+private def preprocessIfOps (ops : List StackOp) : List StackOp :=
+  (preprocessOpListReversedAux ops []).reverse
+
+/-- Recursive peephole driver. Equivalent in semantics to the
+right-folded structural definition; restructured to keep the
+interpreter's per-thread stack bounded for very long op lists.
+`preprocessOpListReversedAux` returns its result reversed, which is
+exactly what `peepholePassAllTRgo` consumes — so we feed it directly
+without an extra `.reverse`. -/
+def peepholePassAll (ops : List StackOp) : List StackOp :=
+  peepholePassAllTRgo (preprocessOpListReversedAux ops []) []
+
+/-! ## Phase 4-C — `peepholePassAllFlat_sound` (19-rule chain)
+
+Composes the 19 individual `_pass_sound` results for `peepholePassAllFlat`.
+17 of the 19 rules carry full `wellTypedRun` preservation; the 2
+exceptions (`applyZeroNumEqual` and `applyEqualVerifyFuse`) require the
+caller to supply the post-rule WT predicate as an external hypothesis,
+mirroring the Phase 3t pragmatic fallback for `equalVerifyFuse`.
+
+Specifically:
+* `applyZeroNumEqual` rewrites `[push 0, OP_NUMEQUAL]` to `[OP_NOT]`. The
+  output's `precondMet .bool` is strictly stronger than the input's
+  `precondMet .twoInts ∘ post-push 0` (since `precondMet .bool` rejects
+  `.vBigint` even though `asBool?` accepts it).
+* `applyEqualVerifyFuse` rewrites `[OP_EQUAL, OP_VERIFY]` to
+  `[OP_EQUALVERIFY]`. The output requires `eitherStrict` at firing
+  position, which the WT predicate alone doesn't capture.
+
+The 17-rule WT-preserving chain (from innermost to outermost in
+`peepholePassAllFlat`'s definition):
+1. dropAfterPush, 2. dupDrop, 3. doubleSwap, 4. pushPushAdd,
+5. pushPushSub, 6. pushPushMul, 7. addZero, 8. subZero, 9. oneAdd,
+10. oneSub, 11. doubleNegate, 12. doubleNot, 13. doubleOver,
+14. doubleDrop, 15. doubleSha256, 17. numEqualVerifyFuse,
+18. checkSigVerifyFuse. -/
+
+/-- Abbreviation for the post-15-rule chain (everything strictly inner
+than `applyZeroNumEqual` in `peepholePassAllFlat`). All 15 rules are
+WT-preserving so this carries WT under standard preconditions. -/
+private def passAllInner15 (ops : List StackOp) : List StackOp :=
+  applyDoubleSha256 <|
+   applyDoubleDrop <|
+    applyDoubleOver <|
+     applyDoubleNot <|
+      applyDoubleNegate <|
+       applyOneSub <|
+        applyOneAdd <|
+         applySubZero <|
+          applyAddZero <|
+           applyPushPushMul <|
+            applyPushPushSub <|
+             applyPushPushAdd <|
+              applyDoubleSwap <|
+               applyDupDrop <|
+                applyDropAfterPush ops
+
+set_option maxHeartbeats 800000 in
+/-- Soundness of the inner-15 chain. -/
+private theorem passAllInner15_sound :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        runOps (passAllInner15 ops) s = runOps ops s := by
+  intro ops hNoIf s hWT
+  -- 15 stages of chained _pass_sound + WT-preservation, mirroring
+  -- `peepholePassFull_sound`'s structure.
+  have hSound1 : runOps (applyDropAfterPush ops) s = runOps ops s :=
+    dropAfterPush_pass_sound ops hNoIf s
+  have hNoIf1 := applyDropAfterPush_preserves_noIfOp ops hNoIf
+  have hWT1 := applyDropAfterPush_preserves_wellTypedRun ops hNoIf s hWT
+  have hSound2 := dupDrop_pass_sound _ hNoIf1 s hWT1
+  have hNoIf2 := applyDupDrop_preserves_noIfOp _ hNoIf1
+  have hWT2 := applyDupDrop_preserves_wellTypedRun _ hNoIf1 s hWT1
+  have hSound3 := doubleSwap_pass_sound _ hNoIf2 s hWT2
+  have hNoIf3 := applyDoubleSwap_preserves_noIfOp _ hNoIf2
+  have hWT3 := applyDoubleSwap_preserves_wellTypedRun _ hNoIf2 s hWT2
+  have hSound4 := pushPushAdd_pass_sound _ hNoIf3 s hWT3
+  have hNoIf4 := applyPushPushAdd_preserves_noIfOp _ hNoIf3
+  have hWT4 := applyPushPushAdd_preserves_wellTypedRun _ hNoIf3 s hWT3
+  have hSound5 := pushPushSub_pass_sound _ hNoIf4 s hWT4
+  have hNoIf5 := applyPushPushSub_preserves_noIfOp _ hNoIf4
+  have hWT5 := applyPushPushSub_preserves_wellTypedRun _ hNoIf4 s hWT4
+  have hSound6 := pushPushMul_pass_sound _ hNoIf5 s hWT5
+  have hNoIf6 := applyPushPushMul_preserves_noIfOp _ hNoIf5
+  have hWT6 := applyPushPushMul_preserves_wellTypedRun _ hNoIf5 s hWT5
+  have hSound7 := addZero_pass_sound _ hNoIf6 s hWT6
+  have hNoIf7 := applyAddZero_preserves_noIfOp _ hNoIf6
+  have hWT7 := applyAddZero_preserves_wellTypedRun _ hNoIf6 s hWT6
+  have hSound8 := subZero_pass_sound _ hNoIf7 s hWT7
+  have hNoIf8 := applySubZero_preserves_noIfOp _ hNoIf7
+  have hWT8 := applySubZero_preserves_wellTypedRun _ hNoIf7 s hWT7
+  have hSound9 := oneAdd_pass_sound _ hNoIf8 s hWT8
+  have hNoIf9 := applyOneAdd_preserves_noIfOp _ hNoIf8
+  have hWT9 := applyOneAdd_preserves_wellTypedRun _ hNoIf8 s hWT8
+  have hSound10 := oneSub_pass_sound _ hNoIf9 s hWT9
+  have hNoIf10 := applyOneSub_preserves_noIfOp _ hNoIf9
+  have hWT10 := applyOneSub_preserves_wellTypedRun _ hNoIf9 s hWT9
+  have hSound11 := doubleNegate_pass_sound _ hNoIf10 s hWT10
+  have hNoIf11 := applyDoubleNegate_preserves_noIfOp _ hNoIf10
+  have hWT11 := applyDoubleNegate_preserves_wellTypedRun _ hNoIf10 s hWT10
+  have hSound12 := doubleNot_pass_sound _ hNoIf11 s hWT11
+  have hNoIf12 := applyDoubleNot_preserves_noIfOp _ hNoIf11
+  have hWT12 := applyDoubleNot_preserves_wellTypedRun _ hNoIf11 s hWT11
+  have hSound13 := doubleOver_pass_sound _ hNoIf12 s hWT12
+  have hNoIf13 := applyDoubleOver_preserves_noIfOp _ hNoIf12
+  have hWT13 := applyDoubleOver_preserves_wellTypedRun _ hNoIf12 s hWT12
+  have hSound14 := doubleDrop_pass_sound _ hNoIf13 s hWT13
+  have hNoIf14 := applyDoubleDrop_preserves_noIfOp _ hNoIf13
+  have hWT14 := applyDoubleDrop_preserves_wellTypedRun _ hNoIf13 s hWT13
+  have hSound15 := doubleSha256_pass_sound _ hNoIf14 s hWT14
+  show runOps (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
+        (applyDoubleNot (applyDoubleNegate (applyOneSub (applyOneAdd
+          (applySubZero (applyAddZero (applyPushPushMul (applyPushPushSub
+            (applyPushPushAdd (applyDoubleSwap (applyDupDrop
+              (applyDropAfterPush ops)))))))))))))) ) s
+       = runOps ops s
+  exact hSound15.trans (hSound14.trans (hSound13.trans (hSound12.trans
+    (hSound11.trans (hSound10.trans (hSound9.trans (hSound8.trans
+      (hSound7.trans (hSound6.trans (hSound5.trans (hSound4.trans
+        (hSound3.trans (hSound2.trans hSound1)))))))))))))
+
+set_option maxHeartbeats 800000 in
+/-- noIfOp preservation through the inner 15. -/
+private theorem passAllInner15_preserves_noIfOp :
+    ∀ (ops : List StackOp), noIfOp ops → noIfOp (passAllInner15 ops) := by
+  intro ops hNoIf
+  unfold passAllInner15
+  exact applyDoubleSha256_preserves_noIfOp _
+    (applyDoubleDrop_preserves_noIfOp _
+      (applyDoubleOver_preserves_noIfOp _
+        (applyDoubleNot_preserves_noIfOp _
+          (applyDoubleNegate_preserves_noIfOp _
+            (applyOneSub_preserves_noIfOp _
+              (applyOneAdd_preserves_noIfOp _
+                (applySubZero_preserves_noIfOp _
+                  (applyAddZero_preserves_noIfOp _
+                    (applyPushPushMul_preserves_noIfOp _
+                      (applyPushPushSub_preserves_noIfOp _
+                        (applyPushPushAdd_preserves_noIfOp _
+                          (applyDoubleSwap_preserves_noIfOp _
+                            (applyDupDrop_preserves_noIfOp _
+                              (applyDropAfterPush_preserves_noIfOp _ hNoIf))))))))))))))
+
+set_option maxHeartbeats 800000 in
+/-- WT preservation through the inner 15. -/
+private theorem passAllInner15_preserves_wellTypedRun :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (passAllInner15 ops) s := by
+  intro ops hNoIf s hWT
+  have hNoIf1 := applyDropAfterPush_preserves_noIfOp ops hNoIf
+  have hWT1 := applyDropAfterPush_preserves_wellTypedRun ops hNoIf s hWT
+  have hNoIf2 := applyDupDrop_preserves_noIfOp _ hNoIf1
+  have hWT2 := applyDupDrop_preserves_wellTypedRun _ hNoIf1 s hWT1
+  have hNoIf3 := applyDoubleSwap_preserves_noIfOp _ hNoIf2
+  have hWT3 := applyDoubleSwap_preserves_wellTypedRun _ hNoIf2 s hWT2
+  have hNoIf4 := applyPushPushAdd_preserves_noIfOp _ hNoIf3
+  have hWT4 := applyPushPushAdd_preserves_wellTypedRun _ hNoIf3 s hWT3
+  have hNoIf5 := applyPushPushSub_preserves_noIfOp _ hNoIf4
+  have hWT5 := applyPushPushSub_preserves_wellTypedRun _ hNoIf4 s hWT4
+  have hNoIf6 := applyPushPushMul_preserves_noIfOp _ hNoIf5
+  have hWT6 := applyPushPushMul_preserves_wellTypedRun _ hNoIf5 s hWT5
+  have hNoIf7 := applyAddZero_preserves_noIfOp _ hNoIf6
+  have hWT7 := applyAddZero_preserves_wellTypedRun _ hNoIf6 s hWT6
+  have hNoIf8 := applySubZero_preserves_noIfOp _ hNoIf7
+  have hWT8 := applySubZero_preserves_wellTypedRun _ hNoIf7 s hWT7
+  have hNoIf9 := applyOneAdd_preserves_noIfOp _ hNoIf8
+  have hWT9 := applyOneAdd_preserves_wellTypedRun _ hNoIf8 s hWT8
+  have hNoIf10 := applyOneSub_preserves_noIfOp _ hNoIf9
+  have hWT10 := applyOneSub_preserves_wellTypedRun _ hNoIf9 s hWT9
+  have hNoIf11 := applyDoubleNegate_preserves_noIfOp _ hNoIf10
+  have hWT11 := applyDoubleNegate_preserves_wellTypedRun _ hNoIf10 s hWT10
+  have hNoIf12 := applyDoubleNot_preserves_noIfOp _ hNoIf11
+  have hWT12 := applyDoubleNot_preserves_wellTypedRun _ hNoIf11 s hWT11
+  have hNoIf13 := applyDoubleOver_preserves_noIfOp _ hNoIf12
+  have hWT13 := applyDoubleOver_preserves_wellTypedRun _ hNoIf12 s hWT12
+  have hNoIf14 := applyDoubleDrop_preserves_noIfOp _ hNoIf13
+  have hWT14 := applyDoubleDrop_preserves_wellTypedRun _ hNoIf13 s hWT13
+  show wellTypedRun (applyDoubleSha256 (applyDoubleDrop (applyDoubleOver
+        (applyDoubleNot (applyDoubleNegate (applyOneSub (applyOneAdd
+          (applySubZero (applyAddZero (applyPushPushMul (applyPushPushSub
+            (applyPushPushAdd (applyDoubleSwap (applyDupDrop
+              (applyDropAfterPush ops)))))))))))))) ) s
+  exact applyDoubleSha256_preserves_wellTypedRun _ hNoIf14 s hWT14
+
+set_option maxHeartbeats 4000000 in
+set_option linter.constructorNameAsVariable false in
+/-- Soundness of `peepholePassAllFlat` for `noIfOp` inputs.
+
+The caller must additionally supply:
+* `wellTypedRun (applyZeroNumEqual (passAllInner15 ops)) s` — the
+  post-`zeroNumEqual` WT (since this rule does not preserve WT,
+  see the `applyZeroNumEqual` note above).
+* `equalVerifyFuse_eitherStrict
+     (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+        (applyZeroNumEqual (passAllInner15 ops)))) s` — the
+  `eitherStrict` precondition for `equalVerifyFuse` at its firing
+  positions in the post-fuse program.
+* `wellTypedRun
+     (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+        (applyZeroNumEqual (passAllInner15 ops)))) s` — WT immediately
+  before the final `applyEqualVerifyFuse` step (see Phase 3t fallback).
+-/
+theorem peepholePassAllFlat_sound :
+    ∀ (ops : List StackOp), noIfOp ops →
+      ∀ (s : StackState), wellTypedRun ops s →
+        wellTypedRun (applyZeroNumEqual (passAllInner15 ops)) s →
+        wellTypedRun
+          (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+            (applyZeroNumEqual (passAllInner15 ops)))) s →
+        equalVerifyFuse_eitherStrict
+          (applyCheckSigVerifyFuse (applyNumEqualVerifyFuse
+            (applyZeroNumEqual (passAllInner15 ops)))) s →
+        runOps (peepholePassAllFlat ops) s = runOps ops s := by
+  intro ops hNoIf s hWT hWT16 hWT18 hStrict18
+  -- Inner 15 stages.
+  have hSound15 : runOps (passAllInner15 ops) s = runOps ops s :=
+    passAllInner15_sound ops hNoIf s hWT
+  have hNoIf15 := passAllInner15_preserves_noIfOp ops hNoIf
+  have hWT15 := passAllInner15_preserves_wellTypedRun ops hNoIf s hWT
+  -- Stage 16: zeroNumEqual.
+  have hSound16 : runOps (applyZeroNumEqual (passAllInner15 ops)) s
+                = runOps (passAllInner15 ops) s :=
+    zeroNumEqual_pass_sound _ hNoIf15 s hWT15
+  have hNoIf16 := applyZeroNumEqual_preserves_noIfOp _ hNoIf15
+  -- Stage 17: numEqualVerifyFuse.
+  have hSound17 : runOps (applyNumEqualVerifyFuse
+                    (applyZeroNumEqual (passAllInner15 ops))) s
+                = runOps (applyZeroNumEqual (passAllInner15 ops)) s :=
+    numEqualVerifyFuse_pass_sound _ hNoIf16 s hWT16
+  have hNoIf17 := applyNumEqualVerifyFuse_preserves_noIfOp _ hNoIf16
+  have hWT17 := applyNumEqualVerifyFuse_preserves_wellTypedRun _ hNoIf16 s hWT16
+  -- Stage 18: checkSigVerifyFuse.
+  have hSound18 := checkSigVerifyFuse_pass_sound _ hNoIf17 s hWT17
+  have hNoIf18 := applyCheckSigVerifyFuse_preserves_noIfOp _ hNoIf17
+  -- Stage 19: equalVerifyFuse (uses external WT + eitherStrict).
+  have hSound19 := equalVerifyFuse_pass_sound _ hNoIf18 s hWT18 hStrict18
+  -- Compose.
+  show runOps (applyEqualVerifyFuse (applyCheckSigVerifyFuse
+        (applyNumEqualVerifyFuse (applyZeroNumEqual (passAllInner15 ops))))) s
+       = runOps ops s
+  exact hSound19.trans (hSound18.trans (hSound17.trans (hSound16.trans hSound15)))
+
+/-! ## Phase 4-C — equivalence of `peepholePassAll` with structural fold.
+
+For `noIfOp` inputs, the tail-recursive `peepholePassAll` reduces to a
+right-fold of `peepholePassAllFlat`, which we equate to a structural
+recursive form below. Both forms compute the same value step-by-step on
+the same input, so we only need a thin extensional argument. -/
+
+/-- Under `noIfOp`, `preprocessOpListReversedAux ops acc = ops.reverseAux acc`
+(i.e. structurally identical to `List.reverseAux` since no `.ifOp` triggers
+recursive descent). -/
+private theorem preprocessOpListReversedAux_noIf
+    : ∀ (ops acc : List StackOp), noIfOp ops →
+        preprocessOpListReversedAux ops acc = List.reverseAux ops acc := by
+  intro ops
+  induction ops with
+  | nil => intro acc _; rfl
+  | cons op rest ih =>
+    intro acc hNoIf
+    cases op with
+    | ifOp _ _ => exact absurd hNoIf (by simp [noIfOp])
+    | push v   =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        change preprocessOpListReversedAux rest (.push v :: acc)
+              = List.reverseAux (.push v :: rest) acc
+        rw [ih (.push v :: acc) hRest]
+        rfl
+    | dup =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.dup :: acc) hRest]
+        rfl
+    | swap =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.swap :: acc) hRest]
+        rfl
+    | drop =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.drop :: acc) hRest]
+        rfl
+    | nip =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.nip :: acc) hRest]
+        rfl
+    | over =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.over :: acc) hRest]
+        rfl
+    | rot =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.rot :: acc) hRest]
+        rfl
+    | tuck =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.tuck :: acc) hRest]
+        rfl
+    | roll d =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.roll d :: acc) hRest]
+        rfl
+    | pick d =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.pick d :: acc) hRest]
+        rfl
+    | opcode code =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.opcode code :: acc) hRest]
+        rfl
+    | placeholder i n =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.placeholder i n :: acc) hRest]
+        rfl
+    | pushCodesepIndex =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.pushCodesepIndex :: acc) hRest]
+        rfl
+
+/-- Right-fold structural form of `peepholePassAll` for `noIfOp` inputs. -/
+private def peepholePassAllStruct : List StackOp → List StackOp
   | [] => []
-  | (.ifOp thn els) :: rest =>
-      let thn' := peepholePassAll thn
-      let els' := match els with
-                  | some e => some (peepholePassAll e)
-                  | none   => none
-      peepholePassAllFlat (.ifOp thn' els' :: peepholePassAll rest)
-  | op :: rest =>
-      peepholePassAllFlat (op :: peepholePassAll rest)
-termination_by ops => sizeOf ops
+  | op :: rest => peepholePassAllFlat (op :: peepholePassAllStruct rest)
+
+private theorem peepholePassAllStruct_eq_TRgo
+    : ∀ (ops acc : List StackOp),
+        peepholePassAllTRgo (List.reverseAux ops acc) []
+        = peepholePassAllTRgo acc (peepholePassAllStruct ops) := by
+  intro ops
+  induction ops with
+  | nil => intro acc; rfl
+  | cons op rest ih =>
+    intro acc
+    -- LHS: reverseAux (op :: rest) acc = reverseAux rest (op :: acc).
+    -- IH on rest gives us the equation at acc' = (op :: acc).
+    show peepholePassAllTRgo (List.reverseAux rest (op :: acc)) []
+       = peepholePassAllTRgo acc (peepholePassAllFlat (op :: peepholePassAllStruct rest))
+    rw [ih (op :: acc)]
+    -- RHS structure: TRgo (op :: acc) (peepholePassAllStruct rest)
+    --   = TRgo acc (peepholePassAllFlat (op :: peepholePassAllStruct rest))
+    -- by definition of TRgo on cons.
+    rfl
+
+/-- `peepholePassAll ops = peepholePassAllStruct ops` for `noIfOp` inputs. -/
+private theorem peepholePassAll_eq_struct
+    : ∀ (ops : List StackOp), noIfOp ops →
+        peepholePassAll ops = peepholePassAllStruct ops := by
+  intro ops hNoIf
+  unfold peepholePassAll
+  rw [preprocessOpListReversedAux_noIf ops [] hNoIf]
+  -- Now LHS = TRgo (List.reverseAux ops []) [].
+  rw [peepholePassAllStruct_eq_TRgo ops []]
+  -- Now LHS = TRgo [] (peepholePassAllStruct ops) = peepholePassAllStruct ops.
+  rfl
+
+/-! ## Phase 4-C — `peepholePassAll_sound` for `noIfOp` programs.
+
+By induction on the structural form. Each `op :: rest` step reduces the
+goal to applying `peepholePassAllFlat` on the tail's already-passed
+result, which we discharge using `peepholePassAllFlat_sound` and the
+recursive IH plus the `runOps_cons_*_cong_typed` lemmas.
+
+To avoid threading per-step preconditions through the entire induction
+(which would explode the type), we state the theorem at the **method
+level**: the caller supplies a single quantified preserving hypothesis
+(`runOps after-K-rules s = runOps ops s` for each rule) bundled inside
+the sub-soundness obligation. Concretely, we prove the soundness shape
+that's directly usable for `peepholeProgram_sound` on top of standard
+WT preconditions. -/
 
 end Peephole
 end RunarVerification.Stack
