@@ -262,6 +262,32 @@ module IntegrationHelpers
   # Provider helper
   # ---------------------------------------------------------------------------
 
+  # Patch ``provider#broadcast`` so each call logs the raw tx size in bytes
+  # to STDERR before delegating to the SDK implementation. The SDK gem
+  # itself is left untouched — this wrapper lives only in the integration
+  # suite to give CI logs a uniform per-broadcast tx-size line.
+  #
+  # @param provider [Runar::SDK::RPCProvider]
+  # @return [Runar::SDK::RPCProvider] same instance, with broadcast patched
+  def instrument_broadcast(provider)
+    provider.singleton_class.class_eval do
+      alias_method :__runar_broadcast_orig, :broadcast unless method_defined?(:__runar_broadcast_orig)
+      define_method(:broadcast) do |tx, *rest, **kw|
+        tx_hex = if tx.respond_to?(:to_hex)
+                   tx.to_hex
+                 elsif tx.is_a?(String)
+                   tx
+                 else
+                   ''
+                 end
+        size_bytes = tx_hex.length / 2
+        warn "[runar-integration] tx broadcast: #{size_bytes} bytes"
+        __runar_broadcast_orig(tx, *rest, **kw)
+      end
+    end
+    provider
+  end
+
   # Create an RPCProvider configured for regtest.
   #
   # Uses the RPC_URL, RPC_USER, and RPC_PASS environment variables (with
@@ -270,12 +296,13 @@ module IntegrationHelpers
   # @return [Runar::SDK::RPCProvider]
   def create_provider
     uri = URI.parse(RPC_URL)
-    Runar::SDK::RPCProvider.regtest(
+    provider = Runar::SDK::RPCProvider.regtest(
       host: uri.host,
       port: uri.port,
       username: RPC_USER,
       password: RPC_PASS
     )
+    instrument_broadcast(provider)
   end
 
   # ---------------------------------------------------------------------------

@@ -70,6 +70,8 @@ public final class RpcProvider implements Provider {
 
     @Override
     public String broadcastRaw(String txHex) {
+        int sizeBytes = txHex == null ? 0 : txHex.length() / 2;
+        System.out.println("[runar-integration] tx broadcast: " + sizeBytes + " bytes");
         String result = rpc.call("sendrawtransaction", txHex);
         // sendrawtransaction returns a bare JSON string (the txid).
         String txid = result.trim();

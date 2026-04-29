@@ -190,7 +190,12 @@ pub fn importAddress(allocator: std.mem.Allocator, address: []const u8) !void {
 }
 
 /// Broadcast a raw transaction hex. Returns the txid.
+///
+/// Logs a per-broadcast tx-size line to stderr in the shared integration
+/// format ("[runar-integration] tx broadcast: <N> bytes") so CI logs are
+/// scannable across all 7 language suites.
 pub fn sendRawTransaction(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
+    std.debug.print("[runar-integration] tx broadcast: {d} bytes\n", .{tx_hex.len / 2});
     const params = try std.fmt.allocPrint(allocator, "[\"{s}\"]", .{tx_hex});
     defer allocator.free(params);
     const result = try rpcCall(allocator, "sendrawtransaction", params);

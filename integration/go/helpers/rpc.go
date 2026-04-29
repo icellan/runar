@@ -160,6 +160,7 @@ func SendToAddress(addr string, btcAmount float64) (string, error) {
 
 // SendRawTransaction broadcasts a raw transaction hex.
 func SendRawTransaction(txHex string) (string, error) {
+	fmt.Fprintf(os.Stderr, "[runar-integration] tx broadcast: %d bytes\n", len(txHex)/2)
 	result, err := RPCCall("sendrawtransaction", txHex)
 	if err != nil {
 		return "", err

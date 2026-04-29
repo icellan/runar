@@ -22,6 +22,8 @@ from urllib.request import Request, urlopen
 
 import pytest
 
+import sys
+
 from runar_compiler.compiler import compile_from_source, artifact_to_json
 from runar.sdk import RunarArtifact, RPCProvider, ExternalSigner
 from runar.sdk.local_signer import LocalSigner
@@ -253,9 +255,33 @@ def compile_contract_ts(rel_path: str) -> RunarArtifact:
 # Provider helper
 # ---------------------------------------------------------------------------
 
+def _instrument_broadcast(provider: RPCProvider) -> RPCProvider:
+    """Patch ``provider.broadcast`` so each call logs the raw tx size in
+    bytes to stderr before delegating to the SDK implementation. The SDK
+    itself is left untouched — this wrapper lives only in the integration
+    suite to give CI logs a uniform per-broadcast tx-size line.
+    """
+    original = provider.broadcast
+
+    def broadcast(tx, *args, **kwargs):
+        # ``tx`` may be either a Transaction-like object exposing ``to_hex()``
+        # or already a hex string, depending on which SDK call path invoked
+        # the provider. Handle both shapes defensively.
+        try:
+            tx_hex = tx.to_hex()
+        except AttributeError:
+            tx_hex = tx if isinstance(tx, str) else ""
+        size_bytes = len(tx_hex) // 2
+        print(f"[runar-integration] tx broadcast: {size_bytes} bytes", file=sys.stderr, flush=True)
+        return original(tx, *args, **kwargs)
+
+    provider.broadcast = broadcast  # type: ignore[method-assign]
+    return provider
+
+
 def create_provider() -> RPCProvider:
     """Create an RPCProvider configured for regtest with auto-mine."""
-    return RPCProvider.regtest(RPC_URL, RPC_USER, RPC_PASS)
+    return _instrument_broadcast(RPCProvider.regtest(RPC_URL, RPC_USER, RPC_PASS))
 
 
 # ---------------------------------------------------------------------------

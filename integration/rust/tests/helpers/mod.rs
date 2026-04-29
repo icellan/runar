@@ -2,12 +2,64 @@
 pub mod crypto;
 
 use runar_lang::sdk::{
-    ExternalSigner, LocalSigner, RPCProvider, RunarArtifact, Signer,
+    ExternalSigner, LocalSigner, Provider, RPCProvider, RunarArtifact, Signer,
+    TransactionData, Utxo,
 };
+use bsv::transaction::Transaction as BsvTransaction;
 use sha2::{Digest, Sha256};
 use ripemd::Ripemd160;
 use k256::ecdsa::SigningKey;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Wrapper around `RPCProvider` that prints the raw tx size in bytes on
+/// every broadcast. The SDK is left untouched; this wrapper lives only in
+/// the integration suite to give CI logs a uniform per-broadcast tx-size
+/// line. Implements `Provider` by delegating to the inner provider for
+/// every method.
+pub struct LoggingRPCProvider {
+    inner: RPCProvider,
+}
+
+impl LoggingRPCProvider {
+    pub fn new(inner: RPCProvider) -> Self {
+        Self { inner }
+    }
+}
+
+impl Provider for LoggingRPCProvider {
+    fn get_transaction(&self, txid: &str) -> Result<TransactionData, String> {
+        self.inner.get_transaction(txid)
+    }
+
+    fn broadcast(&mut self, tx: &BsvTransaction) -> Result<String, String> {
+        let size_bytes = match tx.to_hex() {
+            Ok(h) => h.len() / 2,
+            Err(_) => 0,
+        };
+        eprintln!("[runar-integration] tx broadcast: {} bytes", size_bytes);
+        self.inner.broadcast(tx)
+    }
+
+    fn get_utxos(&self, address: &str) -> Result<Vec<Utxo>, String> {
+        self.inner.get_utxos(address)
+    }
+
+    fn get_contract_utxo(&self, script_hash: &str) -> Result<Option<Utxo>, String> {
+        self.inner.get_contract_utxo(script_hash)
+    }
+
+    fn get_network(&self) -> &str {
+        self.inner.get_network()
+    }
+
+    fn get_fee_rate(&self) -> Result<i64, String> {
+        self.inner.get_fee_rate()
+    }
+
+    fn get_raw_transaction(&self, txid: &str) -> Result<String, String> {
+        self.inner.get_raw_transaction(txid)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Compile helpers
@@ -56,12 +108,15 @@ pub fn compile_source(source: &str, file_name: &str) -> RunarArtifact {
 // Provider / Node helpers
 // ---------------------------------------------------------------------------
 
-/// Create an RPCProvider configured for regtest.
-pub fn create_provider() -> RPCProvider {
+/// Create a regtest provider. Returns a `LoggingRPCProvider` which wraps
+/// the SDK's `RPCProvider` and prints the raw tx size in bytes on every
+/// broadcast — see the `[runar-integration] tx broadcast: <N> bytes` line
+/// surfaced in CI logs by every language's integration suite.
+pub fn create_provider() -> LoggingRPCProvider {
     let url = std::env::var("RPC_URL").unwrap_or_else(|_| "http://localhost:18332".to_string());
     let user = std::env::var("RPC_USER").unwrap_or_else(|_| "bitcoin".to_string());
     let pass = std::env::var("RPC_PASS").unwrap_or_else(|_| "bitcoin".to_string());
-    RPCProvider::new_regtest(&url, &user, &pass)
+    LoggingRPCProvider::new(RPCProvider::new_regtest(&url, &user, &pass))
 }
 
 /// Fail fast if the regtest node is not reachable. Called by each integration
@@ -258,7 +313,7 @@ pub fn create_wallet() -> TestWallet {
 /// Create a funded wallet and return (ExternalSigner wrapping LocalSigner, TestWallet).
 /// The ExternalSigner returns the regtest address but delegates signing to LocalSigner.
 pub fn create_funded_wallet(
-    _provider: &mut RPCProvider,
+    _provider: &mut LoggingRPCProvider,
 ) -> (Box<dyn Signer>, TestWallet) {
     let wallet = create_wallet();
     fund_address(&wallet.address, 1.0);

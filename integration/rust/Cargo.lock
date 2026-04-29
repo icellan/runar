@@ -987,6 +987,7 @@ dependencies = [
 name = "runar-integration-rust"
 version = "0.1.0"
 dependencies = [
+ "bsv-sdk",
  "k256",
  "num-bigint",
  "num-integer",
@@ -1021,6 +1022,11 @@ dependencies = [
 [[package]]
 name = "runar-lang-macros"
 version = "0.4.4"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "rustc-hash"

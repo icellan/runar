@@ -13,7 +13,7 @@ use crate::helpers::*;
 use runar_lang::sdk::{DeployOptions, RunarContract, SdkValue};
 
 fn deploy_game(
-    provider: &mut runar_lang::sdk::RPCProvider,
+    provider: &mut crate::helpers::LoggingRPCProvider,
     signer: &dyn runar_lang::sdk::Signer,
     player_x_hex: &str,
     bet_amount: i64,

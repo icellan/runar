@@ -64,6 +64,28 @@ tasks.named<Test>("test") {
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
 
+    // Per-test wall-clock duration. Gradle's testLogging events do not print
+    // durations on their own; this listener reports each test's elapsed time
+    // in a single line so CI logs are scannable per the integration suite's
+    // shared format conventions.
+    addTestListener(object : org.gradle.api.tasks.testing.TestListener {
+        override fun beforeSuite(suite: org.gradle.api.tasks.testing.TestDescriptor) {}
+        override fun afterSuite(
+            suite: org.gradle.api.tasks.testing.TestDescriptor,
+            result: org.gradle.api.tasks.testing.TestResult,
+        ) {}
+        override fun beforeTest(test: org.gradle.api.tasks.testing.TestDescriptor) {}
+        override fun afterTest(
+            test: org.gradle.api.tasks.testing.TestDescriptor,
+            result: org.gradle.api.tasks.testing.TestResult,
+        ) {
+            val ms = result.endTime - result.startTime
+            val cls = test.className ?: "?"
+            val name = test.name
+            println("[runar-integration] test duration: $cls.$name ${ms} ms (${result.resultType})")
+        }
+    })
+
     // Forward the gating property so `@EnabledIfSystemProperty` is
     // honoured inside the forked test JVM.
     systemProperty(

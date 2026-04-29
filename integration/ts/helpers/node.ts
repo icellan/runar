@@ -3,19 +3,40 @@
  */
 
 import { RPCProvider } from 'runar-sdk';
+import type { Transaction } from '@bsv/sdk';
 
 export const RPC_URL = process.env.RPC_URL ?? 'http://localhost:18332';
 export const RPC_USER = process.env.RPC_USER ?? 'bitcoin';
 export const RPC_PASS = process.env.RPC_PASS ?? 'bitcoin';
 
+/**
+ * Wrap an RPCProvider's broadcast method to log the raw tx size in bytes
+ * before delegating to the SDK implementation. Mutates the provider in
+ * place; returns the same instance for chaining.
+ */
+function instrumentBroadcast(provider: RPCProvider): RPCProvider {
+  const original = provider.broadcast.bind(provider);
+  provider.broadcast = async (tx: Transaction): Promise<string> => {
+    const hex = tx.toHex();
+    const sizeBytes = Math.floor(hex.length / 2);
+    process.stderr.write(`[runar-integration] tx broadcast: ${sizeBytes} bytes\n`);
+    return original(tx);
+  };
+  return provider;
+}
+
 /** Create an RPCProvider using env-configured credentials. */
 export function createProvider(): RPCProvider {
-  return new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: true, network: 'testnet' });
+  return instrumentBroadcast(
+    new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: true, network: 'testnet' }),
+  );
 }
 
 /** Create a provider that does NOT mine after each broadcast. Call mine(1) manually. */
 export function createBatchProvider(): RPCProvider {
-  return new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: false, network: 'testnet' });
+  return instrumentBroadcast(
+    new RPCProvider(RPC_URL, RPC_USER, RPC_PASS, { autoMine: false, network: 'testnet' }),
+  );
 }
 
 export async function rpcCall(method: string, ...params: unknown[]): Promise<unknown> {
