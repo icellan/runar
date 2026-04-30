@@ -1130,6 +1130,26 @@ const Parser = struct {
 
     fn parsePrimary(self: *Parser) ?Expression {
         return switch (self.current.kind) {
+            .ampersand => blk: {
+                // `&.{ ... }` — Zig slice-literal syntax used to coerce an
+                // anonymous tuple to a `[]const T` slice (e.g. `&.{ sig1, sig2 }`).
+                // Treat as an array literal; the leading `&` carries no Rúnar
+                // semantics. `&` is otherwise a binary operator handled in
+                // parseBitwiseAnd, so it cannot appear at primary position.
+                _ = self.bump();
+                if (self.current.kind != .dot) { self.addError("expected '.' after '&'"); break :blk null; }
+                _ = self.bump();
+                if (self.current.kind != .lbrace) { self.addError("expected '{' after '&.'"); break :blk null; }
+                _ = self.bump();
+                var elems: std.ArrayListUnmanaged(Expression) = .empty;
+                while (self.current.kind != .rbrace and self.current.kind != .eof) {
+                    const elem = self.parseExpression() orelse return null;
+                    elems.append(self.allocator, elem) catch return null;
+                    if (self.current.kind == .comma) _ = self.bump();
+                }
+                _ = self.expect(.rbrace);
+                break :blk .{ .array_literal = elems.items };
+            },
             .dot => blk: {
                 _ = self.bump();
                 if (self.current.kind != .lbrace) break :blk null;
