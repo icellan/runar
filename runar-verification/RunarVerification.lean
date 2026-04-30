@@ -7,6 +7,7 @@ import RunarVerification.Stack.Syntax
 import RunarVerification.Stack.Eval
 import RunarVerification.Stack.Lower
 import RunarVerification.Stack.Sim
+import RunarVerification.Stack.Agrees
 import RunarVerification.Stack.Peephole
 import RunarVerification.Script.Syntax
 import RunarVerification.Script.Eval

@@ -197,6 +197,61 @@ def emitOps : List StackOp → ByteArray
 
 end
 
+/-! ## Builder-style fast emit (perf path)
+
+`emit` / `emitOps` above use repeated `ByteArray.++`, which is O(n²) in
+total byte count. For EC / SLH-DSA fixtures generating ~10⁵+ opcodes
+this becomes prohibitive (tens of minutes).
+
+The fast variants below produce byte-identical output via tail-recursive
+accumulators that use `ByteArray.push` (amortised O(1)). They are
+defined in a separate mutual block so that the structural `emitStackOp`
+/ `emitOps` keep their definitional `rfl` reductions for the proofs in
+`Script/EmitCorrect.lean`.
+
+Critically, `emitStackOpFast` recurses into `emitOpsFast` for `.ifOp`
+bodies — without this, deeply-nested ifOp programs (e.g. ecMul's 257
+ifOp wrappers each holding ~1000 inner ops) would still hit the O(n²)
+wall via the slow `emitOps` invocation inside `.ifOp`. -/
+
+mutual
+
+def emitStackOpFast : StackOp → ByteArray
+  | .push v          => encodePushVal v
+  | .dup             => ByteArray.mk #[0x76]
+  | .swap            => ByteArray.mk #[0x7c]
+  | .nip             => ByteArray.mk #[0x77]
+  | .over            => ByteArray.mk #[0x78]
+  | .rot             => ByteArray.mk #[0x7b]
+  | .tuck            => ByteArray.mk #[0x7d]
+  | .drop            => ByteArray.mk #[0x75]
+  | .roll d          => encodePushBigInt d ++ ByteArray.mk #[0x7a]
+  | .pick d          => encodePushBigInt d ++ ByteArray.mk #[0x79]
+  | .opcode name     =>
+      match opcodeByName? name with
+      | some b => ByteArray.mk #[b]
+      | none   => ByteArray.empty
+  | .ifOp thn els    =>
+      -- Use the fast emit recursively for the body.
+      let thnBytes := emitOpsFast thn
+      let elseSection :=
+        match els with
+        | none      => ByteArray.empty
+        | some elsB => ByteArray.mk #[0x67] ++ emitOpsFast elsB
+      ByteArray.mk #[0x63] ++ thnBytes ++ elseSection ++ ByteArray.mk #[0x68]
+  | .placeholder _ _ => ByteArray.mk #[0x00]
+  | .pushCodesepIndex => ByteArray.mk #[0x00]
+
+private def emitOpsFastAux : ByteArray → List StackOp → ByteArray
+  | acc, [] => acc
+  | acc, op :: rest =>
+    emitOpsFastAux ((emitStackOpFast op).foldl (init := acc) fun a b => a.push b) rest
+
+def emitOpsFast (ops : List StackOp) : ByteArray :=
+  emitOpsFastAux ByteArray.empty ops
+
+end
+
 /-! ## Method emission (Phase 3w-d)
 
 Mirrors `06-emit.ts:555-637`:
@@ -293,6 +348,46 @@ def emit (p : StackProgram) : ByteArray :=
 /-- Emit + hex-encode in one shot, matching `expected-script.hex` format. -/
 def emitHex (p : StackProgram) : String :=
   bytesToHex (emit p)
+
+/-! ## Builder-style fast emit (perf path for large fixtures)
+
+`emit` above uses repeated `++` on `ByteArray`, which is O(n²) in the
+total byte count. For most fixtures this is negligible (< 50 KB scripts
+finish in milliseconds). For EC / SLH-DSA fixtures generating
+hundreds of thousands of opcodes (~1+ MB scripts), the O(n²) factor
+becomes prohibitive (tens of minutes).
+
+`emitFast` produces byte-identical output via a tail-recursive
+accumulator that uses `ByteArray.push` (amortised O(1)) instead.
+Used by `Pipeline.compile`. The structural `emit` / `emitOps` remain
+for proof-friendly definitional unfolding (e.g. `emitOps_nil := rfl`).
+-/
+
+private def appendBA (acc : ByteArray) (bs : ByteArray) : ByteArray :=
+  bs.foldl (init := acc) fun a b => a.push b
+
+private def emitDispatchChainFast : ByteArray → Nat → List StackMethod → ByteArray
+  | acc, _, []         => acc
+  | acc, i, [m]        =>
+    let acc1 := appendBA acc (emitDispatchHeadLast i)
+    emitOpsFastAux acc1 m.ops
+  | acc, i, m :: rest  =>
+    let acc1 := appendBA acc (emitDispatchHeadNonLast i)
+    let acc2 := emitOpsFastAux acc1 m.ops
+    let acc3 := acc2.push 0x67  -- OP_ELSE
+    emitDispatchChainFast acc3 (i + 1) rest
+
+private def emitEndifsFastAux : ByteArray → Nat → ByteArray
+  | acc, 0     => acc
+  | acc, n + 1 => emitEndifsFastAux (acc.push 0x68) n
+
+def emitFast (p : StackProgram) : ByteArray :=
+  match publicMethodsOf p with
+  | []      => ByteArray.empty
+  | [m]     => emitOpsFast m.ops
+  | ms      =>
+    let chainAcc := emitDispatchChainFast ByteArray.empty 0 ms
+    emitEndifsFastAux chainAcc (ms.length - 1)
 
 end Emit
 end RunarVerification.Script

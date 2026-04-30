@@ -1,6 +1,9 @@
 import RunarVerification.ANF.Syntax
 import RunarVerification.ANF.WF
 import RunarVerification.Stack.Syntax
+import RunarVerification.Stack.Blake3
+import RunarVerification.Stack.Wots
+import RunarVerification.Stack.Ec
 
 /-!
 # Stack IR — Lowering pass (Phase 3a, simple-constructor subset)
@@ -2221,6 +2224,100 @@ def lowerSha256FinalizeOps (sm : StackMap) (bindingName : String)
   let smFinal := sm.push bindingName
   (s1 ++ s2 ++ s3 ++ shaEmitFinalize, smFinal)
 
+/-! ## BLAKE3 codegen — Phase 4-E
+
+Mirrors the TypeScript reference at
+`packages/runar-compiler/src/passes/blake3-codegen.ts`. The TS reference
+implements `blake3Compress(chainingValue, block)` (single-block
+compression, no padding) and `blake3Hash(message)` (zero-pad message
+to 64 bytes, hash with IV as chaining value).
+
+The ops themselves are precomputed in `Stack.Blake3` (pure StackOp
+lists). Here we just thread the live stack-map through the two-arg /
+one-arg load + splice pattern. -/
+
+open RunarVerification.Stack.Blake3 in
+/-- Lowering for `blake3Compress(chainingValue, block)`. After compress:
+2 args popped, 1 result pushed. Net: -1. -/
+def lowerBlake3CompressOpsLive (sm : StackMap) (bindingName : String)
+    (chainingValue block : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadCV, sm1) := loadRefLive sm chainingValue currentIndex lastUses outerProtected
+  let (loadBlock, sm2) := loadRefLive sm1 block currentIndex lastUses outerProtected
+  let smFinal := (sm2.popN 2).push bindingName
+  (loadCV ++ loadBlock ++ b3CompressOps, smFinal)
+
+open RunarVerification.Stack.Blake3 in
+/-- Lowering for `blake3Hash(message)`. After hash: 1 arg popped,
+1 result pushed. Net: 0. -/
+def lowerBlake3HashOpsLive (sm : StackMap) (bindingName : String)
+    (message : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadMsg, sm1) := loadRefLive sm message currentIndex lastUses outerProtected
+  let smFinal := (sm1.popN 1).push bindingName
+  (loadMsg ++ b3HashOps, smFinal)
+
+/-! ## WOTS+ codegen — Phase 4-F
+
+Mirrors `lowerVerifyWOTS` (TS `05-stack-lower.ts:4022-4175`). The body
+itself is precomputed in `Stack.Wots` (`wotsBodyOps`). Here we just
+thread the live stack-map through a 3-arg load + splice, matching the
+TS pattern of `bringToTop` for each of `[msg, sig, pubkey]` followed
+by 3 stack-map pops. -/
+
+open RunarVerification.Stack.Wots in
+/-- Lowering for `verifyWOTS(msg, sig, pubkey)`. After body: 3 args
+popped, 1 boolean result pushed. Net: -2. -/
+def lowerVerifyWotsOpsLive (sm : StackMap) (bindingName : String)
+    (msg sig pubkey : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadMsg, sm1) := loadRefLive sm msg currentIndex lastUses outerProtected
+  let (loadSig, sm2) := loadRefLive sm1 sig currentIndex lastUses outerProtected
+  let (loadPk,  sm3) := loadRefLive sm2 pubkey currentIndex lastUses outerProtected
+  let smFinal := (sm3.popN 3).push bindingName
+  (loadMsg ++ loadSig ++ loadPk ++ wotsBodyOps, smFinal)
+
+/-! ## secp256k1 EC codegen — Phase 4-G
+
+Mirrors `lowerEcBuiltin` (TS `05-stack-lower.ts:4290-4325`). Each EC
+builtin loads its arguments to TOS via `loadRefLive`, pops the arg slots
+from the stack map, splices the precomputed op list from `Stack.Ec`,
+then pushes the result slot under `bindingName`.
+
+All EC builtins are pop-N push-1 except `ecAdd` (pop 2 push 1),
+`ecMul` (pop 2 push 1), `ecMulGen` (pop 1 push 1), `ecMakePoint`
+(pop 2 push 1), and the rest pop 1 push 1. The shape is captured by
+`args.length` per call site. -/
+
+open RunarVerification.Stack.Ec in
+/-- Lowering for an EC builtin. Loads each arg to TOS, then splices the
+appropriate static op list. Net stack-map effect: pop `args.length`,
+push `bindingName`. -/
+def lowerEcBuiltinOpsLive (sm : StackMap) (bindingName : String)
+    (func : String) (args : List String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  -- Load all args to TOS
+  let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
+  -- Pick the right op list
+  let body : List StackOp :=
+    if func = "ecAdd" then emitEcAdd
+    else if func = "ecMul" then emitEcMul
+    else if func = "ecMulGen" then emitEcMulGen
+    else if func = "ecNegate" then emitEcNegate
+    else if func = "ecOnCurve" then emitEcOnCurve
+    else if func = "ecModReduce" then emitEcModReduce
+    else if func = "ecEncodeCompressed" then emitEcEncodeCompressed
+    else if func = "ecMakePoint" then emitEcMakePoint
+    else if func = "ecPointX" then emitEcPointX
+    else if func = "ecPointY" then emitEcPointY
+    else [.opcode "OP_RUNAR_UNKNOWN_EC_BUILTIN"]
+  let smFinal := (sm1.popN args.length).push bindingName
+  (argOps ++ body, smFinal)
+
 /-! ## Mutual lowering
 
 `lowerValue` and `lowerBindings` recurse via the `ifVal` and `loop`
@@ -2594,6 +2691,157 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
              smFinal, localBindings)
         | _ =>
             ([.opcode "OP_RUNAR_CLAMP_ARITY"], sm.push bindingName, localBindings)
+      else if func = "pow" then
+        -- TS `lowerPow` (`05-stack-lower.ts:3407-3483`): bounded
+        -- 32-iteration multiply. The loop body is a flat opcode sequence
+        -- (no structured if-blocks at the StackMap level — each iteration
+        -- emits a `StackOp.ifOp` whose body multiplies into the accumulator).
+        --
+        --   <base> <exp>
+        --   OP_SWAP OP_1                       -- exp base 1
+        --   for i in 0..32:                    -- exp base acc
+        --     <2> OP_PICK                       -- exp base acc exp
+        --     <i> OP_GREATERTHAN                -- exp base acc (exp > i)
+        --     OP_IF OP_OVER OP_MUL OP_ENDIF     -- exp base acc'
+        --   OP_NIP OP_NIP                       -- result
+        match args with
+        | [base, exp] =>
+            let (loadB, sm1) := loadRefLive sm base currentIndex lastUses outerProtected
+            let (loadE, sm2) := loadRefLive sm1 exp currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm2.popN 2).push bindingName
+            let header : List StackOp :=
+              [StackOp.swap, StackOp.push (.bigint 1)]
+            let iter (i : Nat) : List StackOp :=
+              [ StackOp.push (.bigint 2)
+              , StackOp.opcode "OP_PICK"
+              , StackOp.push (.bigint (Int.ofNat i))
+              , StackOp.opcode "OP_GREATERTHAN"
+              , StackOp.ifOp [StackOp.over, StackOp.opcode "OP_MUL"] none ]
+            let body : List StackOp :=
+              (List.range 32).flatMap iter
+            let trailer : List StackOp := [StackOp.nip, StackOp.nip]
+            (loadB ++ loadE ++ header ++ body ++ trailer, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_POW_ARITY"], sm.push bindingName, localBindings)
+      else if func = "sqrt" then
+        -- TS `lowerSqrt` (`05-stack-lower.ts:3564-3610`): integer square
+        -- root via Newton's method, guarded by `OP_DUP OP_IF ... OP_ENDIF`
+        -- so that `n == 0` skips the iteration (avoids div-by-zero) and
+        -- the original 0 remains on the stack.
+        --
+        --   <n> OP_DUP
+        --   OP_IF
+        --     OP_DUP                           -- n guess(=n)
+        --     16x: OP_OVER OP_OVER OP_DIV OP_ADD <2> OP_DIV
+        --     OP_NIP                           -- result
+        --   OP_ENDIF
+        match args with
+        | [n] =>
+            let (loadN, sm1) := loadRefLive sm n currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm1.popN 1).push bindingName
+            let iter : List StackOp :=
+              [ StackOp.over, StackOp.over
+              , StackOp.opcode "OP_DIV"
+              , StackOp.opcode "OP_ADD"
+              , StackOp.push (.bigint 2)
+              , StackOp.opcode "OP_DIV" ]
+            let newtonOps : List StackOp :=
+              StackOp.opcode "OP_DUP"
+                :: ((List.range 16).flatMap (fun _ => iter)) ++ [StackOp.nip]
+            let body : List StackOp :=
+              [ StackOp.opcode "OP_DUP"
+              , StackOp.ifOp newtonOps none ]
+            (loadN ++ body, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_SQRT_ARITY"], sm.push bindingName, localBindings)
+      else if func = "gcd" then
+        -- TS `lowerGcd` (`05-stack-lower.ts:3617-3663`): bounded
+        -- Euclidean algorithm with 256 unrolled iterations.
+        --
+        --   <a> <b>
+        --   OP_ABS OP_SWAP OP_ABS OP_SWAP            -- |a| |b|
+        --   for _ in 0..256:                          -- a b
+        --     OP_DUP OP_0NOTEQUAL
+        --     OP_IF OP_TUCK OP_MOD OP_ENDIF
+        --   OP_DROP                                   -- result
+        match args with
+        | [a, b] =>
+            let (loadA, sm1) := loadRefLive sm a currentIndex lastUses outerProtected
+            let (loadB, sm2) := loadRefLive sm1 b currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm2.popN 2).push bindingName
+            let header : List StackOp :=
+              [ StackOp.opcode "OP_ABS"
+              , StackOp.swap
+              , StackOp.opcode "OP_ABS"
+              , StackOp.swap ]
+            let iter : List StackOp :=
+              [ StackOp.opcode "OP_DUP"
+              , StackOp.opcode "OP_0NOTEQUAL"
+              , StackOp.ifOp
+                  [ StackOp.opcode "OP_TUCK", StackOp.opcode "OP_MOD" ]
+                  none ]
+            let body : List StackOp :=
+              (List.range 256).flatMap (fun _ => iter)
+            let trailer : List StackOp := [StackOp.drop]
+            (loadA ++ loadB ++ header ++ body ++ trailer, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_GCD_ARITY"], sm.push bindingName, localBindings)
+      else if func = "log2" then
+        -- TS `lowerLog2` (`05-stack-lower.ts:3721-3767`): floor(log2(n))
+        -- via 64-iteration bit-scan. Each iteration shifts the input right
+        -- and increments the counter when input > 1.
+        --
+        --   <n> <0>                                   -- input counter
+        --   for _ in 0..64:
+        --     OP_SWAP OP_DUP <1> OP_GREATERTHAN
+        --     OP_IF <2> OP_DIV OP_SWAP OP_1ADD OP_SWAP OP_ENDIF
+        --     OP_SWAP                                 -- input counter
+        --   OP_NIP                                    -- counter
+        match args with
+        | [n] =>
+            let (loadN, sm1) := loadRefLive sm n currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm1.popN 1).push bindingName
+            let iter : List StackOp :=
+              [ StackOp.swap
+              , StackOp.opcode "OP_DUP"
+              , StackOp.push (.bigint 1)
+              , StackOp.opcode "OP_GREATERTHAN"
+              , StackOp.ifOp
+                  [ StackOp.push (.bigint 2)
+                  , StackOp.opcode "OP_DIV"
+                  , StackOp.swap
+                  , StackOp.opcode "OP_1ADD"
+                  , StackOp.swap ]
+                  none
+              , StackOp.swap ]
+            let body : List StackOp :=
+              StackOp.push (.bigint 0)
+                :: ((List.range 64).flatMap (fun _ => iter)) ++ [StackOp.nip]
+            (loadN ++ body, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_LOG2_ARITY"], sm.push bindingName, localBindings)
+      else if func = "sign" then
+        -- TS `lowerSign` (`05-stack-lower.ts:3779-3812`): -1 / 0 / 1
+        -- dispatch using OP_DUP + OP_IF guard so that `x == 0` short-circuits
+        -- the division.
+        --
+        --   <x> OP_DUP
+        --   OP_IF OP_DUP OP_ABS OP_SWAP OP_DIV OP_ENDIF
+        match args with
+        | [x] =>
+            let (loadX, sm1) := loadRefLive sm x currentIndex lastUses outerProtected
+            let smFinal : StackMap := (sm1.popN 1).push bindingName
+            let body : List StackOp :=
+              [ StackOp.opcode "OP_DUP"
+              , StackOp.ifOp
+                  [ StackOp.opcode "OP_DUP"
+                  , StackOp.opcode "OP_ABS"
+                  , StackOp.swap
+                  , StackOp.opcode "OP_DIV" ]
+                  none ]
+            (loadX ++ body, smFinal, localBindings)
+        | _ =>
+            ([.opcode "OP_RUNAR_SIGN_ARITY"], sm.push bindingName, localBindings)
       else if func = "verifyRabinSig" then
         -- Phase 3z-K: dedicated lowering (mirrors TS `lowerVerifyRabinSig`
         -- at `05-stack-lower.ts:3884-3931`). Verifies the Rabin equation
@@ -2625,6 +2873,45 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                 currentIndex lastUses outerProtected
         | _ =>
             ([.opcode "OP_RUNAR_SHA256FINALIZE_ARITY"], sm.push bindingName, localBindings)
+      else if func = "blake3Compress" then
+        -- Phase 4-E: dedicated lowering (mirrors TS `emitBlake3Compress`
+        -- at `blake3-codegen.ts:406-408`).
+        match args with
+        | [chainingValue, block] =>
+            withLB <|
+              lowerBlake3CompressOpsLive sm bindingName chainingValue block
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_BLAKE3COMPRESS_ARITY"], sm.push bindingName, localBindings)
+      else if func = "blake3Hash" then
+        -- Phase 4-E: dedicated lowering (mirrors TS `emitBlake3Hash`
+        -- at `blake3-codegen.ts:418-447`).
+        match args with
+        | [message] =>
+            withLB <|
+              lowerBlake3HashOpsLive sm bindingName message
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_BLAKE3HASH_ARITY"], sm.push bindingName, localBindings)
+      else if func = "verifyWOTS" then
+        -- Phase 4-F: dedicated lowering (mirrors TS `lowerVerifyWOTS`
+        -- at `05-stack-lower.ts:4022-4175`).
+        match args with
+        | [msg, sig, pubkey] =>
+            withLB <|
+              lowerVerifyWotsOpsLive sm bindingName msg sig pubkey
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_VERIFYWOTS_ARITY"], sm.push bindingName, localBindings)
+      else if func = "ecAdd" || func = "ecMul" || func = "ecMulGen" ||
+              func = "ecNegate" || func = "ecOnCurve" || func = "ecModReduce" ||
+              func = "ecEncodeCompressed" || func = "ecMakePoint" ||
+              func = "ecPointX" || func = "ecPointY" then
+        -- Phase 4-G: secp256k1 EC builtins (mirrors TS `lowerEcBuiltin`
+        -- at `05-stack-lower.ts:4294-4325`).
+        withLB <|
+          lowerEcBuiltinOpsLive sm bindingName func args
+            currentIndex lastUses outerProtected
       else
         let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
         let opcodeOps := (builtinOpcode func).map (.opcode)
