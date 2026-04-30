@@ -43,8 +43,11 @@ const TS_EXAMPLES = findExampleFiles(EXAMPLES_TS_DIR, '.runar.ts')
 //
 // nested-if-multi-reassign: issue #34 regression fixture — TS-only
 // initially; Zig port to follow.
+// if-without-else-multi-temp: issue #36 regression fixture — TS-only
+// initially; Zig port to follow.
 const ZIG_PORT_PENDING: readonly string[] = [
   'nested-if-multi-reassign/StackTrackerRepro.runar.zig',
+  'if-without-else-multi-temp/StackTrackerReproV10min.runar.zig',
 ];
 
 describe('Zig parser: example inventory', () => {
