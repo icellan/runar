@@ -1351,6 +1351,26 @@ class _ZigParser:
     def _parse_primary(self) -> Expression:
         tok = self._current()
 
+        # Zig slice-literal: &.{ elem, ... } -> array literal. Coerces an
+        # anonymous tuple to []const T (e.g. `&.{ sig1, sig2 }` for
+        # runar.checkMultiSig). The leading `&` carries no Rúnar
+        # semantics. `&` is otherwise a binary bitwise-and consumed at
+        # expression level and cannot appear at primary position.
+        if (
+            tok.kind == TOK_AMP
+            and self._peek_ahead(1).kind == TOK_DOT
+            and self._peek_ahead(2).kind == TOK_LBRACE
+        ):
+            self._advance()  # '&'
+            self._advance()  # '.'
+            self._advance()  # '{'
+            elements: list[Expression] = []
+            while self._current().kind != TOK_RBRACE and self._current().kind != TOK_EOF:
+                elements.append(self._parse_expression())
+                self._match(TOK_COMMA)
+            self._expect(TOK_RBRACE, "}")
+            return ArrayLiteralExpr(elements=elements)
+
         # Zig anonymous struct literal: .{ elem, ... }
         if tok.kind == TOK_DOT and self._peek_ahead(1).kind == TOK_LBRACE:
             self._advance()  # '.'

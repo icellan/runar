@@ -994,6 +994,28 @@ class ZigParser extends ParserCore<ZigToken> {
   protected parsePrimary(): Expression {
     const token = this.current();
 
+    // `&.{ ... }` — Zig slice-literal syntax used to coerce an anonymous
+    // tuple to a `[]const T` slice (e.g. `&.{ sig1, sig2 }` for
+    // `runar.checkMultiSig`). Treat as an array literal; the leading `&`
+    // carries no Rúnar semantics. `&` is otherwise a binary bitwise-and
+    // consumed by ParserCore and cannot appear at primary position.
+    if (
+      token.type === '&' &&
+      this.tokens[this.pos + 1]?.type === '.' &&
+      this.tokens[this.pos + 2]?.type === '{'
+    ) {
+      this.advance();
+      this.advance();
+      this.advance();
+      const elements: Expression[] = [];
+      while (this.current().type !== '}' && this.current().type !== 'eof') {
+        elements.push(this.parseExpression());
+        if (this.current().type === ',') this.advance();
+      }
+      this.expect('}');
+      return { kind: 'array_literal', elements };
+    }
+
     if (token.type === '.' && this.tokens[this.pos + 1]?.type === '{') {
       this.advance();
       this.advance();

@@ -1298,6 +1298,24 @@ public final class ZigParser {
         Expression parsePrimary() {
             Token tok = current();
 
+            // Slice-literal: &.{ elem, ... } -> array literal. Zig coerces an
+            // anonymous tuple to []const T via this leading-`&` form (e.g.
+            // `&.{ sig1, sig2 }` for runar.checkMultiSig). The `&` carries no
+            // Rúnar semantics. `&` is otherwise a binary bitwise-and consumed
+            // at expression level and cannot appear at primary position.
+            if (tok.kind == Kind.AMP && peekAhead(1).kind == Kind.DOT && peekAhead(2).kind == Kind.LBRACE) {
+                advance(); // '&'
+                advance(); // '.'
+                advance(); // '{'
+                List<Expression> elements = new ArrayList<>();
+                while (current().kind != Kind.RBRACE && current().kind != Kind.EOF) {
+                    elements.add(parseExpression());
+                    match(Kind.COMMA);
+                }
+                expect(Kind.RBRACE, "}");
+                return new ArrayLiteralExpr(elements);
+            }
+
             // Anonymous struct literal: .{ elem, ... }
             if (tok.kind == Kind.DOT && peekAhead(1).kind == Kind.LBRACE) {
                 advance(); // '.'

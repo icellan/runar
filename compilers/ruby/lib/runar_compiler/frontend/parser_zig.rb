@@ -1382,6 +1382,25 @@ module RunarCompiler
       def parse_primary
         tok = peek
 
+        # Slice-literal: &.{ ... } -> array literal. Zig coerces an
+        # anonymous tuple to []const T via this leading-`&` form (e.g.
+        # `&.{ sig1, sig2 }` for runar.checkMultiSig). The `&` carries
+        # no Rúnar semantics. `&` is otherwise a binary bitwise-and
+        # consumed at expression level and cannot appear at primary
+        # position.
+        if tok.kind == TOK_AMP && peek_at(1).kind == TOK_DOT && peek_at(2).kind == TOK_LBRACE
+          advance # consume &
+          advance # consume .
+          advance # consume {
+          elements = []
+          while !check(TOK_RBRACE) && !check(TOK_EOF)
+            elements << parse_expression
+            match_tok(TOK_COMMA)
+          end
+          expect(TOK_RBRACE)
+          return ArrayLiteralExpr.new(elements: elements)
+        end
+
         # Struct literal: .{ ... }
         if tok.kind == TOK_DOT && peek_at(1).kind == TOK_LBRACE
           advance # consume .

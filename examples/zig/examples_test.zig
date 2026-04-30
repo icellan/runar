@@ -118,6 +118,7 @@ test {
     _ = @import("./ec-primitives/ECPrimitives_test.zig");
     _ = @import("./if-else/IfElse_test.zig");
     _ = @import("./if-without-else/IfWithoutElse_test.zig");
+    _ = @import("./if-without-else-multi-temp/StackTrackerReproV10min_test.zig");
     _ = @import("./multi-method/MultiMethod_test.zig");
     _ = @import("./p256-primitives/P256Primitives_test.zig");
     _ = @import("./p384-primitives/P384Primitives_test.zig");

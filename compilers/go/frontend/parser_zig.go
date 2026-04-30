@@ -1476,6 +1476,24 @@ func (p *zigParser) parseUnary() Expression {
 func (p *zigParser) parsePrimary() Expression {
 	tok := p.peek()
 
+	// Slice-literal: &.{ elem, ... } -> array literal. Zig coerces an
+	// anonymous tuple to []const T via this leading-`&` form (e.g.
+	// `&.{ sig1, sig2 }` for runar.checkMultiSig). The `&` carries no
+	// Rúnar semantics. `&` is otherwise a binary bitwise-and consumed
+	// in parseBitwiseAnd, so it cannot appear at primary position.
+	if tok.kind == zigTokAmp && p.peekAt(1).kind == zigTokDot && p.peekAt(2).kind == zigTokLBrace {
+		p.advance() // '&'
+		p.advance() // '.'
+		p.advance() // '{'
+		var elements []Expression
+		for !p.check(zigTokRBrace) && !p.check(zigTokEOF) {
+			elements = append(elements, p.parseExpression())
+			p.match(zigTokComma)
+		}
+		p.expect(zigTokRBrace)
+		return ArrayLiteralExpr{Elements: elements}
+	}
+
 	// Anonymous struct literal: .{ elem, ... } -> array literal
 	if tok.kind == zigTokDot && p.peekAt(1).kind == zigTokLBrace {
 		p.advance() // '.'

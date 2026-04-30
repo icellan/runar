@@ -1609,6 +1609,28 @@ impl<'a> ZigParser<'a> {
     }
 
     fn parse_primary(&mut self) -> Expression {
+        // Slice-literal: &.{ ... } -> array literal. Zig coerces an
+        // anonymous tuple to `[]const T` via this leading-`&` form
+        // (e.g. `&.{ sig1, sig2 }` for runar.checkMultiSig). The `&`
+        // carries no Rúnar semantics. `&` is otherwise a binary
+        // bitwise-and consumed at expression level and cannot appear
+        // at primary position.
+        if *self.peek() == Token::BitAnd
+            && *self.peek_at(1) == Token::Dot
+            && *self.peek_at(2) == Token::LBrace
+        {
+            self.advance(); // &
+            self.advance(); // .
+            self.advance(); // {
+            let mut elements = Vec::new();
+            while *self.peek() != Token::RBrace && *self.peek() != Token::Eof {
+                elements.push(self.parse_expression());
+                self.match_tok(&Token::Comma);
+            }
+            self.expect(&Token::RBrace);
+            return Expression::ArrayLiteral { elements };
+        }
+
         // Anonymous struct literal: .{ ... }
         if *self.peek() == Token::Dot && *self.peek_at(1) == Token::LBrace {
             self.advance(); // .
