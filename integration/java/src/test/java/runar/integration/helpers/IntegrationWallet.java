@@ -3,6 +3,7 @@ package runar.integration.helpers;
 import java.security.MessageDigest;
 import java.util.concurrent.atomic.AtomicLong;
 
+import runar.lang.sdk.ExternalSigner;
 import runar.lang.sdk.LocalSigner;
 import runar.lang.sdk.Signer;
 
@@ -42,7 +43,11 @@ public final class IntegrationWallet {
         // (uses ExternalSigner) and integration/python/conftest.py's
         // `create_funded_wallet` (uses ExternalSigner).
         this.address = regtestP2PKHAddress(pubKeyHash);
-        this.signer = new RegtestSigner(local, address);
+        this.signer = new ExternalSigner(
+            local.pubKey(),
+            address,
+            (sighash, key) -> local.sign(sighash, key)
+        );
     }
 
     public String privKeyHex() { return privKeyHex; }
@@ -56,35 +61,6 @@ public final class IntegrationWallet {
         long idx = COUNTER.incrementAndGet();
         String hex = String.format("%064x", idx);
         return new IntegrationWallet(hex, new LocalSigner(hex));
-    }
-
-    /**
-     * Wrapper Signer that delegates sign / pubKey to a backing
-     * {@link LocalSigner} but reports the regtest-formatted address.
-     */
-    private static final class RegtestSigner implements Signer {
-        private final LocalSigner inner;
-        private final String regtestAddress;
-
-        RegtestSigner(LocalSigner inner, String regtestAddress) {
-            this.inner = inner;
-            this.regtestAddress = regtestAddress;
-        }
-
-        @Override
-        public byte[] sign(byte[] sighash, String derivationKey) {
-            return inner.sign(sighash, derivationKey);
-        }
-
-        @Override
-        public byte[] pubKey() {
-            return inner.pubKey();
-        }
-
-        @Override
-        public String address() {
-            return regtestAddress;
-        }
     }
 
     /**

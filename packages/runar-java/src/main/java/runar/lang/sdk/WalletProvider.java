@@ -3,7 +3,7 @@ package runar.lang.sdk;
 import java.util.List;
 
 /**
- * {@link Provider} + {@link ExternalSigner} hybrid backed by a
+ * {@link Provider} + {@link Signer} hybrid backed by a
  * {@link BRC100Wallet}. Parity with the Go SDK's {@code WalletProvider}
  * (see {@code packages/runar-go/sdk_wallet.go}).
  *
@@ -27,7 +27,7 @@ import java.util.List;
  * {@code derivationKey} parameter on {@link Signer#sign} is threaded
  * through unchanged.
  */
-public final class WalletProvider implements Provider, ExternalSigner {
+public final class WalletProvider implements Provider, Signer {
 
     private final BRC100Wallet wallet;
     private final Provider delegate;
