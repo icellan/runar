@@ -719,6 +719,52 @@ module RunarCompiler::Codegen
       _track_depth
     end
 
+    # Drain branch-private residue from below TOS at the end of a branch
+    # body, so both branches converge to a layout the parent stack model can
+    # faithfully describe before OP_ENDIF (issue #36).
+    #
+    # A slot is residue when its name is NOT in pre_if_names (the snapshot of
+    # the parent's named slots taken before the branch ran). This catches
+    # both anonymous slots (empty-named, pushed by intrinsics like substr's
+    # OP_SPLIT residue) and named branch-local bindings that lingered past
+    # their last-use (e.g. dead-code load_const intermediates the optimizer
+    # didn't fold). Slots whose name was already in pre_if_names are kept.
+    # Process deepest-first so removing a deeper slot doesn't shift a
+    # shallower slot's depth-from-top.
+    #
+    # @param pre_if_names [Set<String>] parent named slots before the branch
+    def drain_branch_private_residue(pre_if_names)
+      drain_depths = []
+      d = 1
+      while d < @sm.depth
+        name = @sm.peek_at_depth(d)
+        if name.nil? || name.empty?
+          drain_depths << d
+        elsif !pre_if_names.include?(name)
+          drain_depths << d
+        end
+        d += 1
+      end
+      return if drain_depths.empty?
+
+      drain_depths.sort! { |a, b| b <=> a }
+      drain_depths.each do |depth|
+        if depth == 1
+          emit_op({ op: "nip" })
+          @sm.remove_at_depth(1)
+        else
+          emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
+          @sm.push("")
+          emit_op({ op: "roll", depth: depth })
+          @sm.pop
+          rolled = @sm.remove_at_depth(depth)
+          @sm.push(rolled)
+          emit_op({ op: "drop" })
+          @sm.pop
+        end
+      end
+    end
+
     # -----------------------------------------------------------------
     # resolve_ref -- resolve a binding name to bring it to top of stack
     # -----------------------------------------------------------------
@@ -1356,6 +1402,8 @@ module RunarCompiler::Codegen
       then_ctx.private_methods = @private_methods
       then_ctx.lower_bindings(then_bindings, terminal_assert)
 
+      then_ctx.drain_branch_private_residue(pre_if_names)
+
       if terminal_assert && then_ctx.sm.depth > 1
         excess = then_ctx.sm.depth - 1
         excess.times do
@@ -1371,6 +1419,8 @@ module RunarCompiler::Codegen
       else_ctx.inside_branch = true
       else_ctx.private_methods = @private_methods
       else_ctx.lower_bindings(else_bindings, terminal_assert)
+
+      else_ctx.drain_branch_private_residue(pre_if_names)
 
       if terminal_assert && else_ctx.sm.depth > 1
         excess = else_ctx.sm.depth - 1

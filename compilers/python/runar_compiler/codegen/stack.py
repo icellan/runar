@@ -620,6 +620,46 @@ class _LoweringContext:
 
         self._track_depth()
 
+    def drain_branch_private_residue(self, pre_if_names: set[str]) -> None:
+        """Drain branch-private residue from below TOS at the end of a branch
+        body, so both branches converge to a layout the parent stack model can
+        faithfully describe before OP_ENDIF (issue #36).
+
+        A slot is residue when its name is NOT in ``pre_if_names`` (the
+        snapshot of the parent's named slots taken before the branch ran).
+        This catches both anonymous slots (empty-named, pushed by intrinsics
+        like substr's OP_SPLIT residue) and named branch-local bindings that
+        lingered past their last-use (e.g. dead-code load_const intermediates
+        the optimizer didn't fold).
+
+        Slots whose name was already in ``pre_if_names`` are kept --
+        including duplicates created by reassigning an outer-scope local from
+        inside the branch. The TOS slot is also kept regardless.
+        """
+        drain_depths: list[int] = []
+        for d in range(1, self.sm.depth()):
+            name = self.sm.peek_at_depth(d)
+            if not name:
+                drain_depths.append(d)
+            elif name not in pre_if_names:
+                drain_depths.append(d)
+        if not drain_depths:
+            return
+        drain_depths.sort(reverse=True)
+        for depth in drain_depths:
+            if depth == 1:
+                self.emit_op(StackOp(op="nip"))
+                self.sm.remove_at_depth(1)
+            else:
+                self.emit_op(StackOp(op="push", value=big_int_push(depth)))
+                self.sm.push("")
+                self.emit_op(StackOp(op="roll", depth=depth))
+                self.sm.pop()
+                rolled = self.sm.remove_at_depth(depth)
+                self.sm.push(rolled)
+                self.emit_op(StackOp(op="drop"))
+                self.sm.pop()
+
     def _is_last_use(self, ref: str, current_index: int, last_uses: dict[str, int]) -> bool:
         last = last_uses.get(ref)
         if last is None:
@@ -1143,6 +1183,8 @@ class _LoweringContext:
         then_ctx.inside_branch = True
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
+        then_ctx.drain_branch_private_residue(pre_if_names)
+
         if terminal_assert and then_ctx.sm.depth() > 1:
             excess = then_ctx.sm.depth() - 1
             for _ in range(excess):
@@ -1155,6 +1197,8 @@ class _LoweringContext:
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.inside_branch = True
         else_ctx.lower_bindings(else_bindings, terminal_assert)
+
+        else_ctx.drain_branch_private_residue(pre_if_names)
 
         if terminal_assert and else_ctx.sm.depth() > 1:
             excess = else_ctx.sm.depth() - 1

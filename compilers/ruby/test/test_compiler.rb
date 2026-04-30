@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require_relative 'test_helper'
+require 'ostruct'
 
 class TestCompiler < Minitest::Test
   # Conformance test directory relative to repo root
@@ -171,7 +172,9 @@ class TestCompiler < Minitest::Test
     expected_hex = File.read(File.join(CONFORMANCE_DIR, 'basic-p2pkh', 'expected-script.hex')).strip
     return skip("conformance files not found") unless File.exist?(rb_path)
 
-    artifact = RunarCompiler.compile_from_source(rb_path, disable_constant_folding: true)
+    # Compile via subprocess to avoid in-process token-constant collision
+    # between parser_ruby and parser_ts (see comment on compile_rb_source).
+    artifact = compile_rb_source(File.read(rb_path), 'basic-p2pkh.runar.rb')
     assert_equal expected_hex.downcase, artifact.script.downcase,
                  "compiled script should match conformance golden file"
   end

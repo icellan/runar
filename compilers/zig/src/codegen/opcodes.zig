@@ -358,6 +358,37 @@ pub fn toName(opcode: Opcode) []const u8 {
 }
 
 // ============================================================================
+// ArrayListWriter — adapter for ArrayListUnmanaged(u8) to provide writer-like interface
+// ============================================================================
+
+/// A minimal writer adapter for ArrayListUnmanaged(u8) that provides
+/// writeByte, writeAll, and writeInt methods matching the duck-typed
+/// writer interface used by encodePushData and encodeScriptNumber.
+/// Replaces ArrayList.writer(allocator) which was removed in Zig 0.16.
+pub const ArrayListWriter = struct {
+    list: *std.ArrayListUnmanaged(u8),
+    allocator: std.mem.Allocator,
+
+    pub fn writeByte(self: ArrayListWriter, byte: u8) !void {
+        try self.list.append(self.allocator, byte);
+    }
+
+    pub fn writeAll(self: ArrayListWriter, data: []const u8) !void {
+        try self.list.appendSlice(self.allocator, data);
+    }
+
+    pub fn writeInt(self: ArrayListWriter, comptime T: type, value: T, endian: std.builtin.Endian) !void {
+        var bytes: [@sizeOf(T)]u8 = undefined;
+        std.mem.writeInt(T, &bytes, value, endian);
+        try self.list.appendSlice(self.allocator, &bytes);
+    }
+
+    pub fn print(self: ArrayListWriter, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+        return self.list.print(self.allocator, fmt, args);
+    }
+};
+
+// ============================================================================
 // Push Data Encoding
 // ============================================================================
 
@@ -552,7 +583,8 @@ test "push data encoding — empty" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try encodePushData(buf.writer(std.testing.allocator), &.{});
+    const w_pd_1 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodePushData(w_pd_1, &.{});
     try std.testing.expectEqualSlices(u8, &.{0x00}, buf.items);
 }
 
@@ -560,7 +592,8 @@ test "push data encoding — short (2 bytes)" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try encodePushData(buf.writer(std.testing.allocator), &.{ 0xab, 0xcd });
+    const w_pd_2 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodePushData(w_pd_2, &.{ 0xab, 0xcd });
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xab, 0xcd }, buf.items);
 }
 
@@ -570,7 +603,8 @@ test "push data encoding — 75 bytes (max direct)" {
 
     var data: [75]u8 = undefined;
     @memset(&data, 0xff);
-    try encodePushData(buf.writer(std.testing.allocator), &data);
+    const w_pd_3 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodePushData(w_pd_3, &data);
     try std.testing.expectEqual(@as(usize, 76), buf.items.len); // 1 len + 75 data
     try std.testing.expectEqual(@as(u8, 75), buf.items[0]);
 }
@@ -581,7 +615,8 @@ test "push data encoding — 76 bytes (PUSHDATA1)" {
 
     var data: [76]u8 = undefined;
     @memset(&data, 0xaa);
-    try encodePushData(buf.writer(std.testing.allocator), &data);
+    const w_pd_4 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodePushData(w_pd_4, &data);
     try std.testing.expectEqual(@as(usize, 78), buf.items.len); // 1 op + 1 len + 76 data
     try std.testing.expectEqual(@as(u8, 0x4c), buf.items[0]); // OP_PUSHDATA1
     try std.testing.expectEqual(@as(u8, 76), buf.items[1]);
@@ -593,7 +628,8 @@ test "push data encoding — 256 bytes (PUSHDATA2)" {
 
     var data: [256]u8 = undefined;
     @memset(&data, 0xbb);
-    try encodePushData(buf.writer(std.testing.allocator), &data);
+    const w_pd_5 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodePushData(w_pd_5, &data);
     try std.testing.expectEqual(@as(usize, 259), buf.items.len); // 1 op + 2 len + 256 data
     try std.testing.expectEqual(@as(u8, 0x4d), buf.items[0]); // OP_PUSHDATA2
     try std.testing.expectEqual(@as(u8, 0x00), buf.items[1]); // 256 LE low
@@ -604,7 +640,8 @@ test "script number encoding — zero" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 0);
+    const w_sn_1 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_1, 0);
     try std.testing.expectEqualSlices(u8, &.{0x00}, buf.items);
 }
 
@@ -612,15 +649,18 @@ test "script number encoding — small positives (1-16)" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 1);
+    const w_sn_2 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_2, 1);
     try std.testing.expectEqualSlices(u8, &.{0x51}, buf.items);
 
     buf.clearRetainingCapacity();
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 16);
+    const w_sn_3 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_3, 16);
     try std.testing.expectEqualSlices(u8, &.{0x60}, buf.items);
 
     buf.clearRetainingCapacity();
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 8);
+    const w_sn_4 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_4, 8);
     try std.testing.expectEqualSlices(u8, &.{0x58}, buf.items);
 }
 
@@ -628,7 +668,8 @@ test "script number encoding — negative one" {
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
 
-    try encodeScriptNumber(buf.writer(std.testing.allocator), -1);
+    const w_sn_5 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_5, -1);
     try std.testing.expectEqualSlices(u8, &.{0x4f}, buf.items);
 }
 
@@ -637,7 +678,8 @@ test "script number encoding — 17 (beyond OP_16)" {
     defer buf.deinit(std.testing.allocator);
 
     // 17 = 0x11, single byte, push as 01 11
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 17);
+    const w_sn_6 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_6, 17);
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x11 }, buf.items);
 }
 
@@ -646,7 +688,8 @@ test "script number encoding — 128 (needs sign byte)" {
     defer buf.deinit(std.testing.allocator);
 
     // 128 = 0x80, MSB set so needs extra 0x00 byte: push 02 80 00
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 128);
+    const w_sn_7 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_7, 128);
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x80, 0x00 }, buf.items);
 }
 
@@ -655,7 +698,8 @@ test "script number encoding — -128 (negative, MSB conflict)" {
     defer buf.deinit(std.testing.allocator);
 
     // -128: abs = 0x80, MSB set -> extra byte 0x80 for negative: push 02 80 80
-    try encodeScriptNumber(buf.writer(std.testing.allocator), -128);
+    const w_sn_8 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_8, -128);
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0x80, 0x80 }, buf.items);
 }
 
@@ -664,7 +708,8 @@ test "script number encoding — 255" {
     defer buf.deinit(std.testing.allocator);
 
     // 255 = 0xff, MSB set -> needs extra byte: push 02 ff 00
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 255);
+    const w_sn_9 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_9, 255);
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xff, 0x00 }, buf.items);
 }
 
@@ -673,7 +718,8 @@ test "script number encoding — -5" {
     defer buf.deinit(std.testing.allocator);
 
     // -5: abs = 0x05, MSB not set -> set sign bit: push 01 85
-    try encodeScriptNumber(buf.writer(std.testing.allocator), -5);
+    const w_sn_10 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_10, -5);
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x85 }, buf.items);
 }
 
@@ -682,7 +728,8 @@ test "script number encoding — large positive 1000" {
     defer buf.deinit(std.testing.allocator);
 
     // 1000 = 0x03E8 -> LE: E8 03, MSB of 03 not set -> push 02 e8 03
-    try encodeScriptNumber(buf.writer(std.testing.allocator), 1000);
+    const w_sn_11 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_11, 1000);
     try std.testing.expectEqualSlices(u8, &.{ 0x02, 0xe8, 0x03 }, buf.items);
 }
 
@@ -693,7 +740,8 @@ test "script number encoding — i64 MIN does not panic" {
     // minInt(i64) = -9223372036854775808
     // abs = 0x8000000000000000, LE sign-magnitude: 00 00 00 00 00 00 00 80 80 (9 bytes)
     // encodePushData wraps it as: 09 (length) + 9 data bytes
-    try encodeScriptNumber(buf.writer(std.testing.allocator), std.math.minInt(i64));
+    const w_sn_12 = ArrayListWriter{ .list = &buf, .allocator = std.testing.allocator };
+    try encodeScriptNumber(w_sn_12, std.math.minInt(i64));
     try std.testing.expectEqual(@as(usize, 10), buf.items.len); // 1 len + 9 data
     try std.testing.expectEqual(@as(u8, 9), buf.items[0]); // push 9 bytes
     // Last two bytes should be 0x80 0x80 (MSB of magnitude + sign byte)

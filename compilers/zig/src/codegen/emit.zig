@@ -109,7 +109,8 @@ pub const EmitContext = struct {
 
         try self.recordSourceMapping();
         const start = self.script_bytes.items.len;
-        try opcodes.encodePushData(self.script_bytes.writer(self.allocator), data);
+        const pd_writer = opcodes.ArrayListWriter{ .list = &self.script_bytes, .allocator = self.allocator };
+        try opcodes.encodePushData(pd_writer, data);
         const bytes_written: u32 = @intCast(self.script_bytes.items.len - start);
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
@@ -123,7 +124,8 @@ pub const EmitContext = struct {
     pub fn emitScriptNumber(self: *EmitContext, n: i64) !void {
         try self.recordSourceMapping();
         const start = self.script_bytes.items.len;
-        try opcodes.encodeScriptNumber(self.script_bytes.writer(self.allocator), n);
+        const sn_writer = opcodes.ArrayListWriter{ .list = &self.script_bytes, .allocator = self.allocator };
+        try opcodes.encodeScriptNumber(sn_writer, n);
         const bytes_written: u32 = @intCast(self.script_bytes.items.len - start);
         self.byte_offset += bytes_written;
         self.opcode_index += 1;
@@ -468,15 +470,15 @@ pub fn emitArtifact(
     // Build JSON output
     var json_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer json_buf.deinit(allocator);
-    const w = json_buf.writer(allocator);
+    const w = opcodes.ArrayListWriter{ .list = &json_buf, .allocator = allocator };
 
     try w.writeAll("{");
 
     // version
-    try w.writeAll("\"version\":\"runar-v0.4.5\",");
+    try w.writeAll("\"version\":\"runar-v0.4.6\",");
 
     // compilerVersion
-    try w.writeAll("\"compilerVersion\":\"0.4.5-zig\",");
+    try w.writeAll("\"compilerVersion\":\"0.4.6-zig\",");
 
     // contractName
     try w.writeAll("\"contractName\":");
@@ -1180,7 +1182,7 @@ test "writeJsonString — escaping" {
     const allocator = std.testing.allocator;
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    const w = opcodes.ArrayListWriter{ .list = &buf, .allocator = allocator };
 
     try writeJsonString(w, "hello \"world\"");
     try std.testing.expectEqualStrings("\"hello \\\"world\\\"\"", buf.items);

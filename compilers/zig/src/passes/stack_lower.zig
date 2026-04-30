@@ -383,6 +383,39 @@ const LowerCtx = struct {
         try self.bringToTop(name, consume);
     }
 
+    /// Drain branch-private residue from below TOS at the end of a branch
+    /// body, so both branches converge to a layout the parent stack model can
+    /// faithfully describe before OP_ENDIF (issue #36).
+    ///
+    /// A slot is residue when its name is NOT in `pre_if_names` (the snapshot
+    /// of the parent's named slots taken before the branch ran). This catches
+    /// both anonymous slots (null-named, pushed by intrinsics like substr's
+    /// OP_SPLIT residue) and named branch-local bindings that lingered past
+    /// their last-use (e.g. dead-code load_const intermediates the optimizer
+    /// didn't fold). Slots whose name was already in `pre_if_names` are kept.
+    /// Process deepest-first so removing a deeper slot doesn't shift a
+    /// shallower slot's depth-from-top.
+    fn drainBranchPrivateResidue(self: *LowerCtx, pre_if_names: *const std.StringHashMapUnmanaged(void)) !void {
+        var drain_depths: std.ArrayListUnmanaged(usize) = .empty;
+        defer drain_depths.deinit(self.allocator);
+        var d: usize = 1;
+        while (d < self.stack.depth()) : (d += 1) {
+            const slot = self.stack.peekAtDepth(d);
+            if (slot) |name| {
+                if (!pre_if_names.contains(name)) {
+                    try drain_depths.append(self.allocator, d);
+                }
+            } else {
+                try drain_depths.append(self.allocator, d);
+            }
+        }
+        if (drain_depths.items.len == 0) return;
+        std.mem.sort(usize, drain_depths.items, {}, std.sort.desc(usize));
+        for (drain_depths.items) |depth| {
+            try removeBranchValueAtDepth(self, depth);
+        }
+    }
+
     // ========================================================================
     // Last-use analysis
     // ========================================================================
@@ -2993,6 +3026,7 @@ const LowerCtx = struct {
             then_ctx.current_idx = idx;
             try then_ctx.lowerBinding(binding);
         }
+        try then_ctx.drainBranchPrivateResidue(&pre_if_names);
 
         var else_ctx = LowerCtx.init(self.allocator, self.program);
         defer else_ctx.deinit();
@@ -3015,6 +3049,7 @@ const LowerCtx = struct {
             else_ctx.current_idx = idx;
             try else_ctx.lowerBinding(binding);
         }
+        try else_ctx.drainBranchPrivateResidue(&pre_if_names);
 
         var post_then_names = try then_ctx.stack.namedSlots(self.allocator);
         defer post_then_names.deinit(self.allocator);

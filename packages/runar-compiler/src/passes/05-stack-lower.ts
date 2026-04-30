@@ -787,6 +787,57 @@ class LoweringContext {
   }
 
   /**
+   * Drain branch-private residue from below TOS at the end of a branch body,
+   * so that both branches converge to a layout the parent stack model can
+   * faithfully describe before OP_ENDIF (issue #36).
+   *
+   * A slot is residue when its name is NOT in `preIfNames` (the snapshot of
+   * the parent's named slots taken before the branch ran). This catches both:
+   *   1. Anonymous slots (`null`-named) — pushed by intrinsics like `substr`,
+   *      which use OP_SPLIT and leave a residue half on the stack.
+   *   2. Named branch-local slots — bindings introduced inside the branch
+   *      that lingered past their last-use (e.g. dead-code load_const
+   *      intermediates the constant-folder didn't eliminate).
+   *
+   * Slots whose name was already in `preIfNames` are kept — including
+   * duplicates created by reassigning an outer-scope local from inside the
+   * branch (those stale duplicates are cleaned up by the post-ENDIF logic in
+   * `lowerIf`, not here). The TOS slot is also kept regardless: it's the
+   * branch's result value or the latest reassignment.
+   *
+   * Process deepest-first so removing a deeper slot doesn't shift a shallower
+   * slot's depth-from-top.
+   */
+  drainBranchPrivateResidue(preIfNames: Set<string>): void {
+    const drainDepths: number[] = [];
+    for (let d = 1; d < this.stackMap.depth; d++) {
+      const name = this.stackMap.peekAtDepth(d);
+      if (name === null) {
+        drainDepths.push(d);
+      } else if (!preIfNames.has(name)) {
+        drainDepths.push(d);
+      }
+    }
+    if (drainDepths.length === 0) return;
+    drainDepths.sort((a, b) => b - a);
+    for (const depth of drainDepths) {
+      if (depth === 1) {
+        this.emitOp({ op: 'nip' });
+        this.stackMap.removeAtDepth(1);
+      } else {
+        this.emitOp({ op: 'push', value: BigInt(depth) });
+        this.stackMap.push(null);
+        this.emitOp({ op: 'roll', depth });
+        this.stackMap.pop();
+        const rolled = this.stackMap.removeAtDepth(depth);
+        this.stackMap.push(rolled);
+        this.emitOp({ op: 'drop' });
+        this.stackMap.pop();
+      }
+    }
+  }
+
+  /**
    * Lower a sequence of ANF bindings.
    *
    * When `terminalAssert` is true, the final assert in the sequence omits
@@ -1538,6 +1589,8 @@ class LoweringContext {
     thenCtx._insideBranch = true;
     thenCtx.lowerBindings(thenBindings, terminalAssert);
 
+    thenCtx.drainBranchPrivateResidue(preIfNames);
+
     if (terminalAssert && thenCtx.stackMap.depth > 1) {
       const excess = thenCtx.stackMap.depth - 1;
       for (let i = 0; i < excess; i++) {
@@ -1552,6 +1605,8 @@ class LoweringContext {
     elseCtx.outerProtectedRefs = protectedRefs;
     elseCtx._insideBranch = true;
     elseCtx.lowerBindings(elseBindings, terminalAssert);
+
+    elseCtx.drainBranchPrivateResidue(preIfNames);
 
     if (terminalAssert && elseCtx.stackMap.depth > 1) {
       const excess = elseCtx.stackMap.depth - 1;
