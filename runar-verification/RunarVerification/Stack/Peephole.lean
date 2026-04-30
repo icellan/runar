@@ -3075,6 +3075,9 @@ theorem doubleSwap_pass_sound :
       have hs1 : s1.stack = b :: a :: rest_top := rfl
       rw [applySwap_cons2 s1 b a rest_top hs1]
       cases s
+      -- In Lean ≥ v4.29 the `let s1` projection no longer reduces under
+      -- `simp_all` automatically; unfold it explicitly first.
+      simp only [s1]
       simp_all
     have hWellRest : wellTypedRun rest' s := hCont1 s hStepSwap2
     show runOps (applyDoubleSwap rest') s = runOps (.swap :: .swap :: rest') s
@@ -4660,6 +4663,9 @@ theorem applyDoubleSwap_preserves_wellTypedRun :
       have hs1 : s1.stack = b :: a :: rest_top := rfl
       rw [applySwap_cons2 s1 b a rest_top hs1]
       cases s
+      -- In Lean ≥ v4.29 the `let s1` projection no longer reduces under
+      -- `simp_all` automatically; unfold it explicitly first.
+      simp only [s1]
       simp_all
     have hWellRest : wellTypedRun rest' s := hCont1 s hStepSwap2
     show wellTypedRun (applyDoubleSwap rest') s

@@ -51,7 +51,10 @@ Returns `none` if the input has odd length or contains a non-hex
 character. The empty string parses as the empty `ByteArray`.
 -/
 def parseHex? (s : String) : Option ByteArray := do
-  let hex := if s.startsWith "0x" then s.drop 2 else s
+  -- Note: `String.drop` returns `String.Slice` in Lean ≥ v4.29; convert
+  -- back to `String` so the rest of the function operates on a value
+  -- with the standard `String` API (`.length`, `.toList`).
+  let hex : String := if s.startsWith "0x" then (s.drop 2).toString else s
   guard (hex.length % 2 == 0)
   let rec go (acc : ByteArray) : List Char → Option ByteArray
     | [] => some acc
@@ -93,7 +96,8 @@ instance : FromJson ConstValue where
         if s == "@this" then
           .ok .thisRef
         else if s.startsWith "@ref:" then
-          .ok (.refAlias (s.drop 5))
+          -- `String.drop` returns `String.Slice` in Lean ≥ v4.29.
+          .ok (.refAlias (s.drop 5).toString)
         else
           -- Anything else is a hex-encoded ByteString literal
           -- (the Rúnar goldens encode bytestrings as raw hex without
