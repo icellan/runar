@@ -682,6 +682,60 @@ test "e2e FixedArray: TicTacToe v2 is byte-identical to v1" {
     try std.testing.expectEqualStrings(expected_prefix, v1_hex[0..expected_prefix.len]);
 }
 
+/// Compile a .runar.zig source file through the full pipeline and return the
+/// emitted locking-script hex. Mirrors compileTsToHex but routes through
+/// parse_zig.parseZig so the Zig native frontend is exercised end-to-end.
+fn compileZigToHex(alloc: std.mem.Allocator, source: []const u8, path: []const u8) ![]u8 {
+    const parsed = parse_zig.parseZig(alloc, source, path);
+    if (parsed.errors.len > 0) return error.ParseFailed;
+    const contract = parsed.contract orelse return error.ParseFailed;
+    const val = try validate.validate(alloc, contract);
+    if (val.errors.len > 0) return error.ValidateFailed;
+    const tc = try typecheck.typeCheck(alloc, contract);
+    if (tc.errors.len > 0) return error.TypeCheckFailed;
+    const expanded = try expand_fixed_arrays.expand(alloc, contract);
+    if (expanded.errors.len > 0) return error.ExpandFailed;
+    var program = try anf_lower.lowerToANF(alloc, expanded.contract);
+    program = try constant_fold.foldConstants(alloc, program);
+    program = try ec_optimizer.optimize(alloc, program);
+    const stack_program = try stack_lower.lower(alloc, program);
+    const optimized_methods = try peephole.optimize(alloc, stack_program.methods);
+    const optimized = types.StackProgram{
+        .methods = optimized_methods,
+        .contract_name = stack_program.contract_name,
+        .properties = stack_program.properties,
+        .constructor_params = stack_program.constructor_params,
+    };
+    const artifact = try emit.emitArtifact(alloc, optimized, program);
+    const hex = try extractArtifactHex(artifact);
+    return try alloc.dupe(u8, hex);
+}
+
+test "e2e MultiSig2of3: zig compiler produces canonical hex for array_literal + checkMultiSig" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    // Tests run from compilers/zig; the example lives two levels up.
+    const zig_src = std.Io.Dir.cwd().readFileAlloc(
+        std.testing.io,
+        "../../examples/zig/multisig-2of3/MultiSig2of3.runar.zig",
+        alloc,
+        .limited(1 * 1024 * 1024),
+    ) catch return error.SkipZigTest;
+
+    const zig_hex = try compileZigToHex(alloc, zig_src, "MultiSig2of3.runar.zig");
+
+    // Canonical hex for `assert(checkMultiSig(&.{sig1, sig2}, &.{pk1, pk2, pk3}))`
+    // produced by the TS reference compiler from both `.ts` and `.zig` source
+    // (verified via TS-side cross-format parser). Pins the Zig native pipeline
+    // to byte-identical output: any drift in array_literal lowering or
+    // lowerCheckMultiSig (count pushes + OP_0 dummy + stack discipline) fires
+    // here immediately.
+    const expected_hex = "0000007b7b7b007b52537a53ae";
+    try std.testing.expectEqualStrings(expected_hex, zig_hex);
+}
+
 test "e2e error: pipeline handles malformed contracts without crashing" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

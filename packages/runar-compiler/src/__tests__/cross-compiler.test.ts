@@ -508,10 +508,30 @@ class Escrow extends SmartContract {
 }
 `;
 
+const MULTISIG_SOURCE = `
+class MultiSig2of3 extends SmartContract {
+  readonly pk1: PubKey;
+  readonly pk2: PubKey;
+  readonly pk3: PubKey;
+
+  constructor(pk1: PubKey, pk2: PubKey, pk3: PubKey) {
+    super(pk1, pk2, pk3);
+    this.pk1 = pk1;
+    this.pk2 = pk2;
+    this.pk3 = pk3;
+  }
+
+  public unlock(sig1: Sig, sig2: Sig) {
+    assert(checkMultiSig([sig1, sig2], [this.pk1, this.pk2, this.pk3]));
+  }
+}
+`;
+
 const CONTRACT_SOURCES: { name: string; source: string }[] = [
   { name: 'P2PKH', source: P2PKH_SOURCE },
   { name: 'HashLock', source: HASHLOCK_SOURCE },
   { name: 'Escrow', source: ESCROW_SOURCE },
+  { name: 'MultiSig2of3', source: MULTISIG_SOURCE },
 ];
 
 

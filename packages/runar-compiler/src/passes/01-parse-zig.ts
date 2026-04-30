@@ -985,6 +985,16 @@ class ZigParser extends ParserCore<ZigToken> {
       this.advance();
       return { kind: 'unary_expr', op: '~', operand: this.parseUnary() };
     }
+    // Zig's `&` is the address-of operator used for slice coercion at call
+    // sites like `&.{sig1, sig2}` (an anonymous-struct literal coerced to a
+    // slice). Slices have no Rúnar IR analogue — the inner array literal IS
+    // the IR node — so we simply skip the `&` and parse the operand. Recurse
+    // into parsePrimary directly: `&.foo()` is not legal Zig and `&` never
+    // pairs with a postfix chain in practice.
+    if (this.current().type === '&') {
+      this.advance();
+      return this.parsePrimary();
+    }
 
     let expr = this.parsePrimary();
     expr = this.parsePostfixChain(expr, this.selfNames);
@@ -1056,6 +1066,26 @@ class ZigParser extends ParserCore<ZigToken> {
     }
 
     if (token.type === '[') {
+      // `[_]T{...}` — typed array literal with inferred length. The element
+      // type is parsed and discarded; Rúnar infers element types from the
+      // literal contents. The element list is the same `{...}` form used by
+      // `.{...}` anon-struct literals.
+      const next = this.tokens[this.pos + 1];
+      const after = this.tokens[this.pos + 2];
+      if (next?.type === 'ident' && next.value === '_' && after?.type === ']') {
+        this.advance(); // '['
+        this.advance(); // '_'
+        this.advance(); // ']'
+        this.parseType(); // discard element type
+        this.expect('{');
+        const elements: Expression[] = [];
+        while (this.current().type !== '}' && this.current().type !== 'eof') {
+          elements.push(this.parseExpression());
+          if (this.current().type === ',') this.advance();
+        }
+        this.expect('}');
+        return { kind: 'array_literal', elements };
+      }
       this.advance();
       const elements: Expression[] = [];
       while (this.current().type !== ']' && this.current().type !== 'eof') {

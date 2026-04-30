@@ -1082,6 +1082,12 @@ const Parser = struct {
         if (self.current.kind == .minus) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.negate, o); }
         if (self.current.kind == .bang) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.not, o); }
         if (self.current.kind == .tilde) { _ = self.bump(); const o = self.parseUnary() orelse return null; return self.makeUnaryOp(.bitnot, o); }
+        // Zig's `&` is the address-of operator used for slice coercion at
+        // call sites like `&.{sig1, sig2}` (an anonymous-struct literal
+        // coerced to a slice). Slices have no Rúnar IR analogue — the inner
+        // array literal IS the IR node — so we simply skip the `&` and parse
+        // the operand as a primary expression.
+        if (self.current.kind == .ampersand) { _ = self.bump(); return self.parsePrimary(); }
         return self.parsePostfix();
     }
 
@@ -1175,6 +1181,29 @@ const Parser = struct {
                 break :blk Expression{ .identifier = tok.text };
             },
             .lparen => blk: { _ = self.bump(); const inner = self.parseExpression() orelse break :blk null; _ = self.expect(.rparen); break :blk inner; },
+            .lbracket => blk: {
+                // `[_]T{...}` — typed array literal with inferred length. The
+                // element type is parsed and discarded; Rúnar infers element
+                // types from the literal contents. The element list is the
+                // same `{...}` form used by `.{...}` anon-struct literals.
+                _ = self.bump(); // '['
+                if (!(self.current.kind == .ident and std.mem.eql(u8, self.current.text, "_"))) {
+                    self.addError("expected '_' inside '[_]T{...}' typed array literal");
+                    break :blk null;
+                }
+                _ = self.bump(); // '_'
+                _ = self.expect(.rbracket) orelse break :blk null;
+                _ = self.parseTypeNode(); // discard element type
+                _ = self.expect(.lbrace) orelse break :blk null;
+                var elems: std.ArrayListUnmanaged(Expression) = .empty;
+                while (self.current.kind != .rbrace and self.current.kind != .eof) {
+                    const elem = self.parseExpression() orelse return null;
+                    elems.append(self.allocator, elem) catch return null;
+                    if (self.current.kind == .comma) _ = self.bump();
+                }
+                _ = self.expect(.rbrace);
+                break :blk .{ .array_literal = elems.items };
+            },
             .at_sign => blk: {
                 // Zig builtins: @divTrunc(a,b) → a/b, @rem(a,b) → a%b, @mod(a,b) → a%b,
                 // @intCast(expr) → expr, @as(T, expr) → expr
