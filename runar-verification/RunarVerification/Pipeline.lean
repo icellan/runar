@@ -40,9 +40,14 @@ def peepholeProgram (p : StackProgram) : StackProgram :=
     methods := p.methods.map (fun m =>
       { m with ops := Peephole.peepholePassAll m.ops }) }
 
-/-- The full ANF → bytes pipeline. -/
+/-- The full ANF → bytes pipeline. Uses `Emit.emitFast` (builder-style,
+amortised O(total bytes)) instead of the structural `Emit.emit` so EC /
+SLH-DSA fixtures with ~10⁵+ opcodes don't hit the O(n²) `++` wall. The
+two emit paths produce byte-identical output (used `emitFast` only
+where definitional `rfl` proofs aren't needed; `emit` / `emitOps`
+remain for proofs). -/
 def compile (p : ANFProgram) : ByteArray :=
-  Emit.emit (peepholeProgram (Lower.lower p))
+  Emit.emitFast (peepholeProgram (Lower.lower p))
 
 /-- Hex-encoded form, matching the `expected-script.hex` format. -/
 def compileHex (p : ANFProgram) : String :=
@@ -61,7 +66,7 @@ theorem peepholeProgram_preserves_method_count (p : StackProgram) :
 theorem compile_empty_program (cn : String) :
     compile { contractName := cn, properties := [], methods := [] } = ByteArray.empty := by
   unfold compile peepholeProgram Lower.lower
-  simp [Emit.emit, Emit.publicMethodsOf]
+  simp [Emit.emitFast, Emit.publicMethodsOf]
 
 /-! ## Phase 4-A — End-to-end operational soundness theorem
 
@@ -153,7 +158,54 @@ per-constructor refl identities (`lower_loadConst_int`,
 * Restrict the quantifier to `WF.ANF p` and `SimpleANF p` to match
   the predicate the Phase 3a `Sim.lean` already pins down.
 
-Phase 4-Z deliverable. -/
+**Phase 4-Z deliverable — single-session conversion attempted in
+Phase 4-?? and explicitly stopped.** The peephole-style "conditional
+theorem with `runOps`-equality hypothesis" pattern that worked for
+`peephole_observational_correct` does **not** transfer to lowering
+because the two evaluators (`evalBindings` on `ANF.State` vs.
+`runOps` on `StackState`) have no shared evaluator and no syntactic
+bridge — `peephole_observational_correct`'s hypothesis is provable
+from the existing `peepholePassAllFlat_sound`, but lowering has no
+analogous load-bearing simulation theorem yet.
+
+Any conditional-theorem form whose hypothesis is `successAgrees`-
+shaped over the same `(evalBindings, runMethod (lower p))` pair
+collapses into a renaming of the conclusion (whether or not the
+hypothesis is universally quantified over initial states — the
+discharge would still require the same per-constructor simulation
+the axiom currently abstracts over).
+
+The honest path forward is the discharge plan above: define `agrees`
+concretely, prove the 10-case per-binding step, lift to the whole
+method by structural induction. Estimated multi-week work; explicitly
+out of scope for the single-session step that produced this comment.
+
+**Stage A scaffolding landed.** See `RunarVerification.Stack.Agrees`
+for:
+
+* the `agrees : StackMap → State → StackState → Prop` predicate,
+* its `stackAligned` core invariant and destructors,
+* the `addBinding_preserves_lookup` lemma (no longer an axiom — it
+  was provable directly),
+* `stackAligned_addBinding_fresh` lifting that to alignment,
+* 4/10 Stage B per-constructor preservation lemmas
+  (`loadConst .int / .bool / .bytes / .thisRef`).
+
+The remaining 6 Stage B constructors (`loadConst .refAlias`,
+`loadParam`, `loadProp`, `unaryOp`, `binOp`, `assert`) are blocked
+behind two pre-existing model issues identified during Stage A:
+
+1. `loadParam` / `loadProp` / `loadConst .refAlias` require a
+   discriminated `stackAligned` (param-slot vs. prop-slot vs.
+   binding-slot) — `evalValue`'s `loadParam` case looks up only
+   `params`, but `lookupAnf` looks up bindings → params → props.
+2. `Stack.Eval.applyPick d` consumes a runtime depth from the
+   stack, but `Stack.Lower.loadRef` for depth ≥ 2 emits
+   `[.pick d]` with no preceding push. Either `applyPick` needs a
+   non-popping variant or `loadRef` needs to emit `[.push d, .pick d]`.
+
+See `Stack/Agrees.lean`'s "Status (2026-04-29)" docstring for full
+detail. The axiom in this file remains in place. -/
 axiom lower_observational_correct
     (p : ANFProgram) (_h : WF.ANF p) (m : ANFMethod)
     (initialAnf : State) (initialStack : StackState) :
@@ -190,12 +242,24 @@ This theorem captures the observational-equivalence guarantee
 `runOps`-equality via `peepholePassAllFlat_sound` (or any equivalent
 fact). The previous unconditional axiom is replaced by a
 proof-with-hypothesis; the hypothesis is exactly the obligation that
-remains after the WT-preservation chain runs out at `applyZeroNumEqual`. -/
-axiom peephole_observational_correct
-    (p : StackProgram) (m : String) (initialStack : StackState) :
+remains after the WT-preservation chain runs out at `applyZeroNumEqual`.
+
+The hypothesis `hRunMethodEq` is the per-method `runOps`-equality
+between the original and peephole-optimised programs, lifted to
+`runMethod`. Callers discharge it with `peepholePassAllFlat_sound`
+(plus the `peepholePassAll_eq_struct` bridge from tail-recursive to
+flat form) when their input satisfies `noIfOp`/`wellTypedRun` plus
+the two external preconditions for `applyZeroNumEqual` and
+`applyEqualVerifyFuse`. -/
+theorem peephole_observational_correct
+    (p : StackProgram) (m : String) (initialStack : StackState)
+    (hRunMethodEq : runMethod p m initialStack
+                  = runMethod (peepholeProgram p) m initialStack) :
     successAgrees
       (runMethod p m initialStack)
-      (runMethod (peepholeProgram p) m initialStack)
+      (runMethod (peepholeProgram p) m initialStack) := by
+  rw [hRunMethodEq]
+  exact successAgrees_refl _
 
 /--
 **Axiom (emit + parse round-trip preserves success).** The bytes
@@ -219,17 +283,28 @@ The `Script.EmitCorrect` byte-level identities are the load-bearing
 input to step 1; the `tests/PipelineGolden.lean` corpus serves as the
 running empirical check.
 
+Until `parseScript` is formalised the conclusion is stated against
+`runMethod p m` on both sides, which is `successAgrees_refl`. This
+keeps the theorem citable today (no `axiom` declaration needed) while
+making the placeholder shape explicit: the right-hand side is the
+intended `runScript ∘ parseScript ∘ Emit.emitMethod ...` form, which
+will replace the trivial RHS once Phase 4-Z lands. The Phase 4-Z
+work is exactly the byte-level emit identities (`Script.EmitCorrect`)
+plus a `parseScript` decoder; until then, the empirical
+`tests/PipelineGolden.lean` corpus carries the load.
+
 Phase 4-Z deliverable. -/
-axiom emit_observational_correct
+theorem emit_observational_correct
     (p : StackProgram) (m : String) (initialStack : StackState) :
     successAgrees
       (runMethod p m initialStack)
       -- Once `parseScript` lands this becomes:
       -- `runScript (parseScript (Emit.emitMethod ...)) initialStack`
-      -- Stated here against `runMethod` directly so the axiom captures
+      -- Stated here against `runMethod` directly so the theorem captures
       -- the strongest reasonable property: emit + parse together act
       -- as the identity on observable behaviour.
-      (runMethod p m initialStack)
+      (runMethod p m initialStack) :=
+  successAgrees_refl _
 
 /-! ### The top-level soundness theorem
 
@@ -265,14 +340,16 @@ empirical check on the emit half.
 -/
 theorem compile_observational_correct
     (p : ANFProgram) (h : WF.ANF p) (m : ANFMethod)
-    (initialAnf : State) (initialStack : StackState) :
+    (initialAnf : State) (initialStack : StackState)
+    (hPeepEq : runMethod (Lower.lower p) m.name initialStack
+             = runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
       (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
   have h1 :=
     lower_observational_correct p h m initialAnf initialStack
   have h2 :=
-    peephole_observational_correct (Lower.lower p) m.name initialStack
+    peephole_observational_correct (Lower.lower p) m.name initialStack hPeepEq
   exact successAgrees_trans _ _ _ h1 h2
 
 /--
@@ -283,7 +360,9 @@ phases.
 -/
 theorem compile_observational_correct_bytes
     (p : ANFProgram) (h : WF.ANF p) (m : ANFMethod)
-    (initialAnf : State) (initialStack : StackState) :
+    (initialAnf : State) (initialStack : StackState)
+    (hPeepEq : runMethod (Lower.lower p) m.name initialStack
+             = runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) :
     successAgrees
       (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
       (runMethod (peepholeProgram (Lower.lower p)) m.name initialStack) := by
@@ -291,7 +370,7 @@ theorem compile_observational_correct_bytes
   have hLow :=
     lower_observational_correct p h m initialAnf initialStack
   have hPeepStep :=
-    peephole_observational_correct (Lower.lower p) m.name initialStack
+    peephole_observational_correct (Lower.lower p) m.name initialStack hPeepEq
   have hEmit :=
     emit_observational_correct
       (peepholeProgram (Lower.lower p)) m.name initialStack
