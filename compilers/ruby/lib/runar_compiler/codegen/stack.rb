@@ -870,6 +870,52 @@ module RunarCompiler::Codegen
       _track_depth
     end
 
+    # Drain branch-private residue from below TOS at the end of a branch
+    # body, so both branches converge to a layout the parent stack model can
+    # faithfully describe before OP_ENDIF (issue #36).
+    #
+    # A slot is residue when its name is NOT in pre_if_names (the snapshot of
+    # the parent's named slots taken before the branch ran). This catches
+    # both anonymous slots (empty-named, pushed by intrinsics like substr's
+    # OP_SPLIT residue) and named branch-local bindings that lingered past
+    # their last-use (e.g. dead-code load_const intermediates the optimizer
+    # didn't fold). Slots whose name was already in pre_if_names are kept.
+    # Process deepest-first so removing a deeper slot doesn't shift a
+    # shallower slot's depth-from-top.
+    #
+    # @param pre_if_names [Set<String>] parent named slots before the branch
+    def drain_branch_private_residue(pre_if_names)
+      drain_depths = []
+      d = 1
+      while d < @sm.depth
+        name = @sm.peek_at_depth(d)
+        if name.nil? || name.empty?
+          drain_depths << d
+        elsif !pre_if_names.include?(name)
+          drain_depths << d
+        end
+        d += 1
+      end
+      return if drain_depths.empty?
+
+      drain_depths.sort! { |a, b| b <=> a }
+      drain_depths.each do |depth|
+        if depth == 1
+          emit_op({ op: "nip" })
+          @sm.remove_at_depth(1)
+        else
+          emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(depth) })
+          @sm.push("")
+          emit_op({ op: "roll", depth: depth })
+          @sm.pop
+          rolled = @sm.remove_at_depth(depth)
+          @sm.push(rolled)
+          emit_op({ op: "drop" })
+          @sm.pop
+        end
+      end
+    end
+
     # -----------------------------------------------------------------
     # resolve_ref -- resolve a binding name to bring it to top of stack
     # -----------------------------------------------------------------
@@ -1568,6 +1614,8 @@ module RunarCompiler::Codegen
       then_ctx.private_methods = @private_methods
       then_ctx.lower_bindings(then_bindings, terminal_assert)
 
+      then_ctx.drain_branch_private_residue(pre_if_names)
+
       if terminal_assert && then_ctx.sm.depth > 1
         excess = then_ctx.sm.depth - 1
         excess.times do
@@ -1583,6 +1631,8 @@ module RunarCompiler::Codegen
       else_ctx.inside_branch = true
       else_ctx.private_methods = @private_methods
       else_ctx.lower_bindings(else_bindings, terminal_assert)
+
+      else_ctx.drain_branch_private_residue(pre_if_names)
 
       if terminal_assert && else_ctx.sm.depth > 1
         excess = else_ctx.sm.depth - 1
@@ -1929,21 +1979,21 @@ module RunarCompiler::Codegen
       n_pks = @array_lengths[pks_ref] || 1
 
       # Push OP_0 dummy (required by Bitcoin's OP_CHECKMULTISIG bug)
-      emit_op({ op: "push", value: 0 })
+      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(0) })
       @sm.push(nil)
 
       # Bring sigs array to top
       bring_to_top(sigs_ref, _is_last_use(sigs_ref, binding_index, last_uses))
 
       # Push nSigs count
-      emit_op({ op: "push", value: n_sigs })
+      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(n_sigs) })
       @sm.push(nil)
 
       # Bring pubkeys array to top
       bring_to_top(pks_ref, _is_last_use(pks_ref, binding_index, last_uses))
 
       # Push nPKs count
-      emit_op({ op: "push", value: n_pks })
+      emit_op({ op: "push", value: RunarCompiler::Codegen.big_int_push(n_pks) })
       @sm.push(nil)
 
       # Pop everything: OP_0 + sigs + nSigs + pks + nPKs
@@ -3130,15 +3180,20 @@ module RunarCompiler::Codegen
     # -----------------------------------------------------------------
 
     def _lower_array_literal(binding_name, elements, binding_index, last_uses)
-      @array_lengths[binding_name] = elements.length
+      # Bring each element to TOS in order; on the stack-map collapse the
+      # N entries into a single logical slot labelled with the binding name.
+      # Consumers (e.g. checkMultiSig) treat the whole array as one stack
+      # item and read the element count from @array_lengths.
       elements.each do |elem|
         is_last = _is_last_use(elem, binding_index, last_uses)
         bring_to_top(elem, is_last)
-        @sm.pop
-        @sm.push("") # anonymous stack entry for intermediate elements
       end
-      @sm.pop if elements.any?
+      # Pop all elements from the stack map (consumed into the array)
+      elements.length.times { @sm.pop }
+      # Push a single entry representing the whole array
       @sm.push(binding_name)
+      # Record the array length for checkMultiSig
+      @array_lengths[binding_name] = elements.length
       _track_depth
     end
 

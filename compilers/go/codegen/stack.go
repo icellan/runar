@@ -760,6 +760,55 @@ func (ctx *loweringContext) bringToTop(name string, consume bool) {
 	ctx.trackDepth()
 }
 
+// drainBranchPrivateResidue removes branch-private residue from below TOS at
+// the end of a branch body, so both branches converge to a layout the parent
+// stack model can faithfully describe before OP_ENDIF (issue #36).
+//
+// A slot is residue when its name is NOT in preIfNames (the snapshot of the
+// parent's named slots taken before the branch ran). This catches both
+// anonymous slots (empty-named, pushed by intrinsics like substr's OP_SPLIT
+// residue) and named branch-local bindings that lingered past their last-use
+// (e.g. dead-code load_const intermediates the optimizer didn't fold).
+//
+// Slots whose name was already in preIfNames are kept — including duplicates
+// created by reassigning an outer-scope local from inside the branch (those
+// stale duplicates are cleaned up by post-ENDIF logic, not here). The TOS
+// slot is also kept regardless: it's the branch's result value or latest
+// reassignment.
+//
+// Process deepest-first so removing a deeper slot doesn't shift a shallower
+// slot's depth-from-top.
+func (ctx *loweringContext) drainBranchPrivateResidue(preIfNames map[string]bool) {
+	var drainDepths []int
+	for d := 1; d < ctx.sm.depth(); d++ {
+		name := ctx.sm.peekAtDepth(d)
+		if name == "" {
+			drainDepths = append(drainDepths, d)
+		} else if !preIfNames[name] {
+			drainDepths = append(drainDepths, d)
+		}
+	}
+	if len(drainDepths) == 0 {
+		return
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(drainDepths)))
+	for _, depth := range drainDepths {
+		if depth == 1 {
+			ctx.emitOp(StackOp{Op: "nip"})
+			ctx.sm.removeAtDepth(1)
+		} else {
+			ctx.emitOp(StackOp{Op: "push", Value: bigIntPush(int64(depth))})
+			ctx.sm.push("")
+			ctx.emitOp(StackOp{Op: "roll", Depth: depth})
+			ctx.sm.pop()
+			rolled := ctx.sm.removeAtDepth(depth)
+			ctx.sm.push(rolled)
+			ctx.emitOp(StackOp{Op: "drop"})
+			ctx.sm.pop()
+		}
+	}
+}
+
 func (ctx *loweringContext) isLastUse(ref string, currentIndex int, lastUses map[string]int) bool {
 	last, ok := lastUses[ref]
 	return !ok || last <= currentIndex
@@ -1498,6 +1547,8 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	thenCtx.insideBranch = true
 	thenCtx.lowerBindings(thenBindings, ta)
 
+	thenCtx.drainBranchPrivateResidue(preIfNames)
+
 	if ta && thenCtx.sm.depth() > 1 {
 		excess := thenCtx.sm.depth() - 1
 		for i := 0; i < excess; i++ {
@@ -1512,6 +1563,8 @@ func (ctx *loweringContext) lowerIf(bindingName, cond string, thenBindings, else
 	elseCtx.outerProtectedRefs = protectedRefs
 	elseCtx.insideBranch = true
 	elseCtx.lowerBindings(elseBindings, ta)
+
+	elseCtx.drainBranchPrivateResidue(preIfNames)
 
 	if ta && elseCtx.sm.depth() > 1 {
 		excess := elseCtx.sm.depth() - 1

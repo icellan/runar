@@ -347,6 +347,8 @@ class _LoweringContext:
         self.inside_branch: bool = False
         self.current_source_loc: Optional[SourceLocation] = None
         self.const_values: dict[str, int | str | bool] = {}
+        # Element counts for array_literal bindings (used by checkMultiSig).
+        self.array_lengths: dict[str, int] = {}
         self._track_depth()
 
     def _track_depth(self) -> None:
@@ -709,6 +711,46 @@ class _LoweringContext:
                 self.sm.push(picked)
 
         self._track_depth()
+
+    def drain_branch_private_residue(self, pre_if_names: set[str]) -> None:
+        """Drain branch-private residue from below TOS at the end of a branch
+        body, so both branches converge to a layout the parent stack model can
+        faithfully describe before OP_ENDIF (issue #36).
+
+        A slot is residue when its name is NOT in ``pre_if_names`` (the
+        snapshot of the parent's named slots taken before the branch ran).
+        This catches both anonymous slots (empty-named, pushed by intrinsics
+        like substr's OP_SPLIT residue) and named branch-local bindings that
+        lingered past their last-use (e.g. dead-code load_const intermediates
+        the optimizer didn't fold).
+
+        Slots whose name was already in ``pre_if_names`` are kept --
+        including duplicates created by reassigning an outer-scope local from
+        inside the branch. The TOS slot is also kept regardless.
+        """
+        drain_depths: list[int] = []
+        for d in range(1, self.sm.depth()):
+            name = self.sm.peek_at_depth(d)
+            if not name:
+                drain_depths.append(d)
+            elif name not in pre_if_names:
+                drain_depths.append(d)
+        if not drain_depths:
+            return
+        drain_depths.sort(reverse=True)
+        for depth in drain_depths:
+            if depth == 1:
+                self.emit_op(StackOp(op="nip"))
+                self.sm.remove_at_depth(1)
+            else:
+                self.emit_op(StackOp(op="push", value=big_int_push(depth)))
+                self.sm.push("")
+                self.emit_op(StackOp(op="roll", depth=depth))
+                self.sm.pop()
+                rolled = self.sm.remove_at_depth(depth)
+                self.sm.push(rolled)
+                self.emit_op(StackOp(op="drop"))
+                self.sm.pop()
 
     def _is_last_use(self, ref: str, current_index: int, last_uses: dict[str, int]) -> bool:
         last = last_uses.get(ref)
@@ -1284,6 +1326,8 @@ class _LoweringContext:
         then_ctx.inside_branch = True
         then_ctx.lower_bindings(then_bindings, terminal_assert)
 
+        then_ctx.drain_branch_private_residue(pre_if_names)
+
         if terminal_assert and then_ctx.sm.depth() > 1:
             excess = then_ctx.sm.depth() - 1
             for _ in range(excess):
@@ -1296,6 +1340,8 @@ class _LoweringContext:
         else_ctx.outer_protected_refs = protected_refs
         else_ctx.inside_branch = True
         else_ctx.lower_bindings(else_bindings, terminal_assert)
+
+        else_ctx.drain_branch_private_residue(pre_if_names)
 
         if terminal_assert and else_ctx.sm.depth() > 1:
             excess = else_ctx.sm.depth() - 1
@@ -2334,18 +2380,21 @@ class _LoweringContext:
                               binding_index: int, last_uses: dict[str, int]) -> None:
         """Lower an array_literal by bringing each element to the top of the stack.
 
-        The elements remain as individual stack entries; the binding name tracks
-        the last element so that callers (e.g. checkMultiSig) can find them.
+        The elements are brought to the top in order; on the stack-map we
+        collapse the N entries into a single logical slot labelled with the
+        binding name. Consumers (e.g. checkMultiSig) treat the whole array
+        as one stack item and read the element count from ``array_lengths``.
         """
         for elem in elements:
             is_last = self._is_last_use(elem, binding_index, last_uses)
             self.bring_to_top(elem, is_last)
+        # Pop all elements from the stack map (consumed into the array)
+        for _ in elements:
             self.sm.pop()
-            self.sm.push("")  # anonymous stack entry for intermediate elements
-        # Rename the topmost entry to the binding name
-        if elements:
-            self.sm.pop()
+        # Push a single entry representing the whole array
         self.sm.push(binding_name)
+        # Record the array length so checkMultiSig can emit the correct counts
+        self.array_lengths[binding_name] = len(elements)
         self._track_depth()
 
     # -----------------------------------------------------------------
@@ -2360,24 +2409,37 @@ class _LoweringContext:
           OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
 
         The two args reference array_literal bindings whose individual elements
-        are already on the stack.
+        are already on the stack. Element counts are read from
+        ``array_lengths``, populated by ``_lower_array_literal``.
         """
+        sigs_ref = args[0]
+        pks_ref = args[1]
+        n_sigs = self.array_lengths.get(sigs_ref, 1)
+        n_pks = self.array_lengths.get(pks_ref, 1)
+
         # Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
         self.emit_op(StackOp(op="push", value=big_int_push(0)))
         self.sm.push("")
 
-        # Bring sigs array ref to top
-        sigs_is_last = self._is_last_use(args[0], binding_index, last_uses)
-        self.bring_to_top(args[0], sigs_is_last)
+        # Bring sigs array ref to top (the individual elements are treated as one item)
+        sigs_is_last = self._is_last_use(sigs_ref, binding_index, last_uses)
+        self.bring_to_top(sigs_ref, sigs_is_last)
 
-        # Bring pks array ref to top
-        pks_is_last = self._is_last_use(args[1], binding_index, last_uses)
-        self.bring_to_top(args[1], pks_is_last)
+        # Push nSigs count
+        self.emit_op(StackOp(op="push", value=big_int_push(n_sigs)))
+        self.sm.push("")
 
-        # Pop all args + dummy
-        self.sm.pop()  # pks
-        self.sm.pop()  # sigs
-        self.sm.pop()  # OP_0 dummy
+        # Bring pubkeys array ref to top
+        pks_is_last = self._is_last_use(pks_ref, binding_index, last_uses)
+        self.bring_to_top(pks_ref, pks_is_last)
+
+        # Push nPKs count
+        self.emit_op(StackOp(op="push", value=big_int_push(n_pks)))
+        self.sm.push("")
+
+        # Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
+        for _ in range(5):
+            self.sm.pop()
 
         self.emit_op(StackOp(op="opcode", code="OP_CHECKMULTISIG"))
         self.sm.push(binding_name)

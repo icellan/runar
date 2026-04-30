@@ -395,6 +395,8 @@ public final class StackLower {
         Map<String, Boolean> localBindings = new HashMap<>();
         Set<String> outerProtectedRefs;
         boolean insideBranch;
+        // Element counts for array_literal bindings (used by checkMultiSig).
+        Map<String, Integer> arrayLengths = new HashMap<>();
 
         LoweringContext(List<String> params, List<AnfProperty> properties) {
             this.sm = new StackMap(params);
@@ -471,6 +473,49 @@ public final class StackLower {
                 }
             }
             trackDepth();
+        }
+
+        /**
+         * Drain branch-private residue from below TOS at the end of a branch
+         * body, so both branches converge to a layout the parent stack model
+         * can faithfully describe before OP_ENDIF (issue #36).
+         *
+         * A slot is residue when its name is NOT in {@code preIfNames} (the
+         * snapshot of the parent's named slots taken before the branch ran).
+         * This catches both anonymous slots (empty-named, pushed by intrinsics
+         * like substr's OP_SPLIT residue) and named branch-local bindings that
+         * lingered past their last-use (e.g. dead-code load_const intermediates
+         * the optimizer didn't fold). Slots whose name was already in
+         * {@code preIfNames} are kept. Process deepest-first so removing a
+         * deeper slot doesn't shift a shallower slot's depth-from-top.
+         */
+        void drainBranchPrivateResidue(Set<String> preIfNames) {
+            List<Integer> drainDepths = new ArrayList<>();
+            for (int d = 1; d < sm.depth(); d++) {
+                String name = sm.peekAtDepth(d);
+                if (name == null || name.isEmpty()) {
+                    drainDepths.add(d);
+                } else if (!preIfNames.contains(name)) {
+                    drainDepths.add(d);
+                }
+            }
+            if (drainDepths.isEmpty()) return;
+            drainDepths.sort((a, b) -> b - a);
+            for (int depth : drainDepths) {
+                if (depth == 1) {
+                    emitOp(new NipOp());
+                    sm.removeAtDepth(1);
+                } else {
+                    emitOp(new PushOp(PushValue.of(depth)));
+                    sm.push("");
+                    emitOp(new RollOp(depth));
+                    sm.pop();
+                    String rolled = sm.removeAtDepth(depth);
+                    sm.push(rolled);
+                    emitOp(new DropOp());
+                    sm.pop();
+                }
+            }
         }
 
         boolean isLastUse(String ref, int currentIndex, Map<String, Integer> lastUses) {
@@ -1004,13 +1049,38 @@ public final class StackLower {
             trackDepth();
         }
 
-        // checkMultiSig: OP_0 + sigs + pks + OP_CHECKMULTISIG
+        // checkMultiSig(sigs, pks):
+        //   OP_0 <sig1> ... <sigN> <nSigs> <pk1> ... <pkM> <nPKs> OP_CHECKMULTISIG
+        // Element counts come from arrayLengths, populated by lowerArrayLiteral.
         void lowerCheckMultiSig(String bindingName, List<String> args, int idx, Map<String, Integer> lastUses) {
+            String sigsRef = args.get(0);
+            String pksRef = args.get(1);
+            int nSigs = arrayLengths.getOrDefault(sigsRef, 1);
+            int nPks = arrayLengths.getOrDefault(pksRef, 1);
+
+            // Push OP_0 dummy (Bitcoin CHECKMULTISIG off-by-one bug workaround)
             emitOp(new PushOp(PushValue.of(0)));
             sm.push("");
-            bringToTop(args.get(0), isLastUse(args.get(0), idx, lastUses));
-            bringToTop(args.get(1), isLastUse(args.get(1), idx, lastUses));
-            sm.pop(); sm.pop(); sm.pop();
+
+            // Bring sigs array ref to top (the individual elements are treated as one item)
+            bringToTop(sigsRef, isLastUse(sigsRef, idx, lastUses));
+
+            // Push nSigs count
+            emitOp(new PushOp(PushValue.of(nSigs)));
+            sm.push("");
+
+            // Bring pubkeys array ref to top
+            bringToTop(pksRef, isLastUse(pksRef, idx, lastUses));
+
+            // Push nPKs count
+            emitOp(new PushOp(PushValue.of(nPks)));
+            sm.push("");
+
+            // Pop everything: OP_0 + sigs + nSigs + pks + nPKs = 5 stack-map entries.
+            for (int i = 0; i < 5; i++) {
+                sm.pop();
+            }
+
             emitOp(new OpcodeOp("OP_CHECKMULTISIG"));
             sm.push(bindingName);
             trackDepth();
@@ -1498,6 +1568,8 @@ public final class StackLower {
             thenCtx.insideBranch = true;
             thenCtx.lowerBindings(thenB, terminalAssert);
 
+            thenCtx.drainBranchPrivateResidue(preIfNames);
+
             if (terminalAssert && thenCtx.sm.depth() > 1) {
                 int excess = thenCtx.sm.depth() - 1;
                 for (int i = 0; i < excess; i++) {
@@ -1510,6 +1582,8 @@ public final class StackLower {
             elseCtx.outerProtectedRefs = protectedRefs;
             elseCtx.insideBranch = true;
             elseCtx.lowerBindings(elseB, terminalAssert);
+
+            elseCtx.drainBranchPrivateResidue(preIfNames);
 
             if (terminalAssert && elseCtx.sm.depth() > 1) {
                 int excess = elseCtx.sm.depth() - 1;
@@ -2434,13 +2508,21 @@ public final class StackLower {
         // ---------------- array_literal ----------------
 
         void lowerArrayLiteral(String bindingName, List<String> elements, int idx, Map<String, Integer> lastUses) {
+            // Bring each element to TOS in order; on the stack-map collapse the
+            // N entries into a single logical slot labelled with the binding
+            // name. Consumers (e.g. checkMultiSig) treat the whole array as
+            // one stack item and read the element count from arrayLengths.
             for (String el : elements) {
                 bringToTop(el, isLastUse(el, idx, lastUses));
-                sm.pop();
-                sm.push("");
             }
-            if (!elements.isEmpty()) sm.pop();
+            // Pop all elements from the stack map (consumed into the array)
+            for (int i = 0; i < elements.size(); i++) {
+                sm.pop();
+            }
+            // Push a single entry representing the whole array
             sm.push(bindingName);
+            // Record the array length so checkMultiSig can emit nSigs/nPKs.
+            arrayLengths.put(bindingName, elements.size());
             trackDepth();
         }
 
