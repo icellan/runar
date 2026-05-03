@@ -18,7 +18,17 @@ import { join, resolve, basename } from 'path';
 
 const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', 'tests');
 
-const FORMAT_EXTENSIONS = ['.runar.ts', '.runar.sol', '.runar.move', '.runar.rb'] as const;
+const FORMAT_EXTENSIONS = [
+  '.runar.ts',
+  '.runar.sol',
+  '.runar.move',
+  '.runar.go',
+  '.runar.rs',
+  '.runar.py',
+  '.runar.zig',
+  '.runar.rb',
+  '.runar.java',
+] as const;
 
 interface SourceConfig {
   sources?: Record<string, string>;

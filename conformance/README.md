@@ -102,14 +102,37 @@ tests/
 
 ### Per-fixture compiler allowlist
 
-`source.json` may carry an optional `"compilers"` field that restricts which compilers run against that fixture. When the field is absent, every tier (TypeScript, Go, Rust, Python, Zig, Ruby, Java) runs. When present, only the listed tiers are exercised — both the IR-stage and hex-stage golden checks honour the allowlist (see `runner/runner.ts` and `runner/source-parity.ts`).
+`source.json` may carry an optional `"compilers"` field that restricts which compilers run against that fixture. **When the field is absent, the contract is implicit: every tier (TypeScript, Go, Rust, Python, Zig, Ruby, Java) must produce byte-identical IR + script output.** When present, only the listed tiers are exercised — both the IR-stage and hex-stage golden checks honour the allowlist (see `runner/runner.ts` and `runner/source-parity.ts`).
 
-Allowlists are used to opt fixtures out of tiers that intentionally do not implement the underlying primitives:
+Allowlists are reserved for fixtures whose underlying Stack-IR primitives are intentionally not yet implemented in every tier. They are not a place to hide ordinary cross-compiler bugs — the lone supported reasons are documented below.
 
-- **Go-only crypto family** (`babybear`, `babybear-ext4`, `merkle-proof`): The Baby Bear field, the FRI / Merkle proof, Poseidon2, BN254-witness, and FiatShamir-KB primitives ship as Go-only Stack-IR codegen modules. They power Mode-3 STARK / FRI verification flows that have not been ported to the other six tiers — see CLAUDE.md ("Go-only crypto codegen modules") and the per-tier source-parity README. Fixtures that exercise these primitives carry `"compilers": ["go"]`.
-- **Java-excluded covenants** (`state-covenant`, `stateful-bytestring`): These contracts use Baby Bear field arithmetic + SHA-256 Merkle-root primitives in their method bodies. The Rúnar Java frontend (parse → validate → typecheck) accepts the source so the Java SDK's `CompileCheck` smoke-test still runs against them, but the Java compiler does not yet emit Stack-IR codegen for the Go-only crypto family, so the IR + hex golden checks are scoped to `["ts", "go", "rust", "python", "zig", "ruby"]`.
+#### Audited allowlists
 
-Once a missing primitive lands in another tier, drop the corresponding entry from the fixture's allowlist (or remove the field entirely) so the new tier starts running against the existing goldens.
+The complete set of fixtures with a `compilers` allowlist is enumerated and pinned by `runner/__tests__/allowlist-audit.test.ts`. That test fails if a new allowlist appears (or an existing one drifts) without being approved here, so the set cannot silently expand. Adding a new allowlisted fixture requires **both**:
+
+1. Adding the fixture's expected allowlist to `APPROVED_ALLOWLISTS` in `runner/__tests__/allowlist-audit.test.ts`.
+2. Adding a row to the table below with a one-line rationale.
+
+##### Go-only crypto family
+
+These fixtures exercise the Baby Bear / KoalaBear / Poseidon2 / BN254-witness / FRI / Merkle / FiatShamir-KB Stack-IR codegen modules, which currently ship in the Go compiler only (Mode-3 STARK / FRI verification flows). See CLAUDE.md ("Go-only crypto codegen modules").
+
+| Fixture | Allowlist | Rationale |
+|---|---|---|
+| `babybear` | `["go"]` | BabyBear prime-field arithmetic; Stack-IR codegen ships in Go only. |
+| `babybear-ext4` | `["go"]` | BabyBear Ext4 extension-field operations; Stack-IR codegen ships in Go only. |
+| `merkle-proof` | `["go"]` | SHA-256 Merkle-root verification using the Go-only Merkle codegen helpers. |
+
+##### Java-deferred Stack-IR (parser still exercised)
+
+These contracts surface-parse cleanly through every Rúnar frontend (so the Java SDK's `CompileCheck` smoke-test still covers them), but their method bodies depend on the Go-only crypto family above. Until the Java compiler grows Stack-IR codegen for the same primitives, the IR + hex golden checks intentionally exclude the Java tier.
+
+| Fixture | Allowlist | Rationale |
+|---|---|---|
+| `state-covenant` | `["ts", "go", "rust", "python", "zig", "ruby"]` | Stateful covenant whose body uses Baby Bear primitives; Java Stack-IR codegen pending. |
+| `stateful-bytestring` | `["ts", "go", "rust", "python", "zig", "ruby"]` | Stateful ByteString contract using SHA-256 Merkle-root primitives; Java Stack-IR codegen pending. |
+
+Once a missing primitive lands in another tier, drop the corresponding entry from both the fixture's `source.json` allowlist (or remove the field entirely) and `APPROVED_ALLOWLISTS`, then update the rows above so the new tier starts running against the existing goldens.
 
 ### File Roles
 

@@ -13,20 +13,20 @@ import (
 	"github.com/icellan/runar/compilers/go/frontend"
 )
 
-// TestSp1FriVerifierPoc_Compile asserts that the Sp1FriVerifierPoc contract
-// compiles cleanly through the Go compiler frontend:
+// TestSp1FriVerifierPoc_Compile is the granular frontend-stage gate. It
+// asserts that the Sp1FriVerifierPoc contract advances cleanly through each
+// of the Go compiler's frontend passes:
 //
 //	parse → validate → typecheck → ANF lowering
 //
-// It does NOT assert that stack lowering or emit succeeds. The
-// `runar.VerifySP1FRI` codegen body is deferred (see
-// docs/sp1-fri-verifier.md §8); the Go compiler's stack-lowering
-// dispatch panics on `verifySP1FRI` until the STARK verifier port lands.
+// and inspects the resulting ANF program to confirm the `verifySP1FRI`
+// intrinsic call is present in the `verify` method's bindings.
 //
-// This test exists so BSVM's `AdvanceState` covenant can be authored
-// against the `runar.VerifySP1FRI(proofBlob, publicValues, sp1VKeyHash)`
-// ABI today — the frontend (parse/validate/typecheck/ANF) accepts the
-// call and only the final codegen stage refuses.
+// This test deliberately stops at ANF so frontend-only regressions surface
+// with a focused error message (parse / validate / typecheck / ANF). The
+// end-to-end gate that the `EmitFullSP1FriVerifierBody` orchestrator is
+// wired and the contract compiles cleanly through stack lowering and emit
+// lives just below in `TestSp1FriVerifierPoc_CodegenAccepts`.
 func TestSp1FriVerifierPoc_Compile(t *testing.T) {
 	_, thisFile, _, _ := runtime.Caller(0)
 	contractPath := filepath.Join(filepath.Dir(thisFile), "contracts", "Sp1FriVerifierPoc.runar.go")

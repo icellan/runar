@@ -865,25 +865,30 @@ public final class MockCrypto {
     public static BigInteger kbFieldMul(BigInteger a, BigInteger b) { return mod(a.multiply(b), KB_P); }
     public static BigInteger kbFieldInv(BigInteger a) { return a.modInverse(KB_P); }
 
-    // Poseidon2 / BN254 — not implemented in the Java simulator. Full
-    // ports are out of scope; proof-system circuits are not exercisable
-    // off-chain at byte-level fidelity. Calls now fail loudly instead of
-    // silently returning zero.
+    // Poseidon2 / BN254 — Go-tier-only by design; not implemented in the
+    // Java simulator. Proof-system circuits are not exercisable off-chain
+    // at byte-level fidelity, and Go is authoritative for these primitives
+    // (see CLAUDE.md "Go-only crypto codegen modules"). Calls fail loudly
+    // instead of silently returning zero — to test contracts that exercise
+    // these primitives, compile with the Go compiler and run via the VM.
     public static BigInteger poseidon2Hash(BigInteger... inputs) {
         throw new UnsupportedOperationException(
-            "MockCrypto.poseidon2Hash is not implemented in the Java simulator — "
-            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+            "MockCrypto.poseidon2Hash is not implemented in the Java simulator by design — "
+            + "Go is authoritative for BN254/Poseidon2 (see CLAUDE.md \"Go-only crypto codegen modules\"). "
+            + "Test proof-system contracts via the Go compiler + VM path instead of the Java simulator.");
     }
 
     public static BigInteger bn254FieldAdd(BigInteger a, BigInteger b) {
         throw new UnsupportedOperationException(
-            "MockCrypto.bn254FieldAdd is not implemented in the Java simulator — "
-            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+            "MockCrypto.bn254FieldAdd is not implemented in the Java simulator by design — "
+            + "Go is authoritative for BN254/Poseidon2 (see CLAUDE.md \"Go-only crypto codegen modules\"). "
+            + "Test proof-system contracts via the Go compiler + VM path instead of the Java simulator.");
     }
     public static BigInteger bn254FieldMul(BigInteger a, BigInteger b) {
         throw new UnsupportedOperationException(
-            "MockCrypto.bn254FieldMul is not implemented in the Java simulator — "
-            + "test proof-system contracts via the compiler+VM path (Go is authoritative for BN254/Poseidon2).");
+            "MockCrypto.bn254FieldMul is not implemented in the Java simulator by design — "
+            + "Go is authoritative for BN254/Poseidon2 (see CLAUDE.md \"Go-only crypto codegen modules\"). "
+            + "Test proof-system contracts via the Go compiler + VM path instead of the Java simulator.");
     }
 
     // =======================================================================

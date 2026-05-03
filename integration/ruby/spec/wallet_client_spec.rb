@@ -130,3 +130,16 @@ RSpec.describe 'BRC-100 WalletClient live endpoint', :integration do
     end
   end
 end
+
+# Sentinel example so the suite shows discovered-but-skipped (rather than empty)
+# in rspec output when RUNAR_WALLET_ENDPOINT is unset. Mirrors the second
+# describe block in packages/runar-sdk/src/__tests__/wallet-client.spec.ts.
+# rubocop:disable RSpec/DescribeClass
+RSpec.describe 'BRC-100 WalletClient live endpoint (skipped)' do
+  # rubocop:enable RSpec/DescribeClass
+  it 'is skipped — set RUNAR_WALLET_ENDPOINT to a BRC-100 wallet URL to enable' do
+    if ENV['RUNAR_WALLET_ENDPOINT'].to_s.empty?
+      skip 'RUNAR_WALLET_ENDPOINT not set — set it to a BRC-100 wallet URL to enable'
+    end
+  end
+end

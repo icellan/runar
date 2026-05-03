@@ -211,10 +211,10 @@ func TestBN254MultiPairing4_Bisect(t *testing.T) {
 		{"2_distinct_pair_split", G2, G2, TWO, TWO},
 		// 2 distinct palindromic (passes today).
 		{"2_distinct_AB_BA", G2, TWO, TWO, G2},
-		// 3 distinct (fails today).
+		// 3 distinct (passes after a05cab7c..3fed3295 fix; regression guard).
 		{"3_distinct_q4_eq_q2", G2, TWO, THREE, TWO},
 		{"3_distinct_q1_eq_q3", TWO, G2, TWO, THREE},
-		// 4 distinct (fails today).
+		// 4 distinct (passes after a05cab7c..3fed3295 fix; regression guard).
 		{"4_distinct", G2, TWO, FOUR, THREE},
 	}
 

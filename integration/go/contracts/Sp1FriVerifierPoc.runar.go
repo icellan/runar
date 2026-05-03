@@ -19,11 +19,18 @@ import runar "github.com/icellan/runar/packages/runar-go"
 //
 // # Status
 //
-// The type-checker and ANF lowering accept the call so BSVM's covenant
-// (pkg/covenant/contracts/rollup_fri.runar.go in the bsv-evm repo) can be
-// written against this ABI. Stack lowering is deferred — any attempt to
-// compile past ANF raises "verifySP1FRI codegen body not yet implemented".
-// See docs/sp1-fri-verifier.md §8.
+// Compilation now succeeds end-to-end through the full pipeline
+// (parse → validate → typecheck → ANF → stack → emit). The
+// `EmitFullSP1FriVerifierBody` orchestrator (compilers/go/codegen/sp1_fri.go)
+// is wired into the Go compiler's `lowerVerifySP1FRI` dispatch, and the PoC
+// contract produces a deployable hex-encoded locking script (~280 KB of
+// opcodes for the PoC param tuple). End-to-end script-VM acceptance against
+// the canonical Plonky3 minimal-guest FRI fixture is exercised by
+// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture`.
+//
+// The remaining follow-up is the per-query unlocking-script encoder for the
+// Sp1VKeyHash constructor-slot mechanism plus the structured field-push
+// prelude — see docs/sp1-fri-verifier.md §10 for the per-query layout.
 type Sp1FriVerifierPoc struct {
 	runar.SmartContract
 	// Sp1VKeyHash is the 32-byte keccak256 digest of the SP1 verifying key.

@@ -2,7 +2,7 @@
 
 **Formal specification documents for the Rúnar language, type system, semantics, and IR format.**
 
-This directory contains the normative documents that define what Rúnar is. All compiler implementations -- the TypeScript reference compiler, the Go compiler, the Rust compiler, the Python compiler, the Zig compiler, and the Ruby compiler -- must conform to these specifications.
+This directory contains the normative documents that define what Rúnar is. All compiler implementations -- the TypeScript reference compiler, the Go compiler, the Rust compiler, the Python compiler, the Zig compiler, the Ruby compiler, and the Java compiler -- must conform to these specifications.
 
 ---
 
@@ -38,13 +38,18 @@ The specification is authoritative. If a compiler's behavior contradicts the spe
        |
        | must pass
        v
-  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+
-  |  TS    |  |  Go    |  |  Rust  |  | Python |  |  Zig   |  |  Ruby  |
-  | Compiler| | Compiler| | Compiler| | Compiler| | Compiler| | Compiler|
-  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+
+  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+
+  |  TS    |  |  Go    |  |  Rust  |  | Python |  |  Zig   |  |  Ruby  |  |  Java  |
+  | Compiler| | Compiler| | Compiler| | Compiler| | Compiler| | Compiler| | Compiler|
+  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+  +--------+
 ```
 
-The conformance test suite in `conformance/` is derived from the spec's examples and rules. A compiler is conformant if and only if it passes the full conformance suite.
+The conformance test suite in `conformance/` is derived from the spec's examples and rules. Conformance has two layers:
+
+- **Frontend conformance (mandatory for every tier).** Each compiler must parse every fixture in every one of the nine source formats (`.runar.ts`, `.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`, `.runar.java`) and produce the same AST shape. There are no per-tier carve-outs at the parser layer.
+- **Stack-IR + hex conformance (scoped).** For each fixture, the tiers listed in its `source.json` `"compilers"` allowlist must produce byte-identical Stack IR and byte-identical Bitcoin Script hex; if the field is absent, all seven tiers are required. A handful of fixtures exercising Go-only crypto codegen (BabyBear, KoalaBear, Poseidon2, BN254 witness / Groth16, Merkle, FRI / SP1 FRI verifier, FiatShamir-KB) carry `"compilers": ["go"]` and therefore only lock the Go tier at the codegen layer; their parsers are still exercised by every frontend. See `conformance/README.md` for the current allowlists.
+
+A compiler is conformant if and only if it passes every fixture for which its tier is in scope under both layers above.
 
 ---
 
@@ -53,7 +58,7 @@ The conformance test suite in `conformance/` is derived from the spec's examples
 1. Open an issue describing the proposed change and its rationale.
 2. Draft the change as a pull request modifying the relevant spec document.
 3. Update the conformance test suite to reflect the change.
-4. All six compilers must be updated (or have tracked issues) before the spec change is merged.
+4. All seven compilers must be updated (or have tracked issues) before the spec change is merged.
 5. The spec version number is bumped according to the versioning policy.
 
 ---

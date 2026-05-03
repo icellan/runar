@@ -12,11 +12,6 @@ import { TestContract } from '../index.js';
 
 // ---- helpers ----------------------------------------------------------------
 
-function bigintToHex32(n: bigint): string {
-  return n.toString(16).padStart(64, '0');
-}
-void bigintToHex32; // TODO: will be used by upcoming EC cross-verify tests
-
 /** Construct a 64-byte Rúnar Point hex from a @bsv/sdk Point. */
 function bsvPointToHex(p: BsvPoint): string {
   return p.getX().toHex(32) + p.getY().toHex(32);
@@ -41,8 +36,6 @@ const G_BSV = new BsvPoint(
 
 const G_HEX = bsvPointToHex(G_BSV);
 const EC_N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
-const EC_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2Fn; // eslint-disable-line
-void EC_P; // TODO: will be used by upcoming EC cross-verify tests
 
 // ---- contracts used across tests --------------------------------------------
 

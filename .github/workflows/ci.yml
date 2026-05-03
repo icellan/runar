@@ -285,42 +285,178 @@ jobs:
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
         run: |
+          set -u
           fail=0
+          log_dir=$(mktemp -d)
+
+          # Run a single compiler against an IR fixture. Captures stdout to
+          # $log_dir/<compiler>.hex and stderr to $log_dir/<compiler>.err.
+          # Returns the exit code of the compiler. Empty stdout is allowed at
+          # this layer; the caller decides whether emptiness is fatal.
+          run_compiler() {
+            local compiler="$1"
+            local test="$2"
+            local out="$log_dir/$compiler.hex"
+            local err="$log_dir/$compiler.err"
+            : > "$out"
+            : > "$err"
+            local rc=0
+            case "$compiler" in
+              go)
+                ./runar-go --ir "$test" --hex >"$out" 2>"$err" || rc=$?
+                ;;
+              rust)
+                ./runar-compiler-rust --ir "$test" --hex >"$out" 2>"$err" || rc=$?
+                ;;
+              zig)
+                ./runar-zig compile-ir "$test" --hex >"$out" 2>"$err" || rc=$?
+                # zig prints diagnostics on stdout before the hex; keep
+                # only the first non-empty line for the comparison.
+                head -1 "$out" > "$out.tmp" && mv "$out.tmp" "$out"
+                ;;
+              ruby)
+                ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding >"$out" 2>"$err" || rc=$?
+                ;;
+              python)
+                ( cd compilers/python && python3 -m runar_compiler --ir "../../$test" --hex --disable-constant-folding ) >"$out" 2>"$err" || rc=$?
+                ;;
+              java)
+                java -jar "$JAVA_JAR" --ir "$test" --hex --disable-constant-folding >"$out" 2>"$err" || rc=$?
+                ;;
+              *)
+                echo "run_compiler: unknown compiler id '$compiler'" >&2
+                return 2
+                ;;
+            esac
+            return $rc
+          }
+
+          # Print a failure block with the last 50 lines of the compiler's
+          # stderr capture so CI logs explain what went wrong.
+          dump_failure() {
+            local compiler="$1"
+            local fixture="$2"
+            local rc="$3"
+            local reason="$4"
+            local err="$log_dir/$compiler.err"
+            echo "::error::conformance: $compiler/$fixture failed ($reason, exit=$rc)"
+            echo "----- last 50 lines of $compiler stderr for $fixture -----"
+            tail -n 50 "$err" 2>/dev/null || true
+            echo "----- end stderr -----"
+          }
+
           for test in conformance/tests/*/expected-ir.json; do
             dir=$(dirname "$test")
             name=$(basename "$dir")
-            echo -n "=== $name === "
-            go_hex=$(./runar-go --ir "$test" --hex)
-            rust_hex=$(./runar-compiler-rust --ir "$test" --hex)
-            zig_hex=$(./runar-zig compile-ir "$test" --hex 2>/dev/null | head -1 | tr -d '[:space:]')
-            ruby_hex=$(ruby compilers/ruby/bin/runar-compiler-ruby --ir "$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
-            python_hex=$(cd compilers/python && python3 -m runar_compiler --ir "../$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
-            java_hex=$(java -jar "$JAVA_JAR" --ir "$test" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]')
-            if [ "$go_hex" != "$rust_hex" ]; then
-              echo "MISMATCH Go vs Rust"
-              fail=1
-            elif [ -n "$zig_hex" ] && [ "$go_hex" != "$zig_hex" ]; then
-              echo "MISMATCH Go vs Zig"
-              fail=1
-            elif [ -n "$ruby_hex" ] && [ "$go_hex" != "$ruby_hex" ]; then
-              echo "MISMATCH Go vs Ruby"
-              fail=1
-            elif [ -n "$python_hex" ] && [ "$go_hex" != "$python_hex" ]; then
-              echo "MISMATCH Go vs Python"
-              fail=1
-            elif [ -n "$java_hex" ] && [ "$go_hex" != "$java_hex" ]; then
-              echo "MISMATCH Go vs Java"
-              fail=1
-            else
-              echo "OK (${#go_hex} hex chars)"
+            source_json="$dir/source.json"
+
+            # Determine the active compiler set for this fixture. When
+            # source.json declares a "compilers" allowlist, intersect it with
+            # the non-TS compilers we drive here. Otherwise, every non-TS
+            # tier must produce identical output. TS conformance is exercised
+            # separately via vitest / the multi-format runner step below.
+            all_compilers="go rust zig ruby python java"
+            allowlist=""
+            if [ -f "$source_json" ]; then
+              allowlist=$(jq -r '.compilers // [] | join(" ")' "$source_json")
             fi
-            expected_hex_file="${test%/*}/expected-script.hex"
+            active=""
+            if [ -z "$allowlist" ]; then
+              active="$all_compilers"
+            else
+              for c in $all_compilers; do
+                for a in $allowlist; do
+                  if [ "$c" = "$a" ]; then
+                    active="$active $c"
+                    break
+                  fi
+                done
+              done
+              # Trim leading whitespace.
+              active=$(echo "$active" | awk '{$1=$1};1')
+            fi
+
+            if [ -z "$active" ]; then
+              # Allowlist had no overlap with our 6 non-TS tiers (e.g. ts-only
+              # fixture). Skip silently — it's covered by the TS-side runner.
+              echo "=== $name === SKIP (no non-TS compilers in allowlist)"
+              continue
+            fi
+
+            echo -n "=== $name === active=[${active// /,}] "
+
+            # Run every active compiler. Fail loudly on non-zero exit or
+            # empty hex output — no more silent passes.
+            fixture_failed=0
+            for compiler in $active; do
+              rc=0
+              run_compiler "$compiler" "$test" || rc=$?
+              hex=$(tr -d '[:space:]' < "$log_dir/$compiler.hex")
+              if [ "$rc" -ne 0 ]; then
+                echo
+                dump_failure "$compiler" "$name" "$rc" "non-zero exit"
+                fail=1
+                fixture_failed=1
+              elif [ -z "$hex" ]; then
+                echo
+                dump_failure "$compiler" "$name" "$rc" "empty hex output"
+                fail=1
+                fixture_failed=1
+              fi
+              # Persist normalized hex for the comparison phase.
+              printf '%s' "$hex" > "$log_dir/$compiler.norm"
+            done
+
+            if [ "$fixture_failed" -ne 0 ]; then
+              continue
+            fi
+
+            # Compare every active compiler against Go (the reference). When
+            # Go isn't in the active set, fall back to the first listed
+            # compiler as the reference — this keeps allowlists like
+            # ["python","ruby"] (none today, but defensive) sensible.
+            ref=""
+            for compiler in $active; do
+              if [ "$compiler" = "go" ]; then
+                ref="go"
+                break
+              fi
+            done
+            if [ -z "$ref" ]; then
+              ref=$(echo "$active" | awk '{print $1}')
+            fi
+            ref_hex=$(cat "$log_dir/$ref.norm")
+
+            mismatch=0
+            for compiler in $active; do
+              if [ "$compiler" = "$ref" ]; then
+                continue
+              fi
+              other_hex=$(cat "$log_dir/$compiler.norm")
+              if [ "$ref_hex" != "$other_hex" ]; then
+                echo
+                echo "::error::conformance: $name — $ref hex differs from $compiler hex"
+                echo "  $ref:	$ref_hex"
+                echo "  $compiler:	$other_hex"
+                fail=1
+                mismatch=1
+              fi
+            done
+
+            if [ "$mismatch" -eq 0 ]; then
+              echo "OK (${#ref_hex} hex chars, ref=$ref)"
+            fi
+
+            # Compare reference output against the golden hex file when
+            # present. Mirrors the previous behavior but uses whichever
+            # compiler is the comparison reference.
+            expected_hex_file="$dir/expected-script.hex"
             if [ -f "$expected_hex_file" ]; then
               expected_hex=$(tr -d '[:space:]' < "$expected_hex_file")
-              if [ -n "$expected_hex" ] && [ "$go_hex" != "$expected_hex" ]; then
-                echo "FAIL: $name — Go output does not match golden file"
-                echo "  Go:       $go_hex"
-                echo "  Expected: $expected_hex"
+              if [ -n "$expected_hex" ] && [ "$ref_hex" != "$expected_hex" ]; then
+                echo "::error::conformance: $name — $ref output does not match golden file"
+                echo "  $ref:	$ref_hex"
+                echo "  Expected:	$expected_hex"
                 fail=1
               fi
             fi

@@ -143,6 +143,34 @@ public final class StackLower {
         "~", List.of("OP_INVERT")
     );
 
+    // Builtins whose Stack-IR codegen ships in the Go tier ONLY by design.
+    // These power Mode-3 STARK / FRI / Groth16 verification flows that have
+    // not been ported to the other six compiler tiers. The Java stack lowerer
+    // intentionally rejects them — see CLAUDE.md ("Go-only crypto codegen
+    // modules") and conformance/README.md ("Per-fixture compiler allowlist").
+    private static final Set<String> GO_ONLY_BUILTINS = Set.of(
+        // BabyBear field
+        "bbFieldAdd", "bbFieldSub", "bbFieldMul", "bbFieldInv",
+        "bbExt4Mul0", "bbExt4Mul1", "bbExt4Mul2", "bbExt4Mul3",
+        "bbExt4Inv0", "bbExt4Inv1", "bbExt4Inv2", "bbExt4Inv3",
+        // KoalaBear field
+        "kbFieldAdd", "kbFieldSub", "kbFieldMul", "kbFieldInv",
+        "kbExt4Mul0", "kbExt4Mul1", "kbExt4Mul2", "kbExt4Mul3",
+        "kbExt4Inv0", "kbExt4Inv1", "kbExt4Inv2", "kbExt4Inv3",
+        // Poseidon2 + Merkle (Poseidon2-KB)
+        "merkleRootPoseidon2KB",
+        // BN254 field + curve + pairing
+        "bn254FieldAdd", "bn254FieldSub", "bn254FieldMul",
+        "bn254FieldInv", "bn254FieldNeg",
+        "bn254G1Add", "bn254G1ScalarMul", "bn254G1Negate", "bn254G1OnCurve",
+        "bn254Pairing", "bn254MultiPairing3", "bn254MultiPairing4",
+        // Groth16 witness-assisted helpers
+        "assertGroth16WitnessAssisted", "assertGroth16WitnessAssistedWithMSM",
+        "groth16PublicInput",
+        // SP1 FRI verifier
+        "verifySP1FRI"
+    );
+
     // ------------------------------------------------------------------
     // StackMap: tracks named values on the stack
     // ------------------------------------------------------------------
@@ -909,8 +937,20 @@ public final class StackLower {
 
             List<String> opcodes = BUILTIN_OPCODES.get(funcName);
             if (opcodes == null) {
-                throw new IllegalStateException("unknown builtin: " + funcName
-                    + " — codegen module not implemented in Java tier");
+                if (GO_ONLY_BUILTINS.contains(funcName)) {
+                    throw new IllegalStateException(
+                        "builtin '" + funcName + "' is Go-tier only by design — "
+                        + "its Stack-IR codegen ships in the Go compiler only "
+                        + "(BabyBear/KoalaBear/Poseidon2/BN254/Groth16/SP1-FRI/FiatShamir-KB modules). "
+                        + "Compile this contract with the Go compiler, or opt the fixture out of the Java tier "
+                        + "via source.json's \"compilers\" allowlist. "
+                        + "See CLAUDE.md (\"Go-only crypto codegen modules\") and conformance/README.md.");
+                }
+                throw new IllegalStateException(
+                    "unknown builtin: '" + funcName + "' is not a known Rúnar builtin. "
+                    + "If this is a Rúnar built-in function, add it to StackLower.BUILTIN_OPCODES "
+                    + "(or its dedicated lower* dispatch). If it is a user-defined helper, ensure it is "
+                    + "declared as a private contract method so the inliner can resolve it.");
             }
 
             for (String c : opcodes) emitOp(new OpcodeOp(c));

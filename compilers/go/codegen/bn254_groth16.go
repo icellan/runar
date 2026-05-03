@@ -1569,18 +1569,18 @@ func EmitGroth16VerifierWitnessAssisted(emit func(StackOp), config Groth16Config
 	//   - proof.A (G1): y² == x³ + 3 mod p
 	//   - proof.C (G1): y² == x³ + 3 mod p
 	//   - proof.B (G2): y² == x³ + 3/(9+u) in Fp2 (on the BN254 twist curve)
-	//   - proof.B (G2) subgroup check: see emitWAG2SubgroupCheck
-	//     (partial — see TODO(subgroup-check) there).
+	//   - proof.B (G2) subgroup membership: see emitWAG2SubgroupCheck.
 	//
 	// Without these checks the witness-assisted gradient equations
 	// (lambda·(x₂-x₁) == y₂-y₁) are satisfiable by arbitrary coordinate
 	// pairs that do NOT lie on the curve. A hostile prover could in
 	// principle choose such an off-curve point and forge the pairing
 	// identity — see Barreto et al., "Subgroup security in pairing-based
-	// cryptography". The three on-curve checks plus the partial subgroup
-	// defense close the broad class of these attacks; the narrow residual
-	// (on-curve but in a small-order G2 subgroup) is documented in the
-	// emitWAG2SubgroupCheck doc comment.
+	// cryptography". The three on-curve checks plus the BN-specific
+	// ψ(P) == [6·x²]·P endomorphism check (Scott, eprint 2021/1130 §8)
+	// performed by emitWAG2SubgroupCheck rule out every forgery vector
+	// documented in that line of work; see the emitWAG2SubgroupCheck doc
+	// comment for the full soundness argument.
 	emitWAG1OnCurveCheck(t, "proof_ax", "proof_ay")
 	emitWAG1OnCurveCheck(t, "proof_cx", "proof_cy")
 	emitWAG2OnCurveCheck(t, "proof_bx0", "proof_bx1", "proof_by0", "proof_by1")
