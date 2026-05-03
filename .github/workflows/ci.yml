@@ -128,8 +128,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - name: Install Ruby compiler dependencies
-        run: cd compilers/ruby && bundle install
       - name: Ruby compiler unit tests
         run: cd compilers/ruby && rake test
       - name: Ruby compiler conformance (IR -> hex)
