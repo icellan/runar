@@ -4941,9 +4941,28 @@ export function lowerToStack(program: ANFProgram): StackProgram {
  * before all declared parameters and we must account for it in the
  * stack map.
  */
-function methodUsesCheckPreimage(bindings: ANFBinding[]): boolean {
+function methodUsesCheckPreimage(
+  bindings: ANFBinding[],
+  privateMethods?: Map<string, ANFMethod>,
+  seen: Set<string> = new Set(),
+): boolean {
   for (const b of bindings) {
     if (b.value.kind === 'check_preimage') return true;
+    if (b.value.kind === 'if') {
+      if (methodUsesCheckPreimage(b.value.then, privateMethods, seen)) return true;
+      if (methodUsesCheckPreimage(b.value.else, privateMethods, seen)) return true;
+    }
+    if (b.value.kind === 'loop') {
+      if (methodUsesCheckPreimage(b.value.body, privateMethods, seen)) return true;
+    }
+    if (b.value.kind === 'method_call' && privateMethods) {
+      const target = privateMethods.get(b.value.method);
+      if (target && !seen.has(target.name)) {
+        const nextSeen = new Set(seen);
+        nextSeen.add(target.name);
+        if (methodUsesCheckPreimage(target.body, privateMethods, nextSeen)) return true;
+      }
+    }
   }
   return false;
 }
@@ -4974,7 +4993,7 @@ function lowerMethod(
   // _codePart: full code script (locking script minus state) as ByteString
   // _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
   // These are inserted at the base of the stack so they can be consumed later.
-  if (methodUsesCheckPreimage(method.body)) {
+  if (methodUsesCheckPreimage(method.body, privateMethods)) {
     paramNames.unshift('_opPushTxSig');
     // _codePart is needed when the method has add_output or add_raw_output
     // (it provides the code script for continuation output construction),

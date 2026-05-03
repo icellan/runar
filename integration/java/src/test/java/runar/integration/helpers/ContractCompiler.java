@@ -9,6 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import runar.lang.sdk.RunarArtifact;
 
@@ -69,12 +71,27 @@ public final class ContractCompiler {
     }
 
     /**
+     * Process-wide cache: every test class compiles a small set of contracts,
+     * and most {@code @Test} methods within a class re-compile the same
+     * source. The cache amortises one TS-compiler subprocess per unique
+     * absolute path, eliminating the per-test ~3-5s tsx cold-start penalty.
+     *
+     * The cache lives for the lifetime of the test JVM (forked once per
+     * Gradle test task). Concurrent {@code computeIfAbsent} ensures parallel
+     * test execution doesn't fan-out into duplicate compiles.
+     */
+    private static final Map<Path, RunarArtifact> CACHE = new ConcurrentHashMap<>();
+
+    /** Resolved tsx loader (file URL) — cached so the resolver runs once. */
+    private static volatile String tsxLoaderUrl;
+
+    /**
      * Compiles a contract source file relative to the project root
      * (e.g. {@code examples/java/src/main/java/runar/examples/p2pkh/P2PKH.runar.java})
      * and returns the parsed {@link RunarArtifact}.
      */
     public static RunarArtifact compileRelative(String relPath) {
-        Path abs = projectRoot().resolve(relPath);
+        Path abs = projectRoot().resolve(relPath).normalize();
         if (!Files.exists(abs)) {
             throw new IllegalArgumentException(
                 "ContractCompiler: source not found: " + abs
@@ -90,6 +107,11 @@ public final class ContractCompiler {
      * parser frontend.
      */
     public static RunarArtifact compileAbsolute(Path absPath) {
+        Path key = absPath.toAbsolutePath().normalize();
+        return CACHE.computeIfAbsent(key, ContractCompiler::doCompile);
+    }
+
+    private static RunarArtifact doCompile(Path absPath) {
         Path root = projectRoot();
         Path outDir;
         try {
@@ -105,9 +127,15 @@ public final class ContractCompiler {
         int dot = baseName.lastIndexOf('.');
         if (dot > 0) baseName = baseName.substring(0, dot);
 
+        // Win 2: invoke `node --import <tsx-loader>` instead of `npx tsx`.
+        // `npx tsx` paid ~50-200ms of package-manager resolution on every
+        // call; with N tests × M sub-cases per class this dominated the
+        // integration suite. Resolving the tsx loader to an absolute file://
+        // URL once per JVM is a one-time cost.
         List<String> cmd = new ArrayList<>();
-        cmd.add("npx");
-        cmd.add("tsx");
+        cmd.add("node");
+        cmd.add("--import");
+        cmd.add(getTsxLoader(root));
         cmd.add(root.resolve("packages/runar-cli/src/bin.ts").toString());
         cmd.add("compile");
         cmd.add(absPath.toString());
@@ -164,5 +192,34 @@ public final class ContractCompiler {
         }
 
         return RunarArtifact.fromJson(json);
+    }
+
+    /**
+     * Locate the tsx loader entry as a {@code file://} URL so it can be
+     * passed to {@code node --import}. tsx is hoisted under
+     * {@code conformance/node_modules} (pnpm doesn't dedupe to the repo
+     * root). We probe the known locations and fall back to the literal
+     * string {@code "tsx"} (which only resolves when run from a directory
+     * whose node_modules contains tsx).
+     */
+    private static String getTsxLoader(Path root) {
+        String cached = tsxLoaderUrl;
+        if (cached != null) return cached;
+        Path[] candidates = new Path[] {
+            root.resolve("conformance/node_modules/tsx/dist/loader.mjs"),
+            root.resolve("node_modules/tsx/dist/loader.mjs"),
+            root.resolve("integration/ts/node_modules/tsx/dist/loader.mjs"),
+        };
+        for (Path p : candidates) {
+            if (Files.exists(p)) {
+                String url = p.toUri().toString();
+                tsxLoaderUrl = url;
+                return url;
+            }
+        }
+        // Fall back to the bare specifier — Node will resolve it via the
+        // working-directory node_modules tree.
+        tsxLoaderUrl = "tsx";
+        return "tsx";
     }
 }

@@ -23,7 +23,16 @@ comptime {
     _ = @import("post_quantum_wallet_test.zig");
     _ = @import("babybear_test.zig");
     _ = @import("merkle_proof_test.zig");
+    _ = @import("private_helper_outputs_test.zig");
     _ = @import("state_covenant_test.zig");
+    _ = @import("data_outputs_test.zig");
+    _ = @import("blake3_test.zig");
+    _ = @import("sha256_compress_test.zig");
+    _ = @import("sha256_finalize_test.zig");
+    _ = @import("wots_test.zig");
+    _ = @import("slhdsa_test.zig");
+    _ = @import("bsv20_token_test.zig");
+    _ = @import("bsv21_token_test.zig");
 }
 
 test "integration_setup" {

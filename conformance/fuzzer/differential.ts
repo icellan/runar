@@ -235,20 +235,22 @@ function compileRubySource(source: string, tmpDir: string, hex: boolean = false)
 
 let _javaSkipWarned = false;
 /**
- * The Java compiler (compilers/java/) only parses `.runar.java` source today.
- * The `.runar.ts` parser for Java lands in milestone 7. The legacy string-
- * based fuzzer in this file generates TypeScript source directly, so there
- * is no structured AST to re-render as Java; we simply skip Java here and
- * direct users to the IR-differential harness in `ir-differential.ts`, which
- * renders every compiler's native source from a shared generator.
+ * The Java compiler parses all 9 .runar.* formats just like the other 6
+ * compilers, but the legacy string-based fuzzer in this file only emits
+ * .runar.ts source directly — there is no structured AST it could re-render
+ * as Java. We therefore skip Java in this harness and direct users to the
+ * IR-differential harness in `ir-differential.ts`, which has a structured
+ * generator and renders every compiler's native source (.runar.java
+ * included) from a shared `GeneratedContract`.
  */
 function compileJavaSource(_source: string, _tmpDir: string, _hex: boolean = false): string | null {
   const javaJar = findJavaBinary();
   if (javaJar && !_javaSkipWarned) {
     _javaSkipWarned = true;
     console.warn(
-      'note: Java compiler is available but the legacy fuzzer generates .runar.ts source only; ' +
-      'use `npx tsx conformance/fuzzer/index.ts --ir --render native` to include Java.',
+      'note: Java compiler is available but the legacy fuzzer only renders .runar.ts ' +
+      '(no structured AST -> Java renderer); use `npx tsx conformance/fuzzer/index.ts ' +
+      '--ir --render native` to include Java.',
     );
   }
   return null;
@@ -309,8 +311,8 @@ function findRubyBinary(): string | null {
 /**
  * Mirrors the Java-binary discovery in `conformance/runner/runner.ts` so the
  * legacy fuzzer can at least tell whether `java -jar <runar-java.jar>` would
- * be reachable, even though it cannot currently drive Java (see
- * `compileJavaSource` above).
+ * be reachable, even though this harness has no Java AST renderer (see
+ * `compileJavaSource` above) and therefore cannot drive the Java compiler.
  */
 function findJavaBinary(): string | null {
   const libsDir = resolve(ROOT, 'compilers/java/build/libs');

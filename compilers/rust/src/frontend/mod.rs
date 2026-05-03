@@ -21,5 +21,6 @@ pub mod parser_ruby;
 pub mod parser_rustmacro;
 pub mod parser_sol;
 pub mod parser_zig;
+pub mod side_effect_summary;
 pub mod typecheck;
 pub mod validator;

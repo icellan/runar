@@ -3,7 +3,7 @@ require 'rake/testtask'
 # Run each test file in its own subprocess to avoid constant collisions
 # between the TS and Ruby parsers (they share a namespace for token constants).
 task :test do
-  test_files = FileList['test/test_*.rb']
+  test_files = FileList['test/test_*.rb', 'test/**/test_*.rb'].uniq
   failures = 0
 
   test_files.each do |f|

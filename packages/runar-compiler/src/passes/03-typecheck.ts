@@ -349,8 +349,24 @@ class TypeChecker {
   private readonly propTypes: Map<string, TType>;
   private readonly methodSigs: Map<string, FuncSig>;
 
-  /** Tracks affine values consumed within the current method/constructor. */
+  /**
+   * Tracks affine values consumed within the current method /
+   * constructor. Each entry is a canonical *origin key*, not a
+   * variable name: a parameter is keyed by its name, a property
+   * access by `prop:<name>`. Aliases (`const again: Sig = sig;`)
+   * resolve to the original parameter's origin via `affineAliases`.
+   * 2026-04-30 audit finding F6 — without origin tracking the
+   * compiler accepted both `checkSig(sig, pk); checkSig(again, pk)`
+   * and `checkSig(this.sig, pk); checkSig(this.sig, pk)`.
+   */
   private consumedValues: Set<string> = new Set();
+
+  /**
+   * Maps a local variable name to the affine origin key it aliases.
+   * Populated when a `variable_decl` of an affine-typed identifier or
+   * property access is encountered.
+   */
+  private affineAliases: Map<string, string> = new Map();
 
   constructor(contract: ContractNode, errors: CompilerDiagnostic[]) {
     this.contract = contract;
@@ -383,6 +399,7 @@ class TypeChecker {
 
     // Reset affine tracking for this scope
     this.consumedValues = new Set();
+    this.affineAliases = new Map();
 
     // Add constructor params to env
     for (const param of ctor.params) {
@@ -402,6 +419,7 @@ class TypeChecker {
 
     // Reset affine tracking for this method
     this.consumedValues = new Set();
+    this.affineAliases = new Map();
 
     // Add method params to env
     for (const param of method.params) {
@@ -437,6 +455,18 @@ class TypeChecker {
           env.define(stmt.name, declaredType);
         } else {
           env.define(stmt.name, initType);
+        }
+        // Record affine alias: when the new local is affine-typed
+        // and its initializer is itself an affine origin (param or
+        // contract property), bind the local name to that origin so
+        // a subsequent consume of either the local or the origin is
+        // detected as a double-consume.
+        const declType = stmt.type ? typeNodeToTType(stmt.type) : initType;
+        if (AFFINE_TYPES.has(declType)) {
+          const origin = this.affineOriginOfExpr(stmt.init);
+          if (origin) {
+            this.affineAliases.set(stmt.name, origin);
+          }
         }
         break;
       }
@@ -1396,7 +1426,11 @@ class TypeChecker {
       return sig.returnType;
     }
 
-    // Special case: checkMultiSig uses array params
+    // Special case: checkMultiSig uses array params (`Sig[]`,
+    // `PubKey[]`). Arity is checked here, then the standard subtype
+    // loop below validates the array element types — without this
+    // fall-through, `checkMultiSig([1n], [2n])` (bigint[] for both)
+    // would compile cleanly. 2026-04-30 audit finding F5.
     if (funcName === 'checkMultiSig') {
       if (args.length !== 2) {
         this.errors.push(makeDiagnostic(
@@ -1404,12 +1438,16 @@ class TypeChecker {
           'error',
           args[0]?.sourceLocation,
         ));
+        // Infer remaining args so subsequent expressions can use
+        // them, then return — there is nothing meaningful to subtype
+        // check against the expected `Sig[]` / `PubKey[]` signature.
+        for (const arg of args) {
+          this.inferExprType(arg, env);
+        }
+        this.checkAffineConsumption(funcName, args, env);
+        return sig.returnType;
       }
-      for (const arg of args) {
-        this.inferExprType(arg, env);
-      }
-      this.checkAffineConsumption(funcName, args, env);
-      return sig.returnType;
+      // Fall through to the standard subtype check below.
     }
 
     // Standard argument count check
@@ -1450,6 +1488,11 @@ class TypeChecker {
    * Check affine type constraints: Sig and SigHashPreimage values may only
    * be consumed once (passed to a consuming function like checkSig or
    * checkPreimage).
+   *
+   * Tracks consumption by *origin*, not variable name, so aliases
+   * (`const again = sig`) and property accesses (`this.sig`) cannot
+   * be used to launder a double-consumption past the affine check.
+   * 2026-04-30 audit finding F6.
    */
   private checkAffineConsumption(
     funcName: string,
@@ -1463,22 +1506,62 @@ class TypeChecker {
       if (paramIndex >= args.length) continue;
 
       const arg = args[paramIndex]!;
-      if (arg.kind !== 'identifier') continue;
-
-      const argName = arg.name;
-      const argType = env.lookup(argName);
+      const argType = this.affineExprType(arg, env);
       if (!argType || !AFFINE_TYPES.has(argType)) continue;
 
-      if (this.consumedValues.has(argName)) {
+      const origin = this.affineOriginOfExpr(arg);
+      if (!origin) continue;
+
+      // Render a short label for the diagnostic — local name,
+      // alias, or `this.<prop>` form. We print the source label
+      // (not the canonical origin) so the error message points
+      // back at the call-site expression.
+      const label = arg.kind === 'identifier' ? arg.name
+        : arg.kind === 'property_access' ? `this.${arg.property}`
+        : origin;
+
+      if (this.consumedValues.has(origin)) {
         this.errors.push(makeDiagnostic(
-          `affine value '${argName}' has already been consumed`,
+          `affine value '${label}' has already been consumed`,
           'error',
           arg.sourceLocation,
         ));
       } else {
-        this.consumedValues.add(argName);
+        this.consumedValues.add(origin);
       }
     }
+  }
+
+  /**
+   * Resolve the canonical *origin key* of an expression for affine
+   * tracking. Identifiers resolve through the alias map; property
+   * accesses use a `prop:<name>` namespace; everything else returns
+   * undefined (meaning "no traceable affine origin").
+   */
+  private affineOriginOfExpr(expr: Expression): string | undefined {
+    if (expr.kind === 'identifier') {
+      const aliased = this.affineAliases.get(expr.name);
+      return aliased ?? expr.name;
+    }
+    if (expr.kind === 'property_access') {
+      return `prop:${expr.property}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Type-check helper: returns the inferred type of an expression
+   * for affine purposes, defaulting to env lookup for identifiers
+   * and the property-type map for `this.x`.
+   */
+  private affineExprType(expr: Expression, env: TypeEnv): TType | undefined {
+    if (expr.kind === 'identifier') {
+      return env.lookup(expr.name) ?? undefined;
+    }
+    if (expr.kind === 'property_access') {
+      return this.propTypes.get(expr.property);
+    }
+    return undefined;
   }
 }
 

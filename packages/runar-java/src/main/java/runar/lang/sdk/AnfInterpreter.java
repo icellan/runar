@@ -81,6 +81,26 @@ public final class AnfInterpreter {
         return run(anf, methodName, currentState, args, constructorArgs, false).newState;
     }
 
+    /**
+     * Like {@link #executeStrict} but skips asserts and on-chain-only
+     * operations — useful when the SDK needs both the new state and the
+     * data outputs declared via {@code addDataOutput} but cannot satisfy
+     * on-chain assertions (e.g. the auto-injected hashOutputs check on
+     * stateful contracts, which only validates against the runtime tx).
+     *
+     * <p>Mirrors {@code ComputeNewStateAndDataOutputs} in the Go SDK.
+     */
+    public static ExecutionResult computeNewStateAndDataOutputs(
+        Map<String, Object> anf,
+        String methodName,
+        Map<String, Object> currentState,
+        Map<String, Object> args,
+        List<Object> constructorArgs
+    ) {
+        Run r = run(anf, methodName, currentState, args, constructorArgs, false);
+        return new ExecutionResult(r.newState, r.dataOutputs);
+    }
+
     /** Result bundle returned from a strict execution. */
     public static final class ExecutionResult {
         public final Map<String, Object> newState;

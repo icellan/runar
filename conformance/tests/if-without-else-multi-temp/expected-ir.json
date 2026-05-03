@@ -1,28 +1,843 @@
 {
   "contractName": "StackTrackerReproV10min",
-  "properties": [],
   "methods": [
     {
-      "name": "constructor",
-      "params": [],
       "body": [
         {
           "name": "t0",
           "value": {
-            "kind": "call",
+            "args": [],
             "func": "super",
-            "args": []
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 5,
-            "column": 18
+            "kind": "call"
           }
         }
       ],
-      "isPublic": false
+      "isPublic": false,
+      "name": "constructor",
+      "params": []
     },
     {
+      "body": [
+        {
+          "name": "t0",
+          "value": {
+            "kind": "load_const",
+            "value": 46
+          }
+        },
+        {
+          "name": "p",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t0"
+          }
+        },
+        {
+          "name": "t1",
+          "value": {
+            "kind": "load_param",
+            "name": "rawTx"
+          }
+        },
+        {
+          "name": "t2",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t3",
+          "value": {
+            "args": [
+              "t1",
+              "p",
+              "t2"
+            ],
+            "func": "substr",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t4",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t5",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t6",
+          "value": {
+            "args": [
+              "t4",
+              "t5"
+            ],
+            "func": "num2bin",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t7",
+          "value": {
+            "args": [
+              "t3",
+              "t6"
+            ],
+            "func": "cat",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "t8",
+          "value": {
+            "args": [
+              "t7"
+            ],
+            "func": "bin2num",
+            "kind": "call"
+          }
+        },
+        {
+          "name": "outCount",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t8"
+          }
+        },
+        {
+          "name": "t9",
+          "value": {
+            "kind": "load_const",
+            "value": 253
+          }
+        },
+        {
+          "name": "t10",
+          "value": {
+            "kind": "bin_op",
+            "left": "outCount",
+            "op": "<",
+            "right": "t9"
+          }
+        },
+        {
+          "name": "t11",
+          "value": {
+            "kind": "assert",
+            "value": "t10"
+          }
+        },
+        {
+          "name": "t12",
+          "value": {
+            "kind": "load_const",
+            "value": 8
+          }
+        },
+        {
+          "name": "t13",
+          "value": {
+            "kind": "bin_op",
+            "left": "outCount",
+            "op": "<=",
+            "right": "t12"
+          }
+        },
+        {
+          "name": "t14",
+          "value": {
+            "kind": "assert",
+            "value": "t13"
+          }
+        },
+        {
+          "name": "t15",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t16",
+          "value": {
+            "kind": "bin_op",
+            "left": "p",
+            "op": "+",
+            "right": "t15"
+          }
+        },
+        {
+          "name": "p",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t16"
+          }
+        },
+        {
+          "name": "t17",
+          "value": {
+            "kind": "load_const",
+            "value": false
+          }
+        },
+        {
+          "name": "foundMnee",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t17"
+          }
+        },
+        {
+          "name": "t18",
+          "value": {
+            "kind": "load_const",
+            "value": false
+          }
+        },
+        {
+          "name": "foundExtra",
+          "value": {
+            "kind": "load_const",
+            "value": "@ref:t18"
+          }
+        },
+        {
+          "name": "t19",
+          "value": {
+            "kind": "load_const",
+            "value": 0
+          }
+        },
+        {
+          "name": "t20",
+          "value": {
+            "kind": "bin_op",
+            "left": "t19",
+            "op": "<",
+            "right": "outCount"
+          }
+        },
+        {
+          "name": "t49",
+          "value": {
+            "cond": "t20",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t21",
+                "value": {
+                  "kind": "load_param",
+                  "name": "rawTx"
+                }
+              },
+              {
+                "name": "t22",
+                "value": {
+                  "kind": "load_const",
+                  "value": 8
+                }
+              },
+              {
+                "name": "t23",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "p",
+                  "op": "+",
+                  "right": "t22"
+                }
+              },
+              {
+                "name": "t24",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t25",
+                "value": {
+                  "args": [
+                    "t21",
+                    "t23",
+                    "t24"
+                  ],
+                  "func": "substr",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t26",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t27",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t28",
+                "value": {
+                  "args": [
+                    "t26",
+                    "t27"
+                  ],
+                  "func": "num2bin",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t29",
+                "value": {
+                  "args": [
+                    "t25",
+                    "t28"
+                  ],
+                  "func": "cat",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t30",
+                "value": {
+                  "args": [
+                    "t29"
+                  ],
+                  "func": "bin2num",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "scriptLen",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t30"
+                }
+              },
+              {
+                "name": "t31",
+                "value": {
+                  "kind": "load_const",
+                  "value": 253
+                }
+              },
+              {
+                "name": "t32",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "scriptLen",
+                  "op": "<",
+                  "right": "t31"
+                }
+              },
+              {
+                "name": "t33",
+                "value": {
+                  "kind": "assert",
+                  "value": "t32"
+                }
+              },
+              {
+                "name": "t34",
+                "value": {
+                  "kind": "load_const",
+                  "value": 8
+                }
+              },
+              {
+                "name": "t35",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t36",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t34",
+                  "op": "+",
+                  "right": "t35"
+                }
+              },
+              {
+                "name": "t37",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t36",
+                  "op": "+",
+                  "right": "scriptLen"
+                }
+              },
+              {
+                "name": "blobLen",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t37"
+                }
+              },
+              {
+                "name": "t38",
+                "value": {
+                  "kind": "load_param",
+                  "name": "rawTx"
+                }
+              },
+              {
+                "name": "t39",
+                "value": {
+                  "args": [
+                    "t38",
+                    "p",
+                    "blobLen"
+                  ],
+                  "func": "substr",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "blob",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t39"
+                }
+              },
+              {
+                "name": "t40",
+                "value": {
+                  "kind": "load_param",
+                  "name": "expectedMneeOutputBytes"
+                }
+              },
+              {
+                "name": "t41",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "blob",
+                  "op": "===",
+                  "result_type": "bytes",
+                  "right": "t40"
+                }
+              },
+              {
+                "name": "t43",
+                "value": {
+                  "cond": "t41",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t42",
+                      "value": {
+                        "kind": "load_const",
+                        "value": true
+                      }
+                    },
+                    {
+                      "name": "foundMnee",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t42"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "t44",
+                "value": {
+                  "kind": "load_param",
+                  "name": "expectedExtraDataOutputBytes"
+                }
+              },
+              {
+                "name": "t45",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "blob",
+                  "op": "===",
+                  "result_type": "bytes",
+                  "right": "t44"
+                }
+              },
+              {
+                "name": "t47",
+                "value": {
+                  "cond": "t45",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t46",
+                      "value": {
+                        "kind": "load_const",
+                        "value": true
+                      }
+                    },
+                    {
+                      "name": "foundExtra",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t46"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "t48",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "p",
+                  "op": "+",
+                  "right": "blobLen"
+                }
+              },
+              {
+                "name": "p",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t48"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t50",
+          "value": {
+            "kind": "load_const",
+            "value": 1
+          }
+        },
+        {
+          "name": "t51",
+          "value": {
+            "kind": "bin_op",
+            "left": "t50",
+            "op": "<",
+            "right": "outCount"
+          }
+        },
+        {
+          "name": "t80",
+          "value": {
+            "cond": "t51",
+            "else": [],
+            "kind": "if",
+            "then": [
+              {
+                "name": "t52",
+                "value": {
+                  "kind": "load_param",
+                  "name": "rawTx"
+                }
+              },
+              {
+                "name": "t53",
+                "value": {
+                  "kind": "load_const",
+                  "value": 8
+                }
+              },
+              {
+                "name": "t54",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "p",
+                  "op": "+",
+                  "right": "t53"
+                }
+              },
+              {
+                "name": "t55",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t56",
+                "value": {
+                  "args": [
+                    "t52",
+                    "t54",
+                    "t55"
+                  ],
+                  "func": "substr",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t57",
+                "value": {
+                  "kind": "load_const",
+                  "value": 0
+                }
+              },
+              {
+                "name": "t58",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t59",
+                "value": {
+                  "args": [
+                    "t57",
+                    "t58"
+                  ],
+                  "func": "num2bin",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t60",
+                "value": {
+                  "args": [
+                    "t56",
+                    "t59"
+                  ],
+                  "func": "cat",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "t61",
+                "value": {
+                  "args": [
+                    "t60"
+                  ],
+                  "func": "bin2num",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "scriptLen",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t61"
+                }
+              },
+              {
+                "name": "t62",
+                "value": {
+                  "kind": "load_const",
+                  "value": 253
+                }
+              },
+              {
+                "name": "t63",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "scriptLen",
+                  "op": "<",
+                  "right": "t62"
+                }
+              },
+              {
+                "name": "t64",
+                "value": {
+                  "kind": "assert",
+                  "value": "t63"
+                }
+              },
+              {
+                "name": "t65",
+                "value": {
+                  "kind": "load_const",
+                  "value": 8
+                }
+              },
+              {
+                "name": "t66",
+                "value": {
+                  "kind": "load_const",
+                  "value": 1
+                }
+              },
+              {
+                "name": "t67",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t65",
+                  "op": "+",
+                  "right": "t66"
+                }
+              },
+              {
+                "name": "t68",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "t67",
+                  "op": "+",
+                  "right": "scriptLen"
+                }
+              },
+              {
+                "name": "blobLen",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t68"
+                }
+              },
+              {
+                "name": "t69",
+                "value": {
+                  "kind": "load_param",
+                  "name": "rawTx"
+                }
+              },
+              {
+                "name": "t70",
+                "value": {
+                  "args": [
+                    "t69",
+                    "p",
+                    "blobLen"
+                  ],
+                  "func": "substr",
+                  "kind": "call"
+                }
+              },
+              {
+                "name": "blob",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t70"
+                }
+              },
+              {
+                "name": "t71",
+                "value": {
+                  "kind": "load_param",
+                  "name": "expectedMneeOutputBytes"
+                }
+              },
+              {
+                "name": "t72",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "blob",
+                  "op": "===",
+                  "result_type": "bytes",
+                  "right": "t71"
+                }
+              },
+              {
+                "name": "t74",
+                "value": {
+                  "cond": "t72",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t73",
+                      "value": {
+                        "kind": "load_const",
+                        "value": true
+                      }
+                    },
+                    {
+                      "name": "foundMnee",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t73"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "t75",
+                "value": {
+                  "kind": "load_param",
+                  "name": "expectedExtraDataOutputBytes"
+                }
+              },
+              {
+                "name": "t76",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "blob",
+                  "op": "===",
+                  "result_type": "bytes",
+                  "right": "t75"
+                }
+              },
+              {
+                "name": "t78",
+                "value": {
+                  "cond": "t76",
+                  "else": [],
+                  "kind": "if",
+                  "then": [
+                    {
+                      "name": "t77",
+                      "value": {
+                        "kind": "load_const",
+                        "value": true
+                      }
+                    },
+                    {
+                      "name": "foundExtra",
+                      "value": {
+                        "kind": "load_const",
+                        "value": "@ref:t77"
+                      }
+                    }
+                  ]
+                }
+              },
+              {
+                "name": "t79",
+                "value": {
+                  "kind": "bin_op",
+                  "left": "p",
+                  "op": "+",
+                  "right": "blobLen"
+                }
+              },
+              {
+                "name": "p",
+                "value": {
+                  "kind": "load_const",
+                  "value": "@ref:t79"
+                }
+              }
+            ]
+          }
+        },
+        {
+          "name": "t81",
+          "value": {
+            "kind": "assert",
+            "value": "foundMnee"
+          }
+        },
+        {
+          "name": "t82",
+          "value": {
+            "kind": "assert",
+            "value": "foundExtra"
+          }
+        }
+      ],
+      "isPublic": true,
       "name": "verifyMneeTxContainsBothOutputs",
       "params": [
         {
@@ -37,1344 +852,15 @@
           "name": "expectedExtraDataOutputBytes",
           "type": "ByteString"
         }
-      ],
-      "body": [
-        {
-          "name": "t0",
-          "value": {
-            "kind": "load_const",
-            "value": 46
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 12,
-            "column": 4
-          }
-        },
-        {
-          "name": "p",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t0"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 12,
-            "column": 4
-          }
-        },
-        {
-          "name": "t1",
-          "value": {
-            "kind": "load_param",
-            "name": "rawTx"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t2",
-          "value": {
-            "kind": "load_const",
-            "value": 1
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t3",
-          "value": {
-            "kind": "call",
-            "func": "substr",
-            "args": [
-              "t1",
-              "p",
-              "t2"
-            ]
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t4",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t5",
-          "value": {
-            "kind": "load_const",
-            "value": 1
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t6",
-          "value": {
-            "kind": "call",
-            "func": "num2bin",
-            "args": [
-              "t4",
-              "t5"
-            ]
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t7",
-          "value": {
-            "kind": "call",
-            "func": "cat",
-            "args": [
-              "t3",
-              "t6"
-            ]
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t8",
-          "value": {
-            "kind": "call",
-            "func": "bin2num",
-            "args": [
-              "t7"
-            ]
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "outCount",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t8"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 14,
-            "column": 4
-          }
-        },
-        {
-          "name": "t9",
-          "value": {
-            "kind": "load_const",
-            "value": 253
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 15,
-            "column": 4
-          }
-        },
-        {
-          "name": "t10",
-          "value": {
-            "kind": "bin_op",
-            "op": "<",
-            "left": "outCount",
-            "right": "t9"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 15,
-            "column": 4
-          }
-        },
-        {
-          "name": "t11",
-          "value": {
-            "kind": "assert",
-            "value": "t10"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 15,
-            "column": 4
-          }
-        },
-        {
-          "name": "t12",
-          "value": {
-            "kind": "load_const",
-            "value": 8
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 16,
-            "column": 4
-          }
-        },
-        {
-          "name": "t13",
-          "value": {
-            "kind": "bin_op",
-            "op": "<=",
-            "left": "outCount",
-            "right": "t12"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 16,
-            "column": 4
-          }
-        },
-        {
-          "name": "t14",
-          "value": {
-            "kind": "assert",
-            "value": "t13"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 16,
-            "column": 4
-          }
-        },
-        {
-          "name": "t15",
-          "value": {
-            "kind": "load_const",
-            "value": 1
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 17,
-            "column": 4
-          }
-        },
-        {
-          "name": "t16",
-          "value": {
-            "kind": "bin_op",
-            "op": "+",
-            "left": "p",
-            "right": "t15"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 17,
-            "column": 4
-          }
-        },
-        {
-          "name": "p",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t16"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 17,
-            "column": 4
-          }
-        },
-        {
-          "name": "t17",
-          "value": {
-            "kind": "load_const",
-            "value": false
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 19,
-            "column": 4
-          }
-        },
-        {
-          "name": "foundMnee",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t17"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 19,
-            "column": 4
-          }
-        },
-        {
-          "name": "t18",
-          "value": {
-            "kind": "load_const",
-            "value": false
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 20,
-            "column": 4
-          }
-        },
-        {
-          "name": "foundExtra",
-          "value": {
-            "kind": "load_const",
-            "value": "@ref:t18"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 20,
-            "column": 4
-          }
-        },
-        {
-          "name": "t19",
-          "value": {
-            "kind": "load_const",
-            "value": 0
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 22,
-            "column": 4
-          }
-        },
-        {
-          "name": "t20",
-          "value": {
-            "kind": "bin_op",
-            "op": "<",
-            "left": "t19",
-            "right": "outCount"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 22,
-            "column": 4
-          }
-        },
-        {
-          "name": "t49",
-          "value": {
-            "kind": "if",
-            "cond": "t20",
-            "then": [
-              {
-                "name": "t21",
-                "value": {
-                  "kind": "load_param",
-                  "name": "rawTx"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t22",
-                "value": {
-                  "kind": "load_const",
-                  "value": 8
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t23",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "p",
-                  "right": "t22"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t24",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t25",
-                "value": {
-                  "kind": "call",
-                  "func": "substr",
-                  "args": [
-                    "t21",
-                    "t23",
-                    "t24"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t26",
-                "value": {
-                  "kind": "load_const",
-                  "value": 0
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t27",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t28",
-                "value": {
-                  "kind": "call",
-                  "func": "num2bin",
-                  "args": [
-                    "t26",
-                    "t27"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t29",
-                "value": {
-                  "kind": "call",
-                  "func": "cat",
-                  "args": [
-                    "t25",
-                    "t28"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t30",
-                "value": {
-                  "kind": "call",
-                  "func": "bin2num",
-                  "args": [
-                    "t29"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "scriptLen",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t30"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 23,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t31",
-                "value": {
-                  "kind": "load_const",
-                  "value": 253
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 24,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t32",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "<",
-                  "left": "scriptLen",
-                  "right": "t31"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 24,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t33",
-                "value": {
-                  "kind": "assert",
-                  "value": "t32"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 24,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t34",
-                "value": {
-                  "kind": "load_const",
-                  "value": 8
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 25,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t35",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 25,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t36",
-                "value": {
-                  "kind": "load_const",
-                  "value": 9
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 25,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t37",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "t36",
-                  "right": "scriptLen"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 25,
-                  "column": 6
-                }
-              },
-              {
-                "name": "blobLen",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t37"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 25,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t38",
-                "value": {
-                  "kind": "load_param",
-                  "name": "rawTx"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 26,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t39",
-                "value": {
-                  "kind": "call",
-                  "func": "substr",
-                  "args": [
-                    "t38",
-                    "p",
-                    "blobLen"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 26,
-                  "column": 6
-                }
-              },
-              {
-                "name": "blob",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t39"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 26,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t40",
-                "value": {
-                  "kind": "load_param",
-                  "name": "expectedMneeOutputBytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 27,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t41",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "===",
-                  "left": "blob",
-                  "right": "t40",
-                  "result_type": "bytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 27,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t43",
-                "value": {
-                  "kind": "if",
-                  "cond": "t41",
-                  "then": [
-                    {
-                      "name": "t42",
-                      "value": {
-                        "kind": "load_const",
-                        "value": true
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 27,
-                        "column": 46
-                      }
-                    },
-                    {
-                      "name": "foundMnee",
-                      "value": {
-                        "kind": "load_const",
-                        "value": "@ref:t42"
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 27,
-                        "column": 46
-                      }
-                    }
-                  ],
-                  "else": []
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 27,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t44",
-                "value": {
-                  "kind": "load_param",
-                  "name": "expectedExtraDataOutputBytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 28,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t45",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "===",
-                  "left": "blob",
-                  "right": "t44",
-                  "result_type": "bytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 28,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t47",
-                "value": {
-                  "kind": "if",
-                  "cond": "t45",
-                  "then": [
-                    {
-                      "name": "t46",
-                      "value": {
-                        "kind": "load_const",
-                        "value": true
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 28,
-                        "column": 51
-                      }
-                    },
-                    {
-                      "name": "foundExtra",
-                      "value": {
-                        "kind": "load_const",
-                        "value": "@ref:t46"
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 28,
-                        "column": 51
-                      }
-                    }
-                  ],
-                  "else": []
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 28,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t48",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "p",
-                  "right": "blobLen"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 29,
-                  "column": 6
-                }
-              },
-              {
-                "name": "p",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t48"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 29,
-                  "column": 6
-                }
-              }
-            ],
-            "else": []
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 22,
-            "column": 4
-          }
-        },
-        {
-          "name": "t50",
-          "value": {
-            "kind": "load_const",
-            "value": 1
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 31,
-            "column": 4
-          }
-        },
-        {
-          "name": "t51",
-          "value": {
-            "kind": "bin_op",
-            "op": "<",
-            "left": "t50",
-            "right": "outCount"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 31,
-            "column": 4
-          }
-        },
-        {
-          "name": "t80",
-          "value": {
-            "kind": "if",
-            "cond": "t51",
-            "then": [
-              {
-                "name": "t52",
-                "value": {
-                  "kind": "load_param",
-                  "name": "rawTx"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t53",
-                "value": {
-                  "kind": "load_const",
-                  "value": 8
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t54",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "p",
-                  "right": "t53"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t55",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t56",
-                "value": {
-                  "kind": "call",
-                  "func": "substr",
-                  "args": [
-                    "t52",
-                    "t54",
-                    "t55"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t57",
-                "value": {
-                  "kind": "load_const",
-                  "value": 0
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t58",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t59",
-                "value": {
-                  "kind": "call",
-                  "func": "num2bin",
-                  "args": [
-                    "t57",
-                    "t58"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t60",
-                "value": {
-                  "kind": "call",
-                  "func": "cat",
-                  "args": [
-                    "t56",
-                    "t59"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t61",
-                "value": {
-                  "kind": "call",
-                  "func": "bin2num",
-                  "args": [
-                    "t60"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "scriptLen",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t61"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 32,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t62",
-                "value": {
-                  "kind": "load_const",
-                  "value": 253
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 33,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t63",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "<",
-                  "left": "scriptLen",
-                  "right": "t62"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 33,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t64",
-                "value": {
-                  "kind": "assert",
-                  "value": "t63"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 33,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t65",
-                "value": {
-                  "kind": "load_const",
-                  "value": 8
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 34,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t66",
-                "value": {
-                  "kind": "load_const",
-                  "value": 1
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 34,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t67",
-                "value": {
-                  "kind": "load_const",
-                  "value": 9
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 34,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t68",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "t67",
-                  "right": "scriptLen"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 34,
-                  "column": 6
-                }
-              },
-              {
-                "name": "blobLen",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t68"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 34,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t69",
-                "value": {
-                  "kind": "load_param",
-                  "name": "rawTx"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 35,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t70",
-                "value": {
-                  "kind": "call",
-                  "func": "substr",
-                  "args": [
-                    "t69",
-                    "p",
-                    "blobLen"
-                  ]
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 35,
-                  "column": 6
-                }
-              },
-              {
-                "name": "blob",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t70"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 35,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t71",
-                "value": {
-                  "kind": "load_param",
-                  "name": "expectedMneeOutputBytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 36,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t72",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "===",
-                  "left": "blob",
-                  "right": "t71",
-                  "result_type": "bytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 36,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t74",
-                "value": {
-                  "kind": "if",
-                  "cond": "t72",
-                  "then": [
-                    {
-                      "name": "t73",
-                      "value": {
-                        "kind": "load_const",
-                        "value": true
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 36,
-                        "column": 46
-                      }
-                    },
-                    {
-                      "name": "foundMnee",
-                      "value": {
-                        "kind": "load_const",
-                        "value": "@ref:t73"
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 36,
-                        "column": 46
-                      }
-                    }
-                  ],
-                  "else": []
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 36,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t75",
-                "value": {
-                  "kind": "load_param",
-                  "name": "expectedExtraDataOutputBytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 37,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t76",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "===",
-                  "left": "blob",
-                  "right": "t75",
-                  "result_type": "bytes"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 37,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t78",
-                "value": {
-                  "kind": "if",
-                  "cond": "t76",
-                  "then": [
-                    {
-                      "name": "t77",
-                      "value": {
-                        "kind": "load_const",
-                        "value": true
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 37,
-                        "column": 51
-                      }
-                    },
-                    {
-                      "name": "foundExtra",
-                      "value": {
-                        "kind": "load_const",
-                        "value": "@ref:t77"
-                      },
-                      "sourceLoc": {
-                        "file": "StackTrackerReproV10min.runar.ts",
-                        "line": 37,
-                        "column": 51
-                      }
-                    }
-                  ],
-                  "else": []
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 37,
-                  "column": 6
-                }
-              },
-              {
-                "name": "t79",
-                "value": {
-                  "kind": "bin_op",
-                  "op": "+",
-                  "left": "p",
-                  "right": "blobLen"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 38,
-                  "column": 6
-                }
-              },
-              {
-                "name": "p",
-                "value": {
-                  "kind": "load_const",
-                  "value": "@ref:t79"
-                },
-                "sourceLoc": {
-                  "file": "StackTrackerReproV10min.runar.ts",
-                  "line": 38,
-                  "column": 6
-                }
-              }
-            ],
-            "else": []
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 31,
-            "column": 4
-          }
-        },
-        {
-          "name": "t81",
-          "value": {
-            "kind": "assert",
-            "value": "foundMnee"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 41,
-            "column": 4
-          }
-        },
-        {
-          "name": "t82",
-          "value": {
-            "kind": "assert",
-            "value": "foundExtra"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 42,
-            "column": 4
-          }
-        }
-      ],
-      "isPublic": true
+      ]
     },
     {
-      "name": "other",
-      "params": [
-        {
-          "name": "x",
-          "type": "ByteString"
-        }
-      ],
       "body": [
         {
           "name": "t0",
           "value": {
             "kind": "load_param",
             "name": "x"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 45,
-            "column": 32
           }
         },
         {
@@ -1382,26 +868,16 @@
           "value": {
             "kind": "load_param",
             "name": "x"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 45,
-            "column": 32
           }
         },
         {
           "name": "t2",
           "value": {
             "kind": "bin_op",
-            "op": "===",
             "left": "t0",
-            "right": "t1",
-            "result_type": "bytes"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 45,
-            "column": 32
+            "op": "===",
+            "result_type": "bytes",
+            "right": "t1"
           }
         },
         {
@@ -1409,15 +885,18 @@
           "value": {
             "kind": "assert",
             "value": "t2"
-          },
-          "sourceLoc": {
-            "file": "StackTrackerReproV10min.runar.ts",
-            "line": 45,
-            "column": 32
           }
         }
       ],
-      "isPublic": true
+      "isPublic": true,
+      "name": "other",
+      "params": [
+        {
+          "name": "x",
+          "type": "ByteString"
+        }
+      ]
     }
-  ]
+  ],
+  "properties": []
 }

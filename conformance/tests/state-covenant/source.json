@@ -1,4 +1,5 @@
 {
+  "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
   "sources": {
     ".runar.ts": "../../../examples/ts/state-covenant/StateCovenant.runar.ts",
     ".runar.sol": "../../../examples/sol/state-covenant/StateCovenant.runar.sol",

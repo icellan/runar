@@ -42,6 +42,7 @@ import runar.compiler.ir.stack.OpcodeOp;
 import runar.compiler.ir.stack.OverOp;
 import runar.compiler.ir.stack.PickOp;
 import runar.compiler.ir.stack.PlaceholderOp;
+import runar.compiler.ir.stack.PushCodeSepIndexOp;
 import runar.compiler.ir.stack.PushOp;
 import runar.compiler.ir.stack.PushValue;
 import runar.compiler.ir.stack.RollOp;
@@ -323,7 +324,7 @@ public final class StackLower {
         List<String> paramNames = new ArrayList<>();
         for (AnfParam p : method.params()) paramNames.add(p.name());
 
-        if (methodUsesCheckPreimage(method.body())) {
+        if (methodUsesCheckPreimage(method.body(), privateMethods, new java.util.HashSet<>())) {
             // Implicit params pushed by the SDK before the developer's params.
             // Order matches the Python / Go / Rust references exactly:
             // _opPushTxSig is prepended first, then _codePart is prepended in
@@ -360,9 +361,35 @@ public final class StackLower {
         return new StackMethod(method.name(), ctx.ops, ctx.maxDepth);
     }
 
-    private static boolean methodUsesCheckPreimage(List<AnfBinding> body) {
+    /**
+     * Recursively check whether {@code body} (and any private methods it
+     * calls, transitively) contains a CheckPreimage. 2026-04-30 audit
+     * finding F7: previous shallow scan missed manual checkPreimage
+     * calls inside if/loop bodies and private helpers, causing stack
+     * lowering to fail with `Value '_opPushTxSig' not found on stack`.
+     */
+    private static boolean methodUsesCheckPreimage(
+            List<AnfBinding> body,
+            Map<String, AnfMethod> privateMethods,
+            java.util.Set<String> seen) {
         for (AnfBinding b : body) {
-            if (b.value() instanceof CheckPreimage) return true;
+            AnfValue v = b.value();
+            if (v instanceof CheckPreimage) return true;
+            if (v instanceof If iv) {
+                if (methodUsesCheckPreimage(iv.thenBranch(), privateMethods, seen)) return true;
+                if (methodUsesCheckPreimage(iv.elseBranch(), privateMethods, seen)) return true;
+            }
+            if (v instanceof Loop loop) {
+                if (methodUsesCheckPreimage(loop.body(), privateMethods, seen)) return true;
+            }
+            if (v instanceof MethodCall mc && privateMethods != null) {
+                AnfMethod target = privateMethods.get(mc.method());
+                if (target != null && !seen.contains(target.name())) {
+                    java.util.Set<String> nextSeen = new java.util.HashSet<>(seen);
+                    nextSeen.add(target.name());
+                    if (methodUsesCheckPreimage(target.body(), privateMethods, nextSeen)) return true;
+                }
+            }
         }
         return false;
     }
@@ -1979,15 +2006,304 @@ public final class StackLower {
                 sm.push("");
 
                 splitFixedStateFields(stateProps, propSizes);
+            } else if (!sm.has("_codePart")) {
+                // Variable-length state but _codePart not available (terminal
+                // method). Skip deserialization — the method body doesn't use
+                // mutable state. Drop the varint+scriptCode from the stack.
+                emitOp(new DropOp());
+                sm.pop();
             } else {
-                // Variable-length state: full support lives in M6's crypto
-                // codegen. For M5 we throw a clear error so M4-era fixtures
-                // exercising only fixed-width state still pass.
-                throw new RuntimeException(
-                    "deserialize_state: variable-length state fields are not yet supported "
-                    + "(M6 will add the full varint-stripping codegen)");
+                // Variable-length path: ByteString / Sig / SigHashPreimage
+                // fields present. We need _codePart to compute the state
+                // offset at runtime.
+                //
+                // After the steps above we have [varint || scriptCode] on the
+                // stack and need to strip the BIP-143 scriptCode varint
+                // prefix:
+                //   length < 0xfd:        1 byte
+                //   length <= 0xffff:     0xfd + 2 bytes LE  (3 bytes)
+                //   length <= 0xffffffff: 0xfe + 4 bytes LE  (5 bytes)
+                //   otherwise:            0xff + 8 bytes LE  (9 bytes)
+                //
+                // We must support all four shapes; stripping only 1- and
+                // 3-byte varints corrupts state extraction for scripts whose
+                // scriptCode exceeds 65,535 bytes (e.g. embedded BN254
+                // verifiers) and surfaces as `Invalid OP_SPLIT range` on
+                // regtest.
+                emitOp(new PushOp(PushValue.of(1)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_SPLIT"));
+                sm.pop(); sm.pop();
+                sm.push(""); // firstByte
+                sm.push(""); // rest
+                emitOp(new SwapOp());
+                sm.swap();
+                // Zero-pad firstByte before BIN2NUM so 0xfd/0xfe/0xff aren't
+                // interpreted as negative script numbers.
+                emitOp(new PushOp(PushValue.ofHex("00")));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_CAT"));
+                sm.pop(); sm.pop();
+                sm.push("");
+                emitOp(new OpcodeOp("OP_BIN2NUM"));
+                // Stack: [..., rest, fb_num]
+
+                // IF fb_num < 253: 1-byte varint, drop fb_num.
+                emitOp(new DupOp());
+                sm.dup();
+                emitOp(new PushOp(PushValue.of(253)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_LESSTHAN"));
+                sm.pop(); sm.pop();
+                sm.push("");
+                emitOp(new OpcodeOp("OP_IF"));
+                sm.pop();
+                StackMap smAt1ByteIf = sm.clone0();
+                emitOp(new DropOp());
+                sm.pop();
+                emitOp(new OpcodeOp("OP_ELSE"));
+                sm.slots.clear();
+                sm.slots.addAll(smAt1ByteIf.slots);
+                // ELSE: fb_num >= 253. Check 0xfe (5-byte varint) next.
+                emitOp(new DupOp());
+                sm.dup();
+                emitOp(new PushOp(PushValue.of(254)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_NUMEQUAL"));
+                sm.pop(); sm.pop();
+                sm.push("");
+                emitOp(new OpcodeOp("OP_IF"));
+                sm.pop();
+                StackMap smAtFEIf = sm.clone0();
+                // THEN: 5-byte varint (0xfe + 4 bytes LE).
+                emitOp(new DropOp());
+                sm.pop();
+                emitDropMoreVarintBytes(4);
+                emitOp(new OpcodeOp("OP_ELSE"));
+                sm.slots.clear();
+                sm.slots.addAll(smAtFEIf.slots);
+                // ELSE: fb_num != 254. Check 0xff (9-byte varint) next.
+                emitOp(new DupOp());
+                sm.dup();
+                emitOp(new PushOp(PushValue.of(255)));
+                sm.push("");
+                emitOp(new OpcodeOp("OP_NUMEQUAL"));
+                sm.pop(); sm.pop();
+                sm.push("");
+                emitOp(new OpcodeOp("OP_IF"));
+                sm.pop();
+                StackMap smAtFFIf = sm.clone0();
+                // THEN: 9-byte varint (0xff + 8 bytes LE).
+                emitOp(new DropOp());
+                sm.pop();
+                emitDropMoreVarintBytes(8);
+                emitOp(new OpcodeOp("OP_ELSE"));
+                sm.slots.clear();
+                sm.slots.addAll(smAtFFIf.slots);
+                // ELSE: fb_num must be 253 (0xfd) — 3-byte varint.
+                emitOp(new DropOp());
+                sm.pop();
+                emitDropMoreVarintBytes(2);
+                emitOp(new OpcodeOp("OP_ENDIF"));
+                emitOp(new OpcodeOp("OP_ENDIF"));
+                emitOp(new OpcodeOp("OP_ENDIF"));
+                // --- Stack: [..., scriptCode] ---
+
+                // Compute skip = SIZE(_codePart) - codeSepIdx.
+                bringToTop("_codePart", false); // PICK _codePart
+                emitOp(new OpcodeOp("OP_SIZE"));
+                sm.push("");
+                emitOp(new NipOp());
+                sm.pop(); sm.pop();
+                sm.push("");
+                // Push codeSepIndex — the emitter fills in the actual value
+                emitOp(new PushCodeSepIndexOp());
+                sm.push("");
+                emitOp(new OpcodeOp("OP_SUB"));
+                sm.pop(); sm.pop();
+                sm.push("");
+                // Stack: [..., scriptCode, skip]
+
+                // Split scriptCode at skip to get state.
+                emitOp(new OpcodeOp("OP_SPLIT"));
+                sm.pop(); sm.pop();
+                sm.push(""); // prefix (postSepCode + 0x6a)
+                sm.push(""); // state
+                emitOp(new NipOp());
+                sm.pop(); sm.pop();
+                sm.push(""); // state bytes on top
+
+                // Parse state fields left-to-right.
+                parseVariableLengthStateFields(stateProps, propSizes);
             }
             trackDepth();
+        }
+
+        // Drop `n` more varint bytes from the top-of-stack `rest`.
+        // Stack in:  [..., rest]
+        // Stack out: [..., rest_minus_n]
+        private void emitDropMoreVarintBytes(int n) {
+            emitOp(new PushOp(PushValue.of(n)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new NipOp());
+            sm.pop(); sm.pop();
+            sm.push("");
+        }
+
+        // Parse state fields left-to-right when at least one field is a
+        // variable-length byte-string (ByteString, Sig, SigHashPreimage).
+        // Mirrors {@code parseVariableLengthStateFields} in
+        // {@code compilers/go/codegen/stack.go}.
+        private void parseVariableLengthStateFields(List<AnfProperty> stateProps, List<Integer> sizes) {
+            if (stateProps.size() == 1) {
+                AnfProperty p = stateProps.get(0);
+                if (isVariableLengthStateType(p.type())) {
+                    // Single variable-length byte-string field: decode push-data
+                    // prefix, drop trailing empty.
+                    emitPushDataDecode(); // [..., data, remaining]
+                    emitOp(new DropOp());
+                    sm.pop();
+                } else if (isNumericStateType(p.type())) {
+                    emitOp(new OpcodeOp("OP_BIN2NUM"));
+                }
+                sm.pop();
+                sm.push(p.name());
+            } else {
+                for (int i = 0; i < stateProps.size(); i++) {
+                    AnfProperty p = stateProps.get(i);
+                    if (i < stateProps.size() - 1) {
+                        if (isVariableLengthStateType(p.type())) {
+                            // Variable-length byte-string: decode push-data
+                            // prefix, extract data.
+                            emitPushDataDecode(); // [..., data, rest]
+                            sm.pop(); sm.pop();
+                            sm.push(p.name());
+                            sm.push(""); // rest on top
+                        } else {
+                            int sz = sizes.get(i);
+                            emitOp(new PushOp(PushValue.of(sz)));
+                            sm.push("");
+                            emitOp(new OpcodeOp("OP_SPLIT"));
+                            sm.pop(); sm.pop();
+                            sm.push(""); sm.push("");
+                            emitOp(new SwapOp());
+                            sm.swap();
+                            if (isNumericStateType(p.type())) {
+                                emitOp(new OpcodeOp("OP_BIN2NUM"));
+                            }
+                            emitOp(new SwapOp());
+                            sm.swap();
+                            sm.pop(); sm.pop();
+                            sm.push(p.name());
+                            sm.push("");
+                        }
+                    } else {
+                        if (isVariableLengthStateType(p.type())) {
+                            // Last variable-length byte-string: decode push-data
+                            // prefix, drop trailing empty.
+                            emitPushDataDecode(); // [..., data, remaining]
+                            emitOp(new DropOp());
+                            sm.pop();
+                        } else if (isNumericStateType(p.type())) {
+                            emitOp(new OpcodeOp("OP_BIN2NUM"));
+                        }
+                        sm.pop();
+                        sm.push(p.name());
+                    }
+                }
+            }
+        }
+
+        // emitPushDataDecode emits opcodes that decode a push-data-encoded
+        // ByteString from the state bytes on top of the stack.
+        // Expects stack: [..., state_bytes]
+        // Leaves stack:  [..., data, remaining_state]
+        // Mirrors {@code emitPushDataDecode} in
+        // {@code compilers/go/codegen/stack.go}.
+        private void emitPushDataDecode() {
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(76)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_LESSTHAN"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAfterOuterIf = sm.clone0();
+
+            // THEN: fb < 76 → direct length
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            StackMap smEndTarget = sm.clone0();
+
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAfterOuterIf.slots);
+
+            emitOp(new DupOp());
+            sm.push("");
+            emitOp(new PushOp(PushValue.of(77)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_NUMEQUAL"));
+            sm.pop(); sm.pop();
+            sm.push("");
+
+            emitOp(new OpcodeOp("OP_IF"));
+            sm.pop();
+            StackMap smAfterInnerIf = sm.clone0();
+
+            // THEN: fb == 77 → 2-byte LE length
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.of(2)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+
+            emitOp(new OpcodeOp("OP_ELSE"));
+            sm.slots.clear();
+            sm.slots.addAll(smAfterInnerIf.slots);
+
+            // ELSE: fb == 76 → 1-byte length
+            emitOp(new DropOp());
+            sm.pop();
+            emitOp(new PushOp(PushValue.of(1)));
+            sm.push("");
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+            emitOp(new SwapOp());
+            sm.swap();
+            emitOp(new OpcodeOp("OP_BIN2NUM"));
+            emitOp(new OpcodeOp("OP_SPLIT"));
+            sm.pop(); sm.pop();
+            sm.push(""); sm.push("");
+
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            emitOp(new OpcodeOp("OP_ENDIF"));
+            sm.slots.clear();
+            sm.slots.addAll(smEndTarget.slots);
         }
 
         private void splitFixedStateFields(List<AnfProperty> stateProps, List<Integer> sizes) {

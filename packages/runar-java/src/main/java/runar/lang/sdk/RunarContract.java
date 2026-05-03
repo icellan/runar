@@ -213,18 +213,25 @@ public final class RunarContract {
         }
 
         // Auto-merge state updates: explicit caller-supplied stateUpdates
-        // win; otherwise the ANF interpreter computes the new state from
-        // the contract body. Mirrors the Go/Python SDKs.
+        // win; otherwise the ANF interpreter computes the new state and
+        // any addDataOutput entries from the contract body. Mirrors the
+        // Go/Python SDKs.
+        List<TransactionBuilder.DataOutput> resolvedDataOutputs = new ArrayList<>();
         if (isStateful) {
             if (stateUpdates != null) {
                 state.putAll(stateUpdates);
             } else if (artifact.anf() != null) {
                 Map<String, Object> namedArgs = buildNamedArgs(userParams, args);
                 try {
-                    Map<String, Object> computed = AnfInterpreter.computeNewState(
+                    AnfInterpreter.ExecutionResult execResult = AnfInterpreter.computeNewStateAndDataOutputs(
                         artifact.anf(), methodName, state, namedArgs, constructorArgs
                     );
-                    state.putAll(computed);
+                    state.putAll(execResult.newState);
+                    for (AnfInterpreter.DataOutput d : execResult.dataOutputs) {
+                        resolvedDataOutputs.add(
+                            new TransactionBuilder.DataOutput(d.satoshis(), d.script())
+                        );
+                    }
                 } catch (RuntimeException ignore) {
                     // Best-effort — caller can pre-supply stateUpdates if
                     // the body uses primitives the interpreter can't run.
@@ -269,7 +276,7 @@ public final class RunarContract {
         return callWithPushTx(
             m, methodName, resolved, sigIndices,
             methodNeedsChange, methodNeedsNewAmount,
-            isStateful, provider, signer
+            isStateful, resolvedDataOutputs, provider, signer
         );
     }
 
@@ -327,6 +334,7 @@ public final class RunarContract {
         boolean methodNeedsChange,
         boolean methodNeedsNewAmount,
         boolean isStateful,
+        List<TransactionBuilder.DataOutput> dataOutputs,
         Provider provider,
         Signer signer
     ) {
@@ -385,7 +393,7 @@ public final class RunarContract {
         TransactionBuilder.CallTxResult firstPass =
             TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, placeholderUnlock, newLockingScript, newSats,
-                additional, funderAddress, feeRate
+                dataOutputs, additional, funderAddress, feeRate
             );
         long changeAmount = firstPass.changeAmount();
 
@@ -403,7 +411,7 @@ public final class RunarContract {
         TransactionBuilder.CallTxResult secondPass =
             TransactionBuilder.buildCallTransactionFull(
                 currentUtxo, secondPassUnlock, newLockingScript, newSats,
-                additional, funderAddress, feeRate
+                dataOutputs, additional, funderAddress, feeRate
             );
         long finalChangeAmount = secondPass.changeAmount();
         RawTx tx = secondPass.tx();

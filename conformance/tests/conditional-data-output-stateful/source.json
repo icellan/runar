@@ -1,0 +1,5 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/conditional-data-output/ConditionalDataOutput.runar.ts"
+  }
+}

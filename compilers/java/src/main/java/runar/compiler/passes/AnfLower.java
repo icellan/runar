@@ -180,8 +180,8 @@ public final class AnfLower {
                 && method.visibility() == Visibility.PUBLIC;
 
             if (isStatefulPublic) {
-                boolean hasDataOutput = methodHasAddDataOutput(method);
-                boolean hasAddOutput = methodHasAddOutput(method);
+                boolean hasDataOutput = methodHasAddDataOutput(method, contract);
+                boolean hasAddOutput = methodHasAddOutput(method, contract);
                 boolean mutates = methodMutatesState(method, contract);
                 boolean needsChange = mutates || hasAddOutput || hasDataOutput;
                 boolean needsNewAmount = (mutates || hasDataOutput) && !hasAddOutput;
@@ -300,9 +300,104 @@ public final class AnfLower {
         final List<String> addDataOutputRefs = new ArrayList<>();
         final Map<String, String> localAliases = new HashMap<>();
         final Set<String> localByteVars = new HashSet<>();
+        // Param substitution stack used when inlining a private method's body
+        // directly into this context. While the inlined body lowers, identifier
+        // references to that param resolve to the caller's arg ref instead of
+        // emitting load_param. Stacked so nested inlines compose correctly.
+        // Mirrors the TS / Go reference compilers' paramAliasStack.
+        final Map<String, List<String>> paramAliasStack = new HashMap<>();
 
         LowerCtx(ContractNode contract) {
             this.contract = contract;
+        }
+
+        void pushParamAlias(String name, String aliasRef) {
+            paramAliasStack.computeIfAbsent(name, k -> new ArrayList<>()).add(aliasRef);
+        }
+
+        void popParamAlias(String name) {
+            List<String> stack = paramAliasStack.get(name);
+            if (stack == null || stack.isEmpty()) return;
+            stack.remove(stack.size() - 1);
+            if (stack.isEmpty()) paramAliasStack.remove(name);
+        }
+
+        String getParamAlias(String name) {
+            List<String> stack = paramAliasStack.get(name);
+            if (stack == null || stack.isEmpty()) return null;
+            return stack.get(stack.size() - 1);
+        }
+
+        MethodNode getPrivateMethod(String name) {
+            for (MethodNode m : contract.methods()) {
+                if (m.name().equals(name) && !m.name().equals("constructor")
+                    && m.visibility() != Visibility.PUBLIC) {
+                    return m;
+                }
+            }
+            return null;
+        }
+
+        // Return true iff `name` is a private method that (transitively)
+        // emits state outputs (addOutput / addRawOutput) or data outputs
+        // (addDataOutput). Those refs MUST appear in the caller's binding
+        // stream so they participate in the continuation hash; without
+        // ANF-level inlining they would live in a sibling ANF method and
+        // the public method's continuation hash would miss them.
+        //
+        // Mutation-only private helpers (no output intrinsics) are
+        // intentionally NOT inlined — state mutation flows through state
+        // continuity, not through output refs. Mirrors TS/Go/Rust/Python
+        // reference compilers' shouldInlinePrivate.
+        boolean shouldInlinePrivate(String name) {
+            MethodNode m = getPrivateMethod(name);
+            if (m == null) return false;
+            return methodHasAddOutput(m, contract) || methodHasAddDataOutput(m, contract);
+        }
+
+        // Inline a private method's body directly into this context. Used
+        // when the callee has continuation-relevant side effects (addOutput
+        // / addRawOutput / addDataOutput) so that its emitted ANF nodes
+        // register their output refs on the caller's continuation hash.
+        //
+        // The caller's arg refs are mapped onto the private's parameter
+        // names via pushParamAlias. While the body lowers, identifier
+        // references to those param names resolve to the caller's ref via
+        // lowerIdentifier's alias check.
+        //
+        // Recursion across private helpers is forbidden by validation, so
+        // this always terminates. Nested inlining (private A calls private
+        // B with side effects) is handled naturally — the same dispatch
+        // path triggers inlining for B.
+        String inlinePrivateMethodCall(String methodName, List<String> argRefs) {
+            MethodNode method = getPrivateMethod(methodName);
+            if (method == null) {
+                // Defensive: caller already checked shouldInlinePrivate.
+                String thisRef = emit(makeLoadConstString("@this"));
+                return emit(new MethodCall(thisRef, methodName, argRefs));
+            }
+
+            List<String> aliasedParams = new ArrayList<>();
+            int n = Math.min(method.params().size(), argRefs.size());
+            for (int i = 0; i < n; i++) {
+                String paramName = method.params().get(i).name();
+                pushParamAlias(paramName, argRefs.get(i));
+                aliasedParams.add(paramName);
+            }
+
+            int startIndex = bindings.size();
+            lowerStatements(method.body());
+            int endIndex = bindings.size();
+
+            for (int i = aliasedParams.size() - 1; i >= 0; i--) {
+                popParamAlias(aliasedParams.get(i));
+            }
+
+            if (endIndex > startIndex) {
+                return bindings.get(endIndex - 1).name();
+            }
+            // Empty body — emit a placeholder so the caller has a ref.
+            return emit(makeLoadConstString("@void"));
         }
 
         String freshTemp() {
@@ -472,18 +567,47 @@ public final class AnfLower {
             }
             syncCounter(elseCtx);
 
-            boolean thenHasOutputs = !thenCtx.addOutputRefs.isEmpty();
-            boolean elseHasOutputs = !elseCtx.addOutputRefs.isEmpty();
-            boolean thenHasData = !thenCtx.addDataOutputRefs.isEmpty();
-            boolean elseHasData = !elseCtx.addDataOutputRefs.isEmpty();
+            // 2026-04-30 audit finding F2: when a branch contains
+            // output intrinsics, append a cat-chain inside each
+            // branch so the branch's terminal value is the concat of
+            // its output bytes (state then data, in declaration
+            // order). Balances runtime stack effects across branches
+            // and lets the parent's continuation hash see one ref
+            // per if representing the chosen branch's full output
+            // set.
+            boolean branchHasStateOutput = !thenCtx.addOutputRefs.isEmpty()
+                || !elseCtx.addOutputRefs.isEmpty();
+            boolean branchHasOutputs = branchHasStateOutput
+                || !thenCtx.addDataOutputRefs.isEmpty()
+                || !elseCtx.addDataOutputRefs.isEmpty();
+
+            if (branchHasOutputs) {
+                appendBranchOutputConcat(thenCtx);
+                appendBranchOutputConcat(elseCtx);
+            }
 
             String ifName = emit(new If(condRef, thenCtx.bindings, elseCtx.bindings));
 
-            if (thenHasOutputs || elseHasOutputs) {
-                addOutputRefs.add(ifName);
-            }
-            if (thenHasData || elseHasData) {
-                addDataOutputRefs.add(ifName);
+            if (branchHasOutputs) {
+                // Register the if's value once with the parent's
+                // continuation tracker. CRITICAL: pick the right
+                // tracker. If either branch produces a STATE output,
+                // the parent must take the multi-output continuation
+                // path, so we register as a state output ref. If
+                // neither branch produces a state output and at least
+                // one branch produces a data output, we register as a
+                // DATA output ref so the parent keeps its
+                // single-output `computeStateOutput` continuation and
+                // the data-output bytes splice in BETWEEN the state
+                // output and the change output. Without this, a
+                // branch with only `addDataOutput` was incorrectly
+                // forced onto the multi-output path, dropping the
+                // canonical state continuation.
+                if (branchHasStateOutput) {
+                    addOutputRefs.add(ifName);
+                } else {
+                    addDataOutputRefs.add(ifName);
+                }
             }
 
             // If both branches end by reassigning the same local variable,
@@ -495,6 +619,29 @@ public final class AnfLower {
                     setLocalAlias(thenLast.name(), ifName);
                 }
             }
+        }
+
+        /**
+         * Concatenate a branch's output refs (state then data, in
+         * declaration order) into a single bytes-ref appended to the
+         * branch's bindings. If the branch has no outputs, emits an
+         * empty {@code load_const} so the branch still leaves one
+         * item on the stack — required to balance the if's branch
+         * shapes when the OTHER branch has outputs. 2026-04-30 audit
+         * finding F2 fix.
+         */
+        String appendBranchOutputConcat(LowerCtx branchCtx) {
+            List<String> allRefs = new ArrayList<>(branchCtx.addOutputRefs);
+            allRefs.addAll(branchCtx.addDataOutputRefs);
+            if (allRefs.isEmpty()) {
+                return branchCtx.emit(makeLoadConstString(""));
+            }
+            if (allRefs.size() == 1) return allRefs.get(0);
+            String accumulated = allRefs.get(0);
+            for (int i = 1; i < allRefs.size(); i++) {
+                accumulated = branchCtx.emit(new Call("cat", List.of(accumulated, allRefs.get(i))));
+            }
+            return accumulated;
         }
 
         void lowerForStatement(ForStatement stmt) {
@@ -597,6 +744,14 @@ public final class AnfLower {
 
             if ("this".equals(name)) {
                 return emit(makeLoadConstString("@this"));
+            }
+
+            // Param alias takes precedence over normal param lookup. Set when a
+            // private method's body is being inlined into this context — the
+            // private's param names map to the caller's arg refs.
+            String paramAlias = getParamAlias(name);
+            if (paramAlias != null) {
+                return paramAlias;
             }
 
             if (isParam(name)) {
@@ -708,6 +863,9 @@ public final class AnfLower {
             // this.method(...) via PropertyAccessExpr
             if (callee instanceof PropertyAccessExpr pa) {
                 List<String> argRefs = lowerArgs(e.args());
+                if (shouldInlinePrivate(pa.property())) {
+                    return inlinePrivateMethodCall(pa.property(), argRefs);
+                }
                 String thisRef = emit(makeLoadConstString("@this"));
                 return emit(new MethodCall(thisRef, pa.property(), argRefs));
             }
@@ -717,6 +875,9 @@ public final class AnfLower {
                 && me.object() instanceof Identifier oid
                 && "this".equals(oid.name())) {
                 List<String> argRefs = lowerArgs(e.args());
+                if (shouldInlinePrivate(me.property())) {
+                    return inlinePrivateMethodCall(me.property(), argRefs);
+                }
                 String thisRef = emit(makeLoadConstString("@this"));
                 return emit(new MethodCall(thisRef, me.property(), argRefs));
             }
@@ -744,6 +905,9 @@ public final class AnfLower {
             if (callee instanceof Identifier id3) {
                 List<String> argRefs = lowerArgs(e.args());
                 if (isPrivateMethod(id3.name())) {
+                    if (shouldInlinePrivate(id3.name())) {
+                        return inlinePrivateMethodCall(id3.name(), argRefs);
+                    }
                     String thisRef = emit(makeLoadConstString("@this"));
                     return emit(new MethodCall(thisRef, id3.name(), argRefs));
                 }
@@ -892,41 +1056,70 @@ public final class AnfLower {
     // State mutation analysis
     // ------------------------------------------------------------------
 
+    // Walks the private-method call graph so a public method that
+    // delegates state mutation, addOutput / addRawOutput, or
+    // addDataOutput to a private helper is correctly classified.
+    // 2026-04-30 audit fix for findings F1 (Critical) and F3 (High).
+
+    private static MethodNode lookupPrivateMethod(ContractNode contract, String name) {
+        if (name == null) return null;
+        for (MethodNode m : contract.methods()) {
+            if (name.equals(m.name()) && m.visibility() != Visibility.PUBLIC) return m;
+        }
+        return null;
+    }
+
+    private static String calleeName(Expression callee) {
+        if (callee instanceof PropertyAccessExpr pa) return pa.property();
+        if (callee instanceof MemberExpr me) return me.property();
+        if (callee instanceof Identifier id) return id.name();
+        return null;
+    }
+
     private static boolean methodMutatesState(MethodNode method, ContractNode contract) {
         Set<String> mutable = new HashSet<>();
         for (PropertyNode p : contract.properties()) {
             if (!p.readonly()) mutable.add(p.name());
         }
         if (mutable.isEmpty()) return false;
-        return bodyMutatesState(method.body(), mutable);
+        return bodyMutatesState(method.body(), mutable, contract, new HashSet<>());
     }
 
-    private static boolean bodyMutatesState(List<Statement> stmts, Set<String> mutable) {
+    private static boolean bodyMutatesState(
+            List<Statement> stmts, Set<String> mutable, ContractNode contract, Set<String> seen) {
         for (Statement s : stmts) {
-            if (stmtMutatesState(s, mutable)) return true;
+            if (stmtMutatesState(s, mutable, contract, seen)) return true;
         }
         return false;
     }
 
-    private static boolean stmtMutatesState(Statement stmt, Set<String> mutable) {
+    private static boolean stmtMutatesState(
+            Statement stmt, Set<String> mutable, ContractNode contract, Set<String> seen) {
         if (stmt instanceof AssignmentStatement a) {
             return a.target() instanceof PropertyAccessExpr pa && mutable.contains(pa.property());
         }
         if (stmt instanceof ExpressionStatement es) {
-            return exprMutatesState(es.expression(), mutable);
+            return exprMutatesState(es.expression(), mutable, contract, seen);
         }
         if (stmt instanceof IfStatement i) {
-            if (bodyMutatesState(i.thenBody(), mutable)) return true;
-            return i.elseBody() != null && bodyMutatesState(i.elseBody(), mutable);
+            if (bodyMutatesState(i.thenBody(), mutable, contract, seen)) return true;
+            return i.elseBody() != null && bodyMutatesState(i.elseBody(), mutable, contract, seen);
         }
         if (stmt instanceof ForStatement f) {
-            if (f.update() != null && stmtMutatesState(f.update(), mutable)) return true;
-            return bodyMutatesState(f.body(), mutable);
+            if (f.update() != null && stmtMutatesState(f.update(), mutable, contract, seen)) return true;
+            return bodyMutatesState(f.body(), mutable, contract, seen);
+        }
+        // Ruby's RbParser promotes a private method's trailing
+        // ExpressionStatement to a ReturnStatement for implicit-return
+        // semantics. Walk the return value the same way.
+        if (stmt instanceof ReturnStatement r && r.value() != null) {
+            return exprMutatesState(r.value(), mutable, contract, seen);
         }
         return false;
     }
 
-    private static boolean exprMutatesState(Expression expr, Set<String> mutable) {
+    private static boolean exprMutatesState(
+            Expression expr, Set<String> mutable, ContractNode contract, Set<String> seen) {
         if (expr == null) return false;
         if (expr instanceof IncrementExpr ie
             && ie.operand() instanceof PropertyAccessExpr pa) {
@@ -936,33 +1129,47 @@ public final class AnfLower {
             && de.operand() instanceof PropertyAccessExpr pa) {
             return mutable.contains(pa.property());
         }
-        return false;
-    }
-
-    // ------------------------------------------------------------------
-    // addOutput / addDataOutput detection
-    // ------------------------------------------------------------------
-
-    private static boolean methodHasAddOutput(MethodNode m) {
-        return bodyHasAddOutput(m.body());
-    }
-
-    private static boolean bodyHasAddOutput(List<Statement> stmts) {
-        for (Statement s : stmts) if (stmtHasAddOutput(s)) return true;
-        return false;
-    }
-
-    private static boolean stmtHasAddOutput(Statement s) {
-        if (s instanceof ExpressionStatement es) return exprHasAddOutput(es.expression());
-        if (s instanceof IfStatement i) {
-            if (bodyHasAddOutput(i.thenBody())) return true;
-            return i.elseBody() != null && bodyHasAddOutput(i.elseBody());
+        if (expr instanceof CallExpr c) {
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            if (target != null && !seen.contains(target.name())) {
+                Set<String> nextSeen = new HashSet<>(seen);
+                nextSeen.add(target.name());
+                if (bodyMutatesState(target.body(), mutable, contract, nextSeen)) return true;
+            }
         }
-        if (s instanceof ForStatement f) return bodyHasAddOutput(f.body());
         return false;
     }
 
-    private static boolean exprHasAddOutput(Expression e) {
+    // ------------------------------------------------------------------
+    // addOutput / addDataOutput detection (recursive across private calls)
+    // ------------------------------------------------------------------
+
+    private static boolean methodHasAddOutput(MethodNode m, ContractNode contract) {
+        return bodyHasAddOutput(m.body(), contract, new HashSet<>());
+    }
+
+    private static boolean bodyHasAddOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        for (Statement s : stmts) if (stmtHasAddOutput(s, contract, seen)) return true;
+        return false;
+    }
+
+    private static boolean stmtHasAddOutput(Statement s, ContractNode contract, Set<String> seen) {
+        if (s instanceof ExpressionStatement es) return exprHasAddOutput(es.expression(), contract, seen);
+        if (s instanceof IfStatement i) {
+            if (bodyHasAddOutput(i.thenBody(), contract, seen)) return true;
+            return i.elseBody() != null && bodyHasAddOutput(i.elseBody(), contract, seen);
+        }
+        if (s instanceof ForStatement f) return bodyHasAddOutput(f.body(), contract, seen);
+        // Ruby's RbParser promotes a private method's trailing
+        // ExpressionStatement to a ReturnStatement; walk the return value.
+        if (s instanceof ReturnStatement r && r.value() != null) {
+            return exprHasAddOutput(r.value(), contract, seen);
+        }
+        return false;
+    }
+
+    private static boolean exprHasAddOutput(Expression e, ContractNode contract, Set<String> seen) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -975,30 +1182,40 @@ public final class AnfLower {
                 && (me.property().equals("addOutput") || me.property().equals("addRawOutput"))) {
                 return true;
             }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            if (target != null && !seen.contains(target.name())) {
+                Set<String> nextSeen = new HashSet<>(seen);
+                nextSeen.add(target.name());
+                if (bodyHasAddOutput(target.body(), contract, nextSeen)) return true;
+            }
         }
         return false;
     }
 
-    private static boolean methodHasAddDataOutput(MethodNode m) {
-        return bodyHasAddDataOutput(m.body());
+    private static boolean methodHasAddDataOutput(MethodNode m, ContractNode contract) {
+        return bodyHasAddDataOutput(m.body(), contract, new HashSet<>());
     }
 
-    private static boolean bodyHasAddDataOutput(List<Statement> stmts) {
-        for (Statement s : stmts) if (stmtHasAddDataOutput(s)) return true;
+    private static boolean bodyHasAddDataOutput(List<Statement> stmts, ContractNode contract, Set<String> seen) {
+        for (Statement s : stmts) if (stmtHasAddDataOutput(s, contract, seen)) return true;
         return false;
     }
 
-    private static boolean stmtHasAddDataOutput(Statement s) {
-        if (s instanceof ExpressionStatement es) return exprHasAddDataOutput(es.expression());
+    private static boolean stmtHasAddDataOutput(Statement s, ContractNode contract, Set<String> seen) {
+        if (s instanceof ExpressionStatement es) return exprHasAddDataOutput(es.expression(), contract, seen);
         if (s instanceof IfStatement i) {
-            if (bodyHasAddDataOutput(i.thenBody())) return true;
-            return i.elseBody() != null && bodyHasAddDataOutput(i.elseBody());
+            if (bodyHasAddDataOutput(i.thenBody(), contract, seen)) return true;
+            return i.elseBody() != null && bodyHasAddDataOutput(i.elseBody(), contract, seen);
         }
-        if (s instanceof ForStatement f) return bodyHasAddDataOutput(f.body());
+        if (s instanceof ForStatement f) return bodyHasAddDataOutput(f.body(), contract, seen);
+        if (s instanceof ReturnStatement r && r.value() != null) {
+            return exprHasAddDataOutput(r.value(), contract, seen);
+        }
         return false;
     }
 
-    private static boolean exprHasAddDataOutput(Expression e) {
+    private static boolean exprHasAddDataOutput(Expression e, ContractNode contract, Set<String> seen) {
         if (e == null) return false;
         if (e instanceof CallExpr c) {
             if (c.callee() instanceof PropertyAccessExpr pa
@@ -1010,6 +1227,13 @@ public final class AnfLower {
                 && "this".equals(id.name())
                 && me.property().equals("addDataOutput")) {
                 return true;
+            }
+            String name = calleeName(c.callee());
+            MethodNode target = lookupPrivateMethod(contract, name);
+            if (target != null && !seen.contains(target.name())) {
+                Set<String> nextSeen = new HashSet<>(seen);
+                nextSeen.add(target.name());
+                if (bodyHasAddDataOutput(target.body(), contract, nextSeen)) return true;
             }
         }
         return false;

@@ -4632,11 +4632,56 @@ fn lower_to_stack_inner(program: &ANFProgram) -> Result<Vec<StackMethod>, String
     Ok(methods)
 }
 
-/// Check whether a method's body contains a CheckPreimage binding.
-/// If found, the unlocking script will push an implicit <sig> parameter before
-/// all declared parameters (OP_PUSH_TX pattern).
-fn method_uses_check_preimage(bindings: &[ANFBinding]) -> bool {
-    bindings.iter().any(|b| matches!(&b.value, ANFValue::CheckPreimage { .. }))
+/// Check whether a method's body contains a CheckPreimage binding,
+/// recursing through if/loop branches and into private-method bodies.
+/// If found, the unlocking script will push an implicit <sig>
+/// parameter before all declared parameters (OP_PUSH_TX pattern).
+/// Recursion is the 2026-04-30 audit finding F7 fix.
+fn method_uses_check_preimage(
+    bindings: &[ANFBinding],
+    private_methods: Option<&HashMap<String, ANFMethod>>,
+) -> bool {
+    let mut seen: HashSet<String> = HashSet::new();
+    method_uses_check_preimage_rec(bindings, private_methods, &mut seen)
+}
+
+fn method_uses_check_preimage_rec(
+    bindings: &[ANFBinding],
+    private_methods: Option<&HashMap<String, ANFMethod>>,
+    seen: &mut HashSet<String>,
+) -> bool {
+    for b in bindings {
+        match &b.value {
+            ANFValue::CheckPreimage { .. } => return true,
+            ANFValue::If { then, else_branch, .. } => {
+                if method_uses_check_preimage_rec(then, private_methods, seen) {
+                    return true;
+                }
+                if method_uses_check_preimage_rec(else_branch, private_methods, seen) {
+                    return true;
+                }
+            }
+            ANFValue::Loop { body, .. } => {
+                if method_uses_check_preimage_rec(body, private_methods, seen) {
+                    return true;
+                }
+            }
+            ANFValue::MethodCall { method, .. } => {
+                if let Some(privs) = private_methods {
+                    if let Some(target) = privs.get(method) {
+                        if !seen.contains(&target.name) {
+                            seen.insert(target.name.clone());
+                            if method_uses_check_preimage_rec(&target.body, private_methods, seen) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Check whether a method has add_output, add_raw_output, or computeStateOutput/
@@ -4664,7 +4709,7 @@ fn lower_method_with_private_methods(
     // _codePart: full code script (locking script minus state) as ByteString
     // _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
     // These are inserted at the base of the stack so they can be consumed later.
-    if method_uses_check_preimage(&method.body) {
+    if method_uses_check_preimage(&method.body, Some(private_methods)) {
         param_names.insert(0, "_opPushTxSig".to_string());
         // _codePart is needed when the method has add_output or add_raw_output
         // (it provides the code script for continuation output construction),

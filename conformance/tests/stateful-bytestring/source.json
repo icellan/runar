@@ -1,4 +1,5 @@
 {
+  "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
   "sources": {
     ".runar.ts": "../../../examples/ts/message-board/MessageBoard.runar.ts",
     ".runar.sol": "../../../examples/sol/message-board/MessageBoard.runar.sol",

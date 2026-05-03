@@ -1,0 +1,13 @@
+{
+  "sources": {
+    ".runar.ts": "../../../examples/ts/private-helper-outputs/PrivateHelperOutputs.runar.ts",
+    ".runar.sol": "../../../examples/sol/private-helper-outputs/PrivateHelperOutputs.runar.sol",
+    ".runar.move": "../../../examples/move/private-helper-outputs/PrivateHelperOutputs.runar.move",
+    ".runar.go": "../../../examples/go/private-helper-outputs/PrivateHelperOutputs.runar.go",
+    ".runar.rs": "../../../examples/rust/private-helper-outputs/PrivateHelperOutputs.runar.rs",
+    ".runar.py": "../../../examples/python/private-helper-outputs/PrivateHelperOutputs.runar.py",
+    ".runar.zig": "../../../examples/zig/private-helper-outputs/PrivateHelperOutputs.runar.zig",
+    ".runar.rb": "../../../examples/ruby/private-helper-outputs/PrivateHelperOutputs.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/private-helper-outputs/PrivateHelperOutputs.runar.java"
+  }
+}

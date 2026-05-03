@@ -599,3 +599,66 @@ test "sha256 finalize emits padding branch structure" {
     try expectContainsOp(list.items, "OP_LSHIFT");
     try expectContainsOp(list.items, "OP_RSHIFT");
 }
+
+test "sha256 compress emits all 64 round constants in little-endian" {
+    const allocator = std.testing.allocator;
+    var list: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer list.deinit(allocator);
+
+    try appendBuiltinInstructions(&list, allocator, .compress);
+
+    // Each round constant should appear at least once as a 4-byte LE
+    // push_data. We deliberately don't pin the exact ordering — the
+    // emitter is free to interleave rounds however it likes — but every
+    // K_i must be present somewhere in the emitted instruction stream.
+    for (sha256_k_le, 0..) |k_le, idx| {
+        var found = false;
+        for (list.items) |inst| {
+            switch (inst) {
+                .push_data => |bytes| if (bytes.len == 4 and std.mem.eql(u8, bytes, &k_le)) {
+                    found = true;
+                    break;
+                },
+                else => {},
+            }
+        }
+        if (!found) {
+            std.log.err("sha256 compress emitter missing round constant K_{d}", .{idx});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "sha256 compress emitter is deterministic across invocations" {
+    const allocator = std.testing.allocator;
+
+    var first: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer first.deinit(allocator);
+    try appendBuiltinInstructions(&first, allocator, .compress);
+
+    var second: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer second.deinit(allocator);
+    try appendBuiltinInstructions(&second, allocator, .compress);
+
+    try std.testing.expectEqual(first.items.len, second.items.len);
+    for (first.items, second.items) |a, b| {
+        try std.testing.expectEqualDeep(a, b);
+    }
+}
+
+test "sha256 finalize emitter is deterministic across invocations" {
+    const allocator = std.testing.allocator;
+
+    var first: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer first.deinit(allocator);
+    try appendBuiltinInstructions(&first, allocator, .finalize);
+
+    var second: std.ArrayListUnmanaged(Sha256Instruction) = .empty;
+    defer second.deinit(allocator);
+    try appendBuiltinInstructions(&second, allocator, .finalize);
+
+    try std.testing.expectEqual(first.items.len, second.items.len);
+    for (first.items, second.items) |a, b| {
+        try std.testing.expectEqualDeep(a, b);
+    }
+}

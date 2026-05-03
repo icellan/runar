@@ -4157,14 +4157,33 @@ fn anyMethodUsesCodePart(methods: []const types.ANFMethod) bool {
 }
 
 fn methodUsesCheckPreimage(bindings: []const types.ANFBinding) bool {
+    return methodUsesCheckPreimageRec(bindings, null, 0);
+}
+
+const MAX_PREIMAGE_RECURSION_DEPTH: u32 = 64;
+
+fn methodUsesCheckPreimageRec(
+    bindings: []const types.ANFBinding,
+    private_methods: ?std.StringHashMap(types.ANFMethod),
+    depth: u32,
+) bool {
+    if (depth > MAX_PREIMAGE_RECURSION_DEPTH) return false;
     for (bindings) |binding| {
         switch (binding.value) {
             .check_preimage => return true,
             .@"if" => |ie| {
-                if (methodUsesCheckPreimage(ie.then) or methodUsesCheckPreimage(ie.@"else")) return true;
+                if (methodUsesCheckPreimageRec(ie.then, private_methods, depth)) return true;
+                if (methodUsesCheckPreimageRec(ie.@"else", private_methods, depth)) return true;
             },
             .loop => |loop| {
-                if (methodUsesCheckPreimage(loop.body)) return true;
+                if (methodUsesCheckPreimageRec(loop.body, private_methods, depth)) return true;
+            },
+            .method_call => |mc| {
+                if (private_methods) |privs| {
+                    if (privs.get(mc.method)) |target| {
+                        if (methodUsesCheckPreimageRec(target.body, private_methods, depth + 1)) return true;
+                    }
+                }
             },
             else => {},
         }

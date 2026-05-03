@@ -1019,10 +1019,17 @@ fn emit_slh_fors(emit: &mut dyn FnMut(StackOp), p: &SLHCodegenParams) {
         emit(StackOp::Opcode("OP_NUM2BIN".into()));
         emit(StackOp::Opcode("OP_CAT".into()));
         emit(StackOp::Opcode("OP_BIN2NUM".into()));
-        let total_bits = take * 8;
-        let right_shift = total_bits - bit_offset - a;
+        // NOTE: `right_shift` can legitimately be zero or negative — when
+        // `bit_offset + a > take * 8`, the upcoming OP_MOD masks off the
+        // unwanted high bits and no division is required. Computing this in
+        // `usize` underflows (panics in debug, wraps in release) for FIPS 205
+        // parameter sets where `a` is 12+ and `bit_offset` is large
+        // (notably SHA2_192s/SHA2_256s at i=1). Match the TS/Go reference,
+        // which use signed arithmetic and gate the emit on `> 0`.
+        let total_bits: i64 = (take as i64) * 8;
+        let right_shift: i64 = total_bits - (bit_offset as i64) - (a as i64);
         if right_shift > 0 {
-            emit(StackOp::Push(PushValue::Int((1i128 << right_shift) as i128)));
+            emit(StackOp::Push(PushValue::Int(1i128 << right_shift)));
             emit(StackOp::Opcode("OP_DIV".into()));
         }
         // Use OP_MOD instead of OP_AND to avoid byte-length mismatch

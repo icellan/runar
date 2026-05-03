@@ -299,7 +299,10 @@ interface CompilerOutput {
 function runGoCompiler(irFilePath: string): CompilerOutput {
   try {
     const result = execSync(
-      `go run . --ir "${irFilePath}" --hex`,
+      // --disable-constant-folding mirrors the TS-side option used to
+      // generate the IR; without this Go re-applies folding to the
+      // already-folded ANF and produces bytes inconsistent with TS.
+      `go run . --ir "${irFilePath}" --hex --disable-constant-folding`,
       {
         cwd: GO_COMPILER_DIR,
         timeout: 30000,
@@ -322,7 +325,7 @@ function runRustCompiler(irFilePath: string): CompilerOutput {
   if (!rustBinaryPath) return { hex: null, stderr: 'Rust binary not available' };
   try {
     const result = execSync(
-      `"${rustBinaryPath}" --ir "${irFilePath}" --hex`,
+      `"${rustBinaryPath}" --ir "${irFilePath}" --hex --disable-constant-folding`,
       {
         cwd: RUST_COMPILER_DIR,
         timeout: 30000,
@@ -347,7 +350,7 @@ function runRustCompiler(irFilePath: string): CompilerOutput {
 function runPythonCompiler(irFilePath: string): CompilerOutput {
   try {
     const result = execSync(
-      `python3 -m runar_compiler --ir "${irFilePath}" --hex`,
+      `python3 -m runar_compiler --ir "${irFilePath}" --hex --disable-constant-folding`,
       {
         cwd: PYTHON_COMPILER_DIR,
         timeout: 60_000,

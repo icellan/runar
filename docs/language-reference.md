@@ -191,7 +191,7 @@ private square(x: bigint): bigint {
 | `SigHashPreimage` | variable | Transaction sighash preimage for OP_PUSH_TX |
 | `Point` | 64 | secp256k1 elliptic curve point (x[32] \|\| y[32], big-endian) |
 
-All domain types (`PubKey`, `Sig`, `Point`, etc.) are subtypes of `ByteString`. A domain type value can be used wherever a `ByteString` is expected (widening), but not the reverse (narrowing requires an explicit cast function).
+All domain types (`PubKey`, `Sig`, `Point`, etc.) are representational subtypes of `ByteString` — they share the same runtime encoding as raw bytes and exist for documentation and readability, not for compile-time size enforcement. The type checker accepts assignment in both directions: a domain type value can be widened to `ByteString`, and a `ByteString` value can be passed where a domain type is expected. Cross-subtype assignment within the `ByteString` family is also accepted (e.g., `Ripemd160` assignable to `Addr`). Developers are responsible for any required length or domain checks at runtime — for example `assert(len(pk) === 33n)` for a `PubKey`, or `assert(len(addr) === 20n)` for an `Addr`. See `spec/type-system.md` §2.2 for the full subtyping rule.
 
 ### Rabin Types
 

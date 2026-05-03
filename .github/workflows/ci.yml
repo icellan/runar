@@ -123,7 +123,16 @@ jobs:
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
-      - name: Ruby compiler conformance (IR → hex)
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install Ruby compiler dependencies
+        run: cd compilers/ruby && bundle install
+      - name: Ruby compiler unit tests
+        run: cd compilers/ruby && rake test
+      - name: Ruby compiler conformance (IR -> hex)
         run: |
           fail=0
           for test in conformance/tests/*/expected-ir.json; do
@@ -139,40 +148,13 @@ jobs:
             fi
           done
           exit $fail
-      - name: Ruby compiler source conformance (.runar.ts → hex)
-        run: |
-          fail=0
-          for dir in conformance/tests/*/; do
-            name=$(basename "$dir")
-            ts_file="$dir/$name.runar.ts"
-            [ -f "$ts_file" ] || continue
-            expected=$(tr -d '[:space:]' < "$dir/expected-script.hex" | tr '[:upper:]' '[:lower:]')
-            actual=$(ruby compilers/ruby/bin/runar-compiler-ruby --source "$ts_file" --hex --disable-constant-folding 2>&1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-            if [ "$expected" = "$actual" ]; then
-              echo "PASS $name (.runar.ts)"
-            else
-              echo "FAIL $name (.runar.ts)"
-              fail=1
-            fi
-          done
-          exit $fail
-      - name: Ruby compiler source conformance (.runar.rb → hex)
-        run: |
-          fail=0
-          for dir in conformance/tests/*/; do
-            name=$(basename "$dir")
-            rb_file=$(find "$dir" -name "*.runar.rb" | head -1)
-            [ -n "$rb_file" ] || continue
-            expected=$(tr -d '[:space:]' < "$dir/expected-script.hex" | tr '[:upper:]' '[:lower:]')
-            actual=$(ruby compilers/ruby/bin/runar-compiler-ruby --source "$rb_file" --hex --disable-constant-folding 2>&1 | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-            if [ "$expected" = "$actual" ]; then
-              echo "PASS $name (.runar.rb)"
-            else
-              echo "FAIL $name (.runar.rb)"
-              fail=1
-            fi
-          done
-          exit $fail
+      - name: Multi-format source conformance (covers Ruby + all 7 compilers via source.json)
+        # Replaces the previous shell loops that searched for in-directory
+        # `<case>.runar.ts` / `<case>.runar.rb` files. Sources now live under
+        # `examples/`, referenced from each case's `source.json`. The shared
+        # runner reads source.json directly, drives every available compiler,
+        # and compares each one against the golden hex.
+        run: pnpm install --frozen-lockfile && npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
 
   # ---------------------------------------------------------------------------
   # SDKs — package tests + example tests
@@ -346,29 +328,33 @@ jobs:
             fi
           done
           exit $fail
-      - name: Ruby format conformance (source → hex)
-        run: |
-          fail=0
-          for dir in conformance/tests/*/; do
-            name=$(basename "$dir")
-            rb_file="$dir/$name.runar.rb"
-            [ -f "$rb_file" ] || continue
-            expected_file="$dir/expected-script.hex"
-            [ -f "$expected_file" ] || continue
-            expected=$(tr -d '[:space:]' < "$expected_file" | tr '[:upper:]' '[:lower:]')
-            go_hex=$(./runar-go --source "$rb_file" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-            rust_hex=$(./runar-compiler-rust --source "$rb_file" --hex --disable-constant-folding 2>/dev/null | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-            if [ "$go_hex" != "$rust_hex" ]; then
-              echo "MISMATCH $name: Go vs Rust differ"
-              fail=1
-            elif [ "$go_hex" != "$expected" ]; then
-              echo "MISMATCH $name: output differs from golden file"
-              fail=1
-            else
-              echo "OK $name (.runar.rb)"
-            fi
-          done
-          exit $fail
+      # The previous "Ruby format conformance (source -> hex)" step searched for
+      # `<case>.runar.rb` files inside each conformance/tests/<case>/ directory,
+      # but sources now live under `examples/` and are referenced from
+      # `source.json`. The shell loop was a silent no-op. The shared multi-format
+      # runner below subsumes it: it reads every source.json entry (TS, Sol,
+      # Move, Go, Rust, Python, Zig, Ruby, Java) and drives all 7 compilers.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache-dependency-path: compilers/go/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
+        # Adds the TypeScript compiler to the central conformance job (it was
+        # previously absent) and exercises every compiler's frontend against
+        # every declared source.json entry, not just the IR -> hex path above.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
 
   runar-verification:
     name: Runar Verification (Lean 4)
@@ -451,7 +437,7 @@ jobs:
         run: cd conformance/sdk-output/tools/zig-sdk-tool && zig build -Doptimize=ReleaseFast
       - name: Build Java SDK driver
         run: cd conformance/sdk-output/tools/java-driver && gradle fatJar --no-daemon
-      - name: Run SDK output conformance (39 contracts x 7 SDKs)
+      - name: Run SDK output conformance (all contracts x 7 SDKs)
         run: cd conformance/sdk-output && npx tsx runner/sdk-runner.ts
 
   # ---------------------------------------------------------------------------
@@ -557,11 +543,11 @@ jobs:
         run: cd integration/java && gradle test -Drunar.integration=true --no-daemon
         timeout-minutes: 35
 
-      - name: Ruby end-to-end example tests
-        run: |
-          cd examples/end2end-example/ruby
-          bundle install
-          bundle exec rspec price_bet_spec.rb --format documentation
+      - name: Install end-to-end Ruby deps
+        run: cd examples/end2end-example/ruby && bundle install
+
+      - name: All end-to-end PriceBet examples
+        run: pnpm run e2e:all
 
       - name: Stop regtest node
         if: always()

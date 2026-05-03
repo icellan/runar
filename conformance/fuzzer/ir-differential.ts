@@ -83,11 +83,14 @@ const NATIVE_RENDERERS: Record<CompilerName, { ext: string; render: (c: Generate
 };
 
 /**
- * The Java compiler (compilers/java/) parses only `.runar.java` today — the
- * cross-language .runar.java parsers land in milestone 7. In the shared-TS
- * render strategy the generator emits a single .runar.ts that every compiler
- * parses, which Java cannot consume. Force Java onto its own rendered source
- * regardless of strategy so it always gets valid Java.
+ * The Java compiler parses all 9 .runar.* formats (TS, Sol, Move, Go, Rust,
+ * Python, Zig, Ruby, Java) just like the other 6 compilers. We could in
+ * principle feed it the shared .runar.ts source under the 'ts' render
+ * strategy, but routing Java through `renderJava` is simpler and more
+ * reliable: the dedicated Java renderer produces .runar.java that exercises
+ * the Java frontend's primary path and avoids any TS-parser quirks specific
+ * to the Java tier. So Java always gets its own rendered source regardless
+ * of the chosen strategy.
  */
 function renderForCompiler(
   compiler: CompilerName,

@@ -963,6 +963,52 @@ describe('Pass 4: ANF Lower', () => {
       const preimageParam = method.params.find(p => p.name === 'txPreimage');
       expect(preimageParam).toBeUndefined();
     });
+
+    // -----------------------------------------------------------------------
+    // BUG: conditional addDataOutput must NOT route through multi-output path.
+    //
+    // A stateful method that mutates state and emits a data output ONLY on a
+    // branch must keep the canonical single-output `computeStateOutput` state
+    // continuation on every path. The pre-fix lowering registered the
+    // conditional branch's if-expression value as `addOutputRef` (a STATE
+    // output), which forced the multi-output path and dropped
+    // `computeStateOutput` entirely — yielding an incorrect continuation hash.
+    // -----------------------------------------------------------------------
+    it('keeps single-output computeStateOutput when addDataOutput is in a branch', () => {
+      const source = `
+        class Foo extends StatefulSmartContract {
+          amount: bigint;
+          constructor(amount: bigint) {
+            super(amount);
+            this.amount = amount;
+          }
+          public pay(flag: boolean, payload: ByteString) {
+            this.amount = this.amount + 1n;
+            if (flag) {
+              this.addDataOutput(0n, payload);
+            }
+          }
+        }
+      `;
+      const program = lowerSource(source);
+      const method = findMethod(program, 'pay');
+
+      // No state addOutput at all — the branch contains only addDataOutput.
+      expect(bindingsOfKind(method.body, 'add_output')).toHaveLength(0);
+
+      // The single-output state continuation must still be emitted at the
+      // top level (outside the if). Without the fix, the multi-output path
+      // is taken and `computeStateOutput` is missing entirely.
+      const calls = bindingsOfKind(method.body, 'call');
+      const computeStateOutput = calls.find(
+        b => (b.value as { func: string }).func === 'computeStateOutput',
+      );
+      expect(computeStateOutput).toBeDefined();
+
+      // _newAmount must remain in the params list (single-output path).
+      const newAmountParam = method.params.find(p => p.name === '_newAmount');
+      expect(newAmountParam).toBeDefined();
+    });
   });
 
   // ---------------------------------------------------------------------------

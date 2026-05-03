@@ -314,7 +314,13 @@ class _TypeChecker:
         self.errors: list[Diagnostic] = []
         self.prop_types: dict[str, str] = {}
         self.method_sigs: dict[str, FuncSig] = {}
+        # Origin keys of affine values consumed in the current scope.
+        # 2026-04-30 audit finding F6.
         self.consumed_values: dict[str, bool] = {}
+        # Maps a local variable name to the canonical affine origin
+        # it aliases. Populated when a VariableDeclStmt of affine
+        # type is initialized from another affine origin.
+        self.affine_aliases: dict[str, str] = {}
         self._current_method_loc: SourceLocation | None = None
         self._current_stmt_loc: SourceLocation | None = None
 
@@ -345,6 +351,7 @@ class _TypeChecker:
 
         # Reset affine tracking
         self.consumed_values = {}
+        self.affine_aliases = {}
 
         for param in ctor.params:
             env.define(param.name, _type_node_to_string(param.type))
@@ -361,6 +368,7 @@ class _TypeChecker:
 
         # Reset affine tracking
         self.consumed_values = {}
+        self.affine_aliases = {}
 
         for param in method.params:
             env.define(param.name, _type_node_to_string(param.type))
@@ -387,8 +395,18 @@ class _TypeChecker:
                         f"type '{init_type}' is not assignable to type '{declared_type}'"
                     )
                 env.define(stmt.name, declared_type)
+                decl_type = declared_type
             else:
                 env.define(stmt.name, init_type)
+                decl_type = init_type
+            # Record affine alias when the new local is affine-typed
+            # and its initializer is itself an affine origin
+            # (parameter or contract property). 2026-04-30 audit
+            # finding F6.
+            if decl_type in _AFFINE_TYPES and stmt.init is not None:
+                origin = self._affine_origin_of_expr(stmt.init)
+                if origin is not None:
+                    self.affine_aliases[stmt.name] = origin
 
         elif isinstance(stmt, AssignmentStmt):
             target_type = self._infer_expr_type(stmt.target, env)
@@ -780,12 +798,21 @@ class _TypeChecker:
                 self._infer_expr_type(args[1], env)
             return sig.return_type
 
-        # checkMultiSig special case
+        # checkMultiSig special case (Sig[] / PubKey[] arrays). Only
+        # arity is special; arg-type validation falls through to the
+        # standard subtype loop below so callers cannot pass
+        # bigint[] or other element types. 2026-04-30 audit finding
+        # F5.
         if func_name == "checkMultiSig":
-            for arg in args:
-                self._infer_expr_type(arg, env)
-            self._check_affine_consumption(func_name, args, env)
-            return sig.return_type
+            if len(args) != 2:
+                self._add_error(
+                    f"checkMultiSig() expects 2 arguments, got {len(args)}"
+                )
+                for arg in args:
+                    self._infer_expr_type(arg, env)
+                self._check_affine_consumption(func_name, args, env)
+                return sig.return_type
+            # Fall through to the standard subtype check below.
 
         # Standard arg count check
         if len(args) != len(sig.params):
@@ -822,6 +849,10 @@ class _TypeChecker:
         args: list[Expression],
         env: _TypeEnv,
     ) -> None:
+        """Track consumption by *origin*, not variable name, so aliases
+        (`const again = sig`) and property accesses (`this.sig`) cannot
+        launder a double-consumption past the affine check.
+        2026-04-30 audit finding F6."""
         consumed_indices = _CONSUMING_FUNCTIONS.get(func_name)
         if consumed_indices is None:
             return
@@ -831,19 +862,47 @@ class _TypeChecker:
                 continue
 
             arg = args[param_index]
-            if not isinstance(arg, Identifier):
+            arg_type = self._affine_expr_type(arg, env)
+            if arg_type is None or arg_type not in _AFFINE_TYPES:
                 continue
 
-            arg_type, found = env.lookup(arg.name)
-            if not found or arg_type not in _AFFINE_TYPES:
+            origin = self._affine_origin_of_expr(arg)
+            if origin is None:
                 continue
 
-            if self.consumed_values.get(arg.name, False):
+            # Render a short label (source-form) for the diagnostic.
+            if isinstance(arg, Identifier):
+                label = arg.name
+            elif isinstance(arg, PropertyAccessExpr):
+                label = f"this.{arg.property}"
+            else:
+                label = origin
+
+            if self.consumed_values.get(origin, False):
                 self._add_error(
-                    f"affine value '{arg.name}' has already been consumed"
+                    f"affine value '{label}' has already been consumed"
                 )
             else:
-                self.consumed_values[arg.name] = True
+                self.consumed_values[origin] = True
+
+    def _affine_origin_of_expr(self, expr: Expression) -> str | None:
+        """Resolve the canonical affine origin for an expression.
+        Identifiers consult the alias map; property accesses use a
+        ``prop:<name>`` namespace."""
+        if isinstance(expr, Identifier):
+            return self.affine_aliases.get(expr.name, expr.name)
+        if isinstance(expr, PropertyAccessExpr):
+            return f"prop:{expr.property}"
+        return None
+
+    def _affine_expr_type(self, expr: Expression, env: _TypeEnv) -> str | None:
+        """Look up the type of an expression for affine purposes."""
+        if isinstance(expr, Identifier):
+            arg_type, found = env.lookup(expr.name)
+            return arg_type if found else None
+        if isinstance(expr, PropertyAccessExpr):
+            return self.prop_types.get(expr.property)
+        return None
 
 
 # ---------------------------------------------------------------------------

@@ -759,6 +759,11 @@ func sha256Sum(data []byte) []byte {
 
 // CompileWithTSCompiler compiles a source string using the TypeScript compiler
 // via the Node CLI. Returns the raw artifact JSON bytes.
+//
+// Performance note: invokes `node --import <tsx-loader-url>` directly
+// instead of `npx tsx ...`. The latter pays ~50-200ms of package-manager
+// resolution per call which dominates short-test wall time when run in a
+// loop.
 func CompileWithTSCompiler(source, fileName string) ([]byte, error) {
 	// Write source to temp file
 	tmpDir, err := os.MkdirTemp("", "runar-ts-compile-*")
@@ -777,9 +782,10 @@ func CompileWithTSCompiler(source, fileName string) ([]byte, error) {
 
 	// Run TS compiler
 	root := projectRoot()
-	cmd := fmt.Sprintf("npx tsx %s/packages/runar-cli/src/bin.ts compile %s -o %s",
-		root, srcPath, outDir)
-	out, err := runCmd(cmd, root, 30*time.Second)
+	tsxLoader := resolveTsxLoader(root)
+	cmd := fmt.Sprintf("node --import %s %s/packages/runar-cli/src/bin.ts compile %s -o %s",
+		tsxLoader, root, srcPath, outDir)
+	out, err := runCmd(cmd, root, 60*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("TS compile: %s: %w", out, err)
 	}
@@ -788,6 +794,23 @@ func CompileWithTSCompiler(source, fileName string) ([]byte, error) {
 	baseName := fileName[:len(fileName)-3] // strip .ts
 	artifactPath := filepath.Join(outDir, baseName+".json")
 	return os.ReadFile(artifactPath)
+}
+
+// resolveTsxLoader returns a `file://` URL pointing at tsx's loader.mjs,
+// suitable for `node --import <url>`. Falls back to the literal "tsx" if no
+// loader is found (Node will then resolve via the cwd's node_modules).
+func resolveTsxLoader(root string) string {
+	candidates := []string{
+		filepath.Join(root, "conformance/node_modules/tsx/dist/loader.mjs"),
+		filepath.Join(root, "node_modules/tsx/dist/loader.mjs"),
+		filepath.Join(root, "integration/ts/node_modules/tsx/dist/loader.mjs"),
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return "file://" + p
+		}
+	}
+	return "tsx"
 }
 
 func runCmd(cmdStr, dir string, timeout time.Duration) (string, error) {

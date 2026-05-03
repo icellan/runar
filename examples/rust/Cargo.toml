@@ -194,6 +194,10 @@ name = "add_data_output"
 path = "add-data-output/DataOutputTest_test.rs"
 
 [[test]]
+name = "private_helper_outputs"
+path = "private-helper-outputs/PrivateHelperOutputs_test.rs"
+
+[[test]]
 name = "ec_primitives"
 path = "ec-primitives/ECPrimitives_test.rs"
 

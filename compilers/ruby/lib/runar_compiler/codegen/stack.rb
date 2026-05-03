@@ -359,10 +359,36 @@ module RunarCompiler::Codegen
   # Method analysis helpers
   # -----------------------------------------------------------------------
 
+  # Recursively check whether `bindings` (and any private method bodies
+  # they call, transitively) contain a check_preimage. 2026-04-30
+  # audit finding F7: previous shallow scan missed manual
+  # checkPreimage calls inside if/loop bodies and private helpers,
+  # causing stack lowering to fail.
+  #
   # @param bindings [Array<IR::ANFBinding>]
+  # @param private_methods [Hash{String => IR::ANFMethod}, nil]
+  # @param seen [Set<String>] private methods currently on the recursion stack
   # @return [Boolean]
-  def self.method_uses_check_preimage?(bindings)
-    bindings.any? { |b| b.value.kind == "check_preimage" }
+  def self.method_uses_check_preimage?(bindings, private_methods = nil, seen = nil)
+    seen ||= [].to_set
+    bindings.each do |b|
+      return true if b.value.kind == "check_preimage"
+      if b.value.kind == "if"
+        return true if method_uses_check_preimage?(b.value.then, private_methods, seen)
+        return true if b.value.else_ && method_uses_check_preimage?(b.value.else_, private_methods, seen)
+      end
+      if b.value.kind == "loop"
+        return true if method_uses_check_preimage?(b.value.body, private_methods, seen)
+      end
+      if b.value.kind == "method_call" && private_methods
+        target = private_methods[b.value.method]
+        if target && !seen.include?(target.name)
+          new_seen = seen.dup.add(target.name)
+          return true if method_uses_check_preimage?(target.body, private_methods, new_seen)
+        end
+      end
+    end
+    false
   end
 
   # Check whether a method has add_output, add_raw_output, add_data_output,
@@ -3423,7 +3449,7 @@ module RunarCompiler::Codegen
 
     # If the method uses checkPreimage, the unlocking script pushes implicit
     # params before all declared parameters (OP_PUSH_TX pattern).
-    if method_uses_check_preimage?(method.body)
+    if method_uses_check_preimage?(method.body, private_methods)
       param_names = ["_opPushTxSig"] + param_names
       # _codePart is needed when the method has add_output or add_raw_output
       if method_uses_code_part?(method.body)

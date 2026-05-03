@@ -31,6 +31,9 @@ import type {
   BinOp,
   ANFUnaryOp,
 } from '../ir/index.js';
+import { computeSideEffectSummary, continuationShape } from './side-effect-summary.js';
+import type { SideEffectSummary } from './side-effect-summary.js';
+import type { MethodNode } from '../ir/runar-ast.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -104,8 +107,13 @@ function extractLiteralValue(expr: Expression): string | bigint | boolean | unde
 function lowerMethods(contract: ContractNode): ANFMethod[] {
   const result: ANFMethod[] = [];
 
+  // Single source of truth for "does this method (transitively) mutate
+  // state, emit outputs, or use the preimage?" Shared with the artifact
+  // assembler so ABI declarations cannot drift from ANF auto-injection.
+  const sideEffects = computeSideEffectSummary(contract);
+
   // Lower constructor
-  const ctorCtx = new LoweringContext(contract);
+  const ctorCtx = new LoweringContext(contract, sideEffects);
   lowerStatements(contract.constructor.body, ctorCtx);
   result.push({
     name: 'constructor',
@@ -116,14 +124,17 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
 
   // Lower each method
   for (const method of contract.methods) {
-    const methodCtx = new LoweringContext(contract);
+    const methodCtx = new LoweringContext(contract, sideEffects);
 
     if (contract.parentClass === 'StatefulSmartContract' && method.visibility === 'public') {
-      // Determine if this method verifies hashOutputs (needs change output support).
-      // Methods that use addOutput/addDataOutput or mutate state need hashOutputs
-      // verification. Non-mutating methods (like close/destroy) don't verify outputs.
-      const hasDataOutput = methodHasAddDataOutput(method);
-      const needsChangeOutput = methodMutatesState(method, contract) || methodHasAddOutput(method) || hasDataOutput;
+      // Continuation requirements come from the side-effect summary,
+      // which walks the private-method call graph. A public method that
+      // calls a private helper which mutates state or emits an output
+      // must therefore inject the same continuation params as if the
+      // public body did so directly.
+      const effects = sideEffects.get(method.name) ?? { mutatesState: false, hasStateOutput: false, hasDataOutput: false, usesPreimage: false };
+      const shape = continuationShape(effects);
+      const needsChangeOutput = shape.needsChange;
 
       // Register implicit parameters
       if (needsChangeOutput) {
@@ -134,8 +145,7 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // Multi-output (addOutput) methods already specify amounts explicitly per output.
       // Methods that emit only data outputs (no addOutput) still run the single-output
       // continuation path for their state continuation, so they also need _newAmount.
-      const needsNewAmount =
-        (methodMutatesState(method, contract) || hasDataOutput) && !methodHasAddOutput(method);
+      const needsNewAmount = shape.needsNewAmount;
       if (needsNewAmount) {
         methodCtx.addParam('_newAmount');
       }
@@ -181,7 +191,23 @@ function lowerMethods(contract: ContractNode): ANFMethod[] {
       // single-output path applies (no data-output insertion needed).
       const addOutputRefs = methodCtx.getAddOutputRefs();
       const addDataOutputRefs = methodCtx.getAddDataOutputRefs();
-      if (addOutputRefs.length > 0 || addDataOutputRefs.length > 0 || methodMutatesState(method, contract)) {
+      // Gate the continuation assertion on the same shape used for
+      // param injection. Both must agree or the deployed locking
+      // script will not match the ABI's declared parameter list.
+      //
+      // KNOWN GAP: when `effects.hasStateOutput` or
+      // `effects.hasDataOutput` is true via a private method only,
+      // the local `addOutputRefs`/`addDataOutputRefs` lists do not
+      // see those refs (private bodies are inlined later, in stack
+      // lowering, so their `add_output` ANF nodes never bubble up to
+      // this context). The continuation hash will then concatenate
+      // fewer outputs than the runtime transaction actually contains
+      // and the spend will fail on chain. Fixing this requires
+      // either inlining private method bodies at ANF time or moving
+      // continuation-hash construction past stack lowering. Left as
+      // a follow-up audit finding because the audit's F1 expectation
+      // is limited to param injection and continuation presence.
+      if (needsChangeOutput) {
         // Build the P2PKH change output for hashOutputs verification
         const changePKHRef = methodCtx.emit({ kind: 'load_param', name: '_changePKH' });
         const changeAmountRef = methodCtx.emit({ kind: 'load_param', name: '_changeAmount' });
@@ -283,11 +309,29 @@ class LoweringContext {
   /** Maps local variable names to their current ANF binding name.
    *  Updated after if-statements that reassign locals in both branches. */
   private readonly localAliases: Map<string, string> = new Map();
+  /**
+   * Param substitution stack used when inlining a private method's body
+   * directly into this context. Entry on top is the active alias for
+   * the named param. When the inlined body references that param, the
+   * lowered identifier resolves to the aliased ref instead of emitting
+   * a `load_param`. Stacked so nested inlines compose correctly.
+   */
+  private readonly paramAliasStack: Map<string, string[]> = new Map();
+  /**
+   * Side-effect summary shared with the assembler. Used at lowering time
+   * to decide whether a `this.privateHelper(...)` call should inline its
+   * body into the caller's context (so that the helper's
+   * `add_output`/`add_data_output` ANF nodes register output refs on the
+   * caller's continuation hash) or remain a `method_call` for stack
+   * lowering to inline later.
+   */
+  private readonly sideEffects: SideEffectSummary | null;
   /** Debug: source location to attach to emitted ANF bindings. */
   currentSourceLoc: { file: string; line: number; column: number } | undefined;
 
-  constructor(contract: ContractNode) {
+  constructor(contract: ContractNode, sideEffects: SideEffectSummary | null = null) {
     this.contract = contract;
+    this.sideEffects = sideEffects;
   }
 
   /** Generate a fresh temporary name. */
@@ -356,6 +400,64 @@ class LoweringContext {
   /** Check if name matches a private method on the contract. */
   isPrivateMethod(name: string): boolean {
     return this.contract.methods.some(m => m.name === name && m.visibility === 'private');
+  }
+
+  /** Look up a private method by name. */
+  getPrivateMethod(name: string): MethodNode | undefined {
+    return this.contract.methods.find(m => m.name === name && m.visibility === 'private');
+  }
+
+  /**
+   * Whether a call to `name` should be ANF-inlined rather than emitted
+   * as a `method_call`. True iff `name` is a private method that
+   * (transitively) emits state outputs (`addOutput` / `addRawOutput`)
+   * or data outputs (`addDataOutput`). Those refs MUST appear in the
+   * caller's binding stream so they participate in the continuation
+   * hash; without ANF-level inlining they would live in a sibling
+   * ANF method and the public method's continuation hash would miss
+   * them.
+   *
+   * Mutation-only private helpers (no output intrinsics) are
+   * intentionally NOT inlined here — state mutation flows through
+   * state continuity (the continuation hash reads state via
+   * `get_state_script` after all mutations apply), not through
+   * output refs. Keeping the existing `method_call` + stack-lowering
+   * inlining path for those preserves byte-equality with the
+   * pre-fix corpus on contracts that mix state-mutating helpers
+   * with public methods that already mutate state directly (e.g.
+   * TicTacToe).
+   */
+  shouldInlinePrivate(name: string): boolean {
+    if (!this.sideEffects) return false;
+    const method = this.getPrivateMethod(name);
+    if (!method) return false;
+    const effects = this.sideEffects.get(name);
+    if (!effects) return false;
+    return effects.hasStateOutput || effects.hasDataOutput;
+  }
+
+  /**
+   * Push a param alias frame. Subsequent identifier lookups for `name`
+   * will resolve to `aliasRef` until the matching pop. Stacked so
+   * nested inlines compose: pop returns the previous frame.
+   */
+  pushParamAlias(name: string, aliasRef: string): void {
+    const stack = this.paramAliasStack.get(name) ?? [];
+    stack.push(aliasRef);
+    this.paramAliasStack.set(name, stack);
+  }
+
+  popParamAlias(name: string): void {
+    const stack = this.paramAliasStack.get(name);
+    if (!stack || stack.length === 0) return;
+    stack.pop();
+    if (stack.length === 0) this.paramAliasStack.delete(name);
+  }
+
+  getParamAlias(name: string): string | undefined {
+    const stack = this.paramAliasStack.get(name);
+    if (!stack || stack.length === 0) return undefined;
+    return stack[stack.length - 1];
   }
 
   /** Track an addOutput binding ref for multi-output continuation. */
@@ -560,6 +662,34 @@ function lowerIfStatement(
   }
   ctx.syncCounter(elseCtx);
 
+  // 2026-04-30 audit finding F2: when a branch contains output
+  // intrinsics (addOutput / addRawOutput / addDataOutput), the
+  // current implementation registered a single `ifName` as the
+  // parent's addOutputRef regardless of how many outputs each branch
+  // produced. That collapsed cardinality and ordering, and for
+  // branches that mixed kinds it left the runtime stack
+  // unbalanced (different number of bindings between then and
+  // else). The fix: at the END of each branch with output refs,
+  // append a cat-chain that concatenates that branch's outputs
+  // (state then data, in declaration order) into a single
+  // bytes-ref. Each branch then leaves exactly one item on the
+  // stack — the concat — and the if-expression's value is the
+  // concat of whichever branch ran. The parent's continuation hash
+  // sees a single addOutputRef whose runtime value already contains
+  // the correctly-ordered output bytes for the chosen branch.
+  const thenOutputRefs = thenCtx.getAddOutputRefs();
+  const elseOutputRefs = elseCtx.getAddOutputRefs();
+  const thenDataRefs = thenCtx.getAddDataOutputRefs();
+  const elseDataRefs = elseCtx.getAddDataOutputRefs();
+  const branchHasOutputs =
+    thenOutputRefs.length > 0 || elseOutputRefs.length > 0
+    || thenDataRefs.length > 0 || elseDataRefs.length > 0;
+
+  if (branchHasOutputs) {
+    appendBranchOutputConcat(thenCtx);
+    appendBranchOutputConcat(elseCtx);
+  }
+
   const ifName = ctx.emit({
     kind: 'if',
     cond: condRef,
@@ -567,19 +697,31 @@ function lowerIfStatement(
     else: elseCtx.bindings,
   });
 
-  // Propagate addOutput refs from sub-contexts: when both branches produce
-  // the same number of addOutput calls, the if-expression result represents
-  // each addOutput (only one branch executes at runtime).
-  const thenOutputRefs = thenCtx.getAddOutputRefs();
-  const elseOutputRefs = elseCtx.getAddOutputRefs();
-  if (thenOutputRefs.length > 0 || elseOutputRefs.length > 0) {
-    // Use the if-expression result as the addOutput ref since only one branch executes
-    ctx.addOutputRef(ifName);
-  }
-  const thenDataRefs = thenCtx.getAddDataOutputRefs();
-  const elseDataRefs = elseCtx.getAddDataOutputRefs();
-  if (thenDataRefs.length > 0 || elseDataRefs.length > 0) {
-    ctx.addDataOutputRef(ifName);
+  if (branchHasOutputs) {
+    // Register the if's value once with the parent's continuation
+    // tracker. Both state and data bytes from the chosen branch are
+    // already concatenated into this single ref in declaration order.
+    //
+    // CRITICAL: pick the right tracker. If either branch produces a
+    // STATE output (addOutput / addRawOutput), the parent must take
+    // the multi-output continuation path, so we register as a state
+    // output ref. If neither branch produces a state output and at
+    // least one branch produces a data output, we register as a DATA
+    // output ref so the parent keeps its single-output
+    // `computeStateOutput` continuation and the data-output bytes
+    // splice in BETWEEN the state output and the change output.
+    //
+    // Without this distinction, a stateful method whose branch
+    // contains only `addDataOutput` was forced onto the multi-output
+    // path — silently dropping the canonical state continuation and
+    // producing an incorrect hashOutputs commitment.
+    const branchHasStateOutput =
+      thenOutputRefs.length > 0 || elseOutputRefs.length > 0;
+    if (branchHasStateOutput) {
+      ctx.addOutputRef(ifName);
+    } else {
+      ctx.addDataOutputRef(ifName);
+    }
   }
 
   // If both branches end by reassigning the same local variable,
@@ -592,6 +734,34 @@ function lowerIfStatement(
       ctx.isLocal(thenLast.name)) {
     ctx.setLocalAlias(thenLast.name, ifName);
   }
+}
+
+/**
+ * Concatenate a branch's collected output refs (state then data, in
+ * declaration order) into a single bytes-ref appended to the
+ * branch's bindings. If the branch has no outputs, emits an empty
+ * `load_const` so the branch still leaves one item on the stack —
+ * required to balance the if's branch shapes.
+ *
+ * Returns the name of the resulting binding (always a binding in
+ * `branchCtx.bindings`).
+ */
+function appendBranchOutputConcat(branchCtx: LoweringContext): string {
+  const allRefs = [
+    ...branchCtx.getAddOutputRefs(),
+    ...branchCtx.getAddDataOutputRefs(),
+  ];
+  if (allRefs.length === 0) {
+    return branchCtx.emit({ kind: 'load_const', value: '' });
+  }
+  if (allRefs.length === 1) {
+    return allRefs[0]!;
+  }
+  let accumulated = allRefs[0]!;
+  for (let i = 1; i < allRefs.length; i++) {
+    accumulated = branchCtx.emit({ kind: 'call', func: 'cat', args: [accumulated, allRefs[i]!] });
+  }
+  return accumulated;
 }
 
 function lowerForStatement(
@@ -759,6 +929,14 @@ function lowerIdentifier(
   // 'this' is not a value in ANF -- it's handled at the member level
   if (name === 'this') {
     return ctx.emit({ kind: 'load_const', value: '@this' });
+  }
+
+  // Param alias takes precedence over normal param lookup. Set when a
+  // private method's body is being inlined into this context — the
+  // private's param names map to the caller's arg refs.
+  const aliased = ctx.getParamAlias(name);
+  if (aliased !== undefined) {
+    return aliased;
   }
 
   // Check if it's a parameter
@@ -970,9 +1148,13 @@ function lowerCallExpr(
     return ctx.emit({ kind: 'get_state_script' });
   }
 
-  // this.method(...) -> method_call
+  // this.method(...) -> method_call (or inlined if the target is a
+  // private method with continuation-relevant side effects).
   if (callee.kind === 'property_access') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    if (ctx.shouldInlinePrivate(callee.property)) {
+      return inlinePrivateMethodCall(callee.property, argRefs, ctx);
+    }
     return ctx.emit({
       kind: 'method_call',
       object: ctx.emit({ kind: 'load_const', value: '@this' }),
@@ -984,6 +1166,9 @@ function lowerCallExpr(
       callee.object.kind === 'identifier' &&
       callee.object.name === 'this') {
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
+    if (ctx.shouldInlinePrivate(callee.property)) {
+      return inlinePrivateMethodCall(callee.property, argRefs, ctx);
+    }
     return ctx.emit({
       kind: 'method_call',
       object: ctx.emit({ kind: 'load_const', value: '@this' }),
@@ -1000,6 +1185,9 @@ function lowerCallExpr(
     const argRefs = expr.args.map(arg => lowerExprToRef(arg, ctx));
     const isPrivateMethod = ctx.isPrivateMethod(callee.name);
     if (isPrivateMethod) {
+      if (ctx.shouldInlinePrivate(callee.name)) {
+        return inlinePrivateMethodCall(callee.name, argRefs, ctx);
+      }
       const thisRef = ctx.emit({ kind: 'load_const', value: '@this' });
       return ctx.emit({ kind: 'method_call', object: thisRef, method: callee.name, args: argRefs });
     }
@@ -1014,6 +1202,72 @@ function lowerCallExpr(
 
 function isStatefulContextParam(param: ParamNode): boolean {
   return param.type.kind === 'custom_type' && param.type.name === 'StatefulContext';
+}
+
+/**
+ * Inline a private method's body directly into the caller's context.
+ *
+ * Used when the private has continuation-relevant side effects (state
+ * mutation, addOutput, addRawOutput, addDataOutput) so that the
+ * helper's emitted ANF nodes register output refs on the caller. This
+ * is what makes the public method's continuation hash include outputs
+ * declared in private helpers — without it, the helper's
+ * `add_output`/`add_data_output` refs live in a sibling ANF method and
+ * the public's `addOutputRefs`/`addDataOutputRefs` lists miss them, so
+ * the runtime hashOutputs check would diverge from actual outputs.
+ *
+ * Caller's arg refs are mapped onto the private's parameter names via
+ * `pushParamAlias`. While the private's body lowers, any identifier
+ * expression matching one of those param names resolves to the
+ * caller's ref (see `lowerIdentifier`). The aliases are popped
+ * afterwards so subsequent lowering in the caller's body sees its own
+ * scope.
+ *
+ * Recursion across private helpers is forbidden by validation, so this
+ * always terminates. Nested inlining (private A calls private B) works
+ * naturally: when we lower A's body and hit the call to B, the same
+ * `lowerCallExpr` path runs and inlines B too.
+ */
+function inlinePrivateMethodCall(
+  methodName: string,
+  argRefs: string[],
+  ctx: LoweringContext,
+): string {
+  const method = ctx.getPrivateMethod(methodName);
+  if (!method) {
+    // Should not happen — caller checked shouldInlinePrivate which
+    // requires the method to exist. Fall back to a method_call so the
+    // stack lowering pass surfaces a clear error.
+    const thisRef = ctx.emit({ kind: 'load_const', value: '@this' });
+    return ctx.emit({ kind: 'method_call', object: thisRef, method: methodName, args: argRefs });
+  }
+
+  // Bind caller arg refs to the private's parameter names.
+  const aliasedParams: string[] = [];
+  for (let i = 0; i < method.params.length && i < argRefs.length; i++) {
+    const paramName = method.params[i]!.name;
+    ctx.pushParamAlias(paramName, argRefs[i]!);
+    aliasedParams.push(paramName);
+  }
+
+  const startIndex = ctx.bindings.length;
+  lowerStatements(method.body, ctx);
+  const endIndex = ctx.bindings.length;
+
+  // Pop aliases in reverse order so nested inlines compose correctly.
+  for (let i = aliasedParams.length - 1; i >= 0; i--) {
+    ctx.popParamAlias(aliasedParams[i]!);
+  }
+
+  // Method's "return value" is the last binding emitted by the body.
+  // Void methods (e.g., a private helper that just calls addOutput)
+  // still produce a binding (the addOutput result) which the caller
+  // expression-statement path will discard.
+  if (endIndex > startIndex) {
+    return ctx.bindings[endIndex - 1]!.name;
+  }
+  // Empty body — emit a load_const placeholder so the caller has a ref.
+  return ctx.emit({ kind: 'load_const', value: '@void' });
 }
 
 function flattenAddOutputArgs(args: Expression[]): Expression[] {
@@ -1182,106 +1436,6 @@ function typeNodeToString(node: TypeNode): string {
     case 'custom_type':
       return node.name;
   }
-}
-
-// ---------------------------------------------------------------------------
-// State mutation analysis for StatefulSmartContract
-// ---------------------------------------------------------------------------
-
-/**
- * Determine whether a method mutates any mutable (non-readonly) property.
- * Conservative: if ANY code path can mutate state, returns true.
- */
-function methodMutatesState(
-  method: { body: Statement[] },
-  contract: ContractNode,
-): boolean {
-  const mutablePropNames = new Set(
-    contract.properties.filter(p => !p.readonly).map(p => p.name),
-  );
-  if (mutablePropNames.size === 0) return false;
-  return bodyMutatesState(method.body, mutablePropNames);
-}
-
-function bodyMutatesState(stmts: Statement[], mutableProps: Set<string>): boolean {
-  for (const stmt of stmts) {
-    if (stmtMutatesState(stmt, mutableProps)) return true;
-  }
-  return false;
-}
-
-function stmtMutatesState(stmt: Statement, mutableProps: Set<string>): boolean {
-  switch (stmt.kind) {
-    case 'assignment':
-      if (stmt.target.kind === 'property_access' && mutableProps.has(stmt.target.property)) {
-        return true;
-      }
-      return false;
-    case 'expression_statement':
-      return exprMutatesState(stmt.expression, mutableProps);
-    case 'if_statement':
-      return bodyMutatesState(stmt.then, mutableProps) ||
-             (stmt.else ? bodyMutatesState(stmt.else, mutableProps) : false);
-    case 'for_statement':
-      return stmtMutatesState(stmt.update, mutableProps) ||
-             bodyMutatesState(stmt.body, mutableProps);
-    default:
-      return false;
-  }
-}
-
-function exprMutatesState(expr: Expression, mutableProps: Set<string>): boolean {
-  if (expr.kind === 'increment_expr' || expr.kind === 'decrement_expr') {
-    if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function methodHasAddOutput(method: { body: Statement[] }): boolean {
-  return bodyHasCall(method.body, STATE_OUTPUT_METHODS);
-}
-
-function methodHasAddDataOutput(method: { body: Statement[] }): boolean {
-  return bodyHasCall(method.body, DATA_OUTPUT_METHODS);
-}
-
-const STATE_OUTPUT_METHODS = new Set(['addOutput', 'addRawOutput']);
-const DATA_OUTPUT_METHODS = new Set(['addDataOutput']);
-
-function bodyHasCall(stmts: Statement[], names: Set<string>): boolean {
-  for (const stmt of stmts) {
-    if (stmtHasCall(stmt, names)) return true;
-  }
-  return false;
-}
-
-function stmtHasCall(stmt: Statement, names: Set<string>): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprHasCall(stmt.expression, names);
-    case 'if_statement':
-      return bodyHasCall(stmt.then, names) ||
-             (stmt.else ? bodyHasCall(stmt.else, names) : false);
-    case 'for_statement':
-      return bodyHasCall(stmt.body, names);
-    default:
-      return false;
-  }
-}
-
-function exprHasCall(expr: Expression, names: Set<string>): boolean {
-  if (expr.kind === 'call_expr') {
-    const callee = expr.callee;
-    if (callee.kind === 'property_access' && names.has(callee.property)) {
-      return true;
-    }
-    if (callee.kind === 'member_expr' && names.has(callee.property)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 // ---------------------------------------------------------------------------

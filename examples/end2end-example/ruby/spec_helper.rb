@@ -14,9 +14,12 @@ def compile_contract(rel_path)
   abs_path = File.expand_path(rel_path, __dir__)
   compiler_bin = File.join(PROJECT_ROOT, 'compilers', 'ruby', 'bin', 'runar-compiler-ruby')
 
-  output = `ruby #{Shellwords.escape(compiler_bin)} --source #{Shellwords.escape(abs_path)} 2>&1`
-  status = Process.last_status
-  raise "Compilation failed for #{rel_path}:\n#{output}" unless status&.success?
+  # Capture stdout (artifact JSON) and stderr (Ruby warnings) separately so
+  # bundler/RubyGems warnings printed to stderr do not corrupt the artifact
+  # JSON returned to the caller.
+  require 'open3'
+  stdout, stderr, status = Open3.capture3('ruby', compiler_bin, '--source', abs_path)
+  raise "Compilation failed for #{rel_path}:\nSTDOUT:\n#{stdout}\nSTDERR:\n#{stderr}" unless status&.success?
 
-  output
+  stdout
 end

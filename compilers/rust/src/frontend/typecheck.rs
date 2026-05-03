@@ -329,7 +329,15 @@ struct TypeChecker<'a> {
     prop_types: HashMap<String, TType>,
     method_sigs: HashMap<String, (Vec<TType>, TType)>,
     builtins: HashMap<&'static str, FuncSig>,
+    /// Origin keys of affine values consumed in the current scope. Origin
+    /// keys are: parameter names, "prop:<name>" for contract properties,
+    /// and aliased origins resolved via affine_aliases. 2026-04-30 audit
+    /// finding F6.
     consumed_values: HashSet<String>,
+    /// Maps a local variable name to the canonical affine origin it
+    /// aliases. Populated when a variable_decl of affine type is
+    /// initialized from another affine origin.
+    affine_aliases: HashMap<String, String>,
     current_method_loc: Option<SourceLocation>,
 }
 
@@ -367,6 +375,7 @@ impl<'a> TypeChecker<'a> {
             method_sigs,
             builtins: builtin_functions(),
             consumed_values: HashSet::new(),
+            affine_aliases: HashMap::new(),
             current_method_loc: None,
         }
     }
@@ -385,6 +394,7 @@ impl<'a> TypeChecker<'a> {
 
         // Reset affine tracking for this scope
         self.consumed_values.clear();
+        self.affine_aliases.clear();
 
         // Add constructor params to env
         for param in &ctor.params {
@@ -407,6 +417,7 @@ impl<'a> TypeChecker<'a> {
 
         // Reset affine tracking for this method
         self.consumed_values.clear();
+        self.affine_aliases.clear();
 
         // Add method params to env
         for param in &method.params {
@@ -431,7 +442,7 @@ impl<'a> TypeChecker<'a> {
                 ..
             } => {
                 let init_type = self.infer_expr_type(init, env);
-                if let Some(declared) = var_type {
+                let decl_type = if let Some(declared) = var_type {
                     let declared_type = type_node_to_ttype(declared);
                     if !is_subtype(&init_type, &declared_type) {
                         self.add_error(format!(
@@ -439,9 +450,19 @@ impl<'a> TypeChecker<'a> {
                             init_type, declared_type
                         ));
                     }
-                    env.define(name, declared_type);
+                    env.define(name, declared_type.clone());
+                    declared_type
                 } else {
-                    env.define(name, init_type);
+                    env.define(name, init_type.clone());
+                    init_type
+                };
+                // Record affine alias so a subsequent consume of the
+                // local resolves back to the original origin.
+                // 2026-04-30 audit finding F6.
+                if is_affine_type(&decl_type) {
+                    if let Some(origin) = self.affine_origin_of_expr(init) {
+                        self.affine_aliases.insert(name.clone(), origin);
+                    }
                 }
             }
 
@@ -1075,19 +1096,24 @@ impl<'a> TypeChecker<'a> {
             return return_type.to_string();
         }
 
-        // Special case: checkMultiSig
+        // Special case: checkMultiSig (Sig[] / PubKey[] arrays). Only
+        // arity is special; arg-type validation falls through to the
+        // standard subtype loop below so callers cannot pass
+        // `bigint[]` or other element types. 2026-04-30 audit
+        // finding F5.
         if func_name == "checkMultiSig" {
             if args.len() != 2 {
                 self.add_error(format!(
                     "checkMultiSig() expects 2 arguments, got {}",
                     args.len()
                 ));
+                for arg in args {
+                    self.infer_expr_type(arg, env);
+                }
+                self.check_affine_consumption(func_name, args, env);
+                return return_type.to_string();
             }
-            for arg in args {
-                self.infer_expr_type(arg, env);
-            }
-            self.check_affine_consumption(func_name, args, env);
-            return return_type.to_string();
+            // Fall through to the standard subtype check below.
         }
 
         // Standard argument count check
@@ -1128,7 +1154,11 @@ impl<'a> TypeChecker<'a> {
     }
 
     /// Check affine type constraints: Sig and SigHashPreimage values may
-    /// only be consumed once by a consuming function.
+    /// only be consumed once by a consuming function. Tracks
+    /// consumption by *origin*, not variable name, so aliases (`const
+    /// again = sig`) and property accesses (`this.sig`) cannot be
+    /// used to launder a double-consumption past the affine check.
+    /// 2026-04-30 audit finding F6.
     fn check_affine_consumption(
         &mut self,
         func_name: &str,
@@ -1146,23 +1176,61 @@ impl<'a> TypeChecker<'a> {
             }
 
             let arg = &args[param_index];
-            if let Expression::Identifier { name } = arg {
-                if let Some(arg_type) = env.lookup(name) {
-                    let arg_type = arg_type.clone();
-                    if !is_affine_type(&arg_type) {
-                        continue;
-                    }
-
-                    if self.consumed_values.contains(name) {
-                        self.add_error(format!(
-                            "affine value '{}' has already been consumed",
-                            name
-                        ));
-                    } else {
-                        self.consumed_values.insert(name.clone());
-                    }
-                }
+            let arg_type = match self.affine_expr_type(arg, env) {
+                Some(t) => t,
+                None => continue,
+            };
+            if !is_affine_type(&arg_type) {
+                continue;
             }
+
+            let origin = match self.affine_origin_of_expr(arg) {
+                Some(o) => o,
+                None => continue,
+            };
+
+            // Render a short label (source-form) for the diagnostic.
+            let label = match arg {
+                Expression::Identifier { name } => name.clone(),
+                Expression::PropertyAccess { property } => format!("this.{}", property),
+                _ => origin.clone(),
+            };
+
+            if self.consumed_values.contains(&origin) {
+                self.add_error(format!(
+                    "affine value '{}' has already been consumed",
+                    label
+                ));
+            } else {
+                self.consumed_values.insert(origin);
+            }
+        }
+    }
+
+    /// Resolve the canonical origin key for affine tracking.
+    /// Identifiers consult the alias map; property accesses use the
+    /// "prop:<name>" namespace; everything else returns None.
+    fn affine_origin_of_expr(&self, expr: &Expression) -> Option<String> {
+        match expr {
+            Expression::Identifier { name } => Some(
+                self.affine_aliases
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.clone()),
+            ),
+            Expression::PropertyAccess { property } => Some(format!("prop:{}", property)),
+            _ => None,
+        }
+    }
+
+    /// Look up the type of an expression for affine purposes.
+    /// Identifiers come from the env; property accesses from the
+    /// prop-types map.
+    fn affine_expr_type(&self, expr: &Expression, env: &TypeEnv) -> Option<TType> {
+        match expr {
+            Expression::Identifier { name } => env.lookup(name).cloned(),
+            Expression::PropertyAccess { property } => self.prop_types.get(property).cloned(),
+            _ => None,
         }
     }
 }

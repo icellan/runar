@@ -39,7 +39,7 @@ func main() {
 	// ── Pass 1: Parse ───────────────────────────────────────────────────────
 	parseResult := frontend.ParseSource(source, "PriceBet.runar.go")
 	if len(parseResult.Errors) > 0 {
-		fmt.Fprintf(os.Stderr, "Parse errors:\n  %s\n", strings.Join(parseResult.Errors, "\n  "))
+		fmt.Fprintf(os.Stderr, "Parse errors:\n  %s\n", strings.Join(diagMessages(parseResult.Errors), "\n  "))
 		os.Exit(1)
 	}
 	contract := parseResult.Contract
@@ -47,14 +47,14 @@ func main() {
 	// ── Pass 2: Validate ────────────────────────────────────────────────────
 	validResult := frontend.Validate(contract)
 	if len(validResult.Errors) > 0 {
-		fmt.Fprintf(os.Stderr, "Validation errors:\n  %s\n", strings.Join(validResult.Errors, "\n  "))
+		fmt.Fprintf(os.Stderr, "Validation errors:\n  %s\n", strings.Join(diagMessages(validResult.Errors), "\n  "))
 		os.Exit(1)
 	}
 
 	// ── Pass 3: Type-check ──────────────────────────────────────────────────
 	tcResult := frontend.TypeCheck(contract)
 	if len(tcResult.Errors) > 0 {
-		fmt.Fprintf(os.Stderr, "Type-check errors:\n  %s\n", strings.Join(tcResult.Errors, "\n  "))
+		fmt.Fprintf(os.Stderr, "Type-check errors:\n  %s\n", strings.Join(diagMessages(tcResult.Errors), "\n  "))
 		os.Exit(1)
 	}
 
@@ -523,4 +523,16 @@ Stack after scriptSig (top on right): [ bobSig, aliceSig, 1 ]
 
   At BSV fee rates (~0.05 sat/byte), deployment costs ~%d satoshis.
 `, scriptLen, scriptLen, (scriptLen*5+99)/100)
+}
+
+// diagMessages flattens a slice of frontend.Diagnostic to the formatted
+// per-message strings expected by strings.Join. The frontend used to expose
+// errors as []string; today it returns []Diagnostic, so this small helper
+// keeps the dump tool readable without touching the frontend API.
+func diagMessages(diags []frontend.Diagnostic) []string {
+	out := make([]string, len(diags))
+	for i, d := range diags {
+		out[i] = d.FormatMessage()
+	}
+	return out
 }

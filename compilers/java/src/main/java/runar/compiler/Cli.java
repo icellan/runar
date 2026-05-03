@@ -1,7 +1,10 @@
 package runar.compiler;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -71,6 +74,10 @@ public final class Cli {
         if (parsed.version) {
             out.println("runar-java " + Version.VALUE);
             return 0;
+        }
+
+        if (parsed.daemon) {
+            return runDaemon();
         }
 
         if (parsed.help || (parsed.source == null && parsed.ir == null)) {
@@ -249,8 +256,233 @@ public final class Cli {
         stream.println("  --emit-ir                    emit canonical ANF JSON on stdout");
         stream.println("  --hex                        emit Bitcoin Script hex on stdout");
         stream.println("  --disable-constant-folding   disable the constant-folding optimizer (required for conformance)");
+        stream.println("  --daemon                     run in daemon mode (line-delimited JSON RPC on stdin/stdout)");
         stream.println("  --version                    print version and exit");
         stream.println("  -h, --help                   print this help and exit");
+    }
+
+    // -----------------------------------------------------------------
+    // Daemon mode
+    // -----------------------------------------------------------------
+    //
+    // Avoids paying ~1.5s of JVM cold-start on every conformance compile.
+    // Reads line-delimited JSON requests from stdin, writes line-delimited
+    // JSON responses to stdout. All compile state is request-local — the
+    // process holds no contract state between requests.
+    //
+    // Request shape (one JSON object per line):
+    //   {"id": <int>, "source": "<path>", "emitIr": <bool>, "hex": <bool>,
+    //    "disableConstantFolding": <bool>}
+    // Or to terminate: {"id": <int>, "shutdown": true}
+    //
+    // Response shape (one JSON object per line):
+    //   {"id": <int>, "ok": true, "ir": "<canonical-json>", "hex": "<hex>"}
+    //   {"id": <int>, "ok": false, "error": "<message>"}
+    //
+    // The daemon uses ONLY ASCII / UTF-8 in JSON values; strings are escaped
+    // with the minimal set required by RFC 8259 (\\, \", \n, \r, \t, control
+    // chars). Pulling in Jackson / Gson would inflate the runtime, so we
+    // hand-roll a tiny single-line JSON parser scoped to this RPC shape.
+    //
+    // Output convention: each response is exactly ONE LINE; embedded
+    // newlines in IR / hex strings are escaped. The peer reads a line, parses
+    // it, dispatches by id.
+
+    private int runDaemon() {
+        // Print a small banner so the parent runner can sync on startup.
+        out.println("{\"daemon\": \"runar-java\", \"version\": \"" + Version.VALUE + "\"}");
+        out.flush();
+
+        BufferedReader r = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+        try {
+            String line;
+            while ((line = r.readLine()) != null) {
+                line = line.trim();
+                if (line.isEmpty()) continue;
+                DaemonRequest req;
+                try {
+                    req = DaemonRequest.parseLine(line);
+                } catch (RuntimeException e) {
+                    out.println("{\"id\":-1,\"ok\":false,\"error\":" + jsonString(
+                        "request parse error: " + e.getMessage()) + "}");
+                    out.flush();
+                    continue;
+                }
+                if (req.shutdown) {
+                    out.println("{\"id\":" + req.id + ",\"ok\":true,\"shutdown\":true}");
+                    out.flush();
+                    return 0;
+                }
+                String response = serveRequest(req);
+                out.println(response);
+                out.flush();
+            }
+        } catch (IOException e) {
+            err.println("runar-java daemon: stdin read failed: " + e.getMessage());
+            return 74;
+        }
+        return 0;
+    }
+
+    private String serveRequest(DaemonRequest req) {
+        if (req.source == null || req.source.isEmpty()) {
+            return "{\"id\":" + req.id + ",\"ok\":false,\"error\":"
+                + jsonString("missing source path") + "}";
+        }
+        try {
+            String src = Files.readString(Path.of(req.source));
+            ContractNode contract = ParserDispatch.parse(src, req.source);
+            Validate.run(contract);
+            contract = ExpandFixedArrays.run(contract);
+            Typecheck.run(contract);
+            AnfProgram anf = AnfLower.run(contract);
+            anf = optimizeAnf(anf, req.disableConstantFolding);
+
+            String irJson = req.emitIr || (!req.hex && !req.emitIr) ? Jcs.stringify(anf) : "";
+            String hexStr = "";
+            if (req.hex) {
+                StackProgram stack = StackLower.run(anf);
+                StackProgram opt = Peephole.run(stack);
+                hexStr = Emit.run(opt);
+            }
+            StringBuilder b = new StringBuilder(256);
+            b.append("{\"id\":").append(req.id).append(",\"ok\":true");
+            if (req.emitIr || (!req.hex)) b.append(",\"ir\":").append(jsonString(irJson));
+            if (req.hex) b.append(",\"hex\":").append(jsonString(hexStr));
+            b.append('}');
+            return b.toString();
+        } catch (Throwable t) {
+            String msg = t.getClass().getSimpleName() + ": " + (t.getMessage() == null ? "(no message)" : t.getMessage());
+            return "{\"id\":" + req.id + ",\"ok\":false,\"error\":" + jsonString(msg) + "}";
+        }
+    }
+
+    /** Minimal JSON string escaper. */
+    static String jsonString(String s) {
+        if (s == null) return "null";
+        StringBuilder b = new StringBuilder(s.length() + 8);
+        b.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> b.append("\\\"");
+                case '\\' -> b.append("\\\\");
+                case '\n' -> b.append("\\n");
+                case '\r' -> b.append("\\r");
+                case '\t' -> b.append("\\t");
+                case '\b' -> b.append("\\b");
+                case '\f' -> b.append("\\f");
+                default -> {
+                    if (c < 0x20) {
+                        b.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        b.append(c);
+                    }
+                }
+            }
+        }
+        b.append('"');
+        return b.toString();
+    }
+
+    /** Single-line JSON request decoder. Only handles the request shape. */
+    static final class DaemonRequest {
+        int id = -1;
+        String source;
+        boolean emitIr;
+        boolean hex;
+        boolean disableConstantFolding;
+        boolean shutdown;
+
+        static DaemonRequest parseLine(String line) {
+            DaemonRequest r = new DaemonRequest();
+            // Accept any subset of these top-level keys. Naive but safe for
+            // our well-formed peer.
+            r.id = parseIntField(line, "id", -1);
+            r.source = parseStringField(line, "source");
+            r.emitIr = parseBoolField(line, "emitIr", false);
+            r.hex = parseBoolField(line, "hex", false);
+            r.disableConstantFolding = parseBoolField(line, "disableConstantFolding", false);
+            r.shutdown = parseBoolField(line, "shutdown", false);
+            return r;
+        }
+    }
+
+    private static int parseIntField(String json, String key, int defaultValue) {
+        String token = "\"" + key + "\"";
+        int idx = json.indexOf(token);
+        if (idx < 0) return defaultValue;
+        int colon = json.indexOf(':', idx + token.length());
+        if (colon < 0) return defaultValue;
+        int p = colon + 1;
+        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+        int start = p;
+        if (p < json.length() && (json.charAt(p) == '-' || json.charAt(p) == '+')) p++;
+        while (p < json.length() && Character.isDigit(json.charAt(p))) p++;
+        if (p == start) return defaultValue;
+        try {
+            return Integer.parseInt(json.substring(start, p));
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private static boolean parseBoolField(String json, String key, boolean defaultValue) {
+        String token = "\"" + key + "\"";
+        int idx = json.indexOf(token);
+        if (idx < 0) return defaultValue;
+        int colon = json.indexOf(':', idx + token.length());
+        if (colon < 0) return defaultValue;
+        int p = colon + 1;
+        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+        if (p + 4 <= json.length() && json.startsWith("true", p)) return true;
+        if (p + 5 <= json.length() && json.startsWith("false", p)) return false;
+        return defaultValue;
+    }
+
+    private static String parseStringField(String json, String key) {
+        String token = "\"" + key + "\"";
+        int idx = json.indexOf(token);
+        if (idx < 0) return null;
+        int colon = json.indexOf(':', idx + token.length());
+        if (colon < 0) return null;
+        int p = colon + 1;
+        while (p < json.length() && Character.isWhitespace(json.charAt(p))) p++;
+        if (p >= json.length() || json.charAt(p) != '"') return null;
+        p++;
+        StringBuilder b = new StringBuilder();
+        while (p < json.length()) {
+            char c = json.charAt(p);
+            if (c == '\\' && p + 1 < json.length()) {
+                char esc = json.charAt(p + 1);
+                switch (esc) {
+                    case '"' -> b.append('"');
+                    case '\\' -> b.append('\\');
+                    case '/' -> b.append('/');
+                    case 'n' -> b.append('\n');
+                    case 'r' -> b.append('\r');
+                    case 't' -> b.append('\t');
+                    case 'b' -> b.append('\b');
+                    case 'f' -> b.append('\f');
+                    case 'u' -> {
+                        if (p + 5 < json.length()) {
+                            try {
+                                b.append((char) Integer.parseInt(json.substring(p + 2, p + 6), 16));
+                            } catch (NumberFormatException ignored) {}
+                            p += 4;
+                        }
+                    }
+                    default -> b.append(esc);
+                }
+                p += 2;
+            } else if (c == '"') {
+                return b.toString();
+            } else {
+                b.append(c);
+                p++;
+            }
+        }
+        return null;
     }
 
     static final class Args {
@@ -261,6 +493,7 @@ public final class Cli {
         boolean disableConstantFolding;
         boolean version;
         boolean help;
+        boolean daemon;
 
         static Args parse(String[] argv) {
             Args out = new Args();
@@ -273,6 +506,7 @@ public final class Cli {
                     case "--emit-ir" -> out.emitIr = true;
                     case "--hex" -> out.hex = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
+                    case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;
                     case "-h", "--help" -> out.help = true;
                     default -> throw new CliError("unknown flag: " + arg);

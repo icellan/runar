@@ -17,4 +17,19 @@ mod ec_isolation;
 mod tic_tac_toe;
 mod babybear;
 mod merkle_proof;
+mod private_helper_outputs;
 mod state_covenant;
+
+// Phase 2 (2026-05-03): port advanced TS/Go regtest cases that the Rust
+// integration suite was missing per the 2026-05-01 audit.
+mod blake3;
+mod sha256_compress;
+mod sha256_finalize;
+mod slhdsa;
+mod wots;
+mod p256_wallet;
+mod p384_wallet;
+mod data_outputs;
+mod nullfail_multimethod;
+mod message_board;
+mod ordinals;

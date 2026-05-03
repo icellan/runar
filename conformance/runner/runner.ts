@@ -1,7 +1,9 @@
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, basename, resolve, dirname, extname } from 'path';
-import { fileURLToPath } from 'url';
-import { execSync } from 'child_process';
+import { fileURLToPath, pathToFileURL } from 'url';
+import { execSync, spawn } from 'child_process';
+import os from 'os';
+import { JavaDaemon } from './java-daemon.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -11,10 +13,133 @@ const PYTHON_COMPILER_DIR = resolve(__dirname, '../../compilers/python');
 const ZIG_COMPILER_DIR = resolve(__dirname, '../../compilers/zig');
 const RUBY_COMPILER_DIR = resolve(__dirname, '../../compilers/ruby');
 const JAVA_COMPILER_DIR = resolve(__dirname, '../../compilers/java');
+const REPO_ROOT = resolve(__dirname, '../..');
 
-/** Escape a string for safe interpolation into a shell command (single-quote wrapping). */
-function shellEscape(s: string): string {
-  return "'" + s.replace(/'/g, "'\\''") + "'";
+// ---------------------------------------------------------------------------
+// Async subprocess primitive
+// ---------------------------------------------------------------------------
+//
+// Replaces the legacy `execSync` calls. Each compiler invocation now spawns
+// directly (no shell, args passed as an array) so we can run many in parallel
+// without blocking the event loop. Output is captured with a per-process
+// buffer cap so a runaway compiler can't OOM the runner.
+
+interface RunResult {
+  stdout: string;
+  stderr: string;
+  code: number;
+  timedOut: boolean;
+  error?: Error;
+}
+
+interface RunOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  maxBuffer?: number;
+}
+
+function runCmd(cmd: string, args: string[], opts: RunOptions = {}): Promise<RunResult> {
+  return new Promise((resolvePromise) => {
+    const proc = spawn(cmd, args, {
+      cwd: opts.cwd,
+      env: opts.env ?? process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    const cap = opts.maxBuffer ?? 10 * 1024 * 1024;
+    let outLen = 0;
+    let errLen = 0;
+    const outChunks: Buffer[] = [];
+    const errChunks: Buffer[] = [];
+    let timedOut = false;
+    let settled = false;
+
+    const timer = opts.timeoutMs
+      ? setTimeout(() => {
+          timedOut = true;
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            // ignore
+          }
+        }, opts.timeoutMs)
+      : null;
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      outLen += chunk.length;
+      if (outLen > cap) {
+        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+        return;
+      }
+      outChunks.push(chunk);
+    });
+    proc.stderr.on('data', (chunk: Buffer) => {
+      errLen += chunk.length;
+      if (errLen > cap) {
+        try { proc.kill('SIGKILL'); } catch { /* ignore */ }
+        return;
+      }
+      errChunks.push(chunk);
+    });
+
+    proc.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise({
+        stdout: Buffer.concat(outChunks).toString('utf-8'),
+        stderr: Buffer.concat(errChunks).toString('utf-8'),
+        code: -1,
+        timedOut,
+        error: err,
+      });
+    });
+
+    proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolvePromise({
+        stdout: Buffer.concat(outChunks).toString('utf-8'),
+        stderr: Buffer.concat(errChunks).toString('utf-8'),
+        code: code ?? 0,
+        timedOut,
+      });
+    });
+  });
+}
+
+/**
+ * Locate the tsx loader entry as a `file://` URL so we can pass it to
+ * `node --import`. tsx is hoisted under `conformance/node_modules` (pnpm
+ * doesn't dedupe it to repo root). We try a small list of well-known
+ * locations and fall back to literal `'tsx'` (which only resolves when run
+ * from a directory whose node_modules contains tsx).
+ *
+ * Replaces the legacy `npx tsx <args>` shell invocation: each `npx tsx`
+ * paid ~50–200ms of package-manager resolution per call, which adds up
+ * quickly across an N×M conformance matrix.
+ */
+let cachedTsxLoader: string | null = null;
+function resolveTsxLoader(): string {
+  if (cachedTsxLoader) return cachedTsxLoader;
+  const candidates = [
+    join(REPO_ROOT, 'conformance/node_modules/tsx/dist/loader.mjs'),
+    join(REPO_ROOT, 'node_modules/tsx/dist/loader.mjs'),
+    join(REPO_ROOT, 'integration/ts/node_modules/tsx/dist/loader.mjs'),
+  ];
+  for (const p of candidates) {
+    if (existsSync(p)) {
+      cachedTsxLoader = pathToFileURL(p).href;
+      return cachedTsxLoader;
+    }
+  }
+  // Fall through: rely on Node's package resolution with cwd-driven lookup.
+  // Callers pass cwd=REPO_ROOT by default, so this will only succeed if tsx
+  // is symlinked under <repo>/node_modules.
+  cachedTsxLoader = 'tsx';
+  return cachedTsxLoader;
 }
 
 function cargoAwareEnv(): NodeJS.ProcessEnv {
@@ -79,10 +204,21 @@ export interface CompilerOutput {
 // ---------------------------------------------------------------------------
 
 /** Check whether the Go compiler binary is available, falling back to `go run`. */
-function findGoBinary(): string | null {
+//
+// NOTE on search-path strategy: GitHub Actions jobs that consume cross-job
+// artifacts (`actions/download-artifact`) drop the binary into the workflow
+// checkout root by default — i.e. `process.cwd()`. We therefore include
+// `process.cwd()` (and an explicit `<cwd>/runar-go` candidate) so a CI step
+// like `chmod +x runar-go && pnpm run conformance` works without having to
+// teach every workflow about the runner's internal layout. This is
+// forward-compatible: future workflows can keep dropping artifacts at the
+// repo root and the runner will pick them up.
+export function findGoBinary(): string | null {
   const candidates = [
     join(GO_COMPILER_DIR, 'runar-go'),
     join(GO_COMPILER_DIR, 'runar-go.exe'),
+    join(process.cwd(), 'runar-go'),
+    join(process.cwd(), 'runar-go.exe'),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
@@ -106,11 +242,15 @@ function findGoBinary(): string | null {
 }
 
 /** Check whether the Rust compiler binary is available, falling back to `cargo run`. */
-function findRustBinary(): string | null {
+// See findGoBinary above for the rationale on `process.cwd()` candidates: CI
+// jobs that download the `runar-rust` artifact land it at the workflow root.
+export function findRustBinary(): string | null {
   const candidates = [
     join(RUST_COMPILER_DIR, 'target/release/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'target/debug/runar-compiler-rust'),
     join(RUST_COMPILER_DIR, 'runar-compiler-rust'),
+    join(process.cwd(), 'runar-compiler-rust'),
+    join(process.cwd(), 'runar-compiler-rust.exe'),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
@@ -124,13 +264,31 @@ function findRustBinary(): string | null {
     if (existsSync(join(RUST_COMPILER_DIR, 'Cargo.toml'))) {
       try {
         execSync('cargo --version', { stdio: 'pipe', env: cargoAwareEnv() });
-        return `cargo run --release --manifest-path ${shellEscape(join(RUST_COMPILER_DIR, 'Cargo.toml'))} --`;
+        return `cargo run --release --manifest-path ${join(RUST_COMPILER_DIR, 'Cargo.toml')} --`;
       } catch {
         // Cargo not available
       }
     }
     return null;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Argv splitting for find* helpers that may return a multi-token shell phrase.
+// ---------------------------------------------------------------------------
+//
+// `findGoBinary()` etc. return strings like `"go run ."` or
+// `"cargo run --release --manifest-path /path/Cargo.toml --"`. The legacy
+// runner happily concatenated these into a shell command; the new spawn-based
+// runner wants `[cmd, ...args]`. We split on whitespace — paths with spaces
+// would be a problem, but the strings emitted by find* helpers never contain
+// such paths.
+function splitCmd(s: string): { cmd: string; args: string[] } {
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) {
+    return { cmd: '', args: [] };
+  }
+  return { cmd: parts[0]!, args: parts.slice(1) };
 }
 
 // ---------------------------------------------------------------------------
@@ -142,8 +300,11 @@ function findRustBinary(): string | null {
  *
  * Invokes runar-cli to emit an artifact JSON, then reads script/IR from the
  * generated artifact instead of parsing human-readable CLI stdout.
+ *
+ * Uses `node --import tsx` instead of `npx tsx` to avoid the package-manager
+ * resolution overhead that `npx` pays on every invocation.
  */
-function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
+async function runTsCompiler(source: string, sourceFile: string): Promise<CompilerOutput> {
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
@@ -151,16 +312,24 @@ function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
     const tmpFile = join(tmpDir, `${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    const artifactDir = join(tmpDir, 'artifacts-ts');
+    const artifactDir = join(tmpDir, `artifacts-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     if (!existsSync(artifactDir)) mkdirSync(artifactDir, { recursive: true });
 
-    execSync(
-      `npx tsx ${shellEscape(resolve(__dirname, '../../packages/runar-cli/src/bin.ts'))} compile ${shellEscape(tmpFile)} --ir --disable-constant-folding -o ${shellEscape(artifactDir)}`,
-      // 180_000ms: `npx tsx` pays a cold-start cost per invocation; the
-      // prior 30s budget tripped on arithmetic / blake3 / convergence-proof
-      // on slower hosts.
-      { timeout: 180_000, encoding: 'utf-8', cwd: resolve(__dirname, '../..') },
+    const cliEntry = resolve(__dirname, '../../packages/runar-cli/src/bin.ts');
+    const tsxLoader = resolveTsxLoader();
+    const result = await runCmd(
+      'node',
+      ['--import', tsxLoader, cliEntry, 'compile', tmpFile, '--ir', '--disable-constant-folding', '-o', artifactDir],
+      // 180_000ms: tsx pays a cold-start cost per invocation; the prior 30s
+      // budget tripped on arithmetic / blake3 / convergence-proof on slower
+      // hosts.
+      { timeoutMs: 180_000, cwd: REPO_ROOT },
     );
+    if (result.code !== 0) {
+      throw new Error(
+        `TS compiler exited with code ${result.code}${result.timedOut ? ' (timeout)' : ''}: ${result.stderr || result.stdout}`,
+      );
+    }
 
     const baseName = basename(tmpFile, extname(tmpFile));
     const artifactPath = join(artifactDir, `${baseName}.json`);
@@ -212,28 +381,39 @@ function runTsCompiler(source: string, sourceFile: string): CompilerOutput {
  * Run the Go compiler on the given source. Returns undefined if the Go
  * compiler is not available.
  */
-function runGoCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runGoCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const binary = findGoBinary();
   if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `go-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
     // Get IR output
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: GO_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`go --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
     // Get script hex output
-    const scriptHexOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: GO_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
+    );
+    if (hexRes.code !== 0) {
+      throw new Error(`go --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+    }
+    const scriptHexOutput = hexRes.stdout.trim();
 
     const durationMs = performance.now() - start;
     return {
@@ -260,40 +440,37 @@ function runGoCompiler(source: string, sourceFile: string): CompilerOutput | und
  * Run the Rust compiler on the given source. Returns undefined if the Rust
  * compiler is not available.
  */
-function runRustCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runRustCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const binary = findRustBinary();
   if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `rust-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    // Get IR output (required for parity checks)
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      {
-        timeout: 30_000,
-        encoding: 'utf-8',
-        cwd: RUST_COMPILER_DIR,
-        env: cargoAwareEnv(),
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`rust --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
-    // Get script hex output
-    const scriptHexOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-      {
-        timeout: 30_000,
-        encoding: 'utf-8',
-        cwd: RUST_COMPILER_DIR,
-        env: cargoAwareEnv(),
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    ).trim();
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
+    );
+    if (hexRes.code !== 0) {
+      throw new Error(`rust --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+    }
+    const scriptHexOutput = hexRes.stdout.trim();
 
     const durationMs = performance.now() - start;
     return {
@@ -319,6 +496,9 @@ function runRustCompiler(source: string, sourceFile: string): CompilerOutput | u
 /**
  * Check whether the Python compiler is available (`python3 -m runar_compiler`).
  */
+export function findPythonBinary(): string | null {
+  return findPythonCompiler();
+}
 function findPythonCompiler(): string | null {
   if (!existsSync(join(PYTHON_COMPILER_DIR, 'runar_compiler', '__main__.py'))) {
     return null;
@@ -335,28 +515,37 @@ function findPythonCompiler(): string | null {
  * Run the Python compiler on the given source. Returns undefined if the Python
  * compiler is not available.
  */
-function runPythonCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runPythonCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const binary = findPythonCompiler();
   if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `python-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    // Get IR output
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: PYTHON_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`python --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
-    // Get script hex output
-    const scriptHexOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: PYTHON_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
+    );
+    if (hexRes.code !== 0) {
+      throw new Error(`python --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+    }
+    const scriptHexOutput = hexRes.stdout.trim();
 
     const durationMs = performance.now() - start;
     return {
@@ -382,10 +571,17 @@ function runPythonCompiler(source: string, sourceFile: string): CompilerOutput |
 /**
  * Check whether the Zig compiler binary is available.
  */
-function findZigBinary(): string | null {
+// See findGoBinary above for the rationale on `process.cwd()` candidates: the
+// CI conformance job downloads the `runar-zig` artifact directly into the
+// workflow checkout root via `actions/download-artifact`. Without these
+// entries the runner silently fell back to `undefined` and Zig got skipped
+// entirely while CI still claimed "all 7 compilers tested".
+export function findZigBinary(): string | null {
   const candidates = [
     join(ZIG_COMPILER_DIR, 'zig-out/bin/runar-zig'),
     join(ZIG_COMPILER_DIR, 'runar-zig'),
+    join(process.cwd(), 'runar-zig'),
+    join(process.cwd(), 'runar-zig.exe'),
   ];
   for (const candidate of candidates) {
     if (existsSync(candidate)) return candidate;
@@ -403,28 +599,37 @@ function findZigBinary(): string | null {
  * Run the Zig compiler on the given source. Returns undefined if the Zig
  * compiler is not available.
  */
-function runZigCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runZigCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const binary = findZigBinary();
   if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `zig-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    // Get IR output
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: ZIG_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`zig --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
-    // Get script hex output
-    const scriptHexOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: ZIG_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
+    );
+    if (hexRes.code !== 0) {
+      throw new Error(`zig --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+    }
+    const scriptHexOutput = hexRes.stdout.trim();
 
     const durationMs = performance.now() - start;
     return {
@@ -450,7 +655,7 @@ function runZigCompiler(source: string, sourceFile: string): CompilerOutput | un
 /**
  * Check whether the Ruby compiler is available.
  */
-function findRubyBinary(): string | null {
+export function findRubyBinary(): string | null {
   const script = join(RUBY_COMPILER_DIR, 'bin/runar-compiler-ruby');
   if (!existsSync(script)) return null;
   try {
@@ -465,28 +670,37 @@ function findRubyBinary(): string | null {
  * Run the Ruby compiler on the given source. Returns undefined if the Ruby
  * compiler is not available.
  */
-function runRubyCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runRubyCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
   const binary = findRubyBinary();
   if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
 
   const start = performance.now();
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `ruby-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    // Get IR output
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: RUBY_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`ruby --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
-    // Get script hex output
-    const scriptHexOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: RUBY_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
+    );
+    if (hexRes.code !== 0) {
+      throw new Error(`ruby --hex exit ${hexRes.code}: ${hexRes.stderr || hexRes.stdout}`);
+    }
+    const scriptHexOutput = hexRes.stdout.trim();
 
     const durationMs = performance.now() - start;
     return {
@@ -514,7 +728,19 @@ function runRubyCompiler(source: string, sourceFile: string): CompilerOutput | u
  * discovery pattern used for Go / Rust: prefer a distributable artifact
  * over spawning a build system. M4 ships IR only; hex lands in M5.
  */
-function findJavaBinary(): string | null {
+export function findJavaBinary(): string | null {
+  const jarPath = findJavaJarPath();
+  if (jarPath === null) return null;
+  try {
+    execSync('java -version', { stdio: 'pipe' });
+  } catch {
+    return null;
+  }
+  return `java -jar ${jarPath}`;
+}
+
+/** Locate the built runar-java jar, or null if no jar is on disk. */
+export function findJavaJarPath(): string | null {
   const libsDir = join(JAVA_COMPILER_DIR, 'build/libs');
   const preferred = join(libsDir, 'runar-java.jar');
   const candidates: string[] = [];
@@ -533,15 +759,70 @@ function findJavaBinary(): string | null {
       // ignore
     }
   }
-  for (const candidate of candidates) {
-    try {
-      execSync('java -version', { stdio: 'pipe' });
-      return `java -jar ${shellEscape(candidate)}`;
-    } catch {
-      return null;
+  try {
+    const cwdEntries = readdirSync(process.cwd());
+    for (const entry of cwdEntries) {
+      if (
+        (entry === 'runar-java.jar') ||
+        (entry.startsWith('runar-java-compiler-') && entry.endsWith('.jar'))
+      ) {
+        candidates.push(join(process.cwd(), entry));
+      }
     }
+  } catch {
+    // ignore
   }
-  return null;
+  return candidates.length > 0 ? candidates[0]! : null;
+}
+
+// ---------------------------------------------------------------------------
+// Java compile daemon (Win 4)
+// ---------------------------------------------------------------------------
+//
+// Per-invocation `java -jar runar-java.jar` pays ~1.5s of JVM cold-start.
+// In a 49-test × 9-format × 7-compiler matrix that's ~9 minutes of pure
+// JVM startup. The daemon keeps a single JVM alive for the entire run and
+// dispatches each compile request as a JSON-RPC line on stdin / stdout.
+//
+// Enabled by default when:
+//   - the runar-java jar is on disk, AND
+//   - `RUNAR_JAVA_DAEMON=0` is NOT set in the env.
+// Disable explicitly with `RUNAR_JAVA_DAEMON=0` to fall back to one-shot
+// `java -jar` for parity testing.
+
+let javaDaemonInstance: JavaDaemon | null = null;
+let javaDaemonAttempted = false;
+
+function shouldUseJavaDaemon(): boolean {
+  if (process.env.RUNAR_JAVA_DAEMON === '0') return false;
+  return true;
+}
+
+function getOrStartJavaDaemon(): JavaDaemon | null {
+  if (!shouldUseJavaDaemon()) return null;
+  if (javaDaemonInstance) return javaDaemonInstance;
+  if (javaDaemonAttempted) return null;
+  javaDaemonAttempted = true;
+  const jar = findJavaJarPath();
+  if (!jar) return null;
+  try {
+    javaDaemonInstance = JavaDaemon.start(jar);
+    return javaDaemonInstance;
+  } catch (err) {
+    // Daemon failed to start — fall back to one-shot.
+    if (process.env.RUNAR_DEBUG) {
+      console.error('[conformance/runner] Java daemon startup failed:', err);
+    }
+    return null;
+  }
+}
+
+/** Stop the Java daemon (call once at the end of the test run). */
+export async function shutdownJavaDaemon(): Promise<void> {
+  if (javaDaemonInstance) {
+    await javaDaemonInstance.stop();
+    javaDaemonInstance = null;
+  }
 }
 
 /**
@@ -550,30 +831,77 @@ function findJavaBinary(): string | null {
  * captured gracefully with scriptHex = '' (stack lowering + emit land
  * in M5).
  */
-function runJavaCompiler(source: string, sourceFile: string): CompilerOutput | undefined {
+async function runJavaCompiler(source: string, sourceFile: string): Promise<CompilerOutput | undefined> {
+  const start = performance.now();
+
+  // Daemon mode: send a single JSON-RPC request, get IR + hex back in one shot.
+  const daemon = getOrStartJavaDaemon();
+  if (daemon) {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    try {
+      writeFileSync(tmpFile, source, 'utf-8');
+      const resp = await daemon.compile(tmpFile);
+      const durationMs = performance.now() - start;
+      if (!resp.ok) {
+        return {
+          irJson: '',
+          scriptHex: '',
+          scriptAsm: '',
+          success: false,
+          error: resp.error ?? 'Java daemon error',
+          durationMs,
+        };
+      }
+      return {
+        irJson: canonicalizeJson(resp.ir ?? ''),
+        scriptHex: resp.hex ?? '',
+        scriptAsm: '',
+        success: true,
+        durationMs,
+      };
+    } catch (err) {
+      const durationMs = performance.now() - start;
+      return {
+        irJson: '',
+        scriptHex: '',
+        scriptAsm: '',
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        durationMs,
+      };
+    }
+  }
+
+  // One-shot mode (original behaviour, for `RUNAR_JAVA_DAEMON=0`).
   const binary = findJavaBinary();
   if (!binary) return undefined;
-
-  const start = performance.now();
+  const { cmd, args: bin_args } = splitCmd(binary);
   try {
     const tmpDir = join(__dirname, '..', '.tmp');
     if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
-    const tmpFile = join(tmpDir, `java-${basename(sourceFile)}`);
+    const tmpFile = join(tmpDir, `java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
     writeFileSync(tmpFile, source, 'utf-8');
 
-    const irOutput = execSync(
-      `${binary} --source ${shellEscape(tmpFile)} --emit-ir --disable-constant-folding`,
-      { timeout: 30_000, encoding: 'utf-8', cwd: JAVA_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-    ).trim();
+    const irRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: JAVA_COMPILER_DIR },
+    );
+    if (irRes.code !== 0) {
+      throw new Error(`java --emit-ir exit ${irRes.code}: ${irRes.stderr || irRes.stdout}`);
+    }
+    const irOutput = irRes.stdout.trim();
 
     let scriptHex = '';
-    try {
-      scriptHex = execSync(
-        `${binary} --source ${shellEscape(tmpFile)} --hex --disable-constant-folding`,
-        { timeout: 30_000, encoding: 'utf-8', cwd: JAVA_COMPILER_DIR, maxBuffer: 10 * 1024 * 1024 },
-      ).trim();
-    } catch {
-      scriptHex = '';
+    const hexRes = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      { timeoutMs: 30_000, cwd: JAVA_COMPILER_DIR },
+    );
+    if (hexRes.code === 0) {
+      scriptHex = hexRes.stdout.trim();
     }
 
     const durationMs = performance.now() - start;
@@ -598,30 +926,53 @@ function runJavaCompiler(source: string, sourceFile: string): CompilerOutput | u
 }
 
 // ---------------------------------------------------------------------------
-// Output parsing & canonicalization
+// CI strict-mode: fail loudly if any compiler binary is missing in CI.
 // ---------------------------------------------------------------------------
+//
+// The runner historically treated a missing compiler binary as `undefined`
+// and silently skipped it. That's the right default for local devs (who
+// rarely have all 7 toolchains installed) but it's a footgun in CI: the job
+// happily reports "PASS — all 7 compilers tested" even when one of them
+// never ran. We now gate that skip behind `!process.env.CI` and bail out
+// early if any binary is missing in CI.
+let strictModeChecked = false;
+function assertAllCompilersAvailableInCi(): void {
+  if (strictModeChecked) return;
+  strictModeChecked = true;
+  if (process.env.CI !== 'true') return;
 
-/**
- * Parse the output of a Go/Rust compiler invocation. Both are expected to
- * output a JSON blob with { ir: ..., scriptHex: ..., scriptAsm: ... }.
- */
-function parseCompilerOutput(output: string): {
-  ir: string;
-  scriptHex: string;
-  scriptAsm: string;
-} {
-  try {
-    const parsed = JSON.parse(output);
-    return {
-      ir: typeof parsed.ir === 'string' ? parsed.ir : JSON.stringify(parsed.ir),
-      scriptHex: parsed.scriptHex ?? '',
-      scriptAsm: parsed.scriptAsm ?? '',
-    };
-  } catch {
-    // Fall back: treat the whole output as IR JSON (no script output)
-    return { ir: output, scriptHex: '', scriptAsm: '' };
+  const probes: Array<{ name: string; path: string | null }> = [
+    { name: 'go',     path: findGoBinary() },
+    { name: 'rust',   path: findRustBinary() },
+    { name: 'python', path: findPythonCompiler() },
+    { name: 'zig',    path: findZigBinary() },
+    { name: 'ruby',   path: findRubyBinary() },
+    { name: 'java',   path: findJavaBinary() },
+  ];
+  const missing = probes.filter(p => p.path === null).map(p => p.name);
+  if (missing.length > 0) {
+    const cwd = process.cwd();
+    const msg =
+      `[conformance/runner] CI=true but ${missing.length} compiler binary` +
+      (missing.length === 1 ? '' : ' binaries') +
+      ` could not be located: ${missing.join(', ')}.\n` +
+      `  cwd: ${cwd}\n` +
+      `  Searched (per compiler):\n` +
+      `    go:     compilers/go/runar-go[.exe], <cwd>/runar-go[.exe], $PATH\n` +
+      `    rust:   compilers/rust/target/{release,debug}/runar-compiler-rust, compilers/rust/runar-compiler-rust, <cwd>/runar-compiler-rust[.exe], $PATH\n` +
+      `    python: compilers/python/runar_compiler/__main__.py + python3\n` +
+      `    zig:    compilers/zig/zig-out/bin/runar-zig, compilers/zig/runar-zig, <cwd>/runar-zig[.exe], $PATH\n` +
+      `    ruby:   compilers/ruby/bin/runar-compiler-ruby + ruby\n` +
+      `    java:   compilers/java/build/libs/runar-java*.jar, <cwd>/runar-java*.jar + java\n` +
+      `Either install/build the missing toolchain(s) or drop the prebuilt binary at one of the searched paths.`;
+    console.error(msg);
+    process.exit(1);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Output parsing & canonicalization
+// ---------------------------------------------------------------------------
 
 /**
  * Canonicalize a JSON string so that equivalent IR from different compilers
@@ -666,14 +1017,23 @@ function sortKeys(value: unknown): unknown {
 /**
  * Compare IR output across all available compilers. Returns true if every
  * pair of successful compilers produced the same canonical IR JSON.
+ *
+ * When the caller restricted the compiler set (e.g. via the per-fixture
+ * `compilers` allowlist in source.json, used for Go-only crypto modules),
+ * pass `expectedCount` so a single successful compiler is treated as a
+ * trivial match rather than a "cannot cross-validate" failure.
  */
-function compareIR(...outputs: (CompilerOutput | undefined)[]): boolean {
+function compareIR(
+  outputs: (CompilerOutput | undefined)[],
+  expectedCount?: number,
+): boolean {
   const successfulIRs = outputs
     .filter((o): o is CompilerOutput => o !== undefined && o.success && o.irJson !== '')
     .map((o) => o.irJson);
 
   if (successfulIRs.length < 2) {
     if (successfulIRs.length === 0) return true; // No compilers produced IR — not a mismatch
+    if (expectedCount === 1) return true; // Single-compiler fixture: trivial match
     console.warn(`  WARNING: only ${successfulIRs.length} compiler(s) produced IR — cannot cross-validate`);
     return false;
   }
@@ -683,18 +1043,72 @@ function compareIR(...outputs: (CompilerOutput | undefined)[]): boolean {
 /**
  * Compare compiled Bitcoin Script hex across all available compilers.
  * Returns true if every pair of successful compilers produced the same hex.
+ *
+ * See `compareIR` for `expectedCount` semantics.
  */
-function compareScript(...outputs: (CompilerOutput | undefined)[]): boolean {
+function compareScript(
+  outputs: (CompilerOutput | undefined)[],
+  expectedCount?: number,
+): boolean {
   const successfulHexes = outputs
     .filter((o): o is CompilerOutput => o !== undefined && o.success && o.scriptHex !== '')
     .map((o) => o.scriptHex.toLowerCase().replace(/\s/g, ''));
 
   if (successfulHexes.length < 2) {
     if (successfulHexes.length === 0) return true; // No compilers produced hex — not a mismatch
+    if (expectedCount === 1) return true; // Single-compiler fixture: trivial match
     console.warn(`  WARNING: only ${successfulHexes.length} compiler(s) produced hex — cannot cross-validate`);
     return false;
   }
   return successfulHexes.every((hex) => hex === successfulHexes[0]);
+}
+
+// ---------------------------------------------------------------------------
+// Concurrency limiter
+// ---------------------------------------------------------------------------
+
+/** Hand-rolled p-limit replacement: caps concurrent async work at `n`. */
+function makeLimiter(n: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let inFlight = 0;
+  const waiters: Array<() => void> = [];
+  const release = () => {
+    inFlight--;
+    const next = waiters.shift();
+    if (next) next();
+  };
+  return <T>(fn: () => Promise<T>): Promise<T> => {
+    return new Promise<T>((resolveOuter, rejectOuter) => {
+      const start = () => {
+        inFlight++;
+        fn().then(
+          (v) => { release(); resolveOuter(v); },
+          (e) => { release(); rejectOuter(e); },
+        );
+      };
+      if (inFlight < n) start();
+      else waiters.push(start);
+    });
+  };
+}
+
+/**
+ * Concurrency cap for compiler subprocess invocations.
+ *
+ * Each task spawns up to 7 compilers in parallel internally (via Promise.all
+ * inside `runConformanceTestForFormat`). We therefore size the outer limiter
+ * at `cpus / 4` so the total burst is roughly `2 * cpus`, leaving headroom
+ * for the JVM daemon, the parent runner, and disk I/O.
+ *
+ * Override with `RUNAR_CONFORMANCE_CONCURRENCY=<N>`.
+ */
+function defaultConcurrency(): number {
+  const env = process.env.RUNAR_CONFORMANCE_CONCURRENCY;
+  if (env) {
+    const n = parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 1) return n;
+  }
+  const cpus = Math.max(1, os.cpus().length);
+  return Math.max(2, Math.min(8, Math.floor(cpus / 4)));
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +1147,11 @@ function resolveSourceFile(testDir: string, testName: string): string {
  * - `expected-script.hex` -- golden compiled script (optional)
  */
 export async function runConformanceTest(testDir: string): Promise<ConformanceResult> {
+  // CI safety net: fail loudly (once per process) if any compiler binary is
+  // missing while CI=true. Local devs are unaffected — they may legitimately
+  // run the suite with only a subset of toolchains installed.
+  assertAllCompilersAvailableInCi();
+
   const testName = basename(testDir);
   const sourceFile = resolveSourceFile(testDir, testName);
   const expectedIrFile = join(testDir, 'expected-ir.json');
@@ -751,14 +1170,16 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   const source = readFileSync(sourceFile, 'utf-8');
   const errors: string[] = [];
 
-  // Run all compilers
-  const tsResult = runTsCompiler(source, sourceFile);
-  const goResult = runGoCompiler(source, sourceFile);
-  const rustResult = runRustCompiler(source, sourceFile);
-  const pythonResult = runPythonCompiler(source, sourceFile);
-  const zigResult = runZigCompiler(source, sourceFile);
-  const rubyResult = runRubyCompiler(source, sourceFile);
-  const javaResult = runJavaCompiler(source, sourceFile);
+  // Run all compilers in parallel — they're fully independent processes.
+  const [tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult] = await Promise.all([
+    runTsCompiler(source, sourceFile),
+    runGoCompiler(source, sourceFile),
+    runRustCompiler(source, sourceFile),
+    runPythonCompiler(source, sourceFile),
+    runZigCompiler(source, sourceFile),
+    runRubyCompiler(source, sourceFile),
+    runJavaCompiler(source, sourceFile),
+  ]);
 
   if (!tsResult.success) {
     errors.push(`TypeScript compiler failed: ${tsResult.error ?? 'unknown error'}`);
@@ -783,13 +1204,13 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
   }
 
   // Cross-compiler IR comparison
-  const irMatch = compareIR(tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult);
+  const irMatch = compareIR([tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult]);
   if (!irMatch) {
     errors.push('IR mismatch between compilers');
   }
 
   // Cross-compiler script comparison
-  const scriptMatch = compareScript(tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult);
+  const scriptMatch = compareScript([tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult]);
   if (!scriptMatch) {
     errors.push('Script hex mismatch between compilers');
   }
@@ -906,13 +1327,11 @@ export async function runAllConformanceTests(
     );
   }
 
-  const results: ConformanceResult[] = [];
-  for (const testDir of testDirs) {
-    const result = await runConformanceTest(testDir);
-    results.push(result);
-  }
-
-  return results;
+  // Bounded-concurrency parallelism: each test fires 7 compilers simultaneously,
+  // so we cap outer parallelism conservatively. See `defaultConcurrency`.
+  const limit = makeLimiter(defaultConcurrency());
+  const tasks = testDirs.map((testDir) => limit(() => runConformanceTest(testDir)));
+  return Promise.all(tasks);
 }
 
 /**
@@ -924,7 +1343,7 @@ export async function updateGoldenFiles(testDir: string): Promise<void> {
   const sourceFile = resolveSourceFile(testDir, testName);
   const source = readFileSync(sourceFile, 'utf-8');
 
-  const tsResult = runTsCompiler(source, sourceFile);
+  const tsResult = await runTsCompiler(source, sourceFile);
   if (!tsResult.success) {
     throw new Error(`Cannot update golden files: TS compiler failed: ${tsResult.error}`);
   }
@@ -1002,6 +1421,33 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
 }
 
 /**
+ * Read the optional per-fixture `compilers` allowlist from source.json.
+ *
+ * When present, conformance only runs the listed compilers for this fixture
+ * (intersected with each format's natively supported compiler set). Used to
+ * mark fixtures whose codegen is intentionally implemented in only a subset
+ * of tiers — e.g. Go-only crypto modules (BabyBear / Merkle / Poseidon2 /
+ * BN254 / KoalaBear / FiatShamirKb), or fixtures pending in a particular
+ * tier (e.g. Java M6 variable-length state deserialization).
+ *
+ * Returns null when the field is absent (= "all compilers"), or a Set of
+ * allowed compiler ids.
+ */
+function readFixtureCompilerAllowlist(testDir: string): Set<CompilerId> | null {
+  const configFile = join(testDir, 'source.json');
+  if (!existsSync(configFile)) return null;
+  try {
+    const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
+      compilers?: string[];
+    };
+    if (!config.compilers || !Array.isArray(config.compilers)) return null;
+    return new Set(config.compilers as CompilerId[]);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run a single conformance test for a specific format variant.
  *
  * Only runs compilers that support the given format. Results are compared
@@ -1011,6 +1457,9 @@ export async function runConformanceTestForFormat(
   testDir: string,
   format: { ext: string; sourceFile: string },
 ): Promise<ConformanceResult> {
+  // CI safety net: see runConformanceTest above.
+  assertAllCompilersAvailableInCi();
+
   const testName = basename(testDir);
   const expectedIrFile = join(testDir, 'expected-ir.json');
   const expectedScriptFile = join(testDir, 'expected-script.hex');
@@ -1020,36 +1469,52 @@ export async function runConformanceTestForFormat(
 
   // Determine which compilers support this format
   const formatDef = INPUT_FORMATS.find(f => f.ext === format.ext);
-  const supportedCompilers = formatDef?.compilers ?? EMPTY_COMPILERS;
+  let supportedCompilers: readonly CompilerId[] = formatDef?.compilers ?? EMPTY_COMPILERS;
 
-  // Run compilers that support this format
-  const tsResult = supportedCompilers.includes('ts')
+  // Per-fixture compiler allowlist (e.g. Go-only crypto fixtures, Java-deferred fixtures).
+  const allowlist = readFixtureCompilerAllowlist(testDir);
+  if (allowlist) {
+    supportedCompilers = supportedCompilers.filter((c) => allowlist.has(c));
+  }
+
+  // Run compilers that support this format — in parallel.
+  const tsPromise = supportedCompilers.includes('ts')
     ? runTsCompiler(source, format.sourceFile)
-    : { irJson: '', scriptHex: '', scriptAsm: '', success: false, error: 'Format not supported by TS compiler', durationMs: 0 } as CompilerOutput;
+    : Promise.resolve<CompilerOutput>({ irJson: '', scriptHex: '', scriptAsm: '', success: false, error: 'Format not supported by TS compiler', durationMs: 0 });
 
-  const goResult = supportedCompilers.includes('go')
+  const goPromise = supportedCompilers.includes('go')
     ? runGoCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
 
-  const rustResult = supportedCompilers.includes('rust')
+  const rustPromise = supportedCompilers.includes('rust')
     ? runRustCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
 
-  const pythonResult = supportedCompilers.includes('python')
+  const pythonPromise = supportedCompilers.includes('python')
     ? runPythonCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
 
-  const zigResult = supportedCompilers.includes('zig')
+  const zigPromise = supportedCompilers.includes('zig')
     ? runZigCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
 
-  const rubyResult = supportedCompilers.includes('ruby')
+  const rubyPromise = supportedCompilers.includes('ruby')
     ? runRubyCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
 
-  const javaResult = supportedCompilers.includes('java')
+  const javaPromise = supportedCompilers.includes('java')
     ? runJavaCompiler(source, format.sourceFile)
-    : undefined;
+    : Promise.resolve<CompilerOutput | undefined>(undefined);
+
+  const [tsResult, goResult, rustResult, pythonResult, zigResult, rubyResult, javaResult] = await Promise.all([
+    tsPromise,
+    goPromise,
+    rustPromise,
+    pythonPromise,
+    zigPromise,
+    rubyPromise,
+    javaPromise,
+  ]);
 
   if (supportedCompilers.includes('ts') && !tsResult.success) {
     errors.push(`TypeScript compiler failed on ${format.ext}: ${tsResult.error ?? 'unknown error'}`);
@@ -1073,28 +1538,37 @@ export async function runConformanceTestForFormat(
     errors.push(`Java compiler failed on ${format.ext}: ${javaResult.error ?? 'unknown error'}`);
   }
 
-  // Cross-compiler comparison within this format
+  // Cross-compiler comparison within this format. When the fixture
+  // restricts the compiler set to a single tier (e.g. Go-only crypto
+  // modules), pass the expected count so a one-compiler success is
+  // treated as a trivial match rather than "cannot cross-validate".
   const irMatch = compareIR(
-    supportedCompilers.includes('ts') ? tsResult : undefined,
-    goResult,
-    rustResult,
-    pythonResult,
-    zigResult,
-    rubyResult,
-    javaResult,
+    [
+      supportedCompilers.includes('ts') ? tsResult : undefined,
+      goResult,
+      rustResult,
+      pythonResult,
+      zigResult,
+      rubyResult,
+      javaResult,
+    ],
+    supportedCompilers.length,
   );
   if (!irMatch) {
     errors.push(`IR mismatch between compilers for ${format.ext}`);
   }
 
   const scriptMatch = compareScript(
-    supportedCompilers.includes('ts') ? tsResult : undefined,
-    goResult,
-    rustResult,
-    pythonResult,
-    zigResult,
-    rubyResult,
-    javaResult,
+    [
+      supportedCompilers.includes('ts') ? tsResult : undefined,
+      goResult,
+      rustResult,
+      pythonResult,
+      zigResult,
+      rubyResult,
+      javaResult,
+    ],
+    supportedCompilers.length,
   );
   if (!scriptMatch) {
     errors.push(`Script hex mismatch between compilers for ${format.ext}`);
@@ -1181,16 +1655,22 @@ export async function runMultiFormatConformanceTest(
     }];
   }
 
-  const results: ConformanceResult[] = [];
-  for (const format of formats) {
-    results.push(await runConformanceTestForFormat(testDir, format));
-  }
-
-  return results;
+  // Within a single test dir, run formats in parallel — they're independent
+  // (different source files, separate temp files).
+  return Promise.all(formats.map((format) => runConformanceTestForFormat(testDir, format)));
 }
 
 /**
  * Discover and run multi-format conformance tests across all test directories.
+ *
+ * Concurrency model: a SINGLE shared limiter bounds (fixture × format) tasks
+ * across the entire suite. Each task internally still fires 7 compilers in
+ * parallel via Promise.all (cheap and disjoint), but the per-fixture
+ * "9 formats simultaneously" fan-out is gone — formats walk through the same
+ * limiter as fixtures. This caps peak subprocess concurrency at
+ * `defaultConcurrency() × 7` instead of the prior
+ * `defaultConcurrency() × 9 × 7`, which under load caused JVM/cargo
+ * cold-start contention, pipe-buffer pressure, and flaky FAILs.
  */
 export async function runAllMultiFormatConformanceTests(
   testsDir: string,
@@ -1207,17 +1687,34 @@ export async function runAllMultiFormatConformanceTests(
     testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
   }
 
-  const allResults: ConformanceResult[] = [];
-  for (const testDir of testDirs) {
-    const results = await runMultiFormatConformanceTest(testDir);
+  const limit = makeLimiter(defaultConcurrency());
 
-    // If a specific format filter is requested, only include matching results
-    if (options?.format) {
-      allResults.push(...results.filter(r => r.format === options.format));
-    } else {
-      allResults.push(...results);
+  const allTasks: Promise<ConformanceResult>[] = [];
+  for (const testDir of testDirs) {
+    const formats = discoverFormats(testDir, basename(testDir));
+    if (formats.length === 0) {
+      allTasks.push(
+        Promise.resolve<ConformanceResult>({
+          testName: basename(testDir),
+          tsCompiler: { irJson: '', scriptHex: '', scriptAsm: '', success: false, error: 'No source files found', durationMs: 0 },
+          irMatch: false,
+          scriptMatch: false,
+          errors: ['No source files found in test directory'],
+        }),
+      );
+      continue;
+    }
+    for (const format of formats) {
+      allTasks.push(limit(() => runConformanceTestForFormat(testDir, format)));
     }
   }
 
-  return allResults;
+  const results = await Promise.all(allTasks);
+  if (options?.format) {
+    return results.filter((r) => r.format === options.format);
+  }
+  return results;
 }
+
+// Re-export for tools that previously imported these helpers.
+export { runCmd };

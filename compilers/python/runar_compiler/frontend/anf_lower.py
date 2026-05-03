@@ -52,6 +52,11 @@ from runar_compiler.ir.types import (
     ANFValue,
     SourceLocation,
 )
+from runar_compiler.frontend.side_effect_summary import (
+    MethodEffects,
+    compute_side_effect_summary,
+    continuation_shape_for,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -238,8 +243,14 @@ def _extract_literal_value(expr: Expression) -> str | int | bool | None:
 def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
     result: list[ANFMethod] = []
 
+    # Single source of truth for "does this method (transitively)
+    # mutate state, emit outputs, or use the preimage?" Shared across
+    # the lowering pass so every public method's auto-injection sees
+    # private-helper effects, not just direct ones.
+    side_effects = compute_side_effect_summary(contract)
+
     # Lower constructor
-    ctor_ctx = _LowerCtx(contract)
+    ctor_ctx = _LowerCtx(contract, side_effects)
     ctor_ctx.lower_statements(contract.constructor.body)
     result.append(ANFMethod(
         name="constructor",
@@ -250,31 +261,23 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
 
     # Lower each method
     for method in contract.methods:
-        method_ctx = _LowerCtx(contract)
+        method_ctx = _LowerCtx(contract, side_effects)
 
         if contract.parent_class == "StatefulSmartContract" and method.visibility == "public":
-            # Determine if this method verifies hashOutputs (needs change output support).
-            # Methods that use addOutput/addDataOutput or mutate state need hashOutputs
-            # verification. Non-mutating methods (like close/destroy) don't verify outputs.
-            has_data_output = _method_has_add_data_output(method)
-            needs_change_output = (
-                _method_mutates_state(method, contract)
-                or _method_has_add_output(method)
-                or has_data_output
-            )
+            # Continuation requirements come from the side-effect
+            # summary, which walks the private-method call graph. A
+            # public method that calls a private helper which mutates
+            # state or emits an output must therefore inject the same
+            # continuation params as if the public body did so directly.
+            eff = side_effects.get(method.name, MethodEffects())
+            shape = continuation_shape_for(eff)
+            needs_change_output = shape.needs_change
+            needs_new_amount = shape.needs_new_amount
 
             # Register implicit parameters
             if needs_change_output:
                 method_ctx.add_param("_changePKH")
                 method_ctx.add_param("_changeAmount")
-            # Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
-            # Multi-output (addOutput) methods already specify amounts explicitly per output.
-            # Methods that emit only data outputs (no addOutput) still run the single-output
-            # continuation path for their state continuation, so they also need _newAmount.
-            needs_new_amount = (
-                (_method_mutates_state(method, contract) or has_data_output)
-                and not _method_has_add_output(method)
-            )
             if needs_new_amount:
                 method_ctx.add_param("_newAmount")
             method_ctx.add_param("txPreimage")
@@ -309,7 +312,11 @@ def _lower_methods(contract: ContractNode) -> list[ANFMethod]:
             # inserted BETWEEN the single state output and the change output.
             add_output_refs = method_ctx.get_add_output_refs()
             add_data_output_refs = method_ctx.get_add_data_output_refs()
-            if add_output_refs or add_data_output_refs or _method_mutates_state(method, contract):
+            # Gate the continuation assertion on the same shape used
+            # for param injection. Both must agree or the deployed
+            # locking script will not match the auto-injected parameter
+            # list.
+            if needs_change_output:
                 # Build the P2PKH change output for hashOutputs verification
                 change_pkh_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changePKH"))
                 change_amount_ref = method_ctx.emit(ANFValue(kind="load_param", name="_changeAmount"))
@@ -401,7 +408,11 @@ class _LowerCtx:
     Mirrors the Go ``lowerCtx`` struct exactly.
     """
 
-    def __init__(self, contract: ContractNode) -> None:
+    def __init__(
+        self,
+        contract: ContractNode,
+        side_effects: dict[str, MethodEffects] | None = None,
+    ) -> None:
         self.bindings: list[ANFBinding] = []
         self._counter: int = 0
         self._contract: ContractNode = contract
@@ -412,6 +423,65 @@ class _LowerCtx:
         self._local_aliases: dict[str, str] = {}
         self._local_byte_vars: set[str] = set()
         self.current_source_loc: SourceLocation | None = None
+        # Param substitution stack used when inlining a private method's
+        # body into this context. When the inlined body references that
+        # param, the lowered identifier resolves to the aliased ref
+        # instead of emitting load_param. Stacked so nested inlines
+        # compose correctly.
+        self._param_alias_stack: dict[str, list[str]] = {}
+        # Side-effect summary shared with auto-injection decisions. Used
+        # at lowering time to decide whether a private call should be
+        # inlined (so that helper's add_output / add_data_output ANF
+        # nodes register on the caller's continuation hash) or remain a
+        # method_call for stack lowering to inline later.
+        self._side_effects: dict[str, MethodEffects] | None = side_effects
+
+    def push_param_alias(self, name: str, alias_ref: str) -> None:
+        self._param_alias_stack.setdefault(name, []).append(alias_ref)
+
+    def pop_param_alias(self, name: str) -> None:
+        stack = self._param_alias_stack.get(name)
+        if not stack:
+            return
+        stack.pop()
+        if not stack:
+            self._param_alias_stack.pop(name, None)
+
+    def get_param_alias(self, name: str) -> str | None:
+        stack = self._param_alias_stack.get(name)
+        if not stack:
+            return None
+        return stack[-1]
+
+    def should_inline_private(self, name: str) -> bool:
+        """Whether a call to ``name`` should be ANF-inlined rather than
+        emitted as a method_call. True iff ``name`` is a private method
+        that (transitively) emits state outputs (addOutput /
+        addRawOutput) or data outputs (addDataOutput). Those refs MUST
+        appear in the caller's binding stream so they participate in
+        the continuation hash.
+
+        Mutation-only private helpers are intentionally NOT inlined —
+        state mutation flows through state continuity (the
+        continuation hash reads state via get_state_script after all
+        mutations apply). Keeping the existing method_call +
+        stack-lowering inlining path for those preserves byte-equality
+        with the pre-fix corpus.
+        """
+        if self._side_effects is None:
+            return False
+        if not self._is_private_method(name):
+            return False
+        eff = self._side_effects.get(name)
+        if eff is None:
+            return False
+        return eff.has_state_output or eff.has_data_output
+
+    def get_private_method(self, name: str) -> MethodNode | None:
+        for m in self._contract.methods:
+            if m.name == name and m.visibility != "public":
+                return m
+        return None
 
     def fresh_temp(self) -> str:
         name = f"t{self._counter}"
@@ -607,13 +677,24 @@ class _LowerCtx:
             else_ctx.lower_statements(stmt.else_)
         self.sync_counter(else_ctx)
 
-        # Propagate addOutput refs from sub-contexts: when either branch produces
-        # addOutput calls, the if-expression result represents each addOutput
-        # (only one branch executes at runtime).
-        then_has_outputs = bool(then_ctx.get_add_output_refs())
-        else_has_outputs = bool(else_ctx.get_add_output_refs())
-        then_has_data = bool(then_ctx.get_add_data_output_refs())
-        else_has_data = bool(else_ctx.get_add_data_output_refs())
+        # 2026-04-30 audit finding F2: when a branch contains output
+        # intrinsics, append a cat-chain inside each branch so the
+        # branch's terminal value is the concat of its output bytes
+        # (state then data, in declaration order). Balances runtime
+        # stack effects across branches and lets the parent's
+        # continuation hash see one ref per if representing the
+        # chosen branch's full output set.
+        branch_has_state_output = bool(
+            then_ctx.get_add_output_refs() or else_ctx.get_add_output_refs()
+        )
+        branch_has_outputs = (
+            branch_has_state_output
+            or bool(then_ctx.get_add_data_output_refs() or else_ctx.get_add_data_output_refs())
+        )
+
+        if branch_has_outputs:
+            _append_branch_output_concat(then_ctx)
+            _append_branch_output_concat(else_ctx)
 
         if_name = self.emit(ANFValue(
             kind="if",
@@ -622,10 +703,24 @@ class _LowerCtx:
             else_=else_ctx.bindings,
         ))
 
-        if then_has_outputs or else_has_outputs:
-            self.add_output_ref(if_name)
-        if then_has_data or else_has_data:
-            self.add_data_output_ref(if_name)
+        if branch_has_outputs:
+            # Register the if's value once with the parent's continuation
+            # tracker. CRITICAL: pick the right tracker. If either
+            # branch produces a STATE output, the parent must take the
+            # multi-output continuation path, so we register as a
+            # state output ref. If neither branch produces a state
+            # output and at least one branch produces a data output,
+            # we register as a DATA output ref so the parent keeps
+            # its single-output `computeStateOutput` continuation
+            # and the data-output bytes splice in BETWEEN the state
+            # output and the change output. Without this, a branch
+            # with only `addDataOutput` was incorrectly forced onto
+            # the multi-output path, dropping the canonical state
+            # continuation.
+            if branch_has_state_output:
+                self.add_output_ref(if_name)
+            else:
+                self.add_data_output_ref(if_name)
 
         # If both branches end by reassigning the same local variable,
         # alias that variable to the if-expression result
@@ -743,6 +838,14 @@ class _LowerCtx:
         # 'this' is not a value in ANF
         if name == "this":
             return self.emit(_make_load_const_string("@this"))
+
+        # Param alias takes precedence over normal param lookup. Set
+        # when a private method's body is being inlined into this
+        # context — the private's param names map to the caller's arg
+        # refs.
+        alias = self.get_param_alias(name)
+        if alias is not None:
+            return alias
 
         # Check if it's a registered parameter (e.g. txPreimage)
         if self.is_param(name):
@@ -900,9 +1003,13 @@ class _LowerCtx:
             ):
                 return self.emit(ANFValue(kind="get_state_script"))
 
-        # this.method(...) via PropertyAccessExpr
+        # this.method(...) via PropertyAccessExpr (or inlined if the
+        # target is a private method with continuation-relevant side
+        # effects).
         if isinstance(callee, PropertyAccessExpr):
             arg_refs = self._lower_args(e.args)
+            if self.should_inline_private(callee.property):
+                return self._inline_private_method_call(callee.property, arg_refs)
             this_ref = self.emit(_make_load_const_string("@this"))
             return self.emit(ANFValue(
                 kind="method_call", object=this_ref,
@@ -913,6 +1020,8 @@ class _LowerCtx:
         if isinstance(callee, MemberExpr):
             if isinstance(callee.object, Identifier) and callee.object.name == "this":
                 arg_refs = self._lower_args(e.args)
+                if self.should_inline_private(callee.property):
+                    return self._inline_private_method_call(callee.property, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))
                 return self.emit(ANFValue(
                     kind="method_call", object=this_ref,
@@ -929,6 +1038,8 @@ class _LowerCtx:
             # lowering can inline the body. Keeps .runar.move in sync with
             # .runar.ts across all formats.
             if self._is_private_method(callee.name):
+                if self.should_inline_private(callee.name):
+                    return self._inline_private_method_call(callee.name, arg_refs)
                 this_ref = self.emit(_make_load_const_string("@this"))
                 return self.emit(ANFValue(
                     kind="method_call", object=this_ref,
@@ -946,6 +1057,49 @@ class _LowerCtx:
 
     def _lower_args(self, args: list[Expression]) -> list[str]:
         return [self.lower_expr_to_ref(arg) for arg in args]
+
+    def _inline_private_method_call(self, method_name: str, arg_refs: list[str]) -> str:
+        """Lower a private method's body directly into this context.
+
+        Used when the private has continuation-relevant side effects
+        (state mutation, addOutput, addRawOutput, addDataOutput) so the
+        helper's emitted ANF nodes register output refs on the caller.
+        Arg refs are mapped onto the private's parameter names via
+        push_param_alias. While the private's body lowers, any
+        identifier expression matching one of those param names
+        resolves to the caller's ref. The aliases are popped afterwards
+        so subsequent lowering in the caller's body sees its own scope.
+
+        Recursion across private helpers is forbidden by validation, so
+        this always terminates. Nested inlining (private A calls
+        private B) works naturally.
+        """
+        method = self.get_private_method(method_name)
+        if method is None:
+            # Should not happen — caller checked should_inline_private.
+            this_ref = self.emit(_make_load_const_string("@this"))
+            return self.emit(ANFValue(
+                kind="method_call", object=this_ref,
+                method=method_name, args=arg_refs,
+            ))
+
+        aliased: list[str] = []
+        for i, param in enumerate(method.params):
+            if i >= len(arg_refs):
+                break
+            self.push_param_alias(param.name, arg_refs[i])
+            aliased.append(param.name)
+
+        start_index = len(self.bindings)
+        self.lower_statements(method.body)
+        end_index = len(self.bindings)
+
+        for name in reversed(aliased):
+            self.pop_param_alias(name)
+
+        if end_index > start_index:
+            return self.bindings[end_index - 1].name
+        return self.emit(_make_load_const_string("@void"))
 
     def _lower_ternary_expr(self, e: TernaryExpr) -> str:
         cond_ref = self.lower_expr_to_ref(e.condition)
@@ -1034,6 +1188,25 @@ def _make_call(func_name: str, args: list[str]) -> ANFValue:
         func=func_name,
         args=args,
     )
+
+
+def _append_branch_output_concat(branch_ctx: "_LowerCtx") -> str:
+    """Concatenate a branch's output refs (state then data, in
+    declaration order) into a single bytes-ref appended to the
+    branch's bindings. If the branch has no outputs, emits an empty
+    ``load_const`` so the branch still leaves one item on the stack —
+    required to balance the if's branch shapes when the OTHER branch
+    has outputs. 2026-04-30 audit finding F2 fix."""
+    all_refs = list(branch_ctx.get_add_output_refs())
+    all_refs.extend(branch_ctx.get_add_data_output_refs())
+    if not all_refs:
+        return branch_ctx.emit(_make_load_const_string(""))
+    if len(all_refs) == 1:
+        return all_refs[0]
+    accumulated = all_refs[0]
+    for ref in all_refs[1:]:
+        accumulated = branch_ctx.emit(_make_call("cat", [accumulated, ref]))
+    return accumulated
 
 
 def _make_assert(value_ref: str) -> ANFValue:

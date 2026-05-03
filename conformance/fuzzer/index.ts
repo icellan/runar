@@ -56,10 +56,12 @@ interface FuzzerCLIOptions {
 
 function parseArgs(argv: string[]): FuzzerCLIOptions {
   // Default compiler list: includes every compiler that can be driven from a
-  // single generator run. The IR-based harness (`ir-differential.ts`) renders
-  // per-compiler native sources for 'java' automatically. The legacy string
-  // harness in `differential.ts` can only emit .runar.ts and silently skips
-  // Java; that is intentional and documented in compileJavaSource().
+  // single generator run. The Java compiler parses all 9 .runar.* formats just
+  // like the other 6 compilers, but the legacy string-based harness in
+  // `differential.ts` only produces .runar.ts text and has no structured AST
+  // to re-render as Java, so it silently skips Java. The IR-based harness
+  // (`ir-differential.ts`) does have a structured generator and renders
+  // per-compiler native sources for Java (and every other compiler).
   const opts: FuzzerCLIOptions = {
     num: 100,
     compilers: ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'],

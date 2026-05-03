@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="runar.end2end.PriceBetTest" tests="7" skipped="0" failures="0" errors="0" timestamp="2026-05-03T10:53:16.774Z" hostname="Mac.home" time="0.463">
+  <properties/>
+  <testcase name="cancelSucceedsWithBothSignatures()" classname="runar.end2end.PriceBetTest" time="0.034"/>
+  <testcase name="settleBobWinsWhenPriceBelowStrike()" classname="runar.end2end.PriceBetTest" time="0.0"/>
+  <testcase name="contractInstantiates()" classname="runar.end2end.PriceBetTest" time="0.003"/>
+  <testcase name="settleBobWinsAtStrike()" classname="runar.end2end.PriceBetTest" time="0.001"/>
+  <testcase name="compileCheckPasses()" classname="runar.end2end.PriceBetTest" time="0.385"/>
+  <testcase name="settleRejectsZeroPrice()" classname="runar.end2end.PriceBetTest" time="0.003"/>
+  <testcase name="settleAlicewinsWhenPriceExceedsStrike()" classname="runar.end2end.PriceBetTest" time="0.001"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

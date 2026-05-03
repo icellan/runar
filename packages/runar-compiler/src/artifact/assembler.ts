@@ -12,11 +12,10 @@ import type {
   TypeNode,
   ParamNode,
   PropertyNode,
-  Statement,
-  Expression,
   StackProgram,
   ANFProgram,
 } from '../ir/index.js';
+import { computeSideEffectSummary, continuationShape } from '../passes/side-effect-summary.js';
 
 // ---------------------------------------------------------------------------
 // Artifact types (mirroring runar-ir-schema/artifact.ts)
@@ -423,9 +422,11 @@ function extractABI(contract: ContractNode): ABI {
   const constructorParams = regroupAbiParams(rawConstructorParams);
 
   const isStateful = contract.parentClass === 'StatefulSmartContract';
-  const mutablePropNames = isStateful
-    ? new Set(contract.properties.filter(p => !p.readonly).map(p => p.name))
-    : new Set<string>();
+
+  // Single source of truth for continuation requirements — same
+  // classifier the ANF pass uses, so ABI params cannot diverge from
+  // the locking script's auto-injected parameter list.
+  const sideEffects = isStateful ? computeSideEffectSummary(contract) : null;
 
   // Methods
   const methods: ABIMethod[] = contract.methods.map(method => {
@@ -433,19 +434,20 @@ function extractABI(contract: ContractNode): ABI {
     const isPublic = method.visibility === 'public';
     let needsChange = false;
 
-    if (isStateful && isPublic) {
-      // Methods that mutate state or call addOutput need change output params
-      needsChange = methodMutatesState(method.body, mutablePropNames) ||
-                    methodHasAddOutput(method.body);
+    if (isStateful && isPublic && sideEffects) {
+      const effects = sideEffects.get(method.name) ?? {
+        mutatesState: false,
+        hasStateOutput: false,
+        hasDataOutput: false,
+        usesPreimage: false,
+      };
+      const shape = continuationShape(effects);
+      needsChange = shape.needsChange;
       if (needsChange) {
         params.push({ name: '_changePKH', type: 'Ripemd160' });
         params.push({ name: '_changeAmount', type: 'bigint' });
       }
-      // Single-output continuation methods need _newAmount to allow changing UTXO satoshis.
-      // Methods using addOutput already specify amounts explicitly per output.
-      const needsNewAmount = methodMutatesState(method.body, mutablePropNames) &&
-                             !methodHasAddOutput(method.body);
-      if (needsNewAmount) {
+      if (shape.needsNewAmount) {
         params.push({ name: '_newAmount', type: 'bigint' });
       }
       params.push({ name: 'txPreimage', type: 'SigHashPreimage' });
@@ -695,70 +697,3 @@ function bigintReviver(_key: string, value: unknown): unknown {
   return value;
 }
 
-// ---------------------------------------------------------------------------
-// Change output detection (mirrors logic in 04-anf-lower.ts)
-// ---------------------------------------------------------------------------
-
-function methodMutatesState(stmts: Statement[], mutableProps: Set<string>): boolean {
-  for (const stmt of stmts) {
-    if (stmtMutatesState(stmt, mutableProps)) return true;
-  }
-  return false;
-}
-
-function stmtMutatesState(stmt: Statement, mutableProps: Set<string>): boolean {
-  switch (stmt.kind) {
-    case 'assignment':
-      if (stmt.target.kind === 'property_access' && mutableProps.has(stmt.target.property)) {
-        return true;
-      }
-      return false;
-    case 'expression_statement':
-      return exprMutatesState(stmt.expression, mutableProps);
-    case 'if_statement':
-      return methodMutatesState(stmt.then, mutableProps) ||
-             (stmt.else ? methodMutatesState(stmt.else, mutableProps) : false);
-    case 'for_statement':
-      return stmtMutatesState(stmt.update, mutableProps) ||
-             methodMutatesState(stmt.body, mutableProps);
-    default:
-      return false;
-  }
-}
-
-function exprMutatesState(expr: Expression, mutableProps: Set<string>): boolean {
-  if (expr.kind === 'increment_expr' || expr.kind === 'decrement_expr') {
-    if (expr.operand.kind === 'property_access' && mutableProps.has(expr.operand.property)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function methodHasAddOutput(stmts: Statement[]): boolean {
-  for (const stmt of stmts) {
-    if (stmtHasAddOutput(stmt)) return true;
-  }
-  return false;
-}
-
-function stmtHasAddOutput(stmt: Statement): boolean {
-  switch (stmt.kind) {
-    case 'expression_statement':
-      return exprHasAddOutput(stmt.expression);
-    case 'if_statement':
-      return methodHasAddOutput(stmt.then) ||
-             (stmt.else ? methodHasAddOutput(stmt.else) : false);
-    case 'for_statement':
-      return methodHasAddOutput(stmt.body);
-    default:
-      return false;
-  }
-}
-
-function exprHasAddOutput(expr: Expression): boolean {
-  if (expr.kind === 'call_expr' && expr.callee.kind === 'property_access' && expr.callee.property === 'addOutput') {
-    return true;
-  }
-  return false;
-}

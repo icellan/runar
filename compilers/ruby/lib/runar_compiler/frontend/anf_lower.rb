@@ -171,10 +171,10 @@ module RunarCompiler
           # Determine if this method verifies hashOutputs (needs change output support).
           # Methods that use addOutput / addDataOutput or mutate state need hashOutputs
           # verification.
-          has_data_output = _method_has_add_data_output(method)
+          has_data_output = _method_has_add_data_output(method, contract)
           needs_change_output = (
             _method_mutates_state(method, contract) ||
-            _method_has_add_output(method) ||
+            _method_has_add_output(method, contract) ||
             has_data_output
           )
 
@@ -188,7 +188,7 @@ module RunarCompiler
           # single-output continuation path for their state continuation, so
           # they also need _newAmount.
           needs_new_amount = (_method_mutates_state(method, contract) || has_data_output) &&
-                             !_method_has_add_output(method)
+                             !_method_has_add_output(method, contract)
           if needs_new_amount
             method_ctx.add_param("_newAmount")
           end
@@ -354,6 +354,88 @@ module RunarCompiler
         @local_aliases = {}
         @local_byte_vars = Set.new
         @current_source_loc = nil
+        # Param substitution stack used when inlining a private method's body
+        # directly into this context. Mirrors TS / Go reference compilers'
+        # paramAliasStack — see _inline_private_method_call below for usage.
+        @param_alias_stack = {}
+      end
+
+      # Push an alias for a parameter name, used while inlining the body of
+      # a private method into this context: identifier references to that
+      # param resolve to the caller's arg ref instead of emitting load_param.
+      def push_param_alias(name, alias_ref)
+        (@param_alias_stack[name] ||= []) << alias_ref
+      end
+
+      def pop_param_alias(name)
+        stack = @param_alias_stack[name]
+        return if stack.nil? || stack.empty?
+        stack.pop
+        @param_alias_stack.delete(name) if stack.empty?
+      end
+
+      def get_param_alias(name)
+        stack = @param_alias_stack[name]
+        return nil if stack.nil? || stack.empty?
+        stack.last
+      end
+
+      # Look up a private method by name; returns the MethodNode or nil.
+      def get_private_method(name)
+        @contract.methods.find do |m|
+          m.name == name && m.name != "constructor" && m.visibility != "public"
+        end
+      end
+
+      # Whether a call to `name` should be ANF-inlined rather than emitted as
+      # a method_call. True iff `name` is a private method that (transitively)
+      # emits state outputs (addOutput / addRawOutput) or data outputs
+      # (addDataOutput). Those refs MUST appear in the caller's binding stream
+      # so they participate in the continuation hash; without ANF-level
+      # inlining they would live in a sibling ANF method and the public
+      # method's continuation hash would miss them.
+      #
+      # Mutation-only private helpers (no output intrinsics) are intentionally
+      # NOT inlined — state mutation flows through state continuity.
+      def should_inline_private?(name)
+        m = get_private_method(name)
+        return false if m.nil?
+        RunarCompiler::Frontend.send(:_method_has_add_output, m, @contract) ||
+          RunarCompiler::Frontend.send(:_method_has_add_data_output, m, @contract)
+      end
+
+      # Inline a private method's body directly into this context. Mirrors
+      # TS/Go/Rust/Python reference compilers' inlinePrivateMethodCall.
+      def inline_private_method_call(method_name, arg_refs)
+        method = get_private_method(method_name)
+        if method.nil?
+          this_ref = emit(Frontend._make_load_const_string("@this"))
+          return emit(IR::ANFValue.new(kind: "method_call").tap do |v|
+            v.object = this_ref
+            v.method = method_name
+            v.args = arg_refs
+          end)
+        end
+
+        aliased_params = []
+        n = [method.params.size, arg_refs.size].min
+        n.times do |i|
+          param_name = method.params[i].name
+          push_param_alias(param_name, arg_refs[i])
+          aliased_params << param_name
+        end
+
+        start_index = @bindings.size
+        lower_statements(method.body)
+        end_index = @bindings.size
+
+        aliased_params.reverse_each { |p| pop_param_alias(p) }
+
+        if end_index > start_index
+          @bindings[end_index - 1].name
+        else
+          emit(Frontend._make_load_const_string("@void"))
+        end
       end
 
       # Generate a fresh temp name.
@@ -708,14 +790,25 @@ module RunarCompiler
         end
         sync_counter(else_ctx)
 
-        # Propagate addOutput refs from sub-contexts
-        then_has_outputs = then_ctx.get_add_output_refs.any?
-        else_has_outputs = else_ctx.get_add_output_refs.any?
-        # Propagate addDataOutput refs from sub-contexts -- data outputs
-        # declared inside a branch must contribute to the continuation hash
-        # via the if-expression result.
-        then_has_data = then_ctx.get_add_data_output_refs.any?
-        else_has_data = else_ctx.get_add_data_output_refs.any?
+        # 2026-04-30 audit finding F2: when a branch contains output
+        # intrinsics, append a cat-chain inside each branch so the
+        # branch's terminal value is the concat of its output bytes
+        # (state then data, in declaration order). Balances runtime
+        # stack effects across branches and lets the parent's
+        # continuation hash see one ref per if representing the
+        # chosen branch's full output set.
+        branch_has_state_output =
+          then_ctx.get_add_output_refs.any? ||
+          else_ctx.get_add_output_refs.any?
+        branch_has_outputs =
+          branch_has_state_output ||
+          then_ctx.get_add_data_output_refs.any? ||
+          else_ctx.get_add_data_output_refs.any?
+
+        if branch_has_outputs
+          Frontend._append_branch_output_concat(then_ctx)
+          Frontend._append_branch_output_concat(else_ctx)
+        end
 
         if_name = emit(IR::ANFValue.new(kind: "if").tap do |v|
           v.cond = cond_ref
@@ -723,11 +816,24 @@ module RunarCompiler
           v.else_ = else_ctx.bindings
         end)
 
-        if then_has_outputs || else_has_outputs
-          add_output_ref(if_name)
-        end
-        if then_has_data || else_has_data
-          add_data_output_ref(if_name)
+        if branch_has_outputs
+          # Register the if's value once with the parent's continuation
+          # tracker. CRITICAL: pick the right tracker. If either
+          # branch produces a STATE output, the parent must take the
+          # multi-output continuation path, so we register as a state
+          # output ref. If neither branch produces a state output and
+          # at least one branch produces a data output, we register
+          # as a DATA output ref so the parent keeps its single-output
+          # `computeStateOutput` continuation and the data-output
+          # bytes splice in BETWEEN the state output and the change
+          # output. Without this, a branch with only `addDataOutput`
+          # was incorrectly forced onto the multi-output path,
+          # dropping the canonical state continuation.
+          if branch_has_state_output
+            add_output_ref(if_name)
+          else
+            add_data_output_ref(if_name)
+          end
         end
 
         # If both branches end by reassigning the same local variable,
@@ -764,6 +870,12 @@ module RunarCompiler
 
         # 'this' is not a value in ANF
         return emit(Frontend._make_load_const_string("@this")) if name == "this"
+
+        # Param alias takes precedence over normal param lookup. Set when a
+        # private method's body is being inlined into this context — the
+        # private's param names map to the caller's arg refs.
+        param_alias = get_param_alias(name)
+        return param_alias unless param_alias.nil?
 
         # Check if it's a registered parameter (e.g. txPreimage)
         return emit(IR::ANFValue.new(kind: "load_param").tap { |v| v.name = name }) if param?(name)
@@ -952,6 +1064,9 @@ module RunarCompiler
         # this.method(...) via PropertyAccessExpr
         if callee.is_a?(PropertyAccessExpr)
           arg_refs = _lower_args(e.args)
+          if should_inline_private?(callee.property)
+            return inline_private_method_call(callee.property, arg_refs)
+          end
           this_ref = emit(Frontend._make_load_const_string("@this"))
           return emit(IR::ANFValue.new(kind: "method_call").tap do |v|
             v.object = this_ref
@@ -965,6 +1080,9 @@ module RunarCompiler
            callee.object.is_a?(Identifier) &&
            callee.object.name == "this"
           arg_refs = _lower_args(e.args)
+          if should_inline_private?(callee.property)
+            return inline_private_method_call(callee.property, arg_refs)
+          end
           this_ref = emit(Frontend._make_load_const_string("@this"))
           return emit(IR::ANFValue.new(kind: "method_call").tap do |v|
             v.object = this_ref
@@ -982,6 +1100,9 @@ module RunarCompiler
           # path as `this.requireOwner(sig)` so downstream stack lowering can
           # inline the body. Keeps .runar.move in sync with .runar.ts.
           if _is_private_method(callee.name)
+            if should_inline_private?(callee.name)
+              return inline_private_method_call(callee.name, arg_refs)
+            end
             this_ref = emit(Frontend._make_load_const_string("@this"))
             return emit(IR::ANFValue.new(kind: "method_call").tap do |v|
               v.object = this_ref
@@ -1118,6 +1239,26 @@ module RunarCompiler
       end
     end
 
+    # Concatenate a branch's output refs (state then data, in
+    # declaration order) into a single bytes-ref appended to the
+    # branch's bindings. If the branch has no outputs, emits an empty
+    # +load_const+ so the branch still leaves one item on the stack —
+    # required to balance the if's branch shapes when the OTHER
+    # branch has outputs. 2026-04-30 audit finding F2 fix.
+    def self._append_branch_output_concat(branch_ctx)
+      all_refs = branch_ctx.get_add_output_refs.dup
+      all_refs.concat(branch_ctx.get_add_data_output_refs)
+      if all_refs.empty?
+        return branch_ctx.emit(_make_load_const_string(""))
+      end
+      return all_refs[0] if all_refs.length == 1
+      accumulated = all_refs[0]
+      all_refs[1..].each do |ref|
+        accumulated = branch_ctx.emit(_make_call("cat", [accumulated, ref]))
+      end
+      accumulated
+    end
+
     # @param value_ref [String]
     # @return [IR::ANFValue]
     def self._make_assert(value_ref)
@@ -1145,29 +1286,32 @@ module RunarCompiler
     # -------------------------------------------------------------------
 
     # Determine whether a method mutates any mutable (non-readonly) property.
-    # Conservative: if ANY code path can mutate state, returns true.
+    # Conservative: if ANY code path can mutate state, returns true. Walks
+    # the private-method call graph so a public method that delegates the
+    # mutation to a private helper is correctly classified — fix for the
+    # 2026-04-30 audit's F1 finding.
     def self._method_mutates_state(method, contract)
       mutable_props = Set.new
       contract.properties.each do |p|
         mutable_props.add(p.name) unless p.readonly
       end
       return false if mutable_props.empty?
-      _body_mutates_state(method.body, mutable_props)
+      _body_mutates_state(method.body, mutable_props, contract, [].to_set)
     end
     private_class_method :_method_mutates_state
 
     # @param stmts [Array<Statement>]
     # @param mutable_props [Set<String>]
+    # @param contract [ContractNode]
+    # @param seen [Set<String>] private methods currently on the recursion stack
     # @return [Boolean]
-    def self._body_mutates_state(stmts, mutable_props)
-      stmts.any? { |stmt| _stmt_mutates_state(stmt, mutable_props) }
+    def self._body_mutates_state(stmts, mutable_props, contract, seen)
+      stmts.any? { |stmt| _stmt_mutates_state(stmt, mutable_props, contract, seen) }
     end
     private_class_method :_body_mutates_state
 
-    # @param stmt [Statement]
-    # @param mutable_props [Set<String>]
     # @return [Boolean]
-    def self._stmt_mutates_state(stmt, mutable_props)
+    def self._stmt_mutates_state(stmt, mutable_props, contract, seen)
       if stmt.is_a?(AssignmentStmt)
         if stmt.target.is_a?(PropertyAccessExpr)
           return mutable_props.include?(stmt.target.property)
@@ -1176,32 +1320,34 @@ module RunarCompiler
       end
 
       if stmt.is_a?(ExpressionStmt)
-        return _expr_mutates_state(stmt.expr, mutable_props)
+        return _expr_mutates_state(stmt.expr, mutable_props, contract, seen)
       end
 
       if stmt.is_a?(IfStmt)
-        return true if _body_mutates_state(stmt.then, mutable_props)
+        return true if _body_mutates_state(stmt.then, mutable_props, contract, seen)
         if stmt.else_ && stmt.else_.any?
-          return true if _body_mutates_state(stmt.else_, mutable_props)
+          return true if _body_mutates_state(stmt.else_, mutable_props, contract, seen)
         end
         return false
       end
 
       if stmt.is_a?(ForStmt)
-        if stmt.update && _stmt_mutates_state(stmt.update, mutable_props)
+        if stmt.update && _stmt_mutates_state(stmt.update, mutable_props, contract, seen)
           return true
         end
-        return _body_mutates_state(stmt.body, mutable_props)
+        return _body_mutates_state(stmt.body, mutable_props, contract, seen)
+      end
+
+      if stmt.is_a?(ReturnStmt) && stmt.value
+        return _expr_mutates_state(stmt.value, mutable_props, contract, seen)
       end
 
       false
     end
     private_class_method :_stmt_mutates_state
 
-    # @param expr [Expression, nil]
-    # @param mutable_props [Set<String>]
     # @return [Boolean]
-    def self._expr_mutates_state(expr, mutable_props)
+    def self._expr_mutates_state(expr, mutable_props, contract, seen)
       return false if expr.nil?
       if expr.is_a?(IncrementExpr)
         if expr.operand.is_a?(PropertyAccessExpr)
@@ -1213,50 +1359,79 @@ module RunarCompiler
           return mutable_props.include?(expr.operand.property)
         end
       end
+      if expr.is_a?(CallExpr)
+        target = _resolve_private_method(expr.callee, contract)
+        if target && !seen.include?(target.name)
+          new_seen = seen.dup.add(target.name)
+          return true if _body_mutates_state(target.body, mutable_props, contract, new_seen)
+        end
+      end
       false
     end
     private_class_method :_expr_mutates_state
+
+    # Resolve a CallExpr callee to a private method on the contract, or
+    # nil if the callee is a builtin / external / unresolved.
+    def self._resolve_private_method(callee, contract)
+      return nil if callee.nil?
+      name =
+        if callee.is_a?(PropertyAccessExpr)
+          callee.property
+        elsif callee.is_a?(MemberExpr)
+          callee.property
+        elsif callee.is_a?(Identifier)
+          callee.name
+        end
+      return nil if name.nil?
+      contract.methods.find { |m| m.name == name && m.visibility != "public" }
+    end
+    private_class_method :_resolve_private_method
 
     # -------------------------------------------------------------------
     # addOutput detection for determining change output necessity
     # -------------------------------------------------------------------
 
-    # Check if a method body contains any this.addOutput() calls.
-    def self._method_has_add_output(method)
-      _body_has_add_output(method.body)
+    # Check if a method body contains any this.addOutput() calls,
+    # including those reachable via private-helper calls.
+    def self._method_has_add_output(method, contract)
+      _body_has_add_output(method.body, contract, [].to_set)
     end
     private_class_method :_method_has_add_output
 
-    # @param stmts [Array<Statement>]
     # @return [Boolean]
-    def self._body_has_add_output(stmts)
-      stmts.any? { |stmt| _stmt_has_add_output(stmt) }
+    def self._body_has_add_output(stmts, contract, seen)
+      stmts.any? { |stmt| _stmt_has_add_output(stmt, contract, seen) }
     end
     private_class_method :_body_has_add_output
 
-    # @param stmt [Statement]
     # @return [Boolean]
-    def self._stmt_has_add_output(stmt)
+    def self._stmt_has_add_output(stmt, contract, seen)
       if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_output(stmt.expr)
+        return _expr_has_add_output(stmt.expr, contract, seen)
       end
       if stmt.is_a?(IfStmt)
-        return true if _body_has_add_output(stmt.then)
+        return true if _body_has_add_output(stmt.then, contract, seen)
         if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_output(stmt.else_)
+          return true if _body_has_add_output(stmt.else_, contract, seen)
         end
         return false
       end
       if stmt.is_a?(ForStmt)
-        return _body_has_add_output(stmt.body)
+        return _body_has_add_output(stmt.body, contract, seen)
+      end
+      # Ruby's parser_ruby promotes a private method's trailing
+      # ExpressionStmt to a ReturnStmt for implicit-return semantics, so
+      # `add_output(...)` calls in helper bodies wind up here. Walk the
+      # return value the same way an ExpressionStmt would be walked.
+      if stmt.is_a?(ReturnStmt) && stmt.value
+        return _expr_has_add_output(stmt.value, contract, seen)
       end
       false
     end
     private_class_method :_stmt_has_add_output
 
-    # @param expr [Expression, nil]
     # @return [Boolean]
-    def self._expr_has_add_output(expr)
+    def self._expr_has_add_output(expr, contract, seen)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -1269,6 +1444,11 @@ module RunarCompiler
            %w[addOutput addRawOutput].include?(callee.property)
           return true
         end
+        target = _resolve_private_method(callee, contract)
+        if target && !seen.include?(target.name)
+          new_seen = seen.dup.add(target.name)
+          return true if _body_has_add_output(target.body, contract, new_seen)
+        end
       end
       false
     end
@@ -1278,42 +1458,43 @@ module RunarCompiler
     # addDataOutput detection (distinct from state outputs)
     # -------------------------------------------------------------------
 
-    # Check if a method body contains any this.addDataOutput() calls.
-    def self._method_has_add_data_output(method)
-      _body_has_add_data_output(method.body)
+    # Check if a method body contains any this.addDataOutput() calls,
+    # including those reachable via private-helper calls.
+    def self._method_has_add_data_output(method, contract)
+      _body_has_add_data_output(method.body, contract, [].to_set)
     end
     private_class_method :_method_has_add_data_output
 
-    # @param stmts [Array<Statement>]
     # @return [Boolean]
-    def self._body_has_add_data_output(stmts)
-      stmts.any? { |stmt| _stmt_has_add_data_output(stmt) }
+    def self._body_has_add_data_output(stmts, contract, seen)
+      stmts.any? { |stmt| _stmt_has_add_data_output(stmt, contract, seen) }
     end
     private_class_method :_body_has_add_data_output
 
-    # @param stmt [Statement]
     # @return [Boolean]
-    def self._stmt_has_add_data_output(stmt)
+    def self._stmt_has_add_data_output(stmt, contract, seen)
       if stmt.is_a?(ExpressionStmt)
-        return _expr_has_add_data_output(stmt.expr)
+        return _expr_has_add_data_output(stmt.expr, contract, seen)
       end
       if stmt.is_a?(IfStmt)
-        return true if _body_has_add_data_output(stmt.then)
+        return true if _body_has_add_data_output(stmt.then, contract, seen)
         if stmt.else_ && stmt.else_.any?
-          return true if _body_has_add_data_output(stmt.else_)
+          return true if _body_has_add_data_output(stmt.else_, contract, seen)
         end
         return false
       end
       if stmt.is_a?(ForStmt)
-        return _body_has_add_data_output(stmt.body)
+        return _body_has_add_data_output(stmt.body, contract, seen)
+      end
+      if stmt.is_a?(ReturnStmt) && stmt.value
+        return _expr_has_add_data_output(stmt.value, contract, seen)
       end
       false
     end
     private_class_method :_stmt_has_add_data_output
 
-    # @param expr [Expression, nil]
     # @return [Boolean]
-    def self._expr_has_add_data_output(expr)
+    def self._expr_has_add_data_output(expr, contract, seen)
       return false if expr.nil?
       if expr.is_a?(CallExpr)
         callee = expr.callee
@@ -1325,6 +1506,11 @@ module RunarCompiler
            callee.object.name == "this" &&
            callee.property == "addDataOutput"
           return true
+        end
+        target = _resolve_private_method(callee, contract)
+        if target && !seen.include?(target.name)
+          new_seen = seen.dup.add(target.name)
+          return true if _body_has_add_data_output(target.body, contract, new_seen)
         end
       end
       false

@@ -112,6 +112,7 @@ test {
     _ = @import("./p256-wallet/P256Wallet_test.zig");
     _ = @import("./p384-wallet/P384Wallet_test.zig");
     _ = @import("./add-data-output/DataOutputTest_test.zig");
+    _ = @import("./private-helper-outputs/PrivateHelperOutputs_test.zig");
     _ = @import("./arithmetic/Arithmetic_test.zig");
     _ = @import("./boolean-logic/BooleanLogic_test.zig");
     _ = @import("./bounded-loop/BoundedLoop_test.zig");

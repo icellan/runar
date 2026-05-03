@@ -330,7 +330,17 @@ const TypeChecker = struct {
     errors: std.ArrayListUnmanaged([]const u8),
     prop_types: std.StringHashMapUnmanaged(RunarType),
     method_sigs: std.StringHashMapUnmanaged(FuncSig),
+    /// Origin keys of affine values consumed in the current scope.
+    /// 2026-04-30 audit finding F6.
     consumed_values: std.StringHashMapUnmanaged(bool),
+    /// Maps a local name to the canonical affine origin key it
+    /// aliases. Populated by `const_decl` / `let_decl` of an affine
+    /// type whose initializer is itself an affine origin.
+    affine_aliases: std.StringHashMapUnmanaged([]const u8),
+    /// Pre-allocated `prop:<name>` origin keys for each contract
+    /// property, owned by this checker. Avoids per-lookup allocation
+    /// in the affine consumption check.
+    prop_origin_keys: std.StringHashMapUnmanaged([]u8),
     stateful_ctx_params: std.StringHashMapUnmanaged(void),
 
     fn init(allocator: Allocator, contract: ContractNode) !TypeChecker {
@@ -341,12 +351,17 @@ const TypeChecker = struct {
             .prop_types = .empty,
             .method_sigs = .empty,
             .consumed_values = .empty,
+            .affine_aliases = .empty,
+            .prop_origin_keys = .empty,
             .stateful_ctx_params = .empty,
         };
 
-        // Register property types
+        // Register property types and pre-allocate `prop:<name>`
+        // origin keys for affine tracking.
         for (contract.properties) |prop| {
             try self.prop_types.put(allocator, prop.name, prop.type_info);
+            const key = try std.fmt.allocPrint(allocator, "prop:{s}", .{prop.name});
+            try self.prop_origin_keys.put(allocator, prop.name, key);
         }
 
         // StatefulSmartContract gets implicit txPreimage property
@@ -374,6 +389,10 @@ const TypeChecker = struct {
         self.method_sigs.deinit(self.allocator);
         self.prop_types.deinit(self.allocator);
         self.consumed_values.deinit(self.allocator);
+        self.affine_aliases.deinit(self.allocator);
+        var keys_it = self.prop_origin_keys.iterator();
+        while (keys_it.next()) |entry| self.allocator.free(entry.value_ptr.*);
+        self.prop_origin_keys.deinit(self.allocator);
         self.stateful_ctx_params.deinit(self.allocator);
         // Note: self.errors ownership transfers to caller via toOwnedSlice
     }
@@ -394,6 +413,7 @@ const TypeChecker = struct {
         defer env.deinit();
 
         self.consumed_values.clearRetainingCapacity();
+        self.affine_aliases.clearRetainingCapacity();
         self.stateful_ctx_params.clearRetainingCapacity();
 
         const ctor = self.contract.constructor;
@@ -411,6 +431,7 @@ const TypeChecker = struct {
         defer env.deinit();
 
         self.consumed_values.clearRetainingCapacity();
+        self.affine_aliases.clearRetainingCapacity();
         self.stateful_ctx_params.clearRetainingCapacity();
 
         for (method.params) |param| {
@@ -431,7 +452,7 @@ const TypeChecker = struct {
         switch (stmt) {
             .const_decl => |decl| {
                 const init_type = self.inferExprType(decl.value, env);
-                if (decl.type_info) |declared| {
+                const decl_type = if (decl.type_info) |declared| blk: {
                     if (!isSubtype(init_type, declared)) {
                         self.addError("type '{s}' is not assignable to type '{s}'", .{
                             types.runarTypeToString(init_type),
@@ -439,14 +460,17 @@ const TypeChecker = struct {
                         });
                     }
                     env.define(decl.name, declared);
-                } else {
+                    break :blk declared;
+                } else blk: {
                     env.define(decl.name, init_type);
-                }
+                    break :blk init_type;
+                };
+                self.recordAffineAlias(decl.name, decl.value, decl_type);
             },
             .let_decl => |decl| {
                 if (decl.value) |val| {
                     const init_type = self.inferExprType(val, env);
-                    if (decl.type_info) |declared| {
+                    const decl_type = if (decl.type_info) |declared| blk: {
                         if (!isSubtype(init_type, declared)) {
                             self.addError("type '{s}' is not assignable to type '{s}'", .{
                                 types.runarTypeToString(init_type),
@@ -454,9 +478,12 @@ const TypeChecker = struct {
                             });
                         }
                         env.define(decl.name, declared);
-                    } else {
+                        break :blk declared;
+                    } else blk: {
                         env.define(decl.name, init_type);
-                    }
+                        break :blk init_type;
+                    };
+                    self.recordAffineAlias(decl.name, val, decl_type);
                 } else {
                     env.define(decl.name, decl.type_info orelse .unknown);
                 }
@@ -811,9 +838,43 @@ const TypeChecker = struct {
             return func_sig.return_type;
         }
 
-        // checkMultiSig: variadic special case
+        // checkMultiSig special case: arity 2, with arrays of Sig and
+        // PubKey. Zig's RunarType enum does not represent array types,
+        // so we walk literal array elements directly. 2026-04-30 audit
+        // finding F5: previously this branch only inferred types and
+        // skipped subtype validation, so `checkMultiSig([1n], [2n])`
+        // compiled cleanly.
         if (std.mem.eql(u8, func_name, "checkMultiSig")) {
-            for (args) |arg| _ = self.inferExprType(arg, env);
+            if (args.len != 2) {
+                self.addError("checkMultiSig() expects 2 arguments, got {d}", .{args.len});
+                for (args) |arg| _ = self.inferExprType(arg, env);
+                self.checkAffineConsumption(func_name, args, env);
+                return func_sig.return_type;
+            }
+            const expected: [2]RunarType = .{ .sig, .pub_key };
+            const labels: [2][]const u8 = .{ "Sig", "PubKey" };
+            for (args, 0..) |arg, i| {
+                switch (arg) {
+                    .array_literal => |elems| {
+                        for (elems) |elem| {
+                            const elem_type = self.inferExprType(elem, env);
+                            if (!isSubtype(elem_type, expected[i]) and elem_type != .unknown) {
+                                self.addError(
+                                    "argument {d} of checkMultiSig(): expected '{s}[]', got element of type '{s}'",
+                                    .{ i + 1, labels[i], types.runarTypeToString(elem_type) },
+                                );
+                            }
+                        }
+                    },
+                    else => {
+                        // Non-literal array (e.g. an identifier
+                        // referring to an array param). Infer for
+                        // side-effects but cannot validate without
+                        // first-class array types. Future work.
+                        _ = self.inferExprType(arg, env);
+                    },
+                }
+            }
             self.checkAffineConsumption(func_name, args, env);
             return func_sig.return_type;
         }
@@ -848,6 +909,10 @@ const TypeChecker = struct {
     // Affine consumption
     // ------------------------------------------------------------------
 
+    /// Track consumption by *origin*, not variable name, so aliases
+    /// (`const again = sig`) and property accesses (`this.sig`)
+    /// cannot launder a double-consumption past the affine check.
+    /// 2026-04-30 audit finding F6.
     fn checkAffineConsumption(self: *TypeChecker, func_name: []const u8, args: []const Expression, env: *TypeEnv) void {
         const indices = consumedIndices(func_name) orelse return;
 
@@ -855,22 +920,59 @@ const TypeChecker = struct {
             if (param_index >= args.len) continue;
 
             const arg = args[param_index];
-            const arg_name = switch (arg) {
-                .identifier => |name| name,
-                else => continue,
-            };
-
-            const arg_type = env.lookup(arg_name) orelse continue;
+            const arg_type = self.affineExprType(arg, env) orelse continue;
             if (!isAffineType(arg_type)) continue;
 
-            if (self.consumed_values.get(arg_name)) |consumed| {
+            const origin = self.affineOriginOfExpr(arg) orelse continue;
+
+            // Diagnostic label (source-form) — derived inline from
+            // the arg shape so we don't have to allocate.
+            if (self.consumed_values.get(origin)) |consumed| {
                 if (consumed) {
-                    self.addError("affine value '{s}' has already been consumed", .{arg_name});
+                    switch (arg) {
+                        .identifier => |name| self.addError("affine value '{s}' has already been consumed", .{name}),
+                        .property_access => |pa| self.addError("affine value 'this.{s}' has already been consumed", .{pa.property}),
+                        else => self.addError("affine value '{s}' has already been consumed", .{origin}),
+                    }
                     continue;
                 }
             }
-            self.consumed_values.put(self.allocator, arg_name, true) catch {};
+            self.consumed_values.put(self.allocator, origin, true) catch {};
         }
+    }
+
+    /// Compute the canonical origin key for affine tracking. Returns
+    /// borrowed slices owned either by the AST (identifier names) or
+    /// by `prop_origin_keys` (property accesses). Caller must not
+    /// free the returned slice.
+    fn affineOriginOfExpr(self: *TypeChecker, expr: Expression) ?[]const u8 {
+        return switch (expr) {
+            .identifier => |name| blk: {
+                if (self.affine_aliases.get(name)) |aliased| break :blk aliased;
+                break :blk name;
+            },
+            .property_access => |pa| self.prop_origin_keys.get(pa.property),
+            else => null,
+        };
+    }
+
+    /// Look up the type of an expression for affine purposes.
+    fn affineExprType(self: *TypeChecker, expr: Expression, env: *TypeEnv) ?RunarType {
+        return switch (expr) {
+            .identifier => |name| env.lookup(name),
+            .property_access => |pa| self.prop_types.get(pa.property),
+            else => null,
+        };
+    }
+
+    /// Helper used by const_decl / let_decl: when the new local is
+    /// affine-typed and its initializer has a traceable affine
+    /// origin, record the alias so consumption checks resolve back
+    /// to the origin.
+    fn recordAffineAlias(self: *TypeChecker, name: []const u8, init_expr: Expression, decl_type: RunarType) void {
+        if (!isAffineType(decl_type)) return;
+        const origin = self.affineOriginOfExpr(init_expr) orelse return;
+        self.affine_aliases.put(self.allocator, name, origin) catch {};
     }
 };
 

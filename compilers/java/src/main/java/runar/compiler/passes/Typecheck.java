@@ -186,6 +186,9 @@ public final class Typecheck {
         SourceLocation currentMethodLoc;
         SourceLocation currentStmtLoc;
         Map<String, Boolean> consumed = new HashMap<>();
+        // Maps a local name to the canonical affine origin it
+        // aliases. 2026-04-30 audit finding F6.
+        Map<String, String> affineAliases = new HashMap<>();
 
         Checker(ContractNode contract) {
             this.contract = contract;
@@ -235,6 +238,7 @@ public final class Typecheck {
             if (ctor == null) return;
             currentMethodLoc = ctor.sourceLocation();
             consumed = new HashMap<>();
+            affineAliases = new HashMap<>();
             Env env = new Env();
             for (ParamNode p : ctor.params()) {
                 env.define(p.name(), typeToString(p.type()));
@@ -248,6 +252,7 @@ public final class Typecheck {
         private void checkMethod(MethodNode m) {
             currentMethodLoc = m.sourceLocation();
             consumed = new HashMap<>();
+            affineAliases = new HashMap<>();
             Env env = new Env();
             for (ParamNode p : m.params()) {
                 env.define(p.name(), typeToString(p.type()));
@@ -282,14 +287,24 @@ public final class Typecheck {
 
             if (s instanceof VariableDeclStatement v) {
                 String initType = inferExpr(v.init(), env);
+                String declType;
                 if (v.type() != null) {
                     String declared = typeToString(v.type());
                     if (!isSubtype(initType, declared)) {
                         error("type '" + initType + "' is not assignable to type '" + declared + "'");
                     }
                     env.define(v.name(), declared);
+                    declType = declared;
                 } else {
                     env.define(v.name(), initType);
+                    declType = initType;
+                }
+                // Affine alias tracking — 2026-04-30 audit F6.
+                if (AFFINE_TYPES.contains(declType)) {
+                    String origin = affineOriginOfExpr(v.init());
+                    if (origin != null) {
+                        affineAliases.put(v.name(), origin);
+                    }
                 }
             } else if (s instanceof AssignmentStatement a) {
                 String targetType = inferExpr(a.target(), env);
@@ -702,11 +717,19 @@ public final class Typecheck {
                 return returnType;
             }
 
-            // checkMultiSig has array arguments; just evaluate them.
+            // checkMultiSig special case (Sig[] / PubKey[] arrays).
+            // Only arity is special; arg-type validation falls
+            // through to the standard subtype loop below so callers
+            // cannot pass bigint[] or other element types.
+            // 2026-04-30 audit finding F5.
             if ("checkMultiSig".equals(name)) {
-                for (Expression a : args) inferExpr(a, env);
-                checkAffine(name, args, env);
-                return returnType;
+                if (args.size() != 2) {
+                    error("checkMultiSig() expects 2 arguments, got " + args.size());
+                    for (Expression a : args) inferExpr(a, env);
+                    checkAffine(name, args, env);
+                    return returnType;
+                }
+                // Fall through to the standard subtype check below.
             }
 
             if (args.size() != expectedParams.size()) {
@@ -735,21 +758,53 @@ public final class Typecheck {
             return returnType;
         }
 
+        /**
+         * Track consumption by *origin*, not variable name, so aliases
+         * (`const again = sig`) and property accesses (`this.sig`)
+         * cannot launder a double-consumption past the affine check.
+         * 2026-04-30 audit finding F6.
+         */
         private void checkAffine(String name, List<Expression> args, Env env) {
             int[] indices = CONSUMING_FUNCTIONS.get(name);
             if (indices == null) return;
             for (int idx : indices) {
                 if (idx >= args.size()) continue;
                 Expression arg = args.get(idx);
-                if (!(arg instanceof Identifier aid)) continue;
-                String argType = env.lookup(aid.name());
+                String argType = affineExprType(arg, env);
                 if (argType == null || !AFFINE_TYPES.contains(argType)) continue;
-                if (Boolean.TRUE.equals(consumed.get(aid.name()))) {
-                    error("affine value '" + aid.name() + "' has already been consumed");
+                String origin = affineOriginOfExpr(arg);
+                if (origin == null) continue;
+
+                String label;
+                if (arg instanceof Identifier aid) label = aid.name();
+                else if (arg instanceof PropertyAccessExpr pa) label = "this." + pa.property();
+                else label = origin;
+
+                if (Boolean.TRUE.equals(consumed.get(origin))) {
+                    error("affine value '" + label + "' has already been consumed");
                 } else {
-                    consumed.put(aid.name(), true);
+                    consumed.put(origin, true);
                 }
             }
+        }
+
+        /** Resolve the canonical affine origin for an expression. */
+        private String affineOriginOfExpr(Expression expr) {
+            if (expr instanceof Identifier id) {
+                String aliased = affineAliases.get(id.name());
+                return aliased != null ? aliased : id.name();
+            }
+            if (expr instanceof PropertyAccessExpr pa) {
+                return "prop:" + pa.property();
+            }
+            return null;
+        }
+
+        /** Look up the type of an expression for affine purposes. */
+        private String affineExprType(Expression expr, Env env) {
+            if (expr instanceof Identifier id) return env.lookup(id.name());
+            if (expr instanceof PropertyAccessExpr pa) return propTypes.get(pa.property());
+            return null;
         }
     }
 

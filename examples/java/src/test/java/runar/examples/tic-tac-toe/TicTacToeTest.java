@@ -17,15 +17,10 @@ class TicTacToeTest {
     private static final Sig SIG = Sig.fromHex("30440220" + "00".repeat(32) + "0220" + "00".repeat(32));
 
     private TicTacToe freshGame() {
-        return new TicTacToe(
-            ALICE, Bigint.of(1000),
-            ZERO_PK,
-            Bigint.ZERO, Bigint.ZERO, Bigint.ZERO,
-            Bigint.ZERO, Bigint.ZERO, Bigint.ZERO,
-            Bigint.ZERO, Bigint.ZERO, Bigint.ZERO,
-            Bigint.ZERO,
-            Bigint.ZERO
-        );
+        // Constructor takes only the two readonly props (playerX +
+        // betAmount); the remaining mutable fields default via
+        // initialisers in the contract source.
+        return new TicTacToe(ALICE, Bigint.of(1000));
     }
 
     @Test

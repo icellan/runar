@@ -22,6 +22,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::ast::*;
+use super::side_effect_summary::{
+    compute_side_effect_summary, ContinuationShape, SideEffectSummary,
+};
 use crate::ir::{ANFBinding, ANFMethod, ANFParam, ANFProgram, ANFProperty, ANFSyntheticArrayLevel, ANFValue, SourceLocation};
 
 // ---------------------------------------------------------------------------
@@ -133,8 +136,14 @@ fn extract_literal_value(expr: &Expression) -> Option<serde_json::Value> {
 fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
     let mut result = Vec::new();
 
+    // Single source of truth for "does this method (transitively) mutate
+    // state, emit outputs, or use the preimage?" Shared across the
+    // lowering pass so every public method's auto-injection sees
+    // private-helper effects, not just direct ones.
+    let side_effects = compute_side_effect_summary(contract);
+
     // Lower constructor (the TS reference includes the constructor in output)
-    let mut ctor_ctx = LoweringContext::new(contract);
+    let mut ctor_ctx = LoweringContext::with_effects(contract, Some(side_effects.clone()));
     lower_statements(&contract.constructor.body, &mut ctor_ctx);
     result.push(ANFMethod {
         name: "constructor".to_string(),
@@ -145,26 +154,24 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
 
     // Lower each method (including private methods as separate entries)
     for method in &contract.methods {
-        let mut method_ctx = LoweringContext::new(contract);
+        let mut method_ctx = LoweringContext::with_effects(contract, Some(side_effects.clone()));
 
         if contract.parent_class == "StatefulSmartContract"
             && method.visibility == Visibility::Public
         {
-            // Determine if this method verifies hashOutputs (needs change output support).
-            // Methods that use addOutput / addDataOutput or mutate state need
-            // hashOutputs verification. Non-mutating methods (like close/destroy)
-            // don't verify outputs.
-            let has_data_output = method_has_add_data_output(method);
-            let needs_change_output = method_mutates_state(method, contract)
-                || method_has_add_output(method)
-                || has_data_output;
-
-            // Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
-            // Multi-output (addOutput) methods already specify amounts explicitly per output.
-            // Methods that emit only data outputs (no addOutput) still run the single-output
-            // continuation path for their state continuation, so they also need _newAmount.
-            let needs_new_amount = (method_mutates_state(method, contract) || has_data_output)
-                && !method_has_add_output(method);
+            // Continuation requirements come from the side-effect
+            // summary, which walks the private-method call graph. A
+            // public method that calls a private helper which mutates
+            // state or emits an output must therefore inject the same
+            // continuation params as if the public body did so
+            // directly.
+            let eff = side_effects
+                .get(&method.name)
+                .copied()
+                .unwrap_or_default();
+            let shape = ContinuationShape::for_effects(&eff);
+            let needs_change_output = shape.needs_change;
+            let needs_new_amount = shape.needs_new_amount;
 
             // Register implicit parameters
             if needs_change_output {
@@ -225,10 +232,11 @@ fn lower_methods(contract: &ContractNode) -> Vec<ANFMethod> {
             // output and the change output.
             let add_output_refs = method_ctx.add_output_refs.clone();
             let add_data_output_refs = method_ctx.add_data_output_refs.clone();
-            if !add_output_refs.is_empty()
-                || !add_data_output_refs.is_empty()
-                || method_mutates_state(method, contract)
-            {
+            // Gate the continuation assertion on the same shape used
+            // for param injection. Both must agree or the deployed
+            // locking script will not match the auto-injected
+            // parameter list.
+            if needs_change_output {
                 // Build the P2PKH change output for hashOutputs verification
                 let change_pkh_ref = method_ctx.emit(ANFValue::LoadParam {
                     name: "_changePKH".to_string(),
@@ -410,10 +418,26 @@ struct LoweringContext<'a> {
     /// Current source location for debug source maps. Set from each AST statement's
     /// source_location and propagated to emitted ANF bindings.
     current_source_loc: Option<SourceLocation>,
+    /// Param substitution stack used when inlining a private method's
+    /// body directly into this context. When the inlined body
+    /// references that param, the lowered identifier resolves to the
+    /// aliased ref instead of emitting load_param. Stacked so nested
+    /// inlines compose correctly.
+    param_alias_stack: HashMap<String, Vec<String>>,
+    /// Side-effect summary shared with auto-injection decisions. Used
+    /// at lowering time to decide whether a private call should be
+    /// inlined (so that helper's add_output / add_data_output ANF
+    /// nodes register on the caller's continuation hash) or remain a
+    /// method_call for stack lowering to inline later.
+    side_effects: Option<SideEffectSummary>,
 }
 
 impl<'a> LoweringContext<'a> {
     fn new(contract: &'a ContractNode) -> Self {
+        Self::with_effects(contract, None)
+    }
+
+    fn with_effects(contract: &'a ContractNode, side_effects: Option<SideEffectSummary>) -> Self {
         LoweringContext {
             bindings: Vec::new(),
             counter: 0,
@@ -425,7 +449,70 @@ impl<'a> LoweringContext<'a> {
             local_aliases: HashMap::new(),
             local_byte_vars: HashSet::new(),
             current_source_loc: None,
+            param_alias_stack: HashMap::new(),
+            side_effects,
         }
+    }
+
+    /// Push an alias frame for the named param. Subsequent identifier
+    /// lookups for `name` resolve to `alias_ref` until the matching
+    /// pop. Stacked so nested inlines compose: pop returns the
+    /// previous frame.
+    fn push_param_alias(&mut self, name: &str, alias_ref: &str) {
+        self.param_alias_stack
+            .entry(name.to_string())
+            .or_default()
+            .push(alias_ref.to_string());
+    }
+
+    fn pop_param_alias(&mut self, name: &str) {
+        let key = name.to_string();
+        if let Some(stack) = self.param_alias_stack.get_mut(&key) {
+            stack.pop();
+            if stack.is_empty() {
+                self.param_alias_stack.remove(&key);
+            }
+        }
+    }
+
+    fn get_param_alias(&self, name: &str) -> Option<&String> {
+        self.param_alias_stack
+            .get(name)
+            .and_then(|s| s.last())
+    }
+
+    /// Returns true if a call to `name` should be ANF-inlined rather
+    /// than emitted as a method_call. True iff `name` is a private
+    /// method that (transitively) emits state outputs (addOutput /
+    /// addRawOutput) or data outputs (addDataOutput). Those refs MUST
+    /// appear in the caller's binding stream so they participate in
+    /// the continuation hash.
+    ///
+    /// Mutation-only private helpers (no output intrinsics) are
+    /// intentionally NOT inlined — state mutation flows through state
+    /// continuity (the continuation hash reads state via
+    /// `get_state_script` after all mutations apply). Keeping the
+    /// existing `method_call` + stack-lowering inlining path for
+    /// those preserves byte-equality with the pre-fix corpus.
+    fn should_inline_private(&self, name: &str) -> bool {
+        let summary = match self.side_effects.as_ref() {
+            Some(s) => s,
+            None => return false,
+        };
+        if !self.is_private_method(name) {
+            return false;
+        }
+        match summary.get(name) {
+            Some(eff) => eff.has_state_output || eff.has_data_output,
+            None => false,
+        }
+    }
+
+    /// Look up a private method by name.
+    fn get_private_method(&self, name: &str) -> Option<&MethodNode> {
+        self.contract.methods.iter().find(|m| {
+            m.name == name && !matches!(m.visibility, Visibility::Public)
+        })
     }
 
     /// Generate a fresh temporary name.
@@ -502,13 +589,14 @@ impl<'a> LoweringContext<'a> {
     /// Create a sub-context for nested blocks (if/else, loops).
     /// The counter continues from the parent. Local names, param names, and aliases are shared.
     fn sub_context(&self) -> LoweringContext<'a> {
-        let mut sub = LoweringContext::new(self.contract);
+        let mut sub = LoweringContext::with_effects(self.contract, self.side_effects.clone());
         sub.counter = self.counter;
         sub.param_names = self.param_names.clone();
         sub.local_names = self.local_names.clone();
         sub.local_aliases = self.local_aliases.clone();
         sub.local_byte_vars = self.local_byte_vars.clone();
         sub.current_source_loc = self.current_source_loc.clone();
+        sub.param_alias_stack = self.param_alias_stack.clone();
         // Note: add_output_refs is NOT propagated to sub-contexts
         // because addOutput calls in sub-blocks should flow up to
         // the parent context via explicit tracking.
@@ -712,6 +800,24 @@ fn lower_if_statement(
     }
     ctx.sync_counter(&else_ctx);
 
+    // 2026-04-30 audit finding F2: when a branch contains output
+    // intrinsics, append a cat-chain inside each branch so the
+    // branch's terminal value is the concat of its output bytes
+    // (state then data, in declaration order). This balances the
+    // runtime stack effect across branches and lets the parent's
+    // continuation hash see one ref per if representing the chosen
+    // branch's full output set.
+    let branch_has_state_output =
+        !then_ctx.add_output_refs.is_empty() || !else_ctx.add_output_refs.is_empty();
+    let branch_has_outputs = branch_has_state_output
+        || !then_ctx.add_data_output_refs.is_empty()
+        || !else_ctx.add_data_output_refs.is_empty();
+
+    if branch_has_outputs {
+        append_branch_output_concat(&mut then_ctx);
+        append_branch_output_concat(&mut else_ctx);
+    }
+
     let then_bindings = then_ctx.bindings;
     let else_bindings = else_ctx.bindings;
 
@@ -727,30 +833,62 @@ fn lower_if_statement(
         _ => None,
     };
 
-    // Propagate addOutput / addDataOutput refs from sub-contexts: when either
-    // branch produces such calls, the if-expression result represents each
-    // output (only one branch executes at runtime).
-    let then_has_outputs = !then_ctx.add_output_refs.is_empty();
-    let else_has_outputs = !else_ctx.add_output_refs.is_empty();
-    let then_has_data_outputs = !then_ctx.add_data_output_refs.is_empty();
-    let else_has_data_outputs = !else_ctx.add_data_output_refs.is_empty();
-
     let if_name = ctx.emit(ANFValue::If {
         cond: cond_ref,
         then: then_bindings,
         else_branch: else_bindings,
     });
 
-    if then_has_outputs || else_has_outputs {
-        ctx.add_output_refs.push(if_name.clone());
-    }
-    if then_has_data_outputs || else_has_data_outputs {
-        ctx.add_data_output_refs.push(if_name.clone());
+    if branch_has_outputs {
+        // Register the if's value once with the parent's continuation
+        // tracker. CRITICAL: pick the right tracker. If either branch
+        // produces a STATE output (addOutput / addRawOutput), the
+        // parent must take the multi-output continuation path, so we
+        // register as a state output ref. If neither branch produces
+        // a state output and at least one branch produces a data
+        // output, we register as a DATA output ref so the parent
+        // keeps its single-output `computeStateOutput` continuation
+        // and the data-output bytes splice in BETWEEN the state
+        // output and the change output. Without this, a branch with
+        // only `addDataOutput` was incorrectly forced onto the
+        // multi-output path, dropping the canonical state continuation.
+        if branch_has_state_output {
+            ctx.add_output_refs.push(if_name.clone());
+        } else {
+            ctx.add_data_output_refs.push(if_name.clone());
+        }
     }
 
     if let Some(local_name) = alias_local {
         ctx.set_local_alias(&local_name, &if_name);
     }
+}
+
+/// Concatenate a branch's output refs (state then data, in declaration
+/// order) into a single bytes-ref appended to the branch's bindings.
+/// If the branch has no outputs, emits an empty `LoadConst` so the
+/// branch still leaves one item on the stack — required to balance
+/// the if's branch shapes when the OTHER branch has outputs.
+/// 2026-04-30 audit finding F2 fix.
+fn append_branch_output_concat(branch_ctx: &mut LoweringContext) -> String {
+    let mut all_refs = branch_ctx.add_output_refs.clone();
+    all_refs.extend(branch_ctx.add_data_output_refs.iter().cloned());
+    if all_refs.is_empty() {
+        return branch_ctx.emit(ANFValue::LoadConst {
+            value: serde_json::Value::String(String::new()),
+        });
+    }
+    if all_refs.len() == 1 {
+        return all_refs[0].clone();
+    }
+    let mut accumulated = all_refs[0].clone();
+    for next in &all_refs[1..] {
+        accumulated = branch_ctx.emit(ANFValue::Call {
+            func: "cat".to_string(),
+            args: vec![accumulated, next.clone()],
+        });
+    }
+    accumulated
 }
 
 fn lower_for_statement(
@@ -911,6 +1049,13 @@ fn lower_identifier(name: &str, ctx: &mut LoweringContext) -> String {
         return ctx.emit(ANFValue::LoadConst {
             value: serde_json::Value::String("@this".to_string()),
         });
+    }
+
+    // Param alias takes precedence over normal param lookup. Set when
+    // a private method's body is being inlined into this context —
+    // the private's param names map to the caller's arg refs.
+    if let Some(alias) = ctx.get_param_alias(name) {
+        return alias.clone();
     }
 
     // Check if it's a registered parameter (e.g. txPreimage for StatefulSmartContract)
@@ -1185,9 +1330,14 @@ fn lower_call_expr(
         }
     }
 
-    // this.method(...) -> method_call (via PropertyAccess)
+    // this.method(...) -> method_call (via PropertyAccess), or inlined
+    // if the target is a private method with continuation-relevant
+    // side effects.
     if let Expression::PropertyAccess { property } = callee {
         let arg_refs: Vec<String> = args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+        if ctx.should_inline_private(property) {
+            return inline_private_method_call(property, &arg_refs, ctx);
+        }
         let this_ref = ctx.emit(ANFValue::LoadConst {
             value: serde_json::Value::String("@this".to_string()),
         });
@@ -1204,6 +1354,9 @@ fn lower_call_expr(
             if name == "this" {
                 let arg_refs: Vec<String> =
                     args.iter().map(|a| lower_expr_to_ref(a, ctx)).collect();
+                if ctx.should_inline_private(property) {
+                    return inline_private_method_call(property, &arg_refs, ctx);
+                }
                 let this_ref = ctx.emit(ANFValue::LoadConst {
                     value: serde_json::Value::String("@this".to_string()),
                 });
@@ -1226,6 +1379,9 @@ fn lower_call_expr(
         // the body. This keeps .runar.move, .runar.go, and .runar.ts lowering
         // in sync.
         if ctx.is_private_method(name) {
+            if ctx.should_inline_private(name) {
+                return inline_private_method_call(name, &arg_refs, ctx);
+            }
             let this_ref = ctx.emit(ANFValue::LoadConst {
                 value: serde_json::Value::String("@this".to_string()),
             });
@@ -1489,131 +1645,82 @@ fn type_node_to_string(node: &TypeNode) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// State mutation analysis for StatefulSmartContract
+// inline_private_method_call — ANF-level inlining of private helpers
 // ---------------------------------------------------------------------------
 
-/// Determine whether a method mutates any mutable (non-readonly) property.
-/// Conservative: if ANY code path can mutate state, returns true.
-fn method_mutates_state(method: &MethodNode, contract: &ContractNode) -> bool {
-    let mutable_prop_names: HashSet<String> = contract
-        .properties
-        .iter()
-        .filter(|p| !p.readonly)
-        .map(|p| p.name.clone())
-        .collect();
-    if mutable_prop_names.is_empty() {
-        return false;
+/// Lower a private method's body directly into the caller's context.
+///
+/// Used when the private has continuation-relevant side effects (state
+/// mutation, addOutput, addRawOutput, addDataOutput) so the helper's
+/// emitted ANF nodes register output refs on the caller. Caller's arg
+/// refs are mapped onto the private's parameter names via
+/// `push_param_alias`. While the private's body lowers, any
+/// identifier expression matching one of those param names resolves
+/// to the caller's ref. The aliases are popped afterwards so
+/// subsequent lowering in the caller's body sees its own scope.
+///
+/// Recursion across private helpers is forbidden by validation, so
+/// this always terminates. Nested inlining (private A calls private
+/// B) works naturally: when we lower A's body and hit the call to B,
+/// the same dispatch path runs and inlines B too.
+fn inline_private_method_call(
+    method_name: &str,
+    arg_refs: &[String],
+    ctx: &mut LoweringContext,
+) -> String {
+    // Snapshot the method body + param names before mutating the
+    // context (Rust's borrow checker won't let us hold a &MethodNode
+    // and mutate ctx simultaneously).
+    let (params, body): (Vec<String>, Vec<Statement>) = match ctx.get_private_method(method_name) {
+        Some(m) => (m.params.iter().map(|p| p.name.clone()).collect(), m.body.clone()),
+        None => {
+            // Should not happen — caller checked should_inline_private,
+            // which requires the method to exist. Fall back to a
+            // method_call so the stack lowering pass surfaces a clear
+            // error.
+            let this_ref = ctx.emit(ANFValue::LoadConst {
+                value: serde_json::Value::String("@this".to_string()),
+            });
+            return ctx.emit(ANFValue::MethodCall {
+                object: this_ref,
+                method: method_name.to_string(),
+                args: arg_refs.to_vec(),
+            });
+        }
+    };
+
+    // Bind caller arg refs to the private's parameter names.
+    let mut aliased: Vec<String> = Vec::new();
+    for (i, param_name) in params.iter().enumerate() {
+        if i >= arg_refs.len() {
+            break;
+        }
+        ctx.push_param_alias(param_name, &arg_refs[i]);
+        aliased.push(param_name.clone());
     }
-    body_mutates_state(&method.body, &mutable_prop_names)
-}
 
-fn body_mutates_state(stmts: &[Statement], mutable_props: &HashSet<String>) -> bool {
-    for stmt in stmts {
-        if stmt_mutates_state(stmt, mutable_props) {
-            return true;
-        }
+    let start_index = ctx.bindings.len();
+    lower_statements(&body, ctx);
+    let end_index = ctx.bindings.len();
+
+    // Pop aliases in reverse order so nested inlines compose
+    // correctly.
+    for name in aliased.iter().rev() {
+        ctx.pop_param_alias(name);
     }
-    false
-}
 
-fn stmt_mutates_state(stmt: &Statement, mutable_props: &HashSet<String>) -> bool {
-    match stmt {
-        Statement::Assignment { target, .. } => {
-            if let Expression::PropertyAccess { property } = target {
-                if mutable_props.contains(property) {
-                    return true;
-                }
-            }
-            false
-        }
-        Statement::ExpressionStatement { expression, .. } => {
-            expr_mutates_state(expression, mutable_props)
-        }
-        Statement::IfStatement {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            body_mutates_state(then_branch, mutable_props)
-                || else_branch
-                    .as_ref()
-                    .map_or(false, |e| body_mutates_state(e, mutable_props))
-        }
-        Statement::ForStatement { body, .. } => body_mutates_state(body, mutable_props),
-        _ => false,
+    // Method's "return value" is the last binding emitted by the
+    // body. Void methods (e.g., a private helper that just calls
+    // addOutput) still produce a binding which the caller
+    // expression-statement path will discard.
+    if end_index > start_index {
+        return ctx.bindings[end_index - 1].name.clone();
     }
-}
-
-fn expr_mutates_state(expr: &Expression, mutable_props: &HashSet<String>) -> bool {
-    match expr {
-        Expression::IncrementExpr { operand, .. } | Expression::DecrementExpr { operand, .. } => {
-            if let Expression::PropertyAccess { property } = operand.as_ref() {
-                if mutable_props.contains(property) {
-                    return true;
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// addOutput / addDataOutput detection for determining continuation shape
-// ---------------------------------------------------------------------------
-
-/// Check if a method body contains any this.addOutput() or this.addRawOutput()
-/// calls — i.e. any "state output" calls that build the contract's state
-/// continuation explicitly.
-fn method_has_add_output(method: &MethodNode) -> bool {
-    body_has_call(&method.body, &["addOutput", "addRawOutput"])
-}
-
-/// Check if a method body contains any this.addDataOutput() calls — data
-/// outputs that are concatenated into the continuation hash AFTER state
-/// outputs and BEFORE the change output.
-fn method_has_add_data_output(method: &MethodNode) -> bool {
-    body_has_call(&method.body, &["addDataOutput"])
-}
-
-fn body_has_call(stmts: &[Statement], names: &[&str]) -> bool {
-    stmts.iter().any(|s| stmt_has_call(s, names))
-}
-
-fn stmt_has_call(stmt: &Statement, names: &[&str]) -> bool {
-    match stmt {
-        Statement::ExpressionStatement { expression, .. } => expr_has_call(expression, names),
-        Statement::IfStatement {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            body_has_call(then_branch, names)
-                || else_branch
-                    .as_ref()
-                    .map_or(false, |e| body_has_call(e, names))
-        }
-        Statement::ForStatement { body, .. } => body_has_call(body, names),
-        _ => false,
-    }
-}
-
-fn expr_has_call(expr: &Expression, names: &[&str]) -> bool {
-    if let Expression::CallExpr { callee, .. } = expr {
-        if let Expression::PropertyAccess { property } = callee.as_ref() {
-            if names.contains(&property.as_str()) {
-                return true;
-            }
-        }
-        if let Expression::MemberExpr { object, property } = callee.as_ref() {
-            if let Expression::Identifier { name } = object.as_ref() {
-                if name == "this" && names.contains(&property.as_str()) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    // Empty body — emit a load_const placeholder so the caller has
+    // a ref.
+    ctx.emit(ANFValue::LoadConst {
+        value: serde_json::Value::String("@void".to_string()),
+    })
 }
 
 // ---------------------------------------------------------------------------

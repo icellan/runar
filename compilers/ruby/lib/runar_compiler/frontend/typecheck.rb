@@ -271,6 +271,7 @@ module RunarCompiler
         @prop_types = {}
         @method_sigs = {}
         @consumed_values = {}
+        @affine_aliases = {}
         @current_method_loc = nil
         @current_stmt_loc = nil
 
@@ -302,6 +303,7 @@ module RunarCompiler
 
         # Reset affine tracking
         @consumed_values = {}
+        @affine_aliases = {}
 
         ctor.params.each do |param|
           env.define(param.name, type_node_to_string(param.type))
@@ -321,6 +323,7 @@ module RunarCompiler
 
         # Reset affine tracking
         @consumed_values = {}
+        @affine_aliases = {}
 
         method.params.each do |param|
           env.define(param.name, type_node_to_string(param.type))
@@ -456,8 +459,15 @@ module RunarCompiler
               add_error("type '#{init_type}' is not assignable to type '#{declared_type}'")
             end
             env.define(stmt.name, declared_type)
+            decl_type = declared_type
           else
             env.define(stmt.name, init_type)
+            decl_type = init_type
+          end
+          # Affine alias tracking — 2026-04-30 audit finding F6.
+          if AFFINE_TYPES.include?(decl_type)
+            origin = affine_origin_of_expr(stmt.init)
+            @affine_aliases[stmt.name] = origin unless origin.nil?
           end
 
         when AssignmentStmt
@@ -857,11 +867,19 @@ module RunarCompiler
           return sig.return_type
         end
 
-        # checkMultiSig special case
+        # checkMultiSig special case (Sig[] / PubKey[] arrays). Only
+        # arity is special; arg-type validation falls through to the
+        # standard subtype loop below so callers cannot pass
+        # bigint[] or other element types. 2026-04-30 audit finding
+        # F5.
         if func_name == "checkMultiSig"
-          args.each { |arg| infer_expr_type(arg, env) }
-          check_affine_consumption(func_name, args, env)
-          return sig.return_type
+          if args.length != 2
+            add_error("checkMultiSig() expects 2 arguments, got #{args.length}")
+            args.each { |arg| infer_expr_type(arg, env) }
+            check_affine_consumption(func_name, args, env)
+            return sig.return_type
+          end
+          # Fall through to the standard subtype check below.
         end
 
         # Standard arg count check
@@ -896,6 +914,10 @@ module RunarCompiler
       # Affine consumption
       # -------------------------------------------------------------------
 
+      # Track consumption by *origin*, not variable name, so aliases
+      # (`const again = sig`) and property accesses (`this.sig`)
+      # cannot launder a double-consumption past the affine check.
+      # 2026-04-30 audit finding F6.
       def check_affine_consumption(func_name, args, env)
         consumed_indices = CONSUMING_FUNCTIONS[func_name]
         return if consumed_indices.nil?
@@ -904,16 +926,47 @@ module RunarCompiler
           next if param_index >= args.length
 
           arg = args[param_index]
-          next unless arg.is_a?(Identifier)
+          arg_type = affine_expr_type(arg, env)
+          next if arg_type.nil? || !AFFINE_TYPES.include?(arg_type)
 
-          arg_type, found = env.lookup(arg.name)
-          next if !found || !AFFINE_TYPES.include?(arg_type)
+          origin = affine_origin_of_expr(arg)
+          next if origin.nil?
 
-          if @consumed_values[arg.name]
-            add_error("affine value '#{arg.name}' has already been consumed")
+          label =
+            if arg.is_a?(Identifier)
+              arg.name
+            elsif arg.is_a?(PropertyAccessExpr)
+              "this.#{arg.property}"
+            else
+              origin
+            end
+
+          if @consumed_values[origin]
+            add_error("affine value '#{label}' has already been consumed")
           else
-            @consumed_values[arg.name] = true
+            @consumed_values[origin] = true
           end
+        end
+      end
+
+      # Resolve the canonical affine origin for an expression.
+      def affine_origin_of_expr(expr)
+        return nil if expr.nil?
+        if expr.is_a?(Identifier)
+          @affine_aliases[expr.name] || expr.name
+        elsif expr.is_a?(PropertyAccessExpr)
+          "prop:#{expr.property}"
+        end
+      end
+
+      # Look up the type of an expression for affine purposes.
+      def affine_expr_type(expr, env)
+        return nil if expr.nil?
+        if expr.is_a?(Identifier)
+          arg_type, found = env.lookup(expr.name)
+          found ? arg_type : nil
+        elsif expr.is_a?(PropertyAccessExpr)
+          @prop_types[expr.property]
         end
       end
     end

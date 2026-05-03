@@ -268,14 +268,14 @@ fn lowerMethods(allocator: Allocator, contract: ContractNode) LowerError![]ANFMe
             // Build augmented params.
             // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
             // verification (i.e. change output support).
-            const has_data_output = methodHasAddDataOutput(method);
-            const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method) or has_data_output;
+            const has_data_output = methodHasAddDataOutput(method, contract);
+            const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output;
             // Single-output continuation needs _newAmount to allow changing the UTXO
             // satoshis. Multi-output (addOutput) methods specify amounts explicitly.
             // Methods that emit only data outputs (no addOutput) still run the
             // single-output continuation path for their state continuation, so they
             // also need _newAmount.
-            const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method);
+            const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method, contract);
 
             var aug_params: std.ArrayListUnmanaged(ParamNode) = .empty;
             for (method.params) |param| {
@@ -337,12 +337,12 @@ fn lowerStatefulPublicMethod(
 ) LowerError!void {
     // Methods that use addOutput, addDataOutput, or mutate state need hashOutputs
     // verification (change output support).
-    const has_data_output = methodHasAddDataOutput(method);
-    const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method) or has_data_output;
+    const has_data_output = methodHasAddDataOutput(method, contract);
+    const needs_change_output = methodMutatesState(method, contract) or methodHasAddOutput(method, contract) or has_data_output;
     // Single-output continuation needs _newAmount. Methods that emit only data
     // outputs (no addOutput) still run the single-output continuation path, so
     // they also need _newAmount.
-    const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method);
+    const needs_new_amount = (methodMutatesState(method, contract) or has_data_output) and !methodHasAddOutput(method, contract);
 
     // Register implicit parameters
     if (needs_change_output) {
@@ -500,6 +500,12 @@ const LowerCtx = struct {
     /// Tracks addDataOutput binding refs — data outputs are included in the
     /// continuation hash AFTER state outputs and BEFORE the change output.
     add_data_output_refs: std.ArrayListUnmanaged([]const u8),
+    /// Param substitution stack used when inlining a private method's body
+    /// directly into this context. While the inlined body lowers, identifier
+    /// references to that param resolve to the caller's arg ref instead of
+    /// emitting load_param. Stacked so nested inlines compose correctly.
+    /// Mirrors TS / Go reference compilers' paramAliasStack.
+    param_alias_stack: std.StringHashMapUnmanaged(std.ArrayListUnmanaged([]const u8)),
     /// Current source location — set before lowering each statement, stamped on bindings.
     current_source_loc: ?types.SourceLocation = null,
 
@@ -515,6 +521,7 @@ const LowerCtx = struct {
             .local_byte_vars = .empty,
             .add_output_refs = .empty,
             .add_data_output_refs = .empty,
+            .param_alias_stack = .empty,
         };
     }
 
@@ -560,6 +567,42 @@ const LowerCtx = struct {
 
     fn getLocalAlias(self: *const LowerCtx, local_name: []const u8) ?[]const u8 {
         return self.local_aliases.get(local_name);
+    }
+
+    fn pushParamAlias(self: *LowerCtx, name: []const u8, alias_ref: []const u8) void {
+        const gop = self.param_alias_stack.getOrPut(self.allocator, name) catch return;
+        if (!gop.found_existing) {
+            gop.value_ptr.* = .empty;
+        }
+        gop.value_ptr.append(self.allocator, alias_ref) catch {};
+    }
+
+    fn popParamAlias(self: *LowerCtx, name: []const u8) void {
+        if (self.param_alias_stack.getPtr(name)) |list_ptr| {
+            if (list_ptr.items.len > 0) {
+                _ = list_ptr.pop();
+            }
+            if (list_ptr.items.len == 0) {
+                list_ptr.deinit(self.allocator);
+                _ = self.param_alias_stack.remove(name);
+            }
+        }
+    }
+
+    fn getParamAlias(self: *const LowerCtx, name: []const u8) ?[]const u8 {
+        if (self.param_alias_stack.get(name)) |list| {
+            if (list.items.len == 0) return null;
+            return list.items[list.items.len - 1];
+        }
+        return null;
+    }
+
+    /// True iff `name` is a private method that (transitively) emits state or
+    /// data outputs. Triggers ANF-level inlining so the helper's add_output /
+    /// add_data_output refs register on the caller's continuation hash.
+    fn shouldInlinePrivate(self: *const LowerCtx, name: []const u8) bool {
+        const m = lookupPrivateMethod(self.contract, name) orelse return false;
+        return methodHasAddOutput(m, self.contract) or methodHasAddDataOutput(m, self.contract);
     }
 
     fn addOutputRef(self: *LowerCtx, ref: []const u8) void {
@@ -627,6 +670,11 @@ const LowerCtx = struct {
         self.local_byte_vars.deinit(self.allocator);
         self.add_output_refs.deinit(self.allocator);
         self.add_data_output_refs.deinit(self.allocator);
+        var alias_it = self.param_alias_stack.iterator();
+        while (alias_it.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.param_alias_stack.deinit(self.allocator);
     }
 
     /// Allocate a slice of string refs on the arena allocator.
@@ -750,13 +798,23 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
     }
     ctx.syncCounter(&else_ctx);
 
-    // Propagate addOutput / addDataOutput refs from sub-contexts. When either
-    // branch produces addOutput/addDataOutput calls, the if-expression result
-    // represents the produced output (only one branch executes at runtime).
-    const then_has_outputs = then_ctx.getAddOutputRefs().len > 0;
-    const else_has_outputs = else_ctx.getAddOutputRefs().len > 0;
-    const then_has_data_outputs = then_ctx.getAddDataOutputRefs().len > 0;
-    const else_has_data_outputs = else_ctx.getAddDataOutputRefs().len > 0;
+    // 2026-04-30 audit finding F2: when a branch contains output
+    // intrinsics, append a cat-chain inside each branch so the
+    // branch's terminal value is the concat of its output bytes
+    // (state then data, in declaration order). Balances runtime
+    // stack effects across branches and lets the parent's
+    // continuation hash see one ref per if representing the chosen
+    // branch's full output set.
+    const branch_has_state_output = then_ctx.getAddOutputRefs().len > 0
+        or else_ctx.getAddOutputRefs().len > 0;
+    const branch_has_outputs = branch_has_state_output
+        or then_ctx.getAddDataOutputRefs().len > 0
+        or else_ctx.getAddDataOutputRefs().len > 0;
+
+    if (branch_has_outputs) {
+        _ = try appendBranchOutputConcat(&then_ctx);
+        _ = try appendBranchOutputConcat(&else_ctx);
+    }
 
     const if_val = try ctx.allocator.create(types.ANFIf);
     if_val.* = .{
@@ -766,11 +824,24 @@ fn lowerIfStatementFull(ctx: *LowerCtx, condition: Expression, then_body: []cons
     };
     const if_name = try ctx.emit(.{ .@"if" = if_val });
 
-    if (then_has_outputs or else_has_outputs) {
-        ctx.addOutputRef(if_name);
-    }
-    if (then_has_data_outputs or else_has_data_outputs) {
-        ctx.addDataOutputRef(if_name);
+    if (branch_has_outputs) {
+        // Register the if's value once with the parent's continuation
+        // tracker. CRITICAL: pick the right tracker. If either branch
+        // produces a STATE output, the parent must take the
+        // multi-output continuation path, so we register as a state
+        // output ref. If neither branch produces a state output and
+        // at least one branch produces a data output, we register as
+        // a DATA output ref so the parent keeps its single-output
+        // `computeStateOutput` continuation and the data-output
+        // bytes splice in BETWEEN the state output and the change
+        // output. Without this, a branch with only `addDataOutput`
+        // was incorrectly forced onto the multi-output path,
+        // dropping the canonical state continuation.
+        if (branch_has_state_output) {
+            ctx.addOutputRef(if_name);
+        } else {
+            ctx.addDataOutputRef(if_name);
+        }
     }
 
     // Alias detection: if both branches end by reassigning same local variable
@@ -924,6 +995,13 @@ fn lowerIdentifier(ctx: *LowerCtx, name: []const u8) LowerError![]const u8 {
         return try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
     }
 
+    // Param alias takes precedence over normal param lookup. Set when a
+    // private method's body is being inlined into this context — the
+    // private's param names map to the caller's arg refs.
+    if (ctx.getParamAlias(name)) |alias| {
+        return alias;
+    }
+
     // Check if it's a registered parameter
     if (ctx.isParam(name)) {
         return try ctx.emit(.{ .load_param = .{ .name = name } });
@@ -989,6 +1067,9 @@ fn lowerCallExpr(ctx: *LowerCtx, c: *const types.CallExpr) LowerError![]const u8
     for (ctx.contract.methods) |method| {
         if (std.mem.eql(u8, method.name, c.callee)) {
             const arg_refs = try lowerArgs(ctx, c.args);
+            if (ctx.shouldInlinePrivate(c.callee)) {
+                return try inlinePrivateMethodCall(ctx, c.callee, arg_refs);
+            }
             const this_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
             return try ctx.emit(.{ .method_call = .{
                 .object = this_ref,
@@ -1072,6 +1153,9 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
     // this.method(...) -> method_call
     if (is_self) {
         const arg_refs = try lowerArgs(ctx, mc.args);
+        if (ctx.shouldInlinePrivate(mc.method)) {
+            return try inlinePrivateMethodCall(ctx, mc.method, arg_refs);
+        }
         const this_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
         return try ctx.emit(.{ .method_call = .{
             .object = this_ref,
@@ -1088,6 +1172,56 @@ fn lowerMethodCallExpr(ctx: *LowerCtx, mc: *const types.MethodCall) LowerError![
         .method = mc.method,
         .args = arg_refs,
     } });
+}
+
+// Inline a private method's body directly into the caller's context. Used
+// when the private has continuation-relevant side effects (addOutput /
+// addRawOutput / addDataOutput) so that its emitted ANF nodes register
+// their output refs on the caller's continuation hash.
+//
+// The caller's arg refs are mapped onto the private's parameter names via
+// pushParamAlias. While the body lowers, identifier references to those
+// param names resolve to the caller's ref via lowerIdentifier's alias check.
+//
+// Recursion across private helpers is forbidden by validation, so this
+// always terminates.
+fn inlinePrivateMethodCall(ctx: *LowerCtx, method_name: []const u8, arg_refs: []const []const u8) LowerError![]const u8 {
+    const method = lookupPrivateMethod(ctx.contract, method_name) orelse {
+        const this_ref = try ctx.emit(makeLoadConstString(ctx.allocator, "@this"));
+        return try ctx.emit(.{ .method_call = .{
+            .object = this_ref,
+            .method = method_name,
+            .args = arg_refs,
+        } });
+    };
+
+    // Bind caller arg refs to the private's parameter names.
+    var aliased_params: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer aliased_params.deinit(ctx.allocator);
+    const n = @min(method.params.len, arg_refs.len);
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const param_name = method.params[i].name;
+        ctx.pushParamAlias(param_name, arg_refs[i]);
+        aliased_params.append(ctx.allocator, param_name) catch {};
+    }
+
+    const start_index = ctx.bindings.items.len;
+    try lowerStatements(ctx, method.body);
+    const end_index = ctx.bindings.items.len;
+
+    // Pop aliases in reverse order so nested inlines compose correctly.
+    var j: usize = aliased_params.items.len;
+    while (j > 0) {
+        j -= 1;
+        ctx.popParamAlias(aliased_params.items[j]);
+    }
+
+    if (end_index > start_index) {
+        return ctx.bindings.items[end_index - 1].name;
+    }
+    // Empty body — emit a placeholder so the caller has a ref.
+    return try ctx.emit(makeLoadConstString(ctx.allocator, "@void"));
 }
 
 fn lowerTernaryExpr(ctx: *LowerCtx, t: *const types.Ternary) LowerError![]const u8 {
@@ -1214,6 +1348,34 @@ fn makeLoadConstString(allocator: Allocator, val: []const u8) ANFValue {
     return .{ .load_const = .{ .value = .{ .string = val } } };
 }
 
+/// Concatenate a branch's output refs (state then data, in
+/// declaration order) into a single bytes-ref appended to the
+/// branch's bindings. If the branch has no outputs, emits an empty
+/// `load_const` so the branch still leaves one item on the stack —
+/// required to balance the if's branch shapes when the OTHER branch
+/// has outputs. 2026-04-30 audit finding F2 fix.
+fn appendBranchOutputConcat(branch_ctx: *LowerCtx) LowerError![]const u8 {
+    const state_refs = branch_ctx.getAddOutputRefs();
+    const data_refs = branch_ctx.getAddDataOutputRefs();
+    const total = state_refs.len + data_refs.len;
+    if (total == 0) {
+        return try branch_ctx.emit(makeLoadConstString(branch_ctx.allocator, ""));
+    }
+    var all_refs: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer all_refs.deinit(branch_ctx.allocator);
+    try all_refs.appendSlice(branch_ctx.allocator, state_refs);
+    try all_refs.appendSlice(branch_ctx.allocator, data_refs);
+    if (all_refs.items.len == 1) return all_refs.items[0];
+    var accumulated = all_refs.items[0];
+    for (all_refs.items[1..]) |next_ref| {
+        const args = try branch_ctx.allocator.alloc([]const u8, 2);
+        args[0] = accumulated;
+        args[1] = next_ref;
+        accumulated = try branch_ctx.emit(.{ .call = .{ .func = "cat", .args = args } });
+    }
+    return accumulated;
+}
+
 /// Create an "@ref:NAME" string for local variable aliasing.
 fn refString(allocator: Allocator, name: []const u8) LowerError![]const u8 {
     return try std.fmt.allocPrint(allocator, "@ref:{s}", .{name});
@@ -1231,11 +1393,32 @@ fn isReadonlyProperty(properties: []const PropertyNode, name: []const u8) bool {
 }
 
 // ============================================================================
-// State mutation analysis
+// State mutation + intrinsic-call analysis (recursive across private calls)
 // ============================================================================
+//
+// Mirrors `packages/runar-compiler/src/passes/side-effect-summary.ts` —
+// side effects detected here include those reachable transitively through
+// private-method calls, not just direct ones in the public method body.
+// This is the F1+F3 fix from the 2026-04-30 TS compiler audit. Without
+// recursion, a public method that delegates state mutation or an
+// addOutput / addDataOutput intrinsic to a private helper would be
+// silently classified as terminal — the ABI would omit `_changePKH`,
+// `_changeAmount`, `_newAmount`, and the deployed locking script would
+// carry no `hashOutputs` continuation.
+
+fn lookupPrivateMethod(contract: ContractNode, name: []const u8) ?MethodNode {
+    for (contract.methods) |m| {
+        if (!m.is_public and std.mem.eql(u8, m.name, name)) return m;
+    }
+    return null;
+}
+
+// Maximum depth for the private-call recursion. Validation should
+// reject recursion in private methods, so this only triggers under
+// pathological inputs that bypass the validator.
+const MAX_PRIVATE_CALL_DEPTH: u32 = 64;
 
 fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
-    // Collect mutable property names
     var has_mutable = false;
     for (contract.properties) |p| {
         if (!p.readonly) {
@@ -1245,39 +1428,45 @@ fn methodMutatesState(method: MethodNode, contract: ContractNode) bool {
     }
     if (!has_mutable) return false;
 
-    return bodyMutatesState(method.body, contract);
+    return bodyMutatesStateRec(method.body, contract, 0);
 }
 
-fn bodyMutatesState(stmts: []const Statement, contract: ContractNode) bool {
+fn bodyMutatesStateRec(stmts: []const Statement, contract: ContractNode, depth: u32) bool {
+    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
     for (stmts) |stmt| {
-        if (stmtMutatesState(stmt, contract)) return true;
+        if (stmtMutatesStateRec(stmt, contract, depth)) return true;
     }
     return false;
 }
 
-fn stmtMutatesState(stmt: Statement, contract: ContractNode) bool {
+fn stmtMutatesStateRec(stmt: Statement, contract: ContractNode, depth: u32) bool {
     switch (stmt) {
         .assign => |assign| {
-            // Check if target is a mutable property
             for (contract.properties) |p| {
                 if (!p.readonly and std.mem.eql(u8, p.name, assign.target)) return true;
             }
             return false;
         },
-        .expr_stmt => |expr| return exprMutatesState(expr, contract),
+        .expr_stmt => |expr| return exprMutatesStateRec(expr, contract, depth),
         .if_stmt => |if_s| {
-            if (bodyMutatesState(if_s.then_body, contract)) return true;
+            if (bodyMutatesStateRec(if_s.then_body, contract, depth)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyMutatesState(eb, contract)) return true;
+                if (bodyMutatesStateRec(eb, contract, depth)) return true;
             }
             return false;
         },
-        .for_stmt => |for_s| return bodyMutatesState(for_s.body, contract),
+        .for_stmt => |for_s| return bodyMutatesStateRec(for_s.body, contract, depth),
+        .return_stmt => |maybe_expr| {
+            if (maybe_expr) |expr| {
+                return exprMutatesStateRec(expr, contract, depth);
+            }
+            return false;
+        },
         else => return false,
     }
 }
 
-fn exprMutatesState(expr: Expression, contract: ContractNode) bool {
+fn exprMutatesStateRec(expr: Expression, contract: ContractNode, depth: u32) bool {
     switch (expr) {
         .increment => |inc| {
             switch (inc.operand) {
@@ -1299,56 +1488,119 @@ fn exprMutatesState(expr: Expression, contract: ContractNode) bool {
                 else => {},
             }
         },
+        .call => |call| {
+            // Bareword call: callee is the function name. Recurse into
+            // a private helper if the name matches one.
+            if (lookupPrivateMethod(contract, call.callee)) |target| {
+                if (bodyMutatesStateRec(target.body, contract, depth + 1)) return true;
+            }
+            for (call.args) |arg| {
+                if (exprMutatesStateRec(arg, contract, depth)) return true;
+            }
+        },
+        .method_call => |mc| {
+            // this.X / self.X — recurse into the helper.
+            if (lookupPrivateMethod(contract, mc.method)) |target| {
+                if (bodyMutatesStateRec(target.body, contract, depth + 1)) return true;
+            }
+            for (mc.args) |arg| {
+                if (exprMutatesStateRec(arg, contract, depth)) return true;
+            }
+        },
         else => {},
     }
     return false;
 }
 
 // ============================================================================
-// addOutput detection
+// addOutput / addDataOutput detection (recursive across private calls)
 // ============================================================================
+//
+// Like methodMutatesState, recurses into private-method bodies so a public
+// method that delegates an addOutput / addDataOutput intrinsic to a
+// private helper is correctly classified.
 
-fn methodHasAddOutput(method: MethodNode) bool {
-    return bodyHasIntrinsicCall(method.body, method.params, &STATE_OUTPUT_METHODS);
+fn methodHasAddOutput(method: MethodNode, contract: ContractNode) bool {
+    return bodyHasIntrinsicCallRec(method.body, method.params, contract, &STATE_OUTPUT_METHODS, 0);
 }
 
 /// Return true when a method body contains at least one this.addDataOutput call.
-fn methodHasAddDataOutput(method: MethodNode) bool {
-    return bodyHasIntrinsicCall(method.body, method.params, &DATA_OUTPUT_METHODS);
+fn methodHasAddDataOutput(method: MethodNode, contract: ContractNode) bool {
+    return bodyHasIntrinsicCallRec(method.body, method.params, contract, &DATA_OUTPUT_METHODS, 0);
 }
 
 const STATE_OUTPUT_METHODS = [_][]const u8{ "addOutput", "addRawOutput" };
 const DATA_OUTPUT_METHODS = [_][]const u8{"addDataOutput"};
 
-fn bodyHasIntrinsicCall(stmts: []const Statement, params: []const ParamNode, names: []const []const u8) bool {
+fn bodyHasIntrinsicCallRec(
+    stmts: []const Statement,
+    params: []const ParamNode,
+    contract: ContractNode,
+    names: []const []const u8,
+    depth: u32,
+) bool {
+    if (depth > MAX_PRIVATE_CALL_DEPTH) return false;
     for (stmts) |stmt| {
-        if (stmtHasIntrinsicCall(stmt, params, names)) return true;
+        if (stmtHasIntrinsicCallRec(stmt, params, contract, names, depth)) return true;
     }
     return false;
 }
 
-fn stmtHasIntrinsicCall(stmt: Statement, params: []const ParamNode, names: []const []const u8) bool {
+fn stmtHasIntrinsicCallRec(
+    stmt: Statement,
+    params: []const ParamNode,
+    contract: ContractNode,
+    names: []const []const u8,
+    depth: u32,
+) bool {
     switch (stmt) {
-        .expr_stmt => |expr| return exprHasIntrinsicCall(expr, params, names),
+        .expr_stmt => |expr| return exprHasIntrinsicCallRec(expr, params, contract, names, depth),
         .if_stmt => |if_s| {
-            if (bodyHasIntrinsicCall(if_s.then_body, params, names)) return true;
+            if (bodyHasIntrinsicCallRec(if_s.then_body, params, contract, names, depth)) return true;
             if (if_s.else_body) |eb| {
-                if (bodyHasIntrinsicCall(eb, params, names)) return true;
+                if (bodyHasIntrinsicCallRec(eb, params, contract, names, depth)) return true;
             }
             return false;
         },
-        .for_stmt => |for_s| return bodyHasIntrinsicCall(for_s.body, params, names),
+        .for_stmt => |for_s| return bodyHasIntrinsicCallRec(for_s.body, params, contract, names, depth),
+        // Ruby's parse_ruby promotes a private method's trailing
+        // expression-statement to a return-statement for implicit-return
+        // semantics. Walk the return value the same way.
+        .return_stmt => |maybe_expr| {
+            if (maybe_expr) |expr| {
+                return exprHasIntrinsicCallRec(expr, params, contract, names, depth);
+            }
+            return false;
+        },
         else => return false,
     }
 }
 
-fn exprHasIntrinsicCall(expr: Expression, params: []const ParamNode, names: []const []const u8) bool {
+fn exprHasIntrinsicCallRec(
+    expr: Expression,
+    params: []const ParamNode,
+    contract: ContractNode,
+    names: []const []const u8,
+    depth: u32,
+) bool {
     switch (expr) {
         .method_call => |mc| {
             if (std.mem.eql(u8, mc.object, "this") or std.mem.eql(u8, mc.object, "self") or paramIsStatefulContext(params, mc.object)) {
+                // Direct intrinsic match.
                 for (names) |n| {
                     if (std.mem.eql(u8, mc.method, n)) return true;
                 }
+                // Recurse into private helper if this is a method call
+                // on `this` / `self` / stateful-context.
+                if (lookupPrivateMethod(contract, mc.method)) |target| {
+                    if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
+                }
+            }
+        },
+        .call => |call| {
+            // Bareword identifier call on a private helper.
+            if (lookupPrivateMethod(contract, call.callee)) |target| {
+                if (bodyHasIntrinsicCallRec(target.body, target.params, contract, names, depth + 1)) return true;
             }
         },
         else => {},

@@ -3892,13 +3892,52 @@ func LowerToStack(program *ir.ANFProgram, opts ...LowerToStackOptions) (result [
 	return methods, nil
 }
 
-// methodUsesCheckPreimage scans a method's bindings for check_preimage usage.
-// If found, the unlocking script will push an implicit <sig> parameter before
-// all declared parameters (OP_PUSH_TX pattern).
+// methodUsesCheckPreimage scans a method's bindings for check_preimage usage,
+// recursing through if/loop branches and into private-method bodies. If found,
+// the unlocking script will push an implicit <sig> parameter before all
+// declared parameters (OP_PUSH_TX pattern). Recursion is the 2026-04-30 audit
+// finding F7 fix — without it, a manual checkPreimage inside an if/for body
+// or a private helper failed to register the implicit param and stack lowering
+// crashed with `Value '_opPushTxSig' not found on stack`.
 func methodUsesCheckPreimage(bindings []ir.ANFBinding) bool {
+	return methodUsesCheckPreimageRec(bindings, nil, map[string]bool{})
+}
+
+func methodUsesCheckPreimageRec(
+	bindings []ir.ANFBinding,
+	privateMethods map[string]*ir.ANFMethod,
+	seen map[string]bool,
+) bool {
 	for _, b := range bindings {
 		if b.Value.Kind == "check_preimage" {
 			return true
+		}
+		if b.Value.Kind == "if" {
+			if methodUsesCheckPreimageRec(b.Value.Then, privateMethods, seen) {
+				return true
+			}
+			if methodUsesCheckPreimageRec(b.Value.Else, privateMethods, seen) {
+				return true
+			}
+		}
+		if b.Value.Kind == "loop" {
+			if methodUsesCheckPreimageRec(b.Value.Body, privateMethods, seen) {
+				return true
+			}
+		}
+		if b.Value.Kind == "method_call" && privateMethods != nil {
+			if target, ok := privateMethods[b.Value.Method]; ok {
+				if !seen[target.Name] {
+					nextSeen := make(map[string]bool, len(seen)+1)
+					for k, v := range seen {
+						nextSeen[k] = v
+					}
+					nextSeen[target.Name] = true
+					if methodUsesCheckPreimageRec(target.Body, privateMethods, nextSeen) {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false
@@ -4076,7 +4115,7 @@ func lowerMethodWithPrivateMethodsAndOptions(method *ir.ANFMethod, properties []
 	// _codePart: full code script (locking script minus state) as ByteString
 	// _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
 	// These are inserted at the base of the stack so they can be consumed later.
-	if methodUsesCheckPreimage(method.Body) {
+	if methodUsesCheckPreimageRec(method.Body, privateMethods, map[string]bool{}) {
 		paramNames = append([]string{"_opPushTxSig"}, paramNames...)
 		// _codePart is needed when the method has add_output or add_raw_output
 		// (it provides the code script for continuation output construction),

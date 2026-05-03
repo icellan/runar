@@ -186,8 +186,14 @@ func extractLiteralValue(expr Expression) interface{} {
 func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 	var result []ir.ANFMethod
 
+	// Single source of truth for "does this method (transitively) mutate
+	// state, emit outputs, or use the preimage?" Shared across the lowering
+	// pass so every public method's auto-injection sees private-helper
+	// effects, not just direct ones.
+	sideEffects := ComputeSideEffectSummary(contract)
+
 	// Lower constructor (the TS reference includes the constructor in output)
-	ctorCtx := newLowerCtx(contract)
+	ctorCtx := newLowerCtxWithEffects(contract, sideEffects)
 	ctorCtx.lowerStatements(contract.Constructor.Body)
 	result = append(result, ir.ANFMethod{
 		Name:     "constructor",
@@ -198,20 +204,18 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 
 	// Lower each method (including private methods as separate entries)
 	for _, method := range contract.Methods {
-		methodCtx := newLowerCtx(contract)
+		methodCtx := newLowerCtxWithEffects(contract, sideEffects)
 
 		if contract.ParentClass == "StatefulSmartContract" && method.Visibility == "public" {
-			// Determine if this method verifies hashOutputs (needs change output support).
-			// Methods that use addOutput / addDataOutput or mutate state need hashOutputs
-			// verification. Non-mutating methods (like close/destroy) don't verify outputs.
-			hasDataOutput := methodHasAddDataOutput(method)
-			needsChangeOutput := methodMutatesState(method, contract) || methodHasAddOutput(method) || hasDataOutput
-
-			// Single-output continuation needs _newAmount to allow changing the UTXO satoshis.
-			// Multi-output (addOutput) methods already specify amounts explicitly per output.
-			// Methods that emit only data outputs (no addOutput) still run the single-output
-			// continuation path for their state continuation, so they also need _newAmount.
-			needsNewAmount := (methodMutatesState(method, contract) || hasDataOutput) && !methodHasAddOutput(method)
+			// Continuation requirements come from the side-effect summary,
+			// which walks the private-method call graph. A public method
+			// that calls a private helper which mutates state or emits an
+			// output must therefore inject the same continuation params
+			// as if the public body did so directly.
+			eff := sideEffects[method.Name]
+			shape := ContinuationShapeFor(eff)
+			needsChangeOutput := shape.NeedsChange
+			needsNewAmount := shape.NeedsNewAmount
 
 			// Register implicit parameters
 			if needsChangeOutput {
@@ -267,7 +271,10 @@ func lowerMethods(contract *ContractNode) []ir.ANFMethod {
 			// output and the change output.
 			addOutputRefs := methodCtx.getAddOutputRefs()
 			addDataOutputRefs := methodCtx.getAddDataOutputRefs()
-			if len(addOutputRefs) > 0 || len(addDataOutputRefs) > 0 || methodMutatesState(method, contract) {
+			// Gate the continuation assertion on the same shape used for
+			// param injection. Both must agree or the deployed locking
+			// script will not match the auto-injected parameter list.
+			if needsChangeOutput {
 				// Build the P2PKH change output for hashOutputs verification
 				changePKHRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changePKH"})
 				changeAmountRef := methodCtx.emit(ir.ANFValue{Kind: "load_param", Name: "_changeAmount"})
@@ -378,16 +385,101 @@ type lowerCtx struct {
 	localAliases      map[string]string // maps local variable names to their current ANF binding name (updated after if-statements that reassign locals in both branches)
 	localByteVars     map[string]bool   // tracks local variables known to be byte-typed
 	currentSourceLoc  *ir.SourceLocation // Debug: source location to attach to emitted ANF bindings
+	// Param substitution stack used when inlining a private method's body
+	// directly into this context. Each entry on top is the active alias
+	// for that param. When the inlined body references that param, the
+	// lowered identifier resolves to the aliased ref instead of emitting
+	// load_param. Stacked so nested inlines compose correctly.
+	paramAliasStack map[string][]string
+	// Side-effect summary shared with auto-injection decisions. Used at
+	// lowering time to decide whether a private call should be inlined
+	// (so that helper's add_output / add_data_output ANF nodes register
+	// on the caller's continuation hash) or remain a method_call for
+	// stack lowering to inline later.
+	sideEffects SideEffectSummary
 }
 
 func newLowerCtx(contract *ContractNode) *lowerCtx {
+	return newLowerCtxWithEffects(contract, nil)
+}
+
+func newLowerCtxWithEffects(contract *ContractNode, summary SideEffectSummary) *lowerCtx {
 	return &lowerCtx{
-		contract:      contract,
-		localNames:    make(map[string]bool),
-		paramNames:    make(map[string]bool),
-		localAliases:  make(map[string]string),
-		localByteVars: make(map[string]bool),
+		contract:        contract,
+		localNames:      make(map[string]bool),
+		paramNames:      make(map[string]bool),
+		localAliases:    make(map[string]string),
+		localByteVars:   make(map[string]bool),
+		paramAliasStack: make(map[string][]string),
+		sideEffects:     summary,
 	}
+}
+
+// pushParamAlias records that subsequent identifier lookups for `name`
+// should resolve to `aliasRef` until the matching pop. Stacked so
+// nested inlines compose: pop returns the previous frame.
+func (ctx *lowerCtx) pushParamAlias(name, aliasRef string) {
+	ctx.paramAliasStack[name] = append(ctx.paramAliasStack[name], aliasRef)
+}
+
+func (ctx *lowerCtx) popParamAlias(name string) {
+	stack := ctx.paramAliasStack[name]
+	if len(stack) == 0 {
+		return
+	}
+	stack = stack[:len(stack)-1]
+	if len(stack) == 0 {
+		delete(ctx.paramAliasStack, name)
+	} else {
+		ctx.paramAliasStack[name] = stack
+	}
+}
+
+func (ctx *lowerCtx) getParamAlias(name string) (string, bool) {
+	stack := ctx.paramAliasStack[name]
+	if len(stack) == 0 {
+		return "", false
+	}
+	return stack[len(stack)-1], true
+}
+
+// shouldInlinePrivate reports whether a call to `name` should be ANF-inlined
+// rather than emitted as a method_call. True iff `name` is a private method
+// that (transitively) emits state outputs (addOutput / addRawOutput) or data
+// outputs (addDataOutput). Those refs MUST appear in the caller's binding
+// stream so they participate in the continuation hash; without ANF-level
+// inlining they would live in a sibling ANF method and the public method's
+// continuation hash would miss them.
+//
+// Mutation-only private helpers (no output intrinsics) are intentionally
+// NOT inlined — state mutation flows through state continuity (the
+// continuation hash reads state via get_state_script after all mutations
+// apply), not through output refs. Keeping the existing method_call +
+// stack-lowering inlining path for those preserves byte-equality with the
+// pre-fix corpus.
+func (ctx *lowerCtx) shouldInlinePrivate(name string) bool {
+	if ctx.sideEffects == nil {
+		return false
+	}
+	if !ctx.isPrivateMethod(name) {
+		return false
+	}
+	eff, ok := ctx.sideEffects[name]
+	if !ok {
+		return false
+	}
+	return eff.HasStateOutput || eff.HasDataOutput
+}
+
+// getPrivateMethod looks up a private method by name. Returns the method
+// and true if found, zero value and false otherwise.
+func (ctx *lowerCtx) getPrivateMethod(name string) (MethodNode, bool) {
+	for _, m := range ctx.contract.Methods {
+		if m.Name == name && m.Visibility == "private" {
+			return m, true
+		}
+	}
+	return MethodNode{}, false
 }
 
 // freshTemp generates a fresh temporary variable name.
@@ -707,6 +799,25 @@ func (ctx *lowerCtx) lowerIfStatement(stmt IfStmt) {
 	}
 	ctx.syncCounter(elseCtx)
 
+	// 2026-04-30 audit finding F2: when a branch contains output
+	// intrinsics, append a cat-chain inside each branch so the
+	// branch's terminal value is the concat of its output bytes
+	// (state then data, in declaration order). This balances
+	// runtime stack effects across branches and lets the parent's
+	// continuation hash see a single ref representing the chosen
+	// branch's full output set.
+	thenOutputRefs := thenCtx.getAddOutputRefs()
+	elseOutputRefs := elseCtx.getAddOutputRefs()
+	thenDataRefs := thenCtx.getAddDataOutputRefs()
+	elseDataRefs := elseCtx.getAddDataOutputRefs()
+	branchHasOutputs := len(thenOutputRefs) > 0 || len(elseOutputRefs) > 0 ||
+		len(thenDataRefs) > 0 || len(elseDataRefs) > 0
+
+	if branchHasOutputs {
+		appendBranchOutputConcat(thenCtx)
+		appendBranchOutputConcat(elseCtx)
+	}
+
 	elseBindings := elseCtx.bindings
 	if elseBindings == nil {
 		elseBindings = []ir.ANFBinding{}
@@ -718,21 +829,25 @@ func (ctx *lowerCtx) lowerIfStatement(stmt IfStmt) {
 		Else: elseBindings,
 	})
 
-	// Propagate addOutput refs from sub-contexts: when either branch produces
-	// addOutput calls, the if-expression result represents each addOutput
-	// (only one branch executes at runtime).
-	thenOutputRefs := thenCtx.getAddOutputRefs()
-	elseOutputRefs := elseCtx.getAddOutputRefs()
-	if len(thenOutputRefs) > 0 || len(elseOutputRefs) > 0 {
-		ctx.addOutputRef(ifName)
-	}
-	// Same propagation for addDataOutput refs — data outputs declared inside
-	// an if-branch must contribute to the continuation hash via the
-	// if-expression result.
-	thenDataRefs := thenCtx.getAddDataOutputRefs()
-	elseDataRefs := elseCtx.getAddDataOutputRefs()
-	if len(thenDataRefs) > 0 || len(elseDataRefs) > 0 {
-		ctx.addDataOutputRef(ifName)
+	if branchHasOutputs {
+		// Register the if's value once with the parent's continuation
+		// tracker. CRITICAL: pick the right tracker. If either branch
+		// produces a STATE output (addOutput / addRawOutput), the
+		// parent must take the multi-output continuation path, so we
+		// register as a state output ref. If neither branch produces a
+		// state output and at least one branch produces a data output,
+		// we register as a DATA output ref so the parent keeps its
+		// single-output `computeStateOutput` continuation and the
+		// data-output bytes splice in BETWEEN the state output and
+		// the change output. Without this, a branch with only
+		// `addDataOutput` was incorrectly forced onto the multi-output
+		// path, dropping the canonical state continuation.
+		branchHasStateOutput := len(thenOutputRefs) > 0 || len(elseOutputRefs) > 0
+		if branchHasStateOutput {
+			ctx.addOutputRef(ifName)
+		} else {
+			ctx.addDataOutputRef(ifName)
+		}
 	}
 
 	// If both branches end by reassigning the same local variable,
@@ -745,6 +860,28 @@ func (ctx *lowerCtx) lowerIfStatement(stmt IfStmt) {
 			ctx.setLocalAlias(thenLast.Name, ifName)
 		}
 	}
+}
+
+// appendBranchOutputConcat concatenates a branch's output refs (state
+// then data, in declaration order) into a single bytes-ref appended to
+// the branch's bindings. If the branch has no outputs, emits an empty
+// `load_const` so the branch still leaves one item on the stack —
+// required to balance the if's branch shapes when the OTHER branch
+// has outputs. 2026-04-30 audit finding F2 fix.
+func appendBranchOutputConcat(branchCtx *lowerCtx) string {
+	allRefs := append([]string{}, branchCtx.getAddOutputRefs()...)
+	allRefs = append(allRefs, branchCtx.getAddDataOutputRefs()...)
+	if len(allRefs) == 0 {
+		return branchCtx.emit(makeLoadConstString(""))
+	}
+	if len(allRefs) == 1 {
+		return allRefs[0]
+	}
+	accumulated := allRefs[0]
+	for i := 1; i < len(allRefs); i++ {
+		accumulated = branchCtx.emit(makeCall("cat", []string{accumulated, allRefs[i]}))
+	}
+	return accumulated
 }
 
 func (ctx *lowerCtx) lowerForStatement(stmt ForStmt) {
@@ -930,6 +1067,13 @@ func (ctx *lowerCtx) lowerIdentifier(id Identifier) string {
 		return ctx.emit(makeLoadConstString("@this"))
 	}
 
+	// Param alias takes precedence over normal param lookup. Set when a
+	// private method's body is being inlined into this context — the
+	// private's param names map to the caller's arg refs.
+	if alias, ok := ctx.getParamAlias(name); ok {
+		return alias
+	}
+
 	// Check if it's a registered parameter (e.g. txPreimage in StatefulSmartContract)
 	if ctx.isParam(name) {
 		return ctx.emit(ir.ANFValue{Kind: "load_param", Name: name})
@@ -1083,9 +1227,13 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		}
 	}
 
-	// this.method(...) via PropertyAccessExpr
+	// this.method(...) via PropertyAccessExpr (or inlined if the target
+	// is a private method with continuation-relevant side effects).
 	if pa, ok := callee.(PropertyAccessExpr); ok {
 		argRefs := ctx.lowerArgs(e.Args)
+		if ctx.shouldInlinePrivate(pa.Property) {
+			return ctx.inlinePrivateMethodCall(pa.Property, argRefs)
+		}
 		thisRef := ctx.emit(makeLoadConstString("@this"))
 		return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: pa.Property, Args: argRefs})
 	}
@@ -1094,6 +1242,9 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 	if me, ok := callee.(MemberExpr); ok {
 		if id, ok := me.Object.(Identifier); ok && id.Name == "this" {
 			argRefs := ctx.lowerArgs(e.Args)
+			if ctx.shouldInlinePrivate(me.Property) {
+				return ctx.inlinePrivateMethodCall(me.Property, argRefs)
+			}
 			thisRef := ctx.emit(makeLoadConstString("@this"))
 			return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: me.Property, Args: argRefs})
 		}
@@ -1109,6 +1260,9 @@ func (ctx *lowerCtx) lowerCallExpr(e CallExpr) string {
 		// inline the body. This keeps .runar.move, .runar.go, and .runar.ts
 		// lowering in sync.
 		if ctx.isPrivateMethod(id.Name) {
+			if ctx.shouldInlinePrivate(id.Name) {
+				return ctx.inlinePrivateMethodCall(id.Name, argRefs)
+			}
 			thisRef := ctx.emit(makeLoadConstString("@this"))
 			return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: id.Name, Args: argRefs})
 		}
@@ -1255,74 +1409,57 @@ func makeUpdateProp(name, valueRef string) ir.ANFValue {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// State mutation analysis for StatefulSmartContract
-// ---------------------------------------------------------------------------
+// inlinePrivateMethodCall lowers a private method's body directly into
+// the caller's context. Used when the private has continuation-relevant
+// side effects (state mutation, addOutput, addRawOutput, addDataOutput)
+// so the helper's emitted ANF nodes register output refs on the caller.
+//
+// Caller's arg refs are mapped onto the private's parameter names via
+// pushParamAlias. While the private's body lowers, any identifier
+// expression matching one of those param names resolves to the caller's
+// ref (see lowerIdentifier). The aliases are popped afterwards so
+// subsequent lowering in the caller's body sees its own scope.
+//
+// Recursion across private helpers is forbidden by validation, so this
+// always terminates. Nested inlining (private A calls private B) works
+// naturally: when we lower A's body and hit the call to B, the same
+// dispatch path runs and inlines B too.
+func (ctx *lowerCtx) inlinePrivateMethodCall(methodName string, argRefs []string) string {
+	method, ok := ctx.getPrivateMethod(methodName)
+	if !ok {
+		// Should not happen — caller checked shouldInlinePrivate which
+		// requires the method to exist. Fall back to a method_call so
+		// the stack lowering pass surfaces a clear error.
+		thisRef := ctx.emit(makeLoadConstString("@this"))
+		return ctx.emit(ir.ANFValue{Kind: "method_call", Object: thisRef, Method: methodName, Args: argRefs})
+	}
 
-// methodMutatesState determines whether a method mutates any mutable
-// (non-readonly) property. Conservative: if ANY code path can mutate state,
-// returns true.
-func methodMutatesState(method MethodNode, contract *ContractNode) bool {
-	mutableProps := make(map[string]bool)
-	for _, p := range contract.Properties {
-		if !p.Readonly {
-			mutableProps[p.Name] = true
-		}
+	// Bind caller arg refs to the private's parameter names.
+	var aliasedParams []string
+	for i := 0; i < len(method.Params) && i < len(argRefs); i++ {
+		paramName := method.Params[i].Name
+		ctx.pushParamAlias(paramName, argRefs[i])
+		aliasedParams = append(aliasedParams, paramName)
 	}
-	if len(mutableProps) == 0 {
-		return false
-	}
-	return bodyMutatesState(method.Body, mutableProps)
-}
 
-func bodyMutatesState(stmts []Statement, mutableProps map[string]bool) bool {
-	for _, stmt := range stmts {
-		if stmtMutatesState(stmt, mutableProps) {
-			return true
-		}
-	}
-	return false
-}
+	startIndex := len(ctx.bindings)
+	ctx.lowerStatements(method.Body)
+	endIndex := len(ctx.bindings)
 
-func stmtMutatesState(stmt Statement, mutableProps map[string]bool) bool {
-	switch s := stmt.(type) {
-	case AssignmentStmt:
-		if pa, ok := s.Target.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			return true
-		}
-		return false
-	case ExpressionStmt:
-		return exprMutatesState(s.Expr, mutableProps)
-	case IfStmt:
-		if bodyMutatesState(s.Then, mutableProps) {
-			return true
-		}
-		if len(s.Else) > 0 && bodyMutatesState(s.Else, mutableProps) {
-			return true
-		}
-		return false
-	case ForStmt:
-		if stmtMutatesState(s.Update, mutableProps) {
-			return true
-		}
-		return bodyMutatesState(s.Body, mutableProps)
-	default:
-		return false
+	// Pop aliases in reverse order so nested inlines compose correctly.
+	for i := len(aliasedParams) - 1; i >= 0; i-- {
+		ctx.popParamAlias(aliasedParams[i])
 	}
-}
 
-func exprMutatesState(expr Expression, mutableProps map[string]bool) bool {
-	switch e := expr.(type) {
-	case IncrementExpr:
-		if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			return true
-		}
-	case DecrementExpr:
-		if pa, ok := e.Operand.(PropertyAccessExpr); ok && mutableProps[pa.Property] {
-			return true
-		}
+	// Method's "return value" is the last binding emitted by the body.
+	// Void methods (e.g., a private helper that just calls addOutput)
+	// still produce a binding which the caller expression-statement
+	// path will discard.
+	if endIndex > startIndex {
+		return ctx.bindings[endIndex-1].Name
 	}
-	return false
+	// Empty body — emit a load_const placeholder so the caller has a ref.
+	return ctx.emit(makeLoadConstString("@void"))
 }
 
 // flattenAddOutputArgs mirrors flattenAddOutputArgs in 04-anf-lower.ts:
@@ -1339,76 +1476,6 @@ func flattenAddOutputArgs(args []Expression) []Expression {
 		}
 	}
 	return args
-}
-
-// ---------------------------------------------------------------------------
-// addOutput detection for determining change output necessity
-// ---------------------------------------------------------------------------
-
-// State-output intrinsics — methods whose presence triggers the multi-output
-// continuation-hash path. addDataOutput is intentionally excluded: data
-// outputs never replace state outputs, they accompany them.
-var stateOutputMethods = map[string]bool{
-	"addOutput":    true,
-	"addRawOutput": true,
-}
-
-var dataOutputMethods = map[string]bool{
-	"addDataOutput": true,
-}
-
-// methodHasAddOutput checks if a method body contains any this.addOutput or
-// this.addRawOutput calls (state outputs — excludes addDataOutput).
-func methodHasAddOutput(method MethodNode) bool {
-	return bodyHasCall(method.Body, stateOutputMethods)
-}
-
-// methodHasAddDataOutput checks if a method body contains any
-// this.addDataOutput calls.
-func methodHasAddDataOutput(method MethodNode) bool {
-	return bodyHasCall(method.Body, dataOutputMethods)
-}
-
-func bodyHasCall(stmts []Statement, names map[string]bool) bool {
-	for _, stmt := range stmts {
-		if stmtHasCall(stmt, names) {
-			return true
-		}
-	}
-	return false
-}
-
-func stmtHasCall(stmt Statement, names map[string]bool) bool {
-	switch s := stmt.(type) {
-	case ExpressionStmt:
-		return exprHasCall(s.Expr, names)
-	case IfStmt:
-		if bodyHasCall(s.Then, names) {
-			return true
-		}
-		if len(s.Else) > 0 && bodyHasCall(s.Else, names) {
-			return true
-		}
-		return false
-	case ForStmt:
-		return bodyHasCall(s.Body, names)
-	default:
-		return false
-	}
-}
-
-func exprHasCall(expr Expression, names map[string]bool) bool {
-	if ce, ok := expr.(CallExpr); ok {
-		if pa, ok := ce.Callee.(PropertyAccessExpr); ok && names[pa.Property] {
-			return true
-		}
-		if me, ok := ce.Callee.(MemberExpr); ok {
-			if id, ok := me.Object.(Identifier); ok && id.Name == "this" && names[me.Property] {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------------

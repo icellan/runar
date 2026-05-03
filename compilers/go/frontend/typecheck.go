@@ -318,7 +318,16 @@ type typeChecker struct {
 	errors           []Diagnostic
 	propTypes        map[string]string
 	methodSigs       map[string]funcSig
+	// consumedValues records affine-value origins consumed within
+	// the current method/constructor. Origin keys are: parameter
+	// names, "prop:<name>" for contract properties, and aliased
+	// origins resolved via affineAliases. 2026-04-30 audit finding
+	// F6.
 	consumedValues   map[string]bool
+	// affineAliases maps a local variable name to the canonical
+	// affine origin it aliases. Populated when a variable_decl of
+	// affine type is initialized from another affine origin.
+	affineAliases    map[string]string
 	currentMethodLoc *SourceLocation
 	currentStmtLoc   *SourceLocation
 }
@@ -329,6 +338,7 @@ func newTypeChecker(contract *ContractNode) *typeChecker {
 		propTypes:      make(map[string]string),
 		methodSigs:     make(map[string]funcSig),
 		consumedValues: make(map[string]bool),
+		affineAliases:  make(map[string]string),
 	}
 
 	for _, prop := range contract.Properties {
@@ -376,6 +386,7 @@ func (tc *typeChecker) checkConstructor() {
 
 	// Reset affine tracking for this scope
 	tc.consumedValues = make(map[string]bool)
+	tc.affineAliases = make(map[string]string)
 
 	for _, param := range ctor.Params {
 		env.define(param.Name, typeNodeToString(param.Type))
@@ -395,6 +406,7 @@ func (tc *typeChecker) checkMethod(method MethodNode) {
 
 	// Reset affine tracking for this method
 	tc.consumedValues = make(map[string]bool)
+	tc.affineAliases = make(map[string]string)
 
 	for _, param := range method.Params {
 		env.define(param.Name, typeNodeToString(param.Type))
@@ -419,14 +431,24 @@ func (tc *typeChecker) checkStatement(stmt Statement, env *typeEnv) {
 	switch s := stmt.(type) {
 	case VariableDeclStmt:
 		initType := tc.inferExprType(s.Init, env)
+		var declType string
 		if s.Type != nil {
-			declaredType := typeNodeToString(s.Type)
-			if !isSubtype(initType, declaredType) {
-				tc.addError(fmt.Sprintf("type '%s' is not assignable to type '%s'", initType, declaredType))
+			declType = typeNodeToString(s.Type)
+			if !isSubtype(initType, declType) {
+				tc.addError(fmt.Sprintf("type '%s' is not assignable to type '%s'", initType, declType))
 			}
-			env.define(s.Name, declaredType)
+			env.define(s.Name, declType)
 		} else {
+			declType = initType
 			env.define(s.Name, initType)
+		}
+		// Record affine alias when the new local is affine-typed and
+		// its initializer is itself an affine origin (param or
+		// contract property). 2026-04-30 audit finding F6.
+		if affineTypes[declType] {
+			if origin := tc.affineOriginOfExpr(s.Init); origin != "" {
+				tc.affineAliases[s.Name] = origin
+			}
 		}
 
 	case AssignmentStmt:
@@ -852,13 +874,20 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 		return sig.returnType
 	}
 
-	// checkMultiSig special case
+	// checkMultiSig special case (Sig[] / PubKey[] arrays). Only the
+	// arity is special; arg-type validation falls through to the
+	// standard subtype loop below so callers cannot pass `bigint[]`
+	// or other element types. 2026-04-30 audit finding F5.
 	if funcName == "checkMultiSig" {
-		for _, arg := range args {
-			tc.inferExprType(arg, env)
+		if len(args) != 2 {
+			tc.addError(fmt.Sprintf("checkMultiSig() expects 2 arguments, got %d", len(args)))
+			for _, arg := range args {
+				tc.inferExprType(arg, env)
+			}
+			tc.checkAffineConsumption(funcName, args, env)
+			return sig.returnType
 		}
-		tc.checkAffineConsumption(funcName, args, env)
-		return sig.returnType
+		// Fall through to the standard subtype check below.
 	}
 
 	// merkleRootPoseidon2KB special case — variable arity:
@@ -911,6 +940,10 @@ func (tc *typeChecker) checkCallArgs(funcName string, sig funcSig, args []Expres
 
 // checkAffineConsumption enforces that affine-typed values (Sig,
 // SigHashPreimage) are consumed at most once by a consuming function.
+// Tracks consumption by *origin*, not variable name, so aliases
+// (`const again = sig`) and property accesses (`this.sig`) cannot
+// be used to launder a double-consumption past the affine check.
+// 2026-04-30 audit finding F6.
 func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression, env *typeEnv) {
 	consumedIndices, ok := consumingFunctions[funcName]
 	if !ok {
@@ -923,22 +956,63 @@ func (tc *typeChecker) checkAffineConsumption(funcName string, args []Expression
 		}
 
 		arg := args[paramIndex]
-		id, isIdent := arg.(Identifier)
-		if !isIdent {
+		argType := tc.affineExprType(arg, env)
+		if argType == "" || !affineTypes[argType] {
 			continue
 		}
 
-		argType, found := env.lookup(id.Name)
-		if !found || !affineTypes[argType] {
+		origin := tc.affineOriginOfExpr(arg)
+		if origin == "" {
 			continue
 		}
 
-		if tc.consumedValues[id.Name] {
-			tc.addError(fmt.Sprintf("affine value '%s' has already been consumed", id.Name))
+		// Render a short label (source-form) for the diagnostic.
+		label := origin
+		if id, ok := arg.(Identifier); ok {
+			label = id.Name
+		} else if pa, ok := arg.(PropertyAccessExpr); ok {
+			label = "this." + pa.Property
+		}
+
+		if tc.consumedValues[origin] {
+			tc.addError(fmt.Sprintf("affine value '%s' has already been consumed", label))
 		} else {
-			tc.consumedValues[id.Name] = true
+			tc.consumedValues[origin] = true
 		}
 	}
+}
+
+// affineOriginOfExpr returns the canonical origin key for affine
+// tracking. Identifiers resolve through the alias map; property
+// accesses use a "prop:<name>" namespace. Returns "" when the
+// expression has no traceable affine origin.
+func (tc *typeChecker) affineOriginOfExpr(expr Expression) string {
+	if id, ok := expr.(Identifier); ok {
+		if aliased, exists := tc.affineAliases[id.Name]; exists {
+			return aliased
+		}
+		return id.Name
+	}
+	if pa, ok := expr.(PropertyAccessExpr); ok {
+		return "prop:" + pa.Property
+	}
+	return ""
+}
+
+// affineExprType returns the type of an expression for affine
+// purposes (env lookup for identifiers; property-type map for
+// `this.x`). Returns "" when no type can be resolved.
+func (tc *typeChecker) affineExprType(expr Expression, env *typeEnv) string {
+	if id, ok := expr.(Identifier); ok {
+		if t, found := env.lookup(id.Name); found {
+			return t
+		}
+		return ""
+	}
+	if pa, ok := expr.(PropertyAccessExpr); ok {
+		return tc.propTypes[pa.Property]
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------

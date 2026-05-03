@@ -28,4 +28,13 @@ test {
     _ = @import("passes/helpers/poseidon2_merkle.zig");
     _ = @import("passes/helpers/bn254_emitters.zig");
     _ = @import("passes/helpers/nist_ec_emitters.zig");
+    _ = @import("passes/helpers/sha256_emitters.zig");
+    _ = @import("passes/helpers/blake3_emitters.zig");
+    _ = @import("passes/helpers/ec_emitters.zig");
+    _ = @import("passes/helpers/pq_emitters.zig");
+    _ = @import("passes/helpers/crypto_emitters.zig");
+    _ = @import("passes/helpers/crypto_builtins.zig");
+    _ = @import("passes/helpers/merkle_emitters.zig");
+    _ = @import("passes/helpers/babybear_emitters.zig");
+    _ = @import("passes/helpers/stateful_templates.zig");
 }

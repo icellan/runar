@@ -3958,10 +3958,36 @@ def _is_merkle_builtin(name: str) -> bool:
 # methodUsesCheckPreimage
 # ---------------------------------------------------------------------------
 
-def _method_uses_check_preimage(bindings: list[ANFBinding]) -> bool:
+def _method_uses_check_preimage(
+    bindings: list[ANFBinding],
+    private_methods: dict | None = None,
+    seen: set[str] | None = None,
+) -> bool:
+    """Recursively check whether `bindings` (and any private methods
+    they call, transitively) contain a check_preimage. 2026-04-30
+    audit finding F7: previous implementation was a shallow scan that
+    missed manual checkPreimage calls inside if/loop bodies and
+    private helpers, causing stack lowering to fail with
+    `Value '_opPushTxSig' not found on stack`."""
+    if seen is None:
+        seen = set()
     for b in bindings:
         if b.value.kind == "check_preimage":
             return True
+        if b.value.kind == "if":
+            if _method_uses_check_preimage(b.value.then, private_methods, seen):
+                return True
+            if _method_uses_check_preimage(b.value.else_ or [], private_methods, seen):
+                return True
+        if b.value.kind == "loop":
+            if _method_uses_check_preimage(b.value.body, private_methods, seen):
+                return True
+        if b.value.kind == "method_call" and private_methods is not None:
+            target = private_methods.get(b.value.method)
+            if target is not None and target.name not in seen:
+                next_seen = seen | {target.name}
+                if _method_uses_check_preimage(target.body, private_methods, next_seen):
+                    return True
     return False
 
 
@@ -4046,7 +4072,7 @@ def _lower_method_with_private_methods(
     # _codePart: full code script (locking script minus state) as ByteString
     # _opPushTxSig: ECDSA signature for OP_PUSH_TX verification
     # These are inserted at the base of the stack so they can be consumed later.
-    if _method_uses_check_preimage(method.body):
+    if _method_uses_check_preimage(method.body, private_methods):
         param_names = ["_opPushTxSig"] + param_names
         # _codePart is needed when the method has add_output or add_raw_output
         # (it provides the code script for continuation output construction),

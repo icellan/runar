@@ -369,7 +369,15 @@
           "name": "t36",
           "value": {
             "cond": "t29",
-            "else": [],
+            "else": [
+              {
+                "name": "t36",
+                "value": {
+                  "kind": "load_const",
+                  "value": ""
+                }
+              }
+            ],
             "kind": "if",
             "then": [
               {

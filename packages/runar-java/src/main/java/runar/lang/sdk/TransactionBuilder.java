@@ -209,7 +209,30 @@ public final class TransactionBuilder {
         String changeAddress,
         long feeRate
     ) {
+        return buildCallTransactionFull(
+            currentUtxo, unlockingScriptHex, newLockingScriptHex,
+            newSatoshis, List.of(), additionalUtxos, changeAddress, feeRate
+        );
+    }
+
+    /**
+     * Variant that emits {@code dataOutputs} (from {@code this.addDataOutput(...)})
+     * after the state continuation and before the change output, matching
+     * the order the compile-time hashOutputs check expects (and the
+     * Go/Rust/Python/TS SDKs' layout).
+     */
+    public static CallTxResult buildCallTransactionFull(
+        UTXO currentUtxo,
+        String unlockingScriptHex,
+        String newLockingScriptHex,
+        long newSatoshis,
+        List<DataOutput> dataOutputs,
+        List<UTXO> additionalUtxos,
+        String changeAddress,
+        long feeRate
+    ) {
         long rate = feeRate > 0 ? feeRate : FeeEstimator.DEFAULT_FEE_RATE;
+        if (dataOutputs == null) dataOutputs = List.of();
 
         // Greedy largest-first selection of P2PKH funding UTXOs to cover
         // the fee. Stateful contracts forward all contract sats to the
@@ -221,15 +244,24 @@ public final class TransactionBuilder {
         long contractOutSats = newLockingScriptHex == null
             ? 0
             : (newSatoshis > 0 ? newSatoshis : currentUtxo.satoshis());
+        long dataOutSats = 0;
+        for (DataOutput d : dataOutputs) dataOutSats += d.satoshis();
 
         // Always emit a P2PKH change output for the signer; this is the
         // only sink for the funding UTXOs' surplus and matches the Go
         // SDK's stateful-call layout.
         String changeScript = ScriptUtils.buildP2PKHScript(changeAddress);
         int contractInputScriptLen = unlockingScriptHex.length() / 2;
-        int[] contractOutputLens = newLockingScriptHex == null
-            ? new int[0]
-            : new int[] { newLockingScriptHex.length() / 2 };
+        // Build the contract-output script-length array including data
+        // outputs so fee estimation accounts for their bytes.
+        int contractOutCount = newLockingScriptHex == null ? 0 : 1;
+        int[] contractOutputLens = new int[contractOutCount + dataOutputs.size()];
+        if (contractOutCount == 1) {
+            contractOutputLens[0] = newLockingScriptHex.length() / 2;
+        }
+        for (int j = 0; j < dataOutputs.size(); j++) {
+            contractOutputLens[contractOutCount + j] = dataOutputs.get(j).scriptHex().length() / 2;
+        }
 
         List<UTXO> selected = new ArrayList<>();
         long totalFunding = 0;
@@ -243,7 +275,7 @@ public final class TransactionBuilder {
                 contractInputScriptLen, 0, selected.size(),
                 contractOutputLens, /*withChange*/ true, rate
             );
-            change = contractIn + totalFunding - contractOutSats - fee;
+            change = contractIn + totalFunding - contractOutSats - dataOutSats - fee;
             if (change >= 0 || i >= sortedFunding.size()) break;
             UTXO next = sortedFunding.get(i++);
             selected.add(next);
@@ -253,6 +285,7 @@ public final class TransactionBuilder {
             throw new IllegalStateException(
                 "TransactionBuilder.buildCallTransactionFull: insufficient funds: "
                     + "need fee " + fee + " + contract output " + contractOutSats
+                    + " + data outputs " + dataOutSats
                     + ", have contract " + contractIn + " + funding " + totalFunding
             );
         }
@@ -265,11 +298,26 @@ public final class TransactionBuilder {
         if (newLockingScriptHex != null) {
             tx.addOutput(contractOutSats, newLockingScriptHex);
         }
+        // Data outputs (from this.addDataOutput in the method body), in
+        // declaration order, between the state continuation and the
+        // change output. This matches the Go/Rust/Python/TS SDKs and the
+        // compile-time hashOutputs check the contract enforces.
+        for (DataOutput d : dataOutputs) {
+            tx.addOutput(d.satoshis(), d.scriptHex());
+        }
         if (change > 0) {
             tx.addOutput(change, changeScript);
         }
         return new CallTxResult(tx, change, selected);
     }
+
+    /**
+     * One transaction output emitted from {@code this.addDataOutput(...)}.
+     * {@code scriptHex} is the raw hex-encoded scriptPubKey bytes (caller
+     * already includes any {@code OP_RETURN} / {@code OP_FALSE OP_RETURN}
+     * prefix it wants).
+     */
+    public record DataOutput(long satoshis, String scriptHex) {}
 
     /**
      * Result of {@link #buildCallTransactionFull}. {@link #tx()} is
