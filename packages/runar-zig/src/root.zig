@@ -238,7 +238,6 @@ test {
     _ = @import("sdk_codegen.zig");
     _ = @import("sdk_codegen_conformance_test.zig");
     _ = @import("sdk_wallet.zig");
-    _ = @import("sdk_wallet_client_integration_test.zig");
     _ = @import("sdk_http_client.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

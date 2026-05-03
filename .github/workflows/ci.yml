@@ -146,13 +146,13 @@ jobs:
             fi
           done
           exit $fail
-      - name: Multi-format source conformance (covers Ruby + all 7 compilers via source.json)
-        # Replaces the previous shell loops that searched for in-directory
-        # `<case>.runar.ts` / `<case>.runar.rb` files. Sources now live under
-        # `examples/`, referenced from each case's `source.json`. The shared
-        # runner reads source.json directly, drives every available compiler,
-        # and compares each one against the golden hex.
-        run: pnpm install --frozen-lockfile && npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+      # Note: cross-compiler multi-format source conformance lives in the
+      # dedicated `conformance` job below, which depends on every
+      # compiler-build job and installs every toolchain. Running it here
+      # would require this Ruby-only job to also install Go, Rust, Python,
+      # Zig, and Java — duplicating ~5 minutes of setup for no extra
+      # coverage. Ruby's source.json entries are exercised by the central
+      # job alongside every other tier.
 
   # ---------------------------------------------------------------------------
   # SDKs — package tests + example tests
