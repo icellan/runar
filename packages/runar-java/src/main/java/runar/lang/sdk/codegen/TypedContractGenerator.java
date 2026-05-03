@@ -397,13 +397,20 @@ public final class TypedContractGenerator {
         String optionsArgName
     ) {
         if (terminal && isStateful) {
-            b.append("        // outputs are accepted for parity with TS/Ruby/Go; the Java SDK\n");
-            b.append("        // does not yet thread terminalOutputs through call() — they are\n");
-            b.append("        // tracked here for forward compatibility.\n");
+            // Stateful terminal: outputs are required. Convert the
+            // wrapper-emitted TerminalOutput list into SDK
+            // CallOptions.TerminalOutput entries and pass via the rich
+            // CallOptions overload so the SDK builds a no-continuation,
+            // no-change tx with exactly these outputs.
             b.append("        java.util.Objects.requireNonNull(").append(optionsArgName)
                 .append(", \"terminal stateful method requires an outputs list\");\n");
-            b.append("        return inner.call(\"").append(methodName)
-                .append("\", callArgs, null, provider, signer);\n");
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");
+            b.append("        for (TerminalOutput o : ").append(optionsArgName).append(") {\n");
+            b.append("            sdkOuts.add(new runar.lang.sdk.CallOptions.TerminalOutput(o.satoshis(), o.address(), o.scriptHex()));\n");
+            b.append("        }\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = runar.lang.sdk.CallOptions.terminal(sdkOuts);\n");
+            b.append("        return inner.callWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
@@ -411,8 +418,20 @@ public final class TypedContractGenerator {
             b.append("        return inner.call(\"").append(methodName)
                 .append("\", callArgs, stateUpdates, provider, signer);\n");
         } else {
+            // Stateless terminal — outputs is optional. When non-null,
+            // route through the rich CallOptions overload; otherwise the
+            // legacy path (provider-fetched funding + change to signer).
+            b.append("        if (").append(optionsArgName).append(" != null) {\n");
+            b.append("            java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");
+            b.append("            for (TerminalOutput o : ").append(optionsArgName).append(") {\n");
+            b.append("                sdkOuts.add(new runar.lang.sdk.CallOptions.TerminalOutput(o.satoshis(), o.address(), o.scriptHex()));\n");
+            b.append("            }\n");
+            b.append("            runar.lang.sdk.CallOptions sdkOpts = runar.lang.sdk.CallOptions.terminal(sdkOuts);\n");
+            b.append("            return inner.callWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
+            b.append("        }\n");
             b.append("        return inner.call(\"").append(methodName)
-                .append("\", callArgs, null, provider, signer);\n");
+                .append("\", callArgs, (java.util.Map<String, Object>) null, provider, signer);\n");
         }
     }
 
@@ -426,8 +445,13 @@ public final class TypedContractGenerator {
         if (terminal && isStateful) {
             b.append("        java.util.Objects.requireNonNull(").append(optionsArgName)
                 .append(", \"terminal stateful method requires an outputs list\");\n");
-            b.append("        return inner.prepareCall(\"").append(methodName)
-                .append("\", callArgs, null, provider, signer);\n");
+            b.append("        java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");
+            b.append("        for (TerminalOutput o : ").append(optionsArgName).append(") {\n");
+            b.append("            sdkOuts.add(new runar.lang.sdk.CallOptions.TerminalOutput(o.satoshis(), o.address(), o.scriptHex()));\n");
+            b.append("        }\n");
+            b.append("        runar.lang.sdk.CallOptions sdkOpts = runar.lang.sdk.CallOptions.terminal(sdkOuts);\n");
+            b.append("        return inner.prepareCallWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
         } else if (isStateful) {
             b.append("        java.util.Map<String, Object> stateUpdates = ")
                 .append(optionsArgName).append(" != null ? ")
@@ -435,8 +459,17 @@ public final class TypedContractGenerator {
             b.append("        return inner.prepareCall(\"").append(methodName)
                 .append("\", callArgs, stateUpdates, provider, signer);\n");
         } else {
+            b.append("        if (").append(optionsArgName).append(" != null) {\n");
+            b.append("            java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> sdkOuts = new java.util.ArrayList<>();\n");
+            b.append("            for (TerminalOutput o : ").append(optionsArgName).append(") {\n");
+            b.append("                sdkOuts.add(new runar.lang.sdk.CallOptions.TerminalOutput(o.satoshis(), o.address(), o.scriptHex()));\n");
+            b.append("            }\n");
+            b.append("            runar.lang.sdk.CallOptions sdkOpts = runar.lang.sdk.CallOptions.terminal(sdkOuts);\n");
+            b.append("            return inner.prepareCallWithOptions(\"").append(methodName)
+                .append("\", callArgs, sdkOpts, provider, signer);\n");
+            b.append("        }\n");
             b.append("        return inner.prepareCall(\"").append(methodName)
-                .append("\", callArgs, null, provider, signer);\n");
+                .append("\", callArgs, (java.util.Map<String, Object>) null, provider, signer);\n");
         }
     }
 

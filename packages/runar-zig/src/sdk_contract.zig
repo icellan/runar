@@ -337,20 +337,40 @@ pub const RunarContract = struct {
         defer self.allocator.free(address);
         const change_address = if (options) |o| (o.change_address orelse address) else address;
 
-        // Fetch fee rate and funding UTXOs
+        // Detect terminal-output call: contract is fully spent, outputs are
+        // the exact list provided in options.terminal_outputs (replaces
+        // continuation), funding inputs come from options.funding_utxos
+        // (rather than provider-fetched UTXOs), and there is no change.
+        const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        const terminal_outputs: []const types.ContractOutput =
+            if (is_terminal_call) options.?.terminal_outputs.? else &.{};
+        const terminal_funding: []const types.UTXO =
+            if (is_terminal_call) (if (options.?.funding_utxos) |fu| fu else &.{}) else &.{};
+
+        // Fetch fee rate and funding UTXOs (skip provider lookup when
+        // terminal — funding is caller-provided).
         const fee_rate = prov.getFeeRate() catch 100;
-        const all_utxos = prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
-        defer {
+        const all_utxos: []types.UTXO = if (is_terminal_call)
+            &.{}
+        else
+            prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
+        defer if (!is_terminal_call) {
             for (all_utxos) |*u| u.deinit(self.allocator);
-            self.allocator.free(all_utxos);
-        }
+            if (all_utxos.len > 0) self.allocator.free(all_utxos);
+        };
 
         // Filter out the contract UTXO from funding UTXOs
         var additional_utxos: std.ArrayListUnmanaged(types.UTXO) = .empty;
         defer additional_utxos.deinit(self.allocator);
-        for (all_utxos) |u| {
-            if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+        if (is_terminal_call) {
+            for (terminal_funding) |u| {
                 try additional_utxos.append(self.allocator, u);
+            }
+        } else {
+            for (all_utxos) |u| {
+                if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                    try additional_utxos.append(self.allocator, u);
+                }
             }
         }
 
@@ -368,7 +388,7 @@ pub const RunarContract = struct {
             if (anf_data_outputs.len > 0) self.allocator.free(anf_data_outputs);
         }
 
-        if (is_stateful) {
+        if (is_stateful and !is_terminal_call) {
             new_satoshis = contract_utxo.satoshis;
             if (options) |o| {
                 if (o.satoshis > 0) new_satoshis = o.satoshis;
@@ -455,16 +475,27 @@ pub const RunarContract = struct {
             const unlock = try self.buildUnlockingScript(method_name, resolved_args);
             defer self.allocator.free(unlock);
 
+            // Terminal stateless: outputs are the caller-supplied
+            // terminal_outputs (replace any auto-computed change), funding
+            // inputs are the caller-supplied funding_utxos. No change.
+            const stateless_build_opts: call_mod.CallBuildOptions = .{
+                .contract_outputs = terminal_outputs,
+            };
+            const stateless_change_address: ?[]const u8 =
+                if (is_terminal_call) null else change_address;
+            const stateless_build_opts_ptr: ?*const call_mod.CallBuildOptions =
+                if (is_terminal_call) &stateless_build_opts else null;
+
             var call_result = call_mod.buildCallTransaction(
                 self.allocator,
                 contract_utxo,
                 unlock,
                 "",
                 0,
-                change_address,
+                stateless_change_address,
                 additional_utxos.items,
                 fee_rate,
-                null,
+                stateless_build_opts_ptr,
             ) catch return ContractError.CallFailed;
             defer call_result.deinit(self.allocator);
 
@@ -544,19 +575,36 @@ pub const RunarContract = struct {
         );
         defer self.allocator.free(placeholder_unlock);
 
+        // For terminal stateful calls, the contract is fully spent: outputs
+        // are exactly `terminal_outputs` (no continuation), there is no
+        // change, and funding inputs come from `funding_utxos`. For
+        // non-terminal stateful, we keep the regular continuation +
+        // optional `data_outputs` layout.
+        const stateful_contract_outputs: []const types.ContractOutput =
+            if (is_terminal_call) terminal_outputs else &.{};
+        const stateful_data_outputs: []const types.ContractOutput =
+            if (is_terminal_call) &.{} else data_outputs_hex.items;
+        const stateful_change_address: ?[]const u8 =
+            if (is_terminal_call) null else change_address;
+        const stateful_new_locking_script: []const u8 =
+            if (is_terminal_call) "" else new_locking_script;
+        const stateful_new_satoshis: i64 =
+            if (is_terminal_call) 0 else new_satoshis;
+
         const build_opts: call_mod.CallBuildOptions = .{
-            .data_outputs = data_outputs_hex.items,
+            .contract_outputs = stateful_contract_outputs,
+            .data_outputs = stateful_data_outputs,
         };
         const build_opts_ptr: ?*const call_mod.CallBuildOptions =
-            if (data_outputs_hex.items.len > 0) &build_opts else null;
+            if (is_terminal_call or data_outputs_hex.items.len > 0) &build_opts else null;
 
         var call_result = call_mod.buildCallTransaction(
             self.allocator,
             contract_utxo,
             placeholder_unlock,
-            new_locking_script,
-            new_satoshis,
-            change_address,
+            stateful_new_locking_script,
+            stateful_new_satoshis,
+            stateful_change_address,
             additional_utxos.items,
             fee_rate,
             build_opts_ptr,
@@ -621,9 +669,9 @@ pub const RunarContract = struct {
                 self.allocator,
                 contract_utxo,
                 first_unlock,
-                new_locking_script,
-                new_satoshis,
-                change_address,
+                stateful_new_locking_script,
+                stateful_new_satoshis,
+                stateful_change_address,
                 additional_utxos.items,
                 fee_rate,
                 build_opts_ptr,
@@ -745,17 +793,24 @@ pub const RunarContract = struct {
         const txid = prov.broadcast(self.allocator, signed_tx) catch return ContractError.CallFailed;
         errdefer self.allocator.free(txid);
 
-        // Update tracked UTXO for stateful continuation
+        // Update tracked UTXO. For terminal stateful calls the contract is
+        // fully spent (no continuation) — drop the current UTXO. For
+        // non-terminal stateful calls, the continuation lives at output 0
+        // of the broadcast tx.
         if (self.current_utxo) |*old| {
             var mu = old.*;
             mu.deinit(self.allocator);
         }
-        self.current_utxo = .{
-            .txid = try self.allocator.dupe(u8, txid),
-            .output_index = 0,
-            .satoshis = new_satoshis,
-            .script = try self.allocator.dupe(u8, new_locking_script),
-        };
+        if (is_terminal_call) {
+            self.current_utxo = null;
+        } else {
+            self.current_utxo = .{
+                .txid = try self.allocator.dupe(u8, txid),
+                .output_index = 0,
+                .satoshis = new_satoshis,
+                .script = try self.allocator.dupe(u8, new_locking_script),
+            };
+        }
 
         self.allocator.free(signed_tx);
         return txid;
@@ -839,18 +894,33 @@ pub const RunarContract = struct {
         defer self.allocator.free(address);
         const change_address = if (options) |o| (o.change_address orelse address) else address;
 
+        // Terminal-output detection: caller-supplied outputs replace the
+        // automatic continuation/change layout. See `call()` for details.
+        const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        const terminal_outputs: []const types.ContractOutput =
+            if (is_terminal_call) options.?.terminal_outputs.? else &.{};
+        const terminal_funding: []const types.UTXO =
+            if (is_terminal_call) (if (options.?.funding_utxos) |fu| fu else &.{}) else &.{};
+
         const fee_rate = prov.getFeeRate() catch 100;
-        const all_utxos = prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
-        defer {
+        const all_utxos: []types.UTXO = if (is_terminal_call)
+            &.{}
+        else
+            prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
+        defer if (!is_terminal_call) {
             for (all_utxos) |*u| u.deinit(self.allocator);
-            self.allocator.free(all_utxos);
-        }
+            if (all_utxos.len > 0) self.allocator.free(all_utxos);
+        };
 
         var additional_utxos: std.ArrayListUnmanaged(types.UTXO) = .empty;
         defer additional_utxos.deinit(self.allocator);
-        for (all_utxos) |u| {
-            if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
-                try additional_utxos.append(self.allocator, u);
+        if (is_terminal_call) {
+            for (terminal_funding) |u| try additional_utxos.append(self.allocator, u);
+        } else {
+            for (all_utxos) |u| {
+                if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                    try additional_utxos.append(self.allocator, u);
+                }
             }
         }
 
@@ -858,16 +928,24 @@ pub const RunarContract = struct {
         const placeholder_unlock = try self.buildUnlockingScript(method_name, resolved_args);
         defer self.allocator.free(placeholder_unlock);
 
+        const stateless_build_opts: call_mod.CallBuildOptions = .{
+            .contract_outputs = terminal_outputs,
+        };
+        const stateless_change_address: ?[]const u8 =
+            if (is_terminal_call) null else change_address;
+        const stateless_build_opts_ptr: ?*const call_mod.CallBuildOptions =
+            if (is_terminal_call) &stateless_build_opts else null;
+
         var call_result = call_mod.buildCallTransaction(
             self.allocator,
             contract_utxo,
             placeholder_unlock,
             "",
             0,
-            change_address,
+            stateless_change_address,
             additional_utxos.items,
             fee_rate,
-            null,
+            stateless_build_opts_ptr,
         ) catch return ContractError.CallFailed;
         defer call_result.deinit(self.allocator);
 
@@ -1041,18 +1119,34 @@ pub const RunarContract = struct {
         defer self.allocator.free(address);
         const change_address = if (options) |o| (o.change_address orelse address) else address;
 
+        // Terminal-output detection (mirrors `call`). When the caller
+        // supplies `terminal_outputs`, the prepared tx has no continuation
+        // and no change; funding inputs come from `funding_utxos`.
+        const is_terminal_call = if (options) |o| o.terminal_outputs != null else false;
+        const terminal_outputs: []const types.ContractOutput =
+            if (is_terminal_call) options.?.terminal_outputs.? else &.{};
+        const terminal_funding: []const types.UTXO =
+            if (is_terminal_call) (if (options.?.funding_utxos) |fu| fu else &.{}) else &.{};
+
         const fee_rate = prov.getFeeRate() catch 100;
-        const all_utxos = prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
-        defer {
+        const all_utxos: []types.UTXO = if (is_terminal_call)
+            &.{}
+        else
+            prov.getUtxos(self.allocator, address) catch return ContractError.CallFailed;
+        defer if (!is_terminal_call) {
             for (all_utxos) |*u| u.deinit(self.allocator);
-            self.allocator.free(all_utxos);
-        }
+            if (all_utxos.len > 0) self.allocator.free(all_utxos);
+        };
 
         var additional_utxos: std.ArrayListUnmanaged(types.UTXO) = .empty;
         defer additional_utxos.deinit(self.allocator);
-        for (all_utxos) |u| {
-            if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
-                try additional_utxos.append(self.allocator, u);
+        if (is_terminal_call) {
+            for (terminal_funding) |u| try additional_utxos.append(self.allocator, u);
+        } else {
+            for (all_utxos) |u| {
+                if (!(std.mem.eql(u8, u.txid, contract_utxo.txid) and u.output_index == contract_utxo.output_index)) {
+                    try additional_utxos.append(self.allocator, u);
+                }
             }
         }
 
@@ -1069,8 +1163,20 @@ pub const RunarContract = struct {
             }
         }
 
-        const new_locking_script = try self.getLockingScript();
+        // Continuation locking script — empty for terminal calls.
+        const new_locking_script: []u8 = if (is_terminal_call)
+            try self.allocator.alloc(u8, 0)
+        else
+            try self.getLockingScript();
         errdefer self.allocator.free(new_locking_script);
+        const stateful_new_satoshis: i64 = if (is_terminal_call) 0 else new_satoshis;
+        const stateful_change_address: ?[]const u8 =
+            if (is_terminal_call) null else change_address;
+        const stateful_build_opts: call_mod.CallBuildOptions = .{
+            .contract_outputs = terminal_outputs,
+        };
+        const stateful_build_opts_ptr: ?*const call_mod.CallBuildOptions =
+            if (is_terminal_call) &stateful_build_opts else null;
 
         // ---- Compute change PKH for stateful methods needing it ----------
         var change_pkh_buf: []u8 = &.{};
@@ -1111,8 +1217,8 @@ pub const RunarContract = struct {
 
         var call_result = call_mod.buildCallTransaction(
             self.allocator, contract_utxo, placeholder_unlock,
-            new_locking_script, new_satoshis, change_address,
-            additional_utxos.items, fee_rate, null,
+            new_locking_script, stateful_new_satoshis, stateful_change_address,
+            additional_utxos.items, fee_rate, stateful_build_opts_ptr,
         ) catch return ContractError.CallFailed;
         defer call_result.deinit(self.allocator);
 
@@ -1140,8 +1246,8 @@ pub const RunarContract = struct {
 
             var rebuild_result = call_mod.buildCallTransaction(
                 self.allocator, contract_utxo, first_unlock,
-                new_locking_script, new_satoshis, change_address,
-                additional_utxos.items, fee_rate, null,
+                new_locking_script, stateful_new_satoshis, stateful_change_address,
+                additional_utxos.items, fee_rate, stateful_build_opts_ptr,
             ) catch {
                 self.allocator.free(first_unlock);
                 ptx_result.deinit(self.allocator);
@@ -1319,8 +1425,16 @@ pub const RunarContract = struct {
         const txid = prov.broadcast(self.allocator, final_tx) catch return ContractError.CallFailed;
         errdefer self.allocator.free(txid);
 
-        if (prepared.is_stateful) {
-            // Stateful: track the new contract continuation UTXO.
+        // Terminal calls — stateful or stateless — fully spend the
+        // contract: there is no continuation, so `current_utxo` must
+        // become null. We detect them by an empty `new_locking_script`,
+        // which `prepareCallStateful` sets when CallOptions.terminal_outputs
+        // is non-null. For non-terminal stateful calls the locking script
+        // is always populated (it carries the contract code), so the
+        // empty-vs-set test cleanly disambiguates.
+        const is_terminal_prepared = prepared.new_locking_script.len == 0;
+        if (prepared.is_stateful and !is_terminal_prepared) {
+            // Stateful non-terminal: track the new contract continuation UTXO.
             if (self.current_utxo) |*old| {
                 var mu = old.*;
                 mu.deinit(self.allocator);
@@ -1332,7 +1446,7 @@ pub const RunarContract = struct {
                 .script = try self.allocator.dupe(u8, prepared.new_locking_script),
             };
         } else {
-            // Stateless: contract UTXO consumed.
+            // Stateless or stateful-terminal: contract UTXO consumed.
             if (self.current_utxo) |*old| {
                 var mu = old.*;
                 mu.deinit(self.allocator);
@@ -2457,6 +2571,76 @@ test "prepareCall → finalizeCall round-trip broadcasts a tx" {
     try std.testing.expectEqual(@as(usize, 64), txid.len);
     // Stateless terminal call must clear currentUtxo.
     try std.testing.expect(contract.getCurrentUtxo() == null);
+}
+
+test "call with terminal_outputs builds tx with exact outputs and clears UTXO" {
+    const allocator = std.testing.allocator;
+    // Stateless contract that always succeeds (script "51" = OP_1).
+    // No Sig params — exercises the terminal-output path on the simplest
+    // possible contract so failures point at output handling, not signing.
+    const json =
+        \\{"contractName":"OpOne","version":"1","compilerVersion":"1.0","script":"51","asm":"OP_1",
+        \\"abi":{"constructor":{"params":[]},"methods":[{"name":"go","params":[],"isPublic":true}]},
+        \\"stateFields":[],"constructorSlots":[],"buildTimestamp":"2024-01-01"}
+    ;
+    var artifact = try types.RunarArtifact.fromJson(allocator, json);
+    defer artifact.deinit();
+
+    var contract = try RunarContract.init(allocator, &artifact, &.{});
+    defer contract.deinit();
+
+    var prov = provider_mod.MockProvider.init(allocator, "testnet");
+    defer prov.deinit();
+    var signer = try signer_mod.LocalSigner.fromHex("18e14a7b6a307f426a94f8114701e7c8e774e7f9a47e2c2035db29a206321725");
+
+    try contract.setCurrentUtxo(.{
+        .txid = "fe" ** 32,
+        .output_index = 0,
+        .satoshis = 5_000,
+        .script = "51",
+    });
+
+    // Two terminal outputs: 1500 sats to a P2PKH script + 2000 sats to a
+    // raw script (OP_1). 5000 input - 3500 output = 1500 sats absorbed
+    // as fee (more than enough for a tiny tx).
+    const term_p2pkh = "76a914" ++ ("aa" ** 20) ++ "88ac";
+    const term_outputs = [_]types.ContractOutput{
+        .{ .script = term_p2pkh, .satoshis = 1500 },
+        .{ .script = "51", .satoshis = 2000 },
+    };
+    const opts = types.CallOptions{ .terminal_outputs = &term_outputs };
+
+    const txid = try contract.call("go", &.{}, prov.provider(), signer.signer(), opts);
+    defer allocator.free(txid);
+
+    // MockProvider mints a 64-char mock txid on broadcast.
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
+    // Terminal call must clear currentUtxo (contract is fully spent).
+    try std.testing.expect(contract.getCurrentUtxo() == null);
+
+    // The broadcast tx must contain both terminal output scripts.
+    const raw_tx = try prov.provider().getRawTransaction(allocator, txid);
+    defer allocator.free(raw_tx);
+    try std.testing.expect(std.mem.indexOf(u8, raw_tx, term_p2pkh) != null);
+    // The OP_1 output is one byte; check by surrounding length-prefix
+    // pattern "0151" (varint length 1, OP_1).
+    try std.testing.expect(std.mem.indexOf(u8, raw_tx, "0151") != null);
+}
+
+test "resolveTerminalOutputs converts addresses and script_hex into ContractOutput list" {
+    const allocator = std.testing.allocator;
+    const inputs = [_]types.TerminalOutput{
+        .{ .satoshis = 1000, .script_hex = "76a914aabbccddeeff00112233445566778899aabbccdd88ac" },
+        .{ .satoshis = 2000, .address = "abcdef0123456789abcdef0123456789abcdef01" }, // 40-char hex pkh
+    };
+    const out = try call_mod.resolveTerminalOutputs(allocator, &inputs);
+    defer call_mod.freeResolvedTerminalOutputs(allocator, out);
+
+    try std.testing.expectEqual(@as(usize, 2), out.len);
+    try std.testing.expectEqual(@as(i64, 1000), out[0].satoshis);
+    try std.testing.expectEqualStrings("76a914aabbccddeeff00112233445566778899aabbccdd88ac", out[0].script);
+    try std.testing.expectEqual(@as(i64, 2000), out[1].satoshis);
+    try std.testing.expectEqualStrings("76a914abcdef0123456789abcdef0123456789abcdef0188ac", out[1].script);
 }
 
 test "RunarContract.fromUtxo detects inscription in code script" {

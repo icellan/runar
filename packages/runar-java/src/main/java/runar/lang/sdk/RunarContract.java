@@ -186,6 +186,30 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
+        return callWithOptions(
+            methodName,
+            args,
+            stateUpdates == null ? null : new CallOptions(stateUpdates, null, null),
+            provider,
+            signer
+        );
+    }
+
+    /**
+     * Rich-options overload that supports terminal output spending and
+     * caller-supplied funding UTXOs in addition to state overrides. See
+     * {@link CallOptions} for field semantics. Distinct method name from
+     * {@link #call(String, List, Map, Provider, Signer)} so callers
+     * passing {@code null} for the third arg don't trigger overload
+     * ambiguity.
+     */
+    public CallOutcome callWithOptions(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
         if (currentUtxo == null) {
             throw new IllegalStateException(
                 "RunarContract.call: contract has not been deployed. Call deploy() or setCurrentUtxo()."
@@ -212,12 +236,19 @@ public final class RunarContract {
             );
         }
 
+        Map<String, Object> stateUpdates = options == null ? null : options.newState;
+        List<CallOptions.TerminalOutput> terminalOutputs =
+            options == null ? null : options.terminalOutputs;
+        List<UTXO> fundingUtxos =
+            options == null || options.fundingUtxos == null ? List.of() : options.fundingUtxos;
+
         // Auto-merge state updates: explicit caller-supplied stateUpdates
         // win; otherwise the ANF interpreter computes the new state and
         // any addDataOutput entries from the contract body. Mirrors the
-        // Go/Python SDKs.
+        // Go/Python SDKs. Skip ANF auto-compute for terminal calls — the
+        // contract is fully spent so there's no continuation to update.
         List<TransactionBuilder.DataOutput> resolvedDataOutputs = new ArrayList<>();
-        if (isStateful) {
+        if (isStateful && terminalOutputs == null) {
             if (stateUpdates != null) {
                 state.putAll(stateUpdates);
             } else if (artifact.anf() != null) {
@@ -260,6 +291,19 @@ public final class RunarContract {
         boolean methodNeedsChange = hasParam(m, "_changePKH");
         boolean methodNeedsNewAmount = hasParam(m, "_newAmount");
         boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+
+        // ------------------------------------------------------------
+        // Terminal call: contract fully spent into caller-supplied
+        // outputs, no continuation, no automatic change. Bypasses both
+        // legacy paths and routes to the dedicated terminal builder.
+        // ------------------------------------------------------------
+        if (terminalOutputs != null) {
+            return callTerminal(
+                m, methodName, resolved, sigIndices,
+                methodNeedsChange, methodNeedsNewAmount,
+                isStateful, terminalOutputs, fundingUtxos, provider, signer
+            );
+        }
 
         // ------------------------------------------------------------
         // Stateless single-method contract: thin path (legacy P2PKH).
@@ -478,6 +522,173 @@ public final class RunarContract {
             this.currentUtxo = null;
         }
         return new CallOutcome(txid, txHex, nextUtxo);
+    }
+
+    /**
+     * Terminal call path. The contract is fully spent: the tx has the
+     * contract UTXO as its first signed input (plus any caller-supplied
+     * funding UTXOs as P2PKH inputs), the outputs are exactly the
+     * caller-supplied {@link CallOptions#terminalOutputs}, and there is
+     * no continuation and no change. Fee comes implicitly from the
+     * difference between input value and output value.
+     *
+     * <p>For stateful contracts this still runs the OP_PUSH_TX two-pass
+     * convergence — the on-chain script enforces the BIP-143 preimage
+     * regardless of whether a continuation is produced. For stateless
+     * contracts (or stateful methods without {@code _changePKH}) this
+     * just signs Sig placeholders and broadcasts.
+     */
+    private CallOutcome callTerminal(
+        RunarArtifact.ABIMethod m,
+        String methodName,
+        List<Object> resolved,
+        List<Integer> sigIndices,
+        boolean methodNeedsChange,
+        boolean methodNeedsNewAmount,
+        boolean isStateful,
+        List<CallOptions.TerminalOutput> terminalOutputs,
+        List<UTXO> fundingUtxos,
+        Provider provider,
+        Signer signer
+    ) {
+        boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+        long contractSats = currentUtxo.satoshis();
+
+        // Resolve user-facing outputs into hex-encoded scripts. Throws if
+        // any entry has neither address nor scriptHex (validated in
+        // TerminalOutput's compact constructor).
+        record OutEntry(long sats, String scriptHex) {}
+        List<OutEntry> outs = new ArrayList<>();
+        long termOutSats = 0;
+        for (CallOptions.TerminalOutput t : terminalOutputs) {
+            long s = t.satoshis().longValueExact();
+            outs.add(new OutEntry(s, t.resolveScriptHex()));
+            termOutSats += s;
+        }
+
+        // Sanity: contract balance + funding must cover output sum.
+        long fundingSats = 0;
+        for (UTXO fu : fundingUtxos) fundingSats += fu.satoshis();
+        if (contractSats + fundingSats < termOutSats) {
+            throw new IllegalStateException(
+                "RunarContract.call: terminal outputs (" + termOutSats
+                    + " sats) exceed contract balance (" + contractSats
+                    + ") + funding (" + fundingSats + ")"
+            );
+        }
+
+        // Build a tx layout: contract input + funding inputs + terminal
+        // outputs. The unlocking script for the contract input is sized
+        // up front (placeholder for stateful, real for stateless+no-Sig)
+        // so OP_PUSH_TX preimage / Sig sighashes can be computed against
+        // the final tx bytes.
+        java.util.function.Supplier<RawTx> buildTx = () -> {
+            RawTx t = new RawTx();
+            t.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), "");
+            for (UTXO fu : fundingUtxos) {
+                t.addInput(fu.txid(), fu.outputIndex(), "");
+            }
+            for (OutEntry o : outs) {
+                t.addOutput(o.sats(), o.scriptHex());
+            }
+            return t;
+        };
+
+        String contractUnlock;
+        String opPushTxSigHex = null;
+        String preimageHex = null;
+
+        if (isStateful || needsOpPushTx) {
+            // Code-separator-aware sighash subscript for the contract input.
+            int methodIndex = findPublicMethodIndex(methodName);
+            int codeSepIdx = getCodeSepIndex(methodIndex);
+            String fullScriptHex = currentUtxo.scriptHex();
+            String sighashSubscript = codeSepIdx >= 0
+                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                : fullScriptHex;
+
+            // Pass 1: placeholder unlock so we can compute the preimage
+            // against a tx with the correct output layout.
+            String placeholderUnlock = buildPushTxUnlock(
+                m, methodName, resolved, "00".repeat(72),
+                methodNeedsChange ? "00".repeat(20) : null,
+                /*changeAmount*/ 0L, methodNeedsNewAmount, /*newSats*/ 0L,
+                "00".repeat(181)
+            );
+            RawTx tx = buildTx.get();
+            tx.setUnlockingScript(0, placeholderUnlock);
+            byte[] preimage = OpPushTx.preimage(
+                tx, 0, ScriptUtils.hexToBytes(sighashSubscript),
+                contractSats, OpPushTx.SIGHASH_ALL_FORKID
+            );
+            byte[] opPushTxSig = OpPushTx.computePushTxSig(
+                tx, 0, sighashSubscript, contractSats
+            );
+            opPushTxSigHex = ScriptUtils.bytesToHex(opPushTxSig);
+            preimageHex = ScriptUtils.bytesToHex(preimage);
+
+            // Sign Sig placeholders against the same code-separator-aware
+            // sighash the contract input enforces.
+            if (!sigIndices.isEmpty()) {
+                byte[] userSighash = tx.sighashBIP143(
+                    0, sighashSubscript, contractSats, RawTx.SIGHASH_ALL_FORKID
+                );
+                for (int idx : sigIndices) {
+                    byte[] der = signer.sign(userSighash, null);
+                    String sigHex = ScriptUtils.bytesToHex(der)
+                        + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
+                    resolved.set(idx, sigHex);
+                }
+            }
+
+            contractUnlock = buildPushTxUnlock(
+                m, methodName, resolved, opPushTxSigHex,
+                /*changePkhHex (terminal: no change)*/ null,
+                /*changeAmount*/ 0L, methodNeedsNewAmount, /*newSats*/ 0L,
+                preimageHex
+            );
+        } else {
+            // Pure stateless terminal — sign each Sig against the
+            // contract-input sighash on the final tx layout.
+            String placeholderUnlock = buildUnlockingScript(m, resolved);
+            RawTx tx = buildTx.get();
+            tx.setUnlockingScript(0, placeholderUnlock);
+            if (!sigIndices.isEmpty()) {
+                byte[] sighash = tx.sighashBIP143(
+                    0, currentUtxo.scriptHex(), contractSats, RawTx.SIGHASH_ALL_FORKID
+                );
+                for (int idx : sigIndices) {
+                    byte[] der = signer.sign(sighash, null);
+                    String sigHex = ScriptUtils.bytesToHex(der)
+                        + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
+                    resolved.set(idx, sigHex);
+                }
+            }
+            contractUnlock = buildUnlockingScript(m, resolved);
+        }
+
+        RawTx finalTx = buildTx.get();
+        finalTx.setUnlockingScript(0, contractUnlock);
+
+        // Sign each funding input.
+        for (int i = 0; i < fundingUtxos.size(); i++) {
+            int inputIdx = 1 + i;
+            UTXO fu = fundingUtxos.get(i);
+            byte[] fundSighash = finalTx.sighashBIP143(
+                inputIdx, fu.scriptHex(), fu.satoshis(), RawTx.SIGHASH_ALL_FORKID
+            );
+            byte[] der = signer.sign(fundSighash, null);
+            String fundSigHex = ScriptUtils.bytesToHex(der)
+                + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
+            String fundUnlock = ScriptUtils.encodePushData(fundSigHex)
+                + ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.pubKey()));
+            finalTx.setUnlockingScript(inputIdx, fundUnlock);
+        }
+
+        String txHex = finalTx.toHex();
+        String txid = provider.broadcastRaw(txHex);
+        this.currentUtxo = null;
+        return new CallOutcome(txid, txHex, null);
     }
 
     /**
@@ -754,7 +965,7 @@ public final class RunarContract {
         Provider provider,
         Signer signer
     ) {
-        return prepareCall(methodName, args, null, provider, signer);
+        return prepareCall(methodName, args, (Map<String, Object>) null, provider, signer);
     }
 
     public PreparedCall prepareCall(
@@ -762,7 +973,180 @@ public final class RunarContract {
         List<Object> args,
         Provider provider
     ) {
-        return prepareCall(methodName, args, null, provider, null);
+        return prepareCall(methodName, args, (Map<String, Object>) null, provider, null);
+    }
+
+    /**
+     * Rich-options overload for {@link #prepareCall} that supports
+     * terminal output spending. When {@code options.terminalOutputs} is
+     * non-null, builds a no-continuation tx with exactly those outputs
+     * (mirroring {@link #callWithOptions}) and returns a
+     * {@link PreparedCall} with {@code newLockingScriptHex = null} and
+     * {@code isStateful = false}-but-terminal-flagged via an empty
+     * continuation. Distinct method name from
+     * {@link #prepareCall(String, List, Map, Provider, Signer)} to avoid
+     * {@code null}-arg overload ambiguity.
+     */
+    public PreparedCall prepareCallWithOptions(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
+        if (options == null || options.terminalOutputs == null) {
+            return prepareCall(
+                methodName,
+                args,
+                options == null ? null : options.newState,
+                provider,
+                signer
+            );
+        }
+        return prepareTerminalCall(methodName, args, options, provider, signer);
+    }
+
+    private PreparedCall prepareTerminalCall(
+        String methodName,
+        List<Object> args,
+        CallOptions options,
+        Provider provider,
+        Signer signer
+    ) {
+        if (currentUtxo == null) {
+            throw new IllegalStateException(
+                "RunarContract.prepareCall: contract has not been deployed."
+            );
+        }
+        RunarArtifact.ABIMethod m = findMethod(methodName);
+        if (m == null) {
+            throw new IllegalArgumentException(
+                "RunarContract.prepareCall: method '" + methodName + "' not found"
+            );
+        }
+        boolean isStateful = artifact.isStateful();
+        boolean methodNeedsChange = hasParam(m, "_changePKH");
+        boolean methodNeedsNewAmount = hasParam(m, "_newAmount");
+        boolean needsOpPushTx = isStateful || hasParam(m, "txPreimage");
+
+        // Track Sig placeholders the external signer will fill in.
+        List<Object> resolved = new ArrayList<>(args);
+        List<Integer> sigIndices = new ArrayList<>();
+        for (int i = 0; i < m.params().size() && i < resolved.size(); i++) {
+            String type = m.params().get(i).type();
+            if ("Sig".equals(type) && resolved.get(i) == null) {
+                sigIndices.add(i);
+                resolved.set(i, "00".repeat(72));
+            }
+            if ("PubKey".equals(type) && resolved.get(i) == null && signer != null) {
+                resolved.set(i, ScriptUtils.bytesToHex(signer.pubKey()));
+            }
+        }
+
+        // Build the same tx layout as callTerminal: contract input +
+        // funding inputs + caller-supplied outputs. No continuation, no
+        // change, no automatic funding selection.
+        long contractSats = currentUtxo.satoshis();
+        List<UTXO> fundingUtxos = options.fundingUtxos == null ? List.of() : options.fundingUtxos;
+        java.util.function.Supplier<RawTx> buildTx = () -> {
+            RawTx t = new RawTx();
+            t.addInput(currentUtxo.txid(), currentUtxo.outputIndex(), "");
+            for (UTXO fu : fundingUtxos) {
+                t.addInput(fu.txid(), fu.outputIndex(), "");
+            }
+            for (CallOptions.TerminalOutput o : options.terminalOutputs) {
+                t.addOutput(o.satoshis().longValueExact(), o.resolveScriptHex());
+            }
+            return t;
+        };
+
+        String contractUnlock;
+        List<byte[]> sighashes;
+
+        if (needsOpPushTx) {
+            int methodIndex = findPublicMethodIndex(methodName);
+            int codeSepIdx = getCodeSepIndex(methodIndex);
+            String fullScriptHex = currentUtxo.scriptHex();
+            String sighashSubscript = codeSepIdx >= 0
+                ? fullScriptHex.substring((codeSepIdx + 1) * 2)
+                : fullScriptHex;
+
+            String placeholderUnlock = buildPushTxUnlock(
+                m, methodName, resolved, "00".repeat(72),
+                methodNeedsChange ? "00".repeat(20) : null,
+                0L, methodNeedsNewAmount, 0L, "00".repeat(181)
+            );
+            RawTx tx = buildTx.get();
+            tx.setUnlockingScript(0, placeholderUnlock);
+            byte[] preimage = OpPushTx.preimage(
+                tx, 0, ScriptUtils.hexToBytes(sighashSubscript),
+                contractSats, OpPushTx.SIGHASH_ALL_FORKID
+            );
+            byte[] opPushTxSig = OpPushTx.computePushTxSig(
+                tx, 0, sighashSubscript, contractSats
+            );
+            String opPushTxSigHex = ScriptUtils.bytesToHex(opPushTxSig);
+            String preimageHex = ScriptUtils.bytesToHex(preimage);
+
+            // Sighashes the external signer must produce (same digest for
+            // every Sig in the contract input — see prepareCall comment).
+            byte[] userSighash = sigIndices.isEmpty()
+                ? new byte[0]
+                : tx.sighashBIP143(
+                    0, sighashSubscript, contractSats, RawTx.SIGHASH_ALL_FORKID
+                );
+            sighashes = new ArrayList<>(sigIndices.size());
+            for (int i = 0; i < sigIndices.size(); i++) sighashes.add(userSighash.clone());
+
+            contractUnlock = buildPushTxUnlock(
+                m, methodName, resolved, opPushTxSigHex,
+                /*changePkhHex (terminal: no change)*/ null,
+                0L, methodNeedsNewAmount, 0L, preimageHex
+            );
+        } else {
+            // Pure stateless terminal — finalizeCall splices Sig pushes
+            // into the rebuilt unlock.
+            String placeholderUnlock = buildUnlockingScript(m, resolved);
+            RawTx tx = buildTx.get();
+            tx.setUnlockingScript(0, placeholderUnlock);
+            byte[] sh = sigIndices.isEmpty()
+                ? new byte[0]
+                : tx.sighashBIP143(
+                    0, currentUtxo.scriptHex(), contractSats, RawTx.SIGHASH_ALL_FORKID
+                );
+            sighashes = new ArrayList<>(sigIndices.size());
+            for (int i = 0; i < sigIndices.size(); i++) sighashes.add(sh.clone());
+            contractUnlock = placeholderUnlock;
+        }
+
+        RawTx finalTx = buildTx.get();
+        finalTx.setUnlockingScript(0, contractUnlock);
+
+        // Sign every funding input now — only the contract-input Sig
+        // values remain for the external signer to fill in.
+        if (signer != null) {
+            for (int i = 0; i < fundingUtxos.size(); i++) {
+                int inputIdx = 1 + i;
+                UTXO fu = fundingUtxos.get(i);
+                byte[] fundSighash = finalTx.sighashBIP143(
+                    inputIdx, fu.scriptHex(), fu.satoshis(), RawTx.SIGHASH_ALL_FORKID
+                );
+                byte[] der = signer.sign(fundSighash, null);
+                String fundSigHex = ScriptUtils.bytesToHex(der)
+                    + String.format("%02x", RawTx.SIGHASH_ALL_FORKID);
+                String fundUnlock = ScriptUtils.encodePushData(fundSigHex)
+                    + ScriptUtils.encodePushData(ScriptUtils.bytesToHex(signer.pubKey()));
+                finalTx.setUnlockingScript(inputIdx, fundUnlock);
+            }
+        }
+
+        // newLockingScriptHex = null + isStateful = false telegraphs the
+        // terminal flag to finalizeCall (which clears currentUtxo).
+        return new PreparedCall(
+            finalTx.toHex(), sighashes, sigIndices,
+            methodName, resolved, currentUtxo, /*isStateful*/ false,
+            /*continuation*/ null, /*newLockingScriptHex*/ null, /*newSatoshis*/ 0L
+        );
     }
 
     /**

@@ -41,7 +41,11 @@ pub const UTXO = sdk_types.UTXO;
 pub const TransactionData = sdk_types.TransactionData;
 pub const DeployOptions = sdk_types.DeployOptions;
 pub const CallOptions = sdk_types.CallOptions;
+pub const ContractOutput = sdk_types.ContractOutput;
+pub const TerminalOutput = sdk_types.TerminalOutput;
 pub const StateValue = sdk_types.StateValue;
+pub const resolveTerminalOutputs = sdk_call.resolveTerminalOutputs;
+pub const freeResolvedTerminalOutputs = sdk_call.freeResolvedTerminalOutputs;
 pub const PreparedCall = sdk_types.PreparedCall;
 pub const RunarContract = sdk_contract.RunarContract;
 pub const Provider = sdk_provider.Provider;
@@ -234,6 +238,7 @@ test {
     _ = @import("sdk_codegen.zig");
     _ = @import("sdk_codegen_conformance_test.zig");
     _ = @import("sdk_wallet.zig");
+    _ = @import("sdk_wallet_client_integration_test.zig");
     _ = @import("sdk_http_client.zig");
     if (build_options.has_bsvz_runar_harness) {
         _ = @import("script_integration_test.zig");

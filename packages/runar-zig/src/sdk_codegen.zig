@@ -408,10 +408,20 @@ fn emitMethodBody(
     try appendFmt(out, allocator, "        }};\n", .{});
 
     // Forward to inner.call or inner.prepareCall.
+    //
+    // Terminal-output threading: when the wrapper accepts `outputs`, we
+    // resolve the user-facing `TerminalOutput` list (which carries either
+    // `address` or `script_hex`) into the SDK-internal `ContractOutput`
+    // list and pass it via `CallOptions.terminal_outputs`. The runtime
+    // `RunarContract.call`/`prepareCall` then builds a transaction with no
+    // state continuation, no change output, and only the contract UTXO
+    // (plus any `funding_utxos`) as inputs.
     const dispatch = if (is_prepare) "prepareCall" else "call";
     if (terminal and is_stateful) {
-        try appendFmt(out, allocator, "        _ = outputs; // TODO: thread terminalOutputs through inner.{s} once Zig SDK exposes them.\n", .{dispatch});
-        try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, null);\n",
+        try appendFmt(out, allocator, "        const resolved_outputs = try sdk.resolveTerminalOutputs(self.allocator, outputs);\n", .{});
+        try appendFmt(out, allocator, "        defer sdk.freeResolvedTerminalOutputs(self.allocator, resolved_outputs);\n", .{});
+        try appendFmt(out, allocator, "        const sdk_opts: ?sdk.CallOptions = .{{ .terminal_outputs = resolved_outputs }};\n", .{});
+        try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
     } else if (is_stateful) {
         try appendFmt(out, allocator, "        const sdk_opts: ?sdk.CallOptions = if (options) |o| .{{\n", .{});
@@ -422,11 +432,14 @@ fn emitMethodBody(
         try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
     } else {
-        // Stateless terminal. `outputs` may be present as an optional arg;
-        // it is ignored for now (see Java SDK comment: terminal-output
-        // wiring through call() is part of Sp1FriVerifier work).
-        try appendFmt(out, allocator, "        _ = outputs;\n", .{});
-        try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, null);\n",
+        // Stateless terminal — `outputs` is optional. When non-null,
+        // resolve and pass via terminal_outputs; otherwise the SDK uses
+        // the default flow (provider-fetched funding + change to signer).
+        try appendFmt(out, allocator, "        var resolved_outputs: ?[]sdk.ContractOutput = null;\n", .{});
+        try appendFmt(out, allocator, "        defer if (resolved_outputs) |ro| sdk.freeResolvedTerminalOutputs(self.allocator, ro);\n", .{});
+        try appendFmt(out, allocator, "        if (outputs) |os| resolved_outputs = try sdk.resolveTerminalOutputs(self.allocator, os);\n", .{});
+        try appendFmt(out, allocator, "        const sdk_opts: ?sdk.CallOptions = if (resolved_outputs) |ro| .{{ .terminal_outputs = ro }} else null;\n", .{});
+        try appendFmt(out, allocator, "        return self.inner.{s}(\"{s}\", &sdk_args, null, null, sdk_opts);\n",
             .{ dispatch, m.name });
     }
 }

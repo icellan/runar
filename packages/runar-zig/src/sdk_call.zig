@@ -186,6 +186,44 @@ pub fn buildCallTransaction(
     };
 }
 
+/// Resolve a list of user-facing TerminalOutput records (with optional
+/// `address` or `script_hex`) into the SDK-internal `ContractOutput`
+/// list expected by `CallOptions.terminal_outputs`. Each entry must
+/// supply exactly one of `address` (which is converted to a P2PKH
+/// locking script) or `script_hex` (used as the locking script
+/// directly). The returned slice and every entry's `script` field are
+/// allocated from `allocator`; the caller owns them.
+pub fn resolveTerminalOutputs(
+    allocator: std.mem.Allocator,
+    outputs: []const types.TerminalOutput,
+) ![]types.ContractOutput {
+    var resolved = try allocator.alloc(types.ContractOutput, outputs.len);
+    errdefer {
+        for (resolved) |co| if (co.script.len > 0) allocator.free(@constCast(co.script));
+        allocator.free(resolved);
+    }
+    for (outputs, 0..) |o, i| {
+        const script_hex: []u8 = if (o.script_hex) |sh|
+            try allocator.dupe(u8, sh)
+        else if (o.address) |addr|
+            try deploy_mod.buildP2PKHScript(allocator, addr)
+        else
+            return error.InvalidTerminalOutput;
+        resolved[i] = .{ .script = script_hex, .satoshis = o.satoshis };
+    }
+    return resolved;
+}
+
+/// Free a list of resolved terminal outputs allocated by
+/// `resolveTerminalOutputs`.
+pub fn freeResolvedTerminalOutputs(
+    allocator: std.mem.Allocator,
+    outputs: []types.ContractOutput,
+) void {
+    for (outputs) |co| if (co.script.len > 0) allocator.free(@constCast(co.script));
+    allocator.free(outputs);
+}
+
 fn varIntByteSize(n: usize) usize {
     if (n < 0xfd) return 1;
     if (n <= 0xffff) return 3;

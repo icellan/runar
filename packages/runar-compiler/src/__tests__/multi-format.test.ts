@@ -10,7 +10,7 @@ import { describe, it, expect } from 'vitest';
 import { parse } from '../passes/01-parse.js';
 import { compile } from '../index.js';
 import { readFileSync, existsSync, readdirSync } from 'fs';
-import { join } from 'path';
+import { join, resolve, basename } from 'path';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,22 +20,62 @@ const CONFORMANCE_DIR = join(__dirname, '..', '..', '..', '..', 'conformance', '
 
 const FORMAT_EXTENSIONS = ['.runar.ts', '.runar.sol', '.runar.move', '.runar.rb'] as const;
 
-function readConformanceSource(testName: string, ext: string, baseName = testName): string | null {
-  const path = join(CONFORMANCE_DIR, testName, `${baseName}${ext}`);
-  if (!existsSync(path)) return null;
-  return readFileSync(path, 'utf-8');
+interface SourceConfig {
+  sources?: Record<string, string>;
+  compilers?: string[];
+}
+
+function loadSourceConfig(testName: string): SourceConfig {
+  const configFile = join(CONFORMANCE_DIR, testName, 'source.json');
+  if (!existsSync(configFile)) {
+    throw new Error(`source.json not found for conformance fixture '${testName}': ${configFile}`);
+  }
+  return JSON.parse(readFileSync(configFile, 'utf-8')) as SourceConfig;
+}
+
+/**
+ * Resolve a source file referenced by `source.json`'s `sources` map.
+ *
+ * Returns the absolute path if the extension is declared, or `null` if the
+ * fixture intentionally does not ship that format (e.g. babybear is
+ * Go-only, so `.runar.ts` is absent).
+ *
+ * Throws if `source.json` declares the path but the file is missing on disk
+ * — that's a real bug, not a legitimate skip.
+ */
+function resolveSourcePath(testName: string, ext: string): string | null {
+  const config = loadSourceConfig(testName);
+  const rel = config.sources?.[ext];
+  if (rel === undefined) return null;
+  const absPath = resolve(CONFORMANCE_DIR, testName, rel);
+  if (!existsSync(absPath)) {
+    throw new Error(
+      `source.json for '${testName}' declares ${ext} -> ${rel}, but resolved path does not exist: ${absPath}`,
+    );
+  }
+  return absPath;
+}
+
+/** Read the source for (testName, ext). Throws if not declared OR missing on disk. */
+function readRequiredSource(testName: string, ext: string): { content: string; fileName: string } {
+  const path = resolveSourcePath(testName, ext);
+  if (path === null) {
+    throw new Error(
+      `source.json for '${testName}' does not declare a ${ext} source — every fixture in CONFORMANCE_TESTS must ship every FORMAT_EXTENSIONS variant.`,
+    );
+  }
+  return { content: readFileSync(path, 'utf-8'), fileName: basename(path) };
 }
 
 function findZigConformanceCases(): { testName: string; fileName: string }[] {
-  return readdirSync(CONFORMANCE_DIR, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .flatMap((entry) => {
-      const dir = join(CONFORMANCE_DIR, entry.name);
-      return readdirSync(dir)
-        .filter(file => file.endsWith('.runar.zig'))
-        .map(fileName => ({ testName: entry.name, fileName }));
-    })
-    .sort((a, b) => a.testName.localeCompare(b.testName) || a.fileName.localeCompare(b.fileName));
+  const cases: { testName: string; fileName: string }[] = [];
+  for (const entry of readdirSync(CONFORMANCE_DIR, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const sourcePath = resolveSourcePath(entry.name, '.runar.zig');
+    if (sourcePath === null) continue;
+    cases.push({ testName: entry.name, fileName: basename(sourcePath) });
+  }
+  return cases.sort((a, b) => a.testName.localeCompare(b.testName) || a.fileName.localeCompare(b.fileName));
 }
 
 // ---------------------------------------------------------------------------
@@ -44,95 +84,63 @@ function findZigConformanceCases(): { testName: string; fileName: string }[] {
 
 describe('Multi-format: parse() dispatch', () => {
   it('dispatches .runar.sol to Solidity parser', () => {
-    const source = readConformanceSource('arithmetic', '.runar.sol');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for arithmetic.runar.sol');
-      return;
-    }
-    const result = parse(source, 'arithmetic.runar.sol');
+    const { content, fileName } = readRequiredSource('arithmetic', '.runar.sol');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
 
   it('dispatches .runar.move to Move parser', () => {
-    const source = readConformanceSource('arithmetic', '.runar.move');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for arithmetic.runar.move');
-      return;
-    }
-    const result = parse(source, 'arithmetic.runar.move');
+    const { content, fileName } = readRequiredSource('arithmetic', '.runar.move');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
 
   it('dispatches .runar.ts to TypeScript parser (default)', () => {
-    const source = readConformanceSource('arithmetic', '.runar.ts');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for arithmetic.runar.ts');
-      return;
-    }
-    const result = parse(source, 'arithmetic.runar.ts');
+    const { content, fileName } = readRequiredSource('arithmetic', '.runar.ts');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
 
   it('defaults to TypeScript parser for unrecognized extensions', () => {
-    const source = readConformanceSource('arithmetic', '.runar.ts');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for arithmetic.runar.ts (unrecognized extension test)');
-      return;
-    }
-    const result = parse(source, 'arithmetic.unknown');
+    const { content } = readRequiredSource('arithmetic', '.runar.ts');
+    const result = parse(content, 'arithmetic.unknown');
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('Arithmetic');
   });
 
   it('dispatches .runar.py to Python parser (row 64)', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.py');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh.runar.py');
-      return;
-    }
-    const result = parse(source, 'basic-p2pkh.runar.py');
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.py');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('P2PKH');
   });
 
   it('parses .runar.go files using the Go parser (row 318)', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.go');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh.runar.go');
-      return;
-    }
-    const result = parse(source, 'basic-p2pkh.runar.go');
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.go');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('P2PKH');
   });
 
   it('dispatches .runar.rs to Rust parser (row 321)', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.rs');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh.runar.rs');
-      return;
-    }
-    const result = parse(source, 'basic-p2pkh.runar.rs');
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.rs');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('P2PKH');
   });
 
   it('dispatches .runar.zig to Zig parser', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh/P2PKH.runar.zig');
-      return;
-    }
-    const result = parse(source, 'P2PKH.runar.zig');
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.zig');
+    const result = parse(content, fileName);
     expect(result.errors.filter(e => e.severity === 'error')).toEqual([]);
     expect(result.contract).not.toBeNull();
     expect(result.contract!.name).toBe('P2PKH');
@@ -171,12 +179,8 @@ describe('Multi-format: conformance test parsing', () => {
   for (const { name, contractName } of CONFORMANCE_TESTS) {
     for (const ext of FORMAT_EXTENSIONS) {
       it(`parses ${name}${ext} successfully`, () => {
-        const source = readConformanceSource(name, ext);
-        if (!source) {
-          console.warn(`SKIPPED: conformance source not found for ${name}${ext}`);
-          return;
-        }
-        const result = parse(source, `${name}${ext}`);
+        const { content, fileName } = readRequiredSource(name, ext);
+        const result = parse(content, fileName);
         const errors = result.errors.filter(e => e.severity === 'error');
         expect(errors).toEqual([]);
         expect(result.contract).not.toBeNull();
@@ -198,18 +202,16 @@ describe('Multi-format: cross-format structural consistency', () => {
       const results: { ext: string; contract: NonNullable<ReturnType<typeof parse>['contract']> }[] = [];
 
       for (const ext of FORMAT_EXTENSIONS) {
-        const source = readConformanceSource(name, ext);
-        if (!source) continue;
-        const result = parse(source, `${name}${ext}`);
-        if (result.errors.filter(e => e.severity === 'error').length > 0) continue;
-        if (!result.contract) continue;
-        results.push({ ext, contract: result.contract });
+        const { content, fileName } = readRequiredSource(name, ext);
+        const result = parse(content, fileName);
+        const errors = result.errors.filter(e => e.severity === 'error');
+        expect(errors, `parse errors for ${name}${ext}`).toEqual([]);
+        expect(result.contract, `null contract for ${name}${ext}`).not.toBeNull();
+        results.push({ ext, contract: result.contract! });
       }
 
-      if (results.length < 2) {
-        console.warn(`SKIPPED: fewer than 2 format variants found for ${name} — cannot compare cross-format consistency`);
-        return;
-      }
+      // Every fixture in CONFORMANCE_TESTS ships every FORMAT_EXTENSIONS variant.
+      expect(results.length).toBe(FORMAT_EXTENSIONS.length);
 
       const ref = results[0]!;
       for (let i = 1; i < results.length; i++) {
@@ -248,12 +250,8 @@ describe('Multi-format: cross-format structural consistency', () => {
 describe('Multi-format: stateful contract', () => {
   for (const ext of FORMAT_EXTENSIONS) {
     it(`parses stateful contract from ${ext}`, () => {
-      const source = readConformanceSource('stateful', ext);
-      if (!source) {
-        console.warn(`SKIPPED: conformance source not found for stateful${ext}`);
-        return;
-      }
-      const result = parse(source, `stateful${ext}`);
+      const { content, fileName } = readRequiredSource('stateful', ext);
+      const result = parse(content, fileName);
       const errors = result.errors.filter(e => e.severity === 'error');
       expect(errors).toEqual([]);
       expect(result.contract).not.toBeNull();
@@ -273,14 +271,16 @@ describe('Multi-format: stateful contract', () => {
 describe('Multi-format: Zig conformance', () => {
   const zigConformanceCases = findZigConformanceCases();
 
-  it('parses basic-p2pkh from .runar.zig', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh/P2PKH.runar.zig');
-      return;
-    }
+  it('discovers Zig conformance cases via source.json', () => {
+    // Sanity: source.json indirection actually surfaces fixtures. If this
+    // returns 0, the resolver is broken and every per-case test below would
+    // be a no-op.
+    expect(zigConformanceCases.length).toBeGreaterThan(0);
+  });
 
-    const result = parse(source, 'P2PKH.runar.zig');
+  it('parses basic-p2pkh from .runar.zig', () => {
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.zig');
+    const result = parse(content, fileName);
     const errors = result.errors.filter(e => e.severity === 'error');
 
     expect(errors).toEqual([]);
@@ -291,19 +291,15 @@ describe('Multi-format: Zig conformance', () => {
   });
 
   it('compiles basic-p2pkh .runar.zig to the golden script hex', () => {
-    const source = readConformanceSource('basic-p2pkh', '.runar.zig', 'P2PKH');
-    if (!source) {
-      console.warn('SKIPPED: conformance source not found for basic-p2pkh/P2PKH.runar.zig (hex parity test)');
-      return;
-    }
+    const { content, fileName } = readRequiredSource('basic-p2pkh', '.runar.zig');
 
     const expectedHex = readFileSync(
       join(CONFORMANCE_DIR, 'basic-p2pkh', 'expected-script.hex'),
       'utf-8',
     ).trim().toLowerCase();
 
-    const result = compile(source, {
-      fileName: 'P2PKH.runar.zig',
+    const result = compile(content, {
+      fileName,
       disableConstantFolding: true,
     });
 
@@ -315,18 +311,14 @@ describe('Multi-format: Zig conformance', () => {
 
   for (const { testName, fileName } of zigConformanceCases) {
     it(`compiles ${testName}/${fileName} to the golden script hex`, () => {
-      const source = readConformanceSource(testName, '.runar.zig', fileName.replace(/\.runar\.zig$/, ''));
-      if (!source) {
-        console.warn(`SKIPPED: conformance source not found for ${testName}/${fileName} (Zig hex parity test)`);
-        return;
-      }
+      const { content } = readRequiredSource(testName, '.runar.zig');
 
       const expectedHex = readFileSync(
         join(CONFORMANCE_DIR, testName, 'expected-script.hex'),
         'utf-8',
       ).trim().toLowerCase();
 
-      const result = compile(source, {
+      const result = compile(content, {
         fileName,
         disableConstantFolding: true,
       });

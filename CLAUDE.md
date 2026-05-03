@@ -4,7 +4,9 @@
 
 Rúnar compiles a strict subset of TypeScript into Bitcoin SV Script. Developers write smart contracts as TypeScript classes extending `SmartContract` (stateless) or `StatefulSmartContract` (stateful), and the compiler produces Bitcoin Script locking scripts.
 
-Seven independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby, Java) must produce identical output for the same input. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — all formats compile to the same AST and produce identical Bitcoin Script. All seven compilers parse all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extensions.
+Seven independent compiler implementations (TypeScript, Go, Rust, Python, Zig, Ruby, Java) produce identical output for the same input within the scope each conformance fixture declares. Contracts can also be written in Solidity-like, Move-style, Go, Rust DSL, Python, Zig, Ruby, or Java syntax — all formats compile to the same AST and produce identical Bitcoin Script. All seven compilers parse all nine `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` extensions.
+
+A small set of crypto codegen modules (Baby Bear field, KoalaBear, Poseidon2, BN254 witness, Merkle / FRI, FiatShamir-KB) ship Stack-IR codegen in the Go tier only — they power Mode-3 STARK / FRI verification flows that haven't been ported to the other six tiers. Fixtures that exercise those primitives opt out of the non-Go tiers via a `"compilers"` allowlist in `source.json`; fixtures whose contract bodies depend on them but whose surface still parses through every frontend (e.g. `state-covenant`, `stateful-bytestring`) carry an explicit allowlist that excludes Java's Stack-IR pass while keeping the parser path covered. See `conformance/README.md` ⇒ "Per-fixture compiler allowlist" for the current opt-outs.
 
 ## Repository Structure
 

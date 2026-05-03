@@ -2,7 +2,9 @@
 
 **Cross-compiler conformance test suite ensuring all Rúnar compilers produce identical output.**
 
-The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, Rust, Python, Zig, and Ruby -- must pass the full suite.
+The conformance suite is the enforcement mechanism for Rúnar's multi-compiler strategy. It contains golden-file test cases (source + expected IR + expected script), a test runner, and a differential fuzzer. Every Rúnar compiler -- TypeScript, Go, Rust, Python, Zig, Ruby, and Java -- must pass the full suite *for the tiers each fixture lists in its `compilers` allowlist*.
+
+Most fixtures run on every tier. A small number opt out of one or more tiers — see [Per-fixture compiler allowlist](#per-fixture-compiler-allowlist) below.
 
 ---
 
@@ -96,7 +98,18 @@ tests/
 +-- token-nft/
 ```
 
-> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`). All format variants must produce the same ANF IR and script output. A handful of test directories currently only have `.runar.ts` sources (e.g. `add-data-output`, `add-raw-output`, `babybear-ext4`, `bitwise-ops`, `cross-covenant`, `ec-unit`, `merkle-proof`, `state-covenant`) and one (`go-dsl-bytestring-literal`) is Go-only. Several test directories also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
+> **Note:** Most test directories also contain multi-format source variants (`.runar.sol`, `.runar.move`, `.runar.go`, `.runar.rs`, `.runar.py`, `.runar.zig`, `.runar.rb`, `.runar.java`). All format variants must produce the same ANF IR and script output for every compiler tier the fixture targets. Sources live under `examples/<format>/<case>/` and `source.json` references them by relative path. Several test directories also include `.runar.json` (JSON AST) files; these are reference artifacts for tooling and are **not** tested by the conformance runner.
+
+### Per-fixture compiler allowlist
+
+`source.json` may carry an optional `"compilers"` field that restricts which compilers run against that fixture. When the field is absent, every tier (TypeScript, Go, Rust, Python, Zig, Ruby, Java) runs. When present, only the listed tiers are exercised — both the IR-stage and hex-stage golden checks honour the allowlist (see `runner/runner.ts` and `runner/source-parity.ts`).
+
+Allowlists are used to opt fixtures out of tiers that intentionally do not implement the underlying primitives:
+
+- **Go-only crypto family** (`babybear`, `babybear-ext4`, `merkle-proof`): The Baby Bear field, the FRI / Merkle proof, Poseidon2, BN254-witness, and FiatShamir-KB primitives ship as Go-only Stack-IR codegen modules. They power Mode-3 STARK / FRI verification flows that have not been ported to the other six tiers — see CLAUDE.md ("Go-only crypto codegen modules") and the per-tier source-parity README. Fixtures that exercise these primitives carry `"compilers": ["go"]`.
+- **Java-excluded covenants** (`state-covenant`, `stateful-bytestring`): These contracts use Baby Bear field arithmetic + SHA-256 Merkle-root primitives in their method bodies. The Rúnar Java frontend (parse → validate → typecheck) accepts the source so the Java SDK's `CompileCheck` smoke-test still runs against them, but the Java compiler does not yet emit Stack-IR codegen for the Go-only crypto family, so the IR + hex golden checks are scoped to `["ts", "go", "rust", "python", "zig", "ruby"]`.
+
+Once a missing primitive lands in another tier, drop the corresponding entry from the fixture's allowlist (or remove the field entirely) so the new tier starts running against the existing goldens.
 
 ### File Roles
 

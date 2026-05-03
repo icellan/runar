@@ -261,6 +261,73 @@ class RunarContractCallTest {
             "continuation script must reflect the interpreter-computed count=6");
     }
 
+    @Test
+    void callWithOptionsTerminalOutputsBuildsExactOutputsAndClearsUtxo() throws Exception {
+        // Branch 4: callWithOptions(... terminalOutputs ...) → callTerminal().
+        // Verifies the new terminal-output flow: caller-supplied outputs
+        // replace the auto-computed change/continuation entirely, the
+        // contract UTXO is fully spent, and currentUtxo is cleared.
+        RunarArtifact artifact = loadArtifact("artifacts/basic-p2pkh.runar.json");
+        LocalSigner signer = new LocalSigner(PRIV);
+        MockProvider provider = new MockProvider();
+
+        String pkhHex = HexFormat.of().formatHex(Hash160.hash160(signer.pubKey()));
+        RunarContract contract = new RunarContract(artifact, List.of(pkhHex));
+        UTXO contractUtxo = new UTXO("ee".repeat(32), 0, 10_000L, contract.lockingScript());
+        contract.setCurrentUtxo(contractUtxo);
+
+        // Two terminal outputs: 4000 + 5000 sats. The remaining 1000 sats
+        // becomes the (implicit) miner fee.
+        String destPkh = "aa".repeat(20);
+        String destScript = "76a914" + destPkh + "88ac";
+        java.util.List<runar.lang.sdk.CallOptions.TerminalOutput> outs = java.util.List.of(
+            new runar.lang.sdk.CallOptions.TerminalOutput(
+                java.math.BigInteger.valueOf(4000), null, destScript),
+            new runar.lang.sdk.CallOptions.TerminalOutput(
+                java.math.BigInteger.valueOf(5000), null, "51")
+        );
+
+        java.util.ArrayList<Object> args = new java.util.ArrayList<>();
+        args.add(null); args.add(null); // sig + pubKey auto-resolved
+        RunarContract.CallOutcome out = contract.callWithOptions(
+            "unlock", args, runar.lang.sdk.CallOptions.terminal(outs), provider, signer
+        );
+
+        assertEquals(1, provider.getBroadcastedTxs().size());
+        assertNotNull(out.txid());
+        assertNull(out.nextContractUtxo(),
+            "terminal call must report no continuation UTXO");
+        assertNull(contract.currentUtxo(),
+            "terminal call must clear currentUtxo (contract fully spent)");
+
+        RawTx tx = RawTxParser.parse(out.rawTxHex());
+        assertEquals(1, tx.inputs.size(),
+            "no funding UTXOs supplied → only the contract input");
+        assertEquals(2, tx.outputs.size(),
+            "outputs must be exactly the two terminal outputs (no change)");
+        assertEquals(4000L, tx.outputs.get(0).satoshis);
+        assertEquals(destScript, tx.outputs.get(0).scriptPubKeyHex);
+        assertEquals(5000L, tx.outputs.get(1).satoshis);
+        assertEquals("51", tx.outputs.get(1).scriptPubKeyHex);
+    }
+
+    @Test
+    void terminalOutputResolvesAddressIntoP2pkhScript() {
+        // When callers pass a TerminalOutput with `address` instead of
+        // `scriptHex`, the SDK must build a standard P2PKH locking script.
+        runar.lang.sdk.CallOptions.TerminalOutput byHex =
+            new runar.lang.sdk.CallOptions.TerminalOutput(
+                java.math.BigInteger.valueOf(1000), null,
+                "76a914" + "11".repeat(20) + "88ac");
+        assertEquals("76a914" + "11".repeat(20) + "88ac", byHex.resolveScriptHex());
+
+        runar.lang.sdk.CallOptions.TerminalOutput byPkhHex =
+            new runar.lang.sdk.CallOptions.TerminalOutput(
+                java.math.BigInteger.valueOf(2000),
+                "22".repeat(20), null); // 40-char hex pkh
+        assertEquals("76a914" + "22".repeat(20) + "88ac", byPkhHex.resolveScriptHex());
+    }
+
     // ------------------------------------------------------------------
     // helpers
     // ------------------------------------------------------------------

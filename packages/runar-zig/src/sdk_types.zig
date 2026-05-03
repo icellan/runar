@@ -81,12 +81,40 @@ pub const CallOptions = struct {
     /// resolves data outputs automatically by running the ANF interpreter.
     /// Scripts must be hex-encoded.
     data_outputs: ?[]const ContractOutput = null,
+    /// Terminal outputs for methods that fully spend the contract UTXO
+    /// (no continuation). When set, the transaction is built with the
+    /// contract UTXO as the only signed input (plus optional
+    /// `funding_utxos` as P2PKH funding inputs); outputs are exactly
+    /// `terminal_outputs` with no automatic state continuation and no
+    /// change. The fee comes from the contract balance + any funding
+    /// UTXOs. After a terminal call the contract is fully spent
+    /// (`current_utxo` becomes null). Scripts in each entry are
+    /// hex-encoded — the `TerminalOutput` resolver in generated wrapper
+    /// code converts user-supplied addresses into P2PKH scripts before
+    /// passing them here.
+    terminal_outputs: ?[]const ContractOutput = null,
+    /// Additional P2PKH funding UTXOs to include as inputs for terminal
+    /// method calls. Used when the contract balance is insufficient for
+    /// `terminal_outputs` + fee. Ignored unless `terminal_outputs` is
+    /// non-null. Each UTXO is signed with the configured signer's key.
+    funding_utxos: ?[]const UTXO = null,
 };
 
 /// ContractOutput describes one contract continuation output.
 pub const ContractOutput = struct {
     script: []const u8,
     satoshis: i64,
+};
+
+/// TerminalOutput is the user-facing record for a single output in a
+/// terminal method call. Either `address` (resolved to P2PKH) or
+/// `script_hex` (raw locking script) must be set. Generated wrapper code
+/// converts these into `ContractOutput` before passing them to
+/// `CallOptions.terminal_outputs`.
+pub const TerminalOutput = struct {
+    satoshis: i64,
+    address: ?[]const u8 = null,
+    script_hex: ?[]const u8 = null,
 };
 
 // ---------------------------------------------------------------------------

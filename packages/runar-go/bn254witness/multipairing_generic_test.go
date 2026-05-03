@@ -16,17 +16,15 @@ package bn254witness
 // `bn254MultiMillerLoop{3,4}` / `bn254FinalExp` fails for distinct G2
 // inputs. This file reproduces that failure and exercises the fixes.
 //
-// Known state as of this commit:
-//   - `bn254LineEvalAddSparse` now consumes its `qPrefix` input (was leaking
+// Resolved state:
+//   - `bn254LineEvalAddSparse` consumes its `qPrefix` input (was leaking
 //     16 Fp slots per NAF addition step — 4 k iterations × 4 Fp2 slots).
-//   - `bn254Fp2MulByFrobCoeff` c1==0 branch now consumes `aPrefix_0` (was
+//   - `bn254Fp2MulByFrobCoeff` c1==0 branch consumes `aPrefix_0` (was
 //     leaking 8 Fp slots per FrobeniusP2 call in the corrections step).
-//   - A pair of test cases with 2 distinct G2 values passes (identity and
-//     symmetric-split configurations), but 3+ distinct G2 values still
-//     produce an incorrect Fp12 output even though the off-chain pairing
-//     product is 1. Bisection shows all 12 Fp12 slots differ from (1,0,...,0)
-//     for the failing cases, indicating a deeper algebraic bug that these
-//     slot-leak fixes do not address.
+//   - The deeper cross-pair state issue that left 3- and 4-distinct
+//     configurations producing wrong Fp12 outputs was closed by the
+//     primitives port that landed in commits a05cab7c..3fed3295. All
+//     bisection cases (1, 2, 3, 4 distinct Q values) now pass.
 
 import (
 	"math/big"
@@ -89,10 +87,9 @@ func pushG2Point(ops *[]codegen.StackOp, p bn254.G2Affine) {
 //
 // We use distinct multipliers so no two of (b1..b4) coincide.
 //
-// This test is currently EXPECTED to fail until the core algebraic bug in
-// the multi-pair Miller loop is fixed. The slot-leak fixes applied in the
-// same commit are real but insufficient to resolve the full correctness
-// issue. See RUNAR-BN254-GENERIC-BUG.md v2 for bsv-evm's reproduction.
+// Now passes after the cross-pair state leak in `bn254MultiMillerLoop4`
+// was fully closed (commit a05cab7c plus the primitives port through
+// 3fed3295). Kept as a regression guard against re-introducing the leak.
 func TestBN254MultiPairing4_DistinctG2_Script(t *testing.T) {
 	_, _, g1Aff, g2Aff := bn254.Generators()
 
@@ -173,13 +170,15 @@ func TestBN254MultiPairing4_DistinctG2_Script(t *testing.T) {
 	}
 }
 
-// TestBN254MultiPairing4_Bisect narrows down exactly how many distinct G2
-// points trigger the bug. Passing cases use 1 or 2 distinct G2 values;
-// failing cases use 3 or 4 distinct values. All cases have mathematically
-// valid product == 1 in GT.
-//
-// Currently SKIPPED while the bug is unresolved. The bisection is preserved
-// in the source so it can be re-enabled once the fix lands.
+// TestBN254MultiPairing4_Bisect was originally written to bisect a
+// state-sharing bug between the 4 parallel pairing slots in
+// `bn254MultiMillerLoop4`: 1- and 2-distinct-G2 configurations passed,
+// while 3+ distinct values returned an Fp12 ≠ (1, 0, ...). The slot-leak
+// fixes in commit a05cab7c plus the cross-compiler primitives port
+// (cf13c59b / 3fed3295) collectively closed the bug. All
+// configurations now produce the correct GT identity, so the previously
+// skipped 3-distinct and 4-distinct cases are exercised here as a
+// regression guard against re-introducing the cross-pair leak.
 func TestBN254MultiPairing4_Bisect(t *testing.T) {
 	_, _, g1Aff, g2Aff := bn254.Generators()
 	negG1 := g1Aff
@@ -222,10 +221,6 @@ func TestBN254MultiPairing4_Bisect(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			switch tc.name {
-			case "3_distinct_q4_eq_q2", "3_distinct_q1_eq_q3", "4_distinct":
-				t.Skip("known failure: MultiPairing4 bisect fails for 3+ distinct Q values (see TODO in multipairing_generic_test.go)")
-			}
 			gt, err := bn254.Pair(
 				[]bn254.G1Affine{g1Aff, negG1, g1Aff, negG1},
 				[]bn254.G2Affine{tc.q1, tc.q2, tc.q3, tc.q4},
