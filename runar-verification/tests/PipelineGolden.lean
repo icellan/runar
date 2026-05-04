@@ -35,7 +35,7 @@ fixtures became byte-exact after porting `lowerVerifyWOTS` / `emitWOTSOneChain`
 and adding a `verifyWOTS` dispatch arm to `Stack/Lower.lean`. The count
 moved from 29 → 31.
 -/
-def expectedByteExact : Nat := 31
+def expectedByteExact : Nat := 33
 
 def baselineMatches : List String := [
   "add-raw-output",
@@ -93,7 +93,19 @@ def baselineMatches : List String := [
   -- The `verifyWOTS` dispatch arm in `Stack/Lower.lean` follows the same
   -- pattern as the existing `blake3Compress` / `blake3Hash` arms.
   "post-quantum-wots",
-  "post-quantum-wallet"
+  "post-quantum-wallet",
+  -- Promoted in Phase 4: two new fixtures added in commit 3fed3295
+  -- ("close cross-compiler test gaps + fixes") that compile through the
+  -- existing Stack.Lower path. `private-helper-outputs` exercises
+  -- recursive private-helper inlining + paramAliasStack across all 7
+  -- compilers; `conditional-data-output-stateful` covers the canonical
+  -- computeStateOutput path when only an if-branch contains
+  -- addDataOutput. Promotion was unblocked by the Phase 4 fix to
+  -- `removeConsumedAtDepths` (depth-2 cleanup uses `OP_ROT OP_DROP`
+  -- instead of `[push 2, OP_ROLL, OP_DROP]`, saving 1 byte) and the
+  -- empty-bytes else shadow-rebind detection in `lowerIf`.
+  "private-helper-outputs",
+  "conditional-data-output-stateful"
 ]
 
 /--
@@ -169,11 +181,36 @@ fixtures that may not be byte-exact on first compile).
 def mathBuiltinsPending : List String := []
 
 /--
-Sanity check: 31 baseline + 4 Go-only + 11 crypto-pending + 0 math-pending
-= 46, matching `conformance/tests/`.
+Fixtures introduced after the Phase 3 lock (e.g. in commit 3fed3295)
+whose contracts compile but produce a non-byte-exact hex due to
+small-but-real Stack.Lower divergences from the TS reference. These
+are tracked here so the sanity-check sum matches `conformance/tests/`
+without forcing a `baselineMatches` promotion before the divergence
+is closed.
+
+Count: 1.
+
+* `if-without-else-multi-temp` — uses an if-without-else where the
+  THEN branch produces a multi-temp value (not a simple shadow rebind);
+  Lean's `lowerIf` empty-else synthesis path handles only the
+  single-shadow case, so the multi-temp variant produces a divergent
+  PICK/ROLL sequence. Closing this requires extending the empty-else
+  detection to the multi-temp shape (mirrors TS `lowerIf` at
+  `05-stack-lower.ts:1782-1800`).
+-/
+def lowerDivergencePending : List String := [
+  "if-without-else-multi-temp"
+]
+
+/--
+Sanity check: 33 baseline + 4 Go-only + 11 crypto-pending + 0 math-pending
++ 1 lower-divergence = 49, matching `conformance/tests/` after commit
+3fed3295 added 3 fixtures (`conditional-data-output-stateful`,
+`if-without-else-multi-temp`, `private-helper-outputs`).
 -/
 example : baselineMatches.length + goOnlyFixtures.length
-        + cryptoAxiomPending.length + mathBuiltinsPending.length = 46 := by rfl
+        + cryptoAxiomPending.length + mathBuiltinsPending.length
+        + lowerDivergencePending.length = 49 := by rfl
 
 def main : IO Unit := do
   -- Resolve relative to the repo root. CI runs us from `runar-verification/`
@@ -222,6 +259,17 @@ def main : IO Unit := do
         | _ => pure ()
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"
+  -- Phase 4 diagnostic: surface ANY matched fixture not in baselineMatches.
+  -- Both pending-bucket fixtures AND brand-new fixtures (e.g., the 3 added
+  -- in commit 3fed3295) become visible without needing per-bucket entries.
+  let mut promoCandidates : List String := []
+  for n in matchedNames do
+    if !baselineMatches.contains n then
+      promoCandidates := n :: promoCandidates
+  if !promoCandidates.isEmpty then
+    IO.eprintln "NOTICE: byte-exact fixtures NOT in baselineMatches:"
+    for n in promoCandidates do
+      IO.eprintln s!"  - {n}"
 
   -- Gate 1: total byte-exact count must not regress below the Phase 3 baseline.
   if matched < expectedByteExact then

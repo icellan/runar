@@ -1956,3 +1956,134 @@ lake exe pipelineGolden                         # PIPELINE GOLDEN: 31/46 byte-ex
 Lean toolchain: `leanprover/lean4:v4.29.1` (`lean-toolchain`).
 Zero `sorry`/`admit`. Single linking axiom (`hash256_eq_double_sha256`).
 
+## 24. Phase 4 — crypto codegen ports + Stack.Lower fixes (2026-05-04)
+
+Phase 4 lands four orthogonal pieces of work:
+
+### 24.1 Crypto codegen modules ported
+
+* **`Stack/P256P384.lean`** (990 LoC) — port of
+  `packages/runar-compiler/src/passes/p256-p384-codegen.ts` (1229 LoC).
+  Covers `p256{Add,Mul,MulGen,Negate,OnCurve,EncodeCompressed}`,
+  `verifyECDSA_P256`, and the P-384 peer set. Mirrors TS structure 1:1
+  (Tracker-style immutable struct, no `partial def`).
+* **`Stack/SlhDsa.lean`** (1109 LoC) — port of
+  `packages/runar-compiler/src/passes/slh-dsa-codegen.ts` (1357 LoC).
+  All 6 FIPS-205 parameter sets (`verifySLHDSA_SHA2_{128,192,256}{s,f}`).
+
+Both wired into `Stack/Lower.lean`'s `lowerValueP` `.call` arm at
+`lowerP256P384BuiltinOpsLive` and `lowerVerifySlhDsaOpsLive` respectively.
+The `simpleValue` predicate whitelists all new function names.
+
+**Note**: `pipelineGolden` skips fixtures in `cryptoAxiomPending` (EC,
+P-256, P-384, SLH-DSA) because the Lean interpreter takes 10+ minutes
+per fixture for the multi-MB scripts. Byte-exactness for these will
+become measurable once `@[implemented_by]` or a C-based emit path lands.
+The structural ports are correct (build clean, zero `sorry`/`admit`,
+no new global axioms).
+
+### 24.2 `removeConsumedAtDepths` depth-2 fix
+
+`Stack/Lower.lean#removeConsumedAtDepths` — the helper used by the
+asymmetric-consumption path of `lowerIf` to clean up parent stack
+slots consumed by one branch but not the other — was emitting
+`[push d, OP_ROLL, OP_DROP]` (3 bytes) for d=2. The TS reference
+emits `[OP_ROT, OP_DROP]` (2 bytes), saving 1 byte per occurrence.
+
+Added the d=2 special case:
+```lean
+let ops : List StackOp :=
+  if d = 0 then [.drop]
+  else if d = 1 then [.nip]
+  else if d = 2 then [.opcode "OP_ROT", .drop]
+  else [.push (.bigint (Int.ofNat d)), .opcode "OP_ROLL", .drop]
+```
+
+This unblocked the **token-ft regression** that surfaced in commit
+`3fed3295` ("close cross-compiler test gaps + fixes") when the TS
+reference flipped to always emit explicit single-binding `else`
+branches. Lean's `lowerIf` was falling into the asymmetric path,
+which used the d=2 ROLL form instead of the canonical ROT form.
+
+### 24.3 Empty-bytes else shadow-rebind detection
+
+`lowerIf`'s `shadowRebind` detection previously matched only the
+legacy `els = []` shape. Commit `3fed3295` changed the canonical TS
+emission to `els = [{name: topName, value: load_const ""}]`. Extended
+the pattern:
+```lean
+| [b], topName :: _ =>
+    if isEmptyBytesRebind b topName then
+      ...same body...
+```
+
+The two shapes lower to identical bytes (DUP/PICK in else, NIP/ROLL
+after ENDIF), so accepting both forms is the right semantics.
+
+### 24.4 Promotions
+
+| Fixture | Promotion path |
+|---|---|
+| `private-helper-outputs` | new fixture (commit 3fed3295), passes via existing path |
+| `conditional-data-output-stateful` | new fixture (commit 3fed3295), passes via existing path |
+| `token-ft` | recovered from regression via §24.2 |
+
+`expectedByteExact` bumped from **31 → 33** (out of 49 total fixtures
+after the +3 added in commit 3fed3295). The 49 break down as:
+* 33 `baselineMatches`
+* 4 `goOnlyFixtures`
+* 11 `cryptoAxiomPending` (EC × 5, P-256 × 2, P-384 × 2, SLH-DSA × 2)
+* 0 `mathBuiltinsPending`
+* 1 `lowerDivergencePending` (`if-without-else-multi-temp` — nested
+  shadow-rebinds, deferred)
+
+### 24.5 Trust manifest
+
+Added `runar-verification/TRUST_MANIFEST.md` (per HANDOFF §8).
+Inventories 63 axioms + 5 `opaque` defs by category, per-theorem
+trust dependency table, and per-axiom soundness story:
+
+* 1 capstone axiom (`Pipeline.lower_observational_correct`)
+* 1 linking axiom (`Stack.Peephole.hash256_eq_double_sha256`)
+* 61 crypto/builtin axioms (in `ANF/Eval.lean`)
+* 5 `opaque` defs (`sha256`, `ripemd160`, `hash160`, `hash256`,
+  `Stack.Eval.checkMultiSigStub`)
+
+The trust manifest documents what discharging each gap would buy and
+what discharging would require (e.g., concrete SHA-256 implementation,
+mathlib EC group laws).
+
+### 24.6 Verification (Phase 4, exit state)
+
+```
+export PATH="$HOME/.elan/bin:$PATH"
+cd runar-verification
+lake build                                  # Build completed successfully (44 jobs).
+lake exe pipelineGolden                     # PIPELINE GOLDEN: 33/49 byte-exact
+                                            # OK: 33 baseline fixtures still byte-exact
+grep -rE '\b(sorry|admit)\b' \
+  RunarVerification/Stack/{Lower,Peephole,Eval,P256P384,SlhDsa}.lean   # 0
+```
+
+Zero new global axioms in this phase. Single linking axiom
+(`hash256_eq_double_sha256`) and capstone axiom
+(`lower_observational_correct`) unchanged.
+
+### 24.7 What's deferred to Phase 5
+
+* **Operational simulation theorem**: discharge
+  `Pipeline.lower_observational_correct` (the capstone axiom in the
+  trust manifest §1). Estimated multi-week proof effort. Resolves the
+  two model-mismatch issues documented in `Stack/Agrees.lean`.
+* **Crypto-fixture byte-exactness measurement**: replace the
+  `cryptoAxiomPending` skip in `pipelineGolden` with a faster
+  evaluation path (`@[implemented_by]` or compiled-only emit). Then
+  promote whichever EC / P-256 / P-384 / SLH-DSA fixtures actually
+  match.
+* **`if-without-else-multi-temp`**: extend the empty-else
+  shadow-rebind detection to cover the nested-then-multi-binding
+  shape that this fixture uses.
+* **`lean4export` → Rust/TS extraction**: once the simulation theorem
+  is discharged, extract `compile : ANFProgram → ByteArray` as a
+  verified compiler artifact for the Rust and TS reference compilers.
+
