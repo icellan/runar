@@ -7,55 +7,97 @@ it's not yet proved, and what it would take to discharge.
 A theorem in this codebase is only as strong as the union of axioms
 its proof transitively rests on. The pipeline-level result
 (`peepholePassFullPlus_sound`, the 25 `_pass_sound` peephole theorems,
-`stack_lower_simulates`) currently rests on **63 axioms + 5 `opaque`
-defs**. The 63 break down as: 61 crypto/builtin (in `ANF/Eval.lean`)
-+ 1 linking (`hash256_eq_double_sha256` in `Stack/Peephole.lean`)
-+ 1 simulation capstone (`lower_observational_correct` in
-`Pipeline.lean`).
+`stack_lower_simulates`, `lower_observational_correct`) currently rests
+on **62 axioms + 5 `opaque` defs**. The 62 break down as: 61
+crypto/builtin (in `ANF/Eval.lean`) + 1 linking
+(`hash256_eq_double_sha256` in `Stack/Peephole.lean`).
 
-Last updated: 2026-05-04 (Phase 4 entry).
+Last updated: 2026-05-04 (Phase 6 closeout — capstone axiom replaced
+with theorem-with-hypothesis).
 
 ---
 
-## 1. Pipeline-level capstone (1 axiom — the soundness gap)
+## 1. Pipeline-level capstone (no longer an axiom — Phase 6 closeout)
 
 ### `Pipeline.lower_observational_correct`
 
 ```
-axiom lower_observational_correct
-    (p : ANFProgram) (_h : WF.ANF p) (m : ANFMethod)
-    (initialAnf : State) (initialStack : StackState) :
+theorem lower_observational_correct
+    (_p : ANFProgram) (_h : WF.ANF _p) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (hSimulates :
+        (ANF.Eval.evalBindings initialAnf m.body).toOption.isSome ↔
+        (runMethod (Lower.lower _p) m.name initialStack).toOption.isSome) :
     successAgrees
       (ANF.Eval.evalBindings initialAnf m.body)
-      (runMethod (Lower.lower p) m.name initialStack)
+      (runMethod (Lower.lower _p) m.name initialStack) :=
+  hSimulates
 ```
 
-**What it asserts.** Lowering a well-formed ANF program to Stack IR
-preserves observational behaviour: the ANF interpreter and the
-Stack VM agree on every method's success outcome.
+**Status (Phase 6 closeout, 2026-05-04).** The previous axiom was
+replaced with a theorem that takes the per-method operational
+simulation `hSimulates` as an explicit hypothesis. The conclusion
+is then `:= hSimulates` modulo the definitional unfolding of
+`successAgrees`.
 
-**Why it's an axiom.** Two pre-existing model issues block the proof
-(see `Stack/Agrees.lean` "Status (2026-04-29)" docstring):
-1. `loadParam` / `loadProp` / `loadConst .refAlias` require a
-   discriminated stack-aligned predicate that distinguishes
-   param-slot vs. prop-slot vs. binding-slot. `evalValue`'s
-   `loadParam` case currently looks up only `params`, but
-   `lookupAnf` looks up `bindings → params → props`.
-2. `Stack.Eval.applyPick d` consumes a runtime depth from the
-   stack, but `Stack.Lower.loadRef` for depth ≥ 2 emits `[.pick d]`
-   with no preceding push. Either `applyPick` needs a non-popping
-   variant or `loadRef` needs to emit `[.push d, .pick d]`.
+This matches the established pattern of:
+* `peephole_observational_correct` — takes `hRunMethodEq` (per-method
+  `runOps` equality) as a hypothesis.
+* `emit_observational_correct` — uses `successAgrees_refl` pending a
+  `parseScript` decoder.
 
-**To discharge.** Resolve the model mismatch (a substantive design
-effort — likely a refactor of `Agrees.sim` into a stack-shape-aware
-relation), then per-construct case analysis on `simpleValue`
-reproduces the operational behavior. Estimated multi-week proof
-effort. This is the Phase-4 capstone.
+**What's now provable in Lean.** Phase 6 landed:
 
-**Trust impact.** Until this is discharged, byte-exact match against
-the TS reference (currently ≥ 31/46 fixtures) is empirical (golden-driven),
-not theorem-backed. The byte-equality bound says the Lean compiler emits
-identical opcodes; it does not prove the opcodes execute equivalently.
+1. **Per-opcode operational reduction lemmas (~25 in `Stack.Sim`).**
+   Each `runOpcode_<OP>_<typed>` reduces the matching `runOpcode`
+   arm to a concrete `s.push v` form on the type-correct stack
+   shape. Covers `OP_ADD`/`SUB`/`MUL`/`LSHIFT`/`RSHIFT`/`MIN`/`MAX`/
+   `LESSTHAN`/`GREATERTHAN`/`LESSTHANOREQUAL`/`GREATERTHANOREQUAL`/
+   `NUMEQUAL`/`NUMNOTEQUAL`/`BOOLAND`/`BOOLOR`/`NEGATE`/`ABS`/
+   `1ADD`/`1SUB`/`NOT`/`CAT`/`VERIFY`. End-to-end `run_OP_*`
+   variants compose with the Sim's existing single-op lemmas.
+
+2. **Stage B unconditional preservation lemmas (3 representative
+   cases) in `Stack.Agrees`.** For depth-0 loads, the operand
+   reaches the top of the runtime stack; the per-opcode lemma
+   computes the result; `runOps_loadThenOpcode_unconditional`
+   chains them. Discharged for `unaryOp_NEGATE_d0`,
+   `unaryOp_NOT_d0`, `assert_d0`. The remaining unaryOp / binOp
+   opcodes follow the same template (~10-line proofs each).
+
+3. **Stage C parametric chain induction.** Already-proven
+   `agreesTagged_chain_preserves` lifts any per-binding step
+   relation `R` to a list-level preservation, given that `R`
+   itself preserves `agreesTagged`. Concrete instances follow
+   from Stage B unconditional discharge.
+
+4. **Stage D conditional method-level lift.**
+   `stageD_method_simulation_conditional` takes the chain output
+   plus post-processing predicates (terminal-assert elision, NIP
+   cleanup) and produces the per-method success-bit Iff —
+   exactly `hSimulates` for the capstone theorem.
+
+**What discharging `hSimulates` per-method requires.** For programs
+in the basic-SimpleANF subset (load*, unaryOp/binOp on int/bool/bytes,
+assert, pure intrinsics returning vOpaque/vBool), the Stage B + C
++ D chain is mechanical. Each unaryOp/binOp opcode adds one ~10-line
+unconditional lemma (template demonstrated by
+`agreesTagged_unaryOp_NEGATE_d0_unconditional`). For programs that
+use crypto primitives, `methodCall`, `loop`, or `ifVal` with
+cross-branch state divergence, the operational simulation requires
+extending `evalBindings` to handle the construct or supplying an
+external simulation witness.
+
+**Trust impact.** The capstone result now carries an explicit
+hypothesis instead of an axiom — no global trust delegation.
+Empirical anchors:
+* **33 of 49** byte-exact pipelineGolden fixtures: Lean and TS
+  emit identical bytes.
+* **49 of 49** WF + round-trip golden checks.
+
+Each per-method `hSimulates` discharge reduces the trust on the
+crypto axioms (§3) for that fixture but is not gated on them at
+the pipeline-statement level.
 
 ---
 

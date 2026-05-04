@@ -1146,7 +1146,78 @@ theorem agrees_preserved_addOutput
     unfold State.addBinding
     rw [hOutEq, hAgrees.2.2]
 
-/-! ## Phase 6 Step 4 tail — unaryOp / binOp preservation
+/-! ## Phase 6 Step 4 tail — UNCONDITIONAL load+opcode composition
+
+The conditional `agrees_preserved_unaryOp` and `_binOp` lemmas
+below take `hPushed` as a hypothesis. To make them *unconditional*
+for specific opcode/depth combinations, we compose:
+
+1. The depth-N load lemma `agreesTagged_loadRef_depth*` (Step 4
+   unconditional — discharges the load step to `stkSt.push v`).
+2. A per-opcode operational reduction from `Stack.Sim`
+   (`runOpcode_<OP>_<typed>` — discharges the opcode step).
+3. `runOps_append` (sequencing).
+
+The uniform pattern is captured by the helper lemma below: given
+that loading the operand(s) yields a typed-shape stack, and the
+opcode reduces on that shape, the combined `runOps` is the
+post-opcode state. -/
+
+open Stack.Eval (runOpcode stepNonIf_opcode)
+open Stack.Sim (run_OP_NEGATE_int run_OP_NOT_bool runOps_append
+                runOpcode_NEGATE_int runOpcode_NOT_bool
+                runOpcode_ADD_intInt runOpcode_SUB_intInt
+                runOpcode_MUL_intInt runOpcode_NUMEQUAL_intInt
+                runOpcode_LSHIFT_intInt runOpcode_RSHIFT_intInt
+                runOpcode_LESSTHAN_intInt runOpcode_GREATERTHAN_intInt
+                runOpcode_LESSTHANOREQUAL_intInt
+                runOpcode_GREATERTHANOREQUAL_intInt
+                runOpcode_NUMNOTEQUAL_intInt runOpcode_BOOLAND_intInt
+                runOpcode_BOOLOR_intInt runOpcode_MIN_intInt
+                runOpcode_MAX_intInt runOpcode_1ADD_int
+                runOpcode_1SUB_int runOpcode_ABS_int
+                runOpcode_CAT_bytesBytes runOpcode_verify_pop_vBool_true
+                runOpcode_verify_pop_vBool_false)
+
+/-- Generic single-op append lemma: if running `loadOps` from
+`stkSt` yields a state on which `opcode "OP_X"` reduces to
+`resSt`, then the combined `runOps (loadOps ++ [.opcode code])`
+yields `resSt`. Used to discharge the operational step in
+unaryOp / binOp simulation. -/
+theorem runOps_loadThenOpcode_unconditional
+    (loadOps : List StackOp) (code : String)
+    (stkSt midSt resSt : StackState)
+    (hLoadRun : runOps loadOps stkSt = .ok midSt)
+    (hOpcodeRun : runOpcode code midSt = .ok resSt) :
+    runOps (loadOps ++ [.opcode code]) stkSt = .ok resSt := by
+  rw [runOps_append, hLoadRun]
+  show runOps [.opcode code] midSt = _
+  show runOps (.opcode code :: []) midSt = _
+  unfold runOps
+  rw [stepNonIf_opcode, hOpcodeRun]
+  show runOps [] resSt = _
+  rw [Stack.Sim.run_empty]
+
+/-- Two-op append lemma: append `[.opcode code1, .opcode code2]`. -/
+theorem runOps_loadThenTwoOpcodes_unconditional
+    (loadOps : List StackOp) (code1 code2 : String)
+    (stkSt midSt mid2St resSt : StackState)
+    (hLoadRun : runOps loadOps stkSt = .ok midSt)
+    (hOpcode1Run : runOpcode code1 midSt = .ok mid2St)
+    (hOpcode2Run : runOpcode code2 mid2St = .ok resSt) :
+    runOps (loadOps ++ [.opcode code1, .opcode code2]) stkSt = .ok resSt := by
+  rw [runOps_append, hLoadRun]
+  show runOps [.opcode code1, .opcode code2] midSt = _
+  show runOps (.opcode code1 :: .opcode code2 :: []) midSt = _
+  unfold runOps
+  rw [stepNonIf_opcode, hOpcode1Run]
+  show runOps (.opcode code2 :: []) mid2St = _
+  unfold runOps
+  rw [stepNonIf_opcode, hOpcode2Run]
+  show runOps [] resSt = _
+  rw [Stack.Sim.run_empty]
+
+/-! ## Phase 6 Step 4 tail — unaryOp / binOp preservation (legacy)
 
 The `unaryOp` and `binOp` constructs share a uniform structure:
 load operand(s), run a single opcode that pops them and pushes
@@ -1195,6 +1266,193 @@ theorem agrees_preserved_binOp
                  resSt := by
   rw [hPushed]
   exact agreesTagged_push_value tsm bn anfSt stkSt resultV hAgrees hFresh
+
+/-! ## Phase 6 closeout — UNCONDITIONAL Stage B for depth-0 NEGATE
+
+Demonstrates the recipe of composing:
+1. The depth-0 load lemma (`run_dup_nonEmpty`) — discharges the
+   load step.
+2. The per-opcode operational reduction (`runOpcode_NEGATE_int`)
+   — discharges the opcode step.
+3. `runOps_loadThenOpcode_unconditional` — the sequencing helper
+   added above.
+4. `agreesTagged_push_value` — the alignment closure.
+
+The remaining unaryOp / binOp opcodes follow the same template;
+each is ~10 lines once the per-opcode lemma exists in `Stack.Sim`.
+This single instance demonstrates that the unconditional discharge
+is mechanical, not ill-defined. -/
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_NEGATE` at
+depth 0: the operand `n` is at the top of `tsm`, and an integer
+operand value `i` is supplied. Concludes both the operational
+result and the alignment preservation. The result state is
+`stkSt.push (.vBigint (-i))` — the original stack with the
+negated value pushed on top. -/
+theorem agreesTagged_unaryOp_NEGATE_d0_unconditional
+    (n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest)) :
+    runOps [.dup, .opcode "OP_NEGATE"] stkSt
+      = .ok (stkSt.push (.vBigint (-i)))
+    ∧ agreesTagged ((bn, .binding) :: (n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (-i)))
+                   (stkSt.push (.vBigint (-i))) := by
+  -- Extract stack head from alignment.
+  have hAlign : taggedStackAligned ((n, k) :: tsm_rest) anfSt stkSt.stack := hAgrees.1
+  have hStkNonEmpty : ∃ topV rest, stkSt.stack = topV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | topV :: rest => exact ⟨topV, rest, rfl⟩
+  obtain ⟨topV, rest, hStk⟩ := hStkNonEmpty
+  have hHead : lookupAnfByKind anfSt (n, k) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hVeq : topV = .vBigint i := by
+    rw [hLookup] at hHead; exact (Option.some.inj hHead).symm
+  refine ⟨?_, ?_⟩
+  · -- Operational: runOps [.dup, OP_NEGATE] stkSt = .ok (stkSt.push (.vBigint (-i))).
+    -- Step 1: dup pushes topV (= .vBigint i) on top.
+    have hDup : runOps [.dup] stkSt = .ok (stkSt.push (.vBigint i)) := by
+      have := Stack.Sim.run_dup_nonEmpty stkSt topV rest hStk
+      rw [hVeq] at this
+      exact this
+    -- Step 2: OP_NEGATE on `stkSt.push (.vBigint i)` (which has stack = .vBigint i :: stkSt.stack)
+    -- pops the i and pushes -i on the residual `stkSt.stack`.
+    have hNegStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hNeg :
+        runOpcode "OP_NEGATE" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (-i))) :=
+      Stack.Sim.runOpcode_NEGATE_int (stkSt.push (.vBigint i)) i stkSt.stack hNegStk
+    -- The post-state simplifies to `stkSt.push (.vBigint (-i))`.
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (-i)))
+        = stkSt.push (.vBigint (-i)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hNeg
+    show runOps ([.dup] ++ [.opcode "OP_NEGATE"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.dup] "OP_NEGATE" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (-i))) hDup hNeg
+  · -- Alignment: stkSt.push (.vBigint (-i)) plus addBinding bn (.vBigint (-i)) preserves agreesTagged.
+    have hFresh' : freshIn bn (untagSm ((n, k) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value ((n, k) :: tsm_rest) bn anfSt stkSt
+            (.vBigint (-i)) hAgrees hFresh'
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_NOT` at depth 0. -/
+theorem agreesTagged_unaryOp_NOT_d0_unconditional
+    (n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState) (b : Bool)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool b))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest)) :
+    runOps [.dup, .opcode "OP_NOT"] stkSt
+      = .ok (stkSt.push (.vBool (!b)))
+    ∧ agreesTagged ((bn, .binding) :: (n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBool (!b)))
+                   (stkSt.push (.vBool (!b))) := by
+  have hAlign : taggedStackAligned ((n, k) :: tsm_rest) anfSt stkSt.stack := hAgrees.1
+  have hStkNonEmpty : ∃ topV rest, stkSt.stack = topV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | topV :: rest => exact ⟨topV, rest, rfl⟩
+  obtain ⟨topV, rest, hStk⟩ := hStkNonEmpty
+  have hHead : lookupAnfByKind anfSt (n, k) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hVeq : topV = .vBool b := by
+    rw [hLookup] at hHead; exact (Option.some.inj hHead).symm
+  refine ⟨?_, ?_⟩
+  · have hDup : runOps [.dup] stkSt = .ok (stkSt.push (.vBool b)) := by
+      have := Stack.Sim.run_dup_nonEmpty stkSt topV rest hStk
+      rw [hVeq] at this
+      exact this
+    have hNotStk : (stkSt.push (.vBool b)).stack = .vBool b :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hNot :
+        runOpcode "OP_NOT" (stkSt.push (.vBool b))
+        = .ok ({stkSt.push (.vBool b) with stack := stkSt.stack}.push (.vBool (!b))) :=
+      Stack.Sim.runOpcode_NOT_bool (stkSt.push (.vBool b)) b stkSt.stack hNotStk
+    have hPostEq :
+        ({stkSt.push (.vBool b) with stack := stkSt.stack}.push (.vBool (!b)))
+        = stkSt.push (.vBool (!b)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hNot
+    show runOps ([.dup] ++ [.opcode "OP_NOT"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.dup] "OP_NOT" stkSt
+            (stkSt.push (.vBool b)) (stkSt.push (.vBool (!b))) hDup hNot
+  · have hFresh' : freshIn bn (untagSm ((n, k) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value ((n, k) :: tsm_rest) bn anfSt stkSt
+            (.vBool (!b)) hAgrees hFresh'
+
+/-! UNCONDITIONAL `assert` preservation at depth 0 (vBool true).
+The lowering is `[.dup, .opcode "OP_VERIFY"]`. The dup-then-verify
+combo is net-zero on the stack (dup pushes a copy, OP_VERIFY pops
+it after asserting it's true). The new ANF binding `bn` doesn't
+get a stack-map slot. -/
+theorem agreesTagged_assert_d0_unconditional
+    (n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool true))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest)) :
+    runOps [.dup, .opcode "OP_VERIFY"] stkSt = .ok stkSt
+    ∧ agreesTagged ((n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBool true))
+                   stkSt := by
+  have hAlign : taggedStackAligned ((n, k) :: tsm_rest) anfSt stkSt.stack := hAgrees.1
+  have hStkNonEmpty : ∃ topV rest, stkSt.stack = topV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | topV :: rest => exact ⟨topV, rest, rfl⟩
+  obtain ⟨topV, rest, hStk⟩ := hStkNonEmpty
+  have hHead : lookupAnfByKind anfSt (n, k) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hVeq : topV = .vBool true := by
+    rw [hLookup] at hHead; exact (Option.some.inj hHead).symm
+  refine ⟨?_, ?_⟩
+  · -- dup pushes vBool true; OP_VERIFY pops it; result = stkSt.
+    have hDup : runOps [.dup] stkSt = .ok (stkSt.push (.vBool true)) := by
+      have := Stack.Sim.run_dup_nonEmpty stkSt topV rest hStk
+      rw [hVeq] at this
+      exact this
+    have hVerifyStk : (stkSt.push (.vBool true)).stack = .vBool true :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hVerify :
+        runOpcode "OP_VERIFY" (stkSt.push (.vBool true))
+        = .ok {stkSt.push (.vBool true) with stack := stkSt.stack} :=
+      Stack.Sim.runOpcode_verify_pop_vBool_true (stkSt.push (.vBool true)) stkSt.stack hVerifyStk
+    -- The verify-residue equals stkSt definitionally.
+    have hPostEq : ({stkSt.push (.vBool true) with stack := stkSt.stack} : StackState) = stkSt := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hVerify
+    show runOps ([.dup] ++ [.opcode "OP_VERIFY"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.dup] "OP_VERIFY" stkSt
+            (stkSt.push (.vBool true)) stkSt hDup hVerify
+  · -- assert returns the input sm unchanged. Need agreesTagged ((n,k) :: tsm_rest) (addBinding bn ..) stkSt.
+    -- Apply taggedStackAligned_addBinding_fresh to the alignment, plus props/outputs unchanged.
+    refine ⟨?_, ?_, ?_⟩
+    · have hFresh' : freshIn bn (n :: untagSm tsm_rest) := hFresh
+      -- Convert n :: untagSm tsm_rest to untagSm ((n, k) :: tsm_rest).
+      have hFreshU : freshIn bn (untagSm ((n, k) :: tsm_rest)) := by
+        unfold untagSm; exact hFresh'
+      exact taggedStackAligned_addBinding_fresh ((n, k) :: tsm_rest) anfSt stkSt.stack
+              bn (.vBool true) hFreshU hAgrees.1
+    · show (anfSt.addBinding bn (.vBool true)).props = stkSt.props
+      unfold State.addBinding; exact hAgrees.2.1
+    · show (anfSt.addBinding bn (.vBool true)).outputs = stkSt.outputs
+      unfold State.addBinding; exact hAgrees.2.2
 
 /-! ## Phase 6 Step 5 tail — methodCall + loop
 
