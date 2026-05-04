@@ -473,7 +473,7 @@ The constant folding optimizer (+ dead binding elimination) is available between
 
 Rúnar defines a **canonical IR conformance boundary** at the ANF level. The seven reference compilers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) each accept all nine source formats (`.runar.{ts,sol,move,go,rs,py,zig,rb,java}`) and target two layers of conformance:
 
-- **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer.
+- **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer. Enforced in CI by the `--parser-only` runner mode (`pnpm --filter runar-conformance test:parser-only` locally; CI step "Run all-tier parser-only coverage"): every available compiler runs `--parse-only` against every (fixture, format) pair, ignoring the per-fixture `compilers` allowlist (which only scopes Stack-IR / hex parity).
 - **Stack-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical Stack IR + Bitcoin Script hex across all seven tiers. Fixtures that opt out (Go-only crypto: BabyBear / KoalaBear / Poseidon2 / BN254 / Merkle / FRI; Java-deferred: state-covenant / stateful-bytestring) carry an explicit `compilers` array + `compilersJustification` rationale string.
 
 The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 49 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / KoalaBear / Merkle / FRI primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
@@ -549,7 +549,19 @@ docs/                 # Documentation + format guides
 ```bash
 git clone https://github.com/icellan/runar.git && cd runar
 pnpm install && pnpm build
+```
 
+Three layered local-test entry points — pick the one matching your loop:
+
+| Command | Scope | Use when |
+|---|---|---|
+| `pnpm test` | TS unit suites only (workspace `turbo run test`). ~30 s. | Iterating on a single TS package. |
+| `pnpm test:all` | `test` + `conformance:all` + `examples:all` + `e2e:all` + `wallet-client:all`. Excludes regtest integration. ~10–20 min. | Pre-PR sanity. Every cross-tier check the project owns *except* the live BSV regtest node. |
+| `pnpm test:ci` | `test:all` + `integration:all`. Requires `pnpm integration:svnode:start` first. ~20–40 min. | Mirrors what CI gates on. The contract is: green here → green CI. |
+
+Per-tier escape hatches (run an individual compiler / SDK / examples suite):
+
+```bash
 # TypeScript (packages + all format examples)
 npx vitest run
 
