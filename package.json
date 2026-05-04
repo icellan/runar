@@ -7,6 +7,7 @@
   "scripts": {
     "build": "turbo run build",
     "test": "turbo run test",
+    "test:all": "pnpm run test && pnpm run conformance:all && pnpm run examples:all && pnpm run e2e:all && pnpm run wallet-client:all",
     "lint": "turbo run lint",
     "clean": "turbo run clean",
     "typecheck": "turbo run typecheck",

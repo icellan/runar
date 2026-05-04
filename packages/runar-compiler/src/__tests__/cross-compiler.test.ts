@@ -11,6 +11,28 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 // ---------------------------------------------------------------------------
+// CI vs. local behavior switch.
+//
+// Locally, missing toolchains warn-and-skip so devs can iterate without
+// every compiler installed. In CI, missing toolchains are a hard failure —
+// silent skips at the suite level were hiding real CI-runner-setup gaps.
+// Pattern matches conformance/runner/runner.ts::assertAllCompilersAvailableInCi.
+// ---------------------------------------------------------------------------
+const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
+
+const MISSING_COMPILERS_IN_CI: { name: string; hint: string; detail?: string }[] = [];
+
+function reportMissingCompiler(name: string, installHint: string, detail?: string): void {
+  if (IS_CI) {
+    MISSING_COMPILERS_IN_CI.push({ name, hint: installHint, detail });
+    const detailLine = detail ? `\n  detail: ${detail.trim().split('\n').slice(0, 5).join('\n          ')}` : '';
+    console.error(`FATAL: ${name} compiler not found in CI environment — fix runner setup. (install: ${installHint})${detailLine}`);
+  } else {
+    console.warn(`WARNING: ${name.toUpperCase()}_NOT_INSTALLED — install via ${installHint} to enable ${name} cross-compiler tests`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Check if Go is available
 // ---------------------------------------------------------------------------
 
@@ -108,6 +130,7 @@ try {
   // Rust/cargo not available
 }
 
+let rustBuildStderr = '';
 if (hasRust) {
   const rustCompilerDir = join(__dirname, '..', '..', '..', '..', 'compilers', 'rust');
   const candidatePath = join(rustCompilerDir, 'target', 'release', 'runar-compiler-rust');
@@ -134,18 +157,25 @@ if (hasRust) {
       if (existsSync(candidatePath)) {
         rustBinaryPath = candidatePath;
       }
-    } catch {
-      // Build failed; Rust tests will be skipped
+    } catch (err) {
+      // Build failed; Rust tests will be skipped (or hard-fail in CI below).
+      rustBuildStderr = (err as { stderr?: Buffer })?.stderr?.toString?.() ?? String(err);
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Visibility warnings for skipped compilers
+// Visibility warnings for skipped compilers (or FATAL in CI — see IS_CI block at end of probes)
 // ---------------------------------------------------------------------------
 
-if (!hasGo) console.warn('WARNING: Go compiler not found — skipping Go cross-compiler tests');
-if (!hasRust) console.warn('WARNING: Rust compiler not found — skipping Rust cross-compiler tests');
+if (!hasGo) reportMissingCompiler('go', 'https://go.dev/dl/');
+if (!hasRust || !rustBinaryPath) {
+  reportMissingCompiler(
+    'rust',
+    'https://rustup.rs',
+    !hasRust ? 'cargo --version not found on PATH' : `cargo build --release failed:\n${rustBuildStderr}`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Python: invoke via `python3 -m runar_compiler` with cwd=compilers/python
@@ -215,12 +245,13 @@ function findJavaJar(): string | null {
 }
 
 let javaJarPath: string | null = null;
+let javaProbeFailure = '';
 try {
   execSync('java -version', { stdio: 'pipe' });
   javaJarPath = findJavaJar();
   if (!javaJarPath) {
-    // Attempt a one-shot gradle build. If gradle is missing or the build
-    // fails we leave javaJarPath null and skip the suite below.
+    // Attempt a one-shot gradle build. Capture stderr so CI can surface
+    // it instead of silently swallowing setup failures.
     try {
       execSync('gradle --version', { stdio: 'pipe' });
       execSync('gradle jar --no-daemon', {
@@ -229,18 +260,35 @@ try {
         stdio: 'pipe',
       });
       javaJarPath = findJavaJar();
-    } catch {
-      // gradle missing or build failed
+    } catch (err) {
+      const e = err as { stderr?: Buffer; stdout?: Buffer };
+      javaProbeFailure = (e?.stderr?.toString?.() ?? '') + (e?.stdout?.toString?.() ?? '') || String(err);
     }
   }
-} catch {
-  // java not installed
+} catch (err) {
+  javaProbeFailure = `java -version failed: ${(err as Error).message}`;
 }
 
-if (!hasPython) console.warn('WARNING: Python compiler not found — skipping Python cross-compiler tests');
-if (!zigBinaryPath) console.warn('WARNING: Zig compiler binary not found — skipping Zig cross-compiler tests');
-if (!rubyScriptPath) console.warn('WARNING: Ruby compiler not found — skipping Ruby cross-compiler tests');
-if (!javaJarPath) console.warn('WARNING: Java compiler jar not found — skipping Java cross-compiler tests');
+if (!hasPython) reportMissingCompiler('python', 'https://www.python.org/downloads/ + pip install -e compilers/python');
+if (!zigBinaryPath) reportMissingCompiler('zig', 'https://ziglang.org/download/ + cd compilers/zig && zig build');
+if (!rubyScriptPath) reportMissingCompiler('ruby', 'https://www.ruby-lang.org/en/downloads/ (script lives at compilers/ruby/bin/runar-compiler-ruby)');
+if (!javaJarPath) {
+  reportMissingCompiler(
+    'java',
+    'https://adoptium.net + gradle 8.5+ then `cd compilers/java && gradle jar`',
+    javaProbeFailure || undefined,
+  );
+}
+
+// In CI: hard-fail with the consolidated list before any test collection runs.
+// Locally: the per-suite describe.skipIf calls below skip the family with a warning above.
+if (IS_CI && MISSING_COMPILERS_IN_CI.length > 0) {
+  const list = MISSING_COMPILERS_IN_CI.map((m) => m.name).join(', ');
+  throw new Error(
+    `Cross-compiler test suite cannot run in CI without all 7 toolchains. ` +
+    `Missing: ${list}. See FATAL lines above for per-compiler diagnostics.`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Helper functions

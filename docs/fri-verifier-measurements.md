@@ -1,5 +1,13 @@
 # FRI Verifier Measurements
 
+> **⚠ Status — Not production-ready.**
+> SP1 FRI verifier codegen is shipped on the **Go tier only** (`compilers/go/codegen/sp1_fri.go`). The other six tiers (TS / Rust / Python / Zig / Ruby / Java) carry the parser surface but have no Stack-IR codegen — contracts that call `verifySP1FRI` from a non-Go tier will fail at the codegen stage with a clear panic pointing here. The Go-native runtime intrinsic (`packages/runar-go/runar.go::VerifySP1FRI`) is a **simulation mock** that always returns `true` — it does NOT verify the proof off-chain. On-chain enforcement happens only in compiled Bitcoin Script.
+>
+> **Status snapshot:**
+> * **Landed**: Go-tier codegen body + measurements below + the `evm-guest` production preset (`compiler.SP1FriPresetMust("evm-guest")`) compile + execute under the script VM at the natural production tuple (`degreeBits=10, log_blowup=1, log_final_poly_len=0`).
+> * **Mocked / deferred**: native off-chain proof verification, codegen ports to TS / Rust / Python / Zig / Ruby / Java, mainnet broadcast validation at scale.
+> * **Next deliverable**: full off-chain native verifier (so SDK simulators can validate proofs without going to chain) — tracked outside this branch.
+
 Phase 2 production-scale measurements for the SP1 FRI verifier, captured
 against the canonical Plonky3 KoalaBear `evm-guest` fixture
 (`tests/vectors/sp1/fri/evm-guest/proof.postcard`).
@@ -253,6 +261,10 @@ example program could not even compile its first deploy tx.
   `compilers/go/compiler/sp1_fri_compile_test.go`.
 
 ### Out-of-scope follow-ups still pending
+
+(See the "Status — Not production-ready" disclaimer at the top of this
+document for the canonical list. The single deployment-validation item
+below is retained for measurement context.)
 
 * Regtest re-run at the natural production tuple (currently the
   regtest table records only the pre-B1-fix workaround run). Should

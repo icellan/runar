@@ -467,19 +467,16 @@ The compiler is structured as six small, composable nanopass transforms. Each pa
 | 5 | **Stack Lower** | ANF IR | Stack IR |
 | 6 | **Emit** | Stack IR | Bitcoin Script |
 
-The constant folding optimizer (+ dead binding elimination) is available between passes 4 and 5 but is disabled by default to preserve ANF conformance. The peephole optimizer runs between passes 5 and 6 (always enabled).
+The constant folding optimizer (+ dead binding elimination) is available between passes 4 and 5; it is enabled by default at the user-facing TS API and CI enforces cross-tier parity in BOTH fold-on and fold-off modes (see `conformance/fold-on-allowlist.json` for the small set of fixture×format pairs allowlisted under fold-on with a documented reason). The peephole optimizer runs between passes 5 and 6 (always enabled).
 
 ### Multi-Compiler Strategy
 
-Rúnar defines a **canonical IR conformance boundary** at the ANF level. Any compiler that produces byte-identical ANF IR for a given source file is conformant:
+Rúnar defines a **canonical IR conformance boundary** at the ANF level. The seven reference compilers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) each accept all nine source formats (`.runar.{ts,sol,move,go,rs,py,zig,rb,java}`) and target two layers of conformance:
 
-- The **TypeScript compiler** is the reference implementation
-- The **Go compiler** produces identical output for all example contracts including post-quantum
-- The **Rust compiler** produces identical output for all example contracts including post-quantum
-- The **Python compiler** produces identical output for all example contracts including post-quantum
-- The **Zig compiler** produces identical output for the conformance suite and benchmarked example workloads
+- **Frontend parity (mandatory for every tier).** Every fixture must parse cleanly through every compiler in every one of the nine source formats. There are no per-tier carve-outs at the parser layer.
+- **Stack-IR + hex parity (scoped per fixture).** Fixtures without a `compilers` allowlist in `source.json` must produce byte-identical Stack IR + Bitcoin Script hex across all seven tiers. Fixtures that opt out (Go-only crypto: BabyBear / KoalaBear / Poseidon2 / BN254 / Merkle / FRI; Java-deferred: state-covenant / stateful-bytestring) carry an explicit `compilers` array + `compilersJustification` rationale string.
 
-The conformance suite in `conformance/` contains 27 golden-file tests (including WOTS+, SLH-DSA, SHA-256, BLAKE3, and EC primitives). The maintained compilers target the same suite.
+The TypeScript compiler is the reference implementation; Go, Rust, Python, Zig, Ruby, and Java are full peers. The conformance suite in `conformance/` contains 49 fixtures spanning P2PKH, stateful counters, escrow, oracle covenants, WOTS+/SLH-DSA, SHA-256, BLAKE3, EC, NIST P-256/P-384, BabyBear / KoalaBear / Merkle / FRI primitives. The cross-tier audit (`conformance/runner/__tests__/allowlist-audit.test.ts`) gates the allowlist set so opt-outs don't grow silently.
 
 ### Contract Model
 
@@ -571,6 +568,15 @@ cd examples/ruby && bundle exec rspec
 cd packages/runar-py && python3 -m pytest
 cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest
 ```
+
+> **On test skips.** The full corpus has a small number of legitimate skips
+> (slow WOTS+/SLH-DSA/Groth16 scripts gated by `-short`, BRC-100 wallet
+> round-trips gated by `RUNAR_WALLET_ENDPOINT`, regtest integration suite
+> gated by `-Drunar.integration=true` / `-tags=integration`, cross-compiler
+> suites gated on installed toolchains). Every skip is inventoried with its
+> rationale in [`docs/test-skips.md`](docs/test-skips.md). The audit deliberately
+> contains zero "Stale" or "Gap" skips — any new skip should fall into one
+> bucket and either get a `TODO(...)` comment or join that document.
 
 ---
 

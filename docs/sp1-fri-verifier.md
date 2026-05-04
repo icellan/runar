@@ -336,12 +336,14 @@ whitepaper's trust-model language (per handoff §3 step 3).
   `default_koalabear_poseidon2_16()`) plus reproducible Rust
   generator under `minimal-guest/regen/`. Scaffolding for `evm-guest/`
   and the eight `corruptions/` variants pinned in their READMEs.
-- Compile-guard test `TestSp1FriVerifierPoc_CodegenRefuses` (in
-  `integration/go/sp1_fri_poc_test.go`) continues to pass: any
-  attempt to compile a contract calling `runar.VerifySP1FRI` fails
-  cleanly with a message naming the first unimplemented sub-step
-  and pointing at this doc plus the corresponding Plonky3 source.
-  This prevents silently shipping an unsafe no-op.
+- The frontend-acceptance gate now lives in
+  `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`
+  — with `EmitFullSP1FriVerifierBody` wired into `lowerVerifySP1FRI`,
+  the PoC contract compiles cleanly through the full pipeline (parse →
+  validate → typecheck → ANF → stack → emit) and produces a non-empty
+  hex-encoded locking script. The earlier `TestSp1FriVerifierPoc_CodegenRefuses`
+  guard, which intentionally panicked at stack lowering until the
+  dispatch was wired, has been replaced by the acceptance gate.
 
 **Landed (Phase 1.5 — Go off-chain reference verifier):**
 - `packages/runar-go/sp1fri/` — postcard decoder, KoalaBear and Ext4
@@ -386,31 +388,21 @@ whitepaper's trust-model language (per handoff §3 step 3).
   ops, 283,285 bytes (~277 KB), peak named-stack ~135 elements. Well
   under all script-size, stack-depth, and execution-time targets.
 
-**Deferred — dispatch wiring only** (algorithm is complete and
-validated; what remains is purely structural bridging from inline
-test orchestration to the contract dispatch path):
+**Landed (Phase 3 — dispatch wiring + acceptance gate):**
 
-- Extract `EmitFullSP1FriVerifierBody(emit, params)` from the
-  inline orchestration in
-  `compilers/go/codegen/sp1_fri_test.go::TestSp1FriVerifier_AcceptsMinimalGuestFixture`.
-  The extracted helper initialises a `KBTracker` with the canonical
-  pre-pushed-field names (deepest-to-top per §2.1 above) and runs
-  the validated Steps 1+2-5+6+7+8+10+10A+11 emission, but emits no
-  pushes itself — those move from the inline test setup into the
-  unlocking script of the deployed contract.
-- Wire `lowerVerifySP1FRI` (currently panics with a structured
-  message) to call `EmitFullSP1FriVerifierBody` after parking the
-  3 typed args (proofBlob, publicValues, sp1VKeyHash) on the
-  alt-stack so the unlocking-script field pushes sit contiguous
-  beneath them.
-- Flip `integration/go/sp1_fri_poc_test.go` from
-  `TestSp1FriVerifierPoc_CodegenRefuses` to
-  `TestSp1FriVerifierPoc_CodegenAccepts` with a host-side helper
-  that decodes the postcard fixture (via
-  `packages/runar-go/sp1fri.DecodeProof`) and emits the unlocking-
-  script field-push prelude in declaration order. Compile the
-  PoC contract, build the locking + unlocking script, run via the
-  go-sdk Bitcoin Script interpreter, assert acceptance.
+- `EmitFullSP1FriVerifierBody(emit, params)` extracted from the inline
+  test orchestration; wired into `lowerVerifySP1FRI`
+  (`compilers/go/codegen/sp1_fri.go`). The 3 typed args
+  (proofBlob, publicValues, sp1VKeyHash) are parked on the alt-stack
+  so the unlocking-script field pushes sit contiguous beneath them.
+- `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`
+  is now the canonical acceptance gate; the older
+  `TestSp1FriVerifierPoc_CodegenRefuses` guard is gone.
+- Production-scale measurements + Mainnet readiness section in
+  `docs/fri-verifier-measurements.md`. See that document for the
+  canonical "Status — Not production-ready" disclaimer that governs
+  every reference to `verifySP1FRI` in the repo (Go-tier-only codegen,
+  off-chain native intrinsic still mocked, mainnet broadcast deferred).
 
 Fixture generation:
 - `tests/vectors/sp1/fri/minimal-guest/proof.bin` + `vk.bin` +

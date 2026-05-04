@@ -2290,11 +2290,21 @@ func emitAbsorbByteString(fs *FiatShamirState, t *KBTracker) {
 // Internal error helper
 // =============================================================================
 
-// panicSP1FriStub is the uniform panic used by every unimplemented
-// sub-step. The message format preserves the invariant expected by the
-// compiler-guard test in integration/go/sp1_fri_poc_test.go
-// (TestSp1FriVerifierPoc_CodegenRefuses): both "verifySP1FRI" and
-// "docs/sp1-fri-verifier.md" must appear in the panic text.
+// panicSP1FriStub is the uniform panic body used by the small number of
+// SP1 FRI sub-steps that survive in the codebase as dead-code placeholders.
+// They are NOT live failure modes today — `lowerVerifySP1FRI` dispatches to
+// `EmitFullSP1FriVerifierBody`, which is exercised end-to-end by
+// `compilers/go/codegen.TestSp1FriVerifier_AcceptsMinimalGuestFixture` and at
+// the contract-frontend level by
+// `integration/go/sp1_fri_poc_test.go::TestSp1FriVerifierPoc_CodegenAccepts`.
+//
+// The placeholders remain so any future refactor that re-introduces a stub
+// path through `panicSP1FriStub` produces a single, consistent message
+// pointing at both the spec doc (`docs/sp1-fri-verifier.md` §8) and the
+// canonical "Status — Not production-ready" disclaimer in
+// `docs/fri-verifier-measurements.md`. The panic text deliberately keeps
+// both the `verifySP1FRI` and `docs/sp1-fri-verifier.md` substrings so that
+// callsite-discoverability works via grep across the repo.
 //
 // The three arguments are:
 //
@@ -2303,7 +2313,9 @@ func emitAbsorbByteString(fs *FiatShamirState, t *KBTracker) {
 //   - shape: the expected Bitcoin Script emission shape in one paragraph.
 func panicSP1FriStub(what, ref, shape string) {
 	panic(fmt.Sprintf(
-		"verifySP1FRI codegen body not yet implemented — see docs/sp1-fri-verifier.md §8.\n"+
+		"verifySP1FRI codegen sub-step still on the placeholder path — see "+
+			"docs/sp1-fri-verifier.md §8 and the Status disclaimer in "+
+			"docs/fri-verifier-measurements.md.\n"+
 			"  Unimplemented sub-step: %s.\n"+
 			"  Reference: %s\n"+
 			"  Shape: %s",

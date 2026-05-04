@@ -301,27 +301,34 @@ func VerifySLHDSA_SHA2_256f(msg ByteString, sig ByteString, pubkey ByteString) b
 	return SLHVerify(SLH_SHA2_256f, []byte(msg), []byte(sig), []byte(pubkey))
 }
 
-// VerifySP1FRI verifies an SP1 v6.0.2 STARK / FRI proof on-chain.
+// VerifySP1FRI is the off-chain SIMULATION MOCK for the SP1 v6.0.2 STARK / FRI
+// verifier intrinsic.
 //
 // Used by rollup / proof-bridge covenants. See docs/sp1-fri-verifier.md for
-// the API shape, transcript order, and performance targets, and
-// docs/sp1-proof-format.md for the serialized proof byte layout.
+// the API shape + transcript order, docs/sp1-proof-format.md for the
+// serialized proof byte layout, and docs/fri-verifier-measurements.md for
+// the canonical "Status — Not production-ready" disclaimer that governs
+// every reference to this function.
 //
-// The Go-native return value is always true — native invocation during
-// test execution skips proof verification (the heavy lifting lives in the
-// compiled Bitcoin Script). This lets covenant authors write tests against
-// their state-transition logic without bundling an SP1 proof generator into
-// the test harness.
+// MOCK SEMANTICS — read carefully:
+//   - Native (off-chain) invocation always returns true. No proof is
+//     verified; proofBlob / publicValues / sp1VKeyHash are not inspected.
+//   - This is intentionally a mock so covenant authors can run their
+//     state-transition unit tests without bundling an SP1 proof
+//     generator into the test harness. Use it like an `assert(true)`
+//     placeholder; do NOT treat a `true` return as evidence the proof
+//     is valid.
 //
-// In compiled Bitcoin Script, the intrinsic lowers to a full on-chain
-// verifier that absorbs proofBlob, publicValues, and sp1VKeyHash into the
-// Fiat-Shamir transcript, replays the STARK argument, and fails OP_VERIFY
-// on any mismatch.
-//
-// NOTE: stack-lowering is not yet implemented (tracked under BSVM
-// handoff R10). Type-checking the intrinsic succeeds so covenant ABIs
-// can be authored against it; contracts using this call will fail at
-// the codegen stage until the verifier body lands.
+// ON-CHAIN SEMANTICS — Go tier only today:
+//   - In compiled Bitcoin Script, the intrinsic lowers to a full on-chain
+//     verifier that absorbs proofBlob + publicValues + sp1VKeyHash into the
+//     Fiat-Shamir transcript, replays the STARK argument, and fails
+//     OP_VERIFY on any mismatch.
+//   - Codegen ships in the Go reference compiler only
+//     (compilers/go/codegen/sp1_fri.go). The TS / Rust / Python / Zig /
+//     Ruby / Java tiers carry the parser surface but their codegen
+//     stages reject contracts that call verifySP1FRI with a clear panic
+//     pointing at docs/sp1-fri-verifier.md §8 + docs/fri-verifier-measurements.md.
 func VerifySP1FRI(proofBlob ByteString, publicValues ByteString, sp1VKeyHash ByteString) bool {
 	_ = proofBlob
 	_ = publicValues
