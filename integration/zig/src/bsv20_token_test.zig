@@ -94,7 +94,7 @@ fn deployAndVerifyInscription(
     std.log.info("BSV20Token deployed: {s}", .{deploy_txid});
 
     // Fetch tx, parse output 0 script, expect a BSV-20 inscription envelope.
-    var tx = try rpc_provider.provider().getTransaction(allocator, deploy_txid);
+    const tx = try rpc_provider.provider().getTransaction(allocator, deploy_txid);
     defer {
         for (tx.outputs) |*o| {
             if (o.script.len > 0) allocator.free(o.script);
@@ -107,7 +107,7 @@ fn deployAndVerifyInscription(
     try std.testing.expect(tx.outputs.len > 0);
     const script_hex = tx.outputs[0].script;
 
-    var maybe_parsed = try runar.parseInscriptionEnvelope(allocator, script_hex);
+    const maybe_parsed = try runar.parseInscriptionEnvelope(allocator, script_hex);
     try std.testing.expect(maybe_parsed != null);
     var parsed = maybe_parsed.?;
     defer parsed.deinit(allocator);

@@ -90,7 +90,13 @@ jobs:
       - name: Zig conformance tests
         run: cd compilers/zig && zig build conformance
       - name: Build release binary
-        run: cd compilers/zig && zig build -Doptimize=ReleaseFast
+        # ReleaseSafe + baseline CPU: ReleaseFast was SIGILL-ing on heavier
+        # conformance fixtures on the conformance runner (different ubuntu-
+        # latest SKU than the build runner). Baseline target keeps the binary
+        # portable across runner CPUs; ReleaseSafe keeps overflow + bounds
+        # checks so any remaining bug surfaces as a panic with file:line
+        # instead of a bare SIGILL.
+        run: cd compilers/zig && zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-linux-gnu -Dcpu=baseline
       - uses: actions/upload-artifact@v4
         with:
           name: runar-zig

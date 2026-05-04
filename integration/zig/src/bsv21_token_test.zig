@@ -87,7 +87,7 @@ test "BSV21Token_DeployMintInscription" {
 
     // Token ID is txid_vout (vout = 0 for the inscription output).
     var rpc_for_tx = helpers.RPCProvider.init(allocator);
-    var tx = try rpc_for_tx.provider().getTransaction(allocator, deploy_txid);
+    const tx = try rpc_for_tx.provider().getTransaction(allocator, deploy_txid);
     defer {
         for (tx.outputs) |*o| {
             if (o.script.len > 0) allocator.free(o.script);
@@ -98,7 +98,7 @@ test "BSV21Token_DeployMintInscription" {
     }
 
     try std.testing.expect(tx.outputs.len > 0);
-    var maybe_parsed = try runar.parseInscriptionEnvelope(allocator, tx.outputs[0].script);
+    const maybe_parsed = try runar.parseInscriptionEnvelope(allocator, tx.outputs[0].script);
     try std.testing.expect(maybe_parsed != null);
     var parsed = maybe_parsed.?;
     defer parsed.deinit(allocator);
@@ -165,7 +165,7 @@ test "BSV21Token_TransferInscription" {
     try std.testing.expectEqual(@as(usize, 64), deploy_txid.len);
     std.log.info("BSV21Token transfer TX: {s}", .{deploy_txid});
 
-    var tx = try rpc_provider.provider().getTransaction(allocator, deploy_txid);
+    const tx = try rpc_provider.provider().getTransaction(allocator, deploy_txid);
     defer {
         for (tx.outputs) |*o| {
             if (o.script.len > 0) allocator.free(o.script);
@@ -176,7 +176,7 @@ test "BSV21Token_TransferInscription" {
     }
 
     try std.testing.expect(tx.outputs.len > 0);
-    var maybe_parsed = try runar.parseInscriptionEnvelope(allocator, tx.outputs[0].script);
+    const maybe_parsed = try runar.parseInscriptionEnvelope(allocator, tx.outputs[0].script);
     try std.testing.expect(maybe_parsed != null);
     var parsed = maybe_parsed.?;
     defer parsed.deinit(allocator);
