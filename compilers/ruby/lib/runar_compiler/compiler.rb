@@ -160,6 +160,27 @@ module RunarCompiler
   end
   private_class_method :_validate
 
+  # Public parse-only entry point used by the conformance runner's
+  # +--parser-only+ universal-frontend coverage check. Reads the source
+  # file, dispatches to the format parser, and runs +Validate+. Raises
+  # +CompilationError+ on parse / validate failures; returns +nil+ on
+  # success (the caller treats nil as "parser ok").
+  def self.parse_and_validate_only(source_path)
+    source = File.read(source_path)
+    parse_result = _parse_source(source, source_path)
+    if parse_result.errors && !parse_result.errors.empty?
+      raise CompilationError, "parse errors:\n  " + parse_result.error_strings.join("\n  ")
+    end
+    if parse_result.contract.nil?
+      raise CompilationError, "no contract found in #{source_path}"
+    end
+    valid = _validate(parse_result.contract)
+    if valid.errors && !valid.errors.empty?
+      raise CompilationError, "validation errors:\n  " + valid.error_strings.join("\n  ")
+    end
+    nil
+  end
+
   # Run type checking on a parsed ContractNode.
   def self._type_check(contract)
     require_relative "frontend/typecheck"

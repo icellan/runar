@@ -61,6 +61,16 @@ def main() -> None:
         help="Output only the ANF IR JSON (requires --source)",
     )
     parser.add_argument(
+        "--parse-only",
+        dest="parse_only",
+        action="store_true",
+        help=(
+            "Stop after parse + validate; print 'parser ok' on success "
+            "(requires --source). Used by the conformance runner's "
+            "--parser-only universal-frontend coverage check."
+        ),
+    )
+    parser.add_argument(
         "--disable-constant-folding",
         action="store_true",
         help="Disable the ANF constant folding pass",
@@ -84,6 +94,43 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Handle --parse-only: read source, run parse + validate; print
+    # "parser ok" on success or diagnostics on failure. Universal
+    # parser-coverage entry point used by the conformance runner.
+    if args.parse_only:
+        if not args.source:
+            print("--parse-only requires --source", file=sys.stderr)
+            sys.exit(1)
+        try:
+            from runar_compiler.compiler import _parse_source, _validate, _read_file
+        except ImportError as e:
+            print(f"Compilation error: {e}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            src = _read_file(args.source)
+            parse_result = _parse_source(src, args.source)
+            if parse_result.errors:
+                print(
+                    "parse errors:\n  " + "\n  ".join(parse_result.error_strings()),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            if parse_result.contract is None:
+                print(f"parse error: no contract found in {args.source}", file=sys.stderr)
+                sys.exit(1)
+            valid = _validate(parse_result.contract)
+            if valid.errors:
+                print(
+                    "validation errors:\n  " + "\n  ".join(valid.error_strings()),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        except Exception as e:
+            print(f"parse error: {e}", file=sys.stderr)
+            sys.exit(1)
+        print("parser ok")
+        return
 
     # Handle --emit-ir: dump ANF IR JSON and exit
     if args.emit_ir:

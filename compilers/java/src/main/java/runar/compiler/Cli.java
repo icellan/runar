@@ -131,6 +131,13 @@ public final class Cli {
             return 65;
         }
 
+        // --parse-only: stop after parse + validate. Used by the conformance
+        // runner's --parser-only universal-frontend coverage check.
+        if (parsed.parseOnly) {
+            out.println("parser ok");
+            return 0;
+        }
+
         try {
             contract = ExpandFixedArrays.run(contract);
         } catch (ExpandFixedArrays.ExpandException e) {
@@ -333,6 +340,15 @@ public final class Cli {
             String src = Files.readString(Path.of(req.source));
             ContractNode contract = ParserDispatch.parse(src, req.source);
             Validate.run(contract);
+            // parseOnly short-circuit: skip everything past validate. Used
+            // by the conformance runner's --parser-only mode so the
+            // universal frontend coverage check doesn't pay for the full
+            // pipeline.
+            if (req.parseOnly) {
+                StringBuilder b = new StringBuilder(96);
+                b.append("{\"id\":").append(req.id).append(",\"ok\":true,\"parsed\":true}");
+                return b.toString();
+            }
             contract = ExpandFixedArrays.run(contract);
             Typecheck.run(contract);
             AnfProgram anf = AnfLower.run(contract);
@@ -391,6 +407,7 @@ public final class Cli {
         String source;
         boolean emitIr;
         boolean hex;
+        boolean parseOnly;
         boolean disableConstantFolding;
         boolean shutdown;
 
@@ -402,6 +419,7 @@ public final class Cli {
             r.source = parseStringField(line, "source");
             r.emitIr = parseBoolField(line, "emitIr", false);
             r.hex = parseBoolField(line, "hex", false);
+            r.parseOnly = parseBoolField(line, "parseOnly", false);
             r.disableConstantFolding = parseBoolField(line, "disableConstantFolding", false);
             r.shutdown = parseBoolField(line, "shutdown", false);
             return r;
@@ -490,6 +508,7 @@ public final class Cli {
         String ir;
         boolean emitIr;
         boolean hex;
+        boolean parseOnly;
         boolean disableConstantFolding;
         boolean version;
         boolean help;
@@ -505,6 +524,7 @@ public final class Cli {
                     case "--ir" -> out.ir = requireValue(list, "--ir");
                     case "--emit-ir" -> out.emitIr = true;
                     case "--hex" -> out.hex = true;
+                    case "--parse-only" -> out.parseOnly = true;
                     case "--disable-constant-folding" -> out.disableConstantFolding = true;
                     case "--daemon" -> out.daemon = true;
                     case "--version" -> out.version = true;

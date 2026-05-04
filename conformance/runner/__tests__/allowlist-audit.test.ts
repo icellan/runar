@@ -19,17 +19,18 @@ const CONFORMANCE_TESTS_DIR = join(__dirname, '../../tests');
  *   (b) be deleted.
  */
 const APPROVED_ALLOWLISTS: Record<string, string[]> = {
-  // Go-only crypto family: BabyBear / KoalaBear / Poseidon2 / BN254-witness
-  // / FRI / Merkle / FiatShamir-KB Stack-IR codegen ships in Go only.
+  // EVM/STARK proof-system primitives are Go-only by project policy
+  // (see CLAUDE.md "EVM/STARK proof-system primitives are Go-only by
+  // project policy" + the project_go_only_crypto_modules memory).
+  // Covers: BabyBear / KoalaBear / Poseidon2* / BN254 + Groth16 /
+  // Merkle / merkleRootSha256 / SP1 FRI / FiatShamir-KB.
+  // Non-Go tiers may carry partial ports but are NOT conformance
+  // targets for these families. Their parsers are still exercised
+  // by the all-tier --parser-only matrix.
   babybear: ['go'],
   'babybear-ext4': ['go'],
   'merkle-proof': ['go'],
-
-  // Java-deferred Stack-IR (parser still exercised): contracts whose bodies
-  // depend on the Go-only crypto family above. Java frontend still parses
-  // them so CompileCheck stays exercised.
-  'state-covenant': ['ts', 'go', 'rust', 'python', 'zig', 'ruby'],
-  'stateful-bytestring': ['ts', 'go', 'rust', 'python', 'zig', 'ruby'],
+  'state-covenant': ['go'],
 };
 
 function listFixtureDirs(): string[] {

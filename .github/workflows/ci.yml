@@ -493,6 +493,17 @@ jobs:
       # that import tsx from REPO_ROOT/conformance/node_modules, so install its
       # deps explicitly before the multi-format step.
       - run: cd conformance && npm ci
+      - name: Run all-tier parser-only coverage (every compiler × every fixture × every format)
+        # Universal frontend coverage: every available compiler runs
+        # `--parse-only` on every fixture × every declared format. The
+        # per-fixture `compilers` allowlist in source.json is intentionally
+        # IGNORED here — that allowlist scopes Stack-IR / hex parity, not
+        # the parser layer. This step gates the central claim that "every
+        # tier parses every fixture in every one of the nine source
+        # formats" (see spec/README.md and conformance/README.md).
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --parser-only
       - name: Run multi-format source conformance (all 7 compilers, all 9 formats)
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against

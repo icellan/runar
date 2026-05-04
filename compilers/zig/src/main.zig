@@ -24,6 +24,7 @@ const CompileOptions = struct {
     emit_ir: bool = false,
     hex_only: bool = false,
     disable_constant_folding: bool = false,
+    parse_only: bool = false,
 };
 
 const ParseOptionsError = error{
@@ -45,6 +46,10 @@ fn parseCompileOptions(args: []const []const u8, allow_disable_constant_folding:
         if (std.mem.eql(u8, arg, "--disable-constant-folding")) {
             if (!allow_disable_constant_folding) return error.UnsupportedFlag;
             opts.disable_constant_folding = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--parse-only")) {
+            opts.parse_only = true;
             continue;
         }
         return error.UnknownFlag;
@@ -344,6 +349,13 @@ fn compileFromSource(allocator: std.mem.Allocator, io: std.Io, path: []const u8,
         return error.ValidationFailed;
     }
     for (val_result.warnings) |diag| std.debug.print("  warning: {s}\n", .{diag.message});
+
+    // --parse-only: emit "parser ok" and stop after parse + validate. Used by
+    // the conformance runner's --parser-only universal-frontend coverage check.
+    if (opts.parse_only) {
+        try writeStdoutLn(io, "parser ok");
+        return;
+    }
 
     // Pass 3: Typecheck
     const tc_result = try typecheck_pass.typeCheck(work_allocator, contract);

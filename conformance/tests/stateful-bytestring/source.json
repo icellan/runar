@@ -1,6 +1,4 @@
 {
-  "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
-  "compilersJustification": "Java Stack-IR pass for stateful-bytestring is deferred — see HANDOFF. The Java frontend still parses the source via multi-format.test.ts.",
   "sources": {
     ".runar.ts": "../../../examples/ts/message-board/MessageBoard.runar.ts",
     ".runar.sol": "../../../examples/sol/message-board/MessageBoard.runar.sol",

@@ -23,6 +23,7 @@ export interface JavaCompileResponse {
   ok: boolean;
   ir?: string;
   hex?: string;
+  parsed?: boolean;
   error?: string;
 }
 
@@ -109,7 +110,7 @@ export class JavaDaemon {
   }
 
   private handleLine(line: string): void {
-    let parsed: { id?: number; ok?: boolean; ir?: string; hex?: string; error?: string };
+    let parsed: { id?: number; ok?: boolean; ir?: string; hex?: string; parsed?: boolean; error?: string };
     try {
       parsed = JSON.parse(line);
     } catch {
@@ -125,6 +126,7 @@ export class JavaDaemon {
       ok: parsed.ok === true,
       ir: typeof parsed.ir === 'string' ? parsed.ir : undefined,
       hex: typeof parsed.hex === 'string' ? parsed.hex : undefined,
+      parsed: typeof parsed.parsed === 'boolean' ? parsed.parsed : undefined,
       error: typeof parsed.error === 'string' ? parsed.error : undefined,
     });
   }
@@ -150,20 +152,28 @@ export class JavaDaemon {
    * Set the env var to `0` to flip the daemon into fold-on mode for the
    * dual-mode conformance check.
    */
-  async compile(sourcePath: string): Promise<JavaCompileResponse> {
+  async compile(sourcePath: string, options?: { parseOnly?: boolean }): Promise<JavaCompileResponse> {
     if (this.stopped) {
       return { ok: false, error: 'daemon already stopped' };
     }
     await this.banner;
     const id = this.nextId++;
     const disableFold = process.env.RUNAR_DISABLE_CONSTANT_FOLDING !== '0';
-    const req = {
-      id,
-      source: sourcePath,
-      emitIr: true,
-      hex: true,
-      disableConstantFolding: disableFold,
-    };
+    const parseOnly = options?.parseOnly === true;
+    const req = parseOnly
+      ? {
+          id,
+          source: sourcePath,
+          parseOnly: true,
+          disableConstantFolding: disableFold,
+        }
+      : {
+          id,
+          source: sourcePath,
+          emitIr: true,
+          hex: true,
+          disableConstantFolding: disableFold,
+        };
     // Per-request timeout. The daemon itself only takes ~0.5–1s per compile,
     // but on a saturated host (9 parallel `tsx` cold-starts at ~150 MB each)
     // the Node event loop can be starved long enough for a 60 s deadline to

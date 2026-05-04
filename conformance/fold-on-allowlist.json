@@ -24,12 +24,5 @@
     "  - The fold-OFF run still exercises the entry, so allowlisting here",
     "    does not lose coverage of the canonical golden output."
   ],
-  "skip": [
-    {
-      "fixture": "if-without-else-multi-temp",
-      "formats": [".runar.rb"],
-      "reason": "Java daemon produces a 2-byte-shorter script than the other 6 tiers under fold-ON for this specific source; one-shot Java CLI matches the others, so the divergence is in the daemon's request-sequence handling (FRESH_COUNTER / static optimizer state). Single-fixture and single-format runs all pass. Fold-OFF cross-tier parity is still enforced.",
-      "tracking": "Reproduce with `RUNAR_DISABLE_CONSTANT_FOLDING=0 npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format` (full suite). Bypass with `RUNAR_JAVA_DAEMON=0`. Fix is to make `compilers/java/src/main/java/runar/compiler/passes/AnfOptimize.java`'s `FRESH_COUNTER` request-scoped (or to reset it at daemon `serveRequest` entry)."
-    }
-  ]
+  "skip": []
 }

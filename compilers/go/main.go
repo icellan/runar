@@ -41,6 +41,7 @@ func main() {
 	hexOnly := flag.Bool("hex", false, "output only the script hex (no artifact JSON)")
 	asmOnly := flag.Bool("asm", false, "output only the script ASM (no artifact JSON)")
 	emitIR := flag.Bool("emit-ir", false, "output only the ANF IR JSON (requires --source)")
+	parseOnly := flag.Bool("parse-only", false, "stop after parse + validate; exits 0 with 'parser ok' marker (requires --source)")
 	disableConstFold := flag.Bool("disable-constant-folding", false, "disable ANF constant folding pass")
 	flag.Parse()
 
@@ -54,6 +55,32 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Phase 1: Compile from ANF IR JSON to Bitcoin Script (--ir).")
 		fmt.Fprintln(os.Stderr, "Phase 2: Compile from .runar.ts source to Bitcoin Script (--source).")
 		os.Exit(1)
+	}
+
+	// Handle --parse-only: read source, run parser + validator, print "parser ok"
+	// on success, exit non-zero with diagnostics on failure. Used by the
+	// `--parser-only` mode of conformance/runner/runner.ts to assert universal
+	// front-end coverage without invoking the (slower) emit pipeline.
+	if *parseOnly {
+		if *sourceFile == "" {
+			fmt.Fprintln(os.Stderr, "--parse-only requires --source")
+			os.Exit(1)
+		}
+		src, err := os.ReadFile(*sourceFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "read source: %v\n", err)
+			os.Exit(1)
+		}
+		// We import the frontend package here to keep the compile-time
+		// graph: the lower-level frontend package is already pulled in by
+		// compiler.CompileSourceToIR, so this incurs no extra binary size.
+		parseRes := compiler.ParseAndValidateOnly(src, *sourceFile)
+		if parseRes.Err != nil {
+			fmt.Fprintf(os.Stderr, "parse error: %s\n", parseRes.Err.Error())
+			os.Exit(1)
+		}
+		fmt.Println("parser ok")
+		return
 	}
 
 	// Handle --emit-ir: dump ANF IR JSON and exit

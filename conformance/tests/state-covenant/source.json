@@ -1,6 +1,6 @@
 {
-  "compilers": ["ts", "go", "rust", "python", "zig", "ruby"],
-  "compilersJustification": "Java Stack-IR pass for state-covenant is deferred — see HANDOFF. The Java frontend still parses the source via multi-format.test.ts.",
+  "compilers": ["go"],
+  "compilersJustification": "BabyBear (bbFieldMul) + SHA-256 Merkle (merkleRootSha256) are EVM/STARK proof-system primitives that are Go-only by project policy — see CLAUDE.md \"EVM/STARK proof-system primitives are Go-only by project policy\" and the project_go_only_crypto_modules memory. The TS/Rust/Python/Zig/Ruby tiers may carry partial ports for historical reasons but are NOT conformance targets for these families; only the Go tier is the canonical reference. Java is not exempt because of a deferred port — it is exempt because the entire family is Go-only. The non-Go frontends still parse the contract via the all-tier parser-only matrix so CompileCheck coverage is preserved.",
   "sources": {
     ".runar.ts": "../../../examples/ts/state-covenant/StateCovenant.runar.ts",
     ".runar.sol": "../../../examples/sol/state-covenant/StateCovenant.runar.sol",

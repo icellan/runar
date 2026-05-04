@@ -1033,6 +1033,405 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
 }
 
 // ---------------------------------------------------------------------------
+// Universal parser-only coverage
+// ---------------------------------------------------------------------------
+//
+// Runs `--parse-only` on every available compiler for every (fixture, format)
+// pair, ignoring the per-fixture `compilers` allowlist. The allowlist is for
+// Stack-IR / hex parity ONLY; the parser layer is universal — every tier MUST
+// accept every format for every fixture. See conformance/README.md ("Per-tier
+// universal parser coverage") and runConformanceTestForFormat above (which
+// honours the allowlist for the codegen layer).
+//
+// Each compiler exposes a `--parse-only` flag that runs parse + validate and
+// exits zero on success ("parser ok" on stdout). The Java compiler accepts a
+// `parseOnly: true` JSON-RPC request via the daemon (preferred) or the
+// `--parse-only` CLI flag in one-shot mode.
+//
+// Each per-compiler invoker returns a `ParseOnlyResult`. Failures are
+// tabulated by `runAllParserOnlyChecks` and surfaced as a coverage matrix.
+
+export interface ParseOnlyResult {
+  compiler: CompilerId;
+  success: boolean;
+  error?: string;
+  durationMs: number;
+}
+
+interface ParseOnlyDeps {
+  source: string;
+  sourceFile: string;
+}
+
+async function runTsParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const start = performance.now();
+  try {
+    // Invoke the in-process compiler with `parseOnly: true`. Reusing the same
+    // tsx loader / CLI process layout the runner already uses for `runTsCompiler`.
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+
+    const tsxLoader = resolveTsxLoader();
+    // Inline a tiny driver script that loads the compiler and runs parseOnly.
+    const driverInline =
+      `import { compile } from '${pathToFileURL(resolve(REPO_ROOT, 'packages/runar-compiler/src/index.ts')).href}';` +
+      `import { readFileSync } from 'fs';` +
+      `const src = readFileSync(${JSON.stringify(tmpFile)}, 'utf-8');` +
+      `const r = compile(src, { fileName: ${JSON.stringify(tmpFile)}, parseOnly: true });` +
+      `if (!r.success) { for (const d of r.diagnostics) { if (d.severity === 'error') process.stderr.write('parse error: ' + (d.message||'') + '\\n'); } process.exit(1); }` +
+      `process.stdout.write('parser ok\\n');`;
+    const driverFile = join(tmpDir, `driver-ts-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.mjs`);
+    writeFileSync(driverFile, driverInline, 'utf-8');
+    const result = await runCmd(
+      'node',
+      ['--import', tsxLoader, driverFile],
+      { timeoutMs: 90_000, cwd: REPO_ROOT },
+    );
+    const durationMs = performance.now() - start;
+    if (result.code !== 0) {
+      return {
+        compiler: 'ts',
+        success: false,
+        error: (result.stderr || result.stdout || '').slice(-2000) || `exit ${result.code}`,
+        durationMs,
+      };
+    }
+    return { compiler: 'ts', success: true, durationMs };
+  } catch (err) {
+    return {
+      compiler: 'ts',
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+      durationMs: performance.now() - start,
+    };
+  }
+}
+
+async function runGoParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const binary = findGoBinary();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  const start = performance.now();
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-go-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'go', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'go', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'go', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+async function runRustParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const binary = findRustBinary();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  const start = performance.now();
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-rust-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 60_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'rust', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'rust', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'rust', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+async function runPythonParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const binary = findPythonCompiler();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  const start = performance.now();
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-python-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'python', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'python', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'python', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+async function runZigParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const binary = findZigBinary();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  const start = performance.now();
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-zig-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'zig', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'zig', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'zig', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+async function runRubyParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const binary = findRubyBinary();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  const start = performance.now();
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-ruby-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'ruby', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'ruby', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'ruby', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+async function runJavaParseOnly({ source, sourceFile }: ParseOnlyDeps): Promise<ParseOnlyResult | undefined> {
+  const start = performance.now();
+  // Daemon-first: a single round-trip per (fixture, format), no JVM cold-start.
+  const daemon = getOrStartJavaDaemon();
+  if (daemon) {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    try {
+      writeFileSync(tmpFile, source, 'utf-8');
+      const resp = await daemon.compile(tmpFile, { parseOnly: true });
+      const durationMs = performance.now() - start;
+      if (!resp.ok) {
+        return { compiler: 'java', success: false, error: resp.error ?? 'Java daemon error', durationMs };
+      }
+      return { compiler: 'java', success: true, durationMs };
+    } catch (err) {
+      return { compiler: 'java', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+    }
+  }
+  // One-shot fallback (RUNAR_JAVA_DAEMON=0).
+  const binary = findJavaBinary();
+  if (!binary) return undefined;
+  const { cmd, args: bin_args } = splitCmd(binary);
+  try {
+    const tmpDir = join(__dirname, '..', '.tmp');
+    if (!existsSync(tmpDir)) mkdirSync(tmpDir, { recursive: true });
+    const tmpFile = join(tmpDir, `parseonly-java-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${basename(sourceFile)}`);
+    writeFileSync(tmpFile, source, 'utf-8');
+    const res = await runCmd(
+      cmd,
+      [...bin_args, '--source', tmpFile, '--parse-only'],
+      { timeoutMs: 60_000, cwd: JAVA_COMPILER_DIR },
+    );
+    const durationMs = performance.now() - start;
+    if (res.code !== 0) {
+      return { compiler: 'java', success: false, error: (res.stderr || res.stdout || '').slice(-2000) || `exit ${res.code}`, durationMs };
+    }
+    return { compiler: 'java', success: true, durationMs };
+  } catch (err) {
+    return { compiler: 'java', success: false, error: err instanceof Error ? err.message : String(err), durationMs: performance.now() - start };
+  }
+}
+
+export interface ParserCoverageEntry {
+  fixture: string;
+  format: string;
+  results: ParseOnlyResult[];
+}
+
+export interface ParserCoverageReport {
+  entries: ParserCoverageEntry[];
+  /** True if every (compiler, fixture, format) triple parsed cleanly. */
+  allOk: boolean;
+  /** All failures, flattened for easy printing. */
+  failures: Array<{ fixture: string; format: string; compiler: CompilerId; error: string }>;
+  /** Available compilers (the ones that returned a non-undefined ParseOnlyResult at least once). */
+  availableCompilers: CompilerId[];
+  /** Per-compiler aggregate counts. */
+  perCompiler: Record<string, { passed: number; failed: number; skipped: number }>;
+}
+
+/**
+ * Universal parser-coverage check: runs every available compiler's
+ * `--parse-only` mode against every declared (fixture, format) pair. The
+ * per-fixture `compilers` allowlist in source.json is INTENTIONALLY ignored
+ * here — that allowlist scopes Stack-IR / hex parity, not the frontend.
+ * Concurrency mirrors `runAllMultiFormatConformanceTests`.
+ */
+export async function runAllParserOnlyChecks(
+  testsDir: string,
+  options?: { filter?: string },
+): Promise<ParserCoverageReport> {
+  // CI safety net: fail loudly (once per process) if any compiler binary is
+  // missing while CI=true. Mirrors runConformanceTest above.
+  assertAllCompilersAvailableInCi();
+
+  const entries = readdirSync(testsDir, { withFileTypes: true });
+  let testDirs = entries
+    .filter((e) => e.isDirectory())
+    .map((e) => join(testsDir, e.name))
+    .sort();
+  if (options?.filter) {
+    const filterLower = options.filter.toLowerCase();
+    testDirs = testDirs.filter((d) => basename(d).toLowerCase().includes(filterLower));
+  }
+
+  const limit = makeLimiter(defaultConcurrency());
+  const allTasks: Promise<ParserCoverageEntry>[] = [];
+  for (const testDir of testDirs) {
+    const fixture = basename(testDir);
+    let formats: { ext: string; sourceFile: string }[] = [];
+    try {
+      formats = discoverFormats(testDir, fixture);
+    } catch {
+      // discoverFormats throws on parser-coverage gaps — let the regular
+      // multi-format runner surface those. Skip here to avoid duplicate noise.
+      continue;
+    }
+    for (const format of formats) {
+      const formatDef = INPUT_FORMATS.find(f => f.ext === format.ext);
+      if (!formatDef) continue;
+      const compilers = formatDef.compilers;
+      allTasks.push(limit(async () => {
+        const source = readFileSync(format.sourceFile, 'utf-8');
+        const deps: ParseOnlyDeps = { source, sourceFile: format.sourceFile };
+        // Run all 7 compilers in parallel for this (fixture, format) pair.
+        const results = await Promise.all(compilers.map(async (c) => {
+          switch (c) {
+            case 'ts':     return runTsParseOnly(deps);
+            case 'go':     return runGoParseOnly(deps);
+            case 'rust':   return runRustParseOnly(deps);
+            case 'python': return runPythonParseOnly(deps);
+            case 'zig':    return runZigParseOnly(deps);
+            case 'ruby':   return runRubyParseOnly(deps);
+            case 'java':   return runJavaParseOnly(deps);
+          }
+          return undefined;
+        }));
+        return {
+          fixture,
+          format: format.ext,
+          results: results.filter((r): r is ParseOnlyResult => r !== undefined),
+        };
+      }));
+    }
+  }
+  const coverage = await Promise.all(allTasks);
+
+  // Aggregate.
+  const failures: ParserCoverageReport['failures'] = [];
+  const availableSet = new Set<CompilerId>();
+  const perCompiler: Record<string, { passed: number; failed: number; skipped: number }> = {
+    ts: { passed: 0, failed: 0, skipped: 0 },
+    go: { passed: 0, failed: 0, skipped: 0 },
+    rust: { passed: 0, failed: 0, skipped: 0 },
+    python: { passed: 0, failed: 0, skipped: 0 },
+    zig: { passed: 0, failed: 0, skipped: 0 },
+    ruby: { passed: 0, failed: 0, skipped: 0 },
+    java: { passed: 0, failed: 0, skipped: 0 },
+  };
+  for (const entry of coverage) {
+    const seen = new Set<CompilerId>();
+    for (const r of entry.results) {
+      seen.add(r.compiler);
+      availableSet.add(r.compiler);
+      if (r.success) {
+        perCompiler[r.compiler]!.passed++;
+      } else {
+        perCompiler[r.compiler]!.failed++;
+        failures.push({ fixture: entry.fixture, format: entry.format, compiler: r.compiler, error: r.error ?? 'unknown error' });
+      }
+    }
+    // Anything supported-by-format but absent from results is "skipped"
+    // (binary not available locally).
+    const formatDef = INPUT_FORMATS.find(f => f.ext === entry.format);
+    if (formatDef) {
+      for (const c of formatDef.compilers) {
+        if (!seen.has(c)) perCompiler[c]!.skipped++;
+      }
+    }
+  }
+  return {
+    entries: coverage,
+    allOk: failures.length === 0,
+    failures,
+    availableCompilers: Array.from(availableSet),
+    perCompiler,
+  };
+}
+
+/** Pretty-print a parser-coverage report to stdout. */
+export function printParserCoverageReport(report: ParserCoverageReport): void {
+  const compilers: CompilerId[] = ['ts', 'go', 'rust', 'python', 'zig', 'ruby', 'java'];
+  console.log('');
+  console.log('Per-tier parser-only coverage (every compiler × every fixture × every declared format):');
+  console.log('');
+  const header = `  compiler  ${'pass'.padStart(6)}  ${'fail'.padStart(6)}  ${'skip'.padStart(6)}`;
+  console.log(header);
+  console.log('  ' + '-'.repeat(header.length - 2));
+  for (const c of compilers) {
+    const counts = report.perCompiler[c] ?? { passed: 0, failed: 0, skipped: 0 };
+    console.log(`  ${c.padEnd(8)}  ${String(counts.passed).padStart(6)}  ${String(counts.failed).padStart(6)}  ${String(counts.skipped).padStart(6)}`);
+  }
+  console.log('');
+  if (report.failures.length === 0) {
+    console.log('  All available tiers parsed every fixture × every declared format cleanly.');
+  } else {
+    console.log(`  ${report.failures.length} parser failure(s):`);
+    for (const f of report.failures) {
+      const oneLineError = (f.error || '').split('\n').slice(0, 3).join(' | ').slice(0, 400);
+      console.log(`    [${f.compiler}] ${f.fixture} ${f.format}: ${oneLineError}`);
+    }
+  }
+  console.log('');
+}
+
+// ---------------------------------------------------------------------------
 // CI strict-mode: fail loudly if any compiler binary is missing in CI.
 // ---------------------------------------------------------------------------
 //

@@ -19,7 +19,7 @@ import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, readdirSync, existsSync } from 'fs';
 import { spawn } from 'child_process';
-import { runAllConformanceTests, runAllMultiFormatConformanceTests, updateGoldenFiles, shutdownJavaDaemon } from './runner.js';
+import { runAllConformanceTests, runAllMultiFormatConformanceTests, runAllParserOnlyChecks, printParserCoverageReport, updateGoldenFiles, shutdownJavaDaemon } from './runner.js';
 import {
   generateReport,
   formatReportAsJSON,
@@ -41,6 +41,8 @@ interface CLIOptions {
   output?: string;
   updateGolden: boolean;
   multiFormat: boolean;
+  /** When true, run the universal `--parse-only` matrix and exit. */
+  parserOnly: boolean;
   prebuild: boolean;
   help: boolean;
 }
@@ -51,6 +53,7 @@ function parseArgs(argv: string[]): CLIOptions {
     format: 'console',
     updateGolden: false,
     multiFormat: false,
+    parserOnly: false,
     // Pre-build is OFF by default to keep the runner safe to drop into CI
     // jobs that ship prebuilt binaries via actions/download-artifact. Local
     // dev loops should pass --prebuild (or set RUNAR_PREBUILD=1) to ensure
@@ -79,6 +82,9 @@ function parseArgs(argv: string[]): CLIOptions {
         break;
       case '--multi-format':
         opts.multiFormat = true;
+        break;
+      case '--parser-only':
+        opts.parserOnly = true;
         break;
       case '--prebuild':
         opts.prebuild = true;
@@ -119,6 +125,13 @@ Options:
                         (overwrites expected-ir.json and expected-script.hex)
   --multi-format        Test all format variants (.ts, .sol, .move, .go, .rs)
                         instead of only .runar.ts
+  --parser-only         Run the universal parser-only coverage matrix:
+                        every available compiler runs --parse-only on every
+                        fixture × every declared format. The per-fixture
+                        \`compilers\` allowlist in source.json is IGNORED for
+                        this mode (it scopes Stack-IR / hex parity, not the
+                        frontend layer). Exits non-zero on any (compiler,
+                        fixture, format) parser failure.
   --prebuild            Pre-build all native compiler binaries (Go, Rust, Zig,
                         Java) before running the suite. Default: off (so CI
                         jobs that download prebuilt artifacts aren't slowed
@@ -159,6 +172,27 @@ async function main(): Promise<void> {
 
   if (opts.prebuild) {
     await prebuildAllCompilers();
+  }
+
+  // Handle --parser-only mode (universal frontend coverage matrix).
+  // Every available compiler runs `--parse-only` on every fixture × every
+  // declared format. The per-fixture `compilers` allowlist in source.json
+  // is intentionally ignored — it scopes Stack-IR / hex parity, not the
+  // frontend. Exits non-zero on any failure.
+  if (opts.parserOnly) {
+    console.log(`Running universal parser-only coverage check from: ${opts.testsDir}`);
+    if (opts.filter) console.log(`Filter: ${opts.filter}`);
+    console.log('');
+    const startedAt = Date.now();
+    const report = await runAllParserOnlyChecks(opts.testsDir, { filter: opts.filter });
+    const elapsedMs = Date.now() - startedAt;
+    console.log(`\nCompleted ${report.entries.length} (fixture × format) parse checks in ${(elapsedMs / 1000).toFixed(1)}s.`);
+    printParserCoverageReport(report);
+    await shutdownJavaDaemon();
+    if (!report.allOk) {
+      process.exit(1);
+    }
+    return;
   }
 
   // Handle --update-golden mode

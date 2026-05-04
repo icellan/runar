@@ -76,6 +76,10 @@ module RunarCompiler
           options[:emit_ir] = true
         end
 
+        opts.on("--parse-only", "Stop after parse + validate; print 'parser ok' on success (requires --source)") do
+          options[:parse_only] = true
+        end
+
         opts.on("--disable-constant-folding", "Disable the ANF constant folding pass") do
           options[:disable_constant_folding] = true
         end
@@ -95,6 +99,28 @@ module RunarCompiler
       end
 
       disable_cf = options[:disable_constant_folding] || false
+
+      # Handle --parse-only: read source, run parse + validate, print
+      # "parser ok" on success or diagnostics + non-zero exit on failure.
+      # Used by the conformance runner's --parser-only universal-frontend
+      # coverage check.
+      if options[:parse_only]
+        unless options[:source]
+          $stderr.puts "--parse-only requires --source"
+          exit 1
+        end
+        begin
+          RunarCompiler.parse_and_validate_only(options[:source])
+        rescue RunarCompiler::CompilationError => e
+          $stderr.puts "parse error: #{e.message}"
+          exit 1
+        rescue StandardError => e
+          $stderr.puts "parse error: #{e.message}"
+          exit 1
+        end
+        puts "parser ok"
+        return
+      end
 
       # Handle --emit-ir: dump ANF IR JSON and exit
       if options[:emit_ir]

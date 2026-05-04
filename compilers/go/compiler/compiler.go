@@ -403,6 +403,38 @@ func CompileFromSource(sourcePath string, opts ...CompileOptions) (*Artifact, er
 	return CompileFromProgram(program, opts...)
 }
 
+// ParseAndValidateOnlyResult is the result of `ParseAndValidateOnly`. `Err`
+// is non-nil iff the parser or validator emitted any error-severity
+// diagnostics.
+type ParseAndValidateOnlyResult struct {
+	Err error
+}
+
+// ParseAndValidateOnly runs Pass 1 (parse, dispatched by file extension) and
+// Pass 2 (validate) and returns. Used by the conformance runner's
+// `--parser-only` mode to assert universal frontend coverage without paying
+// for typecheck / ANF / stack / emit.
+func ParseAndValidateOnly(source []byte, sourcePath string) ParseAndValidateOnlyResult {
+	parseResult := frontend.ParseSource(source, sourcePath)
+	if len(parseResult.Errors) > 0 {
+		return ParseAndValidateOnlyResult{
+			Err: fmt.Errorf("parse errors:\n  %s", strings.Join(parseResult.ErrorStrings(), "\n  ")),
+		}
+	}
+	if parseResult.Contract == nil {
+		return ParseAndValidateOnlyResult{
+			Err: fmt.Errorf("no contract found in %s", sourcePath),
+		}
+	}
+	validResult := frontend.Validate(parseResult.Contract)
+	if len(validResult.Errors) > 0 {
+		return ParseAndValidateOnlyResult{
+			Err: fmt.Errorf("validation errors:\n  %s", strings.Join(validResult.ErrorStrings(), "\n  ")),
+		}
+	}
+	return ParseAndValidateOnlyResult{Err: nil}
+}
+
 // diagStrings renders a diagnostic slice as a list of error messages for
 // `fmt.Errorf` consumption.
 func diagStrings(diags []frontend.Diagnostic) []string {

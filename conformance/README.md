@@ -110,6 +110,16 @@ Every `source.json` carrying a `compilers` allowlist must ALSO carry a non-empty
 
 The parser layer is tier-agnostic: the conformance runner's `discoverFormats()` asserts that every fixture ships all nine `*.runar.{ts,sol,move,go,rs,py,zig,rb,java}` source files (referenced from `source.json`'s `sources` map) regardless of the `compilers` allowlist. A fixture may opt OUT of a single format at the parser layer by listing it in `source.json`'s `parserSkip` array along with a non-empty `parserSkipReason` string — that escape hatch exists for genuinely blocked ports (e.g. a Move-syntax limitation for a complex contract). Lazy multi-format opt-outs are not allowed; if you find yourself reaching for `parserSkip` for more than one format, port the contract instead.
 
+#### Per-tier universal parser coverage
+
+The runner's `--parser-only` mode (CI step "Run all-tier parser-only coverage") **runs every available compiler's `--parse-only` entry point against every fixture × every declared format**, ignoring the per-fixture `compilers` allowlist. The allowlist scopes Stack-IR / hex parity ONLY — the parser layer is universal, so all 7 tiers (TypeScript, Go, Rust, Python, Zig, Ruby, Java) MUST accept all 9 formats for every fixture. Each compiler exposes `--parse-only` (Java additionally accepts `parseOnly: true` in its JSON-RPC daemon) which runs Pass 1 (parse) + Pass 2 (validate) and exits zero with `parser ok` on success or non-zero with diagnostics on failure. A non-zero exit fails the CI job.
+
+Run locally:
+
+```bash
+cd conformance && npx tsx runner/index.ts --parser-only
+```
+
 #### Audited allowlists
 
 The complete set of fixtures with a `compilers` allowlist is enumerated and pinned by `runner/__tests__/allowlist-audit.test.ts`. That test fails if a new allowlist appears (or an existing one drifts) without being approved here, so the set cannot silently expand. Adding a new allowlisted fixture requires **both**:
@@ -127,16 +137,13 @@ These fixtures exercise the Baby Bear / KoalaBear / Poseidon2 / BN254-witness / 
 | `babybear-ext4` | `["go"]` | BabyBear Ext4 extension-field operations; Stack-IR codegen ships in Go only. |
 | `merkle-proof` | `["go"]` | SHA-256 Merkle-root verification using the Go-only Merkle codegen helpers. |
 
-##### Java-deferred Stack-IR (parser still exercised)
+##### EVM/STARK proof-system primitives (Go-only by project policy)
 
-These contracts surface-parse cleanly through every Rúnar frontend (so the Java SDK's `CompileCheck` smoke-test still covers them), but their method bodies depend on the Go-only crypto family above. Until the Java compiler grows Stack-IR codegen for the same primitives, the IR + hex golden checks intentionally exclude the Java tier.
+Hybrid contracts whose method bodies call EVM/STARK primitives also fall under the Go-only scope above (see CLAUDE.md "EVM/STARK proof-system primitives are Go-only by project policy"). Their parsers are still exercised by every tier via the all-tier `--parser-only` matrix, but the IR + hex golden checks run only against the Go codegen.
 
 | Fixture | Allowlist | Rationale |
 |---|---|---|
-| `state-covenant` | `["ts", "go", "rust", "python", "zig", "ruby"]` | Stateful covenant whose body uses Baby Bear primitives; Java Stack-IR codegen pending. |
-| `stateful-bytestring` | `["ts", "go", "rust", "python", "zig", "ruby"]` | Stateful ByteString contract using SHA-256 Merkle-root primitives; Java Stack-IR codegen pending. |
-
-Once a missing primitive lands in another tier, drop the corresponding entry from both the fixture's `source.json` allowlist (or remove the field entirely) and `APPROVED_ALLOWLISTS`, then update the rows above so the new tier starts running against the existing goldens.
+| `state-covenant` | `["go"]` | Uses `bbFieldMul` (BabyBear field) and `merkleRootSha256` (4-deep Merkle proof). Both are EVM/STARK primitives — Go is the canonical reference; partial ports in TS/Rust/Python/Zig/Ruby exist for historical reasons but are not conformance targets, and Java is not exempt due to a deferred port — it is exempt because the entire family is Go-only. |
 
 ### Fold-ON allowlist (`conformance/fold-on-allowlist.json`)
 

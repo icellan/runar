@@ -37,6 +37,12 @@ struct Args {
     #[arg(long)]
     emit_ir: bool,
 
+    /// Stop after parse + validate; print "parser ok" and exit 0 on success
+    /// (requires --source). Used by the conformance runner's --parser-only
+    /// universal-frontend coverage check.
+    #[arg(long)]
+    parse_only: bool,
+
     /// Disable the ANF constant folding pass
     #[arg(long)]
     disable_constant_folding: bool,
@@ -63,6 +69,39 @@ fn main() {
         eprintln!("  --asm            Output only script ASM");
         eprintln!("  --emit-ir        Output only ANF IR JSON (requires --source)");
         process::exit(1);
+    }
+
+    // Handle --parse-only: read source, run parse + validate, emit
+    // "parser ok" on success or diagnostics + non-zero exit on failure.
+    // Used by the universal parser-coverage assertion.
+    if args.parse_only {
+        let source_path = match &args.source {
+            Some(p) => p,
+            None => {
+                eprintln!("--parse-only requires --source");
+                process::exit(1);
+            }
+        };
+        let source = match std::fs::read_to_string(source_path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("read source: {}", e);
+                process::exit(1);
+            }
+        };
+        let file_name_str = source_path.to_string_lossy();
+        let (errors, warnings) = runar_compiler_rust::frontend_validate(&source, Some(&file_name_str));
+        for w in &warnings {
+            eprintln!("warning: {}", w);
+        }
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("parse error: {}", e);
+            }
+            process::exit(1);
+        }
+        println!("parser ok");
+        return;
     }
 
     // Handle --emit-ir: dump ANF IR JSON and exit
