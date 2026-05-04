@@ -1,0 +1,114 @@
+# Workflow safety note (re: workflow injection):
+#   * No GitHub event inputs (issue.title, pr.body, head_ref, etc.)
+#     are interpolated into shell commands anywhere in this file.
+#   * The only ${{ }} interpolation in shell context is BYTE_EXACT,
+#     which is sourced from steps.full-run.outputs — produced by the
+#     pipelineGolden binary in this repo, never by user-controlled
+#     GitHub data. It is also routed through env: per the security
+#     guide and quoted on use ("$BYTE_EXACT").
+name: Runar Verification (full mode — cryptoAxiomPending bucket)
+
+# Runs the Lean PipelineGolden test with `RUNAR_VERIFICATION_FULL=1`,
+# which also exercises the 11 cryptoAxiomPending fixtures
+# (EC × 5, P-256 × 2, P-384 × 2, SLH-DSA × 2). These are skipped by
+# default in the standard `runar-verification` job because the multi-MB
+# script outputs take >1h to evaluate (per HANDOFF section 25; the
+# bottleneck is `compileHex` evaluating ~10^5+ Stack ops × pure
+# function calls in Lean's runtime, not interpreter overhead).
+#
+# Trigger: workflow_dispatch only.
+#
+# Empirical measurement (2026-05-04 on dev hardware, M-series mac):
+# even the smallest cryptoAxiomPending fixture (post-quantum-slhdsa,
+# 377KB hex) had not produced any progress output after 25 minutes
+# of CPU time. With 11 fixtures in the bucket and the per-fixture
+# cost of that magnitude, a full run does NOT fit in the 6h GitHub
+# Actions timeout when run sequentially. The instrumented binary
+# now streams per-fixture timing as each completes — useful for
+# triaging which fixtures are tractable, even if the run is
+# truncated by timeout.
+#
+# Schedule was dropped on initial setup because a routinely-failing
+# scheduled workflow trains people to ignore CI failures. Re-add a
+# schedule once at least one cryptoAxiomPending fixture completes
+# in <30 min on the GitHub runner.
+#
+# This workflow does NOT gate PR merges. The standard runar-verification
+# job in ci.yml is the per-PR gate (33/49 byte-exact baseline).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runar-verification-full:
+    name: Runar Verification (full, cryptoAxiomPending included)
+    runs-on: ubuntu-latest
+    # 6h cap. RUNAR_VERIFICATION_FULL=1 has been measured at >1h on
+    # native exes; allow plenty of headroom for the multi-MB SLH-DSA
+    # and P-384 fixtures.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan
+        run: |
+          curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | bash -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Cache elan and Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            runar-verification/.lake/build
+          key: runar-verification-full-${{ runner.os }}-${{ hashFiles('runar-verification/lean-toolchain', 'runar-verification/lakefile.lean', 'runar-verification/lake-manifest.json') }}
+          restore-keys: |
+            runar-verification-full-${{ runner.os }}-
+            runar-verification-${{ runner.os }}-
+      - name: Build (lean lib + pipelineGolden exe)
+        working-directory: runar-verification
+        run: lake build && lake build pipelineGolden
+      - name: Run PipelineGolden in full mode (RUNAR_VERIFICATION_FULL=1)
+        id: full-run
+        working-directory: runar-verification
+        env:
+          RUNAR_VERIFICATION_FULL: '1'
+        # The instrumented binary streams per-fixture timing to stderr
+        # via `IO.eprintln` + flush, so workflow logs show progress
+        # during the multi-hour run.
+        run: |
+          set -o pipefail
+          ./.lake/build/bin/pipelineGolden 2>&1 | tee /tmp/full.out
+          line=$(grep -E '^PIPELINE GOLDEN:' /tmp/full.out | tail -n1)
+          count=${line#PIPELINE GOLDEN: }
+          echo "byte_exact=${count}" >> "$GITHUB_OUTPUT"
+      - name: Emit full-mode summary
+        if: always()
+        env:
+          # Internal output from previous step — produced by tools in
+          # this repo, never by user-controlled GitHub event data.
+          BYTE_EXACT: ${{ steps.full-run.outputs.byte_exact }}
+        run: |
+          {
+            printf '## Rúnar Lean 4 Verification — full mode\n\n'
+            printf '| Check | Result |\n'
+            printf '|-------|--------|\n'
+            if [ -n "${BYTE_EXACT:-}" ]; then
+              printf '| Byte-exact (incl. cryptoAxiomPending) | %s |\n' "$BYTE_EXACT"
+            else
+              printf '| Byte-exact (incl. cryptoAxiomPending) | (binary did not complete) |\n'
+            fi
+            printf '\n'
+            printf 'Standard mode (per-PR gate) sits at 33/49 byte-exact.\n'
+            printf 'Any uplift here means promotable cryptoAxiomPending fixtures —\n'
+            printf 'see runar-verification/tests/PipelineGolden.lean and HANDOFF.md.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload full-mode log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipelineGolden-full-log
+          path: /tmp/full.out
+          if-no-files-found: warn
+          retention-days: 30
