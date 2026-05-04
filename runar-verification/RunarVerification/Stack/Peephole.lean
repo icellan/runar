@@ -1115,6 +1115,13 @@ theorem runOps_cons_pick_eq (d : Nat) (rest : List StackOp) (s : StackState) :
       | .ok s'   => runOps rest s' := by
   apply runOps.eq_3; intro thn els h; exact StackOp.noConfusion h
 
+theorem runOps_cons_pickStruct_eq (d : Nat) (rest : List StackOp) (s : StackState) :
+    runOps (StackOp.pickStruct d :: rest) s
+    = match stepNonIf (StackOp.pickStruct d) s with
+      | .error e => .error e
+      | .ok s'   => runOps rest s' := by
+  apply runOps.eq_3; intro thn els h; exact StackOp.noConfusion h
+
 theorem runOps_cons_placeholder_eq (i : Nat) (n : String) (rest : List StackOp) (s : StackState) :
     runOps (StackOp.placeholder i n :: rest) s
     = match stepNonIf (StackOp.placeholder i n) s with
@@ -1276,6 +1283,14 @@ private theorem runOps_cons_pick_cong (d : Nat) (a b : List StackOp) (s : StackS
     runOps (.pick d :: a) s = runOps (.pick d :: b) s := by
   rw [runOps_cons_pick_eq, runOps_cons_pick_eq]
   cases hStep : stepNonIf (.pick d) s with
+  | error e => rfl
+  | ok s'   => exact h s'
+
+private theorem runOps_cons_pickStruct_cong (d : Nat) (a b : List StackOp) (s : StackState)
+    (h : ∀ s', runOps a s' = runOps b s') :
+    runOps (.pickStruct d :: a) s = runOps (.pickStruct d :: b) s := by
+  rw [runOps_cons_pickStruct_eq, runOps_cons_pickStruct_eq]
+  cases hStep : stepNonIf (.pickStruct d) s with
   | error e => rfl
   | ok s'   => exact h s'
 
@@ -1804,6 +1819,14 @@ private theorem runOps_cons_pick_cong_typed (d : Nat) (a b : List StackOp) (s : 
   | error e => rfl
   | ok s'   => exact h s' hStep
 
+private theorem runOps_cons_pickStruct_cong_typed (d : Nat) (a b : List StackOp) (s : StackState)
+    (h : ∀ s', stepNonIf (.pickStruct d) s = .ok s' → runOps a s' = runOps b s') :
+    runOps (.pickStruct d :: a) s = runOps (.pickStruct d :: b) s := by
+  rw [runOps_cons_pickStruct_eq, runOps_cons_pickStruct_eq]
+  cases hStep : stepNonIf (.pickStruct d) s with
+  | error e => rfl
+  | ok s'   => exact h s' hStep
+
 private theorem runOps_cons_push_cong_typed (v : PushVal)
     (a b : List StackOp) (s : StackState)
     (h : ∀ s', stepNonIf (.push v) s = .ok s' → runOps a s' = runOps b s') :
@@ -2101,6 +2124,9 @@ theorem doubleNot_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleNot rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleNot rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyDoubleNot_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -2172,6 +2198,7 @@ theorem dropAfterPush_pass_sound :
           | .tuck :: _ => rfl
           | .roll _ :: _ => rfl
           | .pick _ :: _ => rfl
+          | .pickStruct _ :: _ => rfl
           | .opcode _ :: _ => rfl
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
@@ -2205,6 +2232,9 @@ theorem dropAfterPush_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDropAfterPush rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong d _ _ s (fun s' => ih hRest' s')
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDropAfterPush rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong d _ _ s (fun s' => ih hRest' s')
     | .opcode code =>
         show runOps (.opcode code :: applyDropAfterPush rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong code _ _ s (fun s' => ih hRest' s')
@@ -2327,6 +2357,9 @@ theorem doubleNegate_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleNegate rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleNegate rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyDoubleNegate_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -2453,6 +2486,9 @@ theorem addZero_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyAddZero rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyAddZero rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyAddZero rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -2564,6 +2600,9 @@ theorem subZero_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applySubZero rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applySubZero rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applySubZero rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -2707,6 +2746,9 @@ theorem oneAdd_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyOneAdd rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyOneAdd rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyOneAdd rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -2932,6 +2974,9 @@ theorem doubleSha256_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleSha256 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleSha256 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyDoubleSha256_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -3026,6 +3071,9 @@ theorem dupDrop_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDupDrop rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDupDrop rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyDupDrop rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -3127,6 +3175,9 @@ theorem doubleSwap_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleSwap rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleSwap rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyDoubleSwap rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -3251,6 +3302,9 @@ theorem numEqualVerifyFuse_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyNumEqualVerifyFuse rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyNumEqualVerifyFuse rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyNumEqualVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -3494,6 +3548,9 @@ theorem checkSigVerifyFuse_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyCheckSigVerifyFuse rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyCheckSigVerifyFuse rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyCheckSigVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -3674,6 +3731,9 @@ theorem equalVerifyFuse_pass_sound_int :
     | .pick d   =>
         show runOps (.pick d :: applyEqualVerifyFuse rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyEqualVerifyFuse rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyEqualVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -3741,6 +3801,7 @@ theorem applyDropAfterPush_preserves_noIfOp :
           | .tuck :: _ => rfl
           | .roll _ :: _ => rfl
           | .pick _ :: _ => rfl
+          | .pickStruct _ :: _ => rfl
           | .opcode _ :: _ => rfl
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
@@ -3754,6 +3815,7 @@ theorem applyDropAfterPush_preserves_noIfOp :
       | .tuck     => rfl
       | .roll _   => rfl
       | .pick _   => rfl
+      | .pickStruct _ => rfl
       | .opcode _ => rfl
       | .placeholder _ _ => rfl
       | .pushCodesepIndex => rfl
@@ -4048,6 +4110,7 @@ theorem applyDropAfterPush_preserves_wellTypedRun :
           | .tuck :: _ => rfl
           | .roll _ :: _ => rfl
           | .pick _ :: _ => rfl
+          | .pickStruct _ :: _ => rfl
           | .opcode _ :: _ => rfl
           | .ifOp _ _ :: _ => rfl
           | .placeholder _ _ :: _ => rfl
@@ -4061,6 +4124,7 @@ theorem applyDropAfterPush_preserves_wellTypedRun :
       | .tuck     => rfl
       | .roll _   => rfl
       | .pick _   => rfl
+      | .pickStruct _ => rfl
       | .opcode _ => rfl
       | .placeholder _ _ => rfl
       | .pushCodesepIndex => rfl
@@ -5293,6 +5357,9 @@ theorem equalVerifyFuse_pass_sound_bytes :
     | .pick d   =>
         show runOps (.pick d :: applyEqualVerifyFuse rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyEqualVerifyFuse rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyEqualVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -5503,6 +5570,9 @@ theorem equalVerifyFuse_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyEqualVerifyFuse rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyEqualVerifyFuse rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyEqualVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -5679,6 +5749,9 @@ theorem oneSub_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyOneSub rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyOneSub rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyOneSub rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -5843,6 +5916,9 @@ theorem doubleOver_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleOver rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleOver rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyDoubleOver rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6010,6 +6086,9 @@ theorem doubleDrop_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyDoubleDrop rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyDoubleDrop rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyDoubleDrop rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6193,6 +6272,9 @@ theorem zeroNumEqual_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyZeroNumEqual rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyZeroNumEqual rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyZeroNumEqual rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6341,6 +6423,9 @@ theorem pushPushAdd_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyPushPushAdd rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyPushPushAdd rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyPushPushAdd rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6479,6 +6564,9 @@ theorem pushPushSub_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyPushPushSub rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyPushPushSub rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyPushPushSub rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6630,6 +6718,9 @@ theorem pushPushMul_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyPushPushMul rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyPushPushMul rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyPushPushMul rest') s = runOps (.opcode code :: rest') s
         exact runOps_cons_opcode_cong_typed code _ _ s ihTyped
@@ -6891,6 +6982,10 @@ theorem checkMultiSigVerifyFuse_pass_sound :
         show runOps (.pick d :: applyCheckMultiSigVerifyFuse rest') s
              = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyCheckMultiSigVerifyFuse rest') s
+             = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         rw [applyCheckMultiSigVerifyFuse_cons_no_match (.opcode code) rest'
               (fun rt hOp hRest => h_no_match rt hOp hRest)]
@@ -7110,6 +7205,9 @@ theorem zeroRoll0_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyZeroRoll0 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyZeroRoll0 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyZeroRoll0 rest') s
              = runOps (.opcode code :: rest') s
@@ -7293,6 +7391,9 @@ theorem oneRoll1_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyOneRoll1 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyOneRoll1 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyOneRoll1 rest') s
              = runOps (.opcode code :: rest') s
@@ -7469,6 +7570,9 @@ theorem twoRoll2_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyTwoRoll2 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyTwoRoll2 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyTwoRoll2 rest') s
              = runOps (.opcode code :: rest') s
@@ -7640,6 +7744,9 @@ theorem zeroPick0_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyZeroPick0 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyZeroPick0 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyZeroPick0 rest') s
              = runOps (.opcode code :: rest') s
@@ -7813,6 +7920,9 @@ theorem onePick1_pass_sound :
     | .pick d   =>
         show runOps (.pick d :: applyOnePick1 rest') s = runOps (.pick d :: rest') s
         exact runOps_cons_pick_cong_typed d _ _ s ihTyped
+    | .pickStruct d =>
+        show runOps (.pickStruct d :: applyOnePick1 rest') s = runOps (.pickStruct d :: rest') s
+        exact runOps_cons_pickStruct_cong_typed d _ _ s ihTyped
     | .opcode code =>
         show runOps (.opcode code :: applyOnePick1 rest') s
              = runOps (.opcode code :: rest') s
@@ -9278,6 +9388,12 @@ private theorem preprocessOpListReversedAux_noIf
         unfold preprocessOpListReversedAux
         unfold preprocessOp
         rw [ih (.pick d :: acc) hRest]
+        rfl
+    | pickStruct d =>
+        have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf
+        unfold preprocessOpListReversedAux
+        unfold preprocessOp
+        rw [ih (.pickStruct d :: acc) hRest]
         rfl
     | opcode code =>
         have hRest : noIfOp rest := by simpa [noIfOp] using hNoIf

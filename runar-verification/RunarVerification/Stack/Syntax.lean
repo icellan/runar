@@ -56,6 +56,7 @@ strings in `StackOp` from `stack-ir.ts`:
 | `swap`              | `'swap'`              |
 | `roll`              | `'roll'`              |
 | `pick`              | `'pick'`              |
+| `pickStruct`        | (Lean-only; same bytes as `pick`) |
 | `drop`              | `'drop'`              |
 | `nip`               | `'nip'`               |
 | `over`              | `'over'`              |
@@ -72,6 +73,22 @@ inductive StackOp where
   | swap : StackOp
   | roll (depth : Nat) : StackOp
   | pick (depth : Nat) : StackOp
+  /--
+  Structural pick (no-pop). Same emitted bytes as `pick d`
+  (`[push d, OP_PICK]`), but the runtime semantics are no-pop:
+  copy the value at structural depth `d` to the top of the stack
+  without first consuming a runtime depth value.
+
+  Used by `Stack.Lower.loadRef` and crypto codegen modules where
+  the lowering does *not* push the depth as a separate stack op
+  before the pick. The byte-level encoding remains identical to
+  `.pick d` because `OP_PICK` itself reads the depth from a
+  bytecode-level push that `Script.Emit` synthesises.
+
+  `pick d` retains its pop semantics so existing peephole
+  `_pass_sound` proofs (Phase 3z-B refactor) are unaffected.
+  -/
+  | pickStruct (depth : Nat) : StackOp
   | drop : StackOp
   | nip : StackOp
   | over : StackOp

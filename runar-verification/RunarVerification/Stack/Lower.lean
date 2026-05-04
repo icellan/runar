@@ -356,13 +356,15 @@ def bringToTop (sm : StackMap) (name : String) (consume : Bool) :
       if consume then
         ([.rot], (sm.removeAtDepth 2).push name)
       else
-        -- `.pick 2` already encodes as `[push 2, OP_PICK]` in `Emit.lean`.
-        ([.pick 2], sm.push name)
+        -- `.pickStruct 2` encodes byte-identically to `.pick 2` (`[push 2, OP_PICK]`)
+        -- in `Emit.lean`, but has no-pop runtime semantics matching the
+        -- copy-only `bringToTop` lowering (no preceding push of depth).
+        ([.pickStruct 2], sm.push name)
   | some d =>
       if consume then
         ([.roll d], (sm.removeAtDepth d).push name)
       else
-        ([.pick d], sm.push name)
+        ([.pickStruct d], sm.push name)
 
 /-- Pop `n` entries off the top of the stack map. -/
 def StackMap.popN : StackMap → Nat → StackMap
@@ -608,7 +610,7 @@ def loadRef (sm : StackMap) (name : String) : List StackOp :=
   match sm.depth? name with
   | some 0 => [.dup]
   | some 1 => [.over]
-  | some d => [.pick d]
+  | some d => [.pickStruct d]   -- no-pop pick; emits `[push d, OP_PICK]` bytes
   | none   => [.opcode s!"OP_RUNAR_UNRESOLVED_{name}"]
 
 def emitConst : ConstValue → List StackOp
@@ -1866,12 +1868,15 @@ The cast `n.toUInt32` truncates to 32 bits (matching JS bitwise ops). -/
   let b3 : UInt8 := ((n >>> 24) &&& 0xff).toUInt8
   .push (.bytes (ByteArray.mk #[b0, b1, b2, b3]))
 
-/-- Emit `pick(d)` per TS Emitter: 0 → dup, 1 → over, else `pick d`. -/
+/-- Emit `pick(d)` per TS Emitter: 0 → dup, 1 → over, else `pickStruct d`.
+The TS reference does NOT push a separate depth before its `pick` opcode
+at the StackOp layer (the depth becomes a byte-level push inside `Emit`),
+so we use `pickStruct` (no-pop) for byte parity. -/
 @[inline] private def shaPick (d : Nat) : List StackOp :=
   match d with
   | 0     => [.dup]
   | 1     => [.over]
-  | n + 2 => [.pick (n + 2)]
+  | n + 2 => [.pickStruct (n + 2)]
 
 /-- Emit `roll(d)` per TS Emitter: 0 → [], 1 → swap, 2 → rot, else `roll d`. -/
 @[inline] private def shaRoll (d : Nat) : List StackOp :=

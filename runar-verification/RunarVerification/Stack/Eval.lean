@@ -169,6 +169,17 @@ def applyPick (s : StackState) (d : Nat) : EvalResult StackState :=
       else
         .ok (s'.push s'.stack[d]!)
 
+/-- `pickStruct d`: structural pick (no-pop). Copies the element at
+structural depth `d` to the top without popping a runtime depth first.
+Matches the semantics of `Stack.Lower.loadRef`'s `[.pickStruct d]`
+emission for d≥2 — the lowering does not push a separate depth value;
+`Script.Emit` synthesises the depth push at the byte level. -/
+def applyPickStruct (s : StackState) (d : Nat) : EvalResult StackState :=
+  if d ≥ s.stack.length then
+    .error (.unsupported s!"pickStruct: depth {d} ≥ stack size {s.stack.length}")
+  else
+    .ok (s.push s.stack[d]!)
+
 /-! ## Arithmetic on top-of-stack -/
 
 def liftIntBin (s : StackState) (f : Int → Int → Value) : EvalResult StackState :=
@@ -506,6 +517,7 @@ def stepNonIf (op : StackOp) (s : StackState) : EvalResult StackState :=
   | .swap   => applySwap s
   | .roll d => applyRoll s d
   | .pick d => applyPick s d
+  | .pickStruct d => applyPickStruct s d
   | .drop   => applyDrop s
   | .nip    => applyNip s
   | .over   => applyOver s
