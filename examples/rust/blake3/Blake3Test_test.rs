@@ -3,24 +3,34 @@ mod contract;
 
 use contract::*;
 
-fn new_blake3_test() -> Blake3Test {
-    // Mock BLAKE3 functions return 32 zero bytes, so set expected to match.
-    Blake3Test {
-        expected: vec![0u8; 32],
-    }
+// Cross-language reference vectors for the Rúnar BLAKE3 single-block
+// compression with hardcoded blockLen=64, counter=0, flags=11. Same values
+// pinned in the seven runtime crates.
+const EXPECTED_COMPRESS_ZERO_CV_ZERO_BLOCK: &str =
+    "443e523c2ed96088ceadcfefa47318bdd02bb2c26b27b7ac58ffe578f243bdfc";
+const EXPECTED_HASH_ZERO_32: &str =
+    "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86";
+
+fn hex_decode(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 #[test]
 fn test_verify_compress() {
     let chaining_value = vec![0u8; 32];
     let block = vec![0u8; 64];
-    new_blake3_test().verify_compress(&chaining_value, &block);
+    let c = Blake3Test { expected: hex_decode(EXPECTED_COMPRESS_ZERO_CV_ZERO_BLOCK) };
+    c.verify_compress(&chaining_value, &block);
 }
 
 #[test]
 fn test_verify_hash() {
     let message = vec![0u8; 32];
-    new_blake3_test().verify_hash(&message);
+    let c = Blake3Test { expected: hex_decode(EXPECTED_HASH_ZERO_32) };
+    c.verify_hash(&message);
 }
 
 #[test]

@@ -230,22 +230,144 @@ pub fn ripemd160(data: &[u8]) -> Ripemd160 {
 }
 
 // ---------------------------------------------------------------------------
-// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// BLAKE3 single-block compression (real implementation)
 // ---------------------------------------------------------------------------
+//
+// Matches the Rúnar codegen which hardcodes blockLen=64, counter=0,
+// flags=11 (CHUNK_START | CHUNK_END | ROOT). All seven runtimes (TS, Go,
+// Rust, Python, Zig, Ruby, Java) MUST produce byte-identical output for the
+// same inputs — the cross-language test vectors are pinned in
+// `packages/runar-py/tests/test_blake3.py` and mirrored in this crate's
+// unit tests below.
+//
+// This is *not* a generic BLAKE3 hash of an arbitrary-length message: the
+// emitted Bitcoin Script can only express a single compression invocation,
+// so the off-chain runtime intentionally exposes the same restricted
+// primitive. For message sizes ≤ 64 bytes `blake3_hash` applies zero-padding
+// before calling the compression function with the IV as chaining value.
 
-/// Mock BLAKE3 single-block compression.
-/// In compiled Bitcoin Script this expands to ~10,000 opcodes.
-/// The mock returns 32 zero bytes for business-logic testing.
-pub fn blake3_compress(_chaining_value: &[u8], _block: &[u8]) -> ByteString {
-    vec![0u8; 32]
+/// BLAKE3 initialization vector (8 u32 words, big-endian when serialized).
+const BLAKE3_IV_WORDS: [u32; 8] = [
+    0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
+    0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
+];
+
+/// BLAKE3 message word permutation between rounds.
+const BLAKE3_MSG_PERM: [usize; 16] = [2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8];
+
+#[inline]
+fn blake3_rotr32(x: u32, n: u32) -> u32 {
+    (x >> n) | (x << (32 - n))
 }
 
-/// Mock BLAKE3 hash for messages up to 64 bytes.
-/// In compiled Bitcoin Script this uses the IV as the chaining value and
-/// applies zero-padding before calling the compression function.
-/// The mock returns 32 zero bytes for business-logic testing.
-pub fn blake3_hash(_message: &[u8]) -> ByteString {
-    vec![0u8; 32]
+#[inline]
+fn blake3_g(s: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize, mx: u32, my: u32) {
+    s[a] = s[a].wrapping_add(s[b]).wrapping_add(mx);
+    s[d] = blake3_rotr32(s[d] ^ s[a], 16);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] = blake3_rotr32(s[b] ^ s[c], 12);
+    s[a] = s[a].wrapping_add(s[b]).wrapping_add(my);
+    s[d] = blake3_rotr32(s[d] ^ s[a], 8);
+    s[c] = s[c].wrapping_add(s[d]);
+    s[b] = blake3_rotr32(s[b] ^ s[c], 7);
+}
+
+fn blake3_round(s: &mut [u32; 16], m: &[u32; 16]) {
+    blake3_g(s, 0, 4, 8, 12, m[0], m[1]);
+    blake3_g(s, 1, 5, 9, 13, m[2], m[3]);
+    blake3_g(s, 2, 6, 10, 14, m[4], m[5]);
+    blake3_g(s, 3, 7, 11, 15, m[6], m[7]);
+    blake3_g(s, 0, 5, 10, 15, m[8], m[9]);
+    blake3_g(s, 1, 6, 11, 12, m[10], m[11]);
+    blake3_g(s, 2, 7, 8, 13, m[12], m[13]);
+    blake3_g(s, 3, 4, 9, 14, m[14], m[15]);
+}
+
+fn blake3_iv_bytes() -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, w) in BLAKE3_IV_WORDS.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
+fn blake3_compress_impl(cv: &[u8], block: &[u8]) -> [u8; 32] {
+    // Defensive: pad / truncate to the canonical sizes so a misuse doesn't
+    // panic. Production code should always pass exactly 32 / 64 bytes.
+    let mut cv_buf = [0u8; 32];
+    let n = cv.len().min(32);
+    cv_buf[..n].copy_from_slice(&cv[..n]);
+
+    let mut blk_buf = [0u8; 64];
+    let n = block.len().min(64);
+    blk_buf[..n].copy_from_slice(&block[..n]);
+
+    let mut h = [0u32; 8];
+    for i in 0..8 {
+        h[i] = u32::from_be_bytes([
+            cv_buf[i * 4],
+            cv_buf[i * 4 + 1],
+            cv_buf[i * 4 + 2],
+            cv_buf[i * 4 + 3],
+        ]);
+    }
+    let mut m = [0u32; 16];
+    for i in 0..16 {
+        m[i] = u32::from_be_bytes([
+            blk_buf[i * 4],
+            blk_buf[i * 4 + 1],
+            blk_buf[i * 4 + 2],
+            blk_buf[i * 4 + 3],
+        ]);
+    }
+
+    let mut state: [u32; 16] = [
+        h[0], h[1], h[2], h[3],
+        h[4], h[5], h[6], h[7],
+        BLAKE3_IV_WORDS[0], BLAKE3_IV_WORDS[1], BLAKE3_IV_WORDS[2], BLAKE3_IV_WORDS[3],
+        0,  // counter low
+        0,  // counter high
+        64, // blockLen
+        11, // flags = CHUNK_START | CHUNK_END | ROOT
+    ];
+
+    let mut msg = m;
+    for r in 0..7 {
+        blake3_round(&mut state, &msg);
+        if r < 6 {
+            let mut permuted = [0u32; 16];
+            for (i, &p) in BLAKE3_MSG_PERM.iter().enumerate() {
+                permuted[i] = msg[p];
+            }
+            msg = permuted;
+        }
+    }
+
+    let mut out = [0u8; 32];
+    for i in 0..8 {
+        let w = state[i] ^ state[i + 8];
+        out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+    }
+    out
+}
+
+/// BLAKE3 single-block compression with hardcoded blockLen=64, counter=0,
+/// flags=11. `chaining_value` should be 32 bytes and `block` 64 bytes; both
+/// are interpreted as 8 / 16 big-endian u32 words. Output is 32 big-endian
+/// bytes. Matches the on-chain codegen.
+pub fn blake3_compress(chaining_value: &[u8], block: &[u8]) -> ByteString {
+    blake3_compress_impl(chaining_value, block).to_vec()
+}
+
+/// BLAKE3 hash for messages up to 64 bytes. Equivalent to
+/// `blake3_compress(IV, zero_pad(message, 64))`. Matches the on-chain
+/// codegen.
+pub fn blake3_hash(message: &[u8]) -> ByteString {
+    let cv = blake3_iv_bytes();
+    let mut padded = [0u8; 64];
+    let n = message.len().min(64);
+    padded[..n].copy_from_slice(&message[..n]);
+    blake3_compress_impl(&cv, &padded).to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,5 +1210,62 @@ mod tests {
             let hashed = sha256(msg.as_bytes());
             assert_eq!(finalized, hashed, "mismatch for {:?}", msg);
         }
+    }
+
+    // -- BLAKE3 single-block compression -------------------------------------
+    //
+    // The expected hex strings below are the cross-language reference vectors
+    // pinned in `packages/runar-py/tests/test_blake3.py` and matched by the
+    // Go runtime in `packages/runar-go/blake3_test.go`. Any divergence is a
+    // cross-compiler regression.
+
+    #[test]
+    fn test_blake3_hash_matches_cross_language_reference() {
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "7669004d96866a6330a609d9ad1a08a4f8507c4d04eefd1a50f00b02556aab86"),
+            (b"abc", "6f9871b5d6e80fc882e7bb57857f8b279cdc229664eab9382d2838dbf7d8a20d"),
+            (b"hello world", "47d3d7048c7ed47c986773cc1eefaa0b356bec676dd62cca3269a086999d65fc"),
+        ];
+        for (msg, expected) in cases {
+            let got = blake3_hash(msg);
+            assert_eq!(
+                hex_encode(&got),
+                *expected,
+                "blake3_hash({:?}) mismatch",
+                msg,
+            );
+        }
+    }
+
+    #[test]
+    fn test_blake3_compress_not_zero_stub() {
+        // Guards against regression back to the all-zero stub.
+        let out = blake3_compress(&[0u8; 32], &[0u8; 64]);
+        assert_eq!(out.len(), 32);
+        assert_ne!(out, vec![0u8; 32], "blake3_compress(0,0) returned zero stub");
+    }
+
+    #[test]
+    fn test_blake3_hash_equivalent_to_compression_with_iv() {
+        // blake3_hash(msg) == blake3_compress(IV, zero-pad(msg, 64)).
+        let cv = blake3_iv_bytes();
+        for msg in &[&b""[..], &b"abc"[..], &b"hello world"[..], &[0x19, 0x76, 0xa9, 0x14][..]] {
+            let mut padded = vec![0u8; 64];
+            let n = msg.len().min(64);
+            padded[..n].copy_from_slice(&msg[..n]);
+            let direct = blake3_compress(&cv, &padded);
+            let via_hash = blake3_hash(msg);
+            assert_eq!(direct, via_hash, "mismatch for {:?}", msg);
+        }
+    }
+
+    #[test]
+    fn test_blake3_compress_determinism() {
+        let cv: Vec<u8> = (0u8..32).collect();
+        let block: Vec<u8> = (0u8..64).collect();
+        let a = blake3_compress(&cv, &block);
+        let b = blake3_compress(&cv, &block);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 32);
     }
 }

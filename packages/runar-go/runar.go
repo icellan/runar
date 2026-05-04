@@ -384,22 +384,134 @@ func Ripemd160Func(data ByteString) Ripemd160Hash {
 }
 
 // ---------------------------------------------------------------------------
-// Mock BLAKE3 functions (compiler intrinsics — stubs return 32 zero bytes)
+// BLAKE3 single-block compression (real implementation)
 // ---------------------------------------------------------------------------
+//
+// Matches the Rúnar codegen which hardcodes blockLen=64, counter=0,
+// flags=11 (CHUNK_START | CHUNK_END | ROOT). All seven runtimes (TS, Go,
+// Rust, Python, Zig, Ruby, Java) MUST produce byte-identical output for the
+// same inputs — see blake3_test.go for the pinned cross-language vectors.
+//
+// This is *not* a generic BLAKE3 hash of an arbitrary-length message: the
+// emitted Bitcoin Script can only express a single compression invocation,
+// so the off-chain runtime intentionally exposes the same restricted
+// primitive. For message sizes ≤ 64 bytes Blake3Hash applies zero-padding
+// before calling the compression function with the IV as chaining value.
 
-// Blake3Compress is a mock BLAKE3 single-block compression.
-// In compiled Bitcoin Script this expands to ~10,000 opcodes.
-// The mock returns 32 zero bytes for business-logic testing.
-func Blake3Compress(chainingValue, block ByteString) ByteString {
-	return ByteString(make([]byte, 32))
+// blake3IVWords is the BLAKE3 initialization vector (8 u32 words, big-endian
+// when serialized to bytes). Identical to the SHA-256 IV.
+var blake3IVWords = [8]uint32{
+	0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+	0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 }
 
-// Blake3Hash is a mock BLAKE3 hash for messages up to 64 bytes.
-// In compiled Bitcoin Script this uses the IV as the chaining value and
-// applies zero-padding before calling the compression function.
-// The mock returns 32 zero bytes for business-logic testing.
+// blake3MsgPerm is the BLAKE3 message word permutation applied between
+// rounds (see BLAKE3 spec §2.4).
+var blake3MsgPerm = [16]int{2, 6, 3, 10, 7, 0, 4, 13, 1, 11, 12, 5, 9, 14, 15, 8}
+
+func blake3Rotr32(x uint32, n uint) uint32 {
+	return (x >> n) | (x << (32 - n))
+}
+
+func blake3G(s *[16]uint32, a, b, c, d int, mx, my uint32) {
+	s[a] = s[a] + s[b] + mx
+	s[d] = blake3Rotr32(s[d]^s[a], 16)
+	s[c] = s[c] + s[d]
+	s[b] = blake3Rotr32(s[b]^s[c], 12)
+	s[a] = s[a] + s[b] + my
+	s[d] = blake3Rotr32(s[d]^s[a], 8)
+	s[c] = s[c] + s[d]
+	s[b] = blake3Rotr32(s[b]^s[c], 7)
+}
+
+func blake3Round(s *[16]uint32, m *[16]uint32) {
+	blake3G(s, 0, 4, 8, 12, m[0], m[1])
+	blake3G(s, 1, 5, 9, 13, m[2], m[3])
+	blake3G(s, 2, 6, 10, 14, m[4], m[5])
+	blake3G(s, 3, 7, 11, 15, m[6], m[7])
+	blake3G(s, 0, 5, 10, 15, m[8], m[9])
+	blake3G(s, 1, 6, 11, 12, m[10], m[11])
+	blake3G(s, 2, 7, 8, 13, m[12], m[13])
+	blake3G(s, 3, 4, 9, 14, m[14], m[15])
+}
+
+// blake3CompressImpl is the byte-level single-block compression. cv must be
+// 32 bytes, block must be 64 bytes; both are interpreted as big-endian u32
+// words. Output is 32 big-endian bytes.
+func blake3CompressImpl(cv, block []byte) []byte {
+	if len(cv) != 32 {
+		// Defensive: pad / truncate to 32 bytes so a misuse doesn't panic.
+		fixed := make([]byte, 32)
+		copy(fixed, cv)
+		cv = fixed
+	}
+	if len(block) != 64 {
+		fixed := make([]byte, 64)
+		copy(fixed, block)
+		block = fixed
+	}
+
+	var h [8]uint32
+	for i := 0; i < 8; i++ {
+		h[i] = binary.BigEndian.Uint32(cv[i*4 : i*4+4])
+	}
+	var m [16]uint32
+	for i := 0; i < 16; i++ {
+		m[i] = binary.BigEndian.Uint32(block[i*4 : i*4+4])
+	}
+
+	state := [16]uint32{
+		h[0], h[1], h[2], h[3],
+		h[4], h[5], h[6], h[7],
+		blake3IVWords[0], blake3IVWords[1], blake3IVWords[2], blake3IVWords[3],
+		0,  // counter low
+		0,  // counter high
+		64, // blockLen
+		11, // flags = CHUNK_START | CHUNK_END | ROOT
+	}
+
+	msg := m
+	for r := 0; r < 7; r++ {
+		blake3Round(&state, &msg)
+		if r < 6 {
+			var permuted [16]uint32
+			for i, p := range blake3MsgPerm {
+				permuted[i] = msg[p]
+			}
+			msg = permuted
+		}
+	}
+
+	out := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		w := state[i] ^ state[i+8]
+		binary.BigEndian.PutUint32(out[i*4:i*4+4], w)
+	}
+	return out
+}
+
+// Blake3Compress is the BLAKE3 single-block compression with hardcoded
+// blockLen=64, counter=0, flags=11. chainingValue must be 32 bytes and block
+// must be 64 bytes; both are interpreted as 8 / 16 big-endian u32 words.
+// Output is 32 big-endian bytes. Matches the on-chain codegen.
+func Blake3Compress(chainingValue, block ByteString) ByteString {
+	return ByteString(blake3CompressImpl([]byte(chainingValue), []byte(block)))
+}
+
+// Blake3Hash is the BLAKE3 hash for messages up to 64 bytes. Equivalent to
+// Blake3Compress(IV, zero-pad(message, 64)). Matches the on-chain codegen.
 func Blake3Hash(message ByteString) ByteString {
-	return ByteString(make([]byte, 32))
+	cv := make([]byte, 32)
+	for i, w := range blake3IVWords {
+		binary.BigEndian.PutUint32(cv[i*4:i*4+4], w)
+	}
+	padded := make([]byte, 64)
+	msg := []byte(message)
+	if len(msg) > 64 {
+		msg = msg[:64]
+	}
+	copy(padded, msg)
+	return ByteString(blake3CompressImpl(cv, padded))
 }
 
 // ---------------------------------------------------------------------------
