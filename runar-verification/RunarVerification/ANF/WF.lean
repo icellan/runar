@@ -160,7 +160,17 @@ partial def collectAllBindingNames : List ANFBinding → List String
   | b :: rest =>
       let here :=
         match b.value with
-        | .ifVal _ t e => collectAllBindingNames t ++ collectAllBindingNames e
+        | .ifVal _ t e =>
+            -- A binding inside `t` or `e` whose name matches the
+            -- outer if-binding `b.name` is a phi-input (TS-canonical
+            -- since commit 3fed3295 — token-ft, conditional-data-output-stateful
+            -- etc. emit `t36 = load_const ""` inside ELSE where the
+            -- outer if-binding is also `t36`). Phi-inputs target the
+            -- same SSA name as the if-binding itself, so they should
+            -- not be counted as a separate SSA def.
+            let dropPhi (bs : List ANFBinding) : List ANFBinding :=
+              bs.filter (fun bi => bi.name ≠ b.name)
+            collectAllBindingNames (dropPhi t) ++ collectAllBindingNames (dropPhi e)
         | .loop _ body _ => collectAllBindingNames body
         | _ => []
       b.name :: (here ++ collectAllBindingNames rest)

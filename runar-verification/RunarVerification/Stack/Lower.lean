@@ -4,6 +4,8 @@ import RunarVerification.Stack.Syntax
 import RunarVerification.Stack.Blake3
 import RunarVerification.Stack.Wots
 import RunarVerification.Stack.Ec
+import RunarVerification.Stack.P256P384
+import RunarVerification.Stack.SlhDsa
 
 /-!
 # Stack IR — Lowering pass (Phase 3a, simple-constructor subset)
@@ -266,6 +268,7 @@ def removeConsumedAtDepths (sm : StackMap) (names : List String) :
         let ops : List StackOp :=
           if d = 0 then [.drop]
           else if d = 1 then [.nip]
+          else if d = 2 then [.opcode "OP_ROT", .drop]
           else [.push (.bigint (Int.ofNat d)), .opcode "OP_ROLL", .drop]
         let sm' := sm.removeAtDepth d
         let (rest, smF) := go sm' ds
@@ -2318,6 +2321,61 @@ def lowerEcBuiltinOpsLive (sm : StackMap) (bindingName : String)
   let smFinal := (sm1.popN args.length).push bindingName
   (argOps ++ body, smFinal)
 
+/-! ## NIST P-256 / P-384 EC codegen — Phase 4-H
+
+Mirrors `lowerNistEcBuiltin` and `lowerVerifyECDSA` (TS
+`05-stack-lower.ts:4386-4441`). The body op lists for each builtin
+are precomputed in `Stack.P256P384`. The dispatch arm here follows the
+exact pattern of `lowerEcBuiltinOpsLive` above. -/
+
+open RunarVerification.Stack.P256P384 in
+/-- Lowering for a NIST P-256 / P-384 builtin. Loads each arg to TOS,
+splices the appropriate static op list. Net stack-map effect: pop
+`args.length`, push `bindingName`. -/
+def lowerP256P384BuiltinOpsLive (sm : StackMap) (bindingName : String)
+    (func : String) (args : List String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
+  let body : List StackOp :=
+    if func = "p256Add" then emitP256Add
+    else if func = "p256Mul" then emitP256Mul
+    else if func = "p256MulGen" then emitP256MulGen
+    else if func = "p256Negate" then emitP256Negate
+    else if func = "p256OnCurve" then emitP256OnCurve
+    else if func = "p256EncodeCompressed" then emitP256EncodeCompressed
+    else if func = "verifyECDSA_P256" then emitVerifyECDSA_P256
+    else if func = "p384Add" then emitP384Add
+    else if func = "p384Mul" then emitP384Mul
+    else if func = "p384MulGen" then emitP384MulGen
+    else if func = "p384Negate" then emitP384Negate
+    else if func = "p384OnCurve" then emitP384OnCurve
+    else if func = "p384EncodeCompressed" then emitP384EncodeCompressed
+    else if func = "verifyECDSA_P384" then emitVerifyECDSA_P384
+    else [.opcode "OP_RUNAR_UNKNOWN_P256P384_BUILTIN"]
+  let smFinal := (sm1.popN args.length).push bindingName
+  (argOps ++ body, smFinal)
+
+/-! ## SLH-DSA (FIPS 205) codegen — Phase 4-I
+
+Mirrors `lowerVerifySLHDSA` (TS `05-stack-lower.ts` →
+`packages/runar-compiler/src/passes/slh-dsa-codegen.ts:emitVerifySLHDSA`).
+The body op list is precomputed in `Stack.SlhDsa`. The dispatch arm here
+follows the same pattern as `lowerVerifyWotsOpsLive`. -/
+
+open RunarVerification.Stack.SlhDsa in
+/-- Lowering for `verifySLHDSA_SHA2_*(msg, sig, pubkey)`. After body: 3
+args popped, 1 boolean result pushed. -/
+def lowerVerifySlhDsaOpsLive (sm : StackMap) (bindingName : String)
+    (paramKey : String) (msg sig pubkey : String)
+    (currentIndex : Nat) (lastUses : List (String × Nat))
+    (outerProtected : List String) : (List StackOp × StackMap) :=
+  let (loadMsg, sm1) := loadRefLive sm  msg    currentIndex lastUses outerProtected
+  let (loadSig, sm2) := loadRefLive sm1 sig    currentIndex lastUses outerProtected
+  let (loadPk,  sm3) := loadRefLive sm2 pubkey currentIndex lastUses outerProtected
+  let smFinal := (sm3.popN 3).push bindingName
+  (loadMsg ++ loadSig ++ loadPk ++ emitVerifySLHDSABody paramKey, smFinal)
+
 /-! ## Mutual lowering
 
 `lowerValue` and `lowerBindings` recurse via the `ifVal` and `loop`
@@ -2912,6 +2970,31 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
         withLB <|
           lowerEcBuiltinOpsLive sm bindingName func args
             currentIndex lastUses outerProtected
+      else if func = "p256Add" || func = "p256Mul" || func = "p256MulGen" ||
+              func = "p256Negate" || func = "p256OnCurve" ||
+              func = "p256EncodeCompressed" || func = "verifyECDSA_P256" ||
+              func = "p384Add" || func = "p384Mul" || func = "p384MulGen" ||
+              func = "p384Negate" || func = "p384OnCurve" ||
+              func = "p384EncodeCompressed" || func = "verifyECDSA_P384" then
+        -- Phase 4-H: NIST P-256 / P-384 EC builtins (mirrors TS
+        -- `lowerNistEcBuiltin` / `lowerVerifyECDSA`
+        -- at `05-stack-lower.ts:4386-4441`).
+        withLB <|
+          lowerP256P384BuiltinOpsLive sm bindingName func args
+            currentIndex lastUses outerProtected
+      else if func = "verifySLHDSA_SHA2_128s" || func = "verifySLHDSA_SHA2_128f" ||
+              func = "verifySLHDSA_SHA2_192s" || func = "verifySLHDSA_SHA2_192f" ||
+              func = "verifySLHDSA_SHA2_256s" || func = "verifySLHDSA_SHA2_256f" then
+        -- Phase 4-I: SLH-DSA (FIPS 205) verify (mirrors TS
+        -- `slh-dsa-codegen.ts:emitVerifySLHDSA`).
+        match args with
+        | [msg, sig, pubkey] =>
+            let paramKey : String := (func.drop "verifySLHDSA_".length).toString
+            withLB <|
+              lowerVerifySlhDsaOpsLive sm bindingName paramKey msg sig pubkey
+                currentIndex lastUses outerProtected
+        | _ =>
+            ([.opcode "OP_RUNAR_VERIFYSLHDSA_ARITY"], sm.push bindingName, localBindings)
       else
         let (argOps, sm1) := lowerArgsLive currentIndex lastUses outerProtected sm args
         let opcodeOps := (builtinOpcode func).map (.opcode)
@@ -3020,6 +3103,19 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
       -- This is distinct from the asymmetric-consumption path below: the
       -- shadow case does NOT involve THEN consuming parent items, so
       -- `smThn` and `smBranch` differ ONLY by the new top.
+      -- Recognise both the legacy empty-else shape (`els = []`) and the
+      -- newer canonical TS shape (`els = [{name = topName, value =
+      -- load_const ""}]`). Commit `3fed3295` ("close cross-compiler test
+      -- gaps + fixes") flipped the TS reference to always emit the
+      -- explicit single-binding else; the byte-exact lowering it
+      -- generates is identical to the empty-else case (DUP/PICK in
+      -- else, NIP after ENDIF). Treat both shapes as the shadow-rebind
+      -- path. token-ft is the regression that surfaces this.
+      let isEmptyBytesRebind (b : ANFBinding) (topName : String) : Bool :=
+        b.name = topName &&
+        match b.value with
+        | .loadConst (.bytes ba) => ba.size = 0
+        | _ => false
       let shadowRebind : Option (StackMap × Nat × String) :=
         match els, smThn with
         | [], topName :: _ =>
@@ -3031,6 +3127,15 @@ def lowerValueP (progMethods : List ANFMethod) (props : List ANFProperty) (budge
                 if consumedByThen.isEmpty then some (smBranch, d, topName)
                 else none
             | none => none
+        | [b], topName :: _ =>
+            if isEmptyBytesRebind b topName then
+              match smBranch.depth? topName with
+              | some d =>
+                  let consumedByThen := consumedNames smBranch (smThn.tail)
+                  if consumedByThen.isEmpty then some (smBranch, d, topName)
+                  else none
+              | none => none
+            else none
         | _, _ => none
       match shadowRebind with
       | some (_smB, d, topName) =>
