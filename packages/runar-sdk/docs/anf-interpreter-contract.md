@@ -21,9 +21,9 @@ ANF goldens, so any drift is caught immediately.
 
 | Interpreter | Entry point | IR consumed |
 |---|---|---|
-| TS SDK   | `packages/runar-sdk/src/anf-interpreter.ts:137` (`evalValue`) | ANF JSON loaded as `ANFProgram` |
-| Java SDK | `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java:248` (`evalValue`) — two modes: `computeNewState` (line 74) and `executeStrict` (line 112) | ANF JSON loaded as `Map<String, Object>` |
-| Zig SDK  | `packages/runar-zig/src/sdk_anf_interpreter.zig:145` (`computeNewState`) | ANF JSON loaded as `ANFProgram` |
+| TS SDK   | `packages/runar-sdk/src/anf-interpreter.ts:137` (`evalValue`) — two modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient) and `executeStrict` (`anf-interpreter.ts:110`, throws `AssertionFailureError`) | ANF JSON loaded as `ANFProgram` |
+| Java SDK | `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java:248` (`evalValue`) — two modes: `computeNewState` (line 74) and `executeStrict` (line 112, throws `AssertionFailureException`) | ANF JSON loaded as `Map<String, Object>` |
+| Zig SDK  | `packages/runar-zig/src/sdk_anf_interpreter.zig:145` (`computeNewState`) — two modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient) and `executeStrict` (`sdk_anf_interpreter.zig:182`, returns `error.AssertionFailure`) | ANF JSON loaded as `ANFProgram` |
 
 A fourth interpreter, `packages/runar-testing/src/interpreter/interpreter.ts`,
 operates on the **AST** (pre-ANF) and has stricter coverage (real ECDSA, real
@@ -49,7 +49,7 @@ each implementation.
 | `method_call` | concrete with private-method body inline (`anf-interpreter.ts:174-182`) | concrete | concrete (`AnfInterpreter.java:290-296` → `evalMethodCall:376`) |
 | `if` | concrete branch eval (`anf-interpreter.ts:184-197`) | concrete | concrete (`AnfInterpreter.java:297-309`) |
 | `loop` | concrete bounded loop with iterVar binding (`anf-interpreter.ts:199-213`) | concrete | concrete (`AnfInterpreter.java:310-325`) |
-| `assert` | **skipped** — `return undefined` (`anf-interpreter.ts:215-218`) | **skipped** | **skipped by default**; throws `AssertionFailureException` in `executeStrict` mode (`AnfInterpreter.java:326-337`) |
+| `assert` | **skipped by default**; in `executeStrict` mode throws `AssertionFailureError` on the first falsy predicate (`anf-interpreter.ts:298-307`) | **skipped by default**; in `executeStrict` mode returns `error.AssertionFailure` on the first falsy predicate (`sdk_anf_interpreter.zig:444-456`) | **skipped by default**; throws `AssertionFailureException` in `executeStrict` mode (`AnfInterpreter.java:326-337`) |
 | `update_prop` | mutates `env` + `stateDelta` (`anf-interpreter.ts:220-225`) | mutates state map | mutates `env` + `stateDelta` (`AnfInterpreter.java:338-344`) |
 | `add_output` | extracts state values into `stateDelta` (`anf-interpreter.ts:227-241`) | extracts | extracts (`AnfInterpreter.java:345-360`) |
 | `add_data_output` | records to `dataOutputs[]` (`anf-interpreter.ts:243-252`) | records | records (`AnfInterpreter.java:361-369`) |
@@ -62,7 +62,7 @@ each implementation.
 ### Summary of intentional skips
 
 - **On-chain-only kinds** (`check_preimage`, `deserialize_state`, `get_state_script`, `add_raw_output`): all three interpreters return `undefined`/`null`/no-op. These are simulation-only interpreters; on-chain enforcement happens in compiled Bitcoin Script, not here.
-- **`assert`**: TS and Zig always skip. Java skips by default but enforces in `executeStrict` mode.
+- **`assert`**: all three SDKs skip by default and enforce in an opt-in `executeStrict` entry point — TS throws `AssertionFailureError` (`anf-interpreter.ts:88-99`), Zig returns `error.AssertionFailure` (`sdk_anf_interpreter.zig:122-131`), Java throws `AssertionFailureException`. Strict only enforces explicit `assert(...)` predicates; crypto built-ins (`checkSig`, `checkMultiSig`, `checkPreimage`) stay mocked even in strict mode.
 - **`array_literal`**: silently falls through to default. There is no dedicated case in any of the three interpreters today — methods that pass arrays to `checkMultiSig` rely on the next-step `call` returning `true` rather than the elements actually being resolved.
 
 ## Builtin function call behaviour
@@ -95,7 +95,7 @@ continuation locking script. The on-chain runtime handles that via
 
 ## Known divergences (caught by the parity test)
 
-- **`assert` strictness**: Java's `executeStrict` mode raises on falsy asserts; TS and Zig always swallow them. The parity test runs Java in non-strict mode by default so all three behave identically.
+- **`assert` strictness**: all three SDKs default to lenient (asserts skipped) and opt in to strict via a separate entry point — TS `executeStrict` (throws `AssertionFailureError`), Zig `executeStrict` (returns `error.AssertionFailure`), Java `executeStrict` (throws `AssertionFailureException`). The parity test runs all three in lenient mode by default so they behave identically; strict-mode parity is exercised by per-SDK unit tests rather than the cross-interpreter golden suite.
 - **`array_literal` is silently undefined** in all three, but ANF goldens that include `array_literal` bindings still produce identical `{state, dataOutputs}` outputs because the consumer of the array is `call(checkMultiSig)` which returns `true` regardless. Curated parity-test cases avoid `array_literal` altogether to keep the assertion sharp.
 
 ## Future directions

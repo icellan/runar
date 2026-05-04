@@ -93,7 +93,14 @@ pub const ANFNode = union(enum) {
         iter_var: []const u8 = "",
         body: []ANFBinding = &.{},
     },
-    assert_node: struct {},
+    assert_node: struct {
+        // Reference to the binding holding the predicate value. Used by
+        // strict-mode evaluation to enforce the predicate; lenient mode
+        // ignores it (and earlier ANF emitters didn't always populate it,
+        // so the strict path also tolerates an empty ref by treating the
+        // most recent binding as the predicate via `strict_ctx`).
+        value: []const u8 = "",
+    },
     update_prop: struct {
         name: []const u8 = "",
         value: []const u8 = "",
@@ -116,6 +123,29 @@ pub const ANFNode = union(enum) {
 pub const InterpreterError = error{
     MethodNotFound,
     OutOfMemory,
+};
+
+/// Errors `executeStrict` can return on top of the lenient ones. `AssertionFailure`
+/// is raised on the first `assert(predicate)` (or `call(assert, x)`) whose
+/// predicate evaluates to a falsy value. Crypto built-ins (`checkSig`,
+/// `checkMultiSig`, `checkPreimage`) still mock-return `true` even in strict
+/// mode — strict only enforces explicit `assert(...)` predicates. Use this
+/// before broadcasting a transaction to surface guard failures off-chain
+/// instead of relying on a node rejection.
+pub const StrictError = error{
+    MethodNotFound,
+    OutOfMemory,
+    AssertionFailure,
+};
+
+/// Context for strict-mode evaluation. Carries the public method name being
+/// executed plus the binding name of the most recent ANF binding so a failing
+/// assert can be reported with both. `last_binding_name` is mutated as
+/// `evalBindings` walks the body so error reports always reference the
+/// failing binding.
+const StrictCtx = struct {
+    method_name: []const u8,
+    last_binding_name: []const u8 = "<anonymous>",
 };
 
 /// Sentinel value for "no result" / undefined.
@@ -159,6 +189,26 @@ pub fn computeNewState(
     return result.state;
 }
 
+/// Strict-mode counterpart to `computeNewStateAndDataOutputs`: walks the same
+/// ANF body but returns `error.AssertionFailure` on the first `assert(...)`
+/// whose predicate evaluates to a falsy value. Use this before broadcasting a
+/// transaction to surface guard failures off-chain instead of relying on a
+/// node rejection. Crypto built-ins (`checkSig`, `checkMultiSig`,
+/// `checkPreimage`) still mock-return `true` — strict mode only enforces
+/// explicit `assert(...)` predicates. State + data-output ownership matches
+/// the lenient entry point: caller owns both the state map and the returned
+/// data-output slice (including each entry's `script`).
+pub fn executeStrict(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+) StrictError!NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true);
+}
+
 /// Like `computeNewState` but also returns data outputs resolved from
 /// `this.addDataOutput(...)` calls in declaration order. Caller owns both
 /// the state map and the returned data-output slice (including each
@@ -171,6 +221,26 @@ pub fn computeNewStateAndDataOutputs(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) !NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false) catch |err| switch (err) {
+        // Lenient mode never reports AssertionFailure (asserts are skipped),
+        // but the unified runMethod return type includes it, so coerce away.
+        error.AssertionFailure => unreachable,
+        else => |e| return e,
+    };
+}
+
+/// Internal worker shared by `computeNewStateAndDataOutputs` (strict=false) and
+/// `executeStrict` (strict=true). Returns the StrictError union; lenient
+/// callers prove the AssertionFailure variant is unreachable.
+fn runMethod(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+    strict: bool,
+) StrictError!NewStateResult {
     // Use an arena for all intermediate allocations during interpretation
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -185,7 +255,7 @@ pub fn computeNewStateAndDataOutputs(
         }
     }
 
-    if (method == null) return InterpreterError.MethodNotFound;
+    if (method == null) return StrictError.MethodNotFound;
     const meth = method.?;
 
     // Initialize environment with property values
@@ -230,8 +300,10 @@ pub fn computeNewStateAndDataOutputs(
     var state_delta = std.StringHashMap(ANFValue).init(arena_alloc);
     var data_outputs_arena = std.ArrayList(DataOutputEntry).empty;
 
-    // Walk bindings
-    try evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf);
+    // Walk bindings — strict-mode context (or null for lenient).
+    var strict_ctx_storage: StrictCtx = .{ .method_name = method_name };
+    const strict_ctx_ptr: ?*StrictCtx = if (strict) &strict_ctx_storage else null;
+    try evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf, strict_ctx_ptr);
 
     // Merge with current state — use caller allocator for result
     var result = std.StringHashMap(ANFValue).init(allocator);
@@ -281,9 +353,11 @@ fn evalBindings(
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-) error{OutOfMemory}!void {
+    strict_ctx: ?*StrictCtx,
+) error{ OutOfMemory, AssertionFailure }!void {
     for (bindings) |binding| {
-        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, anf);
+        if (strict_ctx) |ctx| ctx.last_binding_name = binding.name;
+        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, anf, strict_ctx);
         try env.put(binding.name, val);
     }
 }
@@ -295,7 +369,8 @@ fn evalNode(
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-) error{OutOfMemory}!ANFValue {
+    strict_ctx: ?*StrictCtx,
+) error{ OutOfMemory, AssertionFailure }!ANFValue {
     switch (node) {
         .load_param => |lp| {
             return env.get(lp.name) orelse anf_none;
@@ -328,15 +403,25 @@ fn evalNode(
             return evalUnaryOp(allocator, uo.op, operand, uo.result_type);
         },
         .call => |c| {
+            // Strict mode: a `call(assert, x)` lowering path must enforce the
+            // predicate the same way the dedicated `assert` ANF node does.
+            // Crypto built-ins (`checkSig`, `checkMultiSig`, `checkPreimage`)
+            // still mock-return `true` even in strict mode; only explicit
+            // `assert(...)` predicates are enforced.
+            if (strict_ctx != null and std.mem.eql(u8, c.func, "assert")) {
+                const arg = if (c.args.len > 0) (env.get(c.args[0]) orelse anf_none) else anf_none;
+                if (!isTruthy(arg)) return error.AssertionFailure;
+                return anf_none;
+            }
             return evalCall(allocator, c.func, c.args, env);
         },
         .method_call => |mc| {
-            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, anf);
+            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, anf, strict_ctx);
         },
         .if_node => |ifn| {
             const cond = env.get(ifn.cond) orelse anf_none;
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
-            try evalBindings(allocator, branch, env, state_delta, data_outputs, anf);
+            try evalBindings(allocator, branch, env, state_delta, data_outputs, anf, strict_ctx);
             if (branch.len > 0) {
                 return env.get(branch[branch.len - 1].name) orelse anf_none;
             }
@@ -346,15 +431,24 @@ fn evalNode(
             var last_val: ANFValue = anf_none;
             for (0..ln.count) |i| {
                 try env.put(ln.iter_var, .{ .int = @intCast(i) });
-                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, anf);
+                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, anf, strict_ctx);
                 if (ln.body.len > 0) {
                     last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
                 }
             }
             return last_val;
         },
-        .assert_node => {
-            // Skip asserts in simulation
+        .assert_node => |an| {
+            // Strict mode: evaluate the referenced predicate and abort with
+            // `error.AssertionFailure` if it is falsy. Lenient mode skips
+            // (the on-chain script handles enforcement). Crypto built-ins
+            // remain mocked even in strict mode — see `executeStrict` doc.
+            if (strict_ctx != null) {
+                if (an.value.len > 0) {
+                    const predicate = env.get(an.value) orelse anf_none;
+                    if (!isTruthy(predicate)) return error.AssertionFailure;
+                }
+            }
             return anf_none;
         },
         .update_prop => |up| {
@@ -764,7 +858,8 @@ fn evalMethodCall(
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
-) error{OutOfMemory}!ANFValue {
+    strict_ctx: ?*StrictCtx,
+) error{ OutOfMemory, AssertionFailure }!ANFValue {
     // Find the private method
     for (anf.methods) |*m| {
         if (!m.is_public and std.mem.eql(u8, m.name, method_name)) {
@@ -786,8 +881,9 @@ fn evalMethodCall(
                 }
             }
 
-            // Execute the method body
-            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, anf);
+            // Execute the method body — propagate strict_ctx so nested
+            // private-method asserts also abort.
+            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, anf, strict_ctx);
 
             // Propagate property changes back
             for (anf.properties) |prop| {
@@ -1240,7 +1336,10 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
             .value = if (obj.get("value")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
         } };
     }
-    if (std.mem.eql(u8, kind, "assert")) return .{ .assert_node = .{} };
+    if (std.mem.eql(u8, kind, "assert")) {
+        const value_ref = if (obj.get("value")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "";
+        return .{ .assert_node = .{ .value = value_ref } };
+    }
     if (std.mem.eql(u8, kind, "check_preimage")) return .{ .check_preimage = .{} };
     if (std.mem.eql(u8, kind, "deserialize_state")) return .{ .deserialize_state = .{} };
     if (std.mem.eql(u8, kind, "get_state_script")) return .{ .get_state_script = .{} };
@@ -1496,4 +1595,273 @@ test "parseANFFromJson simple counter" {
     try std.testing.expectEqualStrings("increment", program.methods[0].name);
     try std.testing.expect(program.methods[0].is_public);
     try std.testing.expectEqual(@as(usize, 4), program.methods[0].body.len);
+}
+
+// ---------------------------------------------------------------------------
+// Strict-mode tests
+//
+// Mirror the TS spec at packages/runar-sdk/src/__tests__/anf-interpreter-strict.spec.ts:
+// the same Guard contract + bump(amount) shape with two asserts. Lenient mode
+// must accept all inputs (the canonical pre-broadcast simulation behaviour);
+// strict mode must surface failed asserts as `error.AssertionFailure`.
+// ---------------------------------------------------------------------------
+
+fn buildGuardAnf() ANFProgram {
+    const props = struct {
+        var p = [_]ANFProperty{
+            .{ .name = "value", .type_name = "int", .readonly = false },
+        };
+    };
+    const params = struct {
+        var p = [_]ANFParam{
+            .{ .name = "amount", .type_name = "int" },
+        };
+    };
+    const body = struct {
+        var b = [_]ANFBinding{
+            // assert(amount > 0)
+            .{ .name = "t0", .value = .{ .load_param = .{ .name = "amount" } } },
+            .{ .name = "t1", .value = .{ .load_const = .{ .value = .{ .int = 0 } } } },
+            .{ .name = "t2", .value = .{ .bin_op = .{ .op = ">", .left = "t0", .right = "t1", .result_type = "bool" } } },
+            .{ .name = "assertPositive", .value = .{ .assert_node = .{ .value = "t2" } } },
+            // assert(amount < 1000)
+            .{ .name = "t3", .value = .{ .load_const = .{ .value = .{ .int = 1000 } } } },
+            .{ .name = "t4", .value = .{ .bin_op = .{ .op = "<", .left = "t0", .right = "t3", .result_type = "bool" } } },
+            .{ .name = "assertBounded", .value = .{ .assert_node = .{ .value = "t4" } } },
+            // value = value + amount
+            .{ .name = "t5", .value = .{ .load_prop = .{ .name = "value" } } },
+            .{ .name = "t6", .value = .{ .bin_op = .{ .op = "+", .left = "t5", .right = "t0", .result_type = "int" } } },
+            .{ .name = "t7", .value = .{ .update_prop = .{ .name = "value", .value = "t6" } } },
+        };
+    };
+    const methods = struct {
+        var m = [_]ANFMethod{
+            .{ .name = "bump", .params = &params.p, .body = &body.b, .is_public = true },
+        };
+    };
+    return .{
+        .contract_name = "Guard",
+        .properties = &props.p,
+        .methods = &methods.m,
+    };
+}
+
+test "executeStrict — lenient computeNewState passes when assert would fail" {
+    const allocator = std.testing.allocator;
+    const anf = buildGuardAnf();
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("value", .{ .int = 10 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+    try args.put("amount", .{ .int = 0 }); // would fail assert(amount > 0)
+
+    var new_state = try computeNewState(allocator, &anf, "bump", current_state, args, &.{});
+    defer new_state.deinit();
+
+    // Lenient: assert is skipped, value still mutates to 10 + 0 = 10.
+    try std.testing.expectEqual(@as(i64, 10), new_state.get("value").?.int);
+}
+
+test "executeStrict — strict mode passes for valid input" {
+    const allocator = std.testing.allocator;
+    const anf = buildGuardAnf();
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("value", .{ .int = 10 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+    try args.put("amount", .{ .int = 5 });
+
+    const result = try executeStrict(allocator, &anf, "bump", current_state, args, &.{});
+    var state = result.state;
+    defer state.deinit();
+    defer {
+        for (result.data_outputs) |d| allocator.free(d.script);
+        allocator.free(result.data_outputs);
+    }
+
+    try std.testing.expectEqual(@as(i64, 15), state.get("value").?.int);
+    try std.testing.expectEqual(@as(usize, 0), result.data_outputs.len);
+}
+
+test "executeStrict — strict mode returns AssertionFailure on first failing assert" {
+    const allocator = std.testing.allocator;
+    const anf = buildGuardAnf();
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("value", .{ .int = 10 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+    try args.put("amount", .{ .int = 0 }); // fails assert(amount > 0)
+
+    const result = executeStrict(allocator, &anf, "bump", current_state, args, &.{});
+    try std.testing.expectError(StrictError.AssertionFailure, result);
+}
+
+test "executeStrict — strict mode returns AssertionFailure on second failing assert" {
+    const allocator = std.testing.allocator;
+    const anf = buildGuardAnf();
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("value", .{ .int = 10 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+    try args.put("amount", .{ .int = 5000 }); // fails assert(amount < 1000)
+
+    const result = executeStrict(allocator, &anf, "bump", current_state, args, &.{});
+    try std.testing.expectError(StrictError.AssertionFailure, result);
+}
+
+test "executeStrict — crypto mocks (checkSig/checkMultiSig/checkPreimage) still return true in strict" {
+    // P2PKH-style guard: assert(checkSig(sig, pk)). Strict mode keeps
+    // checkSig mocked, so any sig+pk pair passes — strict only enforces
+    // explicit assert predicates, never crypto. Mirrors the TS spec's
+    // "strict mode does NOT verify signatures" test.
+    const allocator = std.testing.allocator;
+
+    const props = struct {
+        var p = [_]ANFProperty{
+            .{ .name = "value", .type_name = "int", .readonly = false },
+        };
+    };
+    const params = struct {
+        var p = [_]ANFParam{
+            .{ .name = "sig", .type_name = "bytes" },
+            .{ .name = "pk", .type_name = "bytes" },
+        };
+    };
+    var sig_args = [_][]const u8{ "sigArg", "pkArg" };
+    const body = struct {
+        var b: [6]ANFBinding = undefined;
+    };
+    body.b = [_]ANFBinding{
+        .{ .name = "sigArg", .value = .{ .load_param = .{ .name = "sig" } } },
+        .{ .name = "pkArg", .value = .{ .load_param = .{ .name = "pk" } } },
+        .{ .name = "sigOk", .value = .{ .call = .{ .func = "checkSig", .args = &sig_args } } },
+        .{ .name = "assertSig", .value = .{ .assert_node = .{ .value = "sigOk" } } },
+        .{ .name = "one", .value = .{ .load_const = .{ .value = .{ .int = 1 } } } },
+        .{ .name = "upd", .value = .{ .update_prop = .{ .name = "value", .value = "one" } } },
+    };
+    const methods = struct {
+        var m: [1]ANFMethod = undefined;
+    };
+    methods.m = [_]ANFMethod{
+        .{ .name = "unlock", .params = &params.p, .body = &body.b, .is_public = true },
+    };
+    const anf = ANFProgram{
+        .contract_name = "SigGuard",
+        .properties = &props.p,
+        .methods = &methods.m,
+    };
+
+    var current_state = std.StringHashMap(ANFValue).init(allocator);
+    defer current_state.deinit();
+    try current_state.put("value", .{ .int = 0 });
+
+    var args = std.StringHashMap(ANFValue).init(allocator);
+    defer args.deinit();
+    try args.put("sig", .{ .bytes = "deadbeef" });
+    try args.put("pk", .{ .bytes = "cafebabe" });
+
+    const result = try executeStrict(allocator, &anf, "unlock", current_state, args, &.{});
+    var state = result.state;
+    defer state.deinit();
+    defer {
+        for (result.data_outputs) |d| allocator.free(d.script);
+        allocator.free(result.data_outputs);
+    }
+
+    // checkSig mocked to true → strict assert passes → value mutates to 1.
+    try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
+}
+
+test "executeStrict — strict mode evaluates call(assert, ...) lowering" {
+    // Some lowering paths emit `call(assert, predicateRef)` rather than the
+    // dedicated `assert` ANF node. Strict mode covers both. Mirrors the
+    // TS spec's "strict mode evaluates assert built-in call" test.
+    const allocator = std.testing.allocator;
+
+    const props = struct {
+        var p = [_]ANFProperty{
+            .{ .name = "value", .type_name = "int", .readonly = false },
+        };
+    };
+    const params = struct {
+        var p = [_]ANFParam{
+            .{ .name = "flag", .type_name = "bool" },
+        };
+    };
+    var call_args = [_][]const u8{"arg"};
+    const body = struct {
+        var b: [4]ANFBinding = undefined;
+    };
+    body.b = [_]ANFBinding{
+        .{ .name = "arg", .value = .{ .load_param = .{ .name = "flag" } } },
+        .{ .name = "callAssert", .value = .{ .call = .{ .func = "assert", .args = &call_args } } },
+        .{ .name = "one", .value = .{ .load_const = .{ .value = .{ .int = 1 } } } },
+        .{ .name = "upd", .value = .{ .update_prop = .{ .name = "value", .value = "one" } } },
+    };
+    const methods = struct {
+        var m: [1]ANFMethod = undefined;
+    };
+    methods.m = [_]ANFMethod{
+        .{ .name = "check", .params = &params.p, .body = &body.b, .is_public = true },
+    };
+    const anf = ANFProgram{
+        .contract_name = "CallAssert",
+        .properties = &props.p,
+        .methods = &methods.m,
+    };
+
+    // Lenient ignores the failing predicate.
+    {
+        var cs = std.StringHashMap(ANFValue).init(allocator);
+        defer cs.deinit();
+        try cs.put("value", .{ .int = 0 });
+        var ar = std.StringHashMap(ANFValue).init(allocator);
+        defer ar.deinit();
+        try ar.put("flag", .{ .boolean = false });
+        var ns = try computeNewState(allocator, &anf, "check", cs, ar, &.{});
+        defer ns.deinit();
+        try std.testing.expectEqual(@as(i64, 1), ns.get("value").?.int);
+    }
+
+    // Strict throws on falsy flag.
+    {
+        var cs = std.StringHashMap(ANFValue).init(allocator);
+        defer cs.deinit();
+        try cs.put("value", .{ .int = 0 });
+        var ar = std.StringHashMap(ANFValue).init(allocator);
+        defer ar.deinit();
+        try ar.put("flag", .{ .boolean = false });
+        const result = executeStrict(allocator, &anf, "check", cs, ar, &.{});
+        try std.testing.expectError(StrictError.AssertionFailure, result);
+    }
+
+    // Strict passes on truthy flag.
+    {
+        var cs = std.StringHashMap(ANFValue).init(allocator);
+        defer cs.deinit();
+        try cs.put("value", .{ .int = 0 });
+        var ar = std.StringHashMap(ANFValue).init(allocator);
+        defer ar.deinit();
+        try ar.put("flag", .{ .boolean = true });
+        const result = try executeStrict(allocator, &anf, "check", cs, ar, &.{});
+        var state = result.state;
+        defer state.deinit();
+        defer {
+            for (result.data_outputs) |d| allocator.free(d.script);
+            allocator.free(result.data_outputs);
+        }
+        try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
+    }
 }

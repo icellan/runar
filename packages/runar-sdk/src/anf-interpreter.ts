@@ -7,8 +7,21 @@
  * while skipping on-chain-only operations like `check_preimage`,
  * `deserialize_state`, `get_state_script`, `add_output`, and `add_raw_output`.
  *
- * This enables the SDK to auto-compute `newState` for stateful contract
- * calls, so callers don't need to duplicate contract logic.
+ * Two execution modes:
+ *
+ *  1. **Lenient** (`computeNewState`, `computeNewStateAndDataOutputs`) —
+ *     skips `assert` predicates so the SDK can pre-compute the post-state
+ *     even when arguments wouldn't actually pass the on-chain script. This
+ *     is the canonical use: auto-deriving `newState` for the next call.
+ *  2. **Strict** (`executeStrict`) — evaluates every `assert` predicate and
+ *     throws `AssertionFailureError` (carrying the contract method + ANF
+ *     binding name of the failing predicate) on the first false assert. Use
+ *     for "will this call go through?" / "would the asserts hold" smoke
+ *     tests off-chain before paying broadcast fees.
+ *
+ *  Note: strict mode does NOT verify signatures (`checkSig`,
+ *  `checkMultiSig`, `checkPreimage` still mock-return `true`). It only
+ *  enforces explicit `assert(...)` predicates.
  */
 
 import type {
@@ -63,6 +76,61 @@ export function computeNewStateAndDataOutputs(
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
 ): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+  return runMethod(anf, methodName, currentState, args, constructorArgs, null);
+}
+
+/**
+ * Thrown by {@link executeStrict} on the first failing `assert` predicate.
+ * Carries enough context to point a developer at the exact ANF binding
+ * that aborted: the method being executed and the binding name (e.g.
+ * `assertPositive` from the source `assert(amount > 0)`).
+ */
+export class AssertionFailureError extends Error {
+  readonly methodName: string;
+  readonly bindingName: string;
+  constructor(methodName: string, bindingName: string) {
+    super(
+      `assert failed in ${methodName}: binding '${bindingName}' evaluated to false`,
+    );
+    this.name = 'AssertionFailureError';
+    this.methodName = methodName;
+    this.bindingName = bindingName;
+  }
+}
+
+/**
+ * Strict-mode counterpart to {@link computeNewStateAndDataOutputs}: walks
+ * the same ANF body but throws {@link AssertionFailureError} on the first
+ * `assert(predicate)` whose predicate evaluates to a falsy value. Use this
+ * before broadcasting a transaction to surface guard failures off-chain
+ * instead of relying on a node rejection. Crypto built-ins (`checkSig`,
+ * `checkMultiSig`, `checkPreimage`) still mock-return `true` — strict mode
+ * only enforces explicit `assert(...)` predicates.
+ */
+export function executeStrict(
+  anf: ANFProgram,
+  methodName: string,
+  currentState: Record<string, unknown>,
+  args: Record<string, unknown>,
+  constructorArgs: unknown[] = [],
+): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+  return runMethod(anf, methodName, currentState, args, constructorArgs, {
+    methodName,
+  });
+}
+
+interface StrictCtx {
+  methodName: string;
+}
+
+function runMethod(
+  anf: ANFProgram,
+  methodName: string,
+  currentState: Record<string, unknown>,
+  args: Record<string, unknown>,
+  constructorArgs: unknown[],
+  strict: StrictCtx | null,
+): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
   // Find the method in ANF
   const method = anf.methods.find(
     (m) => m.name === methodName && m.isPublic,
@@ -112,7 +180,7 @@ export function computeNewStateAndDataOutputs(
   const dataOutputs: DataOutputEntry[] = [];
 
   // Walk bindings
-  evalBindings(method.body, env, stateDelta, dataOutputs, anf);
+  evalBindings(method.body, env, stateDelta, dataOutputs, anf, strict);
 
   return { state: { ...currentState, ...stateDelta }, dataOutputs };
 }
@@ -127,9 +195,12 @@ function evalBindings(
   stateDelta: Record<string, unknown>,
   dataOutputs: DataOutputEntry[],
   anf?: ANFProgram,
+  strict: StrictCtx | null = null,
 ): void {
   for (const binding of bindings) {
-    const val = evalValue(binding.value, env, stateDelta, dataOutputs, anf);
+    const val = evalValue(
+      binding.value, env, stateDelta, dataOutputs, anf, strict, binding.name,
+    );
     env[binding.name] = val;
   }
 }
@@ -140,6 +211,8 @@ function evalValue(
   stateDelta: Record<string, unknown>,
   dataOutputs: DataOutputEntry[],
   anf?: ANFProgram,
+  strict: StrictCtx | null = null,
+  bindingName: string = '<anonymous>',
 ): unknown {
   switch (value.kind) {
     case 'load_param':
@@ -168,8 +241,18 @@ function evalValue(
     case 'unary_op':
       return evalUnaryOp(value.op, env[value.operand], value.result_type);
 
-    case 'call':
+    case 'call': {
+      // Strict mode: a `call(assert, x)` lowering path must enforce the
+      // predicate the same way the dedicated `assert` ANF node does.
+      if (strict && value.func === 'assert') {
+        const arg = env[value.args[0] ?? ''];
+        if (!isTruthy(arg)) {
+          throw new AssertionFailureError(strict.methodName, bindingName);
+        }
+        return undefined;
+      }
       return evalCall(value.func, value.args.map((a) => env[a]));
+    }
 
     case 'method_call':
       return evalMethodCall(
@@ -186,7 +269,7 @@ function evalValue(
       const branch = isTruthy(cond) ? value.then : value.else;
       // Create a child env for the branch
       const childEnv = { ...env };
-      evalBindings(branch, childEnv, stateDelta, dataOutputs, anf);
+      evalBindings(branch, childEnv, stateDelta, dataOutputs, anf, strict);
       // Copy any new bindings back (the last binding is typically the branch result)
       Object.assign(env, childEnv);
       // Return the last binding's value from the branch
@@ -202,7 +285,7 @@ function evalValue(
       for (let i = 0; i < count; i++) {
         env[iterVar] = BigInt(i);
         const loopEnv = { ...env };
-        evalBindings(body, loopEnv, stateDelta, dataOutputs, anf);
+        evalBindings(body, loopEnv, stateDelta, dataOutputs, anf, strict);
         // Copy loop bindings back
         Object.assign(env, loopEnv);
         if (body.length > 0) {
@@ -213,7 +296,13 @@ function evalValue(
     }
 
     case 'assert': {
-      // In simulation, we skip asserts (the on-chain script handles enforcement)
+      if (strict) {
+        const predicate = env[value.value];
+        if (!isTruthy(predicate)) {
+          throw new AssertionFailureError(strict.methodName, bindingName);
+        }
+      }
+      // Lenient: skip asserts (the on-chain script handles enforcement)
       return undefined;
     }
 
