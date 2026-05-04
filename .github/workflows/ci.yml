@@ -303,10 +303,10 @@ jobs:
             local rc=0
             case "$compiler" in
               go)
-                ./runar-go --ir "$test" --hex >"$out" 2>"$err" || rc=$?
+                ./runar-go --ir "$test" --hex --disable-constant-folding >"$out" 2>"$err" || rc=$?
                 ;;
               rust)
-                ./runar-compiler-rust --ir "$test" --hex >"$out" 2>"$err" || rc=$?
+                ./runar-compiler-rust --ir "$test" --hex --disable-constant-folding >"$out" 2>"$err" || rc=$?
                 ;;
               zig)
                 ./runar-zig compile-ir "$test" --hex >"$out" 2>"$err" || rc=$?

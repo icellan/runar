@@ -846,3 +846,101 @@ describe('auto-compute state from ANF IR', () => {
     expect(contract.state.count).toBe(99n);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ANF data output extraction — extraction must run regardless of whether the
+// caller supplied an explicit newState. Data outputs are part of method-body
+// behaviour (not state) and the on-chain continuation hash check fails at
+// spend time if they're missing from the spending tx.
+//
+// Reference: packages/runar-go/sdk_contract.go (always runs ANF interp).
+// Regression mirror: packages/runar-rb/spec/sdk/contract_spec.rb (~L540).
+// ---------------------------------------------------------------------------
+
+describe('ANF data output extraction', () => {
+  // Stateful contract whose emit() bumps `counter` and emits a single
+  // this.addDataOutput(0n, payload). Only the surface needed by the SDK
+  // pipeline (ANF interpreter + data-output stitching) is exercised here.
+  const EMIT_PAYLOAD_HEX = '6a04deadbeef'; // OP_RETURN <4-byte push>
+
+  function makeEmitterArtifact(): RunarArtifact {
+    return makeArtifact({
+      script: '51',
+      abi: {
+        constructor: { params: [{ name: 'counter', type: 'bigint' }] },
+        methods: [{
+          name: 'emit',
+          params: [
+            { name: '_changePKH', type: 'Ripemd160' },
+            { name: '_changeAmount', type: 'bigint' },
+            { name: '_newAmount', type: 'bigint' },
+            { name: 'txPreimage', type: 'SigHashPreimage' },
+          ],
+          isPublic: true,
+        }],
+      },
+      stateFields: [{ name: 'counter', type: 'bigint', index: 0 }],
+      anf: {
+        contractName: 'DataEmitter',
+        properties: [{ name: 'counter', type: 'bigint', readonly: false }],
+        methods: [{
+          name: 'emit',
+          params: [
+            { name: '_changePKH', type: 'Ripemd160' },
+            { name: '_changeAmount', type: 'bigint' },
+            { name: '_newAmount', type: 'bigint' },
+            { name: 'txPreimage', type: 'SigHashPreimage' },
+          ],
+          body: [
+            { name: 't_sats',   value: { kind: 'load_const', value: 0n } },
+            { name: 't_script', value: { kind: 'load_const', value: EMIT_PAYLOAD_HEX } },
+            { name: 't_emit',   value: { kind: 'add_data_output', satoshis: 't_sats', scriptBytes: 't_script' } },
+            { name: 't_prop',   value: { kind: 'load_prop', name: 'counter' } },
+            { name: 't_one',    value: { kind: 'load_const', value: 1n } },
+            { name: 't_sum',    value: { kind: 'bin_op', op: '+', left: 't_prop', right: 't_one' } },
+            { name: 't_upd',    value: { kind: 'update_prop', name: 'counter', value: 't_sum' } },
+          ],
+          isPublic: true,
+        }],
+      },
+    });
+  }
+
+  it('extracts data outputs from ANF when newState is omitted', async () => {
+    const signer = new LocalSigner(PRIV_KEY);
+    const address = await signer.getAddress();
+    const provider = new MockProvider();
+    provider.addUtxo(address, makeUtxo(100_000));
+
+    const contract = new RunarContract(makeEmitterArtifact(), [0n]);
+    contract.connect(provider, signer);
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    provider.addUtxo(address, makeUtxo(100_000, 1));
+
+    const prepared = await contract.prepareCall('emit', []);
+    expect(prepared.tx.toHex()).toContain(EMIT_PAYLOAD_HEX);
+  });
+
+  // Regression: when the caller pre-computes newState, the SDK used to
+  // short-circuit the ANF interpreter pass entirely, so addDataOutput
+  // payloads were never extracted and the spending tx omitted the data
+  // output — which made the on-chain continuation hash check fail.
+  it('extracts data outputs from ANF even when newState is supplied', async () => {
+    const signer = new LocalSigner(PRIV_KEY);
+    const address = await signer.getAddress();
+    const provider = new MockProvider();
+    provider.addUtxo(address, makeUtxo(100_000));
+
+    const contract = new RunarContract(makeEmitterArtifact(), [0n]);
+    contract.connect(provider, signer);
+    await contract.deploy(provider, signer, { satoshis: 50_000 });
+
+    provider.addUtxo(address, makeUtxo(100_000, 1));
+
+    const prepared = await contract.prepareCall('emit', [], {
+      newState: { counter: 1n },
+    });
+    expect(prepared.tx.toHex()).toContain(EMIT_PAYLOAD_HEX);
+  });
+});

@@ -19,10 +19,13 @@ RSpec.describe 'P384Wallet' do # rubocop:disable RSpec/DescribeClass
   end
 
   it 'has a hybrid ECDSA+P-384 verification script in the expected size band' do
+    # Hybrid ECDSA+P-384 scripts compile to ~1-2 MB depending on the
+    # peephole pass; this is an order-of-magnitude bound matching the Python
+    # reference (integration/python/test_p384_wallet.py).
     artifact     = compile_contract('examples/ts/p384-wallet/P384Wallet.runar.ts')
     script_bytes = artifact.script.length / 2
-    expect(script_bytes).to be > 1_000
-    expect(script_bytes).to be < 300_000
+    expect(script_bytes).to be > 100_000
+    expect(script_bytes).to be < 3_000_000
   end
 
   it 'deploys with ECDSA pubkey hash + P-384 pubkey hash' do

@@ -435,6 +435,38 @@ class RunarContract:
                 for d in explicit_data_outputs
             ]
 
+        # Run the ANF interpreter for any stateful method whose artifact has
+        # ANF IR. The interpreter resolves both the new state and any data
+        # outputs declared via this.addDataOutput(...). Data outputs are part
+        # of method-body behaviour (not state) and the on-chain continuation
+        # hash check fails at spend time if they're missing — so this must
+        # run even when the caller pre-supplied opts.new_state. Reference:
+        # packages/runar-go/sdk_contract.go (ComputeNewStateAndDataOutputs).
+        anf_computed_state: dict | None = None
+        if is_stateful and self.artifact.anf:
+            named_args = _build_named_args(user_params, resolved_args)
+            flat_state = _flatten_fixed_array_state(
+                self._state, self.artifact.state_fields,
+            )
+            flat_ctor_args = _flatten_fixed_array_args(
+                self._constructor_args,
+                self.artifact.abi.constructor_params,
+            )
+            try:
+                computed, data_outs = compute_new_state_and_data_outputs(
+                    self.artifact.anf, method_name, flat_state, named_args,
+                    flat_ctor_args,
+                )
+            except Exception:
+                computed, data_outs = None, []
+            if computed is not None:
+                merged = {**flat_state, **computed}
+                anf_computed_state = _regroup_fixed_array_state(
+                    merged, self.artifact.state_fields,
+                )
+            if data_outs and not resolved_data_outputs:
+                resolved_data_outputs = data_outs
+
         if is_stateful and has_multi_output:
             # Multi-output: build a locking script for each output
             code_script = self._code_script or self._build_code_script()
@@ -460,30 +492,8 @@ class RunarContract:
             if opts.new_state:
                 for k, v in opts.new_state.items():
                     self._state[k] = v
-            elif method_needs_change and self.artifact.anf:
-                named_args = _build_named_args(user_params, resolved_args)
-                # Flatten FixedArray grouped state entries into their
-                # underlying synthetic scalar keys so the ANF interpreter
-                # (which only sees expanded scalars) can read them by name.
-                flat_state = _flatten_fixed_array_state(
-                    self._state, self.artifact.state_fields,
-                )
-                flat_ctor_args = _flatten_fixed_array_args(
-                    self._constructor_args,
-                    self.artifact.abi.constructor_params,
-                )
-                computed, data_outs = compute_new_state_and_data_outputs(
-                    self.artifact.anf, method_name, flat_state, named_args,
-                    flat_ctor_args,
-                )
-                if data_outs and not resolved_data_outputs:
-                    resolved_data_outputs = data_outs
-                merged = {**flat_state, **computed}
-                # Re-group synthetic scalars back into array values.
-                regrouped = _regroup_fixed_array_state(
-                    merged, self.artifact.state_fields,
-                )
-                self._state = {**self._state, **regrouped}
+            elif method_needs_change and anf_computed_state is not None:
+                self._state = {**self._state, **anf_computed_state}
             new_locking_script = self.get_locking_script()
 
         # Fetch fee rate and funding UTXOs for all contract types.

@@ -526,4 +526,87 @@ RSpec.describe Runar::SDK::RunarContract do
       expect(no_anf_contract.get_state['count']).to eq(10)
     end
   end
+
+  # ---------------------------------------------------------------------------
+  # ANF data outputs (this.addDataOutput) — extraction must run regardless of
+  # whether the caller supplied an explicit new_state. Data outputs are part
+  # of method-body behaviour (not state) and the on-chain continuation hash
+  # check fails at spend time if they're missing from the spending tx.
+  #
+  # Regression: integration/ruby/spec/data_outputs_spec.rb
+  # Reference:  packages/runar-go/sdk_contract.go (always runs ANF interp).
+  # ---------------------------------------------------------------------------
+
+  describe 'ANF data output extraction' do
+    # Stateful contract whose emit() bumps `counter` and emits a single
+    # this.addDataOutput(0n, payload). The payload binding is t_script
+    # (load_const hex string) and the satoshis binding is t_sats
+    # (load_const 0). The payload value is the bytes that will appear as
+    # the data output's full script.
+    let(:emit_payload_hex) { '6a04deadbeef' } # OP_RETURN <4-byte push>
+    let(:data_emitter_artifact_json) do
+      JSON.generate(
+        version:            '1.0',
+        compilerVersion:    '0.1.0',
+        contractName:       'DataEmitter',
+        abi:                {
+          constructor: { params: [{ name: 'counter', type: 'bigint' }] },
+          methods:     [{ name: 'emit', params: [], isPublic: true }]
+        },
+        script:             'aabbcc',
+        asm:                '',
+        stateFields:        [{ name: 'counter', type: 'bigint', index: 0 }],
+        constructorSlots:   [],
+        codeSeparatorIndex: 0,
+        anf:                {
+          'properties' => [{ 'name' => 'counter', 'type' => 'bigint', 'readonly' => false }],
+          'methods'    => [
+            {
+              'name'     => 'emit',
+              'isPublic' => true,
+              'params'   => [],
+              'body'     => [
+                { 'name' => 't_sats',   'value' => { 'kind' => 'load_const', 'value' => 0 } },
+                { 'name' => 't_script', 'value' => { 'kind' => 'load_const', 'value' => emit_payload_hex } },
+                { 'name' => 't_emit',   'value' => { 'kind' => 'add_data_output', 'satoshis' => 't_sats', 'scriptBytes' => 't_script' } },
+                { 'name' => 't_prop',   'value' => { 'kind' => 'load_prop', 'name' => 'counter' } },
+                { 'name' => 't_one',    'value' => { 'kind' => 'load_const', 'value' => 1 } },
+                { 'name' => 't_sum',    'value' => { 'kind' => 'bin_op', 'op' => '+', 'left' => 't_prop', 'right' => 't_one' } },
+                { 'name' => 't_upd',    'value' => { 'kind' => 'update_prop', 'name' => 'counter', 'value' => 't_sum' } }
+              ]
+            }
+          ]
+        }
+      )
+    end
+
+    let(:data_emitter_artifact) { Runar::SDK::RunarArtifact.from_json(data_emitter_artifact_json) }
+    let(:provider) { mock_provider }
+    let(:signer)   { mock_signer }
+    let(:contract) { described_class.new(data_emitter_artifact, [0]) }
+
+    before do
+      provider.add_utxo(
+        SAMPLE_ADDRESS,
+        make_utxo('11' * 32, 1_000_000, script: '76a914' + SAMPLE_ADDRESS + '88ac')
+      )
+      contract.connect(provider, signer)
+      contract.deploy
+    end
+
+    it 'extracts data outputs from ANF when new_state is nil' do
+      prepared = contract.prepare_call('emit', [])
+      expect(prepared.tx_hex).to include(emit_payload_hex)
+    end
+
+    # Bug regression: when the caller pre-computes new_state, the SDK used to
+    # short-circuit the ANF interpreter pass entirely, so addDataOutput
+    # payloads were never extracted and the spending tx omitted the data
+    # output — which made the on-chain continuation hash check fail.
+    it 'extracts data outputs from ANF even when new_state is supplied' do
+      opts = Runar::SDK::CallOptions.new(new_state: { 'counter' => 1 })
+      prepared = contract.prepare_call('emit', [], nil, nil, opts)
+      expect(prepared.tx_hex).to include(emit_payload_hex)
+    end
+  end
 end

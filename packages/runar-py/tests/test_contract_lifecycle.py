@@ -372,3 +372,98 @@ class TestGetLockingScript:
         # Base script "76a9" followed by encoded 42 ("012a")
         assert script.startswith('76a9')
         assert '012a' in script or script.endswith('012a')
+
+
+# ---------------------------------------------------------------------------
+# ANF data outputs (this.addDataOutput) — extraction must run regardless of
+# whether the caller supplied an explicit new_state. Data outputs are part
+# of method-body behaviour (not state) and the on-chain continuation hash
+# check fails at spend time if they're missing from the spending tx.
+#
+# Reference: packages/runar-go/sdk_contract.go (always runs the ANF interp).
+# Mirrors: packages/runar-rb/spec/sdk/contract_spec.rb "ANF data output extraction".
+# ---------------------------------------------------------------------------
+
+class TestAnfDataOutputExtraction:
+    EMIT_PAYLOAD_HEX = '6a04deadbeef'  # OP_RETURN <4-byte push>
+
+    def _data_emitter_artifact(self) -> RunarArtifact:
+        """Stateful contract whose emit() bumps `counter` and emits a single
+        this.addDataOutput(0n, payload).
+        """
+        from runar.sdk.types import StateField
+
+        return RunarArtifact(
+            version='runar-v0.1.0',
+            compiler_version='0.1.0',
+            contract_name='DataEmitter',
+            abi=Abi(
+                constructor_params=[AbiParam(name='counter', type='bigint')],
+                methods=[AbiMethod(name='emit', params=[
+                    AbiParam(name='txPreimage', type='SigHashPreimage'),
+                    AbiParam(name='_changePKH', type='Addr'),
+                    AbiParam(name='_changeAmount', type='bigint'),
+                ], is_public=True)],
+            ),
+            script='aabbcc',
+            state_fields=[StateField(name='counter', type='bigint', index=0)],
+            code_separator_index=0,
+            anf={
+                'properties': [{'name': 'counter', 'type': 'bigint', 'readonly': False}],
+                'methods': [
+                    {
+                        'name': 'emit',
+                        'isPublic': True,
+                        'params': [],
+                        'body': [
+                            {'name': 't_sats',   'value': {'kind': 'load_const', 'value': 0}},
+                            {'name': 't_script', 'value': {'kind': 'load_const', 'value': self.EMIT_PAYLOAD_HEX}},
+                            {'name': 't_emit',   'value': {'kind': 'add_data_output', 'satoshis': 't_sats', 'scriptBytes': 't_script'}},
+                            {'name': 't_prop',   'value': {'kind': 'load_prop', 'name': 'counter'}},
+                            {'name': 't_one',    'value': {'kind': 'load_const', 'value': 1}},
+                            {'name': 't_sum',    'value': {'kind': 'bin_op', 'op': '+', 'left': 't_prop', 'right': 't_one'}},
+                            {'name': 't_upd',    'value': {'kind': 'update_prop', 'name': 'counter', 'value': 't_sum'}},
+                        ],
+                    }
+                ],
+            },
+        )
+
+    def _connect_and_deploy(self):
+        signer = MockSigner(address='00' * 20)
+        provider = _funded_provider(signer.get_address(), satoshis=1_000_000)
+        contract = RunarContract(self._data_emitter_artifact(), [0])
+        contract.connect(provider, signer)
+        contract.deploy(options=DeployOptions(satoshis=50_000))
+        return contract
+
+    def test_extracts_data_outputs_from_anf_when_new_state_is_none(self):
+        """Baseline: ANF data outputs are extracted on a normal call."""
+        contract = self._connect_and_deploy()
+        prepared = contract.prepare_call('emit', [])
+        assert self.EMIT_PAYLOAD_HEX in prepared.tx_hex
+
+    def test_extracts_data_outputs_from_anf_when_new_state_supplied(self):
+        """Regression: when the caller supplies new_state, the SDK previously
+        short-circuited the ANF interpreter pass entirely and the addDataOutput
+        payload was lost — which made the on-chain continuation hash check fail.
+        """
+        from runar.sdk.types import CallOptions
+
+        contract = self._connect_and_deploy()
+        opts = CallOptions(new_state={'counter': 1})
+        prepared = contract.prepare_call('emit', [], options=opts)
+        assert self.EMIT_PAYLOAD_HEX in prepared.tx_hex
+
+    def test_explicit_data_outputs_override_anf(self):
+        """Caller-supplied opts.data_outputs takes priority over ANF-computed
+        outputs (mirrors Go: options.DataOutputs wins).
+        """
+        from runar.sdk.types import CallOptions
+
+        contract = self._connect_and_deploy()
+        override_hex = '6a02cafe'
+        opts = CallOptions(data_outputs=[{'script': override_hex, 'satoshis': 0}])
+        prepared = contract.prepare_call('emit', [], options=opts)
+        assert override_hex in prepared.tx_hex
+        assert self.EMIT_PAYLOAD_HEX not in prepared.tx_hex

@@ -716,6 +716,35 @@ export class RunarContract {
         ? options.dataOutputs.map((d) => ({ script: d.script, satoshis: Number(d.satoshis) }))
         : [];
 
+    // Always run the ANF interpreter on stateful artifacts so addDataOutput
+    // payloads are extracted even when the caller pre-supplied newState.
+    // newState only overrides the state continuation; data outputs are
+    // method-body behaviour and the on-chain continuation hash check fails
+    // at spend time if they're omitted. Mirrors Go SDK + Ruby SDK.
+    let autoComputedState: Record<string, unknown> | undefined;
+    let autoFlatState: Record<string, unknown> | undefined;
+    if (isStateful && this.artifact.anf) {
+      const namedArgs = buildNamedArgs(userParams, resolvedArgs);
+      const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
+      const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
+      try {
+        const { state: computed, dataOutputs: anfDataOutputs } = computeNewStateAndDataOutputs(
+          this.artifact.anf, methodName, flatState, namedArgs,
+          flatCtorArgs,
+        );
+        autoComputedState = computed;
+        autoFlatState = flatState;
+        if (anfDataOutputs.length > 0 && resolvedDataOutputs.length === 0) {
+          resolvedDataOutputs = anfDataOutputs.map((d) => ({
+            script: d.script,
+            satoshis: Number(d.satoshis),
+          }));
+        }
+      } catch {
+        // ANF interp failures fall through to the legacy newState-only path.
+      }
+    }
+
     if (isStateful && hasMultiOutput) {
       const codeScript = this._codeScript ?? this.buildCodeScript();
       contractOutputs = options!.outputs!.map((out) => {
@@ -727,27 +756,8 @@ export class RunarContract {
       if (options?.newState) {
         // Explicit newState takes priority (backward compat)
         this._state = { ...this._state, ...options.newState };
-      } else if (methodNeedsChange && this.artifact.anf) {
-        // Auto-compute new state from ANF IR
-        const namedArgs = buildNamedArgs(userParams, resolvedArgs);
-        // Flatten FixedArray grouped state entries into their underlying
-        // synthetic scalar keys so the ANF interpreter (which only sees
-        // expanded scalars) can read them by name.
-        const flatState = flattenFixedArrayState(this._state, this.artifact.stateFields);
-        const flatCtorArgs = flattenFixedArrayArgs(this.constructorArgs, this.artifact.abi.constructor.params);
-        const { state: computed, dataOutputs: anfDataOutputs } = computeNewStateAndDataOutputs(
-          this.artifact.anf, methodName, flatState, namedArgs,
-          flatCtorArgs,
-        );
-        if (anfDataOutputs.length > 0 && resolvedDataOutputs.length === 0) {
-          resolvedDataOutputs = anfDataOutputs.map((d) => ({
-            script: d.script,
-            satoshis: Number(d.satoshis),
-          }));
-        }
-        const merged = { ...flatState, ...computed };
-        // Re-group synthetic scalars back into array values, then merge
-        // into the user-visible state.
+      } else if (methodNeedsChange && autoComputedState && autoFlatState) {
+        const merged = { ...autoFlatState, ...autoComputedState };
         const regrouped = regroupFixedArrayState(merged, this.artifact.stateFields);
         this._state = { ...this._state, ...regrouped };
       }

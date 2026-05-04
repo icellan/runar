@@ -317,11 +317,13 @@ module Runar
 
         change_pkh_hex = compute_change_pkh(signer, is_stateful, method_needs_change)
 
-        # Auto-compute new state via ANF interpreter when artifact has ANF IR and
-        # no explicit new_state was provided. This also resolves data outputs
-        # declared via this.addDataOutput(...) in the method body, which the
-        # SDK needs to emit in the tx so the on-chain continuation-hash check
-        # matches at spend time.
+        # Auto-compute new state via ANF interpreter when artifact has ANF IR.
+        # This also resolves data outputs declared via this.addDataOutput(...)
+        # in the method body, which the SDK needs to emit in the tx so the
+        # on-chain continuation-hash check matches at spend time. The ANF
+        # interpreter must run even when an explicit new_state is supplied,
+        # because data outputs are part of the method's spend-time behavior
+        # (not state) and the caller cannot pre-compute them.
         resolved_data_outputs = Array(opts.data_outputs).map do |entry|
           if entry.is_a?(Hash)
             { script: entry[:script] || entry['script'], satoshis: entry[:satoshis] || entry['satoshis'] }
@@ -329,14 +331,16 @@ module Runar
             entry
           end
         end
-        if is_stateful && @artifact.anf && opts.new_state.nil?
+        if is_stateful && @artifact.anf
           named_args = build_named_args(user_params, resolved_args)
           computed_state, anf_data_outputs = ANFInterpreter.compute_new_state_and_data_outputs(
             @artifact.anf, method_name, @state, named_args,
             constructor_args: @constructor_args
           )
-          opts = opts.dup
-          opts.new_state = computed_state
+          if opts.new_state.nil?
+            opts = opts.dup
+            opts.new_state = computed_state
+          end
           if resolved_data_outputs.empty? && anf_data_outputs.any?
             resolved_data_outputs = anf_data_outputs.map do |d|
               { script: d[:script], satoshis: d[:satoshis] }
