@@ -175,6 +175,7 @@ def emitStackOp : StackOp → ByteArray
   | .drop            => ByteArray.mk #[0x75]   -- OP_DROP
   | .roll d          => encodePushBigInt d ++ ByteArray.mk #[0x7a]  -- depth then OP_ROLL
   | .pick d          => encodePushBigInt d ++ ByteArray.mk #[0x79]  -- depth then OP_PICK
+  | .pickStruct d    => encodePushBigInt d ++ ByteArray.mk #[0x79]  -- byte-identical to `.pick d`
   | .opcode name     =>
       match opcodeByName? name with
       | some b => ByteArray.mk #[b]
@@ -227,6 +228,7 @@ def emitStackOpFast : StackOp → ByteArray
   | .drop            => ByteArray.mk #[0x75]
   | .roll d          => encodePushBigInt d ++ ByteArray.mk #[0x7a]
   | .pick d          => encodePushBigInt d ++ ByteArray.mk #[0x79]
+  | .pickStruct d    => encodePushBigInt d ++ ByteArray.mk #[0x79]
   | .opcode name     =>
       match opcodeByName? name with
       | some b => ByteArray.mk #[b]

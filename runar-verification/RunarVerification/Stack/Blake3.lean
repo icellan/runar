@@ -53,12 +53,15 @@ open RunarVerification.Stack
   let b3 : UInt8 := (n &&& 0xff).toUInt8
   #[b0, b1, b2, b3]
 
-/-- Emit `pick(d)` per TS Emitter: 0 → dup, 1 → over, else `pick d`. -/
+/-- Emit `pick(d)` per TS Emitter: 0 → dup, 1 → over, else `pickStruct d`.
+The TS reference emits a single `pick` opcode (no preceding push at the
+StackOp layer); the depth becomes a byte-level push inside `Emit`. We
+use `pickStruct` (no-pop) for byte parity with TS. -/
 @[inline] def b3Pick (d : Nat) : List StackOp :=
   match d with
   | 0     => [.dup]
   | 1     => [.over]
-  | n + 2 => [.pick (n + 2)]
+  | n + 2 => [.pickStruct (n + 2)]
 
 /-- Emit `roll(d)` per TS Emitter: 0 → [], 1 → swap, 2 → rot, else `roll d`. -/
 @[inline] def b3Roll (d : Nat) : List StackOp :=

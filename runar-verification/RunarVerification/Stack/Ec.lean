@@ -163,14 +163,16 @@ def roll (t : Tracker) (d : Nat) : Tracker :=
       { t with nm := nm'.push r }
     else t
 
-/-- `pick(d, n)`: 0 → dup(n), 1 → over(n), else `.pick d` then push name.
-The single Lean `.pick d` op encodes as TS's `push d + pick d` pair. -/
+/-- `pick(d, n)`: 0 → dup(n), 1 → over(n), else `.pickStruct d` then push name.
+The single Lean `.pickStruct d` op encodes byte-identically to the TS
+reference's `push d + pick d` pair (Emit synthesises the depth push),
+but with no-pop runtime semantics matching the copy-only TS lowering. -/
 def pick (t : Tracker) (d : Nat) (n : String) : Tracker :=
   match d with
   | 0     => t.dup n
   | 1     => t.over n
   | k + 2 =>
-    let t := t.emit (.pick (k + 2))
+    let t := t.emit (.pickStruct (k + 2))
     { t with nm := t.nm.push (some n) }
 
 @[inline] def toTop (t : Tracker) (name : String) : Tracker :=

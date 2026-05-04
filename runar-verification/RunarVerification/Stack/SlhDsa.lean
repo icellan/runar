@@ -172,14 +172,14 @@ def emitBuildADRS18 (layer type chain ta8Depth : Nat) (kp4 : Kp4Source) :
     List StackOp :=
   let layerOps : List StackOp := [.push (.bytes (ByteArray.mk #[UInt8.ofNat (layer % 256)]))]
   -- After push: ta8 at ta8Depth+1
-  let pickTa : List StackOp := [.pick (ta8Depth + 1), .opcode "OP_CAT"]
+  let pickTa : List StackOp := [.pickStruct (ta8Depth + 1), .opcode "OP_CAT"]
   -- After CAT: (layer || ta8) net +1
   let typeOps : List StackOp := [.push (.bytes (ByteArray.mk #[UInt8.ofNat (type % 256)])), .opcode "OP_CAT"]
   -- Keypair: PICK or push 4 zeros
   let kpOps : List StackOp :=
     match kp4 with
     | .zero    => [.push (.bytes (zerosN 4)), .opcode "OP_CAT"]
-    | .depth d => [.pick (d + 1), .opcode "OP_CAT"]
+    | .depth d => [.pickStruct (d + 1), .opcode "OP_CAT"]
   let chainOps : List StackOp := [.push (.bytes (int4BE chain)), .opcode "OP_CAT"]
   layerOps ++ pickTa ++ typeOps ++ kpOps ++ chainOps
 
@@ -320,13 +320,16 @@ def roll (t : Tracker) (d : Nat) : Tracker :=
       { t with nm := nm'.push r }
     else t
 
-/-- `pick(d, n)`: 0 → dup(n), 1 → over(n), else `.pick d` then push name. -/
+/-- `pick(d, n)`: 0 → dup(n), 1 → over(n), else `.pickStruct d` then push name.
+The TS reference emits a single `pick` opcode at the StackOp layer (the
+depth becomes a byte-level push inside `Emit`); we use `pickStruct`
+(no-pop) for byte parity. -/
 def pick (t : Tracker) (d : Nat) (n : Option String) : Tracker :=
   match d with
   | 0     => t.dup n
   | 1     => t.over n
   | k + 2 =>
-    let t := t.emit (.pick (k + 2))
+    let t := t.emit (.pickStruct (k + 2))
     { t with nm := t.nm.push n }
 
 @[inline] def toTop (t : Tracker) (name : String) : Tracker :=
@@ -403,7 +406,7 @@ def emitSLHT_raw (n pkSeedPadDepth : Nat) : List StackOp :=
   let cat1 : List StackOp := [.opcode "OP_CAT"]
   -- After CAT: 2 consumed, 1 produced. pspDepth = pkSeedPadDepth - 1.
   let pickD := pkSeedPadDepth - 1
-  let pickOps : List StackOp := [.pick pickD]
+  let pickOps : List StackOp := [.pickStruct pickD]
   let combine : List StackOp :=
     [ .swap, .opcode "OP_CAT", .opcode "OP_SHA256" ]
   let truncate : List StackOp :=
@@ -433,7 +436,7 @@ def slhChainStepThen (n pkSeedPadDepth : Nat) : List StackOp :=
     [.roll 3, .opcode "OP_CAT"]
   -- pkSeedPad via PICK
   let pickPsp : List StackOp :=
-    [.pick pkSeedPadDepth, .swap, .opcode "OP_CAT", .opcode "OP_SHA256"]
+    [.pickStruct pkSeedPadDepth, .swap, .opcode "OP_CAT", .opcode "OP_SHA256"]
   let truncate : List StackOp :=
     if n < 32 then
       [.push (.bigint (Int.ofNat n)), .opcode "OP_SPLIT", .drop]

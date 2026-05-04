@@ -99,16 +99,28 @@ def constIsLiteral : ConstValue → Bool
 
 def constIsWF (env : ScopeEnv) : ConstValue → Bool
   | .int _ | .bool _ | .bytes _ | .thisRef => true
-  | .refAlias n => env.resolves n
+  -- Phase 6 Step 2: `refAlias` must point at a previously-defined
+  -- binding, not at a method param or contract prop. The TS reference
+  -- only emits `@ref:tN` aliases targeting SSA temporaries (verified
+  -- against the conformance corpus — every alias in the 49 goldens
+  -- targets a `tN`-style name in `env.defined`). This tighter check
+  -- lets the simulation theorem extract the binding's value via the
+  -- StackMap without disambiguating param/prop/binding kinds.
+  | .refAlias n => env.defined.contains n
 
 /-! ## ANFValue well-formedness (mutual with bindings) -/
 
 mutual
 
-/-- Every `TempRef` in `v` resolves in `env`, and any nested binding lists are themselves WF. -/
+/-- Every `TempRef` in `v` resolves in `env`, and any nested binding lists are themselves WF.
+
+Phase 6 Step 2: `loadParam name` requires `name ∈ env.params`, and
+`loadProp name` requires `name ∈ env.props`. These were previously
+unconditionally `true`; tightening lets downstream simulation lemmas
+extract the property/parameter from `env` without re-checking. -/
 partial def valueIsWF (env : ScopeEnv) : ANFValue → Bool
-  | .loadParam _ => true
-  | .loadProp _ => true
+  | .loadParam n => env.params.contains n
+  | .loadProp n  => env.props.contains n
   | .loadConst c => constIsWF env c
   | .binOp _ l r _ => env.resolves l && env.resolves r
   | .unaryOp _ o _ => env.resolves o

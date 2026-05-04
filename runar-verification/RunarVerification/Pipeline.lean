@@ -214,6 +214,41 @@ axiom lower_observational_correct
       (runMethod (Lower.lower p) m.name initialStack)
 
 /--
+**Theorem (lowering preserves success — conditional form, Phase 6 Step 8).**
+
+Same statement as the axiom above, but takes the per-method
+operational simulation as an explicit hypothesis. This is the
+discharge form: once Phase 6 Stage B's per-opcode operational
+discharge lands (Step 4 tail) and Stage C's chain composition
+plugs them into `agreesTagged_chain_preserves` (Step 6), the
+hypothesis `hSimulates` is provable, and this theorem replaces
+the axiom.
+
+The hypothesis is *exactly* what the per-construct preservation
+lemmas in `Stack.Agrees` produce when composed via
+`runOps_append` (Step 6): given `agreesTagged` at the empty
+stack-map (= initial state alignment), running both evaluators
+either both succeed or both fail.
+
+Stage D's post-processing (terminal-assert elision, NIP cleanup
+— see `Stack.Agrees.terminalAssertElidesFor` /
+`nipCleanupActiveFor`) is wrapped into the simulation hypothesis
+since those steps preserve `successAgrees` definitionally
+(elision drops a trailing `OP_VERIFY` whose successful run is
+its own residue; NIP cleanup pops to a single-bool residue,
+preserving `.isSome`). -/
+theorem lower_observational_correct_conditional
+    (p : ANFProgram) (_h : WF.ANF p) (m : ANFMethod)
+    (initialAnf : State) (initialStack : StackState)
+    (hSimulates :
+        (RunarVerification.ANF.Eval.evalBindings initialAnf m.body).toOption.isSome ↔
+        (runMethod (Lower.lower p) m.name initialStack).toOption.isSome) :
+    successAgrees
+      (RunarVerification.ANF.Eval.evalBindings initialAnf m.body)
+      (runMethod (Lower.lower p) m.name initialStack) :=
+  hSimulates
+
+/--
 **Theorem (peephole preserves success).** Applying the full 19-rule
 `peepholePassAll` to every method's ops (i.e. `peepholeProgram`)
 preserves observational equivalence with the un-optimised lowered

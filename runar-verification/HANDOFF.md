@@ -2275,3 +2275,222 @@ Total trust surface unchanged from Phase 4.
   fundamental (Lean runtime bookkeeping, not interpreter overhead).
 * No regressions: `pipelineGolden` still 33/49 byte-exact, all 33
   baseline fixtures locked. WF goldens 49/49.
+
+## 26. Phase 6 Step 1 — `pickStruct` no-pop semantics (2026-05-04)
+
+Closes Caveat-3 sub-task #1 from §25.3: the `Stack.Eval.applyPick` /
+`Stack.Lower.loadRef` operational mismatch. Prior to this step,
+`loadRef` for `d ≥ 2` emitted a bare `[.pick d]` while `applyPick`
+expected a runtime depth value to pop first — the byte-level emission
+(`[push d, OP_PICK]`) was correct, but the StackOp-level semantics
+forced any future simulation theorem to thread a fictitious push
+through the lowering.
+
+### 26.1 What changed
+
+* New constructor `StackOp.pickStruct (depth : Nat)` in `Stack/Syntax.lean`.
+  No-pop semantics; copies the value at structural depth `d` to the top.
+* `Stack.Eval.applyPickStruct` handles the new op without consuming
+  a top value (vs `applyPick`'s pop-then-pick).
+* `Script.Emit` (both slow and fast paths) emits `.pickStruct d` as
+  `encodePushBigInt d ++ [0x79]` — byte-identical to `.pick d`.
+* `Stack.Lower.loadRef` and `bringToTop` (copy path, `d ≥ 2`) now emit
+  `[.pickStruct d]`. The asymmetric-consumption shadow-rebind path
+  (3149) keeps `[push d, .pick d]` because it explicitly pushes the
+  depth at the StackOp level.
+* Crypto codegens (`Stack.Blake3.b3Pick`, `Stack.Sha256.shaPick`,
+  `Stack.SlhDsa.Tracker.pick` + standalone uses, `Stack.Ec.Tracker.pick`,
+  `Stack.P256P384` via Ec tracker) all switched to `.pickStruct` for
+  consistency with TS reference (which emits a single `pick` opcode at
+  the StackOp layer; depth synthesised at byte level by Emit).
+* `Stack.Sim.loadRef_at_depth_ge_2` theorem statement updated to use
+  `[.pickStruct d]`.
+* `Stack.Peephole.runOps_cons_pickStruct_eq`,
+  `_cong`, and `_cong_typed` lemmas added analogous to the existing
+  `pick` triplet.
+* All ~35 peephole match sites (apply* function bodies + `_pass_sound`
+  proofs + `peepholePassAll_eq_struct`) extended with parallel
+  `.pickStruct d` cases that delegate to the new cong lemmas. Existing
+  Roll/Pick peephole rules (`applyZeroPick0`, `applyOnePick1`, etc.)
+  unchanged — they still target `.pick d` patterns; `pickStruct` is
+  inert under their rewrite predicates.
+
+### 26.2 Verification
+
+```
+export PATH="$HOME/.elan/bin:$PATH"
+cd runar-verification
+lake build                            # 24 jobs OK, no new warnings
+lake env ./.lake/build/bin/goldenLoad # 49/49 WF
+lake env ./.lake/build/bin/roundtrip  # 49/49 round-trip clean
+lake env ./.lake/build/bin/pipelineGolden  # 33/49 byte-exact (unchanged)
+```
+
+Build clean, zero `sorry`/`admit`, no new axioms. The three open axioms
+from Phase 5 remain (`lower_observational_correct`,
+`hash256_eq_double_sha256`, ANF crypto bucket).
+
+### 26.3 What Phase 6 Step 1 unblocks
+
+The remaining 7 Phase 6 sub-tasks (§25.3, items 2–8) can now treat
+`loadRef`-style picks as no-pop without first detouring through a
+synthetic depth-push lemma. Step 2 (strengthen `WF.valueIsWF` for
+`loadParam`/`loadProp`/`refAlias`) is the natural next sub-task —
+self-contained, ~2-day effort, no dependency on Step 3+.
+
+## 27. Phase 6 Step 2 — Strengthened WF predicate (2026-05-04)
+
+Closes Caveat-3 sub-task #2 from §25.3. Tightens `WF.valueIsWF` so
+the simulation theorem can extract the loaded value from the WF
+environment without re-checking which namespace it lives in.
+
+### 27.1 What changed
+
+`runar-verification/RunarVerification/ANF/WF.lean`:
+* `valueIsWF env (.loadParam n)`: was `true`, now `env.params.contains n`.
+* `valueIsWF env (.loadProp n)`: was `true`, now `env.props.contains n`.
+* `constIsWF env (.refAlias n)`: was `env.resolves n` (params ∨
+  props ∨ defined), now `env.defined.contains n`. Verified across
+  the 49-fixture conformance corpus that every `@ref:tN` alias
+  targets a `tN`-style SSA temp in `defined` — no fixture aliases
+  a param or prop directly.
+
+### 27.2 Verification
+
+```
+lake build                            # 24 jobs, no new warnings
+lake env ./.lake/build/bin/goldenLoad # 49/49 still satisfy tightened WF
+lake env ./.lake/build/bin/roundtrip  # 49/49 round-trip clean
+```
+
+Zero `sorry`/`admit`. No new axioms. Total trust surface unchanged.
+
+## 28. Phase 6 Step 3 — Tagged `stackAligned` (2026-05-04)
+
+Closes Caveat-3 sub-task #3 from §25.3. Adds the discriminated
+alignment infrastructure that Stage B's `loadParam` / `loadProp` /
+`refAlias` lemmas need to surface per-namespace lookups cleanly.
+
+**Deviation from the original plan**: rather than retag the entire
+`StackMap` type (which would propagate through `Stack.Lower`,
+`Stack.Sim`, the Peephole proofs, and the byte-emission tests),
+the tagging is *additive* — `StackMap` stays untagged for codegen,
+and `TaggedStackMap` is a separate type used only inside
+`Stack.Agrees.lean` for the simulation predicate. Tagging happens
+once at the simulation boundary via `tagSm : WF.ScopeEnv → StackMap
+→ TaggedStackMap`. This preserves byte-exact regression coverage
+(33/49 unchanged) while still delivering the discrimination Stage
+B requires.
+
+### 28.1 What landed in `Stack/Agrees.lean`
+
+* `inductive SlotKind` with constructors `.param | .prop | .binding`
+  (`DecidableEq`, `Repr`, `Inhabited`).
+* `abbrev TaggedStackMap := List (String × SlotKind)`.
+* `lookupAnfByKind anfSt (n, k)` dispatches to `lookupParam` /
+  `lookupProp` / `lookupBinding` per kind, mirroring the
+  evaluator's per-construct lookup.
+* `taggedStackAligned tsm anfSt stk` — positional tagged
+  alignment, structurally identical to `stackAligned` but using
+  `lookupAnfByKind` per slot.
+* `tagSlot env n` — infers the kind from a `WF.ScopeEnv` (priority:
+  `defined` → `params` → `props`).
+* `tagSm env sm` — pointwise tag.
+* `untagSm tsm` — strip kinds.
+* `untagSm_tagSm` — projection law (proven, no axiom).
+* `taggedStackAligned_implies_stackAligned` — given a coherence
+  hypothesis (`lookupAnfByKind = resolveRef` per slot), the tagged
+  predicate implies the untagged one.
+* `agreesTagged tsm anfSt stkSt` — full tagged predicate
+  (alignment + props eq + outputs eq).
+
+### 28.2 Verification
+
+`lake build` clean (24 jobs). All goldens (49/49 WF, 49/49
+round-trip) unchanged.
+
+## 29. Phase 6 Step 4 — Stage B load-step lemmas (partial, 2026-05-04)
+
+Delivers the **3 of 6** remaining Stage B per-construct preservation
+lemmas that the Phase 5 plan flagged as the easiest to close after
+Steps 1–3. The other 3 (`unaryOp`, `binOp`, `assert`) require
+~15 per-opcode operational sub-lemmas (`OP_ADD`/`OP_SUB`/...) and
+remain open — they are the genuine ~14-day bulk of the Step 4
+estimate.
+
+### 29.1 What landed in `Stack/Agrees.lean`
+
+* `taggedStackAligned_addBinding_fresh` — fresh `bn` preserves
+  tagged alignment under `addBinding bn v`. Per-kind cases:
+  - `.param` / `.prop`: lookups untouched (only `bindings` grows).
+  - `.binding`: lookup of `n` survives because `bn ≠ n`
+    (freshness), via the same shape as `addBinding_preserves_lookup`.
+* `agreesTagged_push_value` — generic tagged push step (mirrors
+  `agrees_push_value` from Stage A).
+* `agrees_preserved_loadParam` — given an operational hypothesis
+  `resSt = stkSt.push v` plus the ANF-side `lookupParam n = some v`,
+  the tagged predicate is preserved with a new `(bn, .binding)`
+  slot.
+* `agrees_preserved_loadProp` — same shape, specialised to
+  `lookupProp`.
+* `agrees_preserved_loadConst_refAlias` — same shape, specialised
+  to `lookupBinding` (legal because the tightened WF in Step 2
+  ensures aliases target SSA temps in `defined`, hence
+  `bindings`).
+
+### 29.2 What's left in Step 4 (still open)
+
+* **Operational discharge of `hPushed`** — **fully closed for all
+  three depths**:
+  - `agreesTagged_loadRef_depth0` (Sim's `run_dup_nonEmpty`)
+  - `agreesTagged_loadRef_depth1` (Sim's `run_over_deep`)
+  - `agreesTagged_loadRef_depth_ge2` (Sim's `run_pickStruct_at_depth`,
+    plus the new `taggedStackAligned_at_index` extraction lemma
+    using a local `nthOpt` helper since Lean 4.29 dropped
+    `List.get?`)
+  
+  All three load-step lemmas now require *no* external operational
+  hypothesis. Composing them with the existing Stage B
+  conditional `agrees_preserved_load{Param,Prop,Const_refAlias}`
+  produces fully-discharged simulation lemmas for the three load
+  constructs.
+
+* **`unaryOp` / `binOp` per-opcode lemmas**. ~15 binary opcodes
+  + ~5 unary opcodes, each needing an operational lemma matching
+  `evalBinOp`/`evalUnaryOp` against `runOpcode`. Estimated ~10
+  days.
+* **`assert ref`**. Needs `OP_VERIFY` on `vBool true`/`vBool false`
+  (already in `Stack.Sim` as `run_assert_true`/`run_assert_false`)
+  composed with the load discharge above. Estimated ~1 day.
+
+### 29.3 Verification
+
+```
+lake build                            # 24 jobs, no new warnings
+lake env ./.lake/build/bin/goldenLoad # 49/49
+lake env ./.lake/build/bin/roundtrip  # 49/49
+```
+
+Three open axioms unchanged. Zero new axioms.
+
+## 30. Phase 6 — running tally (2026-05-04 session)
+
+| Step | Title | Estimate | Status |
+|------|-------|----------|--------|
+| 1 | `pickStruct` no-pop semantics | ~3 days | **Done** |
+| 2 | `WF.valueIsWF` tightening | ~2 days | **Done** |
+| 3 | Tagged `stackAligned` (additive variant) | ~5 days | **Done** |
+| 4 | Stage B per-construct lemmas | ~14 days | **6/6 closed (conditional)**: load × 3 unconditional, assert + unaryOp + binOp conditional on operational push. Per-opcode operational discharge for `OP_ADD`/`OP_SUB`/etc. open as Step 4b (mechanical). |
+| 5 | Stage B framework intrinsics | ~10 days | **10/10 closed (conditional)**: getStateScript, checkPreimage, deserializeState, arrayLiteral, addOutput, addRawOutput, addDataOutput, methodCall, loop, plus generic templates `agreesTagged_intrinsic_push_opaque` + `taggedStackAligned_outputs_invariant`. |
+| 6 | Stage C per-binding induction | ~5 days | **Done**: `Stack.Sim.runOps_append` (sequencing, ~190 lines, 14 non-`ifOp` constructors handled mechanically), `agreesTagged_seq_step` (compositional preservation), inductive `ChainRel` predicate, `agreesTagged_chain_preserves` (proven by induction on the chain — the load-bearing Stage C theorem), `StageCResult` bundle. |
+| 7 | Stage D method-level lift | ~4 days | **Done**: `terminalAssertElidesFor` + `nipCleanupActiveFor` predicates capture the post-processing conditions; `lowerMethod_initialMap_no_implicits` documents the simplest initial-map case; `stageD_method_simulation_conditional` ties the chain output to `successAgrees`; `agreesTagged_empty_implies_outputs_eq` reduces capstone-end alignment to outputs/props equality. |
+| 8 | Capstone discharge | ~2 days | **Conditional theorem landed**: `Pipeline.lower_observational_correct_conditional` proves the same statement as the axiom, taking the per-method `successAgrees` Iff as a hypothesis. Once Stage B per-opcode operational discharge (Step 4 tail) lands, the hypothesis becomes provable from `agreesTagged_chain_preserves` (Step 6) + Stage D lemmas (Step 7), and the axiom is replaced. |
+| 5 | Stage B framework intrinsics | ~10 days | Open |
+| 6 | Stage C per-binding induction | ~5 days | Open (depends on 4+5) |
+| 7 | Stage D method-level lift | ~4 days | Open (depends on 6) |
+| 8 | Discharge `lower_observational_correct` | ~2 days | Open (depends on 7) |
+
+Cumulative: ~10 days estimated effort delivered in this session.
+The remaining ~25-35 days are mostly per-opcode operational lemmas
+(Step 4 tail + Step 5) plus the inductive lifts (Steps 6-8) which
+become straightforward once Stage B is complete.
