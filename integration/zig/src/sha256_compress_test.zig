@@ -61,6 +61,7 @@ test "Sha256Compress_Deploy_AndCall_KnownVector" {
 
     const expected_bytes = runar.sha256Compress(&state, &block);
     const expected_hex = try bytesToHexAlloc(allocator, expected_bytes);
+    defer allocator.free(expected_hex);
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
         .{ .bytes = expected_hex },

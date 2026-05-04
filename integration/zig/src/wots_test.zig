@@ -66,6 +66,7 @@ test "WOTS_Deploy_AndCall_DeterministicVector" {
     const sig = runar.testing.wotsSignDeterministic(message, &seed, &pub_seed);
 
     const pk_hex = try bytesToHexAlloc(allocator, &pk);
+    defer allocator.free(pk_hex);
     const sig_hex = try bytesToHexAlloc(allocator, &sig);
     defer allocator.free(sig_hex);
     const msg_hex = try bytesToHexAlloc(allocator, message);
