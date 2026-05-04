@@ -1,7 +1,10 @@
 package runar.lang.sdk;
 
 import java.math.BigInteger;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HexFormat;
@@ -9,6 +12,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.crypto.params.ECPublicKeyParameters;
+import org.bouncycastle.crypto.signers.ECDSASigner;
+import org.bouncycastle.math.ec.ECPoint;
 
 import runar.lang.runtime.MockCrypto;
 
@@ -78,7 +87,7 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        return run(anf, methodName, currentState, args, constructorArgs, false).newState;
+        return run(anf, methodName, currentState, args, constructorArgs, false, null).newState;
     }
 
     /**
@@ -97,7 +106,7 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, false);
+        Run r = run(anf, methodName, currentState, args, constructorArgs, false, null);
         return new ExecutionResult(r.newState, r.dataOutputs);
     }
 
@@ -124,10 +133,10 @@ public final class AnfInterpreter {
      * condition is evaluated and the call throws
      * {@link AssertionFailureException} on failure.
      *
-     * <p>Crypto primitives available locally (SHA-256, RIPEMD-160,
-     * hash160, hash256, ECDSA via mock) are real. Others
-     * (BN254/Poseidon2/SLH-DSA/WOTS/sha256Compress) bubble up the
-     * {@link UnsupportedOperationException} from {@link MockCrypto}.
+     * <p>Hash primitives (SHA-256, RIPEMD-160, hash160, hash256) are real.
+     * ECDSA primitives ({@code checkSig}, {@code checkMultiSig},
+     * {@code checkPreimage}) are mocked to {@code true}; for real ECDSA
+     * verification use {@link #executeOnChainAuthoritative}.
      */
     public static ExecutionResult executeStrict(
         Map<String, Object> anf,
@@ -136,8 +145,66 @@ public final class AnfInterpreter {
         Map<String, Object> args,
         List<Object> constructorArgs
     ) {
-        Run r = run(anf, methodName, currentState, args, constructorArgs, true);
+        Run r = run(anf, methodName, currentState, args, constructorArgs, true, null);
         return new ExecutionResult(r.newState, r.dataOutputs);
+    }
+
+    /**
+     * On-chain authoritative simulation: strict assert enforcement PLUS real
+     * ECDSA verification ({@code checkSig}, {@code checkMultiSig}) and real
+     * SHA-256 preimage check ({@code checkPreimage}) against the supplied
+     * 32-byte BIP-143 sighash in {@code ctx}.
+     *
+     * <p>The {@code ctx} parameter is mandatory and carries the sighash, so
+     * callers cannot invoke this entry point accidentally without supplying
+     * the cryptographic inputs that verification needs.
+     *
+     * <p>{@code checkSig(sig, pk)} parses {@code pk} as a SEC1 secp256k1
+     * point (compressed or uncompressed), parses {@code sig} as DER (with
+     * an optional trailing sighash type byte stripped), and runs ECDSA
+     * verification through BouncyCastle. Failure trips the enclosing
+     * {@code assert(...)} and throws {@link AssertionFailureException}.
+     *
+     * <p>{@code checkMultiSig(sigs, pks)} iterates signatures left-to-right
+     * and consumes pubkeys greedily, mirroring Bitcoin's
+     * {@code OP_CHECKMULTISIG}. {@code sigs} and {@code pks} must be
+     * {@code List<?>} of hex strings or byte arrays.
+     *
+     * <p>{@code checkPreimage(preimage)} computes
+     * {@code SHA256(SHA256(preimage))} and compares to {@code ctx.sighash}
+     * — the on-chain {@code OP_PUSH_TX} semantic.
+     */
+    public static ExecutionResult executeOnChainAuthoritative(
+        Map<String, Object> anf,
+        String methodName,
+        Map<String, Object> currentState,
+        Map<String, Object> args,
+        List<Object> constructorArgs,
+        OnChainCryptoContext ctx
+    ) {
+        if (ctx == null || ctx.sighash() == null || ctx.sighash().length != 32) {
+            throw new IllegalArgumentException(
+                "executeOnChainAuthoritative: ctx.sighash must be exactly 32 bytes"
+            );
+        }
+        Run r = run(anf, methodName, currentState, args, constructorArgs, true, ctx);
+        return new ExecutionResult(r.newState, r.dataOutputs);
+    }
+
+    /**
+     * Required cryptographic context for {@link #executeOnChainAuthoritative}.
+     * The 32-byte BIP-143 sighash that crypto built-ins verify against.
+     */
+    public record OnChainCryptoContext(byte[] sighash) {
+        public OnChainCryptoContext {
+            if (sighash != null) sighash = sighash.clone();
+        }
+        @Override public byte[] sighash() { return sighash == null ? null : sighash.clone(); }
+
+        /** Convenience constructor accepting a hex-encoded sighash. */
+        public static OnChainCryptoContext fromHex(String hex) {
+            return new OnChainCryptoContext(HEX.parseHex(hex));
+        }
     }
 
     /** Thrown when an {@code assert} binding's condition is falsy in strict mode. */
@@ -171,7 +238,8 @@ public final class AnfInterpreter {
         Map<String, Object> currentState,
         Map<String, Object> args,
         List<Object> constructorArgs,
-        boolean strict
+        boolean strict,
+        OnChainCryptoContext realCrypto
     ) {
         if (anf == null) {
             throw new InterpreterException("AnfInterpreter: anf IR is null");
@@ -239,7 +307,7 @@ public final class AnfInterpreter {
         Map<String, Object> stateDelta = new LinkedHashMap<>();
         List<DataOutput> dataOutputs = new ArrayList<>();
 
-        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, strict);
+        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, strict, realCrypto);
 
         Map<String, Object> newState = new LinkedHashMap<>();
         newState.putAll(currentState);
@@ -257,10 +325,11 @@ public final class AnfInterpreter {
         Map<String, Object> env,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
-        boolean strict
+        boolean strict,
+        OnChainCryptoContext realCrypto
     ) {
         for (Map<String, Object> binding : bindings) {
-            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, strict);
+            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, strict, realCrypto);
             env.put((String) binding.get("name"), val);
         }
     }
@@ -271,7 +340,8 @@ public final class AnfInterpreter {
         Map<String, Object> env,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
-        boolean strict
+        boolean strict,
+        OnChainCryptoContext realCrypto
     ) {
         String kind = String.valueOf(value.getOrDefault("kind", ""));
 
@@ -305,14 +375,14 @@ public final class AnfInterpreter {
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
-                return evalCall(func, argVals);
+                return evalCall(func, argVals, realCrypto);
             }
             case "method_call": {
                 String mname = (String) value.get("method");
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
-                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, strict);
+                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, strict, realCrypto);
             }
             case "if": {
                 Object cond = env.get((String) value.get("cond"));
@@ -320,7 +390,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict, realCrypto);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     return childEnv.get((String) branch.get(branch.size() - 1).get("name"));
@@ -335,7 +405,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, BigInteger.valueOf(i));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict, realCrypto);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         lastVal = loopEnv.get((String) body.get(body.size() - 1).get("name"));
@@ -400,7 +470,8 @@ public final class AnfInterpreter {
         Map<String, Object> callerEnv,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
-        boolean strict
+        boolean strict,
+        OnChainCryptoContext realCrypto
     ) {
         if (anf == null || methodName == null) return null;
         for (Map<String, Object> m : listOfObjects(anf.get("methods"))) {
@@ -420,7 +491,7 @@ public final class AnfInterpreter {
                 }
                 List<Map<String, Object>> body = listOfObjects(m.get("body"));
                 Map<String, Object> childDelta = new LinkedHashMap<>();
-                evalBindings(anf, body, callEnv, childDelta, dataOutputs, strict);
+                evalBindings(anf, body, callEnv, childDelta, dataOutputs, strict, realCrypto);
                 stateDelta.putAll(childDelta);
                 // Mirror property mutations back into caller env
                 for (Map.Entry<String, Object> e : childDelta.entrySet()) {
@@ -500,13 +571,21 @@ public final class AnfInterpreter {
     // Built-in calls
     // ------------------------------------------------------------------
 
-    private static Object evalCall(String func, List<Object> args) {
+    private static Object evalCall(String func, List<Object> args, OnChainCryptoContext realCrypto) {
         switch (func) {
-            // Mocked crypto
-            case "checkSig":
-            case "checkMultiSig":
-            case "checkPreimage":
-                return Boolean.TRUE;
+            // Mocked crypto unless real-crypto context is supplied.
+            case "checkSig": {
+                if (realCrypto == null) return Boolean.TRUE;
+                return verifyEcdsaReal(args.get(0), args.get(1), realCrypto.sighash());
+            }
+            case "checkMultiSig": {
+                if (realCrypto == null) return Boolean.TRUE;
+                return verifyMultiSigReal(args.get(0), args.get(1), realCrypto.sighash());
+            }
+            case "checkPreimage": {
+                if (realCrypto == null) return Boolean.TRUE;
+                return verifyPreimageReal(args.get(0), realCrypto.sighash());
+            }
 
             // Real hashes
             case "sha256":     return hashHex("sha256", args.get(0));
@@ -687,6 +766,100 @@ public final class AnfInterpreter {
         StringBuilder sb = new StringBuilder(chunk.length() * count);
         for (int i = 0; i < count; i++) sb.append(chunk);
         return sb.toString();
+    }
+
+    // ------------------------------------------------------------------
+    // Real ECDSA / preimage verification (executeOnChainAuthoritative)
+    // ------------------------------------------------------------------
+
+    /** Coerce {@code arg} to a byte array. Hex string or raw byte[] accepted. */
+    private static byte[] toBytes(Object v) {
+        if (v == null) return null;
+        if (v instanceof byte[] b) return b;
+        if (v instanceof String s) {
+            try { return HEX.parseHex(s); }
+            catch (IllegalArgumentException e) { return null; }
+        }
+        return null;
+    }
+
+    /**
+     * Verify an ECDSA signature against a 32-byte digest using BouncyCastle
+     * (same secp256k1 curve as {@link LocalSigner}). Pubkey is SEC1
+     * (compressed 33 bytes or uncompressed 65 bytes); signature is DER with
+     * an optional trailing sighash type byte stripped. Returns false on any
+     * decode error so the enclosing assert fires.
+     */
+    static boolean verifyEcdsaReal(Object sigVal, Object pkVal, byte[] sighash) {
+        byte[] sigBytes = toBytes(sigVal);
+        byte[] pkBytes  = toBytes(pkVal);
+        if (sigBytes == null || pkBytes == null || sighash == null || sighash.length != 32) {
+            return false;
+        }
+        // Strip trailing sighash type byte from a DER+hashtype blob.
+        byte[] der = sigBytes;
+        if (der.length >= 2 && (der[0] & 0xff) == 0x30) {
+            int declared = (der[1] & 0xff) + 2;
+            if (der.length == declared + 1) {
+                der = Arrays.copyOf(der, declared);
+            }
+        }
+        try {
+            ECPoint q = LocalSigner.DOMAIN.getCurve().decodePoint(pkBytes);
+            ECPublicKeyParameters params = new ECPublicKeyParameters(q, LocalSigner.DOMAIN);
+            ECDSASigner signer = new ECDSASigner();
+            signer.init(false, params);
+            ASN1Sequence seq = ASN1Sequence.getInstance(der);
+            BigInteger r = ((ASN1Integer) seq.getObjectAt(0)).getValue();
+            BigInteger s = ((ASN1Integer) seq.getObjectAt(1)).getValue();
+            return signer.verifySignature(sighash, r, s);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Verify a list of signatures against a list of pubkeys. Mirrors
+     * Bitcoin's {@code OP_CHECKMULTISIG}: iterate sigs left-to-right,
+     * consume pubkeys greedily.
+     */
+    @SuppressWarnings("unchecked")
+    static boolean verifyMultiSigReal(Object sigsVal, Object pksVal, byte[] sighash) {
+        if (!(sigsVal instanceof List<?> rawSigs) || !(pksVal instanceof List<?> rawPks)) {
+            return false;
+        }
+        List<Object> sigs = (List<Object>) rawSigs;
+        List<Object> pks  = (List<Object>) rawPks;
+        if (sigs.size() > pks.size()) return false;
+        int pkIdx = 0;
+        for (Object sig : sigs) {
+            boolean matched = false;
+            while (pkIdx < pks.size()) {
+                boolean ok = verifyEcdsaReal(sig, pks.get(pkIdx), sighash);
+                pkIdx++;
+                if (ok) { matched = true; break; }
+            }
+            if (!matched) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Verify that {@code SHA256(SHA256(preimage)) == sighash} — the on-chain
+     * {@code OP_PUSH_TX} semantic for {@code checkPreimage}.
+     */
+    static boolean verifyPreimageReal(Object preimageVal, byte[] sighash) {
+        byte[] preBytes = toBytes(preimageVal);
+        if (preBytes == null || sighash == null || sighash.length != 32) return false;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] first = md.digest(preBytes);
+            md.reset();
+            byte[] second = md.digest(first);
+            return Arrays.equals(second, sighash);
+        } catch (NoSuchAlgorithmException e) {
+            return false;
+        }
     }
 
     // ------------------------------------------------------------------

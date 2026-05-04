@@ -7,7 +7,7 @@
  * while skipping on-chain-only operations like `check_preimage`,
  * `deserialize_state`, `get_state_script`, `add_output`, and `add_raw_output`.
  *
- * Two execution modes:
+ * Three execution modes:
  *
  *  1. **Lenient** (`computeNewState`, `computeNewStateAndDataOutputs`) —
  *     skips `assert` predicates so the SDK can pre-compute the post-state
@@ -17,11 +17,20 @@
  *     throws `AssertionFailureError` (carrying the contract method + ANF
  *     binding name of the failing predicate) on the first false assert. Use
  *     for "will this call go through?" / "would the asserts hold" smoke
- *     tests off-chain before paying broadcast fees.
- *
- *  Note: strict mode does NOT verify signatures (`checkSig`,
- *  `checkMultiSig`, `checkPreimage` still mock-return `true`). It only
- *  enforces explicit `assert(...)` predicates.
+ *     tests off-chain before paying broadcast fees. Crypto built-ins
+ *     (`checkSig`, `checkMultiSig`, `checkPreimage`) still mock-return
+ *     `true` — only explicit `assert(...)` predicates are enforced.
+ *  3. **On-chain authoritative** (`executeOnChainAuthoritative`) — strict
+ *     assert enforcement PLUS real ECDSA / SHA-256 preimage verification
+ *     against a caller-supplied `sighash`. The signature shape requires the
+ *     caller to provide the sighash up front, so it is impossible to invoke
+ *     this mode accidentally without the cryptographic inputs. Use this to
+ *     validate the exact transaction the caller intends to broadcast: a
+ *     `checkSig(sig, pk)` only passes if the supplied DER signature
+ *     verifies against the supplied compressed public key over the
+ *     supplied sighash, and `checkPreimage(preimage)` only passes if
+ *     `SHA256(SHA256(preimage)) === sighash` (the canonical BIP-143
+ *     `OP_PUSH_TX` semantic).
  */
 
 import type {
@@ -29,7 +38,7 @@ import type {
   ANFBinding,
   ANFValue,
 } from 'runar-ir-schema';
-import { Hash, Utils } from '@bsv/sdk';
+import { Hash, Utils, PublicKey, Signature } from '@bsv/sdk';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -119,8 +128,74 @@ export function executeStrict(
   });
 }
 
+/**
+ * Required cryptographic context for {@link executeOnChainAuthoritative}.
+ *
+ * `sighash` is the 32-byte BIP-143 sighash digest the on-chain VM would
+ * verify signatures against (and that the caller would have signed with
+ * `LocalSigner.sign(...)` before broadcasting). The interpreter:
+ *
+ *  - verifies `checkSig(sig, pk)` by parsing `pk` as a compressed/uncompressed
+ *    secp256k1 point, parsing `sig` as DER (with optional trailing sighash byte
+ *    stripped), and calling `pubKey.verify(sighash, signature)` — a real
+ *    ECDSA verification. Any mismatch returns `false`, which then trips the
+ *    enclosing `assert(...)` and throws.
+ *  - verifies `checkMultiSig(sigs, pks)` by iterating signatures left-to-right
+ *    and consuming pubkeys greedily, mirroring Bitcoin's `OP_CHECKMULTISIG`.
+ *  - verifies `checkPreimage(preimage)` by computing `hash256(preimage)`
+ *    (i.e. `SHA256(SHA256(preimage))`) and comparing it to `sighash`
+ *    byte-for-byte — the on-chain `OP_PUSH_TX` semantic.
+ */
+export interface OnChainCryptoContext {
+  /** 32-byte BIP-143 sighash, as a hex string or `Uint8Array`. */
+  sighash: string | Uint8Array;
+}
+
+/**
+ * Like {@link executeStrict} but also performs real cryptographic
+ * verification of `checkSig`, `checkMultiSig`, and `checkPreimage` against
+ * the supplied `sighash`. Throws {@link AssertionFailureError} when any
+ * `assert(...)` (including the implicit one wrapping a failed crypto
+ * built-in) fires.
+ *
+ * The `ctx` parameter is mandatory and carries the sighash, so it is
+ * impossible to call this entry point accidentally without supplying the
+ * cryptographic inputs the verification needs.
+ */
+export function executeOnChainAuthoritative(
+  anf: ANFProgram,
+  methodName: string,
+  currentState: Record<string, unknown>,
+  args: Record<string, unknown>,
+  constructorArgs: unknown[],
+  ctx: OnChainCryptoContext,
+): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+  const sighash = normalizeSighash(ctx.sighash);
+  return runMethod(anf, methodName, currentState, args, constructorArgs, {
+    methodName,
+    realCrypto: { sighash },
+  });
+}
+
 interface StrictCtx {
   methodName: string;
+  /** When set, crypto built-ins verify against this 32-byte sighash. */
+  realCrypto?: { sighash: number[] };
+}
+
+function normalizeSighash(sighash: string | Uint8Array): number[] {
+  let bytes: number[];
+  if (typeof sighash === 'string') {
+    bytes = Utils.toArray(sighash, 'hex');
+  } else {
+    bytes = Array.from(sighash);
+  }
+  if (bytes.length !== 32) {
+    throw new Error(
+      `executeOnChainAuthoritative: sighash must be exactly 32 bytes, got ${bytes.length}`,
+    );
+  }
+  return bytes;
 }
 
 function runMethod(
@@ -251,7 +326,11 @@ function evalValue(
         }
         return undefined;
       }
-      return evalCall(value.func, value.args.map((a) => env[a]));
+      return evalCall(
+        value.func,
+        value.args.map((a) => env[a]),
+        strict?.realCrypto,
+      );
     }
 
     case 'method_call':
@@ -434,12 +513,25 @@ function evalUnaryOp(op: string, operand: unknown, resultType?: string): unknown
 // Built-in function calls
 // ---------------------------------------------------------------------------
 
-function evalCall(func: string, args: unknown[]): unknown {
+function evalCall(
+  func: string,
+  args: unknown[],
+  realCrypto?: { sighash: number[] },
+): unknown {
   switch (func) {
-    // Crypto — mock
-    case 'checkSig': return true;
-    case 'checkMultiSig': return true;
-    case 'checkPreimage': return true;
+    // Crypto — mocked unless real-crypto context is present.
+    case 'checkSig': {
+      if (!realCrypto) return true;
+      return verifyEcdsa(args[0], args[1], realCrypto.sighash);
+    }
+    case 'checkMultiSig': {
+      if (!realCrypto) return true;
+      return verifyMultiSig(args[0], args[1], realCrypto.sighash);
+    }
+    case 'checkPreimage': {
+      if (!realCrypto) return true;
+      return verifyPreimage(args[0], realCrypto.sighash);
+    }
 
     // Crypto — real hashes
     case 'sha256': return hashFn('sha256', args[0]);
@@ -694,6 +786,96 @@ function num2binHex(n: bigint, byteLen: number): string {
   bytes.length = byteLen;
 
   return bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ---------------------------------------------------------------------------
+// Real ECDSA / preimage verification (used by executeOnChainAuthoritative)
+// ---------------------------------------------------------------------------
+
+function toByteArray(v: unknown): number[] | null {
+  if (typeof v === 'string') {
+    if (v.length % 2 !== 0) return null;
+    if (!/^[0-9a-fA-F]*$/.test(v)) return null;
+    return Utils.toArray(v, 'hex');
+  }
+  if (v instanceof Uint8Array) return Array.from(v);
+  if (Array.isArray(v)) return v as number[];
+  return null;
+}
+
+function parseDerSignatureMaybeWithSighashByte(bytes: number[]): InstanceType<typeof Signature> | null {
+  if (bytes.length < 8 || bytes[0] !== 0x30) return null;
+  const declared = bytes[1]!;
+  const expected = declared + 2;
+  let pure: number[];
+  if (bytes.length === expected) {
+    pure = bytes;
+  } else if (bytes.length === expected + 1) {
+    // Drop trailing sighash type byte (e.g. 0x41 SIGHASH_ALL|FORKID).
+    pure = bytes.slice(0, expected);
+  } else {
+    pure = bytes;
+  }
+  try {
+    return Signature.fromDER(pure);
+  } catch {
+    return null;
+  }
+}
+
+function verifyEcdsa(
+  sigVal: unknown,
+  pkVal: unknown,
+  sighash: number[],
+): boolean {
+  const sigBytes = toByteArray(sigVal);
+  const pkBytes = toByteArray(pkVal);
+  if (!sigBytes || !pkBytes) return false;
+  try {
+    const pubKey = PublicKey.fromDER(pkBytes);
+    const sig = parseDerSignatureMaybeWithSighashByte(sigBytes);
+    if (!sig) return false;
+    return pubKey.verify(sighash, sig);
+  } catch {
+    return false;
+  }
+}
+
+function verifyMultiSig(
+  sigsVal: unknown,
+  pksVal: unknown,
+  sighash: number[],
+): boolean {
+  if (!Array.isArray(sigsVal) || !Array.isArray(pksVal)) return false;
+  if (sigsVal.length > pksVal.length) return false;
+  let pkIdx = 0;
+  for (const sig of sigsVal) {
+    let matched = false;
+    while (pkIdx < pksVal.length) {
+      const ok = verifyEcdsa(sig, pksVal[pkIdx], sighash);
+      pkIdx++;
+      if (ok) { matched = true; break; }
+    }
+    if (!matched) return false;
+  }
+  return true;
+}
+
+/**
+ * BIP-143 / OP_PUSH_TX semantic: the on-chain check is
+ * `hash256(preimage) === sighash`. We replicate that: the supplied preimage
+ * is the serialised BIP-143 message; its double-SHA-256 must equal the
+ * sighash the caller provided to {@link executeOnChainAuthoritative}.
+ */
+function verifyPreimage(preimageVal: unknown, sighash: number[]): boolean {
+  const preBytes = toByteArray(preimageVal);
+  if (!preBytes) return false;
+  const computed = Hash.hash256(preBytes);
+  if (computed.length !== sighash.length) return false;
+  for (let i = 0; i < sighash.length; i++) {
+    if (computed[i] !== sighash[i]) return false;
+  }
+  return true;
 }
 
 function bin2numBigInt(hex: string): bigint {

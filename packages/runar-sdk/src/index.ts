@@ -69,9 +69,10 @@ export {
   computeNewState,
   computeNewStateAndDataOutputs,
   executeStrict,
+  executeOnChainAuthoritative,
   AssertionFailureError,
 } from './anf-interpreter.js';
-export type { DataOutputEntry } from './anf-interpreter.js';
+export type { DataOutputEntry, OnChainCryptoContext } from './anf-interpreter.js';
 
 // Re-export artifact types from runar-ir-schema for convenience
 export type {
