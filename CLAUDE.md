@@ -92,7 +92,7 @@ Each pass is a pure function in `packages/runar-compiler/src/passes/`:
 5. **05-stack-lower.ts** — ANF → Stack IR (Bitcoin Script stack operations)
 6. **06-emit.ts** — Stack IR → hex-encoded Bitcoin Script
 
-The constant folding optimizer (`src/optimizer/constant-fold.ts`) is available between passes 4 and 5 but disabled by default to preserve ANF conformance (see whitepaper Section 4.5).
+The constant folding optimizer (`src/optimizer/constant-fold.ts`) runs between passes 4 and 5 and is **enabled by default** in the user-facing TS / Go / Rust / Python / Zig / Ruby / Java compilers (every CLI ships a `--disable-constant-folding` opt-out for byte-exact replay against the checked-in fold-OFF goldens). The checked-in `expected-ir.json` and `expected-script.hex` files were stamped under fold-OFF. CI exercises **both modes**: the legacy multi-format step passes `--disable-constant-folding` (and verifies cross-tier hex + ANF parity *and* equality with the goldens), and a companion step (`RUNAR_DISABLE_CONSTANT_FOLDING=0`) re-runs the same fixtures with folding ON, enforces cross-tier parity across all 7 tiers, and skips the golden comparison. Any future fold-on cross-tier divergence must either (a) fix the divergent compiler or (b) be allowlisted with a per-fixture justification in `conformance/fold-on-allowlist.json` (see `conformance/README.md`).
 The peephole optimizer (`src/optimizer/peephole.ts`) runs on Stack IR between passes 5 and 6 (always enabled).
 
 Go, Rust, Python, Zig, Ruby, and Java compilers have their own parser dispatch:

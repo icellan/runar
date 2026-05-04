@@ -1329,15 +1329,26 @@ impl<'a> RbParser<'a> {
         self.match_tok(&Token::Newline);
         self.skip_newlines();
 
+        // Variables declared inside an if/elsif/else branch are scoped to
+        // that branch. Snapshot+restore declared_locals so a sibling
+        // branch (or sibling top-level if-without-else block) can
+        // re-declare the same local without it being treated as an
+        // assignment to an out-of-scope variable. Mirrors the canonical
+        // TS / Python lexical-scope semantics.
+        let locals_before_then = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before_then.clone();
 
         let else_branch = if *self.peek() == Token::Elsif {
             // elsif -> else { if ... }
-            Some(vec![self.parse_elsif_statement()])
+            let res = Some(vec![self.parse_elsif_statement()]);
+            self.declared_locals = locals_before_then.clone();
+            res
         } else if *self.peek() == Token::Else {
             self.advance(); // 'else'
             self.skip_newlines();
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before_then.clone();
             Some(stmts)
         } else {
             None
@@ -1358,14 +1369,20 @@ impl<'a> RbParser<'a> {
         let condition = self.parse_expression();
         self.skip_newlines();
 
+        // Same scope discipline as parse_if_statement.
+        let locals_before_then = self.declared_locals.clone();
         let then_branch = self.parse_statements();
+        self.declared_locals = locals_before_then.clone();
 
         let else_branch = if *self.peek() == Token::Elsif {
-            Some(vec![self.parse_elsif_statement()])
+            let res = Some(vec![self.parse_elsif_statement()]);
+            self.declared_locals = locals_before_then.clone();
+            res
         } else if *self.peek() == Token::Else {
             self.advance(); // 'else'
             self.skip_newlines();
             let stmts = self.parse_statements();
+            self.declared_locals = locals_before_then.clone();
             Some(stmts)
         } else {
             None

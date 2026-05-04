@@ -143,8 +143,12 @@ export class JavaDaemon {
    * Send a compile request to the daemon and await the response.
    *
    * Both IR and hex are returned in a single round-trip (the daemon does not
-   * pay startup twice for the same source). We always pass
-   * `disableConstantFolding: true` for conformance parity.
+   * pay startup twice for the same source).
+   *
+   * `disableConstantFolding` is read from `RUNAR_DISABLE_CONSTANT_FOLDING`
+   * (default `1` = folding off, matching the legacy fold-off CI step).
+   * Set the env var to `0` to flip the daemon into fold-on mode for the
+   * dual-mode conformance check.
    */
   async compile(sourcePath: string): Promise<JavaCompileResponse> {
     if (this.stopped) {
@@ -152,12 +156,13 @@ export class JavaDaemon {
     }
     await this.banner;
     const id = this.nextId++;
+    const disableFold = process.env.RUNAR_DISABLE_CONSTANT_FOLDING !== '0';
     const req = {
       id,
       source: sourcePath,
       emitIr: true,
       hex: true,
-      disableConstantFolding: true,
+      disableConstantFolding: disableFold,
     };
     // Per-request timeout. The daemon itself only takes ~0.5–1s per compile,
     // but on a saturated host (9 parallel `tsx` cold-starts at ~150 MB each)

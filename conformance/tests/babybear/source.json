@@ -2,7 +2,16 @@
   "compilers": [
     "go"
   ],
+  "compilersJustification": "Codegen for BabyBear prime-field arithmetic is Go-only by project policy — see CLAUDE.md ('Go-only crypto codegen modules'). Other tier parsers still run via multi-format.test.ts.",
   "sources": {
-    ".runar.go": "../../../examples/go/babybear/BabyBearDemo.runar.go"
+    ".runar.ts": "../../../examples/ts/babybear/BabyBearDemo.runar.ts",
+    ".runar.sol": "../../../examples/sol/babybear/BabyBearDemo.runar.sol",
+    ".runar.move": "../../../examples/move/babybear/BabyBearDemo.runar.move",
+    ".runar.go": "../../../examples/go/babybear/BabyBearDemo.runar.go",
+    ".runar.rs": "../../../examples/rust/babybear/BabyBearDemo.runar.rs",
+    ".runar.py": "../../../examples/python/babybear/BabyBearDemo.runar.py",
+    ".runar.zig": "../../../examples/zig/babybear/BabyBearDemo.runar.zig",
+    ".runar.rb": "../../../examples/ruby/babybear/BabyBearDemo.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/babybear/BabyBearDemo.runar.java"
   }
 }

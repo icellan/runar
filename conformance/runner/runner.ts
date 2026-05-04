@@ -153,6 +153,113 @@ function cargoAwareEnv(): NodeJS.ProcessEnv {
 }
 
 // ---------------------------------------------------------------------------
+// Constant-folding mode toggle
+// ---------------------------------------------------------------------------
+//
+// Historically the conformance runner always passed `--disable-constant-folding`
+// to every compiler so that ANF + hex golden comparisons stay byte-stable.
+// That left fold-on cross-tier parity uncovered in CI: a latent fold bug in
+// any one of the 7 compilers could land unnoticed because the runner never
+// exercised the fold path.
+//
+// `RUNAR_DISABLE_CONSTANT_FOLDING=0` flips the toggle off — every compiler
+// then runs with its default (folding ON), and the runner skips the
+// golden-hex / golden-IR file comparison (the goldens were checked in
+// fold-OFF). Cross-tier parity (every compiler produces the same hex / IR
+// for a given fixture) is still strictly enforced.
+//
+// Default is `1` (folding off) for backward compatibility with the existing
+// fold-off CI step + every previously-stamped golden file.
+function constantFoldingDisabled(): boolean {
+  const v = process.env.RUNAR_DISABLE_CONSTANT_FOLDING;
+  if (v === undefined) return true;
+  return v !== '0';
+}
+function foldFlag(): string[] {
+  return constantFoldingDisabled() ? ['--disable-constant-folding'] : [];
+}
+
+// ---------------------------------------------------------------------------
+// Fold-ON allowlist
+// ---------------------------------------------------------------------------
+//
+// `conformance/fold-on-allowlist.json` lists fixtures (and optionally specific
+// format variants) that are known to fail the fold-ON cross-tier check but
+// pass fold-OFF. Each entry MUST carry a per-fixture `reason` string — a
+// bare list is rejected at load time. The fold-OFF run still exercises
+// every entry, so allowlisting here only relaxes the dual-mode check, not
+// the canonical golden coverage.
+
+interface FoldOnSkipEntry {
+  fixture: string;
+  formats?: string[];
+  reason: string;
+  tracking?: string;
+}
+
+let cachedFoldOnSkip: FoldOnSkipEntry[] | null = null;
+function loadFoldOnAllowlist(): FoldOnSkipEntry[] {
+  if (cachedFoldOnSkip !== null) return cachedFoldOnSkip;
+  const path = resolve(__dirname, '../fold-on-allowlist.json');
+  if (!existsSync(path)) {
+    cachedFoldOnSkip = [];
+    return cachedFoldOnSkip;
+  }
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as { skip?: unknown };
+    const list: FoldOnSkipEntry[] = [];
+    if (Array.isArray(raw.skip)) {
+      for (const ent of raw.skip) {
+        if (
+          ent &&
+          typeof ent === 'object' &&
+          typeof (ent as Record<string, unknown>).fixture === 'string' &&
+          typeof (ent as Record<string, unknown>).reason === 'string' &&
+          ((ent as Record<string, unknown>).reason as string).trim().length > 0
+        ) {
+          const e = ent as Record<string, unknown>;
+          list.push({
+            fixture: e.fixture as string,
+            formats: Array.isArray(e.formats) ? (e.formats as string[]) : undefined,
+            reason: e.reason as string,
+            tracking: typeof e.tracking === 'string' ? e.tracking : undefined,
+          });
+        } else {
+          throw new Error(
+            'fold-on-allowlist.json entry rejected: every entry must be ' +
+            '{ fixture: string, reason: string (non-empty), formats?: string[], tracking?: string }',
+          );
+        }
+      }
+    }
+    cachedFoldOnSkip = list;
+    return cachedFoldOnSkip;
+  } catch (err) {
+    throw new Error(
+      `fold-on-allowlist.json parse error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Return the matching allowlist reason if (fixture, format) is allowlisted
+ * under fold-ON, or null otherwise. When constant folding is disabled
+ * (default fold-OFF mode), the allowlist is ignored — every fixture must
+ * pass the canonical golden-stamped check.
+ */
+function foldOnSkipReason(fixture: string, format: string): string | null {
+  if (constantFoldingDisabled()) return null;
+  const list = loadFoldOnAllowlist();
+  for (const entry of list) {
+    if (entry.fixture !== fixture) continue;
+    if (!entry.formats || entry.formats.includes(format)) {
+      return entry.reason;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -319,7 +426,7 @@ async function runTsCompiler(source: string, sourceFile: string): Promise<Compil
     const tsxLoader = resolveTsxLoader();
     const result = await runCmd(
       'node',
-      ['--import', tsxLoader, cliEntry, 'compile', tmpFile, '--ir', '--disable-constant-folding', '-o', artifactDir],
+      ['--import', tsxLoader, cliEntry, 'compile', tmpFile, '--ir', ...foldFlag(), '-o', artifactDir],
       // 180_000ms: tsx pays a cold-start cost per invocation; the prior 30s
       // budget tripped on arithmetic / blake3 / convergence-proof on slower
       // hosts.
@@ -396,7 +503,7 @@ async function runGoCompiler(source: string, sourceFile: string): Promise<Compil
     // Get IR output
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
     );
     if (irRes.code !== 0) {
@@ -407,7 +514,7 @@ async function runGoCompiler(source: string, sourceFile: string): Promise<Compil
     // Get script hex output
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: GO_COMPILER_DIR },
     );
     if (hexRes.code !== 0) {
@@ -454,7 +561,7 @@ async function runRustCompiler(source: string, sourceFile: string): Promise<Comp
 
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
     );
     if (irRes.code !== 0) {
@@ -464,7 +571,7 @@ async function runRustCompiler(source: string, sourceFile: string): Promise<Comp
 
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: RUST_COMPILER_DIR, env: cargoAwareEnv() },
     );
     if (hexRes.code !== 0) {
@@ -529,7 +636,7 @@ async function runPythonCompiler(source: string, sourceFile: string): Promise<Co
 
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
     );
     if (irRes.code !== 0) {
@@ -539,7 +646,7 @@ async function runPythonCompiler(source: string, sourceFile: string): Promise<Co
 
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: PYTHON_COMPILER_DIR },
     );
     if (hexRes.code !== 0) {
@@ -613,7 +720,7 @@ async function runZigCompiler(source: string, sourceFile: string): Promise<Compi
 
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
     );
     if (irRes.code !== 0) {
@@ -623,7 +730,7 @@ async function runZigCompiler(source: string, sourceFile: string): Promise<Compi
 
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: ZIG_COMPILER_DIR },
     );
     if (hexRes.code !== 0) {
@@ -684,7 +791,7 @@ async function runRubyCompiler(source: string, sourceFile: string): Promise<Comp
 
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
     );
     if (irRes.code !== 0) {
@@ -694,7 +801,7 @@ async function runRubyCompiler(source: string, sourceFile: string): Promise<Comp
 
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: RUBY_COMPILER_DIR },
     );
     if (hexRes.code !== 0) {
@@ -886,7 +993,7 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
 
     const irRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--emit-ir', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--emit-ir', ...foldFlag()],
       { timeoutMs: 30_000, cwd: JAVA_COMPILER_DIR },
     );
     if (irRes.code !== 0) {
@@ -897,7 +1004,7 @@ async function runJavaCompiler(source: string, sourceFile: string): Promise<Comp
     let scriptHex = '';
     const hexRes = await runCmd(
       cmd,
-      [...bin_args, '--source', tmpFile, '--hex', '--disable-constant-folding'],
+      [...bin_args, '--source', tmpFile, '--hex', ...foldFlag()],
       { timeoutMs: 30_000, cwd: JAVA_COMPILER_DIR },
     );
     if (hexRes.code === 0) {
@@ -1215,8 +1322,13 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     errors.push('Script hex mismatch between compilers');
   }
 
-  // Golden file comparisons
-  if (existsSync(expectedIrFile) && tsResult.success) {
+  // Golden file comparisons. Skipped under fold-on (RUNAR_DISABLE_CONSTANT_FOLDING=0)
+  // because every existing expected-ir.json / expected-script.hex was stamped
+  // with the fold-off compiler flag. Cross-tier parity (above) is still
+  // strictly enforced in fold-on mode — the goldens are merely a reference
+  // for the fold-off run.
+  const skipGolden = !constantFoldingDisabled();
+  if (!skipGolden && existsSync(expectedIrFile) && tsResult.success) {
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     if (tsResult.irJson !== expectedIr) {
       errors.push(
@@ -1244,7 +1356,7 @@ export async function runConformanceTest(testDir: string): Promise<ConformanceRe
     }
   }
 
-  if (existsSync(expectedScriptFile) && tsResult.success) {
+  if (!skipGolden && existsSync(expectedScriptFile) && tsResult.success) {
     const expectedScript = readFileSync(expectedScriptFile, 'utf-8').trim().toLowerCase();
     const tsScript = tsResult.scriptHex.toLowerCase().replace(/\s/g, '');
     if (tsScript && tsScript !== expectedScript) {
@@ -1375,11 +1487,19 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
   const found: { ext: string; sourceFile: string }[] = [];
 
   const configFile = join(testDir, 'source.json');
+  let parserSkip: string[] = [];
+  let parserSkipReason: string | undefined;
   if (existsSync(configFile)) {
     const config = JSON.parse(readFileSync(configFile, 'utf-8')) as {
       path?: string;
       sources?: Record<string, string>;
+      parserSkip?: string[];
+      parserSkipReason?: string;
     };
+    parserSkip = Array.isArray(config.parserSkip) ? config.parserSkip : [];
+    parserSkipReason = typeof config.parserSkipReason === 'string'
+      ? config.parserSkipReason
+      : undefined;
     if (config.sources) {
       for (const [ext, relPath] of Object.entries(config.sources)) {
         const sourceFile = resolve(testDir, relPath);
@@ -1415,6 +1535,43 @@ function discoverFormats(testDir: string, testName: string): { ext: string; sour
   } catch (err) {
     if (err instanceof Error && err.message.startsWith('Orphan source file')) throw err;
     // Directory read failed for non-orphan reason; ignore.
+  }
+
+  // Parser-coverage assertion: every fixture must ship every one of the nine
+  // input formats unless source.json explicitly opts out via parserSkip[]
+  // (with a non-empty parserSkipReason). The conformance allowlist
+  // (`compilers`) is for Stack-IR/hex parity ONLY — the parser layer is
+  // tier-agnostic, so a missing format is an unconditional bug. Failing
+  // loud here keeps the bar from quietly slipping back to "TS-only" when a
+  // new fixture lands. See spec/README.md ("Each compiler must parse every
+  // fixture in every one of the nine source formats").
+  const allExts = INPUT_FORMATS.map(f => f.ext);
+  const presentExts = new Set(found.map(f => f.ext));
+  const skipSet = new Set(parserSkip);
+  const missing = allExts.filter(ext => !presentExts.has(ext) && !skipSet.has(ext));
+  if (missing.length > 0) {
+    throw new Error(
+      `Parser-coverage gap in conformance fixture '${testName}': ` +
+      `source.json is missing source(s) for ${missing.join(', ')}. ` +
+      `Either add the missing format file(s), or — if the missing format is ` +
+      `legitimately blocked — list it in source.json's "parserSkip" array ` +
+      `with a non-empty "parserSkipReason" string explaining why.`,
+    );
+  }
+  if (parserSkip.length > 0 && (!parserSkipReason || parserSkipReason.trim() === '')) {
+    throw new Error(
+      `Conformance fixture '${testName}': source.json carries "parserSkip" ` +
+      `but no "parserSkipReason". Every parser opt-out requires a sharp ` +
+      `justification — see CLAUDE.md and the parser-coverage rule above.`,
+    );
+  }
+  for (const ext of parserSkip) {
+    if (!allExts.includes(ext)) {
+      throw new Error(
+        `Conformance fixture '${testName}': source.json "parserSkip" lists ` +
+        `unknown extension '${ext}'. Allowed values: ${allExts.join(', ')}.`,
+      );
+    }
   }
 
   return found;
@@ -1463,6 +1620,23 @@ export async function runConformanceTestForFormat(
   const testName = basename(testDir);
   const expectedIrFile = join(testDir, 'expected-ir.json');
   const expectedScriptFile = join(testDir, 'expected-script.hex');
+
+  // Fold-ON allowlist: when running with constant folding enabled, optionally
+  // skip a fixture+format combo that has a known fold-on cross-tier divergence.
+  // The reason string is surfaced in the report so reviewers see exactly why
+  // the test was skipped (no silent passes — see conformance/fold-on-allowlist.json).
+  const foldSkip = foldOnSkipReason(testName, format.ext);
+  if (foldSkip !== null) {
+    console.log(`  fold-on SKIP ${testName} [${format.ext}]: ${foldSkip}`);
+    return {
+      testName: `${testName} [${format.ext}] (fold-on skipped)`,
+      format: format.ext,
+      tsCompiler: { irJson: '', scriptHex: '', scriptAsm: '', success: true, durationMs: 0 },
+      irMatch: true,
+      scriptMatch: true,
+      errors: [],
+    };
+  }
 
   const source = readFileSync(format.sourceFile, 'utf-8');
   const errors: string[] = [];
@@ -1574,8 +1748,11 @@ export async function runConformanceTestForFormat(
     errors.push(`Script hex mismatch between compilers for ${format.ext}`);
   }
 
-  // Golden file comparison (use any successful compiler output)
-  if (existsSync(expectedIrFile)) {
+  // Golden file comparison (use any successful compiler output). Skipped
+  // under fold-on (RUNAR_DISABLE_CONSTANT_FOLDING=0) — see runConformanceTest
+  // above for the rationale.
+  const skipGoldenMf = !constantFoldingDisabled();
+  if (!skipGoldenMf && existsSync(expectedIrFile)) {
     const expectedIr = canonicalizeJson(readFileSync(expectedIrFile, 'utf-8'));
     const allOutputs = [
       supportedCompilers.includes('ts') ? tsResult : undefined,
@@ -1595,7 +1772,7 @@ export async function runConformanceTestForFormat(
     }
   }
 
-  if (existsSync(expectedScriptFile)) {
+  if (!skipGoldenMf && existsSync(expectedScriptFile)) {
     const expectedScript = readFileSync(expectedScriptFile, 'utf-8').trim().toLowerCase();
     const allOutputs = [
       supportedCompilers.includes('ts') ? tsResult : undefined,

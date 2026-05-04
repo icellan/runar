@@ -31,7 +31,7 @@ const runar = @import("runar");
 pub const ConditionalDataOutput = struct {
     pub const Contract = runar.StatefulSmartContract;
 
-    amount: i64,
+    amount: i64 = 0,
 
     pub fn init(amount: i64) ConditionalDataOutput {
         return .{ .amount = amount };

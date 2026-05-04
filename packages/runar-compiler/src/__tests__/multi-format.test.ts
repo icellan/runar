@@ -257,6 +257,80 @@ describe('Multi-format: cross-format structural consistency', () => {
 // Stateful contract format tests
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Universal parser-coverage: every fixture × every format must parse cleanly
+// ---------------------------------------------------------------------------
+//
+// This is the parser-layer guarantee from spec/README.md: "Each compiler must
+// parse every fixture in every one of the nine source formats. There are no
+// per-tier carve-outs at the parser layer." A fixture's optional `compilers`
+// allowlist scopes Stack-IR/hex parity (see runner/runner.ts) but never the
+// parser. Conversely, a fixture may opt OUT of a single format at the parser
+// layer by listing it in `parserSkip` with a non-empty `parserSkipReason` —
+// that escape hatch exists for genuinely blocked ports (e.g. a Move-syntax
+// limitation), and the runner's discoverFormats() asserts that every other
+// format ships AND that every parserSkip entry carries a justification.
+//
+// This test enforces the same discipline at the TS-frontend layer: every
+// format declared by a fixture's source.json must round-trip through parse()
+// without errors and yield a non-null Contract whose name matches across all
+// formats.
+function findAllConformanceFixtures(): string[] {
+  return readdirSync(CONFORMANCE_DIR, { withFileTypes: true })
+    .filter(e => e.isDirectory())
+    .map(e => e.name)
+    .sort();
+}
+
+describe('Multi-format: universal parser coverage (every fixture × every declared format)', () => {
+  const fixtures = findAllConformanceFixtures();
+
+  it('discovers conformance fixtures', () => {
+    expect(fixtures.length).toBeGreaterThan(0);
+  });
+
+  for (const fixture of fixtures) {
+    const config = (() => {
+      try {
+        return loadSourceConfig(fixture);
+      } catch {
+        return { sources: undefined } as SourceConfig;
+      }
+    })();
+    const declaredExts = Object.keys(config.sources ?? {});
+    if (declaredExts.length === 0) continue;
+
+    for (const ext of declaredExts) {
+      it(`parses ${fixture}${ext} cleanly`, () => {
+        const { content, fileName } = readRequiredSource(fixture, ext as (typeof FORMAT_EXTENSIONS)[number]);
+        const result = parse(content, fileName);
+        const errors = result.errors.filter(e => e.severity === 'error');
+        expect(errors, `parse errors for ${fixture}${ext}`).toEqual([]);
+        expect(result.contract, `null contract for ${fixture}${ext}`).not.toBeNull();
+      });
+    }
+
+    // When a fixture ships all 9 declared formats, the contract name MUST
+    // be identical across every variant. Mirrors the cross-format
+    // structural-consistency rule that's already pinned for the smaller
+    // CONFORMANCE_TESTS subset above, but applied universally.
+    if (declaredExts.length === FORMAT_EXTENSIONS.length) {
+      it(`all 9 formats of ${fixture} agree on contract name`, () => {
+        const names = new Set<string>();
+        for (const ext of declaredExts) {
+          const { content, fileName } = readRequiredSource(fixture, ext as (typeof FORMAT_EXTENSIONS)[number]);
+          const result = parse(content, fileName);
+          if (result.contract) names.add(result.contract.name);
+        }
+        expect(
+          names.size,
+          `${fixture}: contract name disagrees across formats: ${[...names].join(', ')}`,
+        ).toBeLessThanOrEqual(1);
+      });
+    }
+  }
+});
+
 describe('Multi-format: stateful contract', () => {
   for (const ext of FORMAT_EXTENSIONS) {
     it(`parses stateful contract from ${ext}`, () => {

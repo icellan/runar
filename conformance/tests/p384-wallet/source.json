@@ -1,10 +1,13 @@
 {
   "sources": {
     ".runar.ts": "../../../examples/ts/p384-wallet/P384Wallet.runar.ts",
+    ".runar.sol": "../../../examples/sol/p384-wallet/P384Wallet.runar.sol",
+    ".runar.move": "../../../examples/move/p384-wallet/P384Wallet.runar.move",
     ".runar.go": "../../../examples/go/p384-wallet/P384Wallet.runar.go",
     ".runar.rs": "../../../examples/rust/p384-wallet/P384Wallet.runar.rs",
     ".runar.py": "../../../examples/python/p384-wallet/P384Wallet.runar.py",
     ".runar.zig": "../../../examples/zig/p384-wallet/P384Wallet.runar.zig",
+    ".runar.rb": "../../../examples/ruby/p384-wallet/P384Wallet.runar.rb",
     ".runar.java": "../../../examples/java/src/main/java/runar/examples/p384-wallet/P384Wallet.runar.java"
   }
 }

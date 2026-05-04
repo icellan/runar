@@ -1244,17 +1244,26 @@ func (p *rbParser) parseIfStatement(loc SourceLocation) Statement {
 	p.match(rbTokNewline)
 	p.skipNewlines()
 
+	// Variables declared inside an if/elsif/else branch are scoped to that
+	// branch. Snapshot+restore declaredLocals so a sibling branch (or a
+	// sibling top-level if-without-else block) can re-declare the same
+	// local without it being treated as an assignment to an out-of-scope
+	// variable. Mirrors the canonical TS / Python lexical-scope semantics.
+	localsBeforeThen := copyStringSet(p.declaredLocals)
 	thenBranch := p.parseStatements()
+	p.declaredLocals = copyStringSet(localsBeforeThen)
 
 	var elseBranch []Statement
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
 		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
 		p.skipNewlines()
 		elseBranch = p.parseStatements()
+		p.declaredLocals = copyStringSet(localsBeforeThen)
 	}
 
 	p.expect(rbTokEnd)
@@ -1272,17 +1281,22 @@ func (p *rbParser) parseElsifStatement(loc SourceLocation) Statement {
 	condition := p.parseExpression()
 	p.skipNewlines()
 
+	// Same scope discipline as parseIfStatement.
+	localsBeforeThen := copyStringSet(p.declaredLocals)
 	thenBranch := p.parseStatements()
+	p.declaredLocals = copyStringSet(localsBeforeThen)
 
 	var elseBranch []Statement
 
 	if p.check(rbTokElsif) {
 		elifLoc := p.loc()
 		elseBranch = []Statement{p.parseElsifStatement(elifLoc)}
+		p.declaredLocals = copyStringSet(localsBeforeThen)
 	} else if p.check(rbTokElse) {
 		p.advance() // 'else'
 		p.skipNewlines()
 		elseBranch = p.parseStatements()
+		p.declaredLocals = copyStringSet(localsBeforeThen)
 	}
 
 	// Note: the outer `end` is consumed by the parent parseIfStatement

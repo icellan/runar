@@ -497,8 +497,26 @@ jobs:
         # Adds the TypeScript compiler to the central conformance job (it was
         # previously absent) and exercises every compiler's frontend against
         # every declared source.json entry, not just the IR -> hex path above.
+        # Default mode: every compiler runs with `--disable-constant-folding`,
+        # matching the fold-off semantics of the checked-in
+        # expected-ir.json / expected-script.hex goldens.
         env:
           JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+        run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
+      - name: Run multi-format source conformance (fold ON, cross-tier parity only)
+        # Companion run: every compiler executes with constant folding ENABLED
+        # (its end-user default) and the runner enforces cross-tier hex + ANF
+        # parity across all 7 tiers, while skipping the golden-file comparison
+        # (the checked-in goldens were stamped fold-OFF). This catches latent
+        # fold bugs that the historical fold-off-only loop would have missed
+        # — see the MEDIUM review finding on "Constant-folding coverage is
+        # weaker than runtime coverage". If a real cross-tier divergence
+        # appears here in future, list the fixture in
+        # `conformance/fold-on-allowlist.json` (with a one-line justification
+        # per the file's contract) instead of silently skipping it.
+        env:
+          JAVA_JAR: ${{ steps.java-jar.outputs.path }}
+          RUNAR_DISABLE_CONSTANT_FOLDING: '0'
         run: npx tsx conformance/runner/index.ts --tests-dir conformance/tests --multi-format
 
   runar-verification:

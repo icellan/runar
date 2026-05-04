@@ -697,6 +697,23 @@ const Parser = struct {
         };
     }
 
+    fn cloneDeclaredLocals(self: *Parser) std.StringHashMapUnmanaged(void) {
+        var out: std.StringHashMapUnmanaged(void) = .empty;
+        var it = self.declared_locals.iterator();
+        while (it.next()) |entry| {
+            out.put(self.allocator, entry.key_ptr.*, {}) catch {};
+        }
+        return out;
+    }
+
+    fn restoreDeclaredLocals(self: *Parser, snapshot: std.StringHashMapUnmanaged(void)) void {
+        self.declared_locals = .empty;
+        var it = snapshot.iterator();
+        while (it.next()) |entry| {
+            self.declared_locals.put(self.allocator, entry.key_ptr.*, {}) catch {};
+        }
+    }
+
     fn peek(self: *const Parser) Token {
         if (self.pos < self.tokens.len) return self.tokens[self.pos];
         return .{ .kind = .eof, .text = "", .line = 0, .col = 0 };
@@ -1372,7 +1389,15 @@ const Parser = struct {
         const condition = self.parseExpression() orelse return null;
         self.skipNewlines();
 
+        // Variables declared inside an if/elsif/else branch are scoped to
+        // that branch. Snapshot+restore declared_locals so a sibling
+        // branch (or sibling top-level if-without-else block) can
+        // re-declare the same local without it being treated as an
+        // assignment to an out-of-scope variable. Mirrors the canonical
+        // TS / Python lexical-scope semantics.
+        const locals_before_then = self.cloneDeclaredLocals();
         const then_body = self.parseStatements();
+        self.restoreDeclaredLocals(locals_before_then);
 
         var else_body: ?[]Statement = null;
 
@@ -1381,9 +1406,11 @@ const Parser = struct {
             const a = self.allocator.alloc(Statement, 1) catch return null;
             a[0] = elif;
             else_body = a;
+            self.restoreDeclaredLocals(locals_before_then);
         } else if (self.match(.kw_else)) {
             self.skipNewlines();
             else_body = self.parseStatements();
+            self.restoreDeclaredLocals(locals_before_then);
         }
 
         _ = self.expect(.kw_end);
@@ -1396,7 +1423,10 @@ const Parser = struct {
         const condition = self.parseExpression() orelse return null;
         self.skipNewlines();
 
+        // Same scope discipline as parseIfStatement.
+        const locals_before_then = self.cloneDeclaredLocals();
         const then_body = self.parseStatements();
+        self.restoreDeclaredLocals(locals_before_then);
 
         var else_body: ?[]Statement = null;
 
@@ -1405,9 +1435,11 @@ const Parser = struct {
             const a = self.allocator.alloc(Statement, 1) catch return null;
             a[0] = elif;
             else_body = a;
+            self.restoreDeclaredLocals(locals_before_then);
         } else if (self.match(.kw_else)) {
             self.skipNewlines();
             else_body = self.parseStatements();
+            self.restoreDeclaredLocals(locals_before_then);
         }
 
         // Note: the outer `end` is consumed by the parent parseIfStatement;

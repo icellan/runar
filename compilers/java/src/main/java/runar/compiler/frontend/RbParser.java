@@ -1048,16 +1048,26 @@ public final class RbParser {
             advance(); // 'if'
             Expression cond = parseExpression();
             skipNewlines();
+            // Variables declared inside an if/elsif/else branch are scoped
+            // to that branch. Snapshot+restore declaredLocals so a sibling
+            // branch (or sibling top-level if-without-else block) can
+            // re-declare the same local without it being treated as an
+            // assignment to an out-of-scope variable. Mirrors the
+            // canonical TS / Python lexical-scope semantics.
+            Set<String> localsBeforeThen = new HashSet<>(declaredLocals);
             List<Statement> thenStmts = parseStatements();
+            declaredLocals = new HashSet<>(localsBeforeThen);
             List<Statement> elseStmts = null;
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
                 elseStmts.add(parseElsifStatement(elifLoc));
+                declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
                 skipNewlines();
                 elseStmts = parseStatements();
+                declaredLocals = new HashSet<>(localsBeforeThen);
             }
             expect(TK.END, "end");
             return new IfStatement(cond, thenStmts, elseStmts != null ? elseStmts : new ArrayList<>(), l);
@@ -1067,16 +1077,21 @@ public final class RbParser {
             advance(); // 'elsif'
             Expression cond = parseExpression();
             skipNewlines();
+            // Same scope discipline as parseIfStatement.
+            Set<String> localsBeforeThen = new HashSet<>(declaredLocals);
             List<Statement> thenStmts = parseStatements();
+            declaredLocals = new HashSet<>(localsBeforeThen);
             List<Statement> elseStmts = null;
             if (peek().kind == TK.ELSIF) {
                 SourceLocation elifLoc = loc();
                 elseStmts = new ArrayList<>();
                 elseStmts.add(parseElsifStatement(elifLoc));
+                declaredLocals = new HashSet<>(localsBeforeThen);
             } else if (peek().kind == TK.ELSE) {
                 advance();
                 skipNewlines();
                 elseStmts = parseStatements();
+                declaredLocals = new HashSet<>(localsBeforeThen);
             }
             // outer 'end' is consumed by the parent if-statement
             return new IfStatement(cond, thenStmts, elseStmts != null ? elseStmts : new ArrayList<>(), l);

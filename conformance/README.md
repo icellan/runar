@@ -106,12 +106,16 @@ tests/
 
 Allowlists are reserved for fixtures whose underlying Stack-IR primitives are intentionally not yet implemented in every tier. They are not a place to hide ordinary cross-compiler bugs — the lone supported reasons are documented below.
 
+Every `source.json` carrying a `compilers` allowlist must ALSO carry a non-empty `compilersJustification` string explaining WHY the listed tiers are scoped (e.g. `"Codegen for {primitive} is Go-only by project policy — see CLAUDE.md"` or `"Java Stack-IR pass for {feature} is deferred — see HANDOFF"`). The `allowlist-audit.test.ts` test fails if any allowlist is missing its rationale.
+
+The parser layer is tier-agnostic: the conformance runner's `discoverFormats()` asserts that every fixture ships all nine `*.runar.{ts,sol,move,go,rs,py,zig,rb,java}` source files (referenced from `source.json`'s `sources` map) regardless of the `compilers` allowlist. A fixture may opt OUT of a single format at the parser layer by listing it in `source.json`'s `parserSkip` array along with a non-empty `parserSkipReason` string — that escape hatch exists for genuinely blocked ports (e.g. a Move-syntax limitation for a complex contract). Lazy multi-format opt-outs are not allowed; if you find yourself reaching for `parserSkip` for more than one format, port the contract instead.
+
 #### Audited allowlists
 
 The complete set of fixtures with a `compilers` allowlist is enumerated and pinned by `runner/__tests__/allowlist-audit.test.ts`. That test fails if a new allowlist appears (or an existing one drifts) without being approved here, so the set cannot silently expand. Adding a new allowlisted fixture requires **both**:
 
 1. Adding the fixture's expected allowlist to `APPROVED_ALLOWLISTS` in `runner/__tests__/allowlist-audit.test.ts`.
-2. Adding a row to the table below with a one-line rationale.
+2. Adding a row to the table below with a one-line rationale (and the matching `compilersJustification` string in the fixture's `source.json`).
 
 ##### Go-only crypto family
 
@@ -133,6 +137,16 @@ These contracts surface-parse cleanly through every Rúnar frontend (so the Java
 | `stateful-bytestring` | `["ts", "go", "rust", "python", "zig", "ruby"]` | Stateful ByteString contract using SHA-256 Merkle-root primitives; Java Stack-IR codegen pending. |
 
 Once a missing primitive lands in another tier, drop the corresponding entry from both the fixture's `source.json` allowlist (or remove the field entirely) and `APPROVED_ALLOWLISTS`, then update the rows above so the new tier starts running against the existing goldens.
+
+### Fold-ON allowlist (`conformance/fold-on-allowlist.json`)
+
+CI runs the multi-format conformance suite **twice**: once with `--disable-constant-folding` passed to every compiler (matching the byte-stable goldens checked into each fixture) and once with `RUNAR_DISABLE_CONSTANT_FOLDING=0` so every compiler runs its end-user default (folding ON). The second run enforces cross-tier hex + ANF parity across all 7 tiers but skips the golden-file comparison (because the goldens were stamped fold-OFF).
+
+A fixture (or a specific format variant of a fixture) that is known to fail the fold-ON cross-tier check must be listed in `conformance/fold-on-allowlist.json` with a per-entry `reason` (and ideally a `tracking` ref). The runner refuses to load entries that lack a non-empty `reason` — there is no "bare list" mode. The fold-OFF run is unaffected, so allowlisting only relaxes the dual-mode parity check, not the canonical golden coverage.
+
+| Entry | Format(s) | Why skipped |
+|---|---|---|
+| `if-without-else-multi-temp` | `.runar.rb` | Java daemon produces a 2-byte-shorter hex than the other 6 tiers under fold-ON for this source; one-shot Java CLI matches the others, so the divergence is a daemon request-sequence artifact (likely `AnfOptimize`'s static `FRESH_COUNTER`). Fold-OFF parity is still enforced. Fix tracked in `conformance/fold-on-allowlist.json`. |
 
 ### File Roles
 

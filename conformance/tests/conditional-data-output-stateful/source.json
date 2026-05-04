@@ -1,5 +1,13 @@
 {
   "sources": {
-    ".runar.ts": "../../../examples/ts/conditional-data-output/ConditionalDataOutput.runar.ts"
+    ".runar.ts": "../../../examples/ts/conditional-data-output/ConditionalDataOutput.runar.ts",
+    ".runar.sol": "../../../examples/sol/conditional-data-output/ConditionalDataOutput.runar.sol",
+    ".runar.move": "../../../examples/move/conditional-data-output/ConditionalDataOutput.runar.move",
+    ".runar.go": "../../../examples/go/conditional-data-output/ConditionalDataOutput.runar.go",
+    ".runar.rs": "../../../examples/rust/conditional-data-output/ConditionalDataOutput.runar.rs",
+    ".runar.py": "../../../examples/python/conditional-data-output/ConditionalDataOutput.runar.py",
+    ".runar.zig": "../../../examples/zig/conditional-data-output/ConditionalDataOutput.runar.zig",
+    ".runar.rb": "../../../examples/ruby/conditional-data-output/ConditionalDataOutput.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/conditional-data-output/ConditionalDataOutput.runar.java"
   }
 }

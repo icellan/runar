@@ -124,4 +124,30 @@ describe('conformance allowlist audit', () => {
       `Allowlist drift detected:\n${mismatches.join('\n')}\n${REMEDIATION}`,
     ).toEqual([]);
   });
+
+  // Every fixture with a `compilers` allowlist MUST also carry a non-empty
+  // `compilersJustification` string. The compilers allowlist is reserved
+  // for genuinely scoped tiers (Go-only crypto, Java-deferred Stack-IR);
+  // requiring an in-file rationale forces the author to articulate WHY a
+  // tier is excluded so a future reader (or auditor) can tell at a glance
+  // whether the opt-out is still valid. Mirrors the parser-coverage
+  // discipline applied to `parserSkip`/`parserSkipReason` in the runner.
+  it('every fixture with a compilers allowlist carries a non-empty compilersJustification', () => {
+    const missing: string[] = [];
+    for (const fixture of Object.keys(actual)) {
+      const sj = readSourceJson(fixture);
+      const j = sj?.compilersJustification;
+      if (typeof j !== 'string' || j.trim() === '') {
+        missing.push(`  - ${fixture}: source.json carries "compilers" but no non-empty "compilersJustification"`);
+      }
+    }
+    expect(
+      missing,
+      `compilersJustification missing or empty:\n${missing.join('\n')}\n` +
+      `Add a "compilersJustification" string to source.json explaining ` +
+      `why the listed tiers are scoped (e.g. "Codegen for {primitive} is ` +
+      `Go-only by project policy — see CLAUDE.md" or "Java Stack-IR pass ` +
+      `for {feature} is deferred — see HANDOFF").`,
+    ).toEqual([]);
+  });
 });

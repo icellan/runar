@@ -1165,17 +1165,29 @@ module RunarCompiler
         condition = parse_expression
         skip_newlines
 
+        # Variables declared inside an if/elsif/else branch are scoped to
+        # that branch in the typechecker. The parser must mirror that
+        # scoping so a `name = expr` reappearing in a sibling branch (or in
+        # a sibling top-level if-without-else block) is emitted as a fresh
+        # variable_decl, not an assignment against an out-of-scope local.
+        # Without this, sibling re-declarations trigger spurious "Undefined
+        # variable" errors in the typechecker. Mirrors the canonical
+        # TS/Python lexical-scope semantics.
+        locals_before_then = @declared_locals.dup
         then_stmts = parse_statements
+        @declared_locals = locals_before_then.dup
 
         else_stmts = nil
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
           else_stmts = [parse_elsif_statement(elif_loc)]
+          @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
           skip_newlines
           else_stmts = parse_statements
+          @declared_locals = locals_before_then.dup
         end
 
         expect(TOK_END, "end")
@@ -1193,17 +1205,23 @@ module RunarCompiler
         condition = parse_expression
         skip_newlines
 
+        # Same scope discipline as parse_if_statement -- save and restore
+        # @declared_locals so a sibling branch can re-declare a local.
+        locals_before_then = @declared_locals.dup
         then_stmts = parse_statements
+        @declared_locals = locals_before_then.dup
 
         else_stmts = nil
 
         if peek.kind == TOK_ELSIF
           elif_loc = loc
           else_stmts = [parse_elsif_statement(elif_loc)]
+          @declared_locals = locals_before_then.dup
         elsif peek.kind == TOK_ELSE
           advance # 'else'
           skip_newlines
           else_stmts = parse_statements
+          @declared_locals = locals_before_then.dup
         end
 
         # Note: the outer +end+ is consumed by the parent +parse_if_statement+.

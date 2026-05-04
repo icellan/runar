@@ -442,7 +442,7 @@ function mapBuiltinName(name: string): string {
 function mapRbType(name: string): string {
   switch (name) {
     case 'Bigint': case 'Integer': case 'Int': return 'bigint';
-    case 'Boolean': return 'boolean';
+    case 'Boolean': case 'Bool': return 'boolean';
     case 'ByteString': return 'ByteString';
     case 'PubKey': return 'PubKey';
     case 'Sig': return 'Sig';
@@ -1129,17 +1129,29 @@ class RbParser {
     this.match('NEWLINE');
     this.skipNewlines();
 
+    // Variables declared inside an if/elsif/else branch are scoped to that
+    // branch in the typechecker (see 03-typecheck.ts case 'if_statement'
+    // which pushScope/popScope around each branch). The parser must mirror
+    // that scoping so a `name = expr` reappearing in a sibling branch is
+    // emitted as a fresh `variable_decl`, not an `assignment` against an
+    // out-of-scope local. Without this, sibling branches that re-declare
+    // the same local trigger spurious "Undefined variable" errors in the
+    // typechecker. Mirrors the canonical TS lexical-scope semantics.
+    const localsBeforeThen = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeThen);
 
     let elseBranch: Statement[] | undefined;
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
       elseBranch = [this.parseElsifStatement(elifLoc)];
+      this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
       this.skipNewlines();
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBeforeThen);
     }
 
     this.expect('end');
@@ -1158,17 +1170,23 @@ class RbParser {
     const condition = this.parseExpression();
     this.skipNewlines();
 
+    // See parseIfStatement comment: snapshot/restore declaredLocals around
+    // each branch so the typechecker's per-branch lexical scoping matches.
+    const localsBeforeThen = new Set(this.declaredLocals);
     const thenBranch = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeThen);
 
     let elseBranch: Statement[] | undefined;
 
     if (this.peek().type === 'elsif') {
       const elifLoc = this.loc();
       elseBranch = [this.parseElsifStatement(elifLoc)];
+      this.declaredLocals = new Set(localsBeforeThen);
     } else if (this.peek().type === 'else') {
       this.advance(); // 'else'
       this.skipNewlines();
       elseBranch = this.parseStatements();
+      this.declaredLocals = new Set(localsBeforeThen);
     }
 
     // Note: the outer `end` is consumed by the parent parseIfStatement
@@ -1188,7 +1206,11 @@ class RbParser {
     const rawCondition = this.parseExpression();
     this.skipNewlines();
 
+    // See parseIfStatement comment: snapshot/restore declaredLocals around
+    // the body so locals declared inside `unless` don't leak into siblings.
+    const localsBeforeBody = new Set(this.declaredLocals);
     const body = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeBody);
 
     this.expect('end');
 
@@ -1236,7 +1258,15 @@ class RbParser {
     this.match('do');
     this.skipNewlines();
 
+    // Snapshot/restore declaredLocals around the loop body so locals
+    // declared inside the loop don't leak into the surrounding scope —
+    // matches how the typechecker treats the loop body.
+    const localsBeforeBody = new Set(this.declaredLocals);
+    // Pre-declare the iter var so the body parser sees `varName = ...`
+    // as an assignment rather than re-declaration.
+    this.declaredLocals.add(varName);
     const body = this.parseStatements();
+    this.declaredLocals = new Set(localsBeforeBody);
     this.expect('end');
 
     // Construct a C-style for loop AST node

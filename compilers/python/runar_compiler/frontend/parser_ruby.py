@@ -1145,17 +1145,27 @@ class _RbParser:
         condition = self._parse_expression()
         self._skip_newlines()
 
+        # Variables declared inside an if/elsif/else branch are scoped to
+        # that branch. Snapshot+restore ``_declared_locals`` so a sibling
+        # branch (or sibling top-level if-without-else block) can
+        # re-declare the same local without it being treated as an
+        # assignment to an out-of-scope variable. Mirrors the canonical
+        # TS / Python lexical-scope semantics.
+        locals_before_then = set(self._declared_locals)
         then_stmts = self._parse_statements()
+        self._declared_locals = set(locals_before_then)
 
         else_stmts: list[Statement] | None = None
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
             else_stmts = [self._parse_elsif_statement(elif_loc)]
+            self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
             self._skip_newlines()
             else_stmts = self._parse_statements()
+            self._declared_locals = set(locals_before_then)
 
         self._expect(TOK_END, "end")
 
@@ -1171,17 +1181,22 @@ class _RbParser:
         condition = self._parse_expression()
         self._skip_newlines()
 
+        # Same scope discipline as ``_parse_if_statement``.
+        locals_before_then = set(self._declared_locals)
         then_stmts = self._parse_statements()
+        self._declared_locals = set(locals_before_then)
 
         else_stmts: list[Statement] | None = None
 
         if self._peek().kind == TOK_ELSIF:
             elif_loc = self._loc()
             else_stmts = [self._parse_elsif_statement(elif_loc)]
+            self._declared_locals = set(locals_before_then)
         elif self._peek().kind == TOK_ELSE:
             self._advance()  # 'else'
             self._skip_newlines()
             else_stmts = self._parse_statements()
+            self._declared_locals = set(locals_before_then)
 
         # Note: the outer ``end`` is consumed by the parent ``_parse_if_statement``.
         # ``elsif`` branches do not consume their own ``end``.

@@ -1,5 +1,13 @@
 {
   "sources": {
-    ".runar.go": "../../../examples/go/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.go"
+    ".runar.ts": "../../../examples/ts/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.ts",
+    ".runar.sol": "../../../examples/sol/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.sol",
+    ".runar.move": "../../../examples/move/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.move",
+    ".runar.go": "../../../examples/go/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.go",
+    ".runar.rs": "../../../examples/rust/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.rs",
+    ".runar.py": "../../../examples/python/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.py",
+    ".runar.zig": "../../../examples/zig/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.zig",
+    ".runar.rb": "../../../examples/ruby/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/go-dsl-bytestring-literal/GoDslBytestringLiteral.runar.java"
   }
 }

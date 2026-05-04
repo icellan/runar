@@ -1,5 +1,13 @@
 {
   "sources": {
-    ".runar.ts": "../../../examples/ts/if-without-else-multi-temp/StackTrackerReproV10min.runar.ts"
+    ".runar.ts": "../../../examples/ts/if-without-else-multi-temp/StackTrackerReproV10min.runar.ts",
+    ".runar.sol": "../../../examples/sol/if-without-else-multi-temp/StackTrackerReproV10min.runar.sol",
+    ".runar.move": "../../../examples/move/if-without-else-multi-temp/StackTrackerReproV10min.runar.move",
+    ".runar.go": "../../../examples/go/if-without-else-multi-temp/StackTrackerReproV10min.runar.go",
+    ".runar.rs": "../../../examples/rust/if-without-else-multi-temp/StackTrackerReproV10min.runar.rs",
+    ".runar.py": "../../../examples/python/if-without-else-multi-temp/StackTrackerReproV10min.runar.py",
+    ".runar.zig": "../../../examples/zig/if-without-else-multi-temp/StackTrackerReproV10min.runar.zig",
+    ".runar.rb": "../../../examples/ruby/if-without-else-multi-temp/StackTrackerReproV10min.runar.rb",
+    ".runar.java": "../../../examples/java/src/main/java/runar/examples/if-without-else-multi-temp/StackTrackerReproV10min.runar.java"
   }
 }

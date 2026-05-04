@@ -172,6 +172,11 @@ function mapSolType(name: string): string {
   const typeMap: Record<string, string> = {
     int: 'bigint', uint: 'bigint',
     int256: 'bigint', uint256: 'bigint',
+    // Capitalised aliases — `Int` is used in cross-format fixtures that
+    // mirror Go DSL `runar.BigintBig` / Move `u256` where lowercase `int`
+    // would be ambiguous with the Solidity native modulo type. Both lower
+    // to the same `bigint` Rúnar primitive.
+    Int: 'bigint', Uint: 'bigint',
     address: 'Addr', bytes: 'ByteString', bool: 'boolean',
   };
   return typeMap[name] || name;
