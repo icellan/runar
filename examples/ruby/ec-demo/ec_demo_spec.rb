@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 require_relative '../spec_helper'
-require_relative 'EcDemo.runar'
+require_relative 'ECDemo.runar'
 
 # ECDemo tests exercise every EC primitive using real secp256k1 math.
 #

@@ -280,13 +280,26 @@ if (!javaJarPath) {
   );
 }
 
-// In CI: hard-fail with the consolidated list before any test collection runs.
-// Locally: the per-suite describe.skipIf calls below skip the family with a warning above.
-if (IS_CI && MISSING_COMPILERS_IN_CI.length > 0) {
+// CI gate is OPT-IN. Most CI jobs are language-specific and intentionally
+// install only the toolchain they need (e.g. the TypeScript Compiler job
+// does not install Zig). Hard-failing on every CI run would block those.
+//
+// Set RUNAR_REQUIRE_ALL_COMPILERS=1 on jobs whose contract IS "all 7
+// toolchains present" (e.g. the dedicated cross-compiler matrix job, if
+// added) to upgrade the FATAL log lines above to a hard suite failure.
+// Without that env var, missing toolchains still log FATAL but per-suite
+// describe.skipIf below handles the actual skipping — the FATAL is
+// grep-able for runner-setup audits but does not abort collection.
+if (
+  IS_CI &&
+  MISSING_COMPILERS_IN_CI.length > 0 &&
+  process.env.RUNAR_REQUIRE_ALL_COMPILERS === '1'
+) {
   const list = MISSING_COMPILERS_IN_CI.map((m) => m.name).join(', ');
   throw new Error(
-    `Cross-compiler test suite cannot run in CI without all 7 toolchains. ` +
-    `Missing: ${list}. See FATAL lines above for per-compiler diagnostics.`,
+    `Cross-compiler test suite cannot run with RUNAR_REQUIRE_ALL_COMPILERS=1 ` +
+    `unless every toolchain is installed. Missing: ${list}. ` +
+    `See FATAL lines above for per-compiler diagnostics.`,
   );
 }
 
