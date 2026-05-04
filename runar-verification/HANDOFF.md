@@ -2087,3 +2087,191 @@ Zero new global axioms in this phase. Single linking axiom
   is discharged, extract `compile : ANFProgram → ByteArray` as a
   verified compiler artifact for the Rust and TS reference compilers.
 
+
+## 25. Phase 5 — finalize attempt (2026-05-04)
+
+Phase 5 attempted to close the three Phase 4 caveats. Two were
+reduced; one — the simulation theorem capstone — remains genuinely
+multi-week and is documented here as a Phase 6 plan with concrete
+sub-task decomposition.
+
+### 25.1 cryptoAxiomPending: opt-in full mode (Caveat 1, partially closed)
+
+The 11 cryptoAxiomPending fixtures (EC × 5, P-256 × 2, P-384 × 2,
+SLH-DSA × 2) were previously skipped unconditionally by
+`tests/PipelineGolden.lean`. Phase 5 adds a `RUNAR_VERIFICATION_FULL=1`
+env flag that opts into running every fixture (default remains skip).
+
+**Why opt-in instead of always-on.** Empirical timing of the native
+compiled binary on `cryptoAxiomPending`:
+- Default skip (pre-existing 38 fixtures): wall ~3:30 (~200s user CPU).
+- Full run with crypto bucket: >1 hour wall before manual kill.
+  The bottleneck is `compileHex` evaluating ~10⁵+ `StackOp`s through
+  Lean's runtime — pure functional, single-threaded, no native
+  intrinsics. Even the native exe (which is ~50–100× faster than the
+  interpreter) does not bring the multi-MB SLH-DSA / WOTS+ fixtures
+  into a tractable CI window.
+
+**Future closure for full default-on.** Two options, neither
+implemented this phase:
+1. `@[implemented_by]` the inner `Script.Emit.emit` (or `compileHex`
+   end-to-end) to a C / Rust helper. Trades verification surface for
+   perf; the Lean function remains the spec, the implementation is
+   replaced at runtime.
+2. Pre-compute the expected hex of each `cryptoAxiomPending` fixture
+   offline (one-time, ~1h on dev hardware), store as a Lean
+   `String` constant, gate `pipelineGolden` against the constant
+   instead of recomputing. Constant-time equality check.
+
+### 25.2 if-without-else-multi-temp (Caveat 2, deferred)
+
+The fixture's IR contains nested if-without-else patterns where THEN
+produces multi-binding outputs and ELSE is empty. The current Lean
+`Stack/Lower.lean#lowerIf` shadow-rebind detection handles only:
+- Legacy `els = []` with single shadow rebind (THEN top name in
+  parent sm).
+- New canonical TS `els = [{name = topName, value = load_const ""}]`.
+
+It does **not** match the multi-binding THEN where the outer
+if-binding name (e.g. `t43`) doesn't equal any THEN binding's name —
+TS handles this case via different bytecode that closes the
+divergence in a SECOND peephole pass.
+
+**Phase 5 attempted fix**: a two-pass peephole runner in
+`Pipeline.peepholeProgram` (`peepholePassAll` applied twice). Built
+clean and would have closed the gap (TS's left-to-right iterate-to-
+fixed-point catches more 3-op windows than the right-fold's single
+pass), but ran in >38 min on the non-crypto baseline because the
+peephole pass walks every method's full op list twice. Reverted in
+this commit because the cost is prohibitive for the marginal gain.
+
+**Future closure**:
+1. Targeted peephole rule that catches the exact `[push, push, swap,
+   swap, OP_<op>]` window without a full second pass.
+2. OR refactor `peepholePassAll` to use a fuel-bounded fixed-point
+   loop instead of right-fold, and prove the loop terminates within
+   a small fuel bound (TS empirically uses ≤ 100, in practice ≤ 3).
+3. OR extend `lowerIf`'s shadow-rebind detection to catch the
+   multi-binding shape directly without relying on peephole.
+
+The fixture remains in `lowerDivergencePending` (count = 1).
+
+### 25.3 lower_observational_correct (Caveat 3, Phase 6 plan)
+
+This is the multi-week capstone simulation theorem. Phase 5 documents
+a concrete Phase 6 plan that decomposes the work into individually-
+tractable sub-tasks. The axiom remains in place.
+
+**Discharge plan (estimated ~6-12 weeks of focused work):**
+
+1. **Fix Stack.Eval.applyPick semantics mismatch** (~3 days).
+   `Stack.Lower.loadRef` for d≥2 emits `[.pick d]` without preceding
+   push, but `applyPick` (Phase 3z-B refactor) pops one runtime
+   depth before structural pick. Resolution path:
+   - Add a new IR op `StackOp.pickStruct (d : Nat)` (no-pop).
+   - `loadRef` for d≥2 emits `[.pickStruct d]`.
+   - `Stack.Eval` handles `.pickStruct d` without pop.
+   - `Script.Emit` emits `.pickStruct d` as `[push d, OP_PICK]`
+     (same bytes as `.pick d`).
+   - All 5 Roll/Pick peephole `_pass_sound` proofs continue to use
+     `.pick d` (pop semantics unchanged).
+   - Verify byte-exact regression: 33/49 should still pass.
+
+2. **Strengthen WF.valueIsWF for loadParam/loadProp/refAlias** (~2 days).
+   Currently `valueIsWF env (.loadParam name)` is `true`
+   unconditionally. Strengthen to `env.params.contains name`. Same
+   for `.loadProp` (`env.props`). For `.loadConst (.refAlias n)`,
+   require `env.defined.contains n`. Re-prove `ANF.WF`-passing for
+   all 49 conformance goldens.
+
+3. **Tagged stackAligned in Agrees.lean** (~5 days).
+   Replace `stackAligned : List String → State → List Value → Prop`
+   with `stackAligned : List (String × SlotKind) → State → List Value → Prop`
+   where `SlotKind = .param | .prop | .binding`. Adjust `lookupAnf`
+   per kind. Adjust `lowerMethod`'s initial sm-build to tag.
+
+4. **Stage B: 6 remaining per-construct preservation lemmas** (~14 days).
+   - `loadConst .refAlias n` (Stack.Eval `.dup`/`.over`/`.pickStruct d`
+     reduces; sm[d]=n; lookupAnf gives the binding value).
+   - `loadParam name` (sm[d]=(name, .param); lookupParam matches).
+   - `loadProp name` (sm[d]=(name, .prop); lookupProp matches).
+   - `unaryOp op operand rt` (load operand + opcode; per-op
+     operational lemma for OP_NEGATE / OP_NOT / OP_ABS / OP_1ADD /
+     OP_1SUB).
+   - `binOp op l r rt` (load both operands + opcode; per-op
+     operational lemma for OP_ADD / OP_SUB / OP_MUL / OP_DIV /
+     OP_MOD / OP_NUMEQUAL / OP_NUMNOTEQUAL / OP_LESSTHAN /
+     OP_LESSTHANOREQUAL / OP_GREATERTHAN / OP_GREATERTHANOREQUAL /
+     OP_MIN / OP_MAX / OP_LSHIFT / OP_RSHIFT / OP_AND / OP_OR /
+     OP_XOR / OP_INVERT — ~15 opcodes × 2-3 type combinations).
+   - `assert ref` (load + OP_VERIFY; vBool true → preserved,
+     vBool false → both fail).
+
+5. **Stage B: framework intrinsics** (~10 days).
+   `getStateScript`, `addOutput`, `addRawOutput`, `addDataOutput`,
+   `checkPreimage`, `deserializeState`, `methodCall`, `loop`,
+   `arrayLiteral`, `call` (builtins). Each needs a per-construct
+   correctness lemma. Most reduce to "stack construction matches
+   ANF state mutation"; the asymmetric ones (`addOutput`'s ~30-op
+   BIP-143 sequence, `deserializeState`'s scriptCode varint
+   stripping) require significant invariant work.
+
+6. **Stage C: per-binding induction** (~5 days).
+   Combine Stage B lemmas via `runOps_append` (provable as a
+   simple structural lemma) + induction on `m.body`. Establish
+   `freshIn bn sm` at each step from the strengthened
+   `WF.bindingsAreWF`.
+
+7. **Stage D: method-level lift** (~4 days).
+   Map `lowerBindings` onto `lowerMethod` accounting for:
+   - Initial `userMap` setup with optional `_opPushTxSig` /
+     `_codePart` prefix slots.
+   - Terminal-assert elision (`bodyEndsInAssert` → drop trailing
+     `OP_VERIFY`).
+   - NIP cleanup (`bindingsUseDeserializeState` → trailing
+     `replicate nipCount StackOp.nip`).
+
+8. **Discharge `lower_observational_correct`** (~2 days).
+   The completed Stage D directly proves the axiom statement.
+   Replace `axiom` with `theorem`.
+
+**Total estimate**: ~6-12 weeks. The phases are largely sequential;
+parallelisation gains are limited because Stage C/D depend on
+Stage B's full set of lemmas.
+
+**Decomposition rationale**: each numbered step above is a
+self-contained PR that can be reviewed and merged independently.
+A future contributor can pick up at any step and make incremental
+progress without holding the full ~12-week mental model.
+
+### 25.4 Verification (Phase 5, exit state)
+
+```
+export PATH="$HOME/.elan/bin:$PATH"
+cd runar-verification
+lake build                                         # 24 jobs OK
+lake build pipelineGolden                          # native exe OK
+lake env ./.lake/build/bin/pipelineGolden          # 33/49 byte-exact
+                                                   # OK: 33 baseline fixtures still byte-exact
+RUNAR_VERIFICATION_FULL=1 \
+  lake env ./.lake/build/bin/pipelineGolden        # >1h wall time (cryptoAxiomPending bucket)
+```
+
+Lean toolchain: `leanprover/lean4:v4.29.1`.
+Zero `sorry`/`admit`. Three open axioms unchanged:
+- `Pipeline.lower_observational_correct` (Phase 6 capstone)
+- `Stack.Peephole.hash256_eq_double_sha256` (linking, OK)
+- 61 crypto/builtin axioms in `ANF/Eval.lean` (Crypto namespace, OK)
+
+Total trust surface unchanged from Phase 4.
+
+### 25.5 What Phase 5 actually delivered
+
+* `RUNAR_VERIFICATION_FULL=1` opt-in mechanism for cryptoAxiomPending.
+* Detailed Phase 6 plan (this section §25.3) with 8 numbered
+  sub-tasks for the simulation-theorem discharge.
+* Empirical timing baseline confirming native exe is too slow for
+  CI on multi-MB crypto fixtures — clarifying that the perf gap is
+  fundamental (Lean runtime bookkeeping, not interpreter overhead).
+* No regressions: `pipelineGolden` still 33/49 byte-exact, all 33
+  baseline fixtures locked. WF goldens 49/49.

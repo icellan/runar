@@ -232,24 +232,21 @@ def main : IO Unit := do
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
-            -- Skip the EC / P-256 / P-384 / SLH-DSA fixtures from compilation:
-            -- their `Stack/Lower.lean` codegen produces hundreds of thousands
-            -- of `StackOp`s and the Lean interpreter takes 10+ minutes to
-            -- evaluate them. Gate-3 promotion-candidate detection is bypassed
-            -- for these; they remain in `cryptoAxiomPending` until the codegen
-            -- evaluation perf is addressed (e.g., via `@[implemented_by]` or
-            -- C-based emit). The structural Lean port lives in
-            -- `Stack/Ec.lean` (and peer modules); byte-exactness is verified
-            -- empirically via `lake env lean --run` per-fixture in CI.
-            if cryptoAxiomPending.contains e.fileName then
-              -- Compile-skip: the EC / P-256 / P-384 / SLH-DSA codegen modules
-              -- generate hundreds of thousands of `StackOp`s; the Lean
-              -- interpreter takes 10+ minutes to evaluate `compileHex` for
-              -- these. The structural Lean port lives in `Stack/Ec.lean`
-              -- (and peer modules); byte-exactness is verified empirically
-              -- via per-fixture CI runs once the codegen-evaluation perf
-              -- is addressed (e.g., via `@[implemented_by]` or compiled-only
-              -- emit). Until then, these stay in `cryptoAxiomPending`.
+            -- Phase 5: the EC / P-256 / P-384 / SLH-DSA fixtures in
+            -- `cryptoAxiomPending` are skipped by default — even the
+            -- compiled native exe takes >1 hour to evaluate the
+            -- multi-MB scripts (`compileHex` is ~10⁵+ ops × pure
+            -- function calls in Lean's runtime). Set
+            -- `RUNAR_VERIFICATION_FULL=1` to include them; users
+            -- doing local crypto-codegen verification opt in.
+            -- Future closure: rewrite `compileHex` (or just
+            -- `Script.Emit.emit`) with `@[implemented_by]` to a C
+            -- helper, OR pre-compute expected hex offline and gate
+            -- via stored constants. See HANDOFF §25 (Phase 5 entry).
+            let full ← match (← IO.getEnv "RUNAR_VERIFICATION_FULL") with
+              | some _ => pure true
+              | none   => pure false
+            if !full && cryptoAxiomPending.contains e.fileName then
               pure ()
             else
               let actual := compileHex p
