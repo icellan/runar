@@ -33,7 +33,7 @@ class StackTrackerReproV10min extends SmartContract {
             ByteString expectedExtraDataOutputBytes) {
         Bigint p = Bigint.of(46);
 
-        Bigint outCount = bin2num(cat(substr(rawTx, p, Bigint.of(1)), num2bin(Bigint.of(0), Bigint.of(1))));
+        Bigint outCount = Bigint.of(bin2num(cat(substr(rawTx, p.value(), Bigint.of(1).value()), num2bin(Bigint.of(0), Bigint.of(1)))));
         assertThat(outCount.lt(Bigint.of(253)));
         assertThat(outCount.le(Bigint.of(8)));
         p = p.plus(Bigint.ONE);
@@ -42,19 +42,19 @@ class StackTrackerReproV10min extends SmartContract {
         boolean foundExtra = false;
 
         if (Bigint.of(0).lt(outCount)) {
-            Bigint scriptLen = bin2num(cat(substr(rawTx, p.plus(Bigint.of(8)), Bigint.of(1)), num2bin(Bigint.of(0), Bigint.of(1))));
+            Bigint scriptLen = Bigint.of(bin2num(cat(substr(rawTx, p.plus(Bigint.of(8)).value(), Bigint.of(1).value()), num2bin(Bigint.of(0), Bigint.of(1)))));
             assertThat(scriptLen.lt(Bigint.of(253)));
             Bigint blobLen = Bigint.of(8).plus(Bigint.ONE).plus(scriptLen);
-            ByteString blob = substr(rawTx, p, blobLen);
+            ByteString blob = substr(rawTx, p.value(), blobLen.value());
             if (blob.equals(expectedMneeOutputBytes)) { foundMnee = true; }
             if (blob.equals(expectedExtraDataOutputBytes)) { foundExtra = true; }
             p = p.plus(blobLen);
         }
         if (Bigint.ONE.lt(outCount)) {
-            Bigint scriptLen = bin2num(cat(substr(rawTx, p.plus(Bigint.of(8)), Bigint.of(1)), num2bin(Bigint.of(0), Bigint.of(1))));
+            Bigint scriptLen = Bigint.of(bin2num(cat(substr(rawTx, p.plus(Bigint.of(8)).value(), Bigint.of(1).value()), num2bin(Bigint.of(0), Bigint.of(1)))));
             assertThat(scriptLen.lt(Bigint.of(253)));
             Bigint blobLen = Bigint.of(8).plus(Bigint.ONE).plus(scriptLen);
-            ByteString blob = substr(rawTx, p, blobLen);
+            ByteString blob = substr(rawTx, p.value(), blobLen.value());
             if (blob.equals(expectedMneeOutputBytes)) { foundMnee = true; }
             if (blob.equals(expectedExtraDataOutputBytes)) { foundExtra = true; }
             p = p.plus(blobLen);
