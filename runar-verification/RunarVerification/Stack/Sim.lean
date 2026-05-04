@@ -524,5 +524,455 @@ theorem runOps_append : ∀ (ops1 ops2 : List StackOp) (s : StackState),
           | error e => rfl
           | ok s' => exact ih ops2 s'
 
+/-! ### Phase 6 Step 4 tail — Per-opcode operational reduction
+
+Each lemma below witnesses that `runOpcode` reduces to a specific
+`s.push result` form when the stack top has the expected typed
+shape. These compose with `runOps_append` to discharge the
+`hPushed` hypothesis in Stage B's `agrees_preserved_unaryOp` /
+`_binOp` / `_assert` lemmas.
+
+Recipe per lemma:
+1. Show `s.stack = [args...] :: rest`.
+2. Unfold `runOpcode` for the specific code.
+3. Reduce via `liftIntBin`/`liftIntUnary`/`liftBytesBin`/`liftBytesUnary`
+   or by direct pattern match.
+
+The lemmas are stated in terms of `s.push v` form for direct
+composition with the existing `agreesTagged_loadRef_depth*`
+lemmas (which all conclude `... = .ok (s.push v)`). -/
+
+/-! #### `_def` rfl projections — single-arm exposure of `runOpcode`
+
+Each `_def` lemma below is `rfl`-provable because Lean reduces the
+literal-string match in `runOpcode` directly to the relevant arm.
+We use them to avoid pulling in the entire ~200-line `unfold runOpcode`
+match in a single tactic step. -/
+
+theorem runOpcode_ADD_def (s : StackState) :
+    runOpcode "OP_ADD" s = liftIntBin s (fun a b => .vBigint (a + b)) := rfl
+
+theorem runOpcode_SUB_def (s : StackState) :
+    runOpcode "OP_SUB" s = liftIntBin s (fun a b => .vBigint (a - b)) := rfl
+
+theorem runOpcode_MUL_def (s : StackState) :
+    runOpcode "OP_MUL" s = liftIntBin s (fun a b => .vBigint (a * b)) := rfl
+
+theorem runOpcode_LSHIFT_def (s : StackState) :
+    runOpcode "OP_LSHIFT" s
+    = liftIntBin s (fun a b => .vBigint (a * (2 ^ b.toNat))) := rfl
+
+theorem runOpcode_RSHIFT_def (s : StackState) :
+    runOpcode "OP_RSHIFT" s
+    = liftIntBin s (fun a b => .vBigint (a / (2 ^ b.toNat))) := rfl
+
+theorem runOpcode_MIN_def (s : StackState) :
+    runOpcode "OP_MIN" s = liftIntBin s (fun a b => .vBigint (min a b)) := rfl
+
+theorem runOpcode_MAX_def (s : StackState) :
+    runOpcode "OP_MAX" s = liftIntBin s (fun a b => .vBigint (max a b)) := rfl
+
+theorem runOpcode_LESSTHAN_def (s : StackState) :
+    runOpcode "OP_LESSTHAN" s
+    = liftIntBin s (fun a b => .vBool (decide (a < b))) := rfl
+
+theorem runOpcode_GREATERTHAN_def (s : StackState) :
+    runOpcode "OP_GREATERTHAN" s
+    = liftIntBin s (fun a b => .vBool (decide (a > b))) := rfl
+
+theorem runOpcode_LESSTHANOREQUAL_def (s : StackState) :
+    runOpcode "OP_LESSTHANOREQUAL" s
+    = liftIntBin s (fun a b => .vBool (decide (a ≤ b))) := rfl
+
+theorem runOpcode_GREATERTHANOREQUAL_def (s : StackState) :
+    runOpcode "OP_GREATERTHANOREQUAL" s
+    = liftIntBin s (fun a b => .vBool (decide (a ≥ b))) := rfl
+
+theorem runOpcode_NUMEQUAL_def (s : StackState) :
+    runOpcode "OP_NUMEQUAL" s
+    = liftIntBin s (fun a b => .vBool (decide (a = b))) := rfl
+
+theorem runOpcode_NUMNOTEQUAL_def (s : StackState) :
+    runOpcode "OP_NUMNOTEQUAL" s
+    = liftIntBin s (fun a b => .vBool (decide (a ≠ b))) := rfl
+
+theorem runOpcode_BOOLAND_def (s : StackState) :
+    runOpcode "OP_BOOLAND" s
+    = liftIntBin s (fun a b => .vBool (decide (a ≠ 0 ∧ b ≠ 0))) := rfl
+
+theorem runOpcode_BOOLOR_def (s : StackState) :
+    runOpcode "OP_BOOLOR" s
+    = liftIntBin s (fun a b => .vBool (decide (a ≠ 0 ∨ b ≠ 0))) := rfl
+
+theorem runOpcode_NEGATE_def (s : StackState) :
+    runOpcode "OP_NEGATE" s = liftIntUnary s (fun i => .vBigint (-i)) := rfl
+
+theorem runOpcode_ABS_def (s : StackState) :
+    runOpcode "OP_ABS" s = liftIntUnary s (fun i => .vBigint i.natAbs) := rfl
+
+theorem runOpcode_1ADD_def (s : StackState) :
+    runOpcode "OP_1ADD" s = liftIntUnary s (fun i => .vBigint (i + 1)) := rfl
+
+theorem runOpcode_1SUB_def (s : StackState) :
+    runOpcode "OP_1SUB" s = liftIntUnary s (fun i => .vBigint (i - 1)) := rfl
+
+theorem runOpcode_NOT_def (s : StackState) :
+    runOpcode "OP_NOT" s
+    = (match s.pop? with
+       | none => .error (.unsupported "OP_NOT: empty stack")
+       | some (v, s') =>
+           match asBool? v with
+           | some b => .ok (s'.push (.vBool (!b)))
+           | none   => .error (.typeError "OP_NOT non-bool")) := rfl
+
+theorem runOpcode_VERIFY_def (s : StackState) :
+    runOpcode "OP_VERIFY" s
+    = (match s.pop? with
+       | none => .error (.unsupported "OP_VERIFY: empty stack")
+       | some (v, s') =>
+           match asBool? v with
+           | some true  => .ok s'
+           | some false => .error .assertFailed
+           | none       => .error (.typeError "OP_VERIFY: non-bool")) := rfl
+
+theorem runOpcode_CAT_def (s : StackState) :
+    runOpcode "OP_CAT" s = liftBytesBin s (fun a b => .vBytes (a ++ b)) := rfl
+
+/-! #### Helper: `popN s 2` on a 2+ stack -/
+
+/-- `popN s 2` when stack starts with two elements `b :: a :: rest`
+returns `[b, a]` and the residual state. Mirrors `popN_two_cons` in
+Peephole.lean (re-derived here because Sim is upstream of Peephole). -/
+private theorem popN_two_local
+    (s : StackState) (b a : Value) (rest : List Value)
+    (hStk : s.stack = b :: a :: rest) :
+    popN s 2 = .ok ([b, a], { s with stack := rest }) := by
+  unfold popN StackState.pop?
+  rw [hStk]
+  simp only [popN, StackState.pop?]
+
+/-- `OP_VERIFY` succeeds on a `vBool true` top, returning the
+popped state (no push). -/
+theorem runOpcode_verify_pop_vBool_true
+    (s : StackState) (rest : List Value)
+    (hStk : s.stack = .vBool true :: rest) :
+    runOpcode "OP_VERIFY" s = .ok { s with stack := rest } := by
+  rw [runOpcode_VERIFY_def]
+  unfold StackState.pop?
+  rw [hStk]
+  simp [asBool?]
+
+/-- `OP_VERIFY` fails on a `vBool false` top. -/
+theorem runOpcode_verify_pop_vBool_false
+    (s : StackState) (rest : List Value)
+    (hStk : s.stack = .vBool false :: rest) :
+    runOpcode "OP_VERIFY" s = .error .assertFailed := by
+  rw [runOpcode_VERIFY_def]
+  unfold StackState.pop?
+  rw [hStk]
+  simp [asBool?]
+
+/-! #### Binary integer ops (`liftIntBin`-shaped) -/
+
+/-- `OP_ADD` on a 2-int stack: pushes `a + b`. -/
+theorem runOpcode_ADD_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_ADD" s = .ok ({ s with stack := rest }.push (.vBigint (a + b))) := by
+  rw [runOpcode_ADD_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_SUB_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_SUB" s = .ok ({ s with stack := rest }.push (.vBigint (a - b))) := by
+  rw [runOpcode_SUB_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_MUL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_MUL" s = .ok ({ s with stack := rest }.push (.vBigint (a * b))) := by
+  rw [runOpcode_MUL_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_LSHIFT_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_LSHIFT" s = .ok ({ s with stack := rest }.push (.vBigint (a * (2 ^ b.toNat)))) := by
+  rw [runOpcode_LSHIFT_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_RSHIFT_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_RSHIFT" s = .ok ({ s with stack := rest }.push (.vBigint (a / (2 ^ b.toNat)))) := by
+  rw [runOpcode_RSHIFT_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_MIN_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_MIN" s = .ok ({ s with stack := rest }.push (.vBigint (min a b))) := by
+  rw [runOpcode_MIN_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_MAX_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_MAX" s = .ok ({ s with stack := rest }.push (.vBigint (max a b))) := by
+  rw [runOpcode_MAX_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+/-! #### Comparison ops (`liftIntBin`-shaped, return `vBool`) -/
+
+theorem runOpcode_LESSTHAN_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_LESSTHAN" s = .ok ({ s with stack := rest }.push (.vBool (decide (a < b)))) := by
+  rw [runOpcode_LESSTHAN_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_GREATERTHAN_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_GREATERTHAN" s = .ok ({ s with stack := rest }.push (.vBool (decide (a > b)))) := by
+  rw [runOpcode_GREATERTHAN_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_LESSTHANOREQUAL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_LESSTHANOREQUAL" s = .ok ({ s with stack := rest }.push (.vBool (decide (a ≤ b)))) := by
+  rw [runOpcode_LESSTHANOREQUAL_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_GREATERTHANOREQUAL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_GREATERTHANOREQUAL" s = .ok ({ s with stack := rest }.push (.vBool (decide (a ≥ b)))) := by
+  rw [runOpcode_GREATERTHANOREQUAL_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_NUMEQUAL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_NUMEQUAL" s = .ok ({ s with stack := rest }.push (.vBool (decide (a = b)))) := by
+  rw [runOpcode_NUMEQUAL_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_NUMNOTEQUAL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_NUMNOTEQUAL" s = .ok ({ s with stack := rest }.push (.vBool (decide (a ≠ b)))) := by
+  rw [runOpcode_NUMNOTEQUAL_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_BOOLAND_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_BOOLAND" s = .ok ({ s with stack := rest }.push (.vBool (decide (a ≠ 0 ∧ b ≠ 0)))) := by
+  rw [runOpcode_BOOLAND_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+theorem runOpcode_BOOLOR_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOpcode "OP_BOOLOR" s = .ok ({ s with stack := rest }.push (.vBool (decide (a ≠ 0 ∨ b ≠ 0)))) := by
+  rw [runOpcode_BOOLOR_def]
+  unfold liftIntBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asInt?]
+
+/-! #### Unary integer ops (`liftIntUnary`-shaped) -/
+
+theorem runOpcode_NEGATE_int
+    (s : StackState) (i : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint i :: rest) :
+    runOpcode "OP_NEGATE" s = .ok ({ s with stack := rest }.push (.vBigint (-i))) := by
+  rw [runOpcode_NEGATE_def]
+  unfold liftIntUnary StackState.pop?
+  rw [hStk]
+  simp [asInt?]
+
+theorem runOpcode_ABS_int
+    (s : StackState) (i : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint i :: rest) :
+    runOpcode "OP_ABS" s = .ok ({ s with stack := rest }.push (.vBigint i.natAbs)) := by
+  rw [runOpcode_ABS_def]
+  unfold liftIntUnary StackState.pop?
+  rw [hStk]
+  simp [asInt?]
+
+theorem runOpcode_1ADD_int
+    (s : StackState) (i : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint i :: rest) :
+    runOpcode "OP_1ADD" s = .ok ({ s with stack := rest }.push (.vBigint (i + 1))) := by
+  rw [runOpcode_1ADD_def]
+  unfold liftIntUnary StackState.pop?
+  rw [hStk]
+  simp [asInt?]
+
+theorem runOpcode_1SUB_int
+    (s : StackState) (i : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint i :: rest) :
+    runOpcode "OP_1SUB" s = .ok ({ s with stack := rest }.push (.vBigint (i - 1))) := by
+  rw [runOpcode_1SUB_def]
+  unfold liftIntUnary StackState.pop?
+  rw [hStk]
+  simp [asInt?]
+
+/-! #### Unary boolean op -/
+
+theorem runOpcode_NOT_bool
+    (s : StackState) (b : Bool) (rest : List Value)
+    (hStk : s.stack = .vBool b :: rest) :
+    runOpcode "OP_NOT" s = .ok ({ s with stack := rest }.push (.vBool (!b))) := by
+  rw [runOpcode_NOT_def]
+  unfold StackState.pop?
+  rw [hStk]
+  simp [asBool?]
+
+/-! #### Bytes ops -/
+
+theorem runOpcode_CAT_bytesBytes
+    (s : StackState) (a b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest) :
+    runOpcode "OP_CAT" s = .ok ({ s with stack := rest }.push (.vBytes (a ++ b))) := by
+  rw [runOpcode_CAT_def]
+  unfold liftBytesBin
+  rw [popN_two_local s _ _ rest hStk]
+  simp [asBytes?]
+
+/-! ### Phase 6 Step 4 tail — End-to-end runOps for unary/binary opcodes
+
+These compose the per-opcode reduction above with the
+single-op `runOps` step `runOps [.opcode code] s` form — useful
+for direct rewriting in Stage B. -/
+
+/-- `runOps [OP_ADD]` on a 2-int stack: end-to-end reduction. -/
+theorem run_OP_ADD_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOps [.opcode "OP_ADD"] s
+    = .ok ({ s with stack := rest }.push (.vBigint (a + b))) := by
+  show runOps (.opcode "OP_ADD" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_ADD_intInt s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_SUB]` on a 2-int stack. -/
+theorem run_OP_SUB_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOps [.opcode "OP_SUB"] s
+    = .ok ({ s with stack := rest }.push (.vBigint (a - b))) := by
+  show runOps (.opcode "OP_SUB" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_SUB_intInt s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_MUL]` on a 2-int stack. -/
+theorem run_OP_MUL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOps [.opcode "OP_MUL"] s
+    = .ok ({ s with stack := rest }.push (.vBigint (a * b))) := by
+  show runOps (.opcode "OP_MUL" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_MUL_intInt s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_NUMEQUAL]` on a 2-int stack. -/
+theorem run_OP_NUMEQUAL_intInt
+    (s : StackState) (a b : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint b :: .vBigint a :: rest) :
+    runOps [.opcode "OP_NUMEQUAL"] s
+    = .ok ({ s with stack := rest }.push (.vBool (decide (a = b)))) := by
+  show runOps (.opcode "OP_NUMEQUAL" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_NUMEQUAL_intInt s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_NEGATE]` on a 1-int stack. -/
+theorem run_OP_NEGATE_int
+    (s : StackState) (i : Int) (rest : List Value)
+    (hStk : s.stack = .vBigint i :: rest) :
+    runOps [.opcode "OP_NEGATE"] s
+    = .ok ({ s with stack := rest }.push (.vBigint (-i))) := by
+  show runOps (.opcode "OP_NEGATE" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_NEGATE_int s i rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_NOT]` on a 1-bool stack. -/
+theorem run_OP_NOT_bool
+    (s : StackState) (b : Bool) (rest : List Value)
+    (hStk : s.stack = .vBool b :: rest) :
+    runOps [.opcode "OP_NOT"] s
+    = .ok ({ s with stack := rest }.push (.vBool (!b))) := by
+  show runOps (.opcode "OP_NOT" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_NOT_bool s b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_CAT]` on a 2-bytes stack. -/
+theorem run_OP_CAT_bytesBytes
+    (s : StackState) (a b : ByteArray) (rest : List Value)
+    (hStk : s.stack = .vBytes b :: .vBytes a :: rest) :
+    runOps [.opcode "OP_CAT"] s
+    = .ok ({ s with stack := rest }.push (.vBytes (a ++ b))) := by
+  show runOps (.opcode "OP_CAT" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_CAT_bytesBytes s a b rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_VERIFY]` on a `vBool true` top: reaches the popped state. -/
+theorem run_OP_VERIFY_pop_true
+    (s : StackState) (rest : List Value)
+    (hStk : s.stack = .vBool true :: rest) :
+    runOps [.opcode "OP_VERIFY"] s = .ok { s with stack := rest } := by
+  show runOps (.opcode "OP_VERIFY" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_verify_pop_vBool_true s rest hStk]
+  simp [run_empty]
+
+/-- `runOps [OP_VERIFY]` on a `vBool false` top: error. -/
+theorem run_OP_VERIFY_pop_false
+    (s : StackState) (rest : List Value)
+    (hStk : s.stack = .vBool false :: rest) :
+    runOps [.opcode "OP_VERIFY"] s = .error .assertFailed := by
+  show runOps (.opcode "OP_VERIFY" :: []) s = _
+  unfold runOps
+  rw [stepNonIf_opcode, runOpcode_verify_pop_vBool_false s rest hStk]
+
 end Sim
 end RunarVerification.Stack
