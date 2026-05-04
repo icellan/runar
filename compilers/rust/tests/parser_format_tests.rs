@@ -9,7 +9,11 @@
 
 use runar_compiler_rust::frontend::parser::parse_source;
 
-fn read_conformance_format(test_name: &str, ext: &str) -> Option<String> {
+/// Resolve a conformance fixture's source for the given extension via its
+/// `source.json` manifest. Every conformance fixture has every
+/// `.runar.{ts,sol,move,go,rs,py,zig,rb,java}` entry populated, so a missing
+/// entry is a real failure and must FAIL LOUDLY rather than silently skip.
+fn read_conformance_format(test_name: &str, ext: &str) -> String {
     let cfg_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -17,11 +21,18 @@ fn read_conformance_format(test_name: &str, ext: &str) -> Option<String> {
         .join("tests")
         .join(test_name)
         .join("source.json");
-    let raw = std::fs::read_to_string(&cfg_path).ok()?;
-    let cfg: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let rel = cfg.get("sources")?.get(ext)?.as_str()?;
-    let resolved = cfg_path.parent()?.join(rel);
-    std::fs::read_to_string(&resolved).ok()
+    let raw = std::fs::read_to_string(&cfg_path)
+        .unwrap_or_else(|e| panic!("missing conformance source.json {:?}: {}", cfg_path, e));
+    let cfg: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("invalid JSON {:?}: {}", cfg_path, e));
+    let rel = cfg
+        .get("sources")
+        .and_then(|s| s.get(ext))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("source.json {:?} missing sources[{}] entry", cfg_path, ext));
+    let resolved = cfg_path.parent().unwrap().join(rel);
+    std::fs::read_to_string(&resolved)
+        .unwrap_or_else(|e| panic!("failed to read fixture {:?}: {}", resolved, e))
 }
 
 // ---------------------------------------------------------------------------
@@ -30,25 +41,23 @@ fn read_conformance_format(test_name: &str, ext: &str) -> Option<String> {
 
 #[test]
 fn test_parse_java_p2pkh_dispatch() {
-    let source = match read_conformance_format("basic-p2pkh", ".runar.java") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: basic-p2pkh source.json missing .runar.java entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("basic-p2pkh", ".runar.java");
     let result = parse_source(&source, Some("P2PKH.runar.java"));
-    // Java parser must dispatch and not panic. It should produce a contract
-    // node, though some advanced surface features may surface diagnostics.
-    if let Some(c) = result.contract {
-        assert_eq!(c.name, "P2PKH");
-    } else {
-        // If parsing fails, errors must be reported rather than silent.
+    // Java parser must dispatch and produce a P2PKH contract for the
+    // conformance fixture. If a future surface-level change can no longer
+    // produce a contract, the parser must at least surface diagnostics —
+    // a contract-less, error-less result is a silent regression.
+    let contract = result.contract.unwrap_or_else(|| {
         assert!(
             !result.errors.is_empty(),
             "Java parser produced no contract and no errors"
         );
-    }
+        panic!(
+            "Java parser produced no contract for basic-p2pkh.runar.java; errors: {:?}",
+            result.errors
+        )
+    });
+    assert_eq!(contract.name, "P2PKH");
 }
 
 // ---------------------------------------------------------------------------
@@ -57,20 +66,18 @@ fn test_parse_java_p2pkh_dispatch() {
 
 #[test]
 fn test_parse_zig_p2pkh_dispatch() {
-    let source = match read_conformance_format("basic-p2pkh", ".runar.zig") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: basic-p2pkh source.json missing .runar.zig entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("basic-p2pkh", ".runar.zig");
     let result = parse_source(&source, Some("P2PKH.runar.zig"));
-    // Zig dispatch must not panic. Some surface features may produce
-    // diagnostics; the cross-compiler conformance suite is the byte-equality
-    // gate. This test just verifies the parser is wired and runs.
-    if let Some(c) = result.contract {
-        assert!(!c.name.is_empty(), "Zig-parsed contract should have a name");
-    }
+    // Zig dispatch must produce a P2PKH contract for the conformance fixture.
+    // The cross-compiler conformance suite is the byte-equality gate; this
+    // test is the dispatch + structural sanity check.
+    let contract = result.contract.unwrap_or_else(|| {
+        panic!(
+            "Zig parser produced no contract for basic-p2pkh.runar.zig; errors: {:?}",
+            result.errors
+        )
+    });
+    assert_eq!(contract.name, "P2PKH");
 }
 
 // ---------------------------------------------------------------------------
@@ -79,21 +86,14 @@ fn test_parse_zig_p2pkh_dispatch() {
 
 #[test]
 fn test_parse_rs_arithmetic_structure() {
-    let source = match read_conformance_format("arithmetic", ".runar.rs") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: arithmetic source.json missing .runar.rs entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("arithmetic", ".runar.rs");
     let result = parse_source(&source, Some("Arithmetic.runar.rs"));
-    let contract = match result.contract {
-        Some(c) => c,
-        None => {
-            eprintln!("SKIP: Rust-macro parser produced no contract for arithmetic.runar.rs");
-            return;
-        }
-    };
+    let contract = result.contract.unwrap_or_else(|| {
+        panic!(
+            "Rust-macro parser produced no contract for arithmetic.runar.rs; errors: {:?}",
+            result.errors
+        )
+    });
     assert_eq!(contract.name, "Arithmetic");
     assert!(
         contract.methods.iter().any(|m| m.name == "verify"),
@@ -103,21 +103,14 @@ fn test_parse_rs_arithmetic_structure() {
 
 #[test]
 fn test_parse_rs_p2pkh_structure() {
-    let source = match read_conformance_format("basic-p2pkh", ".runar.rs") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: basic-p2pkh source.json missing .runar.rs entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("basic-p2pkh", ".runar.rs");
     let result = parse_source(&source, Some("P2PKH.runar.rs"));
-    let contract = match result.contract {
-        Some(c) => c,
-        None => {
-            eprintln!("SKIP: Rust-macro parser produced no contract for basic-p2pkh.runar.rs");
-            return;
-        }
-    };
+    let contract = result.contract.unwrap_or_else(|| {
+        panic!(
+            "Rust-macro parser produced no contract for basic-p2pkh.runar.rs; errors: {:?}",
+            result.errors
+        )
+    });
     assert_eq!(contract.name, "P2PKH");
     assert_eq!(contract.parent_class, "SmartContract");
 }
@@ -128,21 +121,14 @@ fn test_parse_rs_p2pkh_structure() {
 
 #[test]
 fn test_parse_py_p2pkh_structure() {
-    let source = match read_conformance_format("basic-p2pkh", ".runar.py") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: basic-p2pkh source.json missing .runar.py entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("basic-p2pkh", ".runar.py");
     let result = parse_source(&source, Some("P2PKH.runar.py"));
-    let contract = match result.contract {
-        Some(c) => c,
-        None => {
-            eprintln!("SKIP: Python parser produced no contract for basic-p2pkh.runar.py");
-            return;
-        }
-    };
+    let contract = result.contract.unwrap_or_else(|| {
+        panic!(
+            "Python parser produced no contract for basic-p2pkh.runar.py; errors: {:?}",
+            result.errors
+        )
+    });
     assert_eq!(contract.name, "P2PKH");
     // Python uses snake_case which the parser converts to camelCase.
     assert!(
@@ -157,21 +143,14 @@ fn test_parse_py_p2pkh_structure() {
 
 #[test]
 fn test_parse_go_p2pkh_structure_via_conformance() {
-    let source = match read_conformance_format("basic-p2pkh", ".runar.go") {
-        Some(s) => s,
-        None => {
-            eprintln!("SKIP: basic-p2pkh source.json missing .runar.go entry");
-            return;
-        }
-    };
+    let source = read_conformance_format("basic-p2pkh", ".runar.go");
     let result = parse_source(&source, Some("P2PKH.runar.go"));
-    let contract = match result.contract {
-        Some(c) => c,
-        None => {
-            eprintln!("SKIP: Go parser produced no contract for basic-p2pkh.runar.go");
-            return;
-        }
-    };
+    let contract = result.contract.unwrap_or_else(|| {
+        panic!(
+            "Go parser produced no contract for basic-p2pkh.runar.go; errors: {:?}",
+            result.errors
+        )
+    });
     assert_eq!(contract.name, "P2PKH");
     assert!(
         contract.properties.iter().any(|p| p.name == "pubKeyHash"),

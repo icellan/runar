@@ -97,6 +97,24 @@ opt-outs at the conformance-runner level, not test-level skips. See
   falsy `assert` predicate (handles both the dedicated `assert` ANF node
   and the `call(assert, ...)` lowering path). Crypto built-ins still
   mock-return `true`.
+- `compilers/rust/tests/multiformat_tests.rs` and
+  `compilers/rust/tests/parser_format_tests.rs` — every conformance-fixture
+  driven test had a `eprintln!("SKIP: ...") + return` guard. In
+  `multiformat_tests.rs` the `read_conformance_format` helper looked for
+  `<test>/<test>.runar.<ext>` (which never existed — sources live in
+  `examples/...` and are referenced via `source.json`), so every
+  format-dispatch test, structure-check test, and cross-format consistency
+  loop silently skipped — `cargo test` reported green without running any
+  parser assertion. Replaced the helper with the same `source.json` resolver
+  that `parser_format_tests.rs` uses (now `panic!`-ing on a missing fixture
+  rather than returning `None`) and removed every `Some(s) => s, None => return`
+  guard. The `parser_format_tests.rs` resolver was already correct, but its
+  "parser produced no contract" fallbacks were also silent returns: those
+  branches were dead (every parser produces a contract for the conformance
+  fixture today), so they were converted to `panic!` so a future regression
+  fails loudly. Net effect: 28 Rust parser tests now actually exercise their
+  assertions; the suite still reports the same passing count, but is no
+  longer a false-positive.
 
 ## How to verify locally
 
