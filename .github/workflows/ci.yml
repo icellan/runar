@@ -641,6 +641,9 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
+      # Java integration's ContractCompiler spawns `node --import tsx`; tsx
+      # lives in conformance/ (not pnpm-workspace), so install it explicitly.
+      - run: cd conformance && npm ci
 
       - name: Pre-create regtest node config with test credentials
         run: |
