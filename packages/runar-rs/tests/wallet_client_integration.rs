@@ -43,11 +43,16 @@ fn post(base: &str, method: &str, body: Value, auth: Option<&str>) -> Result<Val
 }
 
 #[test]
+#[ignore = "RUNAR_WALLET_ENDPOINT not set — set it to a BRC-100 wallet URL and run with `cargo test -- --ignored` to enable."]
 fn wallet_client_live_round_trip() {
     let Some(base) = endpoint() else {
+        // Defense-in-depth: even when invoked under `--ignored`, refuse
+        // to run if the endpoint is missing. The #[ignore] attribute is
+        // the audit-visible skip surface; this branch is only reachable
+        // when CI sets RUNAR_WALLET_ENDPOINT *and* the user explicitly
+        // requested ignored tests but cleared the var between flags.
         eprintln!(
-            "RUNAR_WALLET_ENDPOINT not set — skipping live BRC-100 wallet round-trip. \
-             Set RUNAR_WALLET_ENDPOINT to a BRC-100 wallet URL to enable."
+            "RUNAR_WALLET_ENDPOINT not set — skipping live BRC-100 wallet round-trip."
         );
         return;
     };
