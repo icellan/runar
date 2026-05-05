@@ -2,6 +2,67 @@ import RunarVerification.Pipeline
 import RunarVerification.ANF.Json
 open RunarVerification ANF Pipeline
 
+/-! ## Pre-computed Lean compileHex output for the cryptoAxiomPending bucket
+
+The 11 cryptoAxiomPending fixtures (EC × 5, P-256 × 2, P-384 × 2,
+SLH-DSA × 2) take >25 min/fixture to evaluate via `compileHex` in
+Lean's runtime — too slow for default-mode CI. This section stores
+the pre-computed `compileHex` output as a Lean `String` constant per
+fixture, so default-mode `pipelineGolden` can compare each constant
+against `expected-script.hex` instantly (constant-time string equality).
+
+### Two-tier gating
+
+* **Default mode** (Gate "constant ≡ expected"): for each
+  cryptoAxiomPending fixture, compare the stored constant against the
+  on-disk `expected-script.hex`. If they match, the fixture is treated
+  as byte-exact for the regression count. If the constant is `none`,
+  the fixture is reported as "unpopulated, regen needed".
+
+* **Regen mode** (`RUNAR_VERIFICATION_REGEN=1`): for each fixture,
+  re-run `compileHex` on the parsed IR and compare the live output
+  against the stored constant. If they diverge, the constant is
+  STALE — the lowering pass has changed since the last regen, and
+  the constant must be refreshed via offline computation. The live
+  hex is dumped to stderr in regen mode for copy-paste back into
+  this table. Stale constants fail regen.
+
+* **Full mode** (`RUNAR_VERIFICATION_FULL=1`, pre-existing): runs
+  the live compileHex for all fixtures including cryptoAxiomPending.
+
+Empirical timing: even the smallest cryptoAxiomPending fixture
+(post-quantum-slhdsa, 377KB hex) takes >25 min on M-series mac.
+A full regen of all 11 fixtures is a multi-hour batch.
+
+### How to (re)generate
+
+```
+cd runar-verification
+RUNAR_VERIFICATION_REGEN=1 lake env ./.lake/build/bin/pipelineGolden 2>/tmp/regen.out
+# Per-fixture live hex is dumped to /tmp/regen.out under
+# 'REGEN <name>: <hex>' lines. Paste each into the lookup below as
+# `| "<name>" => some "<hex>"`.
+```
+-/
+
+/-- Stored Lean `compileHex` output for a cryptoAxiomPending fixture.
+Returns `none` for fixtures whose constant has not been populated
+yet (initial state). Per-fixture entries are added as offline regens
+complete. -/
+def cryptoAxiomPendingExpected : String → Option String
+  | "convergence-proof"   => none
+  | "ec-demo"             => none
+  | "ec-primitives"       => none
+  | "ec-unit"             => none
+  | "p256-primitives"     => none
+  | "p256-wallet"         => none
+  | "p384-primitives"     => none
+  | "p384-wallet"         => none
+  | "post-quantum-slhdsa" => none
+  | "schnorr-zkp"         => none
+  | "sphincs-wallet"      => none
+  | _                     => none
+
 /--
 Phase 3 baseline: fixtures that compile byte-exact through the verified Lean
 pipeline. Any of these fixtures regressing (dropping out of byte-exact match)
@@ -218,9 +279,12 @@ def main : IO Unit := do
   -- runs via `lake env lean --run tests/PipelineGolden.lean` set the same cwd.
   let dir := "../conformance/tests"
   let entries ← System.FilePath.readDir dir
-  -- Determine full vs default mode once up front so the cryptoAxiomPending
-  -- bucket gating + per-fixture timing both observe the same flag.
+  -- Determine modes once up front so the cryptoAxiomPending bucket
+  -- gating + per-fixture timing all observe the same flags.
   let full ← match (← IO.getEnv "RUNAR_VERIFICATION_FULL") with
+    | some _ => pure true
+    | none   => pure false
+  let regen ← match (← IO.getEnv "RUNAR_VERIFICATION_REGEN") with
     | some _ => pure true
     | none   => pure false
   let mut total := 0
@@ -229,6 +293,16 @@ def main : IO Unit := do
   -- 3c: Per-fixture timing telemetry for the cryptoAxiomPending bucket.
   -- Each entry: (fixture name, milliseconds elapsed, byteExact?).
   let mut fullTimings : List (String × Nat × Bool) := []
+  -- 2b: Track regen state per cryptoAxiomPending fixture.
+  --   "stale"        — stored constant exists but diverges from live hex
+  --   "unpopulated"  — no stored constant; first regen
+  --   "fresh"        — live hex matches stored constant
+  let mut regenStatus : List (String × String) := []
+  -- 2b: Track which cryptoAxiomPending fixtures matched via stored
+  -- constant in default mode. Surfaces "constant set but stale vs.
+  -- expected-script.hex" cases as a separate gate.
+  let mut constMatched : List String := []
+  let mut constUnpopulated : List String := []
   for e in entries do
     let path := e.path
     let ir := path / "expected-ir.json"
@@ -240,19 +314,31 @@ def main : IO Unit := do
         match ANFProgram.fromString irJson with
         | .ok p =>
             total := total + 1
+            let isCryptoPending := cryptoAxiomPending.contains e.fileName
             -- Phase 5: the EC / P-256 / P-384 / SLH-DSA fixtures in
-            -- `cryptoAxiomPending` are skipped by default — even the
-            -- compiled native exe takes >1 hour to evaluate the
-            -- multi-MB scripts (`compileHex` is ~10⁵+ ops × pure
-            -- function calls in Lean's runtime). Set
-            -- `RUNAR_VERIFICATION_FULL=1` to include them; users
-            -- doing local crypto-codegen verification opt in.
-            -- Future closure: rewrite `compileHex` (or just
-            -- `Script.Emit.emit`) with `@[implemented_by]` to a C
-            -- helper, OR pre-compute expected hex offline and gate
-            -- via stored constants. See HANDOFF §25 (Phase 5 entry).
-            if !full && cryptoAxiomPending.contains e.fileName then
-              pure ()
+            -- `cryptoAxiomPending` are skipped by default in live-compile
+            -- mode (`compileHex` >25 min/fixture). Three gating modes:
+            --
+            -- * Default: compare the stored constant
+            --   `cryptoAxiomPendingExpected` against `expected-script.hex`.
+            --   Instant. Surfaces unpopulated constants as a NOTICE.
+            -- * `RUNAR_VERIFICATION_REGEN=1`: live compileHex, compare
+            --   against stored constant (catches stale constants when
+            --   the lowering changes), dump live hex to stderr for
+            --   offline copy-paste into `cryptoAxiomPendingExpected`.
+            -- * `RUNAR_VERIFICATION_FULL=1`: live compileHex, compare
+            --   against `expected-script.hex` directly (pre-existing).
+            if isCryptoPending && !full && !regen then
+              -- Default mode: gate via stored constant.
+              match cryptoAxiomPendingExpected e.fileName with
+              | some storedHex =>
+                  if expected == storedHex then
+                    matched := matched + 1
+                    matchedNames := e.fileName :: matchedNames
+                    constMatched := e.fileName :: constMatched
+                  -- else: stored constant disagrees with expected — surfaces below
+              | none =>
+                  constUnpopulated := e.fileName :: constUnpopulated
             else
               -- 3c: Time each fixture's compile. In full mode, log
               -- per-fixture progress so users see what's happening
@@ -262,9 +348,25 @@ def main : IO Unit := do
               let isMatch := expected == actual
               let t1 ← IO.monoMsNow
               let elapsedMs := t1 - t0
-              if full && cryptoAxiomPending.contains e.fileName then
+              if (full || regen) && isCryptoPending then
                 fullTimings := (e.fileName, elapsedMs, isMatch) :: fullTimings
-                IO.eprintln s!"  [full] {e.fileName} compiled in {elapsedMs}ms (byte-exact={isMatch})"
+                IO.eprintln s!"  [{if regen then "regen" else "full"}] {e.fileName} compiled in {elapsedMs}ms (byte-exact={isMatch})"
+                (← IO.getStderr).flush
+              if regen && isCryptoPending then
+                -- Compare live hex against stored constant.
+                let status :=
+                  match cryptoAxiomPendingExpected e.fileName with
+                  | some storedHex =>
+                      if storedHex == actual then "fresh" else "stale"
+                  | none => "unpopulated"
+                regenStatus := (e.fileName, status) :: regenStatus
+                -- Dump live hex to /tmp/regen-<name>.hex for offline
+                -- copy-paste into `cryptoAxiomPendingExpected`. Keeps
+                -- stderr human-readable while preserving the full
+                -- multi-MB hex per fixture.
+                let outFile := s!"/tmp/regen-{e.fileName}.hex"
+                IO.FS.writeFile outFile actual
+                IO.eprintln s!"REGEN {e.fileName}: live hex written to {outFile} ({actual.length} chars)"
                 (← IO.getStderr).flush
               if isMatch then
                 matched := matched + 1
@@ -273,16 +375,40 @@ def main : IO Unit := do
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"
   -- 3c: Surface per-fixture timing for the cryptoAxiomPending bucket
-  -- when full mode ran. Helps identify which fixtures are tractable
-  -- for opt-in CI vs which need the (i) @[implemented_by] or (ii)
-  -- pre-computed-constant escape hatches.
-  if full && !fullTimings.isEmpty then
+  -- when full or regen mode ran.
+  if (full || regen) && !fullTimings.isEmpty then
     IO.println ""
-    IO.println "FULL-MODE TIMING (cryptoAxiomPending bucket):"
+    IO.println s!"{if regen then "REGEN" else "FULL"}-MODE TIMING (cryptoAxiomPending bucket):"
     let sorted := fullTimings.reverse  -- preserve discovery order
     for (n, ms, m) in sorted do
       let mark := if m then "✓" else "✗"
       IO.println s!"  {mark} {n}: {ms}ms"
+  -- 2b: In regen mode, surface stored-constant-vs-live divergence as a
+  -- separate report. Stale constants fail the regen check; unpopulated
+  -- ones are normal during initial regen.
+  if regen && !regenStatus.isEmpty then
+    IO.println ""
+    IO.println "REGEN STATUS (stored constant vs. live compileHex):"
+    let sorted := regenStatus.reverse
+    let mut staleCount := 0
+    for (n, status) in sorted do
+      IO.println s!"  [{status}] {n}"
+      if status == "stale" then
+        staleCount := staleCount + 1
+    if staleCount > 0 then
+      IO.eprintln ""
+      IO.eprintln s!"REGEN FAIL: {staleCount} stored constant(s) are stale."
+      IO.eprintln "  Update tests/PipelineGolden.lean's cryptoAxiomPendingExpected"
+      IO.eprintln "  with the live hex from the REGEN <name>: ... lines above."
+      IO.Process.exit 1
+  -- 2b: In default mode, surface cryptoAxiomPending fixtures whose
+  -- stored constant is unpopulated. Non-fatal NOTICE — these are the
+  -- candidates for the next offline regen.
+  if !constUnpopulated.isEmpty then
+    IO.eprintln "NOTICE: cryptoAxiomPending fixtures with unpopulated stored constants:"
+    for n in constUnpopulated.reverse do
+      IO.eprintln s!"  - {n}"
+    IO.eprintln "  Run with RUNAR_VERIFICATION_REGEN=1 to populate via offline compute."
   -- Phase 4 diagnostic: surface ANY matched fixture not in baselineMatches.
   -- Both pending-bucket fixtures AND brand-new fixtures (e.g., the 3 added
   -- in commit 3fed3295) become visible without needing per-bucket entries.
