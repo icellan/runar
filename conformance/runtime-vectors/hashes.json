@@ -1,13 +1,13 @@
 {
   "_doc": "Cross-SDK runtime conformance vectors. Each SDK's test suite should load this file and assert its native runtime produces byte-identical output. All values are lowercase hex strings without 0x prefix. Update one place; every consumer SDK then has to match.",
   "_consumers": [
-    "packages/runar-java/src/test/java/runar/lang/runtime/MockCryptoTest.java",
-    "(future) packages/runar-py/tests/test_runtime_vectors.py",
-    "(future) packages/runar-go/runtime_vectors_test.go",
-    "(future) packages/runar-rs/tests/runtime_vectors.rs",
-    "(future) packages/runar-zig/test/runtime_vectors.zig",
-    "(future) packages/runar-rb/test/runtime_vectors.rb",
-    "(future) packages/runar-testing/src/__tests__/runtime-vectors.test.ts"
+    "packages/runar-java/src/test/java/runar/lang/runtime/RuntimeVectorsTest.java",
+    "packages/runar-py/tests/test_runtime_vectors.py",
+    "packages/runar-go/runtime_vectors_test.go",
+    "packages/runar-rs/tests/runtime_vectors.rs",
+    "packages/runar-zig/src/runtime_vectors_test.zig",
+    "packages/runar-rb/spec/runar/runtime_vectors_spec.rb",
+    "packages/runar-testing/src/__tests__/runtime-vectors.test.ts"
   ],
   "constants": {
     "sha256_iv": "6a09e667bb67ae853c6ef372a54ff53a510e527f9b05688c1f83d9ab5be0cd19",

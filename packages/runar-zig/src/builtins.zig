@@ -1250,7 +1250,7 @@ fn dupeBytes(bytes: []const u8) []const u8 {
     return std.heap.page_allocator.dupe(u8, bytes) catch @panic("OOM");
 }
 
-fn freeIfOwned(bytes: []const u8) void {
+pub fn freeIfOwned(bytes: []const u8) void {
     if (bytes.len == 0) return;
     const addr = @intFromPtr(bytes.ptr);
     const static_addrs = [_]usize{
