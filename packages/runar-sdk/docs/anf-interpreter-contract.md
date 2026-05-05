@@ -91,7 +91,38 @@ each implementation.
 | `check_preimage` | **skipped** (`anf-interpreter.ts:255`) | **skipped** | **skipped** (`AnfInterpreter.java:56`) |
 | `deserialize_state` | **skipped** (`anf-interpreter.ts:256`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
-| `array_literal` | **default-undefined** in TS — no explicit case in the switch; consumers receive arrays through `args` instead (`anf-interpreter.ts:261-262`) | **default-undefined** in Java | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` |
+| `array_literal` | **default-undefined** — no explicit case in the switch; consumers receive arrays through `args` instead (`anf-interpreter.ts:261-262`) | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` | **default-undefined** — `array_literal` is listed in `CHAIN_ONLY_KINDS` and falls through to the no-op skip (`AnfInterpreter.java:370-372`) |
+
+### Per-kind behaviour for the four ANF-only SDKs
+
+The Go, Rust, Python, and Ruby SDKs implement the lenient mode of the
+contract (`compute_new_state` / `compute_new_state_and_data_outputs`) with
+the same per-kind contract as the TS / Zig / Java reference. Strict and
+real-crypto modes are TS-, Java-, and Zig-only today; the four SDKs below
+ship lenient mode only and are exercised by the cross-interpreter parity
+test in lenient mode.
+
+| Kind | Go (`anf_interpreter.go`) | Rust (`anf_interpreter.rs`) | Python (`anf_interpreter.py`) | Ruby (`anf_interpreter.rb`) |
+|---|---|---|---|---|
+| `load_param` / `load_prop` | 186 / 190 | 293 / 298 | 145 / 148 | 143 (combined) |
+| `load_const` | 194 | 303 | 151 | 146 |
+| `bin_op` | 202 | 314 | 158 | 151 |
+| `unary_op` | 209 | 324 | 166 | 159 |
+| `call` | 215 | 332 | 173 | 166 |
+| `method_call` | 224 | 341 | 177 | 170 |
+| `if` | 268 | 380 | 181 | 174 |
+| `loop` | 293 | 406 | 191 | 182 |
+| `assert` (skipped lenient) | 314 | 431 | 205 | 201 |
+| `update_prop` | 318 | 433 | 208 | 204 |
+| `add_output` | 326 | 442 | 215 | 210 |
+| `add_data_output` | 350 | 460 | 230 | 228 |
+| on-chain-only kinds (skipped) | 367 | 471 | 241 | 239 |
+| `array_literal` | default (undefined) | default (undefined) | default (undefined) | default (undefined) |
+
+These four SDKs do not yet have a strict mode (`executeStrict`) or a
+real-crypto mode (`executeOnChainAuthoritative`). When those land, this
+matrix should grow `assert` enforcement and `checkSig` / `checkMultiSig` /
+`checkPreimage` real-crypto rows for each.
 
 ### Summary of intentional skips
 
