@@ -216,7 +216,7 @@ func buildG1OnCurveHarness(x, y *big.Int) []StackOp {
 // -----------------------------------------------------------------------
 //
 // These cover emitWAG2SubgroupCheck — the witness-assisted endomorphism
-// check (ψ(P) == [6·x²]·P) that closes the TODO(subgroup-check) gap
+// check (ψ(P) == [6·x²]·P) that closes the historic subgroup-check gap
 // documented on the helper. The harness pushes the fixed BN254 modulus,
 // the 390 Fp witness gradients (one Fp² slope per doubling and per
 // addition in the [6·x²] scalar-mul chain), and the four G2 coordinates
