@@ -23,18 +23,26 @@ function readGoldenHex(testName: string): string | null {
 // ---------------------------------------------------------------------------
 
 describe('Analyzer: conformance golden files', () => {
-  // Dynamically discover all conformance test directories
+  // Dynamically discover all conformance test directories that ship a golden
+  // hex file. Fixtures whose `source.json` declares a tier-only allowlist (e.g.
+  // Go-only EVM/STARK primitives) intentionally have no `expected-script.hex`,
+  // so they're filtered out at discovery time rather than silently skipped at
+  // assertion time. Filtering here keeps the test-skip inventory invariant
+  // (docs/test-skips.md) intact.
   const testDirs = existsSync(CONFORMANCE_DIR)
     ? readdirSync(CONFORMANCE_DIR, { withFileTypes: true })
         .filter((d) => d.isDirectory())
         .map((d) => d.name)
+        .filter((name) => readGoldenHex(name) !== null)
     : [];
 
   it.each(testDirs)('%s — no errors', (testName) => {
     const hex = readGoldenHex(testName);
-    if (!hex) return; // skip if no hex file
+    // Existence guaranteed by the discovery-time filter above; assert
+    // defensively so a regression that drops the filter is loud, not silent.
+    expect(hex, `${testName} missing expected-script.hex`).not.toBeNull();
 
-    const result = analyzeScript(hex);
+    const result = analyzeScript(hex!);
     const errors = result.findings.filter((f) => f.severity === 'error');
 
     // Compiler-generated scripts should have no errors

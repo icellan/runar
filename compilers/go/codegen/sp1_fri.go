@@ -2046,10 +2046,13 @@ func emitQuotientRecompose(t *KBTracker, chunkPrefix, outPrefix string) {
 // `logMaxHeight` is the static log2 of the max matrix height (after blowup) —
 // for the PoC fixture this is `logGlobalMaxHeight = 5`. The runtime exponent
 // `reverseBitsLen(index, logMaxHeight)` is computed inline by walking the
-// 5 bits of `index` and conditionally multiplying precomputed g^(2^k) entries.
-// (Strategy (b) from the dispatch brief — cheaper than square-and-multiply for
-// small exponents. TODO for production logMaxHeight ~ 20: switch to a
-// codegen-time-unrolled square-and-multiply chain.)
+// `logMaxHeight` bits of `index` and conditionally multiplying precomputed
+// g^(2^k) entries (strategy (b) from the dispatch brief). Cost is linear in
+// `logMaxHeight` (one OP_IF + one canonical mul per bit) — competitive with a
+// codegen-time-unrolled square-and-multiply chain for the production
+// logMaxHeight ~= 20 case, and strictly cheaper for the small-exponent
+// fixtures we currently exercise. The strategy is fixed; revisit only if a
+// future fixture exposes a measurable cost asymmetry vs. the unrolled chain.
 //
 // References:
 //   - sp1fri/fri.go:147-257 (openInput)
