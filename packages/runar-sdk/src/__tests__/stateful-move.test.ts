@@ -476,22 +476,15 @@ describe('TicTacToe full game with terminal moveAndWin', () => {
   const PLAYER_X_KEY = '0000000000000000000000000000000000000000000000000000000000000003';
   const PLAYER_O_KEY = '0000000000000000000000000000000000000000000000000000000000000005';
 
-  let tttSource: string;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const fs = require('fs');
-    const path = require('path');
-    tttSource = fs.readFileSync(
-      path.resolve(__dirname, '../../../../examples/ts/tic-tac-toe/TicTacToe.runar.ts'),
-      'utf-8',
-    );
-  } catch {
-    tttSource = '';
-  }
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require('fs');
+  const path = require('path');
+  const tttSource: string = fs.readFileSync(
+    path.resolve(__dirname, '../../../../examples/ts/tic-tac-toe/TicTacToe.runar.ts'),
+    'utf-8',
+  );
 
   it('full game: deploy → join → 4 moves → moveAndWin', async () => {
-    if (!tttSource) return; // skip if source not found
-
     const artifact = compileSource(tttSource, 'TicTacToe.runar.ts');
     const provider = new MockProvider();
     const betAmount = 1000;

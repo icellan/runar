@@ -118,7 +118,16 @@ for candidate in gradle /opt/homebrew/bin/gradle /usr/local/bin/gradle; do
   fi
 done
 if [ -z "$GRADLE_BIN" ]; then
-  echo "--- Java: SKIPPED (no gradle >= 8 on PATH) ---"
+  # CI sets RUNAR_INTEGRATION_STRICT=1 so a missing toolchain is a hard
+  # failure rather than a silent green pass. Local devs can leave it
+  # unset to skip Java integration when Gradle is not installed, but the
+  # skip surfaces in the summary and never sets exit 0 in CI.
+  if [ "${RUNAR_INTEGRATION_STRICT:-0}" = "1" ]; then
+    echo "--- Java: FAILED (no gradle >= 8 on PATH; strict mode) ---"
+    FAILED=$((FAILED + 1))
+  else
+    echo "--- Java: SKIPPED (no gradle >= 8 on PATH) ---"
+  fi
 else
   if (cd java && "$GRADLE_BIN" test -Drunar.integration=true --no-daemon); then
     echo "--- Java: PASSED ---"
