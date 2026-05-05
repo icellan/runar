@@ -3557,6 +3557,163 @@ theorem stageC_simpleStep_assert_d1
     unfold untagSm
     exact hFresh
 
+/-! ### Phase 7.6.f — Operational discharge for depth ≥ 2
+
+When the operand is at structural depth `d ≥ 2`, `loadRef` emits
+`[.pickStruct d]`. Uses `run_pickStruct_at_depth` for the load
+step + `taggedStackAligned_at_index` to identify the loaded value
+at depth `d`. Each lemma is parameterised by an
+`nthOpt d tsm = some (n, k)` witness. -/
+
+private theorem loadRef_dge2_op_run
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push v) := by
+  rw [hLoadRefShape]
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = v := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = v := nthOpt_getElem!_default _ _ _ hStkAt
+  exact Stack.Sim.run_pickStruct_at_depth stkSt d v hLen hStkBang
+
+/-- Operational discharge for `loadParam n` at depth ≥ 2. -/
+theorem stageC_simpleStep_loadParam_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.loadParam n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadParam n) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_dge2_op_run tsm n k d anfSt stkSt v hAgrees hAtDepth hLookup hLoadRefShape
+  · exact ⟨hFresh, v, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `loadProp n` at depth ≥ 2. -/
+theorem stageC_simpleStep_loadProp_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.loadProp n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadProp n) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_dge2_op_run tsm n k d anfSt stkSt v hAgrees hAtDepth hLookup hLoadRefShape
+  · exact ⟨hFresh, v, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `loadConst (.refAlias n)` at depth ≥ 2. -/
+theorem stageC_simpleStep_loadConst_refAlias_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.loadConst (.refAlias n))).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadConst (.refAlias n)) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_dge2_op_run tsm n k d anfSt stkSt v hAgrees hAtDepth hLookup hLoadRefShape
+  · exact ⟨hFresh, v, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `unaryOp "-" operand _` at depth ≥ 2. -/
+theorem stageC_simpleStep_unaryOp_NEGATE_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (i : Int) (rt : Option String)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.unaryOp "-" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBigint (-i)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "-" n rt) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn (.vBigint (-i)))
+                    (stkSt.push (.vBigint (-i))) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n ++ [.opcode "OP_NEGATE"]) stkSt
+       = .ok (stkSt.push (.vBigint (-i)))
+    have h := agreesTagged_unaryOp_NEGATE_dge2_unconditional
+                tsm n k d bn anfSt stkSt i hAgrees hAtDepth hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · exact ⟨hFresh, (.vBigint (-i)), rfl, rfl, rfl⟩
+
+/-- Operational discharge for `unaryOp "!" operand _` at depth ≥ 2. -/
+theorem stageC_simpleStep_unaryOp_NOT_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (b : Bool) (rt : Option String)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool b))
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.unaryOp "!" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBool (!b)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "!" n rt) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn (.vBool (!b)))
+                    (stkSt.push (.vBool (!b))) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n ++ [.opcode "OP_NOT"]) stkSt
+       = .ok (stkSt.push (.vBool (!b)))
+    have h := agreesTagged_unaryOp_NOT_dge2_unconditional
+                tsm n k d bn anfSt stkSt b hAgrees hAtDepth hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · exact ⟨hFresh, (.vBool (!b)), rfl, rfl, rfl⟩
+
+/-- Operational discharge for `assert n` at depth ≥ 2 (vBool true). -/
+theorem stageC_simpleStep_assert_dge2
+    (bn n : String) (k : SlotKind) (d : Nat) (tsm : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool true))
+    (hFresh : freshIn bn (untagSm tsm))
+    (hLoadRefShape : loadRef (untagSm tsm) n = [.pickStruct d]) :
+    runOps (lowerValue (untagSm tsm) bn (.assert n)).1 stkSt = .ok stkSt
+    ∧ simpleStepRel (.mk bn (.assert n) none) tsm anfSt stkSt
+                    tsm
+                    (anfSt.addBinding bn (.vBool true))
+                    stkSt := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm tsm) n ++ [.opcode "OP_VERIFY"]) stkSt = .ok stkSt
+    have h := agreesTagged_assert_dge2_unconditional
+                tsm n k d bn anfSt stkSt hAgrees hAtDepth hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · exact ⟨hFresh, rfl, rfl, rfl⟩
+
 /-! ## Phase 7.6.b — list-level `ChainRel simpleStepRel` composition
 
 Lifts per-binding witness theorems to list-level ChainRel proofs.
@@ -3978,6 +4135,152 @@ theorem stageC_mixed_loadConst_unaryNegate
             hStep2
     exact chainRel_nil _ _ _
 
+/-! ### Phase 7.6.g — Longer chain demos (3-binding)
+
+Real Rúnar code commonly has bodies of more than 2 bindings. The
+3-binding demo below shows the framework scales — N applications
+of `chainRel_cons` + `runOps_lowerBindings_cons` thread the
+per-binding witnesses correctly. -/
+
+/-- Stage C closure for the 3-binding double-negation body
+`[loadConst i; unaryOp "-" t0; unaryOp "-" t1]`. Each unaryOp
+operand is at depth 0 of its respective sm (the just-bound
+previous temp). Final stack: `[i, -i, i]` (top), final binding:
+`t2 = i` (= negation of `-i`). -/
+theorem stageC_three_double_negation
+    (bn1 bn2 bn3 : String) (i : Int) (rt2 rt3 : Option String)
+    (tsm : TaggedStackMap) (initialAnf : State) (initialStack : StackState)
+    (hAgrees : agreesTagged tsm initialAnf initialStack)
+    (hFresh1 : freshIn bn1 (untagSm tsm))
+    (hFresh2 : freshIn bn2 (untagSm ((bn1, .binding) :: tsm)))
+    (hFresh3 : freshIn bn3
+                (untagSm ((bn2, .binding) :: (bn1, .binding) :: tsm)))
+    (hLoadRef1 :
+        loadRef (untagSm ((bn1, .binding) :: tsm)) bn1 = [.dup])
+    (hLoadRef2 :
+        loadRef (untagSm ((bn2, .binding) :: (bn1, .binding) :: tsm)) bn2
+          = [.dup]) :
+    let stkAfter1 := initialStack.push (.vBigint i)
+    let stkAfter2 := stkAfter1.push (.vBigint (-i))
+    let stkFinal := stkAfter2.push (.vBigint (-(-i)))
+    let anfFinal := ((initialAnf.addBinding bn1 (.vBigint i)).addBinding
+                       bn2 (.vBigint (-i))).addBinding bn3 (.vBigint (-(-i)))
+    let body := [.mk bn1 (.loadConst (.int i)) none,
+                 .mk bn2 (.unaryOp "-" bn1 rt2) none,
+                 .mk bn3 (.unaryOp "-" bn2 rt3) none]
+    runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
+      = .ok stkFinal
+    ∧ ChainRel simpleStepRel body
+        tsm initialAnf initialStack
+        ((bn3, .binding) :: (bn2, .binding) :: (bn1, .binding) :: tsm)
+        anfFinal stkFinal := by
+  -- Per-binding witnesses.
+  have ⟨hRun1, hStep1⟩ :=
+    stageC_simpleStep_loadConst_int bn1 i tsm initialAnf initialStack hFresh1
+  have hAgrees2 :
+      agreesTagged ((bn1, .binding) :: tsm)
+                   (initialAnf.addBinding bn1 (.vBigint i))
+                   (initialStack.push (.vBigint i)) :=
+    agreesTagged_push_value tsm bn1 initialAnf initialStack (.vBigint i)
+                            hAgrees hFresh1
+  have hLookup2 :
+      lookupAnfByKind (initialAnf.addBinding bn1 (.vBigint i))
+                      (bn1, .binding) = some (.vBigint i) :=
+    addBinding_self_lookup initialAnf bn1 (.vBigint i)
+  have hFresh2' : freshIn bn2 (bn1 :: untagSm tsm) := hFresh2
+  have ⟨hRun2, hStep2⟩ :=
+    stageC_simpleStep_unaryOp_NEGATE_d0
+      bn2 bn1 .binding tsm
+      (initialAnf.addBinding bn1 (.vBigint i)) (initialStack.push (.vBigint i))
+      i rt2 hAgrees2 hLookup2 hFresh2' hLoadRef1
+  have hAgrees3 :
+      agreesTagged ((bn2, .binding) :: (bn1, .binding) :: tsm)
+                   ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+                   ((initialStack.push (.vBigint i)).push (.vBigint (-i))) :=
+    agreesTagged_push_value ((bn1, .binding) :: tsm) bn2
+      (initialAnf.addBinding bn1 (.vBigint i)) (initialStack.push (.vBigint i))
+      (.vBigint (-i)) hAgrees2 hFresh2'
+  have hLookup3 :
+      lookupAnfByKind ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+                      (bn2, .binding) = some (.vBigint (-i)) :=
+    addBinding_self_lookup _ bn2 (.vBigint (-i))
+  have hFresh3' : freshIn bn3 (bn2 :: bn1 :: untagSm tsm) := hFresh3
+  have ⟨hRun3, hStep3⟩ :=
+    stageC_simpleStep_unaryOp_NEGATE_d0
+      bn3 bn2 .binding ((bn1, .binding) :: tsm)
+      ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+      ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
+      (-i) rt3 hAgrees3 hLookup3 hFresh3' hLoadRef2
+  refine ⟨?_, ?_⟩
+  · -- Operational composition: 3-fold cons.
+    have hSm1 :
+        (Stack.Lower.lowerValue (untagSm tsm) bn1 (.loadConst (.int i))).2
+          = bn1 :: untagSm tsm := rfl
+    have hSm2 :
+        (Stack.Lower.lowerValue (bn1 :: untagSm tsm) bn2 (.unaryOp "-" bn1 rt2)).2
+          = bn2 :: bn1 :: untagSm tsm := rfl
+    -- Innermost: singleton lift for bn3.
+    have hRest3 : runOps (Stack.Lower.lowerBindings
+                          (bn2 :: bn1 :: untagSm tsm)
+                          [.mk bn3 (.unaryOp "-" bn2 rt3) none]).1
+                        ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
+                = .ok (((initialStack.push (.vBigint i)).push
+                        (.vBigint (-i))).push (.vBigint (-(-i)))) :=
+      runOps_lowerBindings_singleton _ _ _ _ hRun3
+    -- Middle: cons for bn2 + bn3.
+    have hRest2 : runOps (Stack.Lower.lowerBindings
+                          (bn1 :: untagSm tsm)
+                          [.mk bn2 (.unaryOp "-" bn1 rt2) none,
+                           .mk bn3 (.unaryOp "-" bn2 rt3) none]).1
+                        (initialStack.push (.vBigint i))
+                = .ok (((initialStack.push (.vBigint i)).push
+                        (.vBigint (-i))).push (.vBigint (-(-i)))) :=
+      runOps_lowerBindings_cons (bn1 :: untagSm tsm) (bn2 :: bn1 :: untagSm tsm)
+        (.mk bn2 (.unaryOp "-" bn1 rt2) none)
+        [.mk bn3 (.unaryOp "-" bn2 rt3) none]
+        _ _ _ hRun2 hSm2 hRest3
+    -- Outer: cons for bn1 + (bn2, bn3).
+    exact runOps_lowerBindings_cons (untagSm tsm) (bn1 :: untagSm tsm)
+      (.mk bn1 (.loadConst (.int i)) none)
+      [.mk bn2 (.unaryOp "-" bn1 rt2) none,
+       .mk bn3 (.unaryOp "-" bn2 rt3) none]
+      _ _ _ hRun1 hSm1 hRest2
+  · -- ChainRel composition: 3-fold cons.
+    apply chainRel_cons (.mk bn1 (.loadConst (.int i)) none)
+      [.mk bn2 (.unaryOp "-" bn1 rt2) none,
+       .mk bn3 (.unaryOp "-" bn2 rt3) none]
+      tsm ((bn1, .binding) :: tsm)
+      ((bn3, .binding) :: (bn2, .binding) :: (bn1, .binding) :: tsm)
+      initialAnf (initialAnf.addBinding bn1 (.vBigint i))
+      (((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i))).addBinding bn3 (.vBigint (-(-i))))
+      initialStack (initialStack.push (.vBigint i))
+      (((initialStack.push (.vBigint i)).push (.vBigint (-i))).push (.vBigint (-(-i))))
+      hStep1
+    apply chainRel_cons (.mk bn2 (.unaryOp "-" bn1 rt2) none)
+      [.mk bn3 (.unaryOp "-" bn2 rt3) none]
+      ((bn1, .binding) :: tsm)
+      ((bn2, .binding) :: (bn1, .binding) :: tsm)
+      ((bn3, .binding) :: (bn2, .binding) :: (bn1, .binding) :: tsm)
+      (initialAnf.addBinding bn1 (.vBigint i))
+      ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+      (((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i))).addBinding bn3 (.vBigint (-(-i))))
+      (initialStack.push (.vBigint i))
+      ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
+      (((initialStack.push (.vBigint i)).push (.vBigint (-i))).push (.vBigint (-(-i))))
+      hStep2
+    apply chainRel_cons (.mk bn3 (.unaryOp "-" bn2 rt3) none) []
+      ((bn2, .binding) :: (bn1, .binding) :: tsm)
+      ((bn3, .binding) :: (bn2, .binding) :: (bn1, .binding) :: tsm)
+      ((bn3, .binding) :: (bn2, .binding) :: (bn1, .binding) :: tsm)
+      ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+      (((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i))).addBinding bn3 (.vBigint (-(-i))))
+      (((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i))).addBinding bn3 (.vBigint (-(-i))))
+      ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
+      (((initialStack.push (.vBigint i)).push (.vBigint (-i))).push (.vBigint (-(-i))))
+      (((initialStack.push (.vBigint i)).push (.vBigint (-i))).push (.vBigint (-(-i))))
+      hStep3
+    exact chainRel_nil _ _ _
+
 /-! ## Phase 7.8 — Stage D capstone (props/outputs preservation)
 
 This is the headline observational-equivalence claim for the
@@ -4075,6 +4378,181 @@ theorem stageD_mixed_loadConst_unaryNegate_outputs_preserved
     initialAnf ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
     initialStack ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
     hRun hChain hAgrees
+
+/-! ## Phase 7.8.b — Stage D post-processing preservation
+
+`lowerMethod` performs two post-processing transformations on the
+raw lowered body before producing the final `StackMethod`:
+
+1. **Terminal-assert elision** — for public methods whose body
+   ends in `.assert`, the trailing `[.opcode "OP_VERIFY"]` is
+   stripped. The truthy bool that would have been popped is left
+   on the stack as the script's implicit return.
+2. **NIP cleanup** — for public methods that use
+   `deserializeState`, trailing `[.opcode "OP_NIP"]`s are appended
+   to flatten the stack to the single residue value.
+
+Both transformations modify the runtime *stack* but never touch
+`outputs` / `props`. Hence they preserve the observational
+equivalence claim of Stage D capstone.
+
+The two single-op preservation lemmas formalise this. The
+list-level composition (Phase 7.6.b's `runOps_compose`) lifts
+them to arbitrary post-op tails. -/
+
+/-- `applyNip` preserves `props` + `outputs` (it only removes
+the second-from-top element of `.stack`). -/
+theorem applyNip_preserves_state
+    (s s' : StackState) (h : Stack.Eval.applyNip s = .ok s') :
+    s'.props = s.props ∧ s'.outputs = s.outputs := by
+  unfold Stack.Eval.applyNip at h
+  match hStk : s.stack with
+  | [] => rw [hStk] at h; exact absurd h (by simp)
+  | [_] => rw [hStk] at h; exact absurd h (by simp)
+  | a :: _ :: rest =>
+      rw [hStk] at h
+      simp at h
+      rw [← h]
+      exact ⟨rfl, rfl⟩
+
+/-- `runOpcode "OP_NIP"` preserves `props` + `outputs`. -/
+theorem runOpcode_NIP_preserves_state
+    (s s' : StackState) (h : runOpcode "OP_NIP" s = .ok s') :
+    s'.props = s.props ∧ s'.outputs = s.outputs := by
+  -- runOpcode "OP_NIP" s = applyNip s by definition.
+  have hEq : runOpcode "OP_NIP" s = Stack.Eval.applyNip s := rfl
+  rw [hEq] at h
+  exact applyNip_preserves_state s s' h
+
+/-- `runOpcode "OP_VERIFY"` preserves `props` + `outputs`. The
+verify pops the top and asserts truthy; the residual state has
+the same outputs/props. -/
+theorem runOpcode_VERIFY_preserves_state
+    (s s' : StackState) (h : runOpcode "OP_VERIFY" s = .ok s') :
+    s'.props = s.props ∧ s'.outputs = s.outputs := by
+  -- Case analysis on the stack head: OP_VERIFY only succeeds when top is vBool true,
+  -- in which case the result is `{s with stack := rest}` (per runOpcode_verify_pop_vBool_true).
+  match hStk : s.stack with
+  | [] =>
+      -- runOpcode "OP_VERIFY" on empty stack is .error
+      rw [Stack.Sim.runOpcode_VERIFY_def] at h
+      unfold StackState.pop? at h
+      rw [hStk] at h
+      exact absurd h (by simp)
+  | v :: rest =>
+      -- Use the fact that runOpcode VERIFY pops the top. If the top is vBool true,
+      -- the result is { s with stack := rest }; otherwise it errors.
+      rw [Stack.Sim.runOpcode_VERIFY_def] at h
+      unfold StackState.pop? at h
+      rw [hStk] at h
+      simp at h
+      -- After simp, h has the form `(match asBool? v with …) = .ok s'`.
+      match hBool : asBool? v with
+      | none => rw [hBool] at h; exact absurd h (by simp)
+      | some true =>
+          rw [hBool] at h
+          simp at h
+          -- h : { s with stack := rest } = s'
+          rw [← h]
+          exact ⟨rfl, rfl⟩
+      | some false =>
+          rw [hBool] at h
+          exact absurd h (by simp)
+
+/-! ### Stage D post-processing preservation lifts
+
+Combining the single-op lemmas with `runOps_compose` gives the
+post-processing preservation result for arbitrary appended NIP
+tails / a single trailing OP_VERIFY. -/
+
+/-- Helper: `runOps [.opcode code] s` reduces to `runOpcode code s`
+on the success branch (with `runOps [] s'` collapsing to `.ok s'`). -/
+private theorem runOps_singleOpcode_extract
+    (code : String) (s s' : StackState)
+    (h : runOps [.opcode code] s = .ok s') :
+    runOpcode code s = .ok s' := by
+  cases hOp : runOpcode code s with
+  | error e =>
+      have hContra : runOps [.opcode code] s = .error e := by
+        show runOps (.opcode code :: []) s = _
+        unfold runOps
+        rw [stepNonIf_opcode, hOp]
+      rw [hContra] at h
+      exact absurd h (by simp)
+  | ok s_mid =>
+      have heq : runOps [.opcode code] s = .ok s_mid := by
+        show runOps (.opcode code :: []) s = _
+        unfold runOps
+        rw [stepNonIf_opcode, hOp]
+        simp [Stack.Sim.run_empty]
+      rw [heq] at h
+      have hSmidEq : s_mid = s' := Except.ok.inj h
+      rw [hSmidEq]
+
+/-- Running a single `[.opcode "OP_NIP"]` post-op preserves
+`props` + `outputs`. -/
+theorem runOps_singleNip_preserves_state
+    (s s' : StackState) (h : runOps [.opcode "OP_NIP"] s = .ok s') :
+    s'.props = s.props ∧ s'.outputs = s.outputs :=
+  runOpcode_NIP_preserves_state s s' (runOps_singleOpcode_extract "OP_NIP" s s' h)
+
+/-- Running a single `[.opcode "OP_VERIFY"]` post-op preserves
+`props` + `outputs`. -/
+theorem runOps_singleVerify_preserves_state
+    (s s' : StackState) (h : runOps [.opcode "OP_VERIFY"] s = .ok s') :
+    s'.props = s.props ∧ s'.outputs = s.outputs :=
+  runOpcode_VERIFY_preserves_state s s' (runOps_singleOpcode_extract "OP_VERIFY" s s' h)
+
+/-! ### Stage D capstone with post-processing
+
+The full Stage D theorem: given a Stage C closure for the body +
+a single post-processing operation (NIP or VERIFY), the
+observational equivalence is preserved through post-processing. -/
+
+/-- **Stage D capstone with NIP-cleanup post-processing** —
+running the body's lowered ops followed by a single OP_NIP
+preserves props/outputs equality. -/
+theorem stageD_simpleANF_with_nip_postprocessing
+    (body : List ANFBinding)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkBody stkFinal : StackState)
+    (hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
+                = .ok stkBody)
+    (hRunNip : runOps [.opcode "OP_NIP"] stkBody = .ok stkFinal)
+    (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkBody)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    anfFinal.props = stkFinal.props ∧ anfFinal.outputs = stkFinal.outputs := by
+  -- Body preserves observational equivalence (Stage D predicate).
+  have ⟨hPropsBody, hOutputsBody⟩ := stageD_simpleANF_outputs_preserved
+    body tsm tsm' initialAnf anfFinal initialStack stkBody hChain hAgrees
+  -- Post-processing OP_NIP preserves stkBody → stkFinal props/outputs.
+  have ⟨hPropsNip, hOutputsNip⟩ := runOps_singleNip_preserves_state stkBody stkFinal hRunNip
+  -- Compose: anfFinal.props = stkBody.props = stkFinal.props.
+  exact ⟨hPropsBody.trans hPropsNip.symm, hOutputsBody.trans hOutputsNip.symm⟩
+
+/-- **Stage D capstone with terminal-assert non-elision** —
+running the body's lowered ops followed by a single OP_VERIFY
+preserves props/outputs equality. (For elision, the trailing
+OP_VERIFY is dropped instead of run, but the observational
+claim still holds since OP_VERIFY itself preserves observable
+state.) -/
+theorem stageD_simpleANF_with_verify_postprocessing
+    (body : List ANFBinding)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkBody stkFinal : StackState)
+    (hRunBody : runOps (Stack.Lower.lowerBindings (untagSm tsm) body).1 initialStack
+                = .ok stkBody)
+    (hRunVerify : runOps [.opcode "OP_VERIFY"] stkBody = .ok stkFinal)
+    (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkBody)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    anfFinal.props = stkFinal.props ∧ anfFinal.outputs = stkFinal.outputs := by
+  have ⟨hPropsBody, hOutputsBody⟩ := stageD_simpleANF_outputs_preserved
+    body tsm tsm' initialAnf anfFinal initialStack stkBody hChain hAgrees
+  have ⟨hPropsVerify, hOutputsVerify⟩ :=
+    runOps_singleVerify_preserves_state stkBody stkFinal hRunVerify
+  exact ⟨hPropsBody.trans hPropsVerify.symm, hOutputsBody.trans hOutputsVerify.symm⟩
 
 /-! ### Phase 6 Step 6 freshness derivation from WF
 

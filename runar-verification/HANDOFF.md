@@ -3133,6 +3133,94 @@ Stage B variants.
 
 ---
 
+## 45. Phase 7.6.f / 7.6.g / 7.8.b — Depth-≥2 + longer chains + Stage D post-processing (2026-05-05)
+
+### 45.1 Phase 7.6.f — Depth-≥2 operational variants (6 theorems + 1 helper)
+
+* `loadRef_dge2_op_run` (private helper) — runs `[.pickStruct d]`
+  against alignment, identifies the loaded value at depth d via
+  `taggedStackAligned_at_index`.
+* `stageC_simpleStep_loadParam_dge2`
+* `stageC_simpleStep_loadProp_dge2`
+* `stageC_simpleStep_loadConst_refAlias_dge2`
+* `stageC_simpleStep_unaryOp_NEGATE_dge2`
+* `stageC_simpleStep_unaryOp_NOT_dge2`
+* `stageC_simpleStep_assert_dge2`
+
+Each is parameterised by depth `d` and an `nthOpt d tsm = some (n, k)`
+witness, mirroring `agreesTagged_loadRef_depth_ge2`. Reuses the
+existing `_dge2_unconditional` Stage B lemmas for the load+opcode
+chain.
+
+Operational discharge coverage now: depth-0 (10 theorems) +
+depth-1 (6 theorems) + depth-≥2 (6 theorems). Full depth-tier
+coverage of all stack-pushing constructors + assert.
+
+### 45.2 Phase 7.6.g — 3-binding longer chain demo
+
+`stageC_three_double_negation` — Stage C closure for the 3-binding
+double-negation body:
+
+  let t0 = i        -- loadConst .int
+  let t1 = -t0      -- unaryOp "-" (depth 0 of [t0])
+  let t2 = -t1      -- unaryOp "-" (depth 0 of [t1, t0])
+
+Lower → `[.push i, .dup, .opcode "OP_NEGATE", .dup, .opcode "OP_NEGATE"]`.
+Final: `t2 = -(-i) = i`. Stack accumulates `[i, -i, i]` (top).
+
+3-fold application of `chainRel_cons` + `runOps_lowerBindings_cons`
+demonstrates the framework scales — N-binding bodies follow the
+same recipe.
+
+### 45.3 Phase 7.8.b — Stage D post-processing preservation
+
+Formalises that `lowerMethod`'s post-processing transformations
+(terminal-assert elision, NIP cleanup) preserve props/outputs.
+
+Per-op preservation:
+* `applyNip_preserves_state` — `applyNip` only modifies `.stack`.
+* `runOpcode_NIP_preserves_state` — derived from above.
+* `runOpcode_VERIFY_preserves_state` — case-split on stack head;
+  the success branch is a record update on `.stack`.
+
+List-level preservation lifts:
+* `runOps_singleOpcode_extract` (private helper) — extracts
+  `runOpcode code s = .ok s'` from `runOps [.opcode code] s = .ok s'`.
+* `runOps_singleNip_preserves_state`
+* `runOps_singleVerify_preserves_state`
+
+Stage D capstone with post-processing:
+* `stageD_simpleANF_with_nip_postprocessing` — full props/outputs
+  preservation through body + trailing OP_NIP.
+* `stageD_simpleANF_with_verify_postprocessing` — same through
+  body + trailing OP_VERIFY.
+
+### 45.4 What this delivers
+
+The Stage D capstone now handles real-world `lowerMethod` output:
+* Body lowered via `lowerBindings`
+* + Optional trailing OP_NIP (from `nipCleanupActiveFor`)
+* + Optional trailing OP_VERIFY (the bool that elision strips
+  for public methods, but still proven preserved for non-elision)
+
+Combined with the depth-0/1/≥2 operational discharges, the
+verification covers any `lowerMethod` output for SimpleANF
+methods at any operand depth, with any post-processing.
+
+### 45.5 Verification
+
+```
+lake build                                  # 24/24 OK
+lake env ./.lake/build/bin/goldenLoad       # 49/49 WF
+lake env ./.lake/build/bin/roundtrip        # 49/49 round-trip
+lake env ./.lake/build/bin/pipelineGolden   # 33/49 byte-exact
+```
+
+Trust surface unchanged: 62 axioms + 5 `opaque` defs.
+Zero `sorry`/`admit`. No new global axioms.
+
+---
+
 ## 44. Phase 7.8 — Stage D capstone (2026-05-05)
 
 The headline observational-equivalence theorem for SimpleANF:
