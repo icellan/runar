@@ -39,6 +39,58 @@ operates on the **AST** (pre-ANF) and has stricter coverage (real ECDSA, real
 WOTS+/SLH-DSA verification). It is not part of this contract — it predates ANF
 and serves test-driven contract development.
 
+### Tiering — what is and is not in scope
+
+The seven SDKs split into two tiers for the third (real-crypto) mode:
+
+- **Tier 1 — TS / Java / Zig**: ship `executeOnChainAuthoritative`, the
+  strict + real-ECDSA + real-preimage entry point. Real-crypto behaviour is
+  exercised by per-SDK unit tests
+  (`packages/runar-sdk/src/__tests__/anf-interpreter-real-crypto.spec.ts`,
+  `AnfInterpreterRealCryptoTest`, and the corresponding Zig tests).
+- **Tier 2 — Go / Rust / Python / Ruby**: lenient + strict only by design.
+  These SDKs ship the same lenient + strict semantics (cross-tier parity
+  for both is enforced by `cross-interpreter.test.ts` and
+  `cross-interpreter-strict.test.ts`), but **do not** carry a real-crypto
+  pre-broadcast simulator. Consumers needing a real-crypto pre-broadcast
+  check on a Tier-2 stack should either:
+    1. Run the same call through the TS / Java / Zig SDK in real-crypto
+       mode (the ANF + sighash inputs are language-agnostic), or
+    2. Submit the transaction to a regtest node — the on-chain VM is the
+       authoritative real-crypto verifier.
+
+A cross-interpreter real-crypto golden suite (which would require the four
+Tier-2 SDKs to grow `executeOnChainAuthoritative`) is **explicitly out of
+scope**. It is deferred to the post-Lean-Eval phase: the Lean reference
+will pin canonical real-crypto semantics, and any cross-tier real-crypto
+fixtures should be derived from there rather than from the working ground
+truth captured in the three current implementations.
+
+### `add_raw_output` simulation — out of scope
+
+`this.addRawOutput(satoshis, scriptBytes)` emits a Bitcoin output whose
+locking script is supplied by the caller as raw bytes. None of the seven
+ANF interpreters simulate this kind, and none of them surface raw outputs
+in the result envelope. This is **deliberate**, not a gap: raw outputs
+have arbitrary script bytes that the simulator cannot introspect without
+re-implementing the Bitcoin Script VM. On-chain enforcement happens via
+`OP_PUSH_TX` / `extractOutputHash`, which the on-chain VM verifies
+authoritatively.
+
+Off-chain consumers that need raw-output simulation must extend the
+interpreter explicitly. Doing so requires:
+
+1. Extending the result type from `{state, dataOutputs}` to
+   `{state, dataOutputs, rawOutputs}` across all seven SDKs.
+2. Updating the cross-interpreter parity goldens to include a
+   `rawOutputs[]` field.
+3. Bumping the wire protocol in
+   `conformance/anf-interpreter/drivers/PROTOCOL.md` and every driver.
+
+This is a breaking change to the public ANF-interpreter API and is not
+on the roadmap. Track the scope decision against this contract document
+rather than re-deriving it from the per-SDK source.
+
 ### When to use which mode
 
 - **Lenient** (`computeNewState` / `computeNewStateAndDataOutputs`) — fast
@@ -178,14 +230,17 @@ continuation locking script. The on-chain runtime handles that via
 
 ## Future directions
 
-- The Lean Eval reference (`runar-verification/`) will define the canonical semantics. When it lands, this document should be re-derived from Lean rather than from the seven implementations.
-- All seven SDKs now ship strict mode and are exercised by
-  `conformance/anf-interpreter/cross-interpreter-strict.test.ts`
-  (7 SDKs × 6 fixtures = 42 tests). Real-crypto cross-parity is the
-  remaining gap: TS / Java / Zig ship `executeOnChainAuthoritative`; Go /
-  Rust / Python / Ruby do not. Unit tests on the three SDKs that do ship
-  it cover the per-SDK semantics; a golden cross-parity suite is the
-  natural follow-up once Lean Eval pins the canonical semantics.
-- `add_raw_output` recording is also deferred to that effort. (`array_literal`
-  element resolution in Zig has landed — see the per-kind matrix and the
-  multisig tests.)
+- The Lean Eval reference (`runar-verification/`) will define the canonical
+  semantics. When it lands, this document should be re-derived from Lean
+  rather than from the seven implementations.
+- All seven SDKs ship lenient + strict modes; both are exercised by
+  `cross-interpreter.test.ts` and `cross-interpreter-strict.test.ts` (each
+  is 7 SDKs × 6 fixtures = 42 tests). Real-crypto mode is Tier-1 only
+  (TS / Java / Zig) — see "Tiering" above. The decision to leave Tier-2
+  Go / Rust / Python / Ruby without a real-crypto entry point is documented
+  there, and is upheld by per-SDK unit tests on the Tier-1 stacks plus
+  on-chain verification for any production pre-broadcast check on Tier-2.
+- `add_raw_output` simulation is explicitly out of scope across all seven
+  SDKs (see "out of scope" section above).
+- (`array_literal` element resolution in Zig has landed — see the per-kind
+  matrix and the multisig tests.)
