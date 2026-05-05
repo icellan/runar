@@ -3,8 +3,10 @@
 Every per-SDK driver in this directory is a small CLI that reads a single JSON
 input file, calls the SDK's `computeNewStateAndDataOutputs` ANF interpreter
 entry point in lenient mode, and prints a single JSON output object on stdout.
-The cross-interpreter parity test spawns each driver and compares outputs
-byte-for-byte.
+The cross-interpreter parity test (`../cross-interpreter.test.ts`) spawns each
+driver and compares its output to the TS-pinned golden via vitest's
+`expect(actual).toEqual(expected)` (structural deep equality — key ordering
+within objects does not need to match).
 
 ## Invocation
 
@@ -66,3 +68,22 @@ The TS reference implementation lives at
 `packages/runar-sdk/src/anf-interpreter.ts::computeNewStateAndDataOutputs`. The
 `normalizeResult` helper in `cross-interpreter.test.ts` round-trips its output
 through the same protocol.
+
+## Building each driver
+
+The cross-interpreter test detects each driver by the presence of its built
+binary or script. Local devs need:
+
+| Driver | Build / setup | Discovered by |
+|---|---|---|
+| python | nothing — script `python/driver.py` runs in-place; needs `python3` on PATH | `existsSync('python/driver.py')` |
+| ruby | nothing — script `ruby/driver.rb` runs in-place; needs `ruby` on PATH | `existsSync('ruby/driver.rb')` |
+| go | nothing — `go run go/driver.go` builds on demand from `go.work` | `existsSync('go/driver.go')` + `go` on PATH |
+| rust | `cd rust && cargo build --release` → `rust/target/release/runar-anf-driver-rust` | binary path |
+| java | `cd java && gradle fatJar --no-daemon` → `java/build/libs/runar-anf-driver.jar` | jar path |
+| zig | `cd zig && zig build -Doptimize=ReleaseSafe` → `zig/zig-out/bin/runar-anf-driver-zig` | binary path |
+
+CI installs every toolchain in the `ts-compiler` job and builds every driver
+artifact before invoking vitest, so the matrix runs all 7 SDKs against the 6
+curated fixtures (42 tests). Set `RUNAR_ANF_DRIVERS_STRICT=1` locally to
+upgrade missing-driver suite-level skip into a hard failure (matches CI).
