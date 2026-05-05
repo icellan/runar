@@ -1515,7 +1515,7 @@ A: Stateful contracts have implicit compiler-injected params (`_changePKH`, `_ch
 
 ## 16. Versioning and Stability
 
-`runar-lang` follows semantic versioning. The current version is `0.4.4` (see [`runar.gemspec`](runar.gemspec)), part of the broader Rúnar `0.4.x` line.
+`runar-lang` follows semantic versioning. The current version is `0.5.0` (see [`runar.gemspec`](runar.gemspec)), part of the broader Rúnar `0.5.x` line.
 
 **Pre-1.0 stability promise:** within a `0.x.y` series, patch releases (`0.x.y → 0.x.(y+1)`) are bug-fix-only and do not change the public API. Minor releases (`0.x.y → 0.(x+1).0`) may introduce breaking changes; check the release notes.
 

@@ -118,7 +118,7 @@ function buildSdkTools(): SdkTool[] {
   // binary isn't on PATH (GitHub Actions' setup-gradle caches into the
   // same location).
   const javaToolDir = join(toolsDir, 'java-driver');
-  const javaJar = join(javaToolDir, 'build', 'libs', 'java-sdk-driver-0.4.4-all.jar');
+  const javaJar = join(javaToolDir, 'build', 'libs', 'java-sdk-driver-0.5.0-all.jar');
   const resolveGradle = (): string => {
     try {
       const out = execFileSync('which', ['gradle'], { stdio: 'pipe' }).toString().trim();

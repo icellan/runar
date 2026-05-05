@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "build.runar"
-version = "0.4.4"
+version = "0.5.0"
 
 java {
     toolchain {
@@ -25,7 +25,7 @@ dependencies {
     // run parse → validate → expand-fixed-arrays → typecheck without
     // shelling out. Composite-build via settings.gradle.kts pulls the sources
     // from compilers/java in dev and CI.
-    implementation("build.runar:runar-java-compiler:0.4.4")
+    implementation("build.runar:runar-java-compiler:0.5.0")
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")

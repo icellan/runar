@@ -19,7 +19,7 @@ function utf8ToHex(str: string): string {
 // Minimal P2PKH artifact (stateless)
 const p2pkhArtifact: RunarArtifact = {
   version: 'runar-v0.1.0',
-  compilerVersion: '0.4.4',
+  compilerVersion: '0.5.0',
   contractName: 'P2PKH',
   abi: {
     constructor: {
@@ -48,7 +48,7 @@ const p2pkhArtifact: RunarArtifact = {
 // Minimal Counter artifact (stateful)
 const counterArtifact: RunarArtifact = {
   version: 'runar-v0.1.0',
-  compilerVersion: '0.4.4',
+  compilerVersion: '0.5.0',
   contractName: 'Counter',
   abi: {
     constructor: {

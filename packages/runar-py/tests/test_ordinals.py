@@ -278,7 +278,7 @@ class TestBSV21:
 # Minimal P2PKH artifact (stateless)
 p2pkh_artifact = RunarArtifact(
     version='runar-v0.1.0',
-    compiler_version='0.4.4',
+    compiler_version='0.5.0',
     contract_name='P2PKH',
     abi=Abi(
         constructor_params=[AbiParam(name='pubKeyHash', type='Addr')],
@@ -304,7 +304,7 @@ p2pkh_artifact = RunarArtifact(
 # Minimal Counter artifact (stateful)
 counter_artifact = RunarArtifact(
     version='runar-v0.1.0',
-    compiler_version='0.4.4',
+    compiler_version='0.5.0',
     contract_name='Counter',
     abi=Abi(
         constructor_params=[AbiParam(name='count', type='bigint')],

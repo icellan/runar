@@ -84,6 +84,7 @@ The broadest portable formats today are `.runar.ts`, `.runar.sol`, `.runar.move`
 
 ## Format Reference Documents
 
+- [TypeScript Format](./typescript.md) — canonical reference
 - [Solidity-like Format](./solidity.md)
 - [Move-like Format](./move.md)
 - [Zig Format](./zig.md)
@@ -91,6 +92,7 @@ The broadest portable formats today are `.runar.ts`, `.runar.sol`, `.runar.move`
 - [Rust DSL Format](./rust.md)
 - [Python Format](./python.md)
 - [Ruby Format](./ruby.md)
+- [Java Format](./java.md)
 
 ---
 

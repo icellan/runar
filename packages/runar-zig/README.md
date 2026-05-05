@@ -69,7 +69,7 @@ Section 13b for the conformance proof.
     .fingerprint = 0x1234567890abcdef,
     .dependencies = .{
         .runar_zig = .{
-            .url = "https://github.com/icellan/runar/archive/refs/tags/runar-zig-v0.4.4.tar.gz",
+            .url = "https://github.com/icellan/runar/archive/refs/tags/runar-zig-v0.5.0.tar.gz",
             // After fetching once, `zig fetch --save` writes the hash here.
             .hash = "<filled in by `zig fetch --save`>",
         },
@@ -2199,7 +2199,7 @@ cert store is harder to enumerate from Zig 0.16. When in doubt, use
 
 ## 18. Versioning and stability
 
-This SDK is at **v0.4.4** (see [build.zig.zon](build.zig.zon)). Status
+This SDK is at **v0.5.0** (see [build.zig.zon](build.zig.zon)). Status
 of the surface area:
 
 | Surface | Status |

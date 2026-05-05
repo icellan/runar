@@ -1,7 +1,7 @@
 {
   "artifact": {
-    "version": "runar-v0.4.4",
-    "compilerVersion": "0.4.4",
+    "version": "runar-v0.5.0",
+    "compilerVersion": "0.5.0",
     "contractName": "MathDemo",
     "abi": {
       "constructor": {

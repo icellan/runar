@@ -264,7 +264,7 @@ RSpec.describe 'RunarContract with inscription' do
   let(:p2pkh_artifact_hash) do
     {
       'version'          => 'runar-v0.1.0',
-      'compilerVersion'  => '0.4.4',
+      'compilerVersion'  => '0.5.0',
       'contractName'     => 'P2PKH',
       'abi'              => {
         'constructor' => { 'params' => [{ 'name' => 'pubKeyHash', 'type' => 'Addr' }] },
@@ -288,7 +288,7 @@ RSpec.describe 'RunarContract with inscription' do
   let(:counter_artifact_hash) do
     {
       'version'              => 'runar-v0.1.0',
-      'compilerVersion'      => '0.4.4',
+      'compilerVersion'      => '0.5.0',
       'contractName'         => 'Counter',
       'abi'                  => {
         'constructor' => { 'params' => [{ 'name' => 'count', 'type' => 'bigint' }] },

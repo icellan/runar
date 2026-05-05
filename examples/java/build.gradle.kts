@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "build.runar.examples"
-version = "0.4.4"
+version = "0.5.0"
 
 java {
     toolchain {
@@ -29,7 +29,7 @@ sourceSets {
 }
 
 dependencies {
-    implementation("build.runar:runar-java:0.4.4")
+    implementation("build.runar:runar-java:0.5.0")
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")

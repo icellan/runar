@@ -1993,20 +1993,20 @@ provider; the SDK doesn't poll.
 ## 16. Versioning and Stability
 
 The Rúnar Rust SDK follows semantic versioning. As of this README the crate
-version is `0.4.x`; the `0.x` line carries the **unstable** marker — minor
+version is `0.5.x`; the `0.x` line carries the **unstable** marker — minor
 bumps may break public APIs. We do however commit to the following:
 
 - `RunarContract::deploy` / `::call` / `::prepare_call` / `::finalize_call`
-  signatures are frozen for the `0.4.x` line. Optional `CallOptions` fields
+  signatures are frozen for the `0.5.x` line. Optional `CallOptions` fields
   may be added in patch releases (additive change, default value preserves
   behaviour).
-- `Provider` and `Signer` trait methods are frozen for the `0.4.x` line.
+- `Provider` and `Signer` trait methods are frozen for the `0.5.x` line.
 - Wire formats (artifact JSON, `SdkValue`'s mapping to script bytes) are
   governed by the `version` field on the artifact and validated by the
   cross-SDK conformance suite — they will not change incompatibly within a
   language version.
 
-**Cross-SDK byte identity** — every `0.4.x` release of the seven Rúnar SDKs
+**Cross-SDK byte identity** — every `0.5.x` release of the seven Rúnar SDKs
 (TS, Go, Rust, Python, Zig, Ruby, Java) produces byte-identical deployed
 locking scripts for the same artifact + constructor args. This is verified
 by [`conformance/sdk-output/`](../../conformance/sdk-output/) on every CI

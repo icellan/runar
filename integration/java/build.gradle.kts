@@ -27,7 +27,7 @@ plugins {
 }
 
 group = "build.runar.integration"
-version = "0.4.4"
+version = "0.5.0"
 
 java {
     toolchain {
@@ -40,7 +40,7 @@ repositories {
 }
 
 dependencies {
-    testImplementation("build.runar:runar-java:0.4.4")
+    testImplementation("build.runar:runar-java:0.5.0")
 
     testImplementation(platform("org.junit:junit-bom:5.10.2"))
     testImplementation("org.junit.jupiter:junit-jupiter")

@@ -145,6 +145,40 @@ check_versions() {
     fi
   done
 
+  # Java + sdk-output fixtures + ordinals tests + READMEs — generic stale-string sweep
+  # over the file set that bump_version touches. Any literal $expected mismatch surfaces here.
+  local java_files=(
+    "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java"
+    "$ROOT/compilers/java/build.gradle.kts"
+    "$ROOT/packages/runar-java/build.gradle.kts"
+    "$ROOT/examples/java/build.gradle.kts"
+    "$ROOT/examples/end2end-example/java/build.gradle.kts"
+    "$ROOT/integration/java/build.gradle.kts"
+    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts"
+    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"
+    "$ROOT/packages/runar-java/README.md"
+    "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json"
+    "$ROOT/conformance/sdk-output/runner/sdk-runner.ts"
+    "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts"
+    "$ROOT/packages/runar-py/tests/test_ordinals.py"
+    "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb"
+    "$ROOT/packages/runar-zig/README.md"
+  )
+  local sdk_inputs=()
+  while IFS= read -r line; do sdk_inputs+=("$line"); done < <(find "$ROOT/conformance/sdk-output/tests" -name 'input.json' 2>/dev/null)
+  for f in "${java_files[@]}" "${sdk_inputs[@]}"; do
+    [ -f "$f" ] || continue
+    # Match version-shaped tokens that are NOT $expected. Skip historical refs in CHANGELOG-style content.
+    while IFS=: read -r ln content; do
+      [ -z "$ln" ] && continue
+      echo "  ✗ $(echo "$f" | sed "s|$ROOT/||"):$ln $content"
+      ok=false
+    done < <(grep -nE '(version|Version|compilerVersion|VALUE|java-sdk-driver|runar-zig-v|build\.runar:runar-java)' "$f" 2>/dev/null \
+      | grep -E '0\.[0-9]+\.[0-9]+' \
+      | grep -v "$expected" \
+      | grep -vE '0\.0\.0|0\.1\.|0\.2\.|0\.3\.' || true)
+  done
+
   if $ok; then
     echo "  All versions consistent."
   else
@@ -295,6 +329,61 @@ bump_version() {
   sed -i '' "s/runar-v$OLD/runar-v$NEW/g" \
     "$ROOT/compilers/python/tests/test_compiler.py"
   echo "  ✓ Python compiler test version expectations"
+
+  # Java tier — Gradle modules + Version.java + READMEs + driver jars + fixture artifacts
+  for f in \
+    "$ROOT/compilers/java/build.gradle.kts" \
+    "$ROOT/packages/runar-java/build.gradle.kts" \
+    "$ROOT/examples/java/build.gradle.kts" \
+    "$ROOT/examples/end2end-example/java/build.gradle.kts" \
+    "$ROOT/integration/java/build.gradle.kts" \
+    "$ROOT/conformance/anf-interpreter/drivers/java/build.gradle.kts" \
+    "$ROOT/conformance/sdk-output/tools/java-driver/build.gradle.kts"; do
+    if [ -f "$f" ]; then
+      sed -i '' "s/version = \"$OLD\"/version = \"$NEW\"/g" "$f"
+      sed -i '' "s/build\.runar:runar-java:$OLD/build.runar:runar-java:$NEW/g" "$f"
+      sed -i '' "s/build\.runar:runar-java-compiler:$OLD/build.runar:runar-java-compiler:$NEW/g" "$f"
+    fi
+  done
+  sed -i '' "s/VALUE = \"$OLD\"/VALUE = \"$NEW\"/" \
+    "$ROOT/compilers/java/src/main/java/runar/compiler/Version.java"
+  sed -i '' "s/build\.runar:runar-java:$OLD/build.runar:runar-java:$NEW/g" \
+    "$ROOT/packages/runar-java/README.md"
+  sed -i '' "s|<version>$OLD</version>|<version>$NEW</version>|g" \
+    "$ROOT/packages/runar-java/README.md"
+  echo "  ✓ Java tier (gradle modules, Version.java, README, driver jars)"
+
+  # SDK-output conformance fixture inputs
+  find "$ROOT/conformance/sdk-output/tests" -name 'input.json' -print0 | \
+    xargs -0 sed -i '' \
+      -e "s/\"version\": \"runar-v$OLD\"/\"version\": \"runar-v$NEW\"/" \
+      -e "s/\"compilerVersion\": \"$OLD\"/\"compilerVersion\": \"$NEW\"/"
+  echo "  ✓ SDK-output conformance fixtures"
+
+  # SDK-output runner (driver jar reference) and Java SDK fixture artifact
+  sed -i '' "s/java-sdk-driver-$OLD-all\.jar/java-sdk-driver-$NEW-all.jar/" \
+    "$ROOT/conformance/sdk-output/runner/sdk-runner.ts"
+  sed -i '' \
+    -e "s/\"version\": \"runar-v$OLD\"/\"version\": \"runar-v$NEW\"/" \
+    -e "s/\"compilerVersion\": \"$OLD\"/\"compilerVersion\": \"$NEW\"/" \
+    "$ROOT/packages/runar-java/src/test/resources/artifacts/stateful-counter.runar.json"
+  echo "  ✓ SDK-output runner + Java fixture artifact"
+
+  # Ordinals test version expectations (TS / Python / Ruby)
+  sed -i '' "s/compilerVersion: '$OLD'/compilerVersion: '$NEW'/g" \
+    "$ROOT/packages/runar-sdk/src/__tests__/ordinals-contract.test.ts"
+  sed -i '' "s/compiler_version='$OLD'/compiler_version='$NEW'/g" \
+    "$ROOT/packages/runar-py/tests/test_ordinals.py"
+  sed -i '' "s/'compilerVersion'\(\s*\)=> '$OLD'/'compilerVersion'\1=> '$NEW'/g" \
+    "$ROOT/packages/runar-rb/spec/sdk/ordinals_spec.rb"
+  echo "  ✓ Ordinals test version expectations (TS / Python / Ruby)"
+
+  # READMEs that pin a specific tag URL (Zig SDK)
+  sed -i '' "s/runar-zig-v$OLD\.tar\.gz/runar-zig-v$NEW.tar.gz/g" \
+    "$ROOT/packages/runar-zig/README.md"
+  sed -i '' "s/SDK is at \*\*v$OLD\*\*/SDK is at **v$NEW**/" \
+    "$ROOT/packages/runar-zig/README.md"
+  echo "  ✓ Zig README tag URL"
 
   echo ""
   echo "Done. Verify with:  git diff"

@@ -3,7 +3,7 @@ plugins {
 }
 
 group = "build.runar"
-version = "0.4.4"
+version = "0.5.0"
 
 java {
     toolchain {
@@ -16,7 +16,7 @@ repositories {
 }
 
 dependencies {
-    implementation("build.runar:runar-java:0.4.4")
+    implementation("build.runar:runar-java:0.5.0")
 }
 
 application {

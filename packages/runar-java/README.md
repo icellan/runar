@@ -49,7 +49,7 @@ repositories {
 }
 
 dependencies {
-    implementation("build.runar:runar-java:0.4.4")
+    implementation("build.runar:runar-java:0.5.0")
 }
 ```
 
@@ -57,7 +57,7 @@ Or with the Groovy DSL:
 
 ```groovy
 dependencies {
-    implementation 'build.runar:runar-java:0.4.4'
+    implementation 'build.runar:runar-java:0.5.0'
 }
 ```
 
@@ -67,7 +67,7 @@ For a Maven build:
 <dependency>
     <groupId>build.runar</groupId>
     <artifactId>runar-java</artifactId>
-    <version>0.4.4</version>
+    <version>0.5.0</version>
 </dependency>
 ```
 
