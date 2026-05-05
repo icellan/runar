@@ -124,8 +124,8 @@ pub struct RunarArtifact {
 // Assembly
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: &str = "runar-v0.4.4";
-const COMPILER_VERSION: &str = "0.4.4-rust";
+const SCHEMA_VERSION: &str = "runar-v0.5.0";
+const COMPILER_VERSION: &str = "0.5.0-rust";
 
 /// Build a RunarArtifact from the compilation products.
 pub fn assemble_artifact(

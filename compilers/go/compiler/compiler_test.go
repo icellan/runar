@@ -359,8 +359,8 @@ func TestArtifactJSON(t *testing.T) {
 		}
 	}
 
-	if parsed["version"] != "runar-v0.4.4" {
-		t.Errorf("expected version runar-v0.4.4, got %v", parsed["version"])
+	if parsed["version"] != "runar-v0.5.0" {
+		t.Errorf("expected version runar-v0.5.0, got %v", parsed["version"])
 	}
 }
 
