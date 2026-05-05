@@ -2594,3 +2594,97 @@ the prior Phase 6 Steps 1-8 session. The capstone trust gap is
 closed; remaining work is mechanical fan-out on the per-opcode /
 per-depth Stage B lemmas plus the empirical-discharge tooling for
 crypto fixtures.
+
+## 32. CI surfacing + cryptoAxiomPending instrumentation (2026-05-04)
+
+Two infrastructure improvements landed on top of the Phase 6 closeout.
+
+### 32.1 CI surfacing (3b)
+
+The standard `runar-verification` job in `.github/workflows/ci.yml`
+already runs `pipelineGolden` (which enforces three regression gates;
+exit nonzero on any). Phase 6 closeout left this job's surfacing
+implicit. The 3b refresh:
+
+* **Step renames.** "Run GoldenLoad tests" → "Verify all 49 fixtures
+  parse + satisfy WF". "Run PipelineGolden tests" → "Verify byte-exact
+  regression gate (>= 33/49 fixtures)". The step names now describe
+  what is being asserted, not which binary is being run.
+* **Native exes for goldenLoad / roundtrip.** Replaces the
+  `lake env lean --run tests/...` form with the matching native exes
+  (built by `lake build pipelineGolden goldenLoad roundtrip` in the
+  build step). Cuts CI time on the cached path.
+* **Step summary** (`$GITHUB_STEP_SUMMARY`). After the gate runs, a
+  markdown summary lands in the GitHub Actions UI:
+
+  | Check | Result |
+  |-------|--------|
+  | Parse + WF | 49/49 |
+  | ANF JSON round-trip | 49/49 |
+  | Byte-exact vs. TS reference | 33/49 byte-exact |
+
+  No regression in CI minutes; the summary step uses `if: always()`
+  so it runs even when the gate fails.
+
+* **`runar-verification/README.md`** added (documents the verification
+  status, how to run locally, what's verified vs. not, links to
+  TRUST_MANIFEST.md and HANDOFF.md). Not present before.
+
+### 32.2 cryptoAxiomPending instrumentation (3c)
+
+The 11 cryptoAxiomPending fixtures (EC × 5, P-256 × 2, P-384 × 2,
+SLH-DSA × 2) are skipped by default because the multi-MB script
+outputs take >1h to evaluate. Phase 5 added the
+`RUNAR_VERIFICATION_FULL=1` opt-in but with no progress signal —
+users running it locally saw nothing for hours, then either a single
+"PIPELINE GOLDEN: N/49" line or nothing at all on timeout.
+
+3c improvements:
+
+* **Per-fixture timing in `tests/PipelineGolden.lean`.** When full
+  mode is on, each fixture's compile is wrapped in `IO.monoMsNow`
+  bookends and the result is logged to stderr immediately + flushed:
+
+  ```
+  [full] post-quantum-slhdsa compiled in 1845392ms (byte-exact=true)
+  [full] sphincs-wallet compiled in 1872041ms (byte-exact=false)
+  ```
+
+  Plus a final summary block listing all cryptoAxiomPending fixtures
+  with their times and byte-exact status.
+
+* **New workflow `.github/workflows/runar-verification-full.yml`.**
+  Manual-dispatch only (no schedule yet — see below). Runs
+  `pipelineGolden` with `RUNAR_VERIFICATION_FULL=1` and a 6h cap.
+  Uploads the full log as a workflow artifact. Useful for one-shot
+  measurements before a release.
+
+### 32.3 Empirical timing reality (2026-05-04 measurement)
+
+Local measurement on M-series mac, native exe: even the smallest
+cryptoAxiomPending fixture (post-quantum-slhdsa, 377KB hex output)
+had not produced any per-fixture-completion signal after **25
+minutes** of CPU time. With 11 fixtures in the bucket, the runtime
+budget for sequential evaluation is in the tens of hours.
+
+This rules out adding a scheduled CI job for the cryptoAxiomPending
+bucket: a routinely-failing scheduled workflow trains people to
+ignore CI failures. The full workflow stays manual-only until at
+least one cryptoAxiomPending fixture completes in <30 min on the
+GitHub runner.
+
+The two unblocking paths for routine cryptoAxiomPending verification
+remain:
+
+1. **`@[implemented_by]`** the inner `Script.Emit.emitFast` (or
+   `compileHex` end-to-end) to a C/Rust helper. Trades verification
+   surface for perf; the Lean function remains the spec, the
+   implementation is replaced at runtime.
+2. **Pre-computed expected hex constants.** Run `compileHex` once
+   offline (~hours), store the result as a Lean `String` constant
+   per fixture, gate `pipelineGolden` against the constant in
+   default mode (instant comparison) plus a re-validation pathway
+   (e.g. `RUNAR_VERIFICATION_REGEN=1`) that recomputes and updates
+   the constants when the lowering changes intentionally.
+
+Neither was implemented in this session; both remain Phase 7 work.

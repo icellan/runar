@@ -218,9 +218,17 @@ def main : IO Unit := do
   -- runs via `lake env lean --run tests/PipelineGolden.lean` set the same cwd.
   let dir := "../conformance/tests"
   let entries ← System.FilePath.readDir dir
+  -- Determine full vs default mode once up front so the cryptoAxiomPending
+  -- bucket gating + per-fixture timing both observe the same flag.
+  let full ← match (← IO.getEnv "RUNAR_VERIFICATION_FULL") with
+    | some _ => pure true
+    | none   => pure false
   let mut total := 0
   let mut matched := 0
   let mut matchedNames : List String := []
+  -- 3c: Per-fixture timing telemetry for the cryptoAxiomPending bucket.
+  -- Each entry: (fixture name, milliseconds elapsed, byteExact?).
+  let mut fullTimings : List (String × Nat × Bool) := []
   for e in entries do
     let path := e.path
     let ir := path / "expected-ir.json"
@@ -243,19 +251,38 @@ def main : IO Unit := do
             -- `Script.Emit.emit`) with `@[implemented_by]` to a C
             -- helper, OR pre-compute expected hex offline and gate
             -- via stored constants. See HANDOFF §25 (Phase 5 entry).
-            let full ← match (← IO.getEnv "RUNAR_VERIFICATION_FULL") with
-              | some _ => pure true
-              | none   => pure false
             if !full && cryptoAxiomPending.contains e.fileName then
               pure ()
             else
+              -- 3c: Time each fixture's compile. In full mode, log
+              -- per-fixture progress so users see what's happening
+              -- during multi-hour runs.
+              let t0 ← IO.monoMsNow
               let actual := compileHex p
-              if expected == actual then
+              let isMatch := expected == actual
+              let t1 ← IO.monoMsNow
+              let elapsedMs := t1 - t0
+              if full && cryptoAxiomPending.contains e.fileName then
+                fullTimings := (e.fileName, elapsedMs, isMatch) :: fullTimings
+                IO.eprintln s!"  [full] {e.fileName} compiled in {elapsedMs}ms (byte-exact={isMatch})"
+                (← IO.getStderr).flush
+              if isMatch then
                 matched := matched + 1
                 matchedNames := e.fileName :: matchedNames
         | _ => pure ()
       catch _ => pure ()
   IO.println s!"PIPELINE GOLDEN: {matched}/{total} byte-exact"
+  -- 3c: Surface per-fixture timing for the cryptoAxiomPending bucket
+  -- when full mode ran. Helps identify which fixtures are tractable
+  -- for opt-in CI vs which need the (i) @[implemented_by] or (ii)
+  -- pre-computed-constant escape hatches.
+  if full && !fullTimings.isEmpty then
+    IO.println ""
+    IO.println "FULL-MODE TIMING (cryptoAxiomPending bucket):"
+    let sorted := fullTimings.reverse  -- preserve discovery order
+    for (n, ms, m) in sorted do
+      let mark := if m then "✓" else "✗"
+      IO.println s!"  {mark} {n}: {ms}ms"
   -- Phase 4 diagnostic: surface ANY matched fixture not in baselineMatches.
   -- Both pending-bucket fixtures AND brand-new fixtures (e.g., the 3 added
   -- in commit 3fed3295) become visible without needing per-bucket entries.
