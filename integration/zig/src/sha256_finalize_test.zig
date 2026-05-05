@@ -12,13 +12,10 @@ const compile = @import("compile.zig");
 test "Sha256Finalize_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/sha256-finalize/Sha256FinalizeTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Sha256FinalizeTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("Sha256FinalizeTest", artifact.contract_name);
@@ -30,13 +27,10 @@ test "Sha256Finalize_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/sha256-finalize/Sha256FinalizeTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Sha256FinalizeTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     // Construct with an arbitrary expected — we only assert deployment

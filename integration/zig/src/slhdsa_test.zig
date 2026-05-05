@@ -18,13 +18,10 @@ const compile = @import("compile.zig");
 test "SLHDSA_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile PostQuantumSLHDSANaiveInsecure: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("PostQuantumSLHDSANaiveInsecure", artifact.contract_name);
@@ -39,13 +36,10 @@ test "SLHDSA_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/post-quantum-slhdsa-naive-INSECURE/PostQuantumSLHDSANaiveInsecure.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile PostQuantumSLHDSANaiveInsecure: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     // Use a deterministic placeholder pubkey. Spending is not exercised

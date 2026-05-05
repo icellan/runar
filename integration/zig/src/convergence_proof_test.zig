@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "ConvergenceProof_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
-        std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("ConvergenceProof", artifact.contract_name);
@@ -21,10 +18,7 @@ test "ConvergenceProof_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
-        std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig");
     defer artifact.deinit();
 
     // Use deterministic EC points as constructor args (rA, rB as 64-byte hex points)
@@ -60,10 +54,7 @@ test "ConvergenceProof_Deploy" {
 test "ConvergenceProof_ScriptSize" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
-        std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig");
     defer artifact.deinit();
 
     const script_bytes = artifact.script.len / 2;
@@ -77,10 +68,7 @@ test "ConvergenceProof_SpendValidDelta" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
-        std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig");
     defer artifact.deinit();
 
     // Precomputed EC points: rA = 12345*G, rB = 6789*G

@@ -25,13 +25,10 @@ fn bytesToHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 test "Sha256Compress_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/sha256-compress/Sha256CompressTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Sha256CompressTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("Sha256CompressTest", artifact.contract_name);
@@ -43,13 +40,10 @@ test "Sha256Compress_Deploy_AndCall_KnownVector" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/sha256-compress/Sha256CompressTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Sha256CompressTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     // Reference: state=IV, block=64 bytes of 0x00. Use the SDK's own
@@ -89,7 +83,7 @@ test "Sha256Compress_Deploy_AndCall_KnownVector" {
     const iv_hex = try allocator.dupe(u8, &SHA256_IV_HEX);
     defer allocator.free(iv_hex);
 
-    const call_txid = contract.call(
+    const call_txid = try contract.call(
         "verify",
         &[_]runar.StateValue{
             .{ .bytes = iv_hex },
@@ -98,10 +92,7 @@ test "Sha256Compress_Deploy_AndCall_KnownVector" {
         rpc_provider.provider(),
         local_signer.signer(),
         null,
-    ) catch |err| {
-        std.log.warn("sha256Compress verify call failed: {any}", .{err});
-        return;
-    };
+    );
     defer allocator.free(call_txid);
 
     try std.testing.expectEqual(@as(usize, 64), call_txid.len);

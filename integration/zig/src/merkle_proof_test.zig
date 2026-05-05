@@ -109,10 +109,7 @@ fn buildTreeAndProof(allocator: std.mem.Allocator, leaf_index: usize) !struct {
 test "MerkleProof_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("MerkleProofDemo", artifact.contract_name);
@@ -124,20 +121,14 @@ test "MerkleProof_Sha256_LeafIndex0" {
 
     helpers.requireNodeAvailable(allocator);
 
-    const tree = buildTreeAndProof(allocator, 0) catch |err| {
-        std.log.warn("Could not build test tree: {any}, skipping", .{err});
-        return;
-    };
+    const tree = try buildTreeAndProof(allocator, 0);
     defer {
         allocator.free(tree.root);
         allocator.free(tree.proof);
         allocator.free(tree.leaf);
     }
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -181,10 +172,7 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    const tree = buildTreeAndProof(allocator, 0) catch |err| {
-        std.log.warn("Could not build test tree: {any}, skipping", .{err});
-        return;
-    };
+    const tree = try buildTreeAndProof(allocator, 0);
     defer {
         allocator.free(tree.root);
         allocator.free(tree.proof);
@@ -194,10 +182,7 @@ test "MerkleProof_Sha256_WrongLeaf_Rejected" {
     const wrong_leaf = try sha256Hex(allocator, "ff");
     defer allocator.free(wrong_leaf);
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MerkleProofDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/merkle-proof/MerkleProofDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{

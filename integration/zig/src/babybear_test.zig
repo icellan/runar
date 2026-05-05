@@ -11,10 +11,7 @@ const compile_mod = @import("compile.zig");
 test "BabyBear_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("BabyBearDemo", artifact.contract_name);
@@ -26,10 +23,7 @@ test "BabyBear_FieldAdd_DeployAndCall" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig");
     defer artifact.deinit();
 
     // Constructor takes no args
@@ -73,10 +67,7 @@ test "BabyBear_FieldAdd_WrongResult_Rejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{});
@@ -119,10 +110,7 @@ test "BabyBear_FieldInv_Identity" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile BabyBearDemo: {any}, skipping", .{err});
-        return;
-    };
+    var artifact = try compile_mod.compileContract(allocator, "examples/zig/babybear/BabyBearDemo.runar.zig");
     defer artifact.deinit();
 
     // Constructor takes no args

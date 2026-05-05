@@ -50,10 +50,7 @@ test "Counter_Increment" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     std.log.info("Counter script: {d} bytes", .{artifact.script.len / 2});
@@ -91,10 +88,7 @@ test "Counter_Deploy_WithInitialValue" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     // Deploy with initial count = 10
@@ -122,10 +116,7 @@ test "Counter_Deploy_WithInitialValue" {
 test "Counter_LockingScript_Includes_OpReturn" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -144,10 +135,7 @@ test "Counter_LockingScript_Includes_OpReturn" {
 test "Counter_StateField_Metadata" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     // Counter should have exactly one state field: count
@@ -167,10 +155,7 @@ test "Counter_Call_Increment" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -215,10 +200,7 @@ test "Counter_Call_IncrementChain" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -268,10 +250,7 @@ test "Counter_Call_IncrementThenDecrement" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig") catch |err| {
-        std.log.warn("Could not compile Counter contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/stateful-counter/Counter.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{

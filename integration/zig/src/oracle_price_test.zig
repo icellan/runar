@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "OraclePriceFeed_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("OraclePriceFeed", artifact.contract_name);
@@ -22,10 +19,7 @@ test "OraclePriceFeed_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     var receiver = try helpers.newWallet(allocator);
@@ -64,10 +58,7 @@ test "OraclePriceFeed_DeployDifferentReceiver" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     var receiver1 = try helpers.newWallet(allocator);
@@ -121,10 +112,7 @@ test "OraclePriceFeed_DeployDifferentReceiver" {
 test "OraclePriceFeed_ABI_Methods" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     // OraclePriceFeed should have a settle method
@@ -140,10 +128,7 @@ test "OraclePriceFeed_SpendValidPrice" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     // The receiver will be the signer -- their ECDSA key must match the constructor
@@ -201,10 +186,7 @@ test "OraclePriceFeed_BelowThresholdRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig") catch |err| {
-        std.log.warn("Could not compile OraclePriceFeed contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/oracle-price/OraclePriceFeed.runar.zig");
     defer artifact.deinit();
 
     var receiver = try helpers.newWallet(allocator);

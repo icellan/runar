@@ -28,13 +28,10 @@ fn bytesToHexAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 test "WOTS_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile PostQuantumWOTSNaiveInsecure: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("PostQuantumWOTSNaiveInsecure", artifact.contract_name);
@@ -48,13 +45,10 @@ test "WOTS_Deploy_AndCall_DeterministicVector" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/post-quantum-wots-naive-INSECURE/PostQuantumWOTSNaiveInsecure.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile PostQuantumWOTSNaiveInsecure: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     // Deterministic WOTS+ keypair for the test.
@@ -89,7 +83,7 @@ test "WOTS_Deploy_AndCall_DeterministicVector" {
     defer allocator.free(deploy_txid);
     std.log.info("WOTS contract deployed: {s}", .{deploy_txid});
 
-    const call_txid = contract.call(
+    const call_txid = try contract.call(
         "spend",
         &[_]runar.StateValue{
             .{ .bytes = msg_hex },
@@ -98,10 +92,7 @@ test "WOTS_Deploy_AndCall_DeterministicVector" {
         rpc_provider.provider(),
         local_signer.signer(),
         null,
-    ) catch |err| {
-        std.log.warn("WOTS spend call failed: {any}", .{err});
-        return;
-    };
+    );
     defer allocator.free(call_txid);
 
     try std.testing.expectEqual(@as(usize, 64), call_txid.len);

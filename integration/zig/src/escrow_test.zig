@@ -7,10 +7,7 @@ const compile = @import("compile.zig");
 test "Escrow_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("Escrow", artifact.contract_name);
@@ -22,10 +19,7 @@ test "Escrow_DeployThreePubKeys" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     var buyer = try helpers.newWallet(allocator);
@@ -70,10 +64,7 @@ test "Escrow_DeploySameKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     // All three roles use the same key
@@ -107,10 +98,7 @@ test "Escrow_DeploySameKey" {
 test "Escrow_ABI_Methods" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     // Escrow should have at least 2 public methods: release and refund
@@ -134,10 +122,7 @@ test "Escrow_Call_Release_SameKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     // All three roles use the same key so auto-sign works
@@ -195,10 +180,7 @@ test "Escrow_Call_Release_SameKey" {
 test "Escrow_NotStateful" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     // Escrow is a stateless contract
@@ -210,10 +192,7 @@ test "Escrow_Refund" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig") catch |err| {
-        std.log.warn("Could not compile Escrow contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/escrow/Escrow.runar.zig");
     defer artifact.deinit();
 
     // Signer is both buyer and arbiter so auto-sign works for refund

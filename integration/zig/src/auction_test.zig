@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "Auction_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("Auction", artifact.contract_name);
@@ -22,10 +19,7 @@ test "Auction_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     var auctioneer = try helpers.newWallet(allocator);
@@ -67,10 +61,7 @@ test "Auction_DeployZeroBid" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     var auctioneer = try helpers.newWallet(allocator);
@@ -112,10 +103,7 @@ test "Auction_DeploySameKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     var wallet = try helpers.newWallet(allocator);
@@ -152,10 +140,7 @@ test "Auction_DeploySameKey" {
 test "Auction_ABI_Methods" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     // Auction should have public methods including bid and close
@@ -171,10 +156,7 @@ test "Auction_WrongSignerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig") catch |err| {
-        std.log.warn("Could not compile Auction contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/auction/Auction.runar.zig");
     defer artifact.deinit();
 
     // Auctioneer is the funded wallet that deploys

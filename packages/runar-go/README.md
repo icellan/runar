@@ -738,7 +738,7 @@ func Blake3Compress(chainingValue, block ByteString) ByteString
 func Blake3Hash(message ByteString) ByteString
 ```
 
-Mock BLAKE3 helpers — return 32 zero bytes in Go test mode. The compiled Script emits the real BLAKE3 codegen (~10,000 opcodes per compression). [runar.go](runar.go).
+Real BLAKE3 helpers. `Blake3Compress` runs the BLAKE3 single-block compression with `blockLen=64`, `counter=0`, `flags=11` over a 32-byte chaining value and 64-byte block. `Blake3Hash` is `Blake3Compress(IV, zero-pad(message, 64))` for messages up to 64 bytes. Both produce a 32-byte big-endian digest that matches the on-chain codegen byte-for-byte. The compiled Script emits the equivalent ~10,000-opcode BLAKE3 verifier. [runar.go](runar.go).
 
 #### `Bn254FieldAdd` / `Sub` / `Mul` / `Inv` / `Neg` / `NegP` (and `*P` byte-array variants)
 

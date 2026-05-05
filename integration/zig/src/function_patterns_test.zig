@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "FunctionPatterns_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("FunctionPatterns", artifact.contract_name);
@@ -22,10 +19,7 @@ test "FunctionPatterns_Deploy_And_Call_Deposit" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     var wallet = try helpers.newWallet(allocator);
@@ -74,10 +68,7 @@ test "FunctionPatterns_Deploy_WithOwnerAndBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -112,10 +103,7 @@ test "FunctionPatterns_Deploy_LargeBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -150,10 +138,7 @@ test "FunctionPatterns_Deploy_ZeroBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -188,10 +173,7 @@ test "FunctionPatterns_Call_DepositThenWithdraw" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     var wallet = try helpers.newWallet(allocator);
@@ -253,10 +235,7 @@ test "FunctionPatterns_WrongOwnerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     // Owner wallet (used to lock the contract)
@@ -319,10 +298,7 @@ test "FunctionPatterns_DistinctDeployTxids" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig") catch |err| {
-        std.log.warn("Could not compile FunctionPatterns contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/function-patterns/FunctionPatterns.runar.zig");
     defer artifact.deinit();
 
     // Owner 1

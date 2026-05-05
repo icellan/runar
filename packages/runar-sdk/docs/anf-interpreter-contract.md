@@ -1,19 +1,24 @@
 # ANF Interpreter Behavior Contract
 
-This document captures the **current behaviour** of the three SDK ANF
-interpreters: TypeScript (`packages/runar-sdk`), Zig (`packages/runar-zig`),
-and Java (`packages/runar-java`). It is descriptive, not normative — each row
-cites a `file:line` so the document fails loudly when an implementation drifts.
+This document captures the **current behaviour** of all seven SDK ANF
+interpreters: TypeScript (`packages/runar-sdk`), Java (`packages/runar-java`),
+Zig (`packages/runar-zig`), Go (`packages/runar-go`), Rust (`packages/runar-rs`),
+Python (`packages/runar-py`), and Ruby (`packages/runar-rb`). It is descriptive,
+not normative — each row cites a `file:line` so the document fails loudly when
+an implementation drifts.
 
 The Lean Eval workstream (`runar-verification/`) is the future canonical
-reference for ANF semantics. Until that lands, the three interpreters listed
+reference for ANF semantics. Until that lands, the seven interpreters listed
 here are the working ground truth for off-chain state simulation. They share
 intentional gaps; this document records them so future code changes do not
 silently widen the divergence.
 
-A separate `conformance/anf-interpreter/` parity test asserts that the three
-interpreters produce byte-identical `{state, dataOutputs}` for a curated set of
-ANF goldens, so any drift is caught immediately.
+The `conformance/anf-interpreter/` parity test asserts that all seven
+interpreters produce byte-identical `{state, dataOutputs}` for a curated set
+of ANF goldens (lenient mode), so any drift is caught immediately. Each
+non-TS SDK is exercised through a small CLI driver under
+`conformance/anf-interpreter/drivers/<lang>/`; see
+`conformance/anf-interpreter/drivers/PROTOCOL.md` for the wire spec.
 
 ---
 
@@ -24,6 +29,10 @@ ANF goldens, so any drift is caught immediately.
 | TS SDK   | `packages/runar-sdk/src/anf-interpreter.ts` — three modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient), `executeStrict` (throws `AssertionFailureError`), and `executeOnChainAuthoritative(..., { sighash })` (strict + real ECDSA + real preimage) | ANF JSON loaded as `ANFProgram` |
 | Java SDK | `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java` — three modes: `computeNewState`, `executeStrict` (throws `AssertionFailureException`), and `executeOnChainAuthoritative(..., new OnChainCryptoContext(sighash))` (strict + real ECDSA + real preimage) | ANF JSON loaded as `Map<String, Object>` |
 | Zig SDK  | `packages/runar-zig/src/sdk_anf_interpreter.zig` — three modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient), `executeStrict` (returns `error.AssertionFailure`), and `executeOnChainAuthoritative(..., .{ .sighash = digest })` (strict + real ECDSA + real preimage) | ANF JSON loaded as `ANFProgram` |
+| Go SDK   | `packages/runar-go/anf_interpreter.go` — `ComputeNewState` / `ComputeNewStateAndDataOutputs` (lenient mode); strict + real-crypto modes are not yet ported (lenient parity is enforced by the cross-interpreter test) | ANF JSON loaded as `*ANFProgram` |
+| Rust SDK | `packages/runar-rs/src/sdk/anf_interpreter.rs` — `compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `ANFProgram` |
+| Python SDK | `packages/runar-py/runar/sdk/anf_interpreter.py` — `compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `dict` |
+| Ruby SDK | `packages/runar-rb/lib/runar/sdk/anf_interpreter.rb` — `Runar::SDK::ANFInterpreter.compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `Hash` |
 
 A fourth interpreter, `packages/runar-testing/src/interpreter/interpreter.ts`,
 operates on the **AST** (pre-ANF) and has stricter coverage (real ECDSA, real
@@ -82,13 +91,13 @@ each implementation.
 | `check_preimage` | **skipped** (`anf-interpreter.ts:255`) | **skipped** | **skipped** (`AnfInterpreter.java:56`) |
 | `deserialize_state` | **skipped** (`anf-interpreter.ts:256`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
 | `get_state_script` | **skipped** (`anf-interpreter.ts:257`) | **skipped** | **skipped** (`AnfInterpreter.java:57`) |
-| `array_literal` | **default-undefined** — no explicit case in the switch; falls through to `default: return undefined` (`anf-interpreter.ts:261-262`) | **default-undefined** | **default-undefined** (`AnfInterpreter.java:370-372`) |
+| `array_literal` | **default-undefined** in TS — no explicit case in the switch; consumers receive arrays through `args` instead (`anf-interpreter.ts:261-262`) | **default-undefined** in Java | **handled** — collects the env-resolved values for each `elements` ref into an `ANFValue.array` (`sdk_anf_interpreter.zig:550+`); enables real-crypto `checkMultiSig` |
 
 ### Summary of intentional skips
 
 - **On-chain-only kinds** (`check_preimage`, `deserialize_state`, `get_state_script`, `add_raw_output`): the dedicated `check_preimage` ANF kind is still skipped (returns `undefined`/`null`/no-op) — it is a no-op marker on the binding side. The actual `checkPreimage(preimage)` call (which lowers to a `call` ANF kind, not `check_preimage`) IS verified in real-crypto mode. `deserialize_state`, `get_state_script`, `add_raw_output` remain unconditional skips: they are simulation-only intrinsics; on-chain enforcement happens in compiled Bitcoin Script, not here.
 - **`assert`**: all three SDKs skip by default and enforce in `executeStrict` / `executeOnChainAuthoritative` — TS throws `AssertionFailureError`, Zig returns `error.AssertionFailure`, Java throws `AssertionFailureException`. The two strict modes both enforce explicit `assert(...)` predicates; only `executeOnChainAuthoritative` additionally verifies `checkSig` / `checkMultiSig` / `checkPreimage` against the caller-supplied sighash.
-- **`array_literal`**: silently falls through to default. There is no dedicated case in any of the three interpreters today — methods that pass arrays to `checkMultiSig` rely on the next-step `call` resolving the array via `args` (Java + TS support `List<?>`/`Array.isArray(...)` in `verifyMultiSigReal`; the Zig path returns `false` in real-crypto mode because its ANFValue surface doesn't model arrays yet).
+- **`array_literal`**: TS + Java still rely on the next-step `call` resolving the array via `args` (`Array.isArray(...)` / `List<?>` checks in `verifyMultiSigReal`); the Zig SDK now has an explicit case that materializes an `ANFValue.array` from the binding's `elements` refs, so a contract that builds its multisig sigs/pks lists in the body via `array_literal` works under real-crypto on Zig.
 
 ## Builtin function call behaviour
 
@@ -99,7 +108,7 @@ each implementation.
 | `checkSig` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
 | `checkSig` (real-crypto) | real ECDSA via `@bsv/sdk` `PublicKey.verify(sighash, sig)` (`anf-interpreter.ts` → `verifyEcdsa`) | real ECDSA via BouncyCastle `ECDSASigner.verifySignature(sighash, r, s)` (`AnfInterpreter.java` → `verifyEcdsaReal`) | real ECDSA via `bsvz.crypto.verifyDigest256RelaxedSec1(pk, sighash, der)` (`sdk_anf_interpreter.zig` → `verifyEcdsaReal`) |
 | `checkMultiSig` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
-| `checkMultiSig` (real-crypto) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSig`) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSigReal`) | returns `false` — array-of-bytes ANFValue surface not modelled yet |
+| `checkMultiSig` (real-crypto) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSig`) | real iterative ECDSA over `List<Sig>` × `List<PubKey>` (`verifyMultiSigReal`) | real iterative ECDSA over `ANFValue.array` of `bytes` (`verifyMultiSigReal` in `sdk_anf_interpreter.zig`) |
 | `checkPreimage` (lenient + strict) | mocked → `true` | mocked → `true` | mocked → `true` |
 | `checkPreimage` (real-crypto) | `hash256(preimage) == sighash` byte-eq (`verifyPreimage`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) | `hash256(preimage) == sighash` byte-eq (`verifyPreimageReal`) |
 | `sha256`, `hash256`, `hash160`, `ripemd160` | real, deterministic (`hashFn`) | real, deterministic via `MockCrypto` | real, deterministic via `bsvz.crypto.hash` |
@@ -108,7 +117,7 @@ each implementation.
 | WOTS+ / SLH-DSA verifiers | not implemented | not implemented | not implemented |
 | Math/byte ops (`abs`, `min`, `max`, `cat`, `substr`, `len`, …) | concrete | concrete | concrete |
 
-Any built-in not handled by `evalCall` falls through to a default that returns `undefined`. The three interpreters agree on this default. Cross-implementation parity is asserted by `conformance/anf-interpreter/cross-interpreter.test.ts` over the curated case list (lenient mode only — strict + real-crypto are exercised by per-SDK unit tests in `packages/runar-sdk/src/__tests__/anf-interpreter-{strict,real-crypto}.spec.ts`, the Zig `executeOnChainAuthoritative — *` tests in `packages/runar-zig/src/sdk_anf_interpreter.zig`, and `AnfInterpreterRealCryptoTest` in `packages/runar-java/src/test/java/runar/lang/sdk/`).
+Any built-in not handled by `evalCall` falls through to a default that returns `undefined`. All seven interpreters agree on this default. Cross-implementation parity is asserted by `conformance/anf-interpreter/cross-interpreter.test.ts` over the curated case list — every fixture is run through TS in-process plus the Java / Zig / Go / Rust / Python / Ruby driver subprocesses (see `conformance/anf-interpreter/drivers/`), and every output must equal the TS-pinned golden byte-for-byte. Strict + real-crypto modes are exercised by per-SDK unit tests in `packages/runar-sdk/src/__tests__/anf-interpreter-{strict,real-crypto}.spec.ts`, the Zig `executeOnChainAuthoritative — *` tests in `packages/runar-zig/src/sdk_anf_interpreter.zig`, and `AnfInterpreterRealCryptoTest` in `packages/runar-java/src/test/java/runar/lang/sdk/`.
 
 ## Output contract
 
@@ -126,10 +135,10 @@ continuation locking script. The on-chain runtime handles that via
 ## Known divergences (caught by the parity test)
 
 - **`assert` strictness**: all three SDKs default to lenient (asserts skipped) and opt in to strict via a separate entry point — TS `executeStrict` (throws `AssertionFailureError`), Zig `executeStrict` (returns `error.AssertionFailure`), Java `executeStrict` (throws `AssertionFailureException`). The parity test runs all three in lenient mode by default so they behave identically; strict-mode parity is exercised by per-SDK unit tests rather than the cross-interpreter golden suite.
-- **Real-crypto coverage parity**: `executeOnChainAuthoritative` lands real ECDSA + real preimage verification on TS / Zig / Java. The Zig interpreter's real-crypto `checkMultiSig` returns `false` rather than iterating because its `ANFValue` surface doesn't model arrays yet; TS + Java iterate over `Array.isArray` / `List<?>` arg shapes. ANF goldens that exercise real multisig should run the TS or Java path until Zig grows array-of-bytes support.
-- **`array_literal` is silently undefined** in all three, but ANF goldens that include `array_literal` bindings still produce identical `{state, dataOutputs}` outputs in lenient + strict mode because the consumer of the array is `call(checkMultiSig)` which returns `true` regardless. Curated parity-test cases avoid `array_literal` altogether to keep the assertion sharp.
+- **Real-crypto coverage parity**: `executeOnChainAuthoritative` lands real ECDSA + real preimage verification on TS / Zig / Java with matching shapes. Zig's `checkMultiSig` now iterates over an `ANFValue.array` of `bytes` (sigs and pks) using the same left-to-right consume + greedy-pubkey-match loop as TS / Java; see the multisig tests in `packages/runar-zig/src/sdk_anf_interpreter.zig` ("checkMultiSig 1-of-2 passes when sig matches second pk", "1-of-2 fails when sig matches no pk", "rejects non-array sig arg"). Real-crypto multisig parity is exercised per-SDK in unit tests; the cross-interpreter parity test still runs lenient mode only.
+- **`array_literal`**: TS + Java leave it default-undefined (consumers read arrays from `args`); Zig materializes an `ANFValue.array`. ANF goldens that exercise `array_literal` bindings produce identical `{state, dataOutputs}` outputs across all three because the consumer of the array is either `call(checkMultiSig)` (which returns `true` in lenient mode regardless) or a downstream `call` whose semantics don't depend on per-element identity.
 
 ## Future directions
 
 - The Lean Eval reference (`runar-verification/`) will define the canonical semantics. When it lands, this document should be re-derived from Lean rather than from the three implementations.
-- `add_raw_output` recording, `array_literal` element resolution in Zig, and a TS/Java/Zig real-crypto cross-parity golden suite are deferred to that effort.
+- `add_raw_output` recording and a TS/Java/Zig real-crypto cross-parity golden suite are deferred to that effort. (`array_literal` element resolution in Zig has now landed — see the per-kind matrix and the multisig tests.)

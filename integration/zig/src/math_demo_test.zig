@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "MathDemo_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("MathDemo", artifact.contract_name);
@@ -22,10 +19,7 @@ test "MathDemo_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -53,10 +47,7 @@ test "MathDemo_Call_DivideBy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -94,10 +85,7 @@ test "MathDemo_Call_SquareRoot" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -135,10 +123,7 @@ test "MathDemo_Call_Normalize" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // sign(-42) = -1
@@ -177,10 +162,7 @@ test "MathDemo_Call_Exponentiate" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // 2^10 = 1024
@@ -219,10 +201,7 @@ test "MathDemo_Call_ScaleByRatio" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // 100 * 3 / 4 = 75
@@ -261,10 +240,7 @@ test "MathDemo_Call_ChainOperations" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // Chain: 1000 -> divideBy(10)=100 -> squareRoot()=10 -> scaleByRatio(5,1)=50
@@ -325,10 +301,7 @@ test "MathDemo_Call_ComputeLog2" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // log2(1024) = 10
@@ -367,10 +340,7 @@ test "MathDemo_Call_DivideThenClamp" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // 1000 -> divideBy(10)=100 -> clampValue(0, 50)=50
@@ -420,10 +390,7 @@ test "MathDemo_Call_ReduceGcd" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     // gcd(100, 75) = 25
@@ -462,10 +429,7 @@ test "MathDemo_RejectDivideByZero" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile MathDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/math-demo/MathDemo.runar.zig");
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{

@@ -12,13 +12,10 @@ const compile = @import("compile.zig");
 test "DataOutput_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/add-data-output/DataOutputTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile DataOutputTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("DataOutputTest", artifact.contract_name);
@@ -31,13 +28,10 @@ test "DataOutput_Deploy_Publish" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/add-data-output/DataOutputTest.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile DataOutputTest: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     var contract = try runar.RunarContract.init(allocator, &artifact, &[_]runar.StateValue{
@@ -61,16 +55,13 @@ test "DataOutput_Deploy_Publish" {
     // The contract just relays the bytes verbatim into the data output.
     const payload = "6a026869";
 
-    const call_txid = contract.call(
+    const call_txid = try contract.call(
         "publish",
         &[_]runar.StateValue{.{ .bytes = payload }},
         rpc_provider.provider(),
         local_signer.signer(),
         .{ .new_state = &[_]runar.StateValue{.{ .int = 1 }} },
-    ) catch |err| {
-        std.log.warn("DataOutput publish call failed: {any}", .{err});
-        return;
-    };
+    );
     defer allocator.free(call_txid);
 
     try std.testing.expectEqual(@as(usize, 64), call_txid.len);

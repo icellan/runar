@@ -10,12 +10,49 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Lint — block reintroduction of dishonest test patterns
+  # ---------------------------------------------------------------------------
+
+  lint-no-silent-skips:
+    name: Lint — no silent test skips
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject silent-skip patterns in Zig integration tests
+        # The Zig test runner reports a function that catches an error,
+        # logs, and bare-returns as PASSED. Block reintroduction of that
+        # antipattern by failing CI when the surface markers reappear in
+        # integration/zig/src/*_test.zig. The 162 historical instances
+        # were converted to `try` so any new match is a regression.
+        run: |
+          set -e
+          fail=0
+          if grep -rn "skipping test\|skipping," integration/zig/src/*_test.zig 2>/dev/null; then
+            echo "::error::silent-skip pattern reintroduced (catch + log + bare return reports as PASS)"
+            fail=1
+          fi
+          if grep -rn "Could not compile.*{any}" integration/zig/src/*_test.zig 2>/dev/null; then
+            echo "::error::silent compile-failure log reintroduced -- use 'try compile.compileContract(...)' instead"
+            fail=1
+          fi
+          if grep -rn "unexpectedly succeeded" integration/zig/src/*_test.zig 2>/dev/null; then
+            echo "::error::silent-pass-on-unexpected-success reintroduced -- use 'return error.TestUnexpectedResult'"
+            fail=1
+          fi
+          exit $fail
+
+  # ---------------------------------------------------------------------------
   # Compilers — build, unit test, upload artifacts
   # ---------------------------------------------------------------------------
 
   ts-compiler:
     name: TypeScript Compiler
     runs-on: ubuntu-latest
+    env:
+      # Force the cross-compiler vitest matrix to hard-fail when any of the
+      # 7 toolchains is missing (instead of skipping with a warning). This
+      # job installs every toolchain the matrix references.
+      RUNAR_REQUIRE_ALL_COMPILERS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -28,8 +65,26 @@ jobs:
           go-version: '1.24'
           cache-dependency-path: compilers/go/go.sum
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
       - name: Build Rust compiler (for cross-compiler tests)
         run: cd compilers/rust && cargo build --release
+      - name: Build Zig compiler (for cross-compiler tests)
+        run: cd compilers/zig && zig build -Doptimize=ReleaseSafe
+      - name: Build Java compiler jar (for cross-compiler tests)
+        run: cd compilers/java && gradle jar --no-daemon
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
       - run: pnpm run test

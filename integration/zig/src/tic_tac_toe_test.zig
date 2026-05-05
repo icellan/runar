@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "TicTacToe_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("TicTacToe", artifact.contract_name);
@@ -22,10 +19,7 @@ test "TicTacToe_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     var player_x = try helpers.newWallet(allocator);
@@ -63,10 +57,7 @@ test "TicTacToe_Join" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     var player_x = try helpers.newWallet(allocator);
@@ -104,10 +95,7 @@ test "TicTacToe_Join" {
 
     // join(opponentPK, sig) -- playerO joins
     // State after join: playerO=po_hex, c0-c8=0, turn=1, status=1
-    // Known issue: TicTacToe stateful calls with many state fields may fail
-    // due to Zig compiler output hash verification differences. This is being
-    // investigated (works with TS and Rust compilers).
-    const join_result = contract.call(
+    const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
             .{ .bytes = po_hex },
@@ -130,15 +118,9 @@ test "TicTacToe_Join" {
             .{ .int = 1 }, // status
         } },
     );
-
-    if (join_result) |join_txid| {
-        defer allocator.free(join_txid);
-        std.log.info("TicTacToe join TX: {s}", .{join_txid});
-        try std.testing.expectEqual(@as(usize, 64), join_txid.len);
-    } else |_| {
-        std.log.warn("TicTacToe join call failed (known issue with complex stateful contracts), skipping test", .{});
-        return;
-    }
+    defer allocator.free(join_txid);
+    std.log.info("TicTacToe join TX: {s}", .{join_txid});
+    try std.testing.expectEqual(@as(usize, 64), join_txid.len);
 }
 
 test "TicTacToe_Move" {
@@ -146,10 +128,7 @@ test "TicTacToe_Move" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     var player_x = try helpers.newWallet(allocator);
@@ -185,9 +164,7 @@ test "TicTacToe_Move" {
     var signer_o = try player_o.localSigner();
 
     // Join -- state after join: playerO=po_hex, c0-c8=0, turn=1, status=1
-    // Known issue: TicTacToe stateful calls may fail due to Zig compiler
-    // output hash verification. See TicTacToe_Join test comment.
-    const join_result = contract.call(
+    const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
             .{ .bytes = po_hex },
@@ -210,17 +187,11 @@ test "TicTacToe_Move" {
             .{ .int = 1 }, // status
         } },
     );
-
-    if (join_result) |join_txid| {
-        defer allocator.free(join_txid);
-    } else |_| {
-        std.log.warn("TicTacToe join call failed (known issue), skipping move test", .{});
-        return;
-    }
+    allocator.free(join_txid);
 
     // Move: player X plays position 4 (center)
     // State after move(4, X): c4=1, turn=2 (flipped from 1)
-    const move_result = contract.call(
+    const move_txid = try contract.call(
         "move",
         &[_]runar.StateValue{
             .{ .int = 4 }, // position
@@ -244,24 +215,15 @@ test "TicTacToe_Move" {
             .{ .int = 1 }, // status (unchanged)
         } },
     );
-
-    if (move_result) |move_txid| {
-        defer allocator.free(move_txid);
-        std.log.info("TicTacToe move TX: {s}", .{move_txid});
-        try std.testing.expectEqual(@as(usize, 64), move_txid.len);
-    } else |_| {
-        std.log.warn("TicTacToe move call failed (known issue), skipping", .{});
-        return;
-    }
+    defer allocator.free(move_txid);
+    std.log.info("TicTacToe move TX: {s}", .{move_txid});
+    try std.testing.expectEqual(@as(usize, 64), move_txid.len);
 }
 
 test "TicTacToe_StateFields" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     // TicTacToe should have multiple state fields (board, turn, status, etc.)
@@ -280,10 +242,7 @@ test "TicTacToe_WrongPlayerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     var player_x = try helpers.newWallet(allocator);
@@ -319,7 +278,7 @@ test "TicTacToe_WrongPlayerRejected" {
     var signer_o = try player_o.localSigner();
 
     // Join -- playerO enters the game
-    const join_result = contract.call(
+    const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
             .{ .bytes = po_hex },
@@ -342,13 +301,7 @@ test "TicTacToe_WrongPlayerRejected" {
             .{ .int = 1 }, // status
         } },
     );
-
-    if (join_result) |join_txid| {
-        defer allocator.free(join_txid);
-    } else |_| {
-        std.log.warn("TicTacToe join call failed (known issue), skipping wrong player test", .{});
-        return;
-    }
+    allocator.free(join_txid);
 
     // After join, turn=1 (X's turn). Player O tries to move -- assertCorrectPlayer
     // checks player == playerX when turn==1, so this should be rejected.
@@ -391,10 +344,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig") catch |err| {
-        std.log.warn("Could not compile TicTacToe contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/tic-tac-toe/TicTacToe.runar.zig");
     defer artifact.deinit();
 
     var player_x = try helpers.newWallet(allocator);
@@ -439,7 +389,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
     var signer_intruder = try intruder.localSigner();
 
     // Join -- playerO enters the game
-    const join_result = contract.call(
+    const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
             .{ .bytes = po_hex },
@@ -462,13 +412,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
             .{ .int = 1 }, // status
         } },
     );
-
-    if (join_result) |join_txid| {
-        defer allocator.free(join_txid);
-    } else |_| {
-        std.log.warn("TicTacToe join call failed (known issue), skipping join-after-playing test", .{});
-        return;
-    }
+    allocator.free(join_txid);
 
     // Try to join again with intruder -- status is now 1, assert(status==0) fails
     const second_join_result = contract.call(

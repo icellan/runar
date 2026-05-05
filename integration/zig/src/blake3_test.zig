@@ -12,13 +12,10 @@ const compile = @import("compile.zig");
 test "Blake3_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/blake3/Blake3Test.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Blake3Test: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("Blake3Test", artifact.contract_name);
@@ -32,13 +29,10 @@ test "Blake3Compress_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/blake3/Blake3Test.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile Blake3Test: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     // Deploy with a placeholder expected value — we only assert that

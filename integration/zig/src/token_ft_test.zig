@@ -18,10 +18,7 @@ fn hexEncodeAscii(allocator: std.mem.Allocator, ascii: []const u8) ![]u8 {
 test "FungibleToken_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("FungibleToken", artifact.contract_name);
@@ -34,10 +31,7 @@ test "FungibleToken_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -77,10 +71,7 @@ test "FungibleToken_DeployZeroBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -118,10 +109,7 @@ test "FungibleToken_DeployLargeBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -157,10 +145,7 @@ test "FungibleToken_DeployLargeBalance" {
 test "FungibleToken_StateFields" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     // FungibleToken should have state fields: owner, balance, mergeBalance, tokenId
@@ -179,10 +164,7 @@ test "FungibleToken_Send" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -250,10 +232,7 @@ test "FungibleToken_WrongOwnerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -327,10 +306,7 @@ test "FungibleToken_Transfer" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -370,9 +346,7 @@ test "FungibleToken_Transfer" {
 
     // transfer(sig, to, amount, outputSatoshis) -- splits UTXO into 2 outputs
     // Output 0: recipient gets `amount`, Output 1: sender keeps remainder
-    // Note: Zig SDK currently uses new_state for single continuation output.
-    // Multi-output transfer requires SDK Outputs support (not yet available).
-    const call_result = contract.call(
+    const txid = try contract.call(
         "transfer",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
@@ -388,15 +362,9 @@ test "FungibleToken_Transfer" {
             .{ .int = 0 },
         } },
     );
-
-    if (call_result) |txid| {
-        defer allocator.free(txid);
-        std.log.info("FungibleToken transfer TX: {s}", .{txid});
-        try std.testing.expectEqual(@as(usize, 64), txid.len);
-    } else |err| {
-        // Multi-output transfer may not yet be supported by the Zig SDK
-        std.log.warn("FungibleToken transfer failed (multi-output may not be supported yet): {any}", .{err});
-    }
+    defer allocator.free(txid);
+    std.log.info("FungibleToken transfer TX: {s}", .{txid});
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
 }
 
 test "FungibleToken_TransferExactBalance" {
@@ -404,10 +372,7 @@ test "FungibleToken_TransferExactBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -445,7 +410,7 @@ test "FungibleToken_TransferExactBalance" {
     std.log.info("FungibleToken deployed for exact transfer test: {s}", .{deploy_txid});
 
     // Transfer entire balance to recipient -- should produce 1 output (no change)
-    const call_result = contract.call(
+    const txid = try contract.call(
         "transfer",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
@@ -461,15 +426,9 @@ test "FungibleToken_TransferExactBalance" {
             .{ .int = 0 },
         } },
     );
-
-    if (call_result) |txid| {
-        defer allocator.free(txid);
-        std.log.info("FungibleToken transfer exact balance TX: {s}", .{txid});
-        try std.testing.expectEqual(@as(usize, 64), txid.len);
-    } else |err| {
-        // Multi-output transfer may not yet be supported by the Zig SDK
-        std.log.warn("FungibleToken transfer exact balance failed (multi-output may not be supported yet): {any}", .{err});
-    }
+    defer allocator.free(txid);
+    std.log.info("FungibleToken transfer exact balance TX: {s}", .{txid});
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
 }
 
 test "FungibleToken_TransferDeflatedBalance" {
@@ -477,10 +436,7 @@ test "FungibleToken_TransferDeflatedBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -538,8 +494,7 @@ test "FungibleToken_TransferDeflatedBalance" {
 
     if (result) |txid| {
         allocator.free(txid);
-        // Deflated balance should be rejected; if it succeeded, log a warning
-        std.log.warn("FungibleToken transfer with deflated balance unexpectedly succeeded", .{});
+        return error.TestUnexpectedResult; // deflated balance must be rejected by hashOutputs
     } else |_| {
         std.log.info("FungibleToken correctly rejected transfer with deflated balance", .{});
     }
@@ -550,10 +505,7 @@ test "FungibleToken_TransferInflatedBalance" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -611,7 +563,7 @@ test "FungibleToken_TransferInflatedBalance" {
 
     if (result) |txid| {
         allocator.free(txid);
-        std.log.warn("FungibleToken transfer with inflated balance unexpectedly succeeded", .{});
+        return error.TestUnexpectedResult; // inflated balance must be rejected by hashOutputs
     } else |_| {
         std.log.info("FungibleToken correctly rejected transfer with inflated balance", .{});
     }
@@ -622,10 +574,7 @@ test "FungibleToken_TransferExceedsBalanceRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -693,10 +642,7 @@ test "FungibleToken_TransferWrongSigner" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -773,10 +719,7 @@ test "FungibleToken_TransferZeroAmountRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -844,10 +787,7 @@ test "FungibleToken_Merge" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -897,9 +837,7 @@ test "FungibleToken_Merge" {
 
     // merge(sig, otherBalance, allPrevouts, outputSatoshis)
     // Merges two UTXOs into one with combined balance
-    // Note: Zig SDK does not yet support AdditionalContractInputs,
-    // so merge will be attempted with new_state only.
-    const call_result = contract1.call(
+    const txid = try contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
@@ -915,15 +853,9 @@ test "FungibleToken_Merge" {
             .{ .int = balance2 },
         } },
     );
-
-    if (call_result) |txid| {
-        defer allocator.free(txid);
-        std.log.info("FungibleToken merge TX: {s}", .{txid});
-        try std.testing.expectEqual(@as(usize, 64), txid.len);
-    } else |err| {
-        // Merge requires AdditionalContractInputs which may not yet be supported
-        std.log.warn("FungibleToken merge failed (AdditionalContractInputs may not be supported yet): {any}", .{err});
-    }
+    defer allocator.free(txid);
+    std.log.info("FungibleToken merge TX: {s}", .{txid});
+    try std.testing.expectEqual(@as(usize, 64), txid.len);
 }
 
 test "FungibleToken_MergeDeflated" {
@@ -931,10 +863,7 @@ test "FungibleToken_MergeDeflated" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -1000,7 +929,7 @@ test "FungibleToken_MergeDeflated" {
 
     if (result) |txid| {
         allocator.free(txid);
-        std.log.warn("FungibleToken merge with deflated balance unexpectedly succeeded", .{});
+        return error.TestUnexpectedResult; // deflated otherBalance must be rejected
     } else |_| {
         std.log.info("FungibleToken correctly rejected merge with deflated balance", .{});
     }
@@ -1011,10 +940,7 @@ test "FungibleToken_MergeInflatedTotal" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -1079,7 +1005,7 @@ test "FungibleToken_MergeInflatedTotal" {
 
     if (result) |txid| {
         allocator.free(txid);
-        std.log.warn("FungibleToken merge with inflated total unexpectedly succeeded", .{});
+        return error.TestUnexpectedResult; // inflated total must be rejected by hashOutputs
     } else |_| {
         std.log.info("FungibleToken correctly rejected merge with inflated total", .{});
     }
@@ -1090,10 +1016,7 @@ test "FungibleToken_MergeWrongSigner" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile FungibleTokenExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-ft/FungibleTokenExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);

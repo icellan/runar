@@ -2023,13 +2023,31 @@ fn stateValueToAnf(sv: types.StateValue) anf_interp.ANFValue {
         },
         .boolean => |b| .{ .boolean = b },
         .bytes => |hex| .{ .bytes = hex },
-        // FixedArray state fields are expanded into per-index scalar
-        // properties before they reach this path, so a raw .array_value
-        // here has no representation in the ANF interpreter's scalar
-        // value type. Fall through to .none so auto-state computation
-        // skips the field instead of trapping the switch.
-        .array_value => .{ .none = {} },
+        // Arrays — used by callers that pass `[sig1, sig2, ...]` /
+        // `[pk1, pk2, pk3, ...]` shapes to `checkMultiSig`. The conversion
+        // borrows element storage; the StateValue is owned by the caller
+        // and outlives the per-call interpreter run. (FixedArray state
+        // fields are still expanded into per-index scalar properties
+        // before reaching this path; they never observe this branch.)
+        .array_value => |items| stateValueArrayToAnf(items),
     };
+}
+
+fn stateValueArrayToAnf(items: []const types.StateValue) anf_interp.ANFValue {
+    // Allocate the ANFValue slice with the page allocator so the lifetime
+    // is independent of any per-call arena. The slice is small (one entry
+    // per array element, typically <16 in multisig usage) and short-lived
+    // (one ANF run); rest of this file already returns small one-shot
+    // allocations from the same allocator. On allocation failure we fall
+    // back to .none so the enclosing real-crypto check fails closed.
+    const allocator = std.heap.page_allocator;
+    const out = allocator.alloc(anf_interp.ANFValue, items.len) catch {
+        return .{ .none = {} };
+    };
+    for (items, 0..) |it, i| {
+        out[i] = stateValueToAnf(it);
+    }
+    return .{ .array = out };
 }
 
 fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types.StateValue {
@@ -2037,6 +2055,14 @@ fn anfToStateValue(allocator: std.mem.Allocator, av: anf_interp.ANFValue) !types
         .int => |n| .{ .int = n },
         .boolean => |b| .{ .boolean = b },
         .bytes => |hex| .{ .bytes = try allocator.dupe(u8, hex) },
+        .array => |items| {
+            const out = try allocator.alloc(types.StateValue, items.len);
+            errdefer allocator.free(out);
+            for (items, 0..) |it, i| {
+                out[i] = try anfToStateValue(allocator, it);
+            }
+            return .{ .array_value = out };
+        },
         .none => .{ .int = 0 },
     };
 }

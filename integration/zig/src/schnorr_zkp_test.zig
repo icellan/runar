@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "SchnorrZKP_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("SchnorrZKP", artifact.contract_name);
@@ -19,10 +16,7 @@ test "SchnorrZKP_Compile" {
 test "SchnorrZKP_ScriptSize" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     const script_bytes = artifact.script.len / 2;
@@ -37,10 +31,7 @@ test "SchnorrZKP_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     // Use secp256k1 generator G as the public key (Point)
@@ -74,10 +65,7 @@ test "SchnorrZKP_DeployDifferentKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     // Key 1: G
@@ -126,10 +114,7 @@ test "SchnorrZKP_DeployDifferentKey" {
 test "SchnorrZKP_ABI_Methods" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     // SchnorrZKP should have a verify method
@@ -147,10 +132,7 @@ test "SchnorrZKP_SpendValidProof" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig") catch |err| {
-        std.log.warn("Could not compile SchnorrZKP contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/schnorr-zkp/SchnorrZKP.runar.zig");
     defer artifact.deinit();
 
     // Precomputed values:

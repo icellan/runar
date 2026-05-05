@@ -12,10 +12,7 @@ const compile = @import("compile.zig");
 test "ECIsolation_Compile_ECDemo" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("ECDemo", artifact.contract_name);
@@ -25,10 +22,7 @@ test "ECIsolation_Compile_ECDemo" {
 test "ECIsolation_ScriptSize" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     const script_bytes = artifact.script.len / 2;
@@ -42,10 +36,7 @@ test "ECIsolation_Deploy_ECDemo" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     // secp256k1 generator point G as 64-byte hex (x[32]||y[32])
@@ -77,10 +68,7 @@ test "ECIsolation_Compile_ConvergenceProof" {
 
     // The ConvergenceProof contract uses multiple EC operations together:
     // ecOnCurve, ecAdd, ecNegate, ecMulGen, ecPointX, ecPointY
-    var artifact = compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig") catch |err| {
-        std.log.warn("Could not compile ConvergenceProof contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/convergence-proof/ConvergenceProof.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("ConvergenceProof", artifact.contract_name);
@@ -92,10 +80,7 @@ test "ECIsolation_Deploy_DifferentPoints" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     // Deploy with G point
@@ -146,10 +131,7 @@ test "ECIsolation_Call_CheckOnCurve" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     // Deploy with generator point G
@@ -191,10 +173,7 @@ test "ECIsolation_Call_CheckMulGenOnCurve" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     // Deploy with generator point G (constructor arg; not used by checkMulGenOnCurve)
@@ -238,10 +217,7 @@ test "ECIsolation_Call_CheckNegateRoundtrip" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig") catch |err| {
-        std.log.warn("Could not compile ECDemo contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/ec-demo/ECDemo.runar.zig");
     defer artifact.deinit();
 
     // Deploy with 2*G point

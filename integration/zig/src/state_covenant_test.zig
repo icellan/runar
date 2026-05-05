@@ -196,10 +196,7 @@ fn deployStateCovenant(allocator: std.mem.Allocator) !struct {
 } {
     const artifact = try allocator.create(runar.RunarArtifact);
     errdefer allocator.destroy(artifact);
-    artifact.* = compile.compileContract(allocator, "examples/ts/state-covenant/StateCovenant.runar.ts") catch |err| {
-        std.log.warn("Could not compile StateCovenant contract: {any}, skipping test", .{err});
-        return err;
-    };
+    artifact.* = try compile.compileContract(allocator, "examples/ts/state-covenant/StateCovenant.runar.ts");
     errdefer artifact.deinit();
 
     var tree = try buildMerkleTree(allocator);
@@ -248,10 +245,7 @@ test "StateCovenant_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/ts/state-covenant/StateCovenant.runar.ts") catch |err| {
-        std.log.warn("Could not compile StateCovenant contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/ts/state-covenant/StateCovenant.runar.ts");
     defer artifact.deinit();
 
     var tree = try buildMerkleTree(allocator);

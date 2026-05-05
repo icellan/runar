@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "CovenantVault_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("CovenantVault", artifact.contract_name);
@@ -22,10 +19,7 @@ test "CovenantVault_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -66,10 +60,7 @@ test "CovenantVault_DeployZeroMinAmount" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -110,10 +101,7 @@ test "CovenantVault_DeployLargeMinAmount" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -154,10 +142,7 @@ test "CovenantVault_DeploySameKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     var wallet = try helpers.newWallet(allocator);
@@ -200,10 +185,7 @@ test "CovenantVault_RejectWrongSigner" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig") catch |err| {
-        std.log.warn("Could not compile CovenantVault contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/covenant-vault/CovenantVault.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);

@@ -36,10 +36,7 @@ fn hexDecode(allocator: std.mem.Allocator, hex_str: []const u8) ![]u8 {
 test "BSV21Token_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, SOURCE_PATH) catch |err| {
-        std.log.warn("Could not compile BSV21Token contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, SOURCE_PATH);
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("BSV21Token", artifact.contract_name);
@@ -52,10 +49,7 @@ test "BSV21Token_DeployMintInscription" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, SOURCE_PATH) catch |err| {
-        std.log.warn("Could not compile BSV21Token contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, SOURCE_PATH);
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -130,10 +124,7 @@ test "BSV21Token_TransferInscription" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, SOURCE_PATH) catch |err| {
-        std.log.warn("Could not compile BSV21Token contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, SOURCE_PATH);
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);

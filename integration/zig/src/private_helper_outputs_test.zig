@@ -22,13 +22,10 @@ test "PrivateHelperOutputs_Deploy_AndCommitChain" {
     // formats are accepted by the runner since the parser
     // dispatches by extension. We use the Zig surface here for the
     // .runar.zig parity coverage.
-    var artifact = compile.compileContract(
+    var artifact = try compile.compileContract(
         allocator,
         "examples/zig/private-helper-outputs/PrivateHelperOutputs.runar.zig",
-    ) catch |err| {
-        std.log.warn("Could not compile PrivateHelperOutputs: {any}, skipping", .{err});
-        return;
-    };
+    );
     defer artifact.deinit();
 
     std.log.info("PrivateHelperOutputs script: {d} bytes", .{artifact.script.len / 2});

@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "PostQuantumWallet_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("PostQuantumWallet", artifact.contract_name);
@@ -19,10 +16,7 @@ test "PostQuantumWallet_Compile" {
 test "PostQuantumWallet_ScriptSize" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig");
     defer artifact.deinit();
 
     const script_bytes = artifact.script.len / 2;
@@ -37,10 +31,7 @@ test "PostQuantumWallet_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig");
     defer artifact.deinit();
 
     var ecdsa_wallet = try helpers.newWallet(allocator);
@@ -82,10 +73,7 @@ test "PostQuantumWallet_DeployDifferentSeed" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig");
     defer artifact.deinit();
 
     var ecdsa_wallet = try helpers.newWallet(allocator);
@@ -139,10 +127,7 @@ test "PostQuantumWallet_DeployDifferentSeed" {
 test "PostQuantumWallet_NotStateful" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile PostQuantumWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/post-quantum-wallet/PostQuantumWallet.runar.zig");
     defer artifact.deinit();
 
     // PostQuantumWallet is a stateless contract (extends SmartContract)

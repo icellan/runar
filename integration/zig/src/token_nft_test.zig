@@ -18,10 +18,7 @@ fn hexEncodeAscii(allocator: std.mem.Allocator, ascii: []const u8) ![]u8 {
 test "NFT_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("SimpleNFT", artifact.contract_name);
@@ -34,10 +31,7 @@ test "NFT_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -78,10 +72,7 @@ test "NFT_DeployDifferentOwners" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner1 = try helpers.newWallet(allocator);
@@ -144,10 +135,7 @@ test "NFT_DeployLongMetadata" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -198,10 +186,7 @@ test "NFT_Transfer" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -265,10 +250,7 @@ test "NFT_Burn" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);
@@ -319,10 +301,7 @@ test "NFT_WrongOwnerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig") catch |err| {
-        std.log.warn("Could not compile NFTExample contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/token-nft/NFTExample.runar.zig");
     defer artifact.deinit();
 
     var owner = try helpers.newWallet(allocator);

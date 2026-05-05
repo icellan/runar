@@ -40,10 +40,7 @@ test "P2PKH_ValidUnlock" {
     var owner = try helpers.newWallet(allocator);
     defer owner.deinit();
 
-    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
-        std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig");
     defer artifact.deinit();
 
     std.log.info("P2PKH script: {d} bytes", .{artifact.script.len / 2});
@@ -86,10 +83,7 @@ test "P2PKH_Call_ValidUnlock" {
     var owner = try helpers.newWallet(allocator);
     defer owner.deinit();
 
-    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
-        std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig");
     defer artifact.deinit();
 
     const pkh_hex = try owner.pubKeyHashHex(allocator);
@@ -136,10 +130,7 @@ test "P2PKH_DeployDifferentPubKeyHash" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
-        std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig");
     defer artifact.deinit();
 
     // Owner 1
@@ -190,10 +181,7 @@ test "P2PKH_WrongSignerRejected" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig") catch |err| {
-        std.log.warn("Could not compile P2PKH contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/p2pkh/P2PKH.runar.zig");
     defer artifact.deinit();
 
     // wallet_a is the rightful owner

@@ -8,6 +8,23 @@ the **Stale** column stays empty: any new stale skip should be removed in the sa
 as the change that made it obsolete, and any new Gap skip should carry a `TODO(...)`
 comment naming the missing piece.
 
+## How to add a skip
+
+A skip not in this file is a bug. If you must skip a test:
+
+1. Add a row to the inventory below with `file:line`, the skip mechanism, and a
+   precise reason. If the precondition is reproducible (regtest node, env var,
+   build artifact), say exactly what to flip to make the test execute.
+2. Pick a category (Environmental / Gap / Stale). Stale skips should be deleted
+   in the same PR that made them obsolete — the only valid `Stale` row is one
+   that's about to be removed.
+3. Never add a silent skip. The Zig integration suite previously contained 162
+   `catch |err| { std.log.warn("skipping"); return; }` blocks that the test
+   runner reported as PASSED. They were all converted to `try` (real failures
+   surface) or to negative-test patterns that return `error.TestUnexpectedResult`
+   on unexpected success. CI lints for the surface markers — see
+   `.github/workflows/ci.yml` job `lint-no-silent-skips`.
+
 ## Categories
 
 - **Environmental** — the test depends on a precondition that the local machine may
@@ -47,7 +64,7 @@ comment naming the missing piece.
 | `test_wallet_client_live_round_trip` | `packages/runar-py/tests/test_wallet_client_integration.py:61` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
 | `wallet_client_live_round_trip` | `packages/runar-rs/tests/wallet_client_integration.rs:47` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
 | `BRC-100 WalletClient live endpoint` | `integration/ruby/spec/wallet_client_spec.rb:107` | Environmental | Same `RUNAR_WALLET_ENDPOINT` precondition as Go. |
-| `Cross-compiler: TS IR -> Go Script` (+ Rust / Python / Zig / Ruby / Java suites, ~10 `describe.skipIf(...)` blocks) | `packages/runar-compiler/src/__tests__/cross-compiler.test.ts:661,738,824,933,987,1031,1081,1126,1169,1210,1252` | Environmental | CI-strict: when `CI=true` or `GITHUB_ACTIONS=true`, missing toolchains hard-fail via `assertNoMissingCompilersInCi()`. Local devs without a given toolchain see a one-line WARNING and the suite skips. See `cross-compiler.test.ts:13-51` for the gating. |
+| `Cross-compiler: TS IR -> Go Script` (+ Rust / Python / Zig / Ruby / Java suites, ~10 `describe.skipIf(...)` blocks) | `packages/runar-compiler/src/__tests__/cross-compiler.test.ts:661,738,824,933,987,1031,1081,1126,1169,1210,1252` | Environmental | CI-strict: the `ts-compiler` CI job sets `RUNAR_REQUIRE_ALL_COMPILERS=1` and installs every toolchain the matrix references, so a missing compiler hard-fails the suite via `cross-compiler.test.ts:283-304`. Local devs without a given toolchain see a one-line WARNING and the suite skips. Set `RUNAR_REQUIRE_ALL_COMPILERS=1` locally to upgrade to hard-fail. |
 | `BRC-100 WalletClient live endpoint (skipped)` sentinel | `packages/runar-sdk/src/__tests__/wallet-client.spec.ts:77` | Environmental | Sentinel placeholder so vitest reports "discovered-but-skipped" rather than empty when `RUNAR_WALLET_ENDPOINT` is unset. Mirrors the Ruby spec sibling. |
 | `CurlHttpTransport live GET hits httpbin` / `StdHttpTransport live GET hits httpbin` | `packages/runar-zig/src/sdk_http_client.zig:331,341` | Environmental | Set `RUNAR_HTTP_LIVE=1` to exercise the real HTTPS GET path. |
 | `e2e FixedArray: TicTacToe v2 ...` / `e2e MultiSig2of3 ...` | `compilers/zig/src/tests/e2e.zig:657,663,725` | Environmental | Skips if the example source can't be opened — only fires when the Zig test binary runs from outside `compilers/zig/` (e.g. an extracted module without `examples/`). |
@@ -115,6 +132,17 @@ opt-outs at the conformance-runner level, not test-level skips. See
   fails loudly. Net effect: 28 Rust parser tests now actually exercise their
   assertions; the suite still reports the same passing count, but is no
   longer a false-positive.
+- `integration/zig/src/*_test.zig` — 162 `catch |err| { std.log.warn("...skipping..."); return; }`
+  blocks plus 4 `else { std.log.warn("unexpectedly succeeded"); }` patterns
+  across 28 files. The Zig test runner reports a function that catches an
+  error and bare-returns as PASSED, so the suite was reporting pass without
+  running its assertions. Converted every `compileContract` catch to `try`
+  (the contracts compile fine — the catch was leftover scaffolding from an
+  earlier compiler-completeness gap), every contract.call positive-test
+  silent skip to `try` (real failures now surface as test errors), and every
+  silent-pass-on-unexpected-success to `return error.TestUnexpectedResult`.
+  CI gains a `lint-no-silent-skips` job that fails on reintroduction of any
+  of these surface markers. See `.github/workflows/ci.yml`.
 
 ## How to verify locally
 

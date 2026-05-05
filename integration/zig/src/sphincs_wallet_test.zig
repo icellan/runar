@@ -6,10 +6,7 @@ const compile = @import("compile.zig");
 test "SPHINCSWallet_Compile" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig");
     defer artifact.deinit();
 
     try std.testing.expectEqualStrings("SPHINCSWallet", artifact.contract_name);
@@ -19,10 +16,7 @@ test "SPHINCSWallet_Compile" {
 test "SPHINCSWallet_ScriptSize" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig");
     defer artifact.deinit();
 
     const script_bytes = artifact.script.len / 2;
@@ -37,10 +31,7 @@ test "SPHINCSWallet_Deploy" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig");
     defer artifact.deinit();
 
     var ecdsa_wallet = try helpers.newWallet(allocator);
@@ -82,10 +73,7 @@ test "SPHINCSWallet_DeployDifferentKey" {
 
     helpers.requireNodeAvailable(allocator);
 
-    var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig");
     defer artifact.deinit();
 
     var ecdsa_wallet = try helpers.newWallet(allocator);
@@ -140,10 +128,7 @@ test "SPHINCSWallet_DeployDifferentKey" {
 test "SPHINCSWallet_NotStateful" {
     const allocator = std.testing.allocator;
 
-    var artifact = compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig") catch |err| {
-        std.log.warn("Could not compile SPHINCSWallet contract: {any}, skipping test", .{err});
-        return;
-    };
+    var artifact = try compile.compileContract(allocator, "examples/zig/sphincs-wallet/SPHINCSWallet.runar.zig");
     defer artifact.deinit();
 
     // SPHINCSWallet is a stateless contract (extends SmartContract)

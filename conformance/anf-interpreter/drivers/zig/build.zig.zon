@@ -1,0 +1,11 @@
+.{
+    .name = .runar_anf_driver_zig,
+    .version = "0.1.0",
+    .fingerprint = 0x3d8edfb675ce4556,
+    .dependencies = .{
+        .runar_zig = .{
+            .path = "../../../../packages/runar-zig",
+        },
+    },
+    .paths = .{"."},
+}
