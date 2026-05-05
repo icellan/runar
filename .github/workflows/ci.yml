@@ -15,32 +15,21 @@ jobs:
   # ---------------------------------------------------------------------------
 
   lint-no-silent-skips:
-    name: Lint — no silent test skips
+    name: Lint — no silent test skips, no active TODO markers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Reject silent-skip patterns in Zig integration tests
-        # The Zig test runner reports a function that catches an error,
-        # logs, and bare-returns as PASSED. Block reintroduction of that
-        # antipattern by failing CI when the surface markers reappear in
-        # integration/zig/src/*_test.zig. The 162 historical instances
-        # were converted to `try` so any new match is a regression.
-        run: |
-          set -e
-          fail=0
-          if grep -rn "skipping test\|skipping," integration/zig/src/*_test.zig 2>/dev/null; then
-            echo "::error::silent-skip pattern reintroduced (catch + log + bare return reports as PASS)"
-            fail=1
-          fi
-          if grep -rn "Could not compile.*{any}" integration/zig/src/*_test.zig 2>/dev/null; then
-            echo "::error::silent compile-failure log reintroduced -- use 'try compile.compileContract(...)' instead"
-            fail=1
-          fi
-          if grep -rn "unexpectedly succeeded" integration/zig/src/*_test.zig 2>/dev/null; then
-            echo "::error::silent-pass-on-unexpected-success reintroduced -- use 'return error.TestUnexpectedResult'"
-            fail=1
-          fi
-          exit $fail
+      - name: Run scripts/lint-no-silent-skips.sh (composite lint)
+        # The same script runs locally via `pnpm run lint:silent-skips`. It
+        # covers three cohorts:
+        #   1. Zig integration silent-skip surface markers (the 162-instance
+        #      catch-and-bare-return antipattern that reports PASS).
+        #   2. Active TODO/FIXME/XXX/todo!/unimplemented! markers in source
+        #      code — they're forbidden; finish the work or remove them.
+        #   3. Test-skip surface markers cross-checked against
+        #      docs/test-skips.md so every documented skip stays the audit
+        #      trail of the only legitimate skip paths in the corpus.
+        run: bash scripts/lint-no-silent-skips.sh
 
   conformance-allowlist-audit:
     # Pin which conformance fixtures are allowed to opt out of compiler tiers
@@ -285,10 +274,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install pytest
+      # `slh-dsa` is the FIPS 205 reference impl. We install it in CI so the
+      # SPHINCSWallet / post-quantum-slhdsa-naive negative tests run their
+      # real-crypto path (matching the @_slow @_requires_slhdsa marker pair
+      # in those test files). Locally devs can omit it; pytest's skipif
+      # gate falls back to the documented environmental skip — see
+      # docs/test-skips.md.
+      - run: pip install pytest slh-dsa
       - name: SDK tests
         run: cd packages/runar-py && python -m pytest
-      - name: Example tests
+      - name: Example tests (real SLH-DSA enabled via slh-dsa pkg)
         run: cd examples/python && PYTHONPATH=../../packages/runar-py python -m pytest
 
   zig-sdk:
@@ -840,7 +835,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install pytest bsv-sdk
+      # bsv-sdk gives the SDK its real ECDSA path; slh-dsa unmasks the
+      # SLH-DSA negative-tests so they verify against the real FIPS 205
+      # impl rather than the no-op fallback (which now raises rather
+      # than silently mock-true-ing).
+      - run: pip install pytest bsv-sdk slh-dsa
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'

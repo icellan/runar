@@ -268,7 +268,7 @@ def verify_ecdsa_p384(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return rx % _P384_N == r
 
 
-# -- Real SLH-DSA Verification (falls back to mock if slhdsa not installed) -
+# -- Real SLH-DSA Verification (raises RuntimeError if slhdsa not installed) -
 
 def verify_slh_dsa_sha2_128s(msg: bytes, sig: bytes, pubkey: bytes) -> bool:
     return _slh_verify(msg, sig, pubkey, 'sha2_128s')

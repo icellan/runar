@@ -916,13 +916,16 @@ class ContractB extends SmartContract {
 // ---------------------------------------------------------------------------
 
 func TestParse_ErrorHasSourceLocation(t *testing.T) {
-	// Invalid source: class without parent
+	// Invalid source: class without `extends SmartContract` parent. The
+	// parser MUST reject this — Rúnar contracts are required to extend
+	// either SmartContract or StatefulSmartContract. A future change that
+	// loosens this guard is a real regression, not a "no errors so we
+	// can't test the location shape" environmental skip; fail loudly.
 	source := `class Foo { }`
 	result := ParseSource([]byte(source), "bad.runar.ts")
 	if len(result.Errors) == 0 {
-		t.Skipf("no errors produced for this input — cannot test source location")
+		t.Fatalf("parser accepted bare `class Foo { }` (no SmartContract parent) — expected at least one error")
 	}
-	// If errors are returned, they should be non-empty strings
 	for _, err := range result.Errors {
 		if err.Message == "" {
 			t.Error("expected non-empty error message")

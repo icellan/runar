@@ -1,7 +1,14 @@
 """SLH-DSA (FIPS 205, SPHINCS+) wrapper using the slhdsa package.
 
 Provides keygen, sign, and verify for SLH-DSA-SHA2-128s.
-Falls back to mock (always-True verify) if slhdsa package is not installed.
+
+This module fails closed when the optional `slh-dsa` PyPI package is not
+installed: keygen and verify both raise `RuntimeError` instead of silently
+returning a mock-true value. The previous mock-fallback gave false-pass
+behaviour to tests that genuinely required real SLH-DSA verification — see
+the SPHINCSWallet / post-quantum-slhdsa-naive integration tests, which now
+gate themselves on `_HAS_SLHDSA` and skip explicitly rather than running
+against a no-op verifier.
 
 Install: pip install slh-dsa
 """
@@ -77,8 +84,10 @@ def slh_verify(msg: bytes, sig: bytes, pk: bytes, param_set: str = 'sha2_128s') 
         True if valid, False otherwise.
     """
     if not _HAS_SLHDSA:
-        # Fallback: always True (mock behavior when package not installed)
-        return True
+        raise RuntimeError(
+            "slh-dsa package not installed; cannot verify SLH-DSA signatures. "
+            "Install with: pip install slh-dsa"
+        )
 
     ps = _PARAM_SETS.get(param_set)
     if ps is None:
