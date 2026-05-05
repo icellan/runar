@@ -17,12 +17,25 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
- * SPHINCSWallet integration test -- Hybrid ECDSA + SLH-DSA-SHA2-128s
- * contract. Deploy-only coverage; the full two-pass spend requires raw
- * transaction construction (Go {@code TestSLHDSA_ValidSpend} owns the
- * full spend coverage).
+ * SPHINCSWallet integration test — Hybrid ECDSA + SLH-DSA-SHA2-128s
+ * contract. <strong>Compile + deploy + Java-surface parity coverage
+ * only;</strong> the full SLH-DSA spend round-trip is intentionally
+ * deferred for the Java tier — see the {@code [†]} footnote in
+ * {@code integration/README.md} for the rationale.
  *
- * <p>Ported from {@code integration/python/test_sphincs_wallet.py}.
+ * <p>The compiled SPHINCSWallet artifact is bit-for-bit identical to the
+ * TS-sourced version (verified by {@link #javaSurfaceMatches()}), and
+ * the on-chain SLH-DSA verification path is fully exercised by the
+ * Go / Python / Ruby / Zig / Rust spend tests in the same conformance
+ * row. A Java spend test would require either Java-side SLH-DSA keygen
+ * (BouncyCastle ships SPHINCS+ round-3, not FIPS 205 SLH-DSA, so direct
+ * substitution diverges from the Bitcoin Script verifier the Rúnar
+ * codegen targets) or shelling out to another SDK to produce a valid
+ * signature.
+ *
+ * <p>Ported from {@code integration/python/test_sphincs_wallet.py},
+ * which similarly does compile + deploy plus an explicit signature path
+ * via the optional {@code slh-dsa} PyPI package.
  */
 class SphincsWalletIntegrationTest extends IntegrationBase {
 
