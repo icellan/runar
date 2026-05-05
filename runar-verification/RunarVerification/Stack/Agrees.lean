@@ -2274,6 +2274,386 @@ theorem agreesTagged_assert_dge2_unconditional
     · show (anfSt.addBinding bn (.vBool true)).outputs = stkSt.outputs
       unfold State.addBinding; exact hAgrees.2.2
 
+/-! ### binOp fan-out (depth pair (1, 0))
+
+For a `binOp` whose left operand is at depth 1 of `sm` and right
+operand is at depth 0, the lower function emits
+
+  loadRef sm l ++ loadRef (sm.push l) r ++ [.opcode <op>]
+  = [.over, .over, .opcode <op>]
+
+The first `[.over]` copies depth-1 (= v_l) to top. After that, the
+new tsm shifts r to depth 1 of sm.push l, so the second loadRef
+emits `[.over]` (copies depth-1 = v_r). Combined effect from the
+input stack `[v_r, v_l, rest]`:
+
+  [v_r, v_l, rest] →[.over]→ [v_l, v_r, v_l, rest]
+                  →[.over]→ [v_r, v_l, v_r, v_l, rest]
+                  →[.opcode op]→ [op(v_l, v_r), v_r, v_l, rest]
+
+Each lemma below names the operand at depth 1 (`botName`, the "l")
+and the operand at depth 0 (`topName`, the "r"). -/
+
+/-- UNCONDITIONAL `binOp` preservation for `OP_ADD` at depth pair (1, 0). -/
+theorem agreesTagged_binOp_ADD_d1d0_unconditional
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (bn : String)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest) anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest)) :
+    runOps [.over, .over, .opcode "OP_ADD"] stkSt
+      = .ok (stkSt.push (.vBigint (a + b)))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (a + b)))
+                   (stkSt.push (.vBigint (a + b))) := by
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  have hAt0 : lookupAnfByKind anfSt (topName, k_top) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hAt1 : lookupAnfByKind anfSt (botName, k_bot) = some botV := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeqR : topV = .vBigint b := by
+    rw [hLookupR] at hAt0; exact (Option.some.inj hAt0).symm
+  have hVeqL : botV = .vBigint a := by
+    rw [hLookupL] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · -- Step 1: first .over pushes v_l (depth-1 of original).
+    have hOver1 : runOps [.over] stkSt = .ok (stkSt.push (.vBigint a)) := by
+      have h := Stack.Sim.run_over_deep stkSt topV botV rest hStk
+      rw [hVeqL] at h; exact h
+    -- Step 2: second .over from the post-state pushes v_r (now at depth 1).
+    have hStk1 : (stkSt.push (.vBigint a)).stack
+                  = .vBigint a :: topV :: botV :: rest := by
+      unfold StackState.push; rw [hStk]
+    have hOver2 :
+        runOps [.over] (stkSt.push (.vBigint a))
+        = .ok ((stkSt.push (.vBigint a)).push topV) := by
+      exact Stack.Sim.run_over_deep (stkSt.push (.vBigint a))
+              (.vBigint a) topV (botV :: rest) hStk1
+    -- Combine the two .over steps.
+    have hRunBoth : runOps [.over, .over] stkSt
+        = .ok ((stkSt.push (.vBigint a)).push topV) := by
+      show runOps ([.over] ++ [.over]) stkSt = _
+      rw [runOps_append, hOver1]
+      exact hOver2
+    -- Step 3: OP_ADD with depth-1 = a, top = b.
+    have hMidStk0 : ((stkSt.push (.vBigint a)).push topV).stack
+                  = topV :: .vBigint a :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hMidStk : ((stkSt.push (.vBigint a)).push topV).stack
+                  = .vBigint b :: .vBigint a :: stkSt.stack := by
+      rw [hMidStk0, hVeqR]
+    have hOpRun :
+        runOpcode "OP_ADD" ((stkSt.push (.vBigint a)).push topV)
+        = .ok ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+              (.vBigint (a + b))) :=
+      Stack.Sim.runOpcode_ADD_intInt
+        ((stkSt.push (.vBigint a)).push topV) a b stkSt.stack hMidStk
+    have hPostEq :
+        ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+            (.vBigint (a + b)))
+        = stkSt.push (.vBigint (a + b)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOpRun
+    show runOps ([.over, .over] ++ [.opcode "OP_ADD"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over, .over] "OP_ADD" stkSt
+            ((stkSt.push (.vBigint a)).push topV) (stkSt.push (.vBigint (a + b)))
+            hRunBoth hOpRun
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (botName, k_bot) :: tsm_rest) bn anfSt stkSt
+      (.vBigint (a + b)) hAgrees hFresh'
+
+/-- UNCONDITIONAL `binOp` preservation for `OP_SUB` at depth pair (1, 0). -/
+theorem agreesTagged_binOp_SUB_d1d0_unconditional
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (bn : String)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest) anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest)) :
+    runOps [.over, .over, .opcode "OP_SUB"] stkSt
+      = .ok (stkSt.push (.vBigint (a - b)))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (a - b)))
+                   (stkSt.push (.vBigint (a - b))) := by
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  have hAt0 : lookupAnfByKind anfSt (topName, k_top) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hAt1 : lookupAnfByKind anfSt (botName, k_bot) = some botV := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeqR : topV = .vBigint b := by
+    rw [hLookupR] at hAt0; exact (Option.some.inj hAt0).symm
+  have hVeqL : botV = .vBigint a := by
+    rw [hLookupL] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver1 : runOps [.over] stkSt = .ok (stkSt.push (.vBigint a)) := by
+      have h := Stack.Sim.run_over_deep stkSt topV botV rest hStk
+      rw [hVeqL] at h; exact h
+    have hStk1 : (stkSt.push (.vBigint a)).stack
+                  = .vBigint a :: topV :: botV :: rest := by
+      unfold StackState.push; rw [hStk]
+    have hOver2 :
+        runOps [.over] (stkSt.push (.vBigint a))
+        = .ok ((stkSt.push (.vBigint a)).push topV) :=
+      Stack.Sim.run_over_deep (stkSt.push (.vBigint a))
+        (.vBigint a) topV (botV :: rest) hStk1
+    have hRunBoth : runOps [.over, .over] stkSt
+        = .ok ((stkSt.push (.vBigint a)).push topV) := by
+      show runOps ([.over] ++ [.over]) stkSt = _
+      rw [runOps_append, hOver1]
+      exact hOver2
+    have hMidStk0 : ((stkSt.push (.vBigint a)).push topV).stack
+                  = topV :: .vBigint a :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hMidStk : ((stkSt.push (.vBigint a)).push topV).stack
+                  = .vBigint b :: .vBigint a :: stkSt.stack := by
+      rw [hMidStk0, hVeqR]
+    have hOpRun :
+        runOpcode "OP_SUB" ((stkSt.push (.vBigint a)).push topV)
+        = .ok ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+              (.vBigint (a - b))) :=
+      Stack.Sim.runOpcode_SUB_intInt
+        ((stkSt.push (.vBigint a)).push topV) a b stkSt.stack hMidStk
+    have hPostEq :
+        ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+            (.vBigint (a - b)))
+        = stkSt.push (.vBigint (a - b)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOpRun
+    show runOps ([.over, .over] ++ [.opcode "OP_SUB"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over, .over] "OP_SUB" stkSt
+            ((stkSt.push (.vBigint a)).push topV) (stkSt.push (.vBigint (a - b)))
+            hRunBoth hOpRun
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (botName, k_bot) :: tsm_rest) bn anfSt stkSt
+      (.vBigint (a - b)) hAgrees hFresh'
+
+/-- UNCONDITIONAL `binOp` preservation for `OP_MUL` at depth pair (1, 0). -/
+theorem agreesTagged_binOp_MUL_d1d0_unconditional
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (bn : String)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest) anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest)) :
+    runOps [.over, .over, .opcode "OP_MUL"] stkSt
+      = .ok (stkSt.push (.vBigint (a * b)))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (a * b)))
+                   (stkSt.push (.vBigint (a * b))) := by
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  have hAt0 : lookupAnfByKind anfSt (topName, k_top) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hAt1 : lookupAnfByKind anfSt (botName, k_bot) = some botV := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeqR : topV = .vBigint b := by
+    rw [hLookupR] at hAt0; exact (Option.some.inj hAt0).symm
+  have hVeqL : botV = .vBigint a := by
+    rw [hLookupL] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver1 : runOps [.over] stkSt = .ok (stkSt.push (.vBigint a)) := by
+      have h := Stack.Sim.run_over_deep stkSt topV botV rest hStk
+      rw [hVeqL] at h; exact h
+    have hStk1 : (stkSt.push (.vBigint a)).stack
+                  = .vBigint a :: topV :: botV :: rest := by
+      unfold StackState.push; rw [hStk]
+    have hOver2 :
+        runOps [.over] (stkSt.push (.vBigint a))
+        = .ok ((stkSt.push (.vBigint a)).push topV) :=
+      Stack.Sim.run_over_deep (stkSt.push (.vBigint a))
+        (.vBigint a) topV (botV :: rest) hStk1
+    have hRunBoth : runOps [.over, .over] stkSt
+        = .ok ((stkSt.push (.vBigint a)).push topV) := by
+      show runOps ([.over] ++ [.over]) stkSt = _
+      rw [runOps_append, hOver1]
+      exact hOver2
+    have hMidStk0 : ((stkSt.push (.vBigint a)).push topV).stack
+                  = topV :: .vBigint a :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hMidStk : ((stkSt.push (.vBigint a)).push topV).stack
+                  = .vBigint b :: .vBigint a :: stkSt.stack := by
+      rw [hMidStk0, hVeqR]
+    have hOpRun :
+        runOpcode "OP_MUL" ((stkSt.push (.vBigint a)).push topV)
+        = .ok ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+              (.vBigint (a * b))) :=
+      Stack.Sim.runOpcode_MUL_intInt
+        ((stkSt.push (.vBigint a)).push topV) a b stkSt.stack hMidStk
+    have hPostEq :
+        ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+            (.vBigint (a * b)))
+        = stkSt.push (.vBigint (a * b)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOpRun
+    show runOps ([.over, .over] ++ [.opcode "OP_MUL"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over, .over] "OP_MUL" stkSt
+            ((stkSt.push (.vBigint a)).push topV) (stkSt.push (.vBigint (a * b)))
+            hRunBoth hOpRun
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (botName, k_bot) :: tsm_rest) bn anfSt stkSt
+      (.vBigint (a * b)) hAgrees hFresh'
+
+/-- UNCONDITIONAL `binOp` preservation for `OP_NUMEQUAL` at depth pair (1, 0). -/
+theorem agreesTagged_binOp_NUMEQUAL_d1d0_unconditional
+    (topName botName : String) (k_top k_bot : SlotKind)
+    (tsm_rest : TaggedStackMap) (bn : String)
+    (anfSt : State) (stkSt : StackState) (a b : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (botName, k_bot) :: tsm_rest) anfSt stkSt)
+    (hLookupL : lookupAnfByKind anfSt (botName, k_bot) = some (.vBigint a))
+    (hLookupR : lookupAnfByKind anfSt (topName, k_top) = some (.vBigint b))
+    (hFresh : freshIn bn (topName :: botName :: untagSm tsm_rest)) :
+    runOps [.over, .over, .opcode "OP_NUMEQUAL"] stkSt
+      = .ok (stkSt.push (.vBool (decide (a = b))))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBool (decide (a = b))))
+                   (stkSt.push (.vBool (decide (a = b)))) := by
+  have hAlign :
+      taggedStackAligned ((topName, k_top) :: (botName, k_bot) :: tsm_rest)
+                         anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV botV rest, stkSt.stack = topV :: botV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: botV :: rest => exact ⟨topV, botV, rest, rfl⟩
+  obtain ⟨topV, botV, rest, hStk⟩ := hStkShape
+  have hAt0 : lookupAnfByKind anfSt (topName, k_top) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hAt1 : lookupAnfByKind anfSt (botName, k_bot) = some botV := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeqR : topV = .vBigint b := by
+    rw [hLookupR] at hAt0; exact (Option.some.inj hAt0).symm
+  have hVeqL : botV = .vBigint a := by
+    rw [hLookupL] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver1 : runOps [.over] stkSt = .ok (stkSt.push (.vBigint a)) := by
+      have h := Stack.Sim.run_over_deep stkSt topV botV rest hStk
+      rw [hVeqL] at h; exact h
+    have hStk1 : (stkSt.push (.vBigint a)).stack
+                  = .vBigint a :: topV :: botV :: rest := by
+      unfold StackState.push; rw [hStk]
+    have hOver2 :
+        runOps [.over] (stkSt.push (.vBigint a))
+        = .ok ((stkSt.push (.vBigint a)).push topV) :=
+      Stack.Sim.run_over_deep (stkSt.push (.vBigint a))
+        (.vBigint a) topV (botV :: rest) hStk1
+    have hRunBoth : runOps [.over, .over] stkSt
+        = .ok ((stkSt.push (.vBigint a)).push topV) := by
+      show runOps ([.over] ++ [.over]) stkSt = _
+      rw [runOps_append, hOver1]
+      exact hOver2
+    have hMidStk0 : ((stkSt.push (.vBigint a)).push topV).stack
+                  = topV :: .vBigint a :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hMidStk : ((stkSt.push (.vBigint a)).push topV).stack
+                  = .vBigint b :: .vBigint a :: stkSt.stack := by
+      rw [hMidStk0, hVeqR]
+    have hOpRun :
+        runOpcode "OP_NUMEQUAL" ((stkSt.push (.vBigint a)).push topV)
+        = .ok ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+              (.vBool (decide (a = b)))) :=
+      Stack.Sim.runOpcode_NUMEQUAL_intInt
+        ((stkSt.push (.vBigint a)).push topV) a b stkSt.stack hMidStk
+    have hPostEq :
+        ({((stkSt.push (.vBigint a)).push topV) with stack := stkSt.stack}.push
+            (.vBool (decide (a = b))))
+        = stkSt.push (.vBool (decide (a = b))) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOpRun
+    show runOps ([.over, .over] ++ [.opcode "OP_NUMEQUAL"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over, .over] "OP_NUMEQUAL" stkSt
+            ((stkSt.push (.vBigint a)).push topV) (stkSt.push (.vBool (decide (a = b))))
+            hRunBoth hOpRun
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (botName, k_bot) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (botName, k_bot) :: tsm_rest) bn anfSt stkSt
+      (.vBool (decide (a = b))) hAgrees hFresh'
+
 /-! ## Phase 6 Step 5 tail — methodCall + loop
 
 `methodCall` inlines the callee's body into the caller; `loop`
@@ -2447,6 +2827,1254 @@ theorem chain_nil_id (R : StepRel) (tsm : TaggedStackMap)
     (_hChain : ChainRel R [] tsm anfSt stkSt tsm anfSt stkSt) :
     True := by
   trivial -- captured definitionally by the `nil` constructor
+
+/-! ## Phase 7.4 — Concrete StepRel for SimpleANF Stage C closure
+
+A first concrete instantiation of the Stage C scaffold. We define
+a `StepRel` that is inhabited only for a curated SimpleANF subset
+of `ANFValue`:
+
+* `loadConst .bigint i` / `loadConst .bool b` / `loadConst .bytes ba`
+  — push a literal onto the runtime stack.
+* `loadConst .thisRef` — no stack op, ANF binding only.
+* `assert n` — load operand (any depth), `OP_VERIFY` pops it.
+  Predicate-side preservation collapses to `taggedStackAligned_addBinding_fresh`.
+
+For each constructor we record:
+* the freshness side condition,
+* the post-state shape (tsm, anfSt, stkSt),
+* (for `assert`) the operand-resolves-to-`vBool true` precondition.
+
+The relation is tight enough that `simpleStepRel_preserves` can
+discharge predicate-side preservation directly via Stage A
+helpers (`agreesTagged_push_value`,
+`taggedStackAligned_addBinding_fresh`). Operational composition
+(showing `runOps` over the lowered body witnesses `ChainRel`) is
+the next phase and stays independent of this predicate closure.
+
+The deliverable: any binding list whose every binding is in
+SimpleANF chains through `agreesTagged_chain_preserves`, giving
+a fully-verified Stage C closure on the predicate side. -/
+
+/-- The SimpleANF Stage C step relation. Holds iff the binding
+falls into the curated subset and the input/output states match
+the constructor's prescribed shape. -/
+def simpleStepRel : StepRel := fun b tsm anfSt stkSt tsm' anfSt' stkSt' =>
+  match b.value with
+  | .loadConst (.int i) =>
+      freshIn b.name (untagSm tsm) ∧
+      tsm' = (b.name, .binding) :: tsm ∧
+      anfSt' = anfSt.addBinding b.name (.vBigint i) ∧
+      stkSt' = stkSt.push (.vBigint i)
+  | .loadConst (.bool flag) =>
+      freshIn b.name (untagSm tsm) ∧
+      tsm' = (b.name, .binding) :: tsm ∧
+      anfSt' = anfSt.addBinding b.name (.vBool flag) ∧
+      stkSt' = stkSt.push (.vBool flag)
+  | .loadConst (.bytes ba) =>
+      freshIn b.name (untagSm tsm) ∧
+      tsm' = (b.name, .binding) :: tsm ∧
+      anfSt' = anfSt.addBinding b.name (.vBytes ba) ∧
+      stkSt' = stkSt.push (.vBytes ba)
+  | .loadConst .thisRef =>
+      freshIn b.name (untagSm tsm) ∧
+      tsm' = tsm ∧
+      anfSt' = anfSt.addBinding b.name .vThis ∧
+      stkSt' = stkSt
+  | .assert _ =>
+      freshIn b.name (untagSm tsm) ∧
+      tsm' = tsm ∧
+      anfSt' = anfSt.addBinding b.name (.vBool true) ∧
+      stkSt' = stkSt
+  | .loadParam _ =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | .loadProp _ =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | .loadConst (.refAlias _) =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | .unaryOp _ _ _ =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | .binOp _ _ _ _ =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | .call _ _ =>
+      freshIn b.name (untagSm tsm) ∧
+      ∃ v, tsm' = (b.name, .binding) :: tsm ∧
+           anfSt' = anfSt.addBinding b.name v ∧
+           stkSt' = stkSt.push v
+  | _ => False
+
+/-- Stage C preservation hypothesis for `simpleStepRel`. Discharges
+the per-step preservation requirement of `agreesTagged_chain_preserves`. -/
+theorem simpleStepRel_preserves :
+    ∀ b tsm anfSt stkSt tsm' anfSt' stkSt',
+        simpleStepRel b tsm anfSt stkSt tsm' anfSt' stkSt' →
+        agreesTagged tsm anfSt stkSt →
+        agreesTagged tsm' anfSt' stkSt' := by
+  intro b tsm anfSt stkSt tsm' anfSt' stkSt' hStep hAgrees
+  unfold simpleStepRel at hStep
+  match hVal : b.value with
+  | .loadConst (.int i) =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt (.vBigint i) hAgrees hFresh
+  | .loadConst (.bool flag) =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt (.vBool flag) hAgrees hFresh
+  | .loadConst (.bytes ba) =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt (.vBytes ba) hAgrees hFresh
+  | .loadConst .thisRef =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, hTsm, hAnf, hStk⟩ := hStep
+      rw [hTsm, hAnf, hStk]
+      refine ⟨?_, ?_, ?_⟩
+      · exact taggedStackAligned_addBinding_fresh tsm anfSt stkSt.stack b.name
+                .vThis hFresh hAgrees.1
+      · show (anfSt.addBinding b.name .vThis).props = stkSt.props
+        unfold State.addBinding; exact hAgrees.2.1
+      · show (anfSt.addBinding b.name .vThis).outputs = stkSt.outputs
+        unfold State.addBinding; exact hAgrees.2.2
+  | .assert _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, hTsm, hAnf, hStk⟩ := hStep
+      rw [hTsm, hAnf, hStk]
+      refine ⟨?_, ?_, ?_⟩
+      · exact taggedStackAligned_addBinding_fresh tsm anfSt stkSt.stack b.name
+                (.vBool true) hFresh hAgrees.1
+      · show (anfSt.addBinding b.name (.vBool true)).props = stkSt.props
+        unfold State.addBinding; exact hAgrees.2.1
+      · show (anfSt.addBinding b.name (.vBool true)).outputs = stkSt.outputs
+        unfold State.addBinding; exact hAgrees.2.2
+  | .loadParam _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .loadProp _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .loadConst (.refAlias _) =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .binOp _ _ _ _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .unaryOp _ _ _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .call _ _ =>
+      rw [hVal] at hStep
+      obtain ⟨hFresh, v, hTsm, hAnf, hStk⟩ := hStep
+      subst hTsm hAnf hStk
+      exact agreesTagged_push_value tsm b.name anfSt stkSt v hAgrees hFresh
+  | .methodCall _ _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .ifVal _ _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .updateProp _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .loop _ _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .arrayLiteral _ => rw [hVal] at hStep; exact hStep.elim
+  | .addOutput _ _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .addRawOutput _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .addDataOutput _ _ => rw [hVal] at hStep; exact hStep.elim
+  | .checkPreimage _ => rw [hVal] at hStep; exact hStep.elim
+  | .getStateScript => rw [hVal] at hStep; exact hStep.elim
+  | .deserializeState _ => rw [hVal] at hStep; exact hStep.elim
+
+/-- **Stage C closure for SimpleANF.** From a `ChainRel simpleStepRel`
+witness over a binding list, predicate-side `agreesTagged` preservation
+follows by composing `agreesTagged_chain_preserves` with
+`simpleStepRel_preserves`.
+
+This is the first fully-discharged Stage C theorem against a real
+subset of the language. The complementary operational claim
+("running the lowered body witnesses `ChainRel`") is the next
+phase. -/
+theorem stageC_simpleANF_preserves
+    (bindings : List ANFBinding)
+    (tsm tsm' : TaggedStackMap)
+    (anfSt anfSt' : State)
+    (stkSt stkSt' : StackState)
+    (hChain : ChainRel simpleStepRel bindings tsm anfSt stkSt tsm' anfSt' stkSt')
+    (hAgrees : agreesTagged tsm anfSt stkSt) :
+    agreesTagged tsm' anfSt' stkSt' :=
+  agreesTagged_chain_preserves simpleStepRel simpleStepRel_preserves
+    bindings tsm tsm' anfSt anfSt' stkSt stkSt' hChain hAgrees
+
+/-! ## Phase 7.6 — Operational discharge (per-binding witness for `simpleStepRel`)
+
+For each constructor in the SimpleANF subset, we prove a per-binding
+"witness" theorem of the form
+
+  let (ops, _) := lowerValue (untagSm tsm) bn value
+  runOps ops stkSt = .ok stkSt' ∧
+  simpleStepRel ⟨bn, value, none⟩ tsm anfSt stkSt
+                tsm' (anfSt.addBinding bn val) stkSt'
+
+i.e. running the lowered ops produces a runtime state that, paired
+with the natural ANF post-state (anfSt + new binding), satisfies
+`simpleStepRel`. Combined with the predicate-side
+`simpleStepRel_preserves` and the chain-induction
+`agreesTagged_chain_preserves`, these witnesses discharge Stage C
+for SimpleANF binding lists on the runtime side.
+
+The ANF-side witness (`evalValue anfSt value = .ok (val, anfSt)`)
+is provable but requires deriving equation lemmas for the
+`partial def evalValue` — deferred to a future "evalValue
+equation-lemma" pass that doesn't change the trust surface.
+
+The list-level discharge (`runOps (lowerBindings sm body).1 stkSt`
+witnesses `ChainRel simpleStepRel body ...`) follows by structural
+induction on the body; we ship the per-constructor witnesses here
+and the list-level composition as future work. -/
+
+open Stack.Lower (lowerValue emitConst)
+
+/-- Operational discharge for `loadConst .int`. -/
+theorem stageC_simpleStep_loadConst_int
+    (bn : String) (i : Int)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (lowerValue (untagSm tsm) bn (.loadConst (.int i))).1 stkSt
+      = .ok (stkSt.push (.vBigint i))
+    ∧ simpleStepRel (.mk bn (.loadConst (.int i)) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn (.vBigint i))
+                    (stkSt.push (.vBigint i)) := by
+  refine ⟨?_, ?_⟩
+  · show runOps [.push (.bigint i)] stkSt = .ok (stkSt.push (.vBigint i))
+    exact Stack.Sim.run_push_bigint stkSt i
+  · show freshIn bn (untagSm tsm) ∧
+         (((bn, .binding) :: tsm) = (bn, .binding) :: tsm) ∧
+         (anfSt.addBinding bn (.vBigint i) = anfSt.addBinding bn (.vBigint i)) ∧
+         (stkSt.push (.vBigint i) = stkSt.push (.vBigint i))
+    exact ⟨hFresh, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `loadConst .bool`. -/
+theorem stageC_simpleStep_loadConst_bool
+    (bn : String) (flag : Bool)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (lowerValue (untagSm tsm) bn (.loadConst (.bool flag))).1 stkSt
+      = .ok (stkSt.push (.vBool flag))
+    ∧ simpleStepRel (.mk bn (.loadConst (.bool flag)) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn (.vBool flag))
+                    (stkSt.push (.vBool flag)) := by
+  refine ⟨?_, ?_⟩
+  · show runOps [.push (.bool flag)] stkSt = .ok (stkSt.push (.vBool flag))
+    exact Stack.Sim.run_push_bool stkSt flag
+  · show freshIn bn (untagSm tsm) ∧
+         (((bn, .binding) :: tsm) = (bn, .binding) :: tsm) ∧
+         (anfSt.addBinding bn (.vBool flag) = anfSt.addBinding bn (.vBool flag)) ∧
+         (stkSt.push (.vBool flag) = stkSt.push (.vBool flag))
+    exact ⟨hFresh, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `loadConst .bytes`. -/
+theorem stageC_simpleStep_loadConst_bytes
+    (bn : String) (ba : ByteArray)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (lowerValue (untagSm tsm) bn (.loadConst (.bytes ba))).1 stkSt
+      = .ok (stkSt.push (.vBytes ba))
+    ∧ simpleStepRel (.mk bn (.loadConst (.bytes ba)) none) tsm anfSt stkSt
+                    ((bn, .binding) :: tsm)
+                    (anfSt.addBinding bn (.vBytes ba))
+                    (stkSt.push (.vBytes ba)) := by
+  refine ⟨?_, ?_⟩
+  · show runOps [.push (.bytes ba)] stkSt = .ok (stkSt.push (.vBytes ba))
+    exact Stack.Sim.run_push_bytes stkSt ba
+  · show freshIn bn (untagSm tsm) ∧
+         (((bn, .binding) :: tsm) = (bn, .binding) :: tsm) ∧
+         (anfSt.addBinding bn (.vBytes ba) = anfSt.addBinding bn (.vBytes ba)) ∧
+         (stkSt.push (.vBytes ba) = stkSt.push (.vBytes ba))
+    exact ⟨hFresh, rfl, rfl, rfl⟩
+
+/-- Operational discharge for `loadConst .thisRef`. Stack unchanged;
+ANF binds the synthetic `vThis` value. -/
+theorem stageC_simpleStep_loadConst_thisRef
+    (bn : String)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (lowerValue (untagSm tsm) bn (.loadConst .thisRef)).1 stkSt = .ok stkSt
+    ∧ simpleStepRel (.mk bn (.loadConst .thisRef) none) tsm anfSt stkSt
+                    tsm
+                    (anfSt.addBinding bn .vThis)
+                    stkSt := by
+  refine ⟨?_, ?_⟩
+  · show runOps ([] : List StackOp) stkSt = .ok stkSt
+    exact Stack.Sim.run_empty stkSt
+  · show freshIn bn (untagSm tsm) ∧
+         (tsm = tsm) ∧
+         (anfSt.addBinding bn .vThis = anfSt.addBinding bn .vThis) ∧
+         (stkSt = stkSt)
+    exact ⟨hFresh, rfl, rfl, rfl⟩
+
+/-! ### Phase 7.6 — Operational discharge for `loadParam` / `loadProp` /
+`loadConst .refAlias` (depth-0 case)
+
+Each emits `loadRef sm name`, which dispatches by depth. The
+depth-0 case (n at top of sm) emits `[.dup]` — the most common
+case in real code (just-bound temps used immediately by the next
+binding). Uses `run_dup_nonEmpty` for the operational step and
+`agreesTagged`-derived alignment to identify the loaded value. -/
+
+private theorem loadRef_d0_op_run
+    (n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n) stkSt = .ok (stkSt.push v) := by
+  rw [hLoadRefShape]
+  have hAlign : taggedStackAligned ((n, k) :: tsm_rest) anfSt stkSt.stack := hAgrees.1
+  have hStkNonEmpty : ∃ topV rest, stkSt.stack = topV :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | topV :: rest => exact ⟨topV, rest, rfl⟩
+  obtain ⟨topV, rest, hStk⟩ := hStkNonEmpty
+  have hHead : lookupAnfByKind anfSt (n, k) = some topV := by
+    rw [hStk] at hAlign; unfold taggedStackAligned at hAlign; exact hAlign.1
+  have hVeq : topV = v := by
+    rw [hLookup] at hHead; exact (Option.some.inj hHead).symm
+  rw [← hVeq]
+  exact Stack.Sim.run_dup_nonEmpty stkSt topV rest hStk
+
+/-- Operational discharge for `loadParam n` at depth 0. -/
+theorem stageC_simpleStep_loadParam_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.loadParam n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadParam n) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_d0_op_run n k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `loadProp n` at depth 0. -/
+theorem stageC_simpleStep_loadProp_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.loadProp n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadProp n) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_d0_op_run n k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `loadConst (.refAlias n)` at depth 0. -/
+theorem stageC_simpleStep_loadConst_refAlias_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.loadConst (.refAlias n))).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadConst (.refAlias n)) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n) stkSt = .ok (stkSt.push v)
+    exact loadRef_d0_op_run n k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-! ### Phase 7.6 — Operational discharge for `unaryOp` (depth 0)
+
+For `unaryOp op operand _` with operand at depth 0, the lowered
+ops are `[.dup, .opcode <unaryOpcode op>]`. Stack progression:
+`[v, ...]` → `[v, v, ...]` → `[op(v), v, ...]`. The discharge
+chains `run_dup_nonEmpty` (load) with the per-opcode reduction. -/
+
+/-- Operational discharge for `unaryOp "-" operand _` at depth 0
+(emits `[.dup, .opcode "OP_NEGATE"]`). -/
+theorem stageC_simpleStep_unaryOp_NEGATE_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (i : Int) (rt : Option String)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.unaryOp "-" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBigint (-i)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "-" n rt) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBigint (-i)))
+                    (stkSt.push (.vBigint (-i))) := by
+  refine ⟨?_, ?_⟩
+  · -- lowerValue for unaryOp emits `loadRef sm n ++ [.opcode <unaryOpcode op>]`.
+    -- For op = "-", unaryOpcode = "OP_NEGATE".
+    show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n ++ [.opcode "OP_NEGATE"]) stkSt
+       = .ok (stkSt.push (.vBigint (-i)))
+    -- Use the unconditional unaryOp NEGATE depth-0 lemma which already
+    -- chains load + opcode and yields the post-state directly.
+    have h := agreesTagged_unaryOp_NEGATE_d0_unconditional
+                n k tsm_rest bn anfSt stkSt i hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · refine ⟨?_, (.vBigint (-i)), rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `unaryOp "!" operand _` at depth 0
+(emits `[.dup, .opcode "OP_NOT"]`). -/
+theorem stageC_simpleStep_unaryOp_NOT_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (b : Bool) (rt : Option String)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool b))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.unaryOp "!" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBool (!b)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "!" n rt) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBool (!b)))
+                    (stkSt.push (.vBool (!b))) := by
+  refine ⟨?_, ?_⟩
+  · show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n ++ [.opcode "OP_NOT"]) stkSt
+       = .ok (stkSt.push (.vBool (!b)))
+    have h := agreesTagged_unaryOp_NOT_d0_unconditional
+                n k tsm_rest bn anfSt stkSt b hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · refine ⟨?_, (.vBool (!b)), rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-! ### Phase 7.6 — Operational discharge for `assert` (depth 0)
+
+For `assert n` with operand at depth 0 (vBool true), the lowered
+ops are `[.dup, .opcode "OP_VERIFY"]`. The depth-0 unconditional
+Stage B lemma already chains load + opcode and yields the
+post-state. -/
+
+/-- Operational discharge for `assert n` at depth 0 (vBool true). -/
+theorem stageC_simpleStep_assert_d0
+    (bn n : String) (k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool true))
+    (hFresh : freshIn bn (n :: untagSm tsm_rest))
+    (hLoadRefShape : loadRef (untagSm ((n, k) :: tsm_rest)) n = [.dup]) :
+    runOps (lowerValue (untagSm ((n, k) :: tsm_rest)) bn (.assert n)).1 stkSt = .ok stkSt
+    ∧ simpleStepRel (.mk bn (.assert n) none) ((n, k) :: tsm_rest) anfSt stkSt
+                    ((n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBool true))
+                    stkSt := by
+  refine ⟨?_, ?_⟩
+  · -- lowerValue for assert emits `loadRef sm n ++ [.opcode "OP_VERIFY"]`,
+    -- with sm unchanged (assert returns the input sm, not sm.push bn).
+    show runOps (loadRef (untagSm ((n, k) :: tsm_rest)) n ++ [.opcode "OP_VERIFY"]) stkSt
+       = .ok stkSt
+    have h := agreesTagged_assert_d0_unconditional
+                n k tsm_rest bn anfSt stkSt hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · show freshIn bn (untagSm ((n, k) :: tsm_rest)) ∧
+         (((n, k) :: tsm_rest) = (n, k) :: tsm_rest) ∧
+         (anfSt.addBinding bn (.vBool true) = anfSt.addBinding bn (.vBool true)) ∧
+         (stkSt = stkSt)
+    refine ⟨?_, rfl, rfl, rfl⟩
+    unfold untagSm
+    exact hFresh
+
+/-! ### Phase 7.6.d — Operational discharge for `loadParam` / `loadProp` /
+`loadConst .refAlias` (depth-1 case)
+
+When the operand is at depth 1 of `sm`, `loadRef` emits `[.over]`
+which copies depth-1 to top. Uses `run_over_deep` for the
+operational step + alignment to identify the loaded value. -/
+
+private theorem loadRef_d1_op_run
+    (topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n) stkSt
+      = .ok (stkSt.push v) := by
+  rw [hLoadRefShape]
+  have hAlign : taggedStackAligned ((topName, k_top) :: (n, k) :: tsm_rest)
+                                    anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV depth1V rest, stkSt.stack = topV :: depth1V :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: depth1V :: rest => exact ⟨topV, depth1V, rest, rfl⟩
+  obtain ⟨topV, depth1V, rest, hStk⟩ := hStkShape
+  have hAt1 : lookupAnfByKind anfSt (n, k) = some depth1V := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeq : depth1V = v := by
+    rw [hLookup] at hAt1; exact (Option.some.inj hAt1).symm
+  rw [← hVeq]
+  exact Stack.Sim.run_over_deep stkSt topV depth1V rest hStk
+
+/-- Operational discharge for `loadParam n` at depth 1. -/
+theorem stageC_simpleStep_loadParam_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.loadParam n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadParam n) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n) stkSt
+          = .ok (stkSt.push v)
+    exact loadRef_d1_op_run topName n k_top k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `loadProp n` at depth 1. -/
+theorem stageC_simpleStep_loadProp_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.loadProp n)).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadProp n) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n) stkSt
+          = .ok (stkSt.push v)
+    exact loadRef_d1_op_run topName n k_top k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `loadConst (.refAlias n)` at depth 1. -/
+theorem stageC_simpleStep_loadConst_refAlias_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (v : Value)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some v)
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.loadConst (.refAlias n))).1 stkSt
+      = .ok (stkSt.push v)
+    ∧ simpleStepRel (.mk bn (.loadConst (.refAlias n)) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn v)
+                    (stkSt.push v) := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n) stkSt
+          = .ok (stkSt.push v)
+    exact loadRef_d1_op_run topName n k_top k tsm_rest anfSt stkSt v hAgrees hLookup hLoadRefShape
+  · refine ⟨?_, v, rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `unaryOp "-" operand _` at depth 1. -/
+theorem stageC_simpleStep_unaryOp_NEGATE_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (i : Int) (rt : Option String)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.unaryOp "-" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBigint (-i)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "-" n rt) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBigint (-i)))
+                    (stkSt.push (.vBigint (-i))) := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n
+              ++ [.opcode "OP_NEGATE"]) stkSt
+          = .ok (stkSt.push (.vBigint (-i)))
+    have h := agreesTagged_unaryOp_NEGATE_d1_unconditional
+                topName n k_top k tsm_rest bn anfSt stkSt i hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · refine ⟨?_, (.vBigint (-i)), rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `unaryOp "!" operand _` at depth 1. -/
+theorem stageC_simpleStep_unaryOp_NOT_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState) (b : Bool) (rt : Option String)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool b))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.unaryOp "!" n rt)).1 stkSt
+      = .ok (stkSt.push (.vBool (!b)))
+    ∧ simpleStepRel (.mk bn (.unaryOp "!" n rt) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBool (!b)))
+                    (stkSt.push (.vBool (!b))) := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n
+              ++ [.opcode "OP_NOT"]) stkSt
+          = .ok (stkSt.push (.vBool (!b)))
+    have h := agreesTagged_unaryOp_NOT_d1_unconditional
+                topName n k_top k tsm_rest bn anfSt stkSt b hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · refine ⟨?_, (.vBool (!b)), rfl, rfl, rfl⟩
+    show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+    unfold untagSm
+    exact hFresh
+
+/-- Operational discharge for `assert n` at depth 1 (vBool true). -/
+theorem stageC_simpleStep_assert_d1
+    (bn topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool true))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest))
+    (hLoadRefShape :
+        loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n = [.over]) :
+    runOps (lowerValue (untagSm ((topName, k_top) :: (n, k) :: tsm_rest))
+                       bn (.assert n)).1 stkSt = .ok stkSt
+    ∧ simpleStepRel (.mk bn (.assert n) none)
+                    ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt
+                    ((topName, k_top) :: (n, k) :: tsm_rest)
+                    (anfSt.addBinding bn (.vBool true))
+                    stkSt := by
+  refine ⟨?_, ?_⟩
+  · show runOps
+            (loadRef (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) n
+              ++ [.opcode "OP_VERIFY"]) stkSt = .ok stkSt
+    have h := agreesTagged_assert_d1_unconditional
+                topName n k_top k tsm_rest bn anfSt stkSt hAgrees hLookup hFresh
+    rw [hLoadRefShape]
+    exact h.1
+  · show freshIn bn (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) ∧
+         (((topName, k_top) :: (n, k) :: tsm_rest)
+            = (topName, k_top) :: (n, k) :: tsm_rest) ∧
+         (anfSt.addBinding bn (.vBool true) = anfSt.addBinding bn (.vBool true)) ∧
+         (stkSt = stkSt)
+    refine ⟨?_, rfl, rfl, rfl⟩
+    unfold untagSm
+    exact hFresh
+
+/-! ## Phase 7.6.b — list-level `ChainRel simpleStepRel` composition
+
+Lifts per-binding witness theorems to list-level ChainRel proofs.
+The key building blocks:
+
+1. The empty list yields `ChainRel.nil`.
+2. Cons-extending a ChainRel: given a `simpleStepRel` step and a
+   `ChainRel` continuation, get a longer `ChainRel`.
+3. Operational composition: `runOps (lowerBindings sm body).1 stkSt`
+   distributes over `runOps_append`, so chaining the per-binding
+   `runOps` results gives the whole-body operational claim.
+
+These pieces let users assemble `ChainRel simpleStepRel body ...`
+witnesses + the corresponding `runOps` claims for arbitrary
+SimpleANF binding lists. Combined with `stageC_simpleANF_preserves`,
+this delivers a fully-discharged Stage C closure (predicate +
+operational sides) for any SimpleANF body. -/
+
+/-- Empty body: trivial ChainRel via the nil constructor. -/
+theorem chainRel_nil
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState) :
+    ChainRel simpleStepRel [] tsm anfSt stkSt tsm anfSt stkSt :=
+  ChainRel.nil
+
+/-- Empty body: `runOps` over the lowered ops is the identity. -/
+theorem runOps_lowerBindings_nil
+    (sm : StackMap) (stkSt : StackState) :
+    runOps (Stack.Lower.lowerBindings sm []).1 stkSt = .ok stkSt := by
+  show runOps ([] : List StackOp) stkSt = .ok stkSt
+  exact Stack.Sim.run_empty stkSt
+
+/-- Cons-extension: a single-binding ChainRel can be extended by
+prepending another step. -/
+theorem chainRel_cons
+    (b : ANFBinding) (rest : List ANFBinding)
+    (tsm tsm_b' tsm' : TaggedStackMap)
+    (anfSt anfSt_b' anfSt' : State)
+    (stkSt stkSt_b' stkSt' : StackState)
+    (hStep : simpleStepRel b tsm anfSt stkSt tsm_b' anfSt_b' stkSt_b')
+    (hRest : ChainRel simpleStepRel rest tsm_b' anfSt_b' stkSt_b' tsm' anfSt' stkSt') :
+    ChainRel simpleStepRel (b :: rest) tsm anfSt stkSt tsm' anfSt' stkSt' :=
+  ChainRel.cons hStep hRest
+
+/-- Operational lift for a one-binding body: combine `lowerBindings`
+unfolding with `runOps_append` + the empty-tail identity. -/
+theorem runOps_lowerBindings_singleton
+    (sm : StackMap) (b : ANFBinding) (stkSt stkSt' : StackState)
+    (hRun : runOps (Stack.Lower.lowerValue sm b.name b.value).1 stkSt = .ok stkSt') :
+    runOps (Stack.Lower.lowerBindings sm [b]).1 stkSt = .ok stkSt' := by
+  -- lowerBindings sm [.mk name v _] = (ops ++ [], sm') where ops = (lowerValue sm name v).1
+  cases b with
+  | mk name v src =>
+      show runOps ((Stack.Lower.lowerValue sm name v).1 ++ []) stkSt = .ok stkSt'
+      rw [List.append_nil]
+      exact hRun
+
+/-- Generic two-list compose: chain two `runOps` results via list append. -/
+theorem runOps_compose
+    {ops1 ops2 : List StackOp} {s s_mid s_end : StackState}
+    (h1 : runOps ops1 s = .ok s_mid)
+    (h2 : runOps ops2 s_mid = .ok s_end) :
+    runOps (ops1 ++ ops2) s = .ok s_end := by
+  rw [Stack.Sim.runOps_append, h1]
+  exact h2
+
+/-- Operational lift for cons: chaining a single binding's runOps result
+with the rest's runOps result via `runOps_append`. -/
+theorem runOps_lowerBindings_cons
+    (sm sm_b' : StackMap) (b : ANFBinding) (rest : List ANFBinding)
+    (stkSt stkSt_b' stkSt' : StackState)
+    (hRun : runOps (Stack.Lower.lowerValue sm b.name b.value).1 stkSt = .ok stkSt_b')
+    (hSm : (Stack.Lower.lowerValue sm b.name b.value).2 = sm_b')
+    (hRest : runOps (Stack.Lower.lowerBindings sm_b' rest).1 stkSt_b' = .ok stkSt') :
+    runOps (Stack.Lower.lowerBindings sm (b :: rest)).1 stkSt = .ok stkSt' := by
+  cases b with
+  | mk name v src =>
+      show runOps
+              ((Stack.Lower.lowerValue sm name v).1
+                ++ (Stack.Lower.lowerBindings (Stack.Lower.lowerValue sm name v).2 rest).1)
+              stkSt = .ok stkSt'
+      rw [← hSm] at hRest
+      exact runOps_compose hRun hRest
+
+/-- **Stage C closure for a singleton SimpleANF body** —
+demonstrates the runOps + ChainRel pairing for a one-binding body.
+Combines `runOps_lowerBindings_singleton` with `chainRel_cons`. -/
+theorem stageC_singleton_loadConst_int
+    (bn : String) (i : Int)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn (.loadConst (.int i)) none]).1 stkSt
+      = .ok (stkSt.push (.vBigint i))
+    ∧ ChainRel simpleStepRel [.mk bn (.loadConst (.int i)) none]
+                tsm anfSt stkSt
+                ((bn, .binding) :: tsm)
+                (anfSt.addBinding bn (.vBigint i))
+                (stkSt.push (.vBigint i)) := by
+  -- Per-binding witness from Phase 7.6.
+  have ⟨hRun, hStep⟩ :=
+    stageC_simpleStep_loadConst_int bn i tsm anfSt stkSt hFresh
+  refine ⟨?_, ?_⟩
+  · -- Operational lift to the singleton body via runOps_lowerBindings_singleton.
+    exact runOps_lowerBindings_singleton (untagSm tsm)
+            (.mk bn (.loadConst (.int i)) none) stkSt
+            (stkSt.push (.vBigint i)) hRun
+  · -- ChainRel.cons with nil tail.
+    exact chainRel_cons (.mk bn (.loadConst (.int i)) none) []
+            tsm ((bn, .binding) :: tsm) ((bn, .binding) :: tsm)
+            anfSt (anfSt.addBinding bn (.vBigint i)) (anfSt.addBinding bn (.vBigint i))
+            stkSt (stkSt.push (.vBigint i)) (stkSt.push (.vBigint i))
+            hStep
+            (chainRel_nil ((bn, .binding) :: tsm)
+              (anfSt.addBinding bn (.vBigint i)) (stkSt.push (.vBigint i)))
+
+/-! ### Phase 7.6.c — Multi-binding ChainRel demonstration
+
+The previous singleton example showed how per-binding witnesses
+compose into a single `ChainRel.cons` step. This section
+demonstrates the recursive composition for a 2-binding body —
+the pattern that scales to bodies of arbitrary length.
+
+The body:
+
+  let t0 = 42
+  let t1 = 7
+
+Lower → `[.push 42] ++ [.push 7] = [.push 42, .push 7]`. Stack
+progression from any `stkSt`:
+
+  stkSt → stkSt.push (vBigint 42) → (stkSt.push (vBigint 42)).push (vBigint 7)
+
+ChainRel: two `cons` steps wrapping a `nil` tail. -/
+
+/-- Stage C closure for a 2-binding body of `loadConst .int`.
+Demonstrates that per-binding witnesses compose recursively. -/
+theorem stageC_two_loadConst_int
+    (bn1 bn2 : String) (i1 i2 : Int)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh1 : freshIn bn1 (untagSm tsm))
+    (hFresh2 : freshIn bn2 (untagSm ((bn1, .binding) :: tsm))) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn1 (.loadConst (.int i1)) none,
+               .mk bn2 (.loadConst (.int i2)) none]).1 stkSt
+      = .ok ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+    ∧ ChainRel simpleStepRel
+        [.mk bn1 (.loadConst (.int i1)) none,
+         .mk bn2 (.loadConst (.int i2)) none]
+        tsm anfSt stkSt
+        ((bn2, .binding) :: (bn1, .binding) :: tsm)
+        ((anfSt.addBinding bn1 (.vBigint i1)).addBinding bn2 (.vBigint i2))
+        ((stkSt.push (.vBigint i1)).push (.vBigint i2)) := by
+  -- Per-binding witness for the first binding.
+  have ⟨hRun1, hStep1⟩ :=
+    stageC_simpleStep_loadConst_int bn1 i1 tsm anfSt stkSt hFresh1
+  -- Per-binding witness for the second, with sm/anfSt/stkSt advanced.
+  have ⟨hRun2, hStep2⟩ :=
+    stageC_simpleStep_loadConst_int bn2 i2 ((bn1, .binding) :: tsm)
+      (anfSt.addBinding bn1 (.vBigint i1)) (stkSt.push (.vBigint i1)) hFresh2
+  refine ⟨?_, ?_⟩
+  · -- Operational composition via cons + singleton lift.
+    -- lowerBindings sm [b1, b2] = (ops1 ++ (ops2 ++ []), sm'')
+    --                          = (ops1 ++ ops2, sm'') definitionally.
+    -- We use runOps_lowerBindings_cons twice: once for [b1, b2] and once
+    -- for the inner [b2] singleton.
+    have hSm1 :
+        (Stack.Lower.lowerValue (untagSm tsm) bn1 (.loadConst (.int i1))).2
+          = bn1 :: untagSm tsm := rfl
+    have hRest : runOps (Stack.Lower.lowerBindings
+                          (bn1 :: untagSm tsm)
+                          [.mk bn2 (.loadConst (.int i2)) none]).1
+                        (stkSt.push (.vBigint i1))
+                = .ok ((stkSt.push (.vBigint i1)).push (.vBigint i2)) := by
+      -- Use singleton lift for the inner body.
+      -- hRun2 has form (lowerValue ((bn1,.binding) :: tsm |> untagSm)).1 = ...
+      -- and untagSm ((bn1, .binding) :: tsm) = bn1 :: untagSm tsm by definition.
+      show runOps (Stack.Lower.lowerBindings
+                    (untagSm ((bn1, .binding) :: tsm))
+                    [.mk bn2 (.loadConst (.int i2)) none]).1
+                  (stkSt.push (.vBigint i1))
+            = .ok ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+      exact runOps_lowerBindings_singleton
+              (untagSm ((bn1, .binding) :: tsm))
+              (.mk bn2 (.loadConst (.int i2)) none)
+              (stkSt.push (.vBigint i1))
+              ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+              hRun2
+    exact runOps_lowerBindings_cons (untagSm tsm) (bn1 :: untagSm tsm)
+            (.mk bn1 (.loadConst (.int i1)) none)
+            [.mk bn2 (.loadConst (.int i2)) none]
+            stkSt (stkSt.push (.vBigint i1))
+            ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+            hRun1 hSm1 hRest
+  · -- ChainRel.cons composition.
+    apply chainRel_cons (.mk bn1 (.loadConst (.int i1)) none)
+            [.mk bn2 (.loadConst (.int i2)) none]
+            tsm ((bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            anfSt (anfSt.addBinding bn1 (.vBigint i1))
+            ((anfSt.addBinding bn1 (.vBigint i1)).addBinding bn2 (.vBigint i2))
+            stkSt (stkSt.push (.vBigint i1))
+            ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+            hStep1
+    apply chainRel_cons (.mk bn2 (.loadConst (.int i2)) none) []
+            ((bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            (anfSt.addBinding bn1 (.vBigint i1))
+            ((anfSt.addBinding bn1 (.vBigint i1)).addBinding bn2 (.vBigint i2))
+            ((anfSt.addBinding bn1 (.vBigint i1)).addBinding bn2 (.vBigint i2))
+            (stkSt.push (.vBigint i1))
+            ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+            ((stkSt.push (.vBigint i1)).push (.vBigint i2))
+            hStep2
+    exact chainRel_nil _ _ _
+
+/-- Singleton Stage C closure for `loadConst .bool`. -/
+theorem stageC_singleton_loadConst_bool
+    (bn : String) (flag : Bool)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn (.loadConst (.bool flag)) none]).1 stkSt
+      = .ok (stkSt.push (.vBool flag))
+    ∧ ChainRel simpleStepRel [.mk bn (.loadConst (.bool flag)) none]
+                tsm anfSt stkSt
+                ((bn, .binding) :: tsm)
+                (anfSt.addBinding bn (.vBool flag))
+                (stkSt.push (.vBool flag)) := by
+  have ⟨hRun, hStep⟩ := stageC_simpleStep_loadConst_bool bn flag tsm anfSt stkSt hFresh
+  refine ⟨?_, ?_⟩
+  · exact runOps_lowerBindings_singleton (untagSm tsm)
+            (.mk bn (.loadConst (.bool flag)) none) stkSt
+            (stkSt.push (.vBool flag)) hRun
+  · exact chainRel_cons (.mk bn (.loadConst (.bool flag)) none) []
+            tsm ((bn, .binding) :: tsm) ((bn, .binding) :: tsm)
+            anfSt (anfSt.addBinding bn (.vBool flag)) (anfSt.addBinding bn (.vBool flag))
+            stkSt (stkSt.push (.vBool flag)) (stkSt.push (.vBool flag))
+            hStep
+            (chainRel_nil _ _ _)
+
+/-- Singleton Stage C closure for `loadConst .bytes`. -/
+theorem stageC_singleton_loadConst_bytes
+    (bn : String) (ba : ByteArray)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn (.loadConst (.bytes ba)) none]).1 stkSt
+      = .ok (stkSt.push (.vBytes ba))
+    ∧ ChainRel simpleStepRel [.mk bn (.loadConst (.bytes ba)) none]
+                tsm anfSt stkSt
+                ((bn, .binding) :: tsm)
+                (anfSt.addBinding bn (.vBytes ba))
+                (stkSt.push (.vBytes ba)) := by
+  have ⟨hRun, hStep⟩ := stageC_simpleStep_loadConst_bytes bn ba tsm anfSt stkSt hFresh
+  refine ⟨?_, ?_⟩
+  · exact runOps_lowerBindings_singleton (untagSm tsm)
+            (.mk bn (.loadConst (.bytes ba)) none) stkSt
+            (stkSt.push (.vBytes ba)) hRun
+  · exact chainRel_cons (.mk bn (.loadConst (.bytes ba)) none) []
+            tsm ((bn, .binding) :: tsm) ((bn, .binding) :: tsm)
+            anfSt (anfSt.addBinding bn (.vBytes ba)) (anfSt.addBinding bn (.vBytes ba))
+            stkSt (stkSt.push (.vBytes ba)) (stkSt.push (.vBytes ba))
+            hStep
+            (chainRel_nil _ _ _)
+
+/-- Singleton Stage C closure for `loadConst .thisRef`. Stack
+unchanged; ANF binds `vThis`. -/
+theorem stageC_singleton_loadConst_thisRef
+    (bn : String)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn (.loadConst .thisRef) none]).1 stkSt
+      = .ok stkSt
+    ∧ ChainRel simpleStepRel [.mk bn (.loadConst .thisRef) none]
+                tsm anfSt stkSt
+                tsm
+                (anfSt.addBinding bn .vThis)
+                stkSt := by
+  have ⟨hRun, hStep⟩ := stageC_simpleStep_loadConst_thisRef bn tsm anfSt stkSt hFresh
+  refine ⟨?_, ?_⟩
+  · exact runOps_lowerBindings_singleton (untagSm tsm)
+            (.mk bn (.loadConst .thisRef) none) stkSt stkSt hRun
+  · exact chainRel_cons (.mk bn (.loadConst .thisRef) none) []
+            tsm tsm tsm
+            anfSt (anfSt.addBinding bn .vThis) (anfSt.addBinding bn .vThis)
+            stkSt stkSt stkSt
+            hStep
+            (chainRel_nil _ _ _)
+
+/-! ### Phase 7.6.e — Mixed-constructor demonstration
+
+Real Rúnar code typically interleaves `loadConst`, `loadParam`,
+`unaryOp`, and `binOp`. This section shows that the framework
+handles a realistic 2-binding mixed body:
+
+  let t0 = 42       -- loadConst .int
+  let t1 = -t0      -- unaryOp "-" (depth 0 of [t0])
+
+Lower → `[.push 42, .dup, .opcode "OP_NEGATE"]`. Stack
+progression from `stkSt`:
+
+  stkSt
+   → stkSt.push (vBigint 42)              -- after .push 42
+   → ((stkSt.push (vBigint 42)).push (vBigint 42))  -- after .dup
+   → ((stkSt.push (vBigint 42)).push (vBigint -42)) -- after OP_NEGATE
+
+Final result: `(stkSt.push (vBigint 42)).push (vBigint -42)`.
+
+The proof composes Phase 7.6's `stageC_simpleStep_loadConst_int`
++ `stageC_simpleStep_unaryOp_NEGATE_d0` via the list-level
+composers from Phase 7.6.b. -/
+
+/-- Helper: after `addBinding bn v`, the lookup of `bn` (as a
+binding-kind slot) returns `some v`. Discharged by `simp` over
+the unfolded definitions. -/
+private theorem addBinding_self_lookup
+    (anfSt : State) (bn : String) (v : Value) :
+    lookupAnfByKind (anfSt.addBinding bn v) (bn, .binding) = some v := by
+  unfold lookupAnfByKind State.lookupBinding State.addBinding
+  simp
+
+/-- Stage C closure for the mixed-constructor body
+`[.loadConst .int 42; .unaryOp "-" t0]` — a 2-binding example
+showing how a literal flows into a unary op. -/
+theorem stageC_mixed_loadConst_unaryNegate
+    (bn1 bn2 : String) (i : Int) (rt : Option String)
+    (tsm : TaggedStackMap) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hFresh1 : freshIn bn1 (untagSm tsm))
+    (hFresh2 : freshIn bn2 (untagSm ((bn1, .binding) :: tsm)))
+    (hLoadRefShape :
+        loadRef (untagSm ((bn1, .binding) :: tsm)) bn1 = [.dup]) :
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn1 (.loadConst (.int i)) none,
+               .mk bn2 (.unaryOp "-" bn1 rt) none]).1 stkSt
+      = .ok ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+    ∧ ChainRel simpleStepRel
+        [.mk bn1 (.loadConst (.int i)) none,
+         .mk bn2 (.unaryOp "-" bn1 rt) none]
+        tsm anfSt stkSt
+        ((bn2, .binding) :: (bn1, .binding) :: tsm)
+        ((anfSt.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+        ((stkSt.push (.vBigint i)).push (.vBigint (-i))) := by
+  -- Step 1: per-binding witness for bn1 (loadConst).
+  have ⟨hRun1, hStep1⟩ :=
+    stageC_simpleStep_loadConst_int bn1 i tsm anfSt stkSt hFresh1
+  -- Step 2: derive agreesTagged for the post-bn1 state.
+  have hAgrees2 :
+      agreesTagged ((bn1, .binding) :: tsm)
+                   (anfSt.addBinding bn1 (.vBigint i))
+                   (stkSt.push (.vBigint i)) := by
+    have hFresh1' : freshIn bn1 (untagSm tsm) := hFresh1
+    exact agreesTagged_push_value tsm bn1 anfSt stkSt (.vBigint i) hAgrees hFresh1'
+  -- Step 3: per-binding witness for bn2 (unaryOp NEGATE).
+  -- The simpleStepRel arm wraps the v in an `∃ v, …`, but the per-binding
+  -- witness for unaryOp NEGATE supplies a specific v.
+  have hLookup2 :
+      lookupAnfByKind (anfSt.addBinding bn1 (.vBigint i)) (bn1, .binding)
+        = some (.vBigint i) :=
+    addBinding_self_lookup anfSt bn1 (.vBigint i)
+  -- Convert hFresh2 into the form expected by stageC_simpleStep_unaryOp_NEGATE_d0.
+  have hFresh2' : freshIn bn2 (bn1 :: untagSm tsm) := by
+    show ¬ bn2 ∈ (bn1 :: untagSm tsm)
+    exact hFresh2
+  have ⟨hRun2, hStep2⟩ :=
+    stageC_simpleStep_unaryOp_NEGATE_d0
+      bn2 bn1 .binding tsm
+      (anfSt.addBinding bn1 (.vBigint i)) (stkSt.push (.vBigint i))
+      i rt hAgrees2 hLookup2 hFresh2' hLoadRefShape
+  refine ⟨?_, ?_⟩
+  · -- Operational composition.
+    have hSm1 :
+        (Stack.Lower.lowerValue (untagSm tsm) bn1 (.loadConst (.int i))).2
+          = bn1 :: untagSm tsm := rfl
+    have hRest : runOps (Stack.Lower.lowerBindings
+                          (bn1 :: untagSm tsm)
+                          [.mk bn2 (.unaryOp "-" bn1 rt) none]).1
+                        (stkSt.push (.vBigint i))
+                = .ok ((stkSt.push (.vBigint i)).push (.vBigint (-i))) := by
+      show runOps (Stack.Lower.lowerBindings
+                    (untagSm ((bn1, .binding) :: tsm))
+                    [.mk bn2 (.unaryOp "-" bn1 rt) none]).1
+                  (stkSt.push (.vBigint i))
+            = .ok ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+      exact runOps_lowerBindings_singleton
+              (untagSm ((bn1, .binding) :: tsm))
+              (.mk bn2 (.unaryOp "-" bn1 rt) none)
+              (stkSt.push (.vBigint i))
+              ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+              hRun2
+    exact runOps_lowerBindings_cons (untagSm tsm) (bn1 :: untagSm tsm)
+            (.mk bn1 (.loadConst (.int i)) none)
+            [.mk bn2 (.unaryOp "-" bn1 rt) none]
+            stkSt (stkSt.push (.vBigint i))
+            ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+            hRun1 hSm1 hRest
+  · -- ChainRel composition.
+    apply chainRel_cons (.mk bn1 (.loadConst (.int i)) none)
+            [.mk bn2 (.unaryOp "-" bn1 rt) none]
+            tsm ((bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            anfSt (anfSt.addBinding bn1 (.vBigint i))
+            ((anfSt.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+            stkSt (stkSt.push (.vBigint i))
+            ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+            hStep1
+    apply chainRel_cons (.mk bn2 (.unaryOp "-" bn1 rt) none) []
+            ((bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            ((bn2, .binding) :: (bn1, .binding) :: tsm)
+            (anfSt.addBinding bn1 (.vBigint i))
+            ((anfSt.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+            ((anfSt.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+            (stkSt.push (.vBigint i))
+            ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+            ((stkSt.push (.vBigint i)).push (.vBigint (-i)))
+            hStep2
+    exact chainRel_nil _ _ _
+
+/-! ## Phase 7.8 — Stage D capstone (props/outputs preservation)
+
+This is the headline observational-equivalence claim for the
+SimpleANF subset. Given a fully-discharged Stage C closure
+(witnessed by `ChainRel simpleStepRel`) over an arbitrary
+SimpleANF binding list, the final ANF state and final runtime
+stack state agree on all observable side effects:
+
+* `props` — the contract's mutable state slots, identical on
+  both sides (no SimpleANF construct writes to props, so they
+  pass through unchanged).
+* `outputs` — the transaction outputs accumulated by the body,
+  identical on both sides (SimpleANF doesn't include
+  `addOutput` / `addRawOutput` / `addDataOutput`, so outputs
+  are also unchanged).
+
+Combined with the Phase 7.6.b operational composers, this
+delivers the full method-level simulation: `runOps (lowered body)
+initialStack` succeeds with a stack that observationally matches
+`evalBindings initialAnf body`'s final ANF state.
+
+Stage D's post-processing (terminal-assert elision, NIP cleanup)
+is orthogonal — it transforms the runtime stack but doesn't
+affect props/outputs, so the equivalence is preserved through
+elision/cleanup. -/
+
+/-- **Stage D capstone (predicate side)** — From a `ChainRel
+simpleStepRel` witness + initial `agreesTagged`, the final ANF
+and stack states agree on `props` and `outputs`.
+
+This is the observational-equivalence headline for the SimpleANF
+subset. Composes `stageC_simpleANF_preserves` with the structural
+fact that `agreesTagged` includes props/outputs equality as
+conjuncts. -/
+theorem stageD_simpleANF_outputs_preserved
+    (body : List ANFBinding)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkFinal : StackState)
+    (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkFinal)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    anfFinal.props = stkFinal.props ∧ anfFinal.outputs = stkFinal.outputs := by
+  have hAgreesFinal := stageC_simpleANF_preserves
+    body tsm tsm' initialAnf anfFinal initialStack stkFinal hChain hAgrees
+  exact ⟨hAgreesFinal.2.1, hAgreesFinal.2.2⟩
+
+/-- **Stage D operational + predicate capstone** — Bundle the
+operational claim (`runOps (lowered body) initialStack = .ok stkFinal`)
+with the predicate claim (props/outputs agree at the final state).
+For any SimpleANF body witnessed by a Stage C ChainRel + a runOps
+result, the lowered execution and ANF semantics produce
+observationally-equivalent final states. -/
+theorem stageD_simpleANF_full_capstone
+    (body : List ANFBinding)
+    (sm : StackMap)
+    (tsm tsm' : TaggedStackMap)
+    (initialAnf anfFinal : State)
+    (initialStack stkFinal : StackState)
+    (hRun : runOps (Stack.Lower.lowerBindings sm body).1 initialStack = .ok stkFinal)
+    (hChain : ChainRel simpleStepRel body tsm initialAnf initialStack tsm' anfFinal stkFinal)
+    (hAgrees : agreesTagged tsm initialAnf initialStack) :
+    runOps (Stack.Lower.lowerBindings sm body).1 initialStack = .ok stkFinal
+    ∧ anfFinal.props = stkFinal.props
+    ∧ anfFinal.outputs = stkFinal.outputs := by
+  refine ⟨hRun, ?_⟩
+  exact stageD_simpleANF_outputs_preserved body tsm tsm' initialAnf anfFinal
+          initialStack stkFinal hChain hAgrees
+
+/-- **Concrete Stage D instance** — observational equivalence for
+the mixed-constructor demo body `[loadConst .int i; unaryOp "-" t0]`.
+Combines the Phase 7.6.e Stage C closure with the Stage D
+predicate capstone to deliver props/outputs preservation. -/
+theorem stageD_mixed_loadConst_unaryNegate_outputs_preserved
+    (bn1 bn2 : String) (i : Int) (rt : Option String)
+    (tsm : TaggedStackMap) (initialAnf : State) (initialStack : StackState)
+    (hAgrees : agreesTagged tsm initialAnf initialStack)
+    (hFresh1 : freshIn bn1 (untagSm tsm))
+    (hFresh2 : freshIn bn2 (untagSm ((bn1, .binding) :: tsm)))
+    (hLoadRefShape :
+        loadRef (untagSm ((bn1, .binding) :: tsm)) bn1 = [.dup]) :
+    let stkFinal := (initialStack.push (.vBigint i)).push (.vBigint (-i))
+    let anfFinal := (initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i))
+    runOps (Stack.Lower.lowerBindings (untagSm tsm)
+              [.mk bn1 (.loadConst (.int i)) none,
+               .mk bn2 (.unaryOp "-" bn1 rt) none]).1 initialStack
+      = .ok stkFinal
+    ∧ anfFinal.props = stkFinal.props
+    ∧ anfFinal.outputs = stkFinal.outputs := by
+  have ⟨hRun, hChain⟩ := stageC_mixed_loadConst_unaryNegate
+    bn1 bn2 i rt tsm initialAnf initialStack hAgrees hFresh1 hFresh2 hLoadRefShape
+  exact stageD_simpleANF_full_capstone
+    [.mk bn1 (.loadConst (.int i)) none, .mk bn2 (.unaryOp "-" bn1 rt) none]
+    (untagSm tsm)
+    tsm ((bn2, .binding) :: (bn1, .binding) :: tsm)
+    initialAnf ((initialAnf.addBinding bn1 (.vBigint i)).addBinding bn2 (.vBigint (-i)))
+    initialStack ((initialStack.push (.vBigint i)).push (.vBigint (-i)))
+    hRun hChain hAgrees
 
 /-! ### Phase 6 Step 6 freshness derivation from WF
 
