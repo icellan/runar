@@ -20,7 +20,9 @@ from runar.sdk.anf_interpreter import (
     compute_new_state,
     compute_new_state_and_data_outputs,
     execute_strict,
+    execute_on_chain_authoritative,
     AssertionFailureError,
+    OnChainCryptoContext,
 )
 from runar.sdk.codegen import generate_python
 from runar.sdk.script_utils import extract_constructor_args, matches_artifact
@@ -49,7 +51,8 @@ __all__ = [
     'serialize_state', 'deserialize_state', 'find_last_op_return',
     'compute_op_push_tx',
     'compute_new_state', 'compute_new_state_and_data_outputs',
-    'execute_strict', 'AssertionFailureError',
+    'execute_strict', 'execute_on_chain_authoritative',
+    'AssertionFailureError', 'OnChainCryptoContext',
     'generate_python',
     'extract_constructor_args', 'matches_artifact',
     'TokenWallet',

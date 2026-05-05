@@ -5,18 +5,22 @@
 //!   - decodes `"Xn"` bigint strings recursively
 //!   - loads the ANF JSON from `anfPath` (or, as a convenience for the
 //!     existing `inputs/*.json` fixtures, from `<repo>/conformance/tests/<case>/expected-ir.json`)
-//!   - calls `compute_new_state_and_data_outputs(...)` (lenient) or
-//!     `execute_strict(...)` (strict)
+//!   - calls `compute_new_state_and_data_outputs(...)` (lenient),
+//!     `execute_strict(...)` (strict), or `execute_on_chain_authoritative(...)`
+//!     (on-chain) according to the `--mode=...` flag
 //!   - prints `{ state, dataOutputs, rawOutputs }` JSON to stdout, with
 //!     bigints re-encoded as `"Xn"` strings
 //!
 //! Invocation:
 //!
-//!     runar-anf-driver-rust <input.json>                # lenient (default)
-//!     runar-anf-driver-rust --mode=strict <input.json>  # strict
+//!     runar-anf-driver-rust <input.json>                  # lenient (default)
+//!     runar-anf-driver-rust --mode=strict <input.json>    # strict
+//!     runar-anf-driver-rust --mode=on-chain <input.json>  # real-crypto
 //!
-//! Strict mode emits `{error: "AssertionFailureError", methodName, bindingName}`
-//! on the first falsy `assert(...)` predicate; otherwise the same
+//! Strict and on-chain modes emit
+//! `{error: "AssertionFailureError", methodName, bindingName}` on the first
+//! falsy `assert(...)` predicate (including the implicit one wrapping a
+//! failed crypto verification in on-chain mode); otherwise the same
 //! `{state, dataOutputs, rawOutputs}` envelope as lenient. Order of args is
 //! irrelevant (the input file may appear in any position).
 
@@ -29,21 +33,28 @@ use std::process::ExitCode;
 use serde_json::{Map, Value};
 
 use runar_lang::sdk::anf_interpreter::{
-    compute_new_state_and_data_outputs, execute_strict, ANFProgram, DataOutputEntry,
-    RawOutputEntry,
+    compute_new_state_and_data_outputs, execute_on_chain_authoritative, execute_strict, ANFProgram,
+    DataOutputEntry, OnChainCryptoContext, RawOutputEntry,
 };
 use runar_lang::sdk::types::SdkValue;
 
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Mode {
+    Lenient,
+    Strict,
+    OnChain,
+}
+
 fn main() -> ExitCode {
     let argv: Vec<String> = env::args().collect();
-    let (strict, input_path) = match parse_args(&argv[1..]) {
+    let (mode, input_path) = match parse_args(&argv[1..]) {
         Ok(parsed) => parsed,
         Err(e) => {
             eprintln!("driver error: {}", e);
             return ExitCode::from(1);
         }
     };
-    match run(&input_path, strict) {
+    match run(&input_path, mode) {
         Ok(out) => {
             // Print full output only on success.
             print!("{}", out);
@@ -56,31 +67,34 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse argv into `(strict, input_path)`. Accepts `--mode=strict` /
-/// `--mode=lenient` in any position; the lone non-flag positional argument
-/// is the input file path.
-fn parse_args(args: &[String]) -> Result<(bool, String), String> {
-    let mut strict = false;
+/// Parse argv into `(mode, input_path)`. Accepts `--mode=strict`,
+/// `--mode=lenient`, or `--mode=on-chain` in any position; the lone non-flag
+/// positional argument is the input file path.
+fn parse_args(args: &[String]) -> Result<(Mode, String), String> {
+    let mut mode = Mode::Lenient;
     let mut input_path: Option<String> = None;
     for a in args {
         match a.as_str() {
-            "--mode=strict" => strict = true,
-            "--mode=lenient" => strict = false,
+            "--mode=strict" => mode = Mode::Strict,
+            "--mode=lenient" => mode = Mode::Lenient,
+            "--mode=on-chain" => mode = Mode::OnChain,
             s if s.starts_with("--") => return Err(format!("unknown flag: {}", s)),
             s => {
                 if input_path.is_some() {
-                    return Err("usage: driver [--mode=strict] <input-json-file>".to_string());
+                    return Err(
+                        "usage: driver [--mode=strict|on-chain] <input-json-file>".to_string(),
+                    );
                 }
                 input_path = Some(s.to_string());
             }
         }
     }
-    let input_path =
-        input_path.ok_or_else(|| "usage: driver [--mode=strict] <input-json-file>".to_string())?;
-    Ok((strict, input_path))
+    let input_path = input_path
+        .ok_or_else(|| "usage: driver [--mode=strict|on-chain] <input-json-file>".to_string())?;
+    Ok((mode, input_path))
 }
 
-fn run(input_path: &str, strict: bool) -> Result<String, String> {
+fn run(input_path: &str, mode: Mode) -> Result<String, String> {
     let raw = fs::read_to_string(input_path)
         .map_err(|e| format!("failed to read input file {}: {}", input_path, e))?;
     let input: Value =
@@ -102,48 +116,86 @@ fn run(input_path: &str, strict: bool) -> Result<String, String> {
     let args = decode_state_map(input.get("args"))?;
     let constructor_args = decode_arg_list(input.get("constructorArgs"))?;
 
-    if strict {
-        match execute_strict(&anf, &method_name, &current_state, &args, &constructor_args) {
-            Ok((new_state, data_outputs, raw_outputs)) => {
-                let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
-                let mut out = serde_json::to_string_pretty(&out_value)
-                    .map_err(|e| format!("failed to serialize output: {}", e))?;
-                out.push('\n');
-                Ok(out)
-            }
-            Err(af) => {
-                // Strict-mode AssertionFailure: emit the standard envelope
-                // so the cross-tier parity test can byte-compare. Driver
-                // exit status remains 0 — only real driver errors (missing
-                // IR, malformed input, …) fall to the non-zero exit path.
-                let mut obj = Map::new();
-                obj.insert(
-                    "error".to_string(),
-                    Value::String("AssertionFailureError".to_string()),
-                );
-                obj.insert("methodName".to_string(), Value::String(af.method_name));
-                obj.insert("bindingName".to_string(), Value::String(af.binding_name));
-                let mut out = serde_json::to_string_pretty(&Value::Object(obj))
-                    .map_err(|e| format!("failed to serialize output: {}", e))?;
-                out.push('\n');
-                Ok(out)
-            }
+    match mode {
+        Mode::Strict => {
+            let result =
+                execute_strict(&anf, &method_name, &current_state, &args, &constructor_args);
+            encode_strict_result(result)
         }
-    } else {
-        let (new_state, data_outputs, raw_outputs) = compute_new_state_and_data_outputs(
-            &anf,
-            &method_name,
-            &current_state,
-            &args,
-            &constructor_args,
-        )
-        .map_err(|e| format!("compute_new_state_and_data_outputs failed: {}", e))?;
+        Mode::OnChain => {
+            let sighash = input
+                .get("sighash")
+                .and_then(|v| v.as_str())
+                .ok_or("input missing sighash for --mode=on-chain")?;
+            let ctx = OnChainCryptoContext::from_hex(sighash).map_err(|e| {
+                format!("invalid sighash for --mode=on-chain: {}", e)
+            })?;
+            let result = execute_on_chain_authoritative(
+                &anf,
+                &method_name,
+                &current_state,
+                &args,
+                &constructor_args,
+                &ctx,
+            );
+            encode_strict_result(result)
+        }
+        Mode::Lenient => {
+            let (new_state, data_outputs, raw_outputs) = compute_new_state_and_data_outputs(
+                &anf,
+                &method_name,
+                &current_state,
+                &args,
+                &constructor_args,
+            )
+            .map_err(|e| format!("compute_new_state_and_data_outputs failed: {}", e))?;
 
-        let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
-        let mut out = serde_json::to_string_pretty(&out_value)
-            .map_err(|e| format!("failed to serialize output: {}", e))?;
-        out.push('\n');
-        Ok(out)
+            let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
+            let mut out = serde_json::to_string_pretty(&out_value)
+                .map_err(|e| format!("failed to serialize output: {}", e))?;
+            out.push('\n');
+            Ok(out)
+        }
+    }
+}
+
+/// Encode the result of `execute_strict` / `execute_on_chain_authoritative`
+/// into the wire format. On `Ok`, emits the standard
+/// `{state, dataOutputs, rawOutputs}` envelope; on assertion failure, emits
+/// `{error: "AssertionFailureError", methodName, bindingName}`. Driver exit
+/// status remains 0 in both cases — only real driver errors (missing IR,
+/// malformed input, …) bubble up to the non-zero exit path.
+fn encode_strict_result(
+    result: Result<
+        (
+            HashMap<String, SdkValue>,
+            Vec<DataOutputEntry>,
+            Vec<RawOutputEntry>,
+        ),
+        runar_lang::sdk::anf_interpreter::AssertionFailureError,
+    >,
+) -> Result<String, String> {
+    match result {
+        Ok((new_state, data_outputs, raw_outputs)) => {
+            let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
+            let mut out = serde_json::to_string_pretty(&out_value)
+                .map_err(|e| format!("failed to serialize output: {}", e))?;
+            out.push('\n');
+            Ok(out)
+        }
+        Err(af) => {
+            let mut obj = Map::new();
+            obj.insert(
+                "error".to_string(),
+                Value::String("AssertionFailureError".to_string()),
+            );
+            obj.insert("methodName".to_string(), Value::String(af.method_name));
+            obj.insert("bindingName".to_string(), Value::String(af.binding_name));
+            let mut out = serde_json::to_string_pretty(&Value::Object(obj))
+                .map_err(|e| format!("failed to serialize output: {}", e))?;
+            out.push('\n');
+            Ok(out)
+        }
     }
 }
 

@@ -34,6 +34,8 @@ public final class Driver {
 
     private static final Pattern BIGINT_RE = Pattern.compile("^-?\\d+n$");
 
+    private enum Mode { LENIENT, STRICT, ON_CHAIN }
+
     private Driver() {}
 
     public static void main(String[] args) {
@@ -49,22 +51,24 @@ public final class Driver {
     }
 
     private static void run(String[] args) throws IOException {
-        // Parse flags: optional --mode=strict (or --mode=lenient, the default).
-        // Anything else is the positional input file. Order is irrelevant.
-        boolean strict = false;
+        // Parse flags: optional --mode=strict / --mode=on-chain (or --mode=lenient,
+        // the default). Anything else is the positional input file. Order is irrelevant.
+        Mode mode = Mode.LENIENT;
         String inputArg = null;
         for (String a : args) {
             if ("--mode=strict".equals(a)) {
-                strict = true;
+                mode = Mode.STRICT;
+            } else if ("--mode=on-chain".equals(a)) {
+                mode = Mode.ON_CHAIN;
             } else if ("--mode=lenient".equals(a)) {
-                strict = false;
+                mode = Mode.LENIENT;
             } else if (a.startsWith("--")) {
                 System.err.println("unknown flag: " + a);
                 System.exit(2);
                 return;
             } else {
                 if (inputArg != null) {
-                    System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict] <input-json-file>");
+                    System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict|on-chain] <input-json-file>");
                     System.exit(2);
                     return;
                 }
@@ -72,7 +76,7 @@ public final class Driver {
             }
         }
         if (inputArg == null) {
-            System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict] <input-json-file>");
+            System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict|on-chain] <input-json-file>");
             System.exit(2);
             return;
         }
@@ -100,9 +104,28 @@ public final class Driver {
 
         ExecutionResult result;
         try {
-            result = strict
-                ? AnfInterpreter.executeStrict(anf, methodName, currentState, methodArgs, constructorArgs)
-                : AnfInterpreter.computeNewStateAndDataOutputs(anf, methodName, currentState, methodArgs, constructorArgs);
+            switch (mode) {
+                case ON_CHAIN: {
+                    String sighashHex = MiniJson.asString(input.get("sighash"));
+                    if (sighashHex == null || sighashHex.isEmpty()) {
+                        throw new IllegalArgumentException(
+                            "input JSON missing 'sighash' field (required for --mode=on-chain)"
+                        );
+                    }
+                    AnfInterpreter.OnChainCryptoContext ctx =
+                        AnfInterpreter.OnChainCryptoContext.fromHex(sighashHex);
+                    result = AnfInterpreter.executeOnChainAuthoritative(
+                        anf, methodName, currentState, methodArgs, constructorArgs, ctx
+                    );
+                    break;
+                }
+                case STRICT:
+                    result = AnfInterpreter.executeStrict(anf, methodName, currentState, methodArgs, constructorArgs);
+                    break;
+                default:
+                    result = AnfInterpreter.computeNewStateAndDataOutputs(anf, methodName, currentState, methodArgs, constructorArgs);
+                    break;
+            }
         } catch (AnfInterpreter.AssertionFailureException ex) {
             // Strict-mode assertion failure: emit the standard envelope so the
             // cross-tier parity test can byte-compare. Real driver errors

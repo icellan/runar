@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'digest'
+require_relative '../ecdsa'
 
 # Lightweight ANF interpreter for auto-computing state transitions.
 #
@@ -38,6 +39,52 @@ module Runar
         @method_name = method_name
         @binding_name = binding_name
         super("assert failed in #{method_name}: binding '#{binding_name}' evaluated to false")
+      end
+    end
+
+    # Required cryptographic context for
+    # {ANFInterpreter.execute_on_chain_authoritative}.
+    #
+    # +sighash+ is the 32-byte BIP-143 sighash digest the on-chain VM would
+    # verify signatures against (and that the caller would have signed with
+    # +LocalSigner#sign+ before broadcasting). The interpreter:
+    #
+    # - verifies +checkSig(sig, pk)+ by parsing +pk+ as a SEC1 secp256k1 point
+    #   (compressed or uncompressed), parsing +sig+ as DER (with optional
+    #   trailing sighash type byte stripped), and ECDSA-verifying against the
+    #   sighash. Any mismatch returns +false+, which then trips the enclosing
+    #   +assert(...)+ and raises {AssertionFailureError}.
+    # - verifies +checkMultiSig(sigs, pks)+ by iterating signatures
+    #   left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
+    #   +OP_CHECKMULTISIG+.
+    # - verifies +checkPreimage(preimage)+ by computing
+    #   +SHA256(SHA256(preimage))+ and comparing it to +sighash+ byte-for-byte
+    #   — the on-chain +OP_PUSH_TX+ semantic.
+    class OnChainCryptoContext
+      # @return [String] 32-byte binary sighash
+      attr_reader :sighash
+
+      # @param sighash [String] hex string (64 chars) or 32-byte binary string
+      def initialize(sighash)
+        bytes = if sighash.is_a?(String) && sighash.length == 64 && sighash.match?(/\A[0-9a-fA-F]+\z/)
+                  [sighash].pack('H*')
+                elsif sighash.is_a?(String) && sighash.bytesize == 32
+                  sighash.dup.force_encoding(Encoding::ASCII_8BIT)
+                else
+                  raise ArgumentError,
+                        "OnChainCryptoContext: sighash must be 32 bytes (binary) or 64 hex chars"
+                end
+        if bytes.bytesize != 32
+          raise ArgumentError,
+                "OnChainCryptoContext: sighash must be exactly 32 bytes, got #{bytes.bytesize}"
+        end
+        @sighash = bytes
+      end
+
+      # 32-byte sighash as a hex string.
+      # @return [String]
+      def sighash_hex
+        @sighash.unpack1('H*')
       end
     end
 
@@ -103,15 +150,51 @@ module Runar
       #   +[new_state, data_outputs, raw_outputs]+
       # @raise  [Runar::SDK::AssertionFailureError] on the first falsy assert
       def execute_strict(anf, method_name, current_state, args, constructor_args = [], max_loop_iterations: MAX_LOOP_ITERATIONS)
-        run_method(anf, method_name, current_state, args, constructor_args, method_name, max_loop_iterations)
+        run_method(anf, method_name, current_state, args, constructor_args, method_name, max_loop_iterations, nil)
       end
 
-      # Shared entry-point for both lenient and strict modes.
+      # On-chain authoritative counterpart of #execute_strict.
+      #
+      # Walks the same ANF body but additionally performs *real* cryptographic
+      # verification of +checkSig+, +checkMultiSig+, and +checkPreimage+
+      # against the supplied 32-byte sighash. Any failed predicate trips the
+      # enclosing +assert(...)+ and raises {AssertionFailureError}. Lenient
+      # and strict modes still mock-return +true+ for these built-ins; only
+      # this entry point performs real verification.
+      #
+      # @param anf              [Hash]   the ANF IR (plain Hash from JSON)
+      # @param method_name      [String] the public method to execute
+      # @param current_state    [Hash]   current contract state
+      # @param args             [Hash]   method arguments
+      # @param constructor_args [Array]  positional constructor args
+      # @param ctx              [OnChainCryptoContext] mandatory sighash ctx
+      # @param max_loop_iterations [Integer] optional override for loop cap
+      # @return [Array(Hash, Array<Hash>, Array<Hash>)]
+      # @raise  [AssertionFailureError] on the first falsy assert (incl. the
+      #         implicit one wrapping a failed crypto built-in)
+      def execute_on_chain_authoritative(
+        anf, method_name, current_state, args, constructor_args, ctx,
+        max_loop_iterations: MAX_LOOP_ITERATIONS
+      )
+        unless ctx.is_a?(OnChainCryptoContext)
+          raise ArgumentError,
+                "execute_on_chain_authoritative: ctx must be an OnChainCryptoContext"
+        end
+        run_method(
+          anf, method_name, current_state, args, constructor_args,
+          method_name, max_loop_iterations, ctx,
+        )
+      end
+
+      # Shared entry-point for lenient, strict, and on-chain modes.
       #
       # +strict_method_name+ == nil → lenient (asserts skipped).
       # +strict_method_name+ != nil → strict (asserts enforced; first falsy
       # predicate raises {Runar::SDK::AssertionFailureError}).
-      def run_method(anf, method_name, current_state, args, constructor_args, strict_method_name, max_loop_iterations)
+      # +real_crypto_ctx+ != nil    → on-chain mode (real ECDSA + hash256
+      # checks for +checkSig+/+checkMultiSig+/+checkPreimage+; implies
+      # strict-mode assertions).
+      def run_method(anf, method_name, current_state, args, constructor_args, strict_method_name, max_loop_iterations, real_crypto_ctx = nil)
         method = find_public_method(anf, method_name)
 
         unless method
@@ -125,6 +208,9 @@ module Runar
         # the existing eval_bindings / eval_value signatures (mirrors the
         # loop-limit pattern above). nil = lenient.
         Thread.current[:runar_strict_method] = strict_method_name
+        # Thread real-crypto context through the evaluator. nil in lenient
+        # and strict modes; an OnChainCryptoContext in on-chain mode.
+        Thread.current[:runar_real_crypto] = real_crypto_ctx
 
         # Build constructor param index: position among non-initialized properties.
         # Properties with initialValue are excluded from the constructor, so
@@ -173,6 +259,7 @@ module Runar
       ensure
         Thread.current[:runar_max_loop_iterations] = nil
         Thread.current[:runar_strict_method] = nil
+        Thread.current[:runar_real_crypto] = nil
       end
 
       # Walk a list of ANF bindings, updating env with each result.
@@ -481,10 +568,23 @@ module Runar
       # @return [Object]
       # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
       def eval_call(func, args)
+        real_crypto = Thread.current[:runar_real_crypto]
+
         case func
-        # Mock crypto — always return true in simulation.
-        when 'checkSig', 'checkMultiSig', 'checkPreimage'
-          true
+        # Crypto built-ins:
+        #   - lenient + strict modes: mock-return true
+        #   - on-chain mode: real ECDSA / hash256 verification against the
+        #     32-byte sighash supplied via OnChainCryptoContext. Failed
+        #     verification returns false, which trips the enclosing
+        #     assert(...) and raises AssertionFailureError.
+        when 'checkSig'
+          real_crypto ? verify_ecdsa_real(args[0], args[1], real_crypto.sighash) : true
+
+        when 'checkMultiSig'
+          real_crypto ? verify_multi_sig_real(args[0], args[1], real_crypto.sighash) : true
+
+        when 'checkPreimage'
+          real_crypto ? verify_preimage_real(args[0], real_crypto.sighash) : true
 
         # Real hash functions.
         when 'sha256'   then hash_fn('sha256',   args[0])
@@ -674,6 +774,90 @@ module Runar
         when 'hash160'  then Digest::RMD160.hexdigest(Digest::SHA256.digest(data))
         else ''
         end
+      end
+
+      # ---------------------------------------------------------------------------
+      # Real ECDSA / preimage verification (used by execute_on_chain_authoritative)
+      # ---------------------------------------------------------------------------
+
+      # Coerce a checkSig / checkPreimage arg into a hex string. Accepts
+      # hex strings (returned as-is) and 8-bit binary strings (encoded to
+      # hex). Returns nil if the value is not coercible to bytes.
+      def to_hex_arg(v)
+        return nil if v.nil?
+
+        case v
+        when String
+          # Even-length hex string: pass through.
+          if v.length.even? && v.match?(/\A[0-9a-fA-F]*\z/)
+            v
+          else
+            nil
+          end
+        else
+          nil
+        end
+      end
+
+      # Verify an ECDSA signature against a 32-byte sighash. Pubkey must be
+      # SEC1 (33-byte compressed or 65-byte uncompressed); signature must be
+      # DER with an optional trailing sighash type byte (stripped by
+      # +Runar::ECDSA.parse_der_signature_bytes+). Returns +false+ on any
+      # decode error so the enclosing +assert(...)+ fires.
+      #
+      # The 32-byte sighash is the ECDSA digest itself (no extra hash) — this
+      # mirrors the on-chain +OP_CHECKSIG+ semantic, where the script
+      # interpreter feeds the BIP-143 sighash directly into ECDSA-verify. The
+      # test fixtures' signatures are produced by +ECDSA-sign(sighash, priv)+
+      # against the same 32-byte sighash with no additional hashing.
+      def verify_ecdsa_real(sig_val, pk_val, sighash_bytes)
+        return false unless sighash_bytes.is_a?(String) && sighash_bytes.bytesize == 32
+
+        sig_hex = to_hex_arg(sig_val)
+        pk_hex  = to_hex_arg(pk_val)
+        return false if sig_hex.nil? || pk_hex.nil?
+
+        begin
+          Runar::ECDSA.verify(sighash_bytes.unpack1('H*'), sig_hex, pk_hex)
+        rescue StandardError
+          false
+        end
+      end
+
+      # Verify a list of signatures against a list of pubkeys. Mirrors
+      # Bitcoin's +OP_CHECKMULTISIG+: iterate sigs left-to-right, consume
+      # pubkeys greedily.
+      def verify_multi_sig_real(sigs_val, pks_val, sighash_bytes)
+        return false unless sigs_val.is_a?(Array) && pks_val.is_a?(Array)
+        return false if sigs_val.length > pks_val.length
+
+        pk_idx = 0
+        sigs_val.each do |sig|
+          matched = false
+          while pk_idx < pks_val.length
+            ok = verify_ecdsa_real(sig, pks_val[pk_idx], sighash_bytes)
+            pk_idx += 1
+            if ok
+              matched = true
+              break
+            end
+          end
+          return false unless matched
+        end
+        true
+      end
+
+      # Verify that +SHA256(SHA256(preimage)) == sighash+ — the on-chain
+      # +OP_PUSH_TX+ semantic for +checkPreimage+.
+      def verify_preimage_real(preimage_val, sighash_bytes)
+        return false unless sighash_bytes.is_a?(String) && sighash_bytes.bytesize == 32
+
+        pre_hex = to_hex_arg(preimage_val)
+        return false if pre_hex.nil?
+
+        pre_bytes = [pre_hex].pack('H*')
+        computed = Digest::SHA256.digest(Digest::SHA256.digest(pre_bytes))
+        computed == sighash_bytes
       end
 
       # ---------------------------------------------------------------------------

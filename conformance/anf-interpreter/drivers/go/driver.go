@@ -10,12 +10,15 @@
 //
 // Invocation:
 //
-//	driver <input.json>                # lenient (default)
-//	driver --mode=strict <input.json>  # strict
+//	driver <input.json>                  # lenient (default)
+//	driver --mode=strict <input.json>    # strict
+//	driver --mode=on-chain <input.json>  # strict + real-crypto
 //
 // Strict mode emits {error: "AssertionFailureError", methodName, bindingName}
 // on the first falsy `assert(...)` predicate; otherwise the same
-// {state, dataOutputs} envelope as lenient.
+// {state, dataOutputs} envelope as lenient. On-chain mode behaves like
+// strict and additionally verifies `checkSig`/`checkMultiSig`/`checkPreimage`
+// against the 32-byte `sighash` field carried in the input JSON.
 //
 // Bigints travel as "42n"-suffixed strings on the wire. The driver decodes
 // them to *big.Int when reading currentState/args/constructorArgs and
@@ -183,28 +186,40 @@ func toSlice(v interface{}) []interface{} {
 	return []interface{}{}
 }
 
+// mode discriminates the three interpreter entry points the driver routes to.
+type mode int
+
+const (
+	modeLenient mode = iota
+	modeStrict
+	modeOnChain
+)
+
 func run() error {
-	// Parse flags: optional --mode=strict (or --mode=lenient, the default).
-	// Anything else is the input file. Order is irrelevant.
-	strict := false
+	// Parse flags: optional --mode=strict / --mode=on-chain (or
+	// --mode=lenient, the default). Anything else is the input file. Order
+	// is irrelevant.
+	m := modeLenient
 	var inputFile string
 	for _, a := range os.Args[1:] {
 		switch {
 		case a == "--mode=strict":
-			strict = true
+			m = modeStrict
 		case a == "--mode=lenient":
-			strict = false
+			m = modeLenient
+		case a == "--mode=on-chain":
+			m = modeOnChain
 		case strings.HasPrefix(a, "--"):
 			return fmt.Errorf("unknown flag: %s", a)
 		default:
 			if inputFile != "" {
-				return fmt.Errorf("usage: driver [--mode=strict] <input-json-file>")
+				return fmt.Errorf("usage: driver [--mode=strict|--mode=on-chain] <input-json-file>")
 			}
 			inputFile = a
 		}
 	}
 	if inputFile == "" {
-		return fmt.Errorf("usage: driver [--mode=strict] <input-json-file>")
+		return fmt.Errorf("usage: driver [--mode=strict|--mode=on-chain] <input-json-file>")
 	}
 
 	rawData, err := os.ReadFile(inputFile)
@@ -246,22 +261,35 @@ func run() error {
 		rawOutputs  []runar.ContractOutput
 		interpErr   error
 	)
-	if strict {
+	switch m {
+	case modeOnChain:
+		sighashHex, _ := raw["sighash"].(string)
+		if sighashHex == "" {
+			return fmt.Errorf("on-chain mode requires 'sighash' field in input JSON")
+		}
+		ctx, err := runar.NewRealCryptoCtxFromHex(sighashHex)
+		if err != nil {
+			return fmt.Errorf("invalid sighash: %w", err)
+		}
+		state, dataOutputs, rawOutputs, interpErr = runar.ExecuteOnChainAuthoritative(
+			&anf, methodName, currentState, args, constructorArgs, ctx,
+		)
+	case modeStrict:
 		state, dataOutputs, rawOutputs, interpErr = runar.ExecuteStrict(
 			&anf, methodName, currentState, args, constructorArgs,
 		)
-	} else {
+	default:
 		state, dataOutputs, rawOutputs, interpErr = runar.ComputeNewStateAndDataOutputs(
 			&anf, methodName, currentState, args, constructorArgs,
 		)
 	}
 	if interpErr != nil {
-		// Strict-mode AssertionFailure: emit the standard envelope so the
-		// cross-tier parity test can byte-compare. All other errors are
-		// real driver bugs (missing IR, malformed input, …) and surface
-		// via the non-zero exit + stderr message.
+		// Strict / on-chain AssertionFailure: emit the standard envelope so
+		// the cross-tier parity test can byte-compare. All other errors are
+		// real driver bugs (missing IR, malformed input, …) and surface via
+		// the non-zero exit + stderr message.
 		var af *runar.AssertionFailureError
-		if strict && errors.As(interpErr, &af) {
+		if (m == modeStrict || m == modeOnChain) && errors.As(interpErr, &af) {
 			result := map[string]interface{}{
 				"error":       "AssertionFailureError",
 				"methodName":  af.MethodName,

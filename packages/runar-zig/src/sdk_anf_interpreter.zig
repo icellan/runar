@@ -310,6 +310,24 @@ pub fn executeOnChainAuthoritative(
     return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, null);
 }
 
+/// Like `executeOnChainAuthoritative` but additionally populates
+/// `out_info.method_name` and `out_info.binding_name` with the failing
+/// context when `error.AssertionFailure` is returned. Use this from
+/// drivers that need the structured `{error, methodName, bindingName}`
+/// envelope on the wire. Symmetrical to `executeStrictWithFailureInfo`.
+pub fn executeOnChainAuthoritativeWithFailureInfo(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+    ctx: RealCryptoCtx,
+    out_info: *AssertionFailureInfo,
+) StrictError!NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, out_info);
+}
+
 /// Like `computeNewState` but also returns data outputs resolved from
 /// `this.addDataOutput(...)` calls in declaration order. Caller owns both
 /// the state map and the returned data-output slice (including each

@@ -74,8 +74,56 @@ func (e *AssertionFailureError) Error() string {
 }
 
 // strictCtx is the per-evaluation strict-mode handle. nil = lenient mode.
+//
+// When realCrypto != nil, crypto built-ins (`checkSig`, `checkMultiSig`,
+// `checkPreimage`) verify against `realCrypto.Sighash` instead of mock-returning
+// `true`. realCrypto != nil implies strict assert enforcement (the on-chain
+// authoritative mode used by ExecuteOnChainAuthoritative).
 type strictCtx struct {
 	methodName string
+	realCrypto *RealCryptoCtx
+}
+
+// RealCryptoCtx carries the cryptographic context required by
+// ExecuteOnChainAuthoritative. Sighash is the 32-byte BIP-143 sighash digest
+// the on-chain VM would verify signatures against (and that the caller would
+// have signed with LocalSigner.Sign before broadcasting).
+//
+//   - checkSig(sig, pk) parses pk as SEC1 secp256k1 (compressed/uncompressed),
+//     parses sig as DER (with optional trailing sighash byte stripped — Bitcoin
+//     convention), and ECDSA-verifies against Sighash. On mismatch, returns
+//     false; the enclosing assert(...) trips and yields *AssertionFailureError.
+//   - checkMultiSig(sigs, pks) iterates signatures left-to-right and consumes
+//     pubkeys greedily, mirroring Bitcoin's OP_CHECKMULTISIG. Returns true iff
+//     every signature finds a matching pubkey.
+//   - checkPreimage(preimage) computes hash256(preimage) (SHA-256 of SHA-256)
+//     and byte-compares to Sighash. Returns true on match. Mirrors the on-chain
+//     OP_PUSH_TX semantic.
+type RealCryptoCtx struct {
+	Sighash [32]byte
+}
+
+// NewRealCryptoCtxFromHex builds a RealCryptoCtx from a hex-encoded sighash
+// string (with or without 0x prefix). Returns an error if the hex is malformed
+// or does not decode to exactly 32 bytes.
+func NewRealCryptoCtxFromHex(sighashHex string) (*RealCryptoCtx, error) {
+	s := strings.TrimPrefix(sighashHex, "0x")
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("RealCryptoCtx: invalid sighash hex: %w", err)
+	}
+	return NewRealCryptoCtxFromBytes(b)
+}
+
+// NewRealCryptoCtxFromBytes builds a RealCryptoCtx from a 32-byte slice.
+// Returns an error if the slice is not exactly 32 bytes.
+func NewRealCryptoCtxFromBytes(sighash []byte) (*RealCryptoCtx, error) {
+	if len(sighash) != 32 {
+		return nil, fmt.Errorf("RealCryptoCtx: sighash must be exactly 32 bytes, got %d", len(sighash))
+	}
+	ctx := &RealCryptoCtx{}
+	copy(ctx.Sighash[:], sighash)
+	return ctx, nil
 }
 
 // ComputeNewState interprets the ANF IR to compute the state transition for
@@ -112,6 +160,35 @@ func ExecuteStrict(
 	constructorArgs []interface{},
 ) (map[string]interface{}, []ContractOutput, []ContractOutput, error) {
 	return runMethod(anf, methodName, currentState, args, constructorArgs, &strictCtx{methodName: methodName})
+}
+
+// ExecuteOnChainAuthoritative is like ExecuteStrict but also performs real
+// cryptographic verification of `checkSig`, `checkMultiSig`, and `checkPreimage`
+// against the supplied sighash carried in ctx. Returns
+// (nil, nil, nil, *AssertionFailureError) when any assert(...) — including the
+// implicit one wrapping a failed crypto built-in — fires.
+//
+// The ctx parameter is mandatory: the signature shape requires the caller to
+// provide the sighash up front, so it is impossible to invoke this mode
+// accidentally without the cryptographic inputs.
+//
+// See RealCryptoCtx for the verification semantics. The returned envelope shape
+// matches ExecuteStrict (state + dataOutputs + rawOutputs).
+func ExecuteOnChainAuthoritative(
+	anf *ANFProgram,
+	methodName string,
+	currentState map[string]interface{},
+	args map[string]interface{},
+	constructorArgs []interface{},
+	ctx *RealCryptoCtx,
+) (map[string]interface{}, []ContractOutput, []ContractOutput, error) {
+	if ctx == nil {
+		return nil, nil, nil, fmt.Errorf("ExecuteOnChainAuthoritative: ctx must not be nil")
+	}
+	return runMethod(anf, methodName, currentState, args, constructorArgs, &strictCtx{
+		methodName: methodName,
+		realCrypto: ctx,
+	})
 }
 
 // ComputeNewStateAndDataOutputs is like ComputeNewState but also returns
@@ -325,7 +402,11 @@ func anfEvalValue(
 			}
 			return nil
 		}
-		return anfEvalCall(funcName, argVals)
+		var rc *RealCryptoCtx
+		if strict != nil {
+			rc = strict.realCrypto
+		}
+		return anfEvalCall(funcName, argVals, rc)
 
 	case "method_call":
 		methodName, _ := value["method"].(string)
@@ -610,11 +691,42 @@ func anfEvalUnaryOp(op string, operand interface{}, resultType string) interface
 // Built-in function calls
 // ---------------------------------------------------------------------------
 
-func anfEvalCall(funcName string, args []interface{}) interface{} {
+func anfEvalCall(funcName string, args []interface{}, realCrypto *RealCryptoCtx) interface{} {
 	switch funcName {
-	// Crypto — mock
-	case "checkSig", "checkMultiSig", "checkPreimage":
-		return true
+	// Crypto — mocked unless real-crypto context is present.
+	case "checkSig":
+		if realCrypto == nil {
+			return true
+		}
+		var sig, pk interface{}
+		if len(args) > 0 {
+			sig = args[0]
+		}
+		if len(args) > 1 {
+			pk = args[1]
+		}
+		return anfVerifyEcdsa(sig, pk, realCrypto.Sighash[:])
+	case "checkMultiSig":
+		if realCrypto == nil {
+			return true
+		}
+		var sigs, pks interface{}
+		if len(args) > 0 {
+			sigs = args[0]
+		}
+		if len(args) > 1 {
+			pks = args[1]
+		}
+		return anfVerifyMultiSig(sigs, pks, realCrypto.Sighash[:])
+	case "checkPreimage":
+		if realCrypto == nil {
+			return true
+		}
+		var pre interface{}
+		if len(args) > 0 {
+			pre = args[0]
+		}
+		return anfVerifyPreimage(pre, realCrypto.Sighash[:])
 
 	// Crypto — real hashes
 	case "sha256":
@@ -794,6 +906,134 @@ func anfEvalCall(funcName string, args []interface{}) interface{} {
 	}
 
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Real ECDSA / preimage verification (used by ExecuteOnChainAuthoritative)
+// ---------------------------------------------------------------------------
+
+// anfToHexBytes converts an interface{} value to a raw byte slice. Accepts
+// hex strings (even-length, lowercase or uppercase), []byte, and []interface{}
+// of byte-sized integers. Returns nil on any malformed input — the caller
+// treats nil as a verification failure rather than a Go-level error.
+func anfToHexBytes(v interface{}) []byte {
+	switch val := v.(type) {
+	case string:
+		if len(val)%2 != 0 {
+			return nil
+		}
+		b, err := hex.DecodeString(val)
+		if err != nil {
+			return nil
+		}
+		return b
+	case []byte:
+		out := make([]byte, len(val))
+		copy(out, val)
+		return out
+	case []interface{}:
+		out := make([]byte, len(val))
+		for i, item := range val {
+			switch x := item.(type) {
+			case float64:
+				if x < 0 || x > 255 {
+					return nil
+				}
+				out[i] = byte(x)
+			case int:
+				if x < 0 || x > 255 {
+					return nil
+				}
+				out[i] = byte(x)
+			case int64:
+				if x < 0 || x > 255 {
+					return nil
+				}
+				out[i] = byte(x)
+			default:
+				return nil
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// anfVerifyEcdsa parses sigVal as DER (with optional trailing sighash byte
+// stripped — Bitcoin convention) and pkVal as a SEC1 secp256k1 public key
+// (compressed or uncompressed), then ECDSA-verifies against the supplied
+// 32-byte sighash. Returns false on any parse error or signature mismatch.
+//
+// The digest passed to the ECDSA verify is the raw 32-byte sighash — this
+// matches the on-chain OP_CHECKSIG semantic (no extra hashing) and the TS
+// reference's behaviour, where signatures are produced by RFC 6979
+// ECDSA-sign(sighash, priv) directly and the verify path lands on the same
+// 32-byte scalar.
+func anfVerifyEcdsa(sigVal, pkVal interface{}, sighash []byte) bool {
+	sigBytes := anfToHexBytes(sigVal)
+	pkBytes := anfToHexBytes(pkVal)
+	if sigBytes == nil || pkBytes == nil {
+		return false
+	}
+	// Bitcoin DER signatures may carry a trailing 1-byte sighash type
+	// (e.g. 0x41 SIGHASH_ALL|FORKID). Strip it before parsing the DER body.
+	if len(sigBytes) >= 2 && sigBytes[0] == 0x30 {
+		declared := int(sigBytes[1]) + 2
+		if len(sigBytes) == declared+1 {
+			sigBytes = sigBytes[:declared]
+		}
+	}
+	return ecdsaVerify(sigBytes, pkBytes, sighash)
+}
+
+// anfVerifyMultiSig iterates signatures left-to-right and consumes pubkeys
+// greedily, mirroring Bitcoin's OP_CHECKMULTISIG. Returns true iff every
+// signature finds a matching pubkey.
+func anfVerifyMultiSig(sigsVal, pksVal interface{}, sighash []byte) bool {
+	sigs, sigsOk := sigsVal.([]interface{})
+	pks, pksOk := pksVal.([]interface{})
+	if !sigsOk || !pksOk {
+		return false
+	}
+	if len(sigs) > len(pks) {
+		return false
+	}
+	pkIdx := 0
+	for _, sig := range sigs {
+		matched := false
+		for pkIdx < len(pks) {
+			ok := anfVerifyEcdsa(sig, pks[pkIdx], sighash)
+			pkIdx++
+			if ok {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// anfVerifyPreimage replicates the on-chain BIP-143 / OP_PUSH_TX semantic:
+// the supplied preimage's double-SHA-256 must equal the sighash the caller
+// provided to ExecuteOnChainAuthoritative.
+func anfVerifyPreimage(preimageVal interface{}, sighash []byte) bool {
+	preBytes := anfToHexBytes(preimageVal)
+	if preBytes == nil {
+		return false
+	}
+	digest := Hash256(ByteString(preBytes))
+	if len(digest) != len(sighash) {
+		return false
+	}
+	for i := range sighash {
+		if digest[i] != sighash[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------

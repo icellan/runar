@@ -11,7 +11,7 @@ skipped — see below.
 This enables the SDK to auto-compute ``newState`` for stateful contract
 calls, so callers don't need to duplicate contract logic.
 
-Two execution modes are exposed:
+Three execution modes are exposed:
 
 * **Lenient** (:func:`compute_new_state`, :func:`compute_new_state_and_data_outputs`)
   — skips ``assert`` predicates, deferring enforcement to the on-chain script.
@@ -20,20 +20,29 @@ Two execution modes are exposed:
   binding name) on the first falsy one. Crypto built-ins (``checkSig``,
   ``checkMultiSig``, ``checkPreimage``) still mock-return ``True`` in strict
   mode; only explicit ``assert(...)`` predicates are enforced.
+* **On-chain authoritative** (:func:`execute_on_chain_authoritative`) — strict
+  assert enforcement PLUS real ECDSA / SHA-256 preimage verification against a
+  caller-supplied 32-byte ``sighash`` (BIP-143). ``checkSig(sig, pk)`` only
+  passes if the supplied DER signature verifies against the supplied SEC1
+  public key over the supplied sighash; ``checkPreimage(preimage)`` only
+  passes if ``SHA256(SHA256(preimage)) == sighash``. The signature shape
+  requires the caller to provide the sighash up front via
+  :class:`OnChainCryptoContext`, so this mode cannot be invoked accidentally
+  without the cryptographic inputs.
 
-Both lenient and strict modes return a 3-tuple
-``(state, data_outputs, raw_outputs)``. ``raw_outputs`` collects entries
-from ``this.addRawOutput(satoshis, scriptBytes)`` in the method body; the
-script bytes are caller-supplied raw locking-script hex and the simulator
-does NOT introspect them — it forwards them verbatim so an off-chain
-transaction builder can splice them in at the correct position.
+All three modes return a 3-tuple ``(state, data_outputs, raw_outputs)``.
+``raw_outputs`` collects entries from ``this.addRawOutput(satoshis,
+scriptBytes)`` in the method body; the script bytes are caller-supplied raw
+locking-script hex and the simulator does NOT introspect them — it forwards
+them verbatim so an off-chain transaction builder can splice them in at the
+correct position.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # ---------------------------------------------------------------------------
@@ -65,13 +74,75 @@ class AssertionFailureError(Exception):
         )
 
 
+class OnChainCryptoContext:
+    """Cryptographic context for :func:`execute_on_chain_authoritative`.
+
+    Carries the 32-byte BIP-143 sighash digest the on-chain VM would verify
+    signatures against (and that the caller would have signed before
+    broadcasting). The interpreter:
+
+    * verifies ``checkSig(sig, pk)`` by parsing ``pk`` as SEC1 secp256k1
+      (33-byte compressed or 65-byte uncompressed), parsing ``sig`` as DER
+      (with the optional trailing sighash byte stripped — Bitcoin convention),
+      and ECDSA-verifying against this sighash. Any mismatch returns ``False``,
+      tripping the enclosing ``assert(...)`` and raising
+      :class:`AssertionFailureError`.
+    * verifies ``checkMultiSig(sigs, pks)`` by iterating signatures
+      left-to-right and consuming pubkeys greedily, mirroring Bitcoin's
+      ``OP_CHECKMULTISIG``.
+    * verifies ``checkPreimage(preimage)`` by computing
+      ``hash256(preimage) == SHA256(SHA256(preimage))`` and byte-comparing it
+      to this sighash — the on-chain ``OP_PUSH_TX`` semantic.
+
+    Construct with either a 64-character hex string (with or without ``0x``
+    prefix) or a 32-byte ``bytes`` / ``bytearray`` value.
+    """
+
+    __slots__ = ("sighash",)
+
+    def __init__(self, sighash: Union[str, bytes, bytearray]) -> None:
+        if isinstance(sighash, str):
+            s = sighash[2:] if sighash.startswith("0x") or sighash.startswith("0X") else sighash
+            try:
+                b = bytes.fromhex(s)
+            except ValueError as exc:
+                raise ValueError(
+                    f"OnChainCryptoContext: invalid sighash hex: {exc}"
+                ) from exc
+        elif isinstance(sighash, (bytes, bytearray)):
+            b = bytes(sighash)
+        else:
+            raise TypeError(
+                "OnChainCryptoContext: sighash must be hex str or bytes, "
+                f"got {type(sighash).__name__}"
+            )
+        if len(b) != 32:
+            raise ValueError(
+                "OnChainCryptoContext: sighash must be exactly 32 bytes, "
+                f"got {len(b)}"
+            )
+        self.sighash: bytes = b
+
+
 class _StrictCtx:
-    """Per-evaluation strict-mode handle. ``None`` (in callers) = lenient."""
+    """Per-evaluation strict-mode handle. ``None`` (in callers) = lenient.
 
-    __slots__ = ("method_name",)
+    When ``real_crypto`` is set, crypto built-ins (``checkSig``,
+    ``checkMultiSig``, ``checkPreimage``) verify against
+    ``real_crypto.sighash`` instead of mock-returning ``True``. A non-``None``
+    ``real_crypto`` implies strict assert enforcement (the on-chain
+    authoritative mode used by :func:`execute_on_chain_authoritative`).
+    """
 
-    def __init__(self, method_name: str) -> None:
+    __slots__ = ("method_name", "real_crypto")
+
+    def __init__(
+        self,
+        method_name: str,
+        real_crypto: Optional[OnChainCryptoContext] = None,
+    ) -> None:
         self.method_name = method_name
+        self.real_crypto = real_crypto
 
 
 def compute_new_state(
@@ -158,6 +229,53 @@ def execute_strict(
     return _run_method(
         anf, method_name, current_state, args, constructor_args,
         strict=_StrictCtx(method_name),
+    )
+
+
+def execute_on_chain_authoritative(
+    anf: dict,
+    method_name: str,
+    current_state: dict,
+    args: dict,
+    constructor_args: list,
+    ctx: OnChainCryptoContext,
+) -> Tuple[dict, list, list]:
+    """Like :func:`execute_strict` but also performs real cryptographic
+    verification of ``checkSig``, ``checkMultiSig``, and ``checkPreimage``
+    against the supplied ``ctx.sighash``.
+
+    Raises :class:`AssertionFailureError` when any ``assert(...)`` (including
+    the implicit one wrapping a failed crypto built-in) fires.
+
+    The ``ctx`` parameter is mandatory and carries the sighash, so it is
+    impossible to call this entry point accidentally without supplying the
+    cryptographic inputs the verification needs.
+
+    Args:
+        anf: The ANF IR from the compiled artifact (plain dict from JSON).
+        method_name: The method to execute (must be a public method).
+        current_state: Current contract state (property name -> value).
+        args: Method arguments (param name -> value).
+        constructor_args: Constructor arg values (declaration order).
+        ctx: The :class:`OnChainCryptoContext` carrying the 32-byte sighash.
+
+    Returns:
+        ``(state, data_outputs, raw_outputs)`` — same envelope as
+        :func:`compute_new_state_and_data_outputs`.
+
+    Raises:
+        AssertionFailureError: on the first falsy assert predicate (including
+            failed crypto verifications).
+        TypeError: if ``ctx`` is not an :class:`OnChainCryptoContext`.
+    """
+    if not isinstance(ctx, OnChainCryptoContext):
+        raise TypeError(
+            "execute_on_chain_authoritative: ctx must be an "
+            "OnChainCryptoContext instance"
+        )
+    return _run_method(
+        anf, method_name, current_state, args, constructor_args,
+        strict=_StrictCtx(method_name, real_crypto=ctx),
     )
 
 
@@ -307,7 +425,8 @@ def _eval_value(
             if not _is_truthy(pred):
                 raise AssertionFailureError(strict.method_name, binding_name)
             return None
-        return _eval_call(value['func'], call_args)
+        real_crypto = strict.real_crypto if strict is not None else None
+        return _eval_call(value['func'], call_args, real_crypto=real_crypto)
 
     if kind == 'method_call':
         call_args = [env.get(a) for a in value.get('args', [])]
@@ -504,10 +623,29 @@ def _eval_unary_op(op: str, operand: Any, result_type: Optional[str] = None) -> 
 # Built-in function calls
 # ---------------------------------------------------------------------------
 
-def _eval_call(func: str, args: List[Any]) -> Any:
-    # Crypto -- mock
-    if func in ('checkSig', 'checkMultiSig', 'checkPreimage'):
-        return True
+def _eval_call(
+    func: str,
+    args: List[Any],
+    real_crypto: Optional[OnChainCryptoContext] = None,
+) -> Any:
+    # Crypto -- mocked unless real-crypto context is present.
+    if func == 'checkSig':
+        if real_crypto is None:
+            return True
+        sig = args[0] if len(args) > 0 else None
+        pk = args[1] if len(args) > 1 else None
+        return _verify_ecdsa(sig, pk, real_crypto.sighash)
+    if func == 'checkMultiSig':
+        if real_crypto is None:
+            return True
+        sigs = args[0] if len(args) > 0 else None
+        pks = args[1] if len(args) > 1 else None
+        return _verify_multi_sig(sigs, pks, real_crypto.sighash)
+    if func == 'checkPreimage':
+        if real_crypto is None:
+            return True
+        pre = args[0] if len(args) > 0 else None
+        return _verify_preimage(pre, real_crypto.sighash)
 
     # Crypto -- real hashes
     if func == 'sha256':
@@ -778,3 +916,111 @@ def _bin2num_int(hex_str: str) -> int:
         result = (result << 8) | result_bytes[i]
 
     return -result if negative else result
+
+
+# ---------------------------------------------------------------------------
+# Real ECDSA / preimage verification (used by execute_on_chain_authoritative)
+# ---------------------------------------------------------------------------
+
+def _to_byte_array(v: Any) -> Optional[bytes]:
+    """Convert an interpreter value to a raw byte slice.
+
+    Accepts hex strings (even-length, lowercase or uppercase), ``bytes``,
+    ``bytearray``, and lists of byte-sized integers. Returns ``None`` on any
+    malformed input — the caller treats ``None`` as a verification failure
+    rather than a Python-level error.
+    """
+    if isinstance(v, str):
+        if len(v) % 2 != 0:
+            return None
+        try:
+            return bytes.fromhex(v)
+        except ValueError:
+            return None
+    if isinstance(v, (bytes, bytearray)):
+        return bytes(v)
+    if isinstance(v, list):
+        out = bytearray(len(v))
+        for i, item in enumerate(v):
+            if isinstance(item, bool) or not isinstance(item, int):
+                return None
+            if item < 0 or item > 255:
+                return None
+            out[i] = item
+        return bytes(out)
+    return None
+
+
+def _normalize_pubkey_to_compressed(pk_bytes: bytes) -> Optional[bytes]:
+    """Accept SEC1 33-byte compressed or 65-byte uncompressed pubkey.
+
+    Returns a 33-byte compressed encoding (the form expected by
+    :func:`runar.ecdsa.ecdsa_verify`'s ``_decompress_pubkey``). Returns
+    ``None`` on any malformed input.
+    """
+    if len(pk_bytes) == 33 and pk_bytes[0] in (0x02, 0x03):
+        return pk_bytes
+    if len(pk_bytes) == 65 and pk_bytes[0] == 0x04:
+        x = pk_bytes[1:33]
+        y = pk_bytes[33:65]
+        # y % 2 == 0 -> 0x02, else 0x03
+        prefix = 0x02 if (y[-1] & 0x01) == 0 else 0x03
+        return bytes([prefix]) + x
+    return None
+
+
+def _verify_ecdsa(sig_val: Any, pk_val: Any, sighash: bytes) -> bool:
+    """Real ECDSA verify against a 32-byte sighash.
+
+    Parses ``sig_val`` as DER (with optional trailing sighash byte stripped —
+    Bitcoin convention) and ``pk_val`` as SEC1 secp256k1 (33-byte compressed
+    or 65-byte uncompressed). The signature is verified directly against the
+    raw 32-byte sighash (the on-chain ``OP_CHECKSIG`` semantic — the VM does
+    NOT re-hash before verifying). Returns ``False`` on any parse error or
+    signature mismatch.
+    """
+    sig_bytes = _to_byte_array(sig_val)
+    pk_bytes = _to_byte_array(pk_val)
+    if sig_bytes is None or pk_bytes is None:
+        return False
+    pk_compressed = _normalize_pubkey_to_compressed(pk_bytes)
+    if pk_compressed is None:
+        return False
+    try:
+        # Lazy import: keeps the SDK's zero-required-deps stance for callers
+        # who never invoke real-crypto mode.
+        from runar.ecdsa import ecdsa_verify
+        return ecdsa_verify(sig_bytes, pk_compressed, sighash)
+    except Exception:
+        return False
+
+
+def _verify_multi_sig(sigs_val: Any, pks_val: Any, sighash: bytes) -> bool:
+    """OP_CHECKMULTISIG semantic: iterate sigs left-to-right, consume pks
+    greedily. Returns ``True`` iff every signature finds a matching pubkey.
+    """
+    if not isinstance(sigs_val, list) or not isinstance(pks_val, list):
+        return False
+    if len(sigs_val) > len(pks_val):
+        return False
+    pk_idx = 0
+    for sig in sigs_val:
+        matched = False
+        while pk_idx < len(pks_val):
+            ok = _verify_ecdsa(sig, pks_val[pk_idx], sighash)
+            pk_idx += 1
+            if ok:
+                matched = True
+                break
+        if not matched:
+            return False
+    return True
+
+
+def _verify_preimage(preimage_val: Any, sighash: bytes) -> bool:
+    """BIP-143 / OP_PUSH_TX semantic: ``hash256(preimage) == sighash``."""
+    pre_bytes = _to_byte_array(preimage_val)
+    if pre_bytes is None:
+        return False
+    digest = hashlib.sha256(hashlib.sha256(pre_bytes).digest()).digest()
+    return digest == sighash

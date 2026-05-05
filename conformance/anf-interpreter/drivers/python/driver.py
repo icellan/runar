@@ -4,17 +4,26 @@
 Spec: ../PROTOCOL.md
 
 Reads a single JSON input file, invokes the Python SDK's
-``compute_new_state_and_data_outputs`` (lenient) or ``execute_strict`` (strict)
+``compute_new_state_and_data_outputs`` (lenient),
+``execute_strict`` (strict), or ``execute_on_chain_authoritative`` (on-chain)
 ANF interpreter entry point, and prints a single JSON output object on stdout.
 
 Invocation::
 
     driver.py <input.json>                # lenient (default)
     driver.py --mode=strict <input.json>  # strict
+    driver.py --mode=on-chain <input.json>  # strict + real-crypto
 
-Strict mode emits ``{error: "AssertionFailureError", methodName, bindingName}``
-on the first falsy ``assert(...)`` predicate; otherwise the same
-``{state, dataOutputs, rawOutputs}`` envelope as lenient.
+Strict and on-chain modes emit
+``{error: "AssertionFailureError", methodName, bindingName}`` on the first
+falsy ``assert(...)`` predicate (including failed crypto verifications in
+on-chain mode); otherwise the same ``{state, dataOutputs, rawOutputs}``
+envelope as lenient.
+
+On-chain mode reads ``sighash`` from the input JSON (32-byte hex string)
+and passes it through :class:`OnChainCryptoContext` so ``checkSig`` /
+``checkMultiSig`` / ``checkPreimage`` perform real ECDSA + double-SHA-256
+verification rather than mock-returning ``True``.
 
 Bigints are encoded as ``"42n"`` strings on the wire and decoded to / from
 Python ``int`` at the boundary.
@@ -30,6 +39,12 @@ from typing import Any, Tuple
 
 
 _BIGINT_RE = re.compile(r"^-?\d+n$")
+
+
+# Mode constants
+_MODE_LENIENT = "lenient"
+_MODE_STRICT = "strict"
+_MODE_ON_CHAIN = "on-chain"
 
 
 def _decode_bigints(v: Any) -> Any:
@@ -75,30 +90,34 @@ def _resolve_anf_path(input_obj: dict, input_file: str) -> str:
     raise ValueError("input JSON missing both 'anfPath' and 'case' fields")
 
 
-def _parse_args(argv: list) -> Tuple[bool, str]:
-    """Parse argv into (strict, input_file). Order is irrelevant."""
-    strict = False
+def _parse_args(argv: list) -> Tuple[str, str]:
+    """Parse argv into (mode, input_file). Order is irrelevant."""
+    mode = _MODE_LENIENT
     input_file = ""
     for a in argv[1:]:
         if a == "--mode=strict":
-            strict = True
+            mode = _MODE_STRICT
         elif a == "--mode=lenient":
-            strict = False
+            mode = _MODE_LENIENT
+        elif a == "--mode=on-chain":
+            mode = _MODE_ON_CHAIN
         elif a.startswith("--"):
             raise ValueError(f"unknown flag: {a}")
         else:
             if input_file:
                 raise ValueError(
-                    "usage: driver.py [--mode=strict] <input-json-file>"
+                    "usage: driver.py [--mode=strict|--mode=on-chain] <input-json-file>"
                 )
             input_file = a
     if not input_file:
-        raise ValueError("usage: driver.py [--mode=strict] <input-json-file>")
-    return strict, input_file
+        raise ValueError(
+            "usage: driver.py [--mode=strict|--mode=on-chain] <input-json-file>"
+        )
+    return mode, input_file
 
 
 def main(argv: list) -> int:
-    strict, input_file = _parse_args(argv)
+    mode, input_file = _parse_args(argv)
 
     # Wire up the runar-py package: drivers/python/driver.py → packages/runar-py
     here = os.path.dirname(os.path.abspath(__file__))
@@ -109,7 +128,9 @@ def main(argv: list) -> int:
     # Import after sys.path is set up.
     from runar.sdk.anf_interpreter import (
         AssertionFailureError,
+        OnChainCryptoContext,
         compute_new_state_and_data_outputs,
+        execute_on_chain_authoritative,
         execute_strict,
     )
 
@@ -126,7 +147,17 @@ def main(argv: list) -> int:
         anf = json.load(fh)
 
     try:
-        if strict:
+        if mode == _MODE_ON_CHAIN:
+            sighash_hex = raw.get("sighash")
+            if not isinstance(sighash_hex, str) or not sighash_hex:
+                raise ValueError(
+                    "on-chain mode requires 'sighash' field in input JSON"
+                )
+            ctx = OnChainCryptoContext(sighash_hex)
+            state, data_outputs, raw_outputs = execute_on_chain_authoritative(
+                anf, method_name, current_state, args, constructor_args, ctx,
+            )
+        elif mode == _MODE_STRICT:
             state, data_outputs, raw_outputs = execute_strict(
                 anf, method_name, current_state, args, constructor_args,
             )
@@ -135,8 +166,8 @@ def main(argv: list) -> int:
                 anf, method_name, current_state, args, constructor_args,
             )
     except AssertionFailureError as af:
-        # Strict-mode assert failure: emit the standard envelope so the
-        # cross-tier parity test can byte-compare. Real driver errors
+        # Strict / on-chain assert failure: emit the standard envelope so
+        # the cross-tier parity test can byte-compare. Real driver errors
         # (missing IR, malformed input, …) still surface via the
         # non-zero exit + stderr message in __main__.
         out = {

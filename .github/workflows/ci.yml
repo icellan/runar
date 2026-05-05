@@ -664,13 +664,18 @@ jobs:
         run: cd conformance/anf-interpreter/drivers/zig && zig build -Doptimize=ReleaseSafe
       - name: Run ANF cross-interpreter parity — lenient (7 SDKs × 6 fixtures)
         run: pnpm run conformance:anf-parity
-      - name: Run ANF cross-interpreter parity — strict (7 SDKs × 6 fixtures)
+      - name: Run ANF cross-interpreter parity — strict (7 SDKs × 7 fixtures)
         # Strict mode also asserts cross-tier byte-equality of the
-        # `{error, methodName, bindingName}` envelope on the four fixtures
-        # whose `assert(...)` predicates fire under mocked crypto. Two
-        # fixtures (if-else-check-{true,false}) have no failing asserts and
-        # produce the same `{state, dataOutputs}` shape as lenient mode.
+        # `{error, methodName, bindingName}` envelope on the fixtures
+        # whose `assert(...)` predicates fire under mocked crypto.
         run: pnpm run conformance:anf-parity:strict
+      - name: Run ANF cross-interpreter parity — real-crypto (7 SDKs × 2 fixtures)
+        # Real-crypto mode performs ECDSA verify against the supplied
+        # 32-byte sighash, matching the on-chain CHECKSIG semantic. The
+        # pass fixture should succeed (sig verifies against constructor
+        # pubKeyHash + sighash); the fail fixture should produce
+        # AssertionFailureError at the assert(checkSig(...)) binding.
+        run: pnpm run conformance:anf-parity:real-crypto
 
   runar-verification:
     name: Runar Verification (Lean 4)

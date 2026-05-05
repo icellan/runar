@@ -26,41 +26,45 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
-    // Parse flags: optional --mode=strict (or --mode=lenient, the default).
-    // Anything else is the positional input file. argv[0] is the program name.
-    var strict = false;
+    // Parse flags: optional --mode=strict / --mode=on-chain (or --mode=lenient,
+    // the default). Anything else is the positional input file.
+    var mode: Mode = .lenient;
     var input_path: ?[]const u8 = null;
     if (args.len < 2) {
-        std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
+        std.debug.print("usage: runar-anf-driver-zig [--mode=strict|on-chain] <input-json-file>\n", .{});
         std.process.exit(1);
     }
     for (args[1..]) |a| {
         if (std.mem.eql(u8, a, "--mode=strict")) {
-            strict = true;
+            mode = .strict;
+        } else if (std.mem.eql(u8, a, "--mode=on-chain")) {
+            mode = .on_chain;
         } else if (std.mem.eql(u8, a, "--mode=lenient")) {
-            strict = false;
+            mode = .lenient;
         } else if (std.mem.startsWith(u8, a, "--")) {
             std.debug.print("unknown flag: {s}\n", .{a});
             std.process.exit(2);
         } else {
             if (input_path != null) {
-                std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
+                std.debug.print("usage: runar-anf-driver-zig [--mode=strict|on-chain] <input-json-file>\n", .{});
                 std.process.exit(1);
             }
             input_path = a;
         }
     }
     if (input_path == null) {
-        std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
+        std.debug.print("usage: runar-anf-driver-zig [--mode=strict|on-chain] <input-json-file>\n", .{});
         std.process.exit(1);
     }
-    runDriver(allocator, io, input_path.?, strict) catch |err| {
+    runDriver(allocator, io, input_path.?, mode) catch |err| {
         std.debug.print("driver error: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
-fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, strict: bool) !void {
+const Mode = enum { lenient, strict, on_chain };
+
+fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, mode: Mode) !void {
     // Load the input JSON.
     const input_data = try std.Io.Dir.cwd().readFileAlloc(io, input_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(input_data);
@@ -118,44 +122,67 @@ fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, s
         }
     }
 
-    // Run the interpreter — strict or lenient. In strict mode, an
-    // AssertionFailure populates `failure_info` (method + binding name) so
-    // we can emit the cross-tier `{error, methodName, bindingName}` envelope.
+    // Run the interpreter. Strict + on-chain modes both populate
+    // `failure_info` on AssertionFailure so we can emit the cross-tier
+    // `{error, methodName, bindingName}` envelope; on-chain additionally
+    // requires a 32-byte sighash from the input file.
     const result: NewStateResult = blk: {
-        if (strict) {
-            var failure_info: runar.sdk_anf_interpreter.AssertionFailureInfo = .{};
-            const r = runar.sdk_anf_interpreter.executeStrictWithFailureInfo(
-                allocator,
-                &anf,
-                method_name,
-                current_state,
-                arg_map,
-                ctor_args.items,
-                &failure_info,
-            ) catch |err| switch (err) {
-                error.AssertionFailure => {
-                    var fail_buf: [1024]u8 = undefined;
-                    var fail_w = std.Io.File.stdout().writer(io, &fail_buf);
-                    try fail_w.interface.writeAll("{\"error\":\"AssertionFailureError\",\"methodName\":");
-                    try writeJsonString(&fail_w.interface, failure_info.method_name);
-                    try fail_w.interface.writeAll(",\"bindingName\":");
-                    try writeJsonString(&fail_w.interface, failure_info.binding_name);
-                    try fail_w.interface.writeAll("}\n");
-                    try fail_w.interface.flush();
-                    return;
-                },
-                else => |e| return e,
-            };
-            break :blk r;
+        switch (mode) {
+            .on_chain => {
+                const sighash_v = input_root.get("sighash") orelse return error.MissingSighash;
+                if (sighash_v != .string) return error.InvalidSighash;
+                if (sighash_v.string.len != 64) return error.InvalidSighashLength;
+                var sighash_bytes: [32]u8 = undefined;
+                {
+                    var i: usize = 0;
+                    while (i < 32) : (i += 1) {
+                        sighash_bytes[i] = std.fmt.parseInt(u8, sighash_v.string[i * 2 .. i * 2 + 2], 16) catch return error.InvalidSighashHex;
+                    }
+                }
+                const ctx = runar.sdk_anf_interpreter.RealCryptoCtx{ .sighash = sighash_bytes };
+                var failure_info: runar.sdk_anf_interpreter.AssertionFailureInfo = .{};
+                const r = runar.sdk_anf_interpreter.executeOnChainAuthoritativeWithFailureInfo(
+                    allocator, &anf, method_name, current_state, arg_map, ctor_args.items, ctx, &failure_info,
+                ) catch |err| switch (err) {
+                    error.AssertionFailure => {
+                        var fail_buf: [1024]u8 = undefined;
+                        var fail_w = std.Io.File.stdout().writer(io, &fail_buf);
+                        try fail_w.interface.writeAll("{\"error\":\"AssertionFailureError\",\"methodName\":");
+                        try writeJsonString(&fail_w.interface, failure_info.method_name);
+                        try fail_w.interface.writeAll(",\"bindingName\":");
+                        try writeJsonString(&fail_w.interface, failure_info.binding_name);
+                        try fail_w.interface.writeAll("}\n");
+                        try fail_w.interface.flush();
+                        return;
+                    },
+                    else => |e| return e,
+                };
+                break :blk r;
+            },
+            .strict => {
+                var failure_info: runar.sdk_anf_interpreter.AssertionFailureInfo = .{};
+                const r = runar.sdk_anf_interpreter.executeStrictWithFailureInfo(
+                    allocator, &anf, method_name, current_state, arg_map, ctor_args.items, &failure_info,
+                ) catch |err| switch (err) {
+                    error.AssertionFailure => {
+                        var fail_buf: [1024]u8 = undefined;
+                        var fail_w = std.Io.File.stdout().writer(io, &fail_buf);
+                        try fail_w.interface.writeAll("{\"error\":\"AssertionFailureError\",\"methodName\":");
+                        try writeJsonString(&fail_w.interface, failure_info.method_name);
+                        try fail_w.interface.writeAll(",\"bindingName\":");
+                        try writeJsonString(&fail_w.interface, failure_info.binding_name);
+                        try fail_w.interface.writeAll("}\n");
+                        try fail_w.interface.flush();
+                        return;
+                    },
+                    else => |e| return e,
+                };
+                break :blk r;
+            },
+            .lenient => break :blk try runar.sdk_anf_interpreter.computeNewStateAndDataOutputs(
+                allocator, &anf, method_name, current_state, arg_map, ctor_args.items,
+            ),
         }
-        break :blk try runar.sdk_anf_interpreter.computeNewStateAndDataOutputs(
-            allocator,
-            &anf,
-            method_name,
-            current_state,
-            arg_map,
-            ctor_args.items,
-        );
     };
     defer {
         // Clean up data-output and raw-output script slices (state map is

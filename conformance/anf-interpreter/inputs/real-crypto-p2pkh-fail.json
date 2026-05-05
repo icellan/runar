@@ -1,0 +1,12 @@
+{
+  "case": "basic-p2pkh",
+  "methodName": "unlock",
+  "currentState": {},
+  "args": {
+    "sig": "3045022100c82dc77c9c740a2e7e299898290e1d3586221bcbce0bfc308dad201abeaa8617022026ad5a69f741e6da936ac2cd7e099daff6b1d6f88703e41dc2955c66ccb6f5b7",
+    "pubKey": "02057ffc2b5e380939f86a29693fe6561883c4cce0ec89f215ae417dcdd1fdaa41"
+  },
+  "constructorArgs": ["e00abe3873ca70f0ba63dec7e8b638062b0e9d47"],
+  "sighash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "_doc": "Real-crypto failing fixture. Same priv/pubKey/sig as the pass fixture, but sighash is all zeros, so the DER signature does NOT verify against it. Real-crypto mode raises AssertionFailureError at the assert(checkSig(...)) binding."
+}

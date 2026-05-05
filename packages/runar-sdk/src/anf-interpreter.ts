@@ -38,7 +38,14 @@ import type {
   ANFBinding,
   ANFValue,
 } from 'runar-ir-schema';
-import { Hash, Utils, PublicKey, Signature } from '@bsv/sdk';
+import { Hash, Utils, PublicKey, Signature, BigNumber } from '@bsv/sdk';
+// `verify` from @bsv/sdk's ECDSA module performs raw ECDSA verification
+// against an already-hashed digest. We use this rather than
+// `pubKey.verify(...)` (which internally sha256s its first arg) so the
+// `sighash` passed by the caller is treated as the actual ECDSA digest,
+// matching the on-chain CHECKSIG semantic where ECDSA verifies against
+// the BIP-143 sighash directly with no extra hashing.
+import { verify as ecdsaVerifyRaw } from '@bsv/sdk/primitives/ECDSA';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -888,7 +895,14 @@ function verifyEcdsa(
     const pubKey = PublicKey.fromDER(pkBytes);
     const sig = parseDerSignatureMaybeWithSighashByte(sigBytes);
     if (!sig) return false;
-    return pubKey.verify(sighash, sig);
+    // Raw ECDSA verify: treat `sighash` as the message digest directly,
+    // matching the on-chain CHECKSIG semantic (and the cross-tier real-
+    // crypto fixture convention). `pubKey.verify(msg, sig)` would re-hash
+    // `msg` with sha256 internally, which makes the TS verification
+    // disagree with every other SDK that simply ECDSA-verifies the
+    // supplied 32-byte digest.
+    const msgBN = new BigNumber(sighash);
+    return ecdsaVerifyRaw(msgBN, sig, pubKey);
   } catch {
     return false;
   }

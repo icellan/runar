@@ -3,26 +3,40 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { executeStrict, AssertionFailureError } from 'runar-sdk';
+import {
+  executeOnChainAuthoritative,
+  AssertionFailureError,
+} from 'runar-sdk';
 import type { ANFProgram } from 'runar-ir-schema';
 
-// Strict-mode counterpart to cross-interpreter.test.ts.
+// Real-crypto counterpart to cross-interpreter.test.ts and
+// cross-interpreter-strict.test.ts.
 //
-// Runs the same six fixture inputs through `executeStrict` (TS reference) and
-// each per-SDK driver invoked with `--mode=strict`. On a falsy `assert(...)`
-// predicate, a strict-mode driver MUST emit:
+// Runs each fixture through `executeOnChainAuthoritative` (TS reference) and
+// each per-SDK driver invoked with `--mode=on-chain`. The mode performs:
+//
+//   - Real ECDSA verify of `checkSig(sig, pk)` against the supplied 32-byte
+//     sighash. SEC1 secp256k1 pubkey, DER signature with optional trailing
+//     sighash type byte.
+//   - Real iterative `checkMultiSig(sigs, pks)` (left-to-right consume,
+//     greedy pubkey-match — Bitcoin's OP_CHECKMULTISIG semantic).
+//   - Real `checkPreimage(preimage)`: hash256(preimage) byte-equal to
+//     the sighash.
+//
+// On a falsy `assert(...)` predicate, every driver MUST emit:
 //
 //   { "error": "AssertionFailureError", "methodName": "<m>", "bindingName": "<b>" }
 //
-// On success it emits the same `{ state, dataOutputs }` envelope as lenient
-// mode. The TS reference is stamped first; every per-SDK driver must agree
-// byte-for-byte (structural equality — key ordering does not matter).
+// On success it emits `{ state, dataOutputs, rawOutputs }` — same shape as
+// strict + lenient. The TS reference is stamped first; every per-SDK
+// driver must agree byte-for-byte (structural equality — key ordering
+// does not matter).
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '..', '..');
 const CONFORMANCE_TESTS_DIR = join(__dirname, '../tests');
 const INPUTS_DIR = join(__dirname, 'inputs');
-const EXPECTED_DIR = join(__dirname, 'expected-strict');
+const EXPECTED_DIR = join(__dirname, 'expected-real-crypto');
 const DRIVERS_DIR = join(__dirname, 'drivers');
 
 const IS_CI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
@@ -33,6 +47,7 @@ interface CaseInput {
   currentState: Record<string, unknown>;
   args: Record<string, unknown>;
   constructorArgs: unknown[];
+  sighash: string;
 }
 
 interface SuccessOutput {
@@ -93,38 +108,39 @@ function loadAnf(caseName: string): ANFProgram {
   return JSON.parse(readFileSync(path, 'utf8')) as ANFProgram;
 }
 
-// Strict parity exercises every input file EXCEPT those that carry a
-// `sighash` field — those are the real-crypto fixtures, exercised by
-// `cross-interpreter-real-crypto.test.ts` via `--mode=on-chain`.
+// Only the inputs that carry a `sighash` field — those are the real-crypto
+// fixtures. This lets the lenient + strict suites share `inputs/` without
+// stepping on the real-crypto fixture inputs.
 const inputFiles = readdirSync(INPUTS_DIR)
   .filter(f => f.endsWith('.json'))
   .filter(f => {
     const raw = JSON.parse(readFileSync(join(INPUTS_DIR, f), 'utf8'));
-    return typeof raw.sighash !== 'string';
+    return typeof raw.sighash === 'string';
   })
   .sort();
 
 // ---------------------------------------------------------------------------
-// TS SDK reference: imported in-process and stamped against the strict-mode
+// TS SDK reference: imported in-process and stamped against the on-chain
 // goldens. Every per-SDK driver below MUST agree byte-for-byte.
 // ---------------------------------------------------------------------------
 
-describe('ANF strict parity (TS SDK)', () => {
+describe('ANF real-crypto parity (TS SDK)', () => {
   for (const inputFile of inputFiles) {
     const baseName = inputFile.replace(/\.json$/, '');
-    it(`${baseName} matches pinned strict golden`, () => {
+    it(`${baseName} matches pinned real-crypto golden`, () => {
       const inputRaw = JSON.parse(readFileSync(join(INPUTS_DIR, inputFile), 'utf8')) as CaseInput;
       const input = decodeBigints(inputRaw) as CaseInput;
       const anf = loadAnf(input.case);
 
       let actual: CaseOutput;
       try {
-        const result = executeStrict(
+        const result = executeOnChainAuthoritative(
           anf,
           input.methodName,
           input.currentState,
           input.args,
           input.constructorArgs,
+          { sighash: input.sighash },
         );
         actual = normalizeResult(result);
       } catch (e) {
@@ -151,7 +167,7 @@ describe('ANF strict parity (TS SDK)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Per-SDK strict driver matrix.
+// Per-SDK real-crypto driver matrix.
 // ---------------------------------------------------------------------------
 
 interface DriverConfig {
@@ -227,7 +243,7 @@ function isDriverAvailable(cfg: DriverConfig): boolean {
 }
 
 function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
-  const argv = cfg.prefix ? [...cfg.prefix, cfg.binary, '--mode=strict', inputFile] : [cfg.binary, '--mode=strict', inputFile];
+  const argv = cfg.prefix ? [...cfg.prefix, cfg.binary, '--mode=on-chain', inputFile] : [cfg.binary, '--mode=on-chain', inputFile];
   const cmd = argv[0]!;
   const args = argv.slice(1);
   const out = execFileSync(cmd, args, {
@@ -238,7 +254,7 @@ function runDriver(cfg: DriverConfig, inputFile: string): CaseOutput {
   });
   const trimmed = out.trim();
   if (!trimmed) {
-    throw new Error(`${cfg.name} strict driver produced empty stdout`);
+    throw new Error(`${cfg.name} on-chain driver produced empty stdout`);
   }
   return JSON.parse(trimmed) as CaseOutput;
 }
@@ -248,22 +264,21 @@ const requireAll = IS_CI || process.env.RUNAR_ANF_DRIVERS_STRICT === '1';
 const missingDrivers: DriverConfig[] = driverConfigs.filter(c => !isDriverAvailable(c));
 if (requireAll && missingDrivers.length > 0) {
   throw new Error(
-    `ANF strict-parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
+    `ANF real-crypto-parity drivers missing in CI / strict mode: ${missingDrivers.map(c => c.name).join(', ')}.\n` +
     missingDrivers.map(c => `  - ${c.name}: ${c.setupHint}`).join('\n'),
   );
 }
 
 for (const cfg of driverConfigs) {
-  describe.skipIf(!isDriverAvailable(cfg))(`ANF strict parity (${cfg.name} SDK)`, () => {
+  describe.skipIf(!isDriverAvailable(cfg))(`ANF real-crypto parity (${cfg.name} SDK)`, () => {
     for (const inputFile of inputFiles) {
       const baseName = inputFile.replace(/\.json$/, '');
-      it(`${baseName} matches pinned strict golden`, () => {
+      it(`${baseName} matches pinned real-crypto golden`, () => {
         const inputPath = join(INPUTS_DIR, inputFile);
         const actual = runDriver(cfg, inputPath);
         const expectedPath = join(EXPECTED_DIR, inputFile);
         const expected = JSON.parse(readFileSync(expectedPath, 'utf8')) as CaseOutput;
         expect(actual).toEqual(expected);
-        // Defensive shape check: failure outputs must always carry both name fields.
         if (isFailureOutput(actual)) {
           expect(actual.methodName.length).toBeGreaterThan(0);
           expect(actual.bindingName.length).toBeGreaterThan(0);

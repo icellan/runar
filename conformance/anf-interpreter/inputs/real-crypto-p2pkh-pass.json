@@ -1,0 +1,12 @@
+{
+  "case": "basic-p2pkh",
+  "methodName": "unlock",
+  "currentState": {},
+  "args": {
+    "sig": "3045022100c82dc77c9c740a2e7e299898290e1d3586221bcbce0bfc308dad201abeaa8617022026ad5a69f741e6da936ac2cd7e099daff6b1d6f88703e41dc2955c66ccb6f5b7",
+    "pubKey": "02057ffc2b5e380939f86a29693fe6561883c4cce0ec89f215ae417dcdd1fdaa41"
+  },
+  "constructorArgs": ["e00abe3873ca70f0ba63dec7e8b638062b0e9d47"],
+  "sighash": "66f605fe8c48e394c387cf4e64e859926168637caeafe8e98347232a33244588",
+  "_doc": "Real-crypto fixture. The basic-p2pkh ANF asserts (a) hash160(pubKey) == constructor pubKeyHash, and (b) checkSig(sig, pubKey) verifies against the supplied sighash. Both predicates pass: pubKey is the secp256k1 compressed pubkey for the deterministic test priv key aa11..eeff, hash160 of which is e00a..9d47; sig is the canonical low-S DER signature produced by RFC 6979 ECDSA-sign(sighash, priv) — the digest is the sighash itself, no extra hash, matching the on-chain CHECKSIG semantic. sighash = sha256(\"runar-sdk-anf-real-crypto-test\")."
+}

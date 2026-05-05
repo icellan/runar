@@ -75,10 +75,10 @@ satoshis fields.
   to `dataOutputs`. MUST be present (as `[]` if empty) — every driver and
   every golden file in `expected/` and `expected-strict/` carries this key.
 
-### Strict-mode failure shape (cross-interpreter-strict.test.ts only)
+### Strict-mode and on-chain-mode failure shape
 
-When invoked with `--mode=strict` and the contract method body fires an
-`assert(...)` that evaluates to false, drivers print:
+When invoked with `--mode=strict` or `--mode=on-chain` and the contract
+method body fires an `assert(...)` that evaluates to false, drivers print:
 
 ```json
 {
@@ -89,7 +89,30 @@ When invoked with `--mode=strict` and the contract method body fires an
 ```
 
 instead of the success envelope above. Exit code stays 0; only real driver
-errors (missing IR, malformed input) exit non-zero with a stderr message.
+errors (missing IR, malformed input, missing `sighash` for on-chain) exit
+non-zero with a stderr message.
+
+### Mode flag (`--mode=lenient|strict|on-chain`)
+
+- **lenient** (default): asserts skipped, crypto built-ins mocked
+  (`checkSig` / `checkMultiSig` / `checkPreimage` always return true).
+  Used for state-transition simulation.
+- **strict**: asserts enforced (raises `AssertionFailureError` on first
+  falsy predicate); crypto built-ins still mocked. Used for pre-broadcast
+  guard checks.
+- **on-chain**: asserts enforced AND crypto built-ins perform real
+  verification against the supplied `sighash`:
+  - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
+    secp256k1. DER signature with optional trailing sighash type byte
+    stripped. Verification is against the raw 32-byte sighash (no extra
+    SHA-256), matching the on-chain `OP_CHECKSIG` semantic.
+  - `checkMultiSig(sigs, pks)` → iterate sigs left-to-right, consume
+    pubkeys greedily.
+  - `checkPreimage(preimage)` → `hash256(preimage) == sighash`
+    byte-equal.
+
+  Required input field: `sighash` (32-byte hex string). Drivers exit
+  non-zero with stderr if it's missing or malformed.
 
 The TS reference implementation lives at
 `packages/runar-sdk/src/anf-interpreter.ts::computeNewStateAndDataOutputs`. The

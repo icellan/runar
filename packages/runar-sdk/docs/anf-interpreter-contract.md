@@ -39,32 +39,34 @@ operates on the **AST** (pre-ANF) and has stricter coverage (real ECDSA, real
 WOTS+/SLH-DSA verification). It is not part of this contract — it predates ANF
 and serves test-driven contract development.
 
-### Tiering — what is and is not in scope
+### Modes — all three available across all seven SDKs
 
-The seven SDKs split into two tiers for the third (real-crypto) mode:
+Every SDK ships the same three execution modes:
 
-- **Tier 1 — TS / Java / Zig**: ship `executeOnChainAuthoritative`, the
-  strict + real-ECDSA + real-preimage entry point. Real-crypto behaviour is
-  exercised by per-SDK unit tests
-  (`packages/runar-sdk/src/__tests__/anf-interpreter-real-crypto.spec.ts`,
-  `AnfInterpreterRealCryptoTest`, and the corresponding Zig tests).
-- **Tier 2 — Go / Rust / Python / Ruby**: lenient + strict only by design.
-  These SDKs ship the same lenient + strict semantics (cross-tier parity
-  for both is enforced by `cross-interpreter.test.ts` and
-  `cross-interpreter-strict.test.ts`), but **do not** carry a real-crypto
-  pre-broadcast simulator. Consumers needing a real-crypto pre-broadcast
-  check on a Tier-2 stack should either:
-    1. Run the same call through the TS / Java / Zig SDK in real-crypto
-       mode (the ANF + sighash inputs are language-agnostic), or
-    2. Submit the transaction to a regtest node — the on-chain VM is the
-       authoritative real-crypto verifier.
+- **Lenient** (`computeNewState` / `computeNewStateAndDataOutputs`):
+  state-transition simulator. Asserts skipped; crypto built-ins
+  mocked. Cross-tier parity:
+  `conformance/anf-interpreter/cross-interpreter.test.ts`.
+- **Strict** (`executeStrict`): asserts enforced (raises
+  `AssertionFailureError` on first falsy predicate); crypto built-ins
+  still mocked. Cross-tier parity:
+  `conformance/anf-interpreter/cross-interpreter-strict.test.ts`.
+- **On-chain authoritative** (`executeOnChainAuthoritative`): asserts
+  enforced AND crypto built-ins perform real verification against the
+  supplied 32-byte BIP-143 sighash:
+  - `checkSig(sig, pk)` → ECDSA-verify(sighash, sig, pk) using SEC1
+    secp256k1. DER signature with optional trailing sighash type byte
+    stripped. Verification is against the raw 32-byte sighash (no extra
+    SHA-256), matching the on-chain `OP_CHECKSIG` semantic.
+  - `checkMultiSig(sigs, pks)` → left-to-right consume + greedy
+    pubkey-match (Bitcoin's `OP_CHECKMULTISIG`).
+  - `checkPreimage(preimage)` → `hash256(preimage) == sighash`
+    byte-equal.
 
-A cross-interpreter real-crypto golden suite (which would require the four
-Tier-2 SDKs to grow `executeOnChainAuthoritative`) is **explicitly out of
-scope**. It is deferred to the post-Lean-Eval phase: the Lean reference
-will pin canonical real-crypto semantics, and any cross-tier real-crypto
-fixtures should be derived from there rather than from the working ground
-truth captured in the three current implementations.
+  Cross-tier parity:
+  `conformance/anf-interpreter/cross-interpreter-real-crypto.test.ts`
+  (drivers invoked with `--mode=on-chain`; sighash supplied via the
+  fixture's `sighash` field).
 
 ### `add_raw_output` simulation — supported (pass-through only)
 

@@ -4,21 +4,27 @@
 # ANF interpreter parity driver — Ruby SDK.
 #
 # See ../PROTOCOL.md for the input/output spec. Reads a single JSON input
-# file, invokes the Ruby SDK's lenient (compute_new_state_and_data_outputs)
-# or strict (execute_strict) ANF interpreter entry point, and prints a single
-# JSON object on stdout. Exits 0 on success, non-zero on real driver errors
-# (missing IR, malformed input, etc.).
+# file, invokes the Ruby SDK's lenient (compute_new_state_and_data_outputs),
+# strict (execute_strict), or on-chain (execute_on_chain_authoritative) ANF
+# interpreter entry point, and prints a single JSON object on stdout. Exits
+# 0 on success, non-zero on real driver errors (missing IR, malformed input,
+# etc.).
 #
 # Invocation:
 #
 #   driver.rb <input.json>                 # lenient (default)
 #   driver.rb --mode=strict <input.json>   # strict
 #   driver.rb --mode=lenient <input.json>  # explicit lenient
+#   driver.rb --mode=on-chain <input.json> # real-crypto / on-chain
 #
-# Strict mode emits {error: "AssertionFailureError", methodName, bindingName}
-# (and exits 0) on the first falsy +assert(...)+ predicate; otherwise the
-# same {state, dataOutputs, rawOutputs} envelope as lenient. Flag order is
-# irrelevant.
+# Strict and on-chain modes emit
+# {error: "AssertionFailureError", methodName, bindingName} (and exit 0) on
+# the first falsy +assert(...)+ predicate; otherwise the same
+# {state, dataOutputs, rawOutputs} envelope as lenient. On-chain mode
+# additionally requires a +sighash+ field in the input JSON (32 bytes / 64
+# hex chars) and performs real ECDSA + hash256 verification of
+# +checkSig+/+checkMultiSig+/+checkPreimage+ against that sighash. Flag
+# order is irrelevant.
 
 require 'json'
 require 'pathname'
@@ -98,24 +104,26 @@ def resolve_anf_path(input, input_file_path)
 end
 
 def main
-  # Parse args: optional --mode=strict (or --mode=lenient, the default).
+  # Parse args: optional --mode=strict|lenient|on-chain (default lenient).
   # Anything else is the input file. Order is irrelevant.
-  strict = false
+  mode = :lenient
   input_path = nil
   ARGV.each do |a|
     case a
     when '--mode=strict'
-      strict = true
+      mode = :strict
     when '--mode=lenient'
-      strict = false
+      mode = :lenient
+    when '--mode=on-chain'
+      mode = :on_chain
     else
       raise "unknown flag: #{a}" if a.start_with?('--')
-      raise 'usage: driver.rb [--mode=strict] <input-json-file>' if input_path
+      raise 'usage: driver.rb [--mode=strict|lenient|on-chain] <input-json-file>' if input_path
 
       input_path = a
     end
   end
-  raise 'usage: driver.rb [--mode=strict] <input-json-file>' unless input_path
+  raise 'usage: driver.rb [--mode=strict|lenient|on-chain] <input-json-file>' unless input_path
 
   raw = JSON.parse(File.read(input_path))
 
@@ -129,7 +137,23 @@ def main
 
   begin
     state, data_outputs, raw_outputs =
-      if strict
+      case mode
+      when :on_chain
+        sighash = raw['sighash']
+        unless sighash.is_a?(String)
+          raise "input JSON must include a 'sighash' hex string for --mode=on-chain"
+        end
+
+        ctx = Runar::SDK::OnChainCryptoContext.new(sighash)
+        Runar::SDK::ANFInterpreter.execute_on_chain_authoritative(
+          anf,
+          method_name,
+          current_state,
+          args,
+          constructor_args,
+          ctx,
+        )
+      when :strict
         Runar::SDK::ANFInterpreter.execute_strict(
           anf,
           method_name,

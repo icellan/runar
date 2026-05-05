@@ -106,23 +106,25 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
   const sighash = deterministicSighash();
   const sighashHex = Utils.toHex(sighash);
 
-  // Sign the sighash with the test private key. @bsv/sdk's `PrivateKey.sign`
-  // takes the *message* and SHA-256 hashes it internally before signing,
-  // matching how `LocalSigner.sign` produces a signature in the SDK
-  // (it passes SHA256(preimage) as the message, so the actual digest signed
-  // is SHA256(SHA256(preimage)) = the BIP-143 sighash). To produce a sig
-  // that verifies against `sighash` directly, we'd have to hand the raw
-  // sighash to @bsv/sdk's API. Looking at PublicKey.verify, it also
-  // SHA-256s the message argument — so to verify against `sighash` we have
-  // to feed `sighash` as the *raw bytes* and sign via the same path.
-  //
-  // Using PrivateKey.sign(msg) and PublicKey.verify(msg, sig) where
-  // msg = sighash bytes gives a self-consistent round-trip: both sides
-  // hash msg the same way before doing the actual ECDSA op. This is what
-  // the real-crypto interpreter mode does.
+  // Sign the sighash directly via the raw ECDSA primitive (no extra
+  // hashing). The interpreter's real-crypto mode mirrors the on-chain
+  // CHECKSIG semantic where ECDSA verifies the signature against the
+  // BIP-143 sighash itself, with no additional sha256 layer. Going
+  // through `PrivateKey.sign(msg)` + `PublicKey.verify(msg, sig)` would
+  // sha256 the supplied bytes on both sides — self-consistent for a
+  // single-SDK round-trip but incompatible with cross-tier verifiers
+  // (Go / Rust / Python / Ruby / Java / Zig) that ECDSA-verify the
+  // sighash directly.
   const priv = PrivateKey.fromHex(TEST_PRIV_HEX);
   const pubHex = priv.toPublicKey().toDER('hex') as string;
-  const sigDerHex = priv.sign(sighash).toDER('hex') as string;
+  const sigDerHex = (() => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { sign: ecdsaSignRaw } = require('@bsv/sdk/primitives/ECDSA');
+    const { BigNumber } = require('@bsv/sdk');
+    const msgBN = new BigNumber(sighash);
+    const sig = ecdsaSignRaw(msgBN, priv, true);
+    return sig.toDER('hex') as string;
+  })();
 
   // ECDSA — checkSig
   describe('checkSig', () => {
@@ -233,7 +235,16 @@ describe('ANF interpreter — executeOnChainAuthoritative', () => {
     const anf = makeMultisigGuardANF();
     const priv2 = PrivateKey.fromHex('22'.repeat(32));
     const pub2 = priv2.toPublicKey().toDER('hex') as string;
-    const sig2 = priv2.sign(sighash).toDER('hex') as string;
+    // Same raw-ECDSA sign rationale as the checkSig case above — the
+    // interpreter's verifier ECDSA-verifies against the sighash directly
+    // with no extra sha256 layer.
+    const sig2 = (() => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { sign: ecdsaSignRaw } = require('@bsv/sdk/primitives/ECDSA');
+      const { BigNumber } = require('@bsv/sdk');
+      const msgBN = new BigNumber(sighash);
+      return ecdsaSignRaw(msgBN, priv2, true).toDER('hex') as string;
+    })();
 
     it('passes when both sigs verify against a 2-of-2 pubkey set', () => {
       const result = executeOnChainAuthoritative(

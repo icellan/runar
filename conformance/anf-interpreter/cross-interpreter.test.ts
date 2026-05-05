@@ -74,7 +74,16 @@ function loadAnf(caseName: string): ANFProgram {
   return JSON.parse(readFileSync(path, 'utf8')) as ANFProgram;
 }
 
-const inputFiles = readdirSync(INPUTS_DIR).filter(f => f.endsWith('.json')).sort();
+// Lenient parity exercises every input file EXCEPT those that carry a
+// `sighash` field — those are the real-crypto fixtures, exercised by
+// `cross-interpreter-real-crypto.test.ts` via `--mode=on-chain`.
+const inputFiles = readdirSync(INPUTS_DIR)
+  .filter(f => f.endsWith('.json'))
+  .filter(f => {
+    const raw = JSON.parse(readFileSync(join(INPUTS_DIR, f), 'utf8'));
+    return typeof raw.sighash !== 'string';
+  })
+  .sort();
 
 // ---------------------------------------------------------------------------
 // TS SDK reference: imported in-process so the goldens are stamped against
