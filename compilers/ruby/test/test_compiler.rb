@@ -155,11 +155,8 @@ class TestCompiler < Minitest::Test
   # ------------------------------------------------------------------
 
   def test_conformance_basic_p2pkh_ts
-    return skip("conformance dir not found — run from repo root: #{CONFORMANCE_DIR}") unless File.directory?(CONFORMANCE_DIR)
-
-    ts_path = File.join(CONFORMANCE_DIR, 'basic-p2pkh', 'basic-p2pkh.runar.ts')
+    ts_path = ConformanceFixture.resolve('basic-p2pkh', '.runar.ts')
     expected_hex = File.read(File.join(CONFORMANCE_DIR, 'basic-p2pkh', 'expected-script.hex')).strip
-    return skip("conformance file not found: #{ts_path}") unless File.exist?(ts_path)
 
     artifact = RunarCompiler.compile_from_source(ts_path, disable_constant_folding: true)
     assert_equal expected_hex.downcase, artifact.script.downcase,
@@ -167,11 +164,8 @@ class TestCompiler < Minitest::Test
   end
 
   def test_conformance_basic_p2pkh_rb
-    return skip("conformance dir not found — run from repo root: #{CONFORMANCE_DIR}") unless File.directory?(CONFORMANCE_DIR)
-
-    rb_path = File.join(CONFORMANCE_DIR, 'basic-p2pkh', 'basic-p2pkh.runar.rb')
+    rb_path = ConformanceFixture.resolve('basic-p2pkh', '.runar.rb')
     expected_hex = File.read(File.join(CONFORMANCE_DIR, 'basic-p2pkh', 'expected-script.hex')).strip
-    return skip("conformance file not found: #{rb_path}") unless File.exist?(rb_path)
 
     artifact = RunarCompiler.compile_from_source(rb_path, disable_constant_folding: true)
     assert_equal expected_hex.downcase, artifact.script.downcase,
@@ -219,15 +213,16 @@ class TestCompiler < Minitest::Test
 
   CONFORMANCE_TESTS.each do |test_dir, source_file|
     method_name = "test_conformance_#{test_dir.gsub('-', '_')}"
+    # Derive extension from the legacy source-file name (e.g. "foo.runar.ts" → ".runar.ts").
+    ext = source_file[/\.runar\.[a-z]+\z/]
+
     define_method(method_name) do
-      skip("conformance dir not found — run from repo root: #{CONFORMANCE_DIR}") unless File.directory?(CONFORMANCE_DIR)
-
-      source_path = File.join(CONFORMANCE_DIR, test_dir, source_file)
       hex_path = File.join(CONFORMANCE_DIR, test_dir, 'expected-script.hex')
-      missing = [source_path, hex_path].reject { |p| File.exist?(p) }
-      skip("conformance files not found for #{test_dir}: #{missing.join(', ')}") unless missing.empty?
+      assert File.exist?(hex_path), "expected-script.hex missing for #{test_dir}"
 
+      source_path = ConformanceFixture.resolve(test_dir, ext)
       expected_hex = File.read(hex_path).strip
+
       artifact = RunarCompiler.compile_from_source(source_path, disable_constant_folding: true)
       assert_equal expected_hex.downcase, artifact.script.downcase,
                    "#{test_dir}: compiled script should match conformance golden file"

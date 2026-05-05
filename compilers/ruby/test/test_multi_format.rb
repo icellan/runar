@@ -17,18 +17,12 @@ class TestMultiFormat < Minitest::Test
   # Helpers
   # ---------------------------------------------------------------------------
 
-  def skip_unless_conformance
-    skip("conformance dir not found") unless File.directory?(CONFORMANCE_DIR)
-    skip("basic-p2pkh dir not found") unless File.directory?(BASIC_P2PKH_DIR)
-  end
-
-  # Compile a conformance source file and return the hex script.
-  # Uses subprocess for .runar.rb to avoid tokenizer namespace collision.
-  def compile_conformance_file(source_file)
-    path = File.join(BASIC_P2PKH_DIR, source_file)
-    skip("#{source_file} not found") unless File.exist?(path)
-
-    if source_file.end_with?(".runar.rb")
+  # Compile the basic-p2pkh fixture for a given extension (resolved via
+  # source.json). Uses subprocess for .runar.rb to avoid tokenizer namespace
+  # collision with the .runar.ts parser.
+  def compile_conformance_ext(ext)
+    path = ConformanceFixture.resolve("basic-p2pkh", ext)
+    if ext == ".runar.rb"
       compile_rb_subprocess(path)
     else
       artifact = RunarCompiler.compile_from_source(path, disable_constant_folding: true)
@@ -56,7 +50,7 @@ class TestMultiFormat < Minitest::Test
 
   def expected_hex
     hex_path = File.join(BASIC_P2PKH_DIR, "expected-script.hex")
-    skip("expected-script.hex not found") unless File.exist?(hex_path)
+    assert File.exist?(hex_path), "expected-script.hex missing"
     File.read(hex_path).strip.downcase
   end
 
@@ -65,8 +59,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_ts_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.ts")
+    hex = compile_conformance_ext(".runar.ts")
     assert_equal expected_hex, hex, ".runar.ts should match expected hex"
   end
 
@@ -75,8 +68,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_sol_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.sol")
+    hex = compile_conformance_ext(".runar.sol")
     assert_equal expected_hex, hex, ".runar.sol should match expected hex"
   end
 
@@ -85,8 +77,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_move_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.move")
+    hex = compile_conformance_ext(".runar.move")
     assert_equal expected_hex, hex, ".runar.move should match expected hex"
   end
 
@@ -95,8 +86,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_go_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.go")
+    hex = compile_conformance_ext(".runar.go")
     assert_equal expected_hex, hex, ".runar.go should match expected hex"
   end
 
@@ -105,8 +95,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_rs_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.rs")
+    hex = compile_conformance_ext(".runar.rs")
     assert_equal expected_hex, hex, ".runar.rs should match expected hex"
   end
 
@@ -115,8 +104,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_py_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.py")
+    hex = compile_conformance_ext(".runar.py")
     assert_equal expected_hex, hex, ".runar.py should match expected hex"
   end
 
@@ -125,8 +113,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_rb_matches_golden
-    skip_unless_conformance
-    hex = compile_conformance_file("basic-p2pkh.runar.rb")
+    hex = compile_conformance_ext(".runar.rb")
     assert_equal expected_hex, hex, ".runar.rb should match expected hex"
   end
 
@@ -135,9 +122,7 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_zig_matches_golden
-    skip_unless_conformance
-    zig_file = File.join(BASIC_P2PKH_DIR, "P2PKH.runar.zig")
-    skip("P2PKH.runar.zig not found") unless File.exist?(zig_file)
+    zig_file = ConformanceFixture.resolve("basic-p2pkh", ".runar.zig")
 
     artifact = RunarCompiler.compile_from_source(zig_file, disable_constant_folding: true)
     hex = artifact.script.downcase
@@ -149,32 +134,19 @@ class TestMultiFormat < Minitest::Test
   # ---------------------------------------------------------------------------
 
   def test_all_non_rb_formats_identical
-    skip_unless_conformance
-
-    formats = %w[
-      basic-p2pkh.runar.ts
-      basic-p2pkh.runar.sol
-      basic-p2pkh.runar.move
-      basic-p2pkh.runar.go
-      basic-p2pkh.runar.rs
-      basic-p2pkh.runar.py
-    ]
+    exts = %w[.runar.ts .runar.sol .runar.move .runar.go .runar.rs .runar.py]
 
     scripts = {}
-    formats.each do |fmt|
-      path = File.join(BASIC_P2PKH_DIR, fmt)
-      next unless File.exist?(path)
-
+    exts.each do |ext|
+      path = ConformanceFixture.resolve("basic-p2pkh", ext)
       artifact = RunarCompiler.compile_from_source(path, disable_constant_folding: true)
-      scripts[fmt] = artifact.script.downcase
+      scripts[ext] = artifact.script.downcase
     end
 
-    skip("fewer than 2 formats available") if scripts.length < 2
-
-    reference_fmt, reference_hex = scripts.first
-    scripts.each do |fmt, hex|
+    reference_ext, reference_hex = scripts.first
+    scripts.each do |ext, hex|
       assert_equal reference_hex, hex,
-                   "#{fmt} should produce identical script to #{reference_fmt}"
+                   "#{ext} should produce identical script to #{reference_ext}"
     end
   end
 

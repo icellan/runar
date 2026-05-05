@@ -1,10 +1,8 @@
 package runar.compiler.frontend;
 
-import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import org.junit.jupiter.api.Test;
 import runar.compiler.ir.ast.AssignmentStatement;
 import runar.compiler.ir.ast.BigIntLiteral;
@@ -44,13 +42,7 @@ class PyParserTest {
 
     @Test
     void parsesConformanceP2pkhFixture() throws Exception {
-        Path fixture = Paths.get("..", "..", "conformance", "tests", "basic-p2pkh", "basic-p2pkh.runar.py")
-            .toAbsolutePath().normalize();
-        if (!Files.exists(fixture)) {
-            // Worktree placement may differ; skip if fixture isn't where we
-            // expect rather than failing the whole suite.
-            return;
-        }
+        Path fixture = ConformanceFixture.resolve("basic-p2pkh", ".runar.py");
         String src = Files.readString(fixture);
         ContractNode c = PyParser.parse(src, "basic-p2pkh.runar.py");
         assertEquals("P2PKH", c.name());

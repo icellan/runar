@@ -350,23 +350,7 @@ class SolParserTest {
 
     @Test
     void parsesConformanceStatefulCounterFixture() throws Exception {
-        Path fixture = Path.of(
-            System.getProperty("user.dir"),
-            "..", "..",
-            "conformance", "tests", "stateful-counter", "stateful-counter.runar.sol"
-        );
-        if (!Files.exists(fixture)) {
-            // Worktree layouts differ; fall back to walking up to repo root.
-            fixture = Path.of(
-                System.getProperty("user.dir"),
-                "..", "..", "..", "..",
-                "conformance", "tests", "stateful-counter", "stateful-counter.runar.sol"
-            );
-        }
-        if (!Files.exists(fixture)) {
-            // Skip — fixture not found in this layout.
-            return;
-        }
+        Path fixture = ConformanceFixture.resolve("stateful-counter", ".runar.sol");
         String src = Files.readString(fixture);
         ContractNode c = SolParser.parse(src, "stateful-counter.runar.sol");
         assertEquals("Counter", c.name());
