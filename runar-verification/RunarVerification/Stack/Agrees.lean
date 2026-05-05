@@ -1820,6 +1820,460 @@ theorem agreesTagged_assert_d1_unconditional
     · show (anfSt.addBinding bn (.vBool true)).outputs = stkSt.outputs
       unfold State.addBinding; exact hAgrees.2.2
 
+/-! ### Depth-1 fan-out (continued) — ABS / 1ADD / 1SUB
+
+Mirror the recipe of `agreesTagged_unaryOp_NEGATE_d1_unconditional`
+to cover the remaining integer unary opcodes at depth 1. -/
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_ABS` at depth 1. -/
+theorem agreesTagged_unaryOp_ABS_d1_unconditional
+    (topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest)) :
+    runOps [.over, .opcode "OP_ABS"] stkSt
+      = .ok (stkSt.push (.vBigint i.natAbs))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint i.natAbs))
+                   (stkSt.push (.vBigint i.natAbs)) := by
+  have hAlign : taggedStackAligned ((topName, k_top) :: (n, k) :: tsm_rest)
+                                   anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV depth1V rest, stkSt.stack = topV :: depth1V :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: depth1V :: rest => exact ⟨topV, depth1V, rest, rfl⟩
+  obtain ⟨topV, depth1V, rest, hStk⟩ := hStkShape
+  have hAt1 : lookupAnfByKind anfSt (n, k) = some depth1V := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeq : depth1V = .vBigint i := by
+    rw [hLookup] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver : runOps [.over] stkSt = .ok (stkSt.push (.vBigint i)) := by
+      have := Stack.Sim.run_over_deep stkSt topV depth1V rest hStk
+      rw [hVeq] at this
+      exact this
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_ABS" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint i.natAbs)) :=
+      Stack.Sim.runOpcode_ABS_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint i.natAbs))
+        = stkSt.push (.vBigint i.natAbs) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.over] ++ [.opcode "OP_ABS"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over] "OP_ABS" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint i.natAbs)) hOver hOp
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (n, k) :: tsm_rest) bn anfSt stkSt
+      (.vBigint i.natAbs) hAgrees hFresh'
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_1ADD` at depth 1. -/
+theorem agreesTagged_unaryOp_1ADD_d1_unconditional
+    (topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest)) :
+    runOps [.over, .opcode "OP_1ADD"] stkSt
+      = .ok (stkSt.push (.vBigint (i + 1)))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (i + 1)))
+                   (stkSt.push (.vBigint (i + 1))) := by
+  have hAlign : taggedStackAligned ((topName, k_top) :: (n, k) :: tsm_rest)
+                                   anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV depth1V rest, stkSt.stack = topV :: depth1V :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: depth1V :: rest => exact ⟨topV, depth1V, rest, rfl⟩
+  obtain ⟨topV, depth1V, rest, hStk⟩ := hStkShape
+  have hAt1 : lookupAnfByKind anfSt (n, k) = some depth1V := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeq : depth1V = .vBigint i := by
+    rw [hLookup] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver : runOps [.over] stkSt = .ok (stkSt.push (.vBigint i)) := by
+      have := Stack.Sim.run_over_deep stkSt topV depth1V rest hStk
+      rw [hVeq] at this
+      exact this
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_1ADD" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i + 1))) :=
+      Stack.Sim.runOpcode_1ADD_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i + 1)))
+        = stkSt.push (.vBigint (i + 1)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.over] ++ [.opcode "OP_1ADD"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over] "OP_1ADD" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (i + 1))) hOver hOp
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (n, k) :: tsm_rest) bn anfSt stkSt
+      (.vBigint (i + 1)) hAgrees hFresh'
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_1SUB` at depth 1. -/
+theorem agreesTagged_unaryOp_1SUB_d1_unconditional
+    (topName n : String) (k_top k : SlotKind) (tsm_rest : TaggedStackMap)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged ((topName, k_top) :: (n, k) :: tsm_rest) anfSt stkSt)
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (topName :: n :: untagSm tsm_rest)) :
+    runOps [.over, .opcode "OP_1SUB"] stkSt
+      = .ok (stkSt.push (.vBigint (i - 1)))
+    ∧ agreesTagged ((bn, .binding) :: (topName, k_top) :: (n, k) :: tsm_rest)
+                   (anfSt.addBinding bn (.vBigint (i - 1)))
+                   (stkSt.push (.vBigint (i - 1))) := by
+  have hAlign : taggedStackAligned ((topName, k_top) :: (n, k) :: tsm_rest)
+                                   anfSt stkSt.stack := hAgrees.1
+  have hStkShape : ∃ topV depth1V rest, stkSt.stack = topV :: depth1V :: rest := by
+    match hCases : stkSt.stack with
+    | [] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        exact absurd hAlign (by simp)
+    | [_] =>
+        rw [hCases] at hAlign
+        unfold taggedStackAligned at hAlign
+        obtain ⟨_, hTail⟩ := hAlign
+        unfold taggedStackAligned at hTail
+        exact absurd hTail (by simp)
+    | topV :: depth1V :: rest => exact ⟨topV, depth1V, rest, rfl⟩
+  obtain ⟨topV, depth1V, rest, hStk⟩ := hStkShape
+  have hAt1 : lookupAnfByKind anfSt (n, k) = some depth1V := by
+    rw [hStk] at hAlign
+    unfold taggedStackAligned at hAlign
+    obtain ⟨_, hTail⟩ := hAlign
+    unfold taggedStackAligned at hTail
+    exact hTail.1
+  have hVeq : depth1V = .vBigint i := by
+    rw [hLookup] at hAt1; exact (Option.some.inj hAt1).symm
+  refine ⟨?_, ?_⟩
+  · have hOver : runOps [.over] stkSt = .ok (stkSt.push (.vBigint i)) := by
+      have := Stack.Sim.run_over_deep stkSt topV depth1V rest hStk
+      rw [hVeq] at this
+      exact this
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_1SUB" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i - 1))) :=
+      Stack.Sim.runOpcode_1SUB_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i - 1)))
+        = stkSt.push (.vBigint (i - 1)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.over] ++ [.opcode "OP_1SUB"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.over] "OP_1SUB" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (i - 1))) hOver hOp
+  · have hFresh' : freshIn bn
+        (untagSm ((topName, k_top) :: (n, k) :: tsm_rest)) := by
+      unfold untagSm; exact hFresh
+    exact agreesTagged_push_value
+      ((topName, k_top) :: (n, k) :: tsm_rest) bn anfSt stkSt
+      (.vBigint (i - 1)) hAgrees hFresh'
+
+/-! ### Depth-≥ 2 fan-out
+
+When the operand is at structural depth `d ≥ 2`, `loadRef` emits
+`[.pickStruct d]` (cf. `agreesTagged_loadRef_depth_ge2`). The
+recipe is identical to depth-0/1 but uses `run_pickStruct_at_depth`
+for the load step. Each lemma is parameterised by the depth `d`
+and the `nthOpt d tsm = some (n, k)` witness. -/
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_NEGATE` at depth ≥ 2. -/
+theorem agreesTagged_unaryOp_NEGATE_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_NEGATE"] stkSt
+      = .ok (stkSt.push (.vBigint (-i)))
+    ∧ agreesTagged ((bn, .binding) :: tsm)
+                   (anfSt.addBinding bn (.vBigint (-i)))
+                   (stkSt.push (.vBigint (-i))) := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBigint i := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBigint i :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBigint i)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBigint i) hLen hStkBang
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_NEGATE" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (-i))) :=
+      Stack.Sim.runOpcode_NEGATE_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (-i)))
+        = stkSt.push (.vBigint (-i)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.pickStruct d] ++ [.opcode "OP_NEGATE"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_NEGATE" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (-i))) hLoad hOp
+  · exact agreesTagged_push_value tsm bn anfSt stkSt
+            (.vBigint (-i)) hAgrees hFresh
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_NOT` at depth ≥ 2. -/
+theorem agreesTagged_unaryOp_NOT_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState) (b : Bool)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool b))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_NOT"] stkSt
+      = .ok (stkSt.push (.vBool (!b)))
+    ∧ agreesTagged ((bn, .binding) :: tsm)
+                   (anfSt.addBinding bn (.vBool (!b)))
+                   (stkSt.push (.vBool (!b))) := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBool b := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBool b :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBool b)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBool b) hLen hStkBang
+    have hOpStk : (stkSt.push (.vBool b)).stack = .vBool b :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_NOT" (stkSt.push (.vBool b))
+        = .ok ({stkSt.push (.vBool b) with stack := stkSt.stack}.push (.vBool (!b))) :=
+      Stack.Sim.runOpcode_NOT_bool (stkSt.push (.vBool b)) b stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBool b) with stack := stkSt.stack}.push (.vBool (!b)))
+        = stkSt.push (.vBool (!b)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.pickStruct d] ++ [.opcode "OP_NOT"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_NOT" stkSt
+            (stkSt.push (.vBool b)) (stkSt.push (.vBool (!b))) hLoad hOp
+  · exact agreesTagged_push_value tsm bn anfSt stkSt
+            (.vBool (!b)) hAgrees hFresh
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_ABS` at depth ≥ 2. -/
+theorem agreesTagged_unaryOp_ABS_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_ABS"] stkSt
+      = .ok (stkSt.push (.vBigint i.natAbs))
+    ∧ agreesTagged ((bn, .binding) :: tsm)
+                   (anfSt.addBinding bn (.vBigint i.natAbs))
+                   (stkSt.push (.vBigint i.natAbs)) := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBigint i := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBigint i :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBigint i)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBigint i) hLen hStkBang
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_ABS" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint i.natAbs)) :=
+      Stack.Sim.runOpcode_ABS_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint i.natAbs))
+        = stkSt.push (.vBigint i.natAbs) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.pickStruct d] ++ [.opcode "OP_ABS"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_ABS" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint i.natAbs)) hLoad hOp
+  · exact agreesTagged_push_value tsm bn anfSt stkSt
+            (.vBigint i.natAbs) hAgrees hFresh
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_1ADD` at depth ≥ 2. -/
+theorem agreesTagged_unaryOp_1ADD_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_1ADD"] stkSt
+      = .ok (stkSt.push (.vBigint (i + 1)))
+    ∧ agreesTagged ((bn, .binding) :: tsm)
+                   (anfSt.addBinding bn (.vBigint (i + 1)))
+                   (stkSt.push (.vBigint (i + 1))) := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBigint i := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBigint i :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBigint i)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBigint i) hLen hStkBang
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_1ADD" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i + 1))) :=
+      Stack.Sim.runOpcode_1ADD_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i + 1)))
+        = stkSt.push (.vBigint (i + 1)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.pickStruct d] ++ [.opcode "OP_1ADD"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_1ADD" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (i + 1))) hLoad hOp
+  · exact agreesTagged_push_value tsm bn anfSt stkSt
+            (.vBigint (i + 1)) hAgrees hFresh
+
+/-- UNCONDITIONAL `unaryOp` preservation for `OP_1SUB` at depth ≥ 2. -/
+theorem agreesTagged_unaryOp_1SUB_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState) (i : Int)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBigint i))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_1SUB"] stkSt
+      = .ok (stkSt.push (.vBigint (i - 1)))
+    ∧ agreesTagged ((bn, .binding) :: tsm)
+                   (anfSt.addBinding bn (.vBigint (i - 1)))
+                   (stkSt.push (.vBigint (i - 1))) := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBigint i := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBigint i :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBigint i)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBigint i) hLen hStkBang
+    have hOpStk : (stkSt.push (.vBigint i)).stack = .vBigint i :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hOp :
+        runOpcode "OP_1SUB" (stkSt.push (.vBigint i))
+        = .ok ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i - 1))) :=
+      Stack.Sim.runOpcode_1SUB_int (stkSt.push (.vBigint i)) i stkSt.stack hOpStk
+    have hPostEq :
+        ({stkSt.push (.vBigint i) with stack := stkSt.stack}.push (.vBigint (i - 1)))
+        = stkSt.push (.vBigint (i - 1)) := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hOp
+    show runOps ([.pickStruct d] ++ [.opcode "OP_1SUB"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_1SUB" stkSt
+            (stkSt.push (.vBigint i)) (stkSt.push (.vBigint (i - 1))) hLoad hOp
+  · exact agreesTagged_push_value tsm bn anfSt stkSt
+            (.vBigint (i - 1)) hAgrees hFresh
+
+/-- UNCONDITIONAL `assert` preservation at depth ≥ 2 (vBool true). -/
+theorem agreesTagged_assert_dge2_unconditional
+    (tsm : TaggedStackMap) (n : String) (k : SlotKind) (d : Nat)
+    (bn : String) (anfSt : State) (stkSt : StackState)
+    (hAgrees : agreesTagged tsm anfSt stkSt)
+    (hAtDepth : nthOpt d tsm = some (n, k))
+    (hLookup : lookupAnfByKind anfSt (n, k) = some (.vBool true))
+    (hFresh : freshIn bn (untagSm tsm)) :
+    runOps [.pickStruct d, .opcode "OP_VERIFY"] stkSt = .ok stkSt
+    ∧ agreesTagged tsm
+                   (anfSt.addBinding bn (.vBool true))
+                   stkSt := by
+  have hAlign : taggedStackAligned tsm anfSt stkSt.stack := hAgrees.1
+  obtain ⟨v', hStkAt, hLookAt⟩ :=
+    taggedStackAligned_at_index anfSt tsm stkSt.stack hAlign d (n, k) hAtDepth
+  have hVeq : v' = .vBool true := by
+    rw [hLookup] at hLookAt; exact (Option.some.inj hLookAt).symm
+  rw [hVeq] at hStkAt
+  have hLen : d < stkSt.stack.length := nthOpt_lt_length _ _ _ hStkAt
+  have hStkBang : stkSt.stack[d]! = .vBool true :=
+    nthOpt_getElem!_default _ _ _ hStkAt
+  refine ⟨?_, ?_⟩
+  · have hLoad : runOps [.pickStruct d] stkSt = .ok (stkSt.push (.vBool true)) :=
+      Stack.Sim.run_pickStruct_at_depth stkSt d (.vBool true) hLen hStkBang
+    have hVerifyStk : (stkSt.push (.vBool true)).stack = .vBool true :: stkSt.stack := by
+      unfold StackState.push; simp
+    have hVerify :
+        runOpcode "OP_VERIFY" (stkSt.push (.vBool true))
+        = .ok {stkSt.push (.vBool true) with stack := stkSt.stack} :=
+      Stack.Sim.runOpcode_verify_pop_vBool_true (stkSt.push (.vBool true)) stkSt.stack hVerifyStk
+    have hPostEq :
+        ({stkSt.push (.vBool true) with stack := stkSt.stack} : StackState) = stkSt := by
+      unfold StackState.push; cases stkSt; simp
+    rw [hPostEq] at hVerify
+    show runOps ([.pickStruct d] ++ [.opcode "OP_VERIFY"]) stkSt = _
+    exact runOps_loadThenOpcode_unconditional [.pickStruct d] "OP_VERIFY" stkSt
+            (stkSt.push (.vBool true)) stkSt hLoad hVerify
+  · refine ⟨?_, ?_, ?_⟩
+    · exact taggedStackAligned_addBinding_fresh tsm anfSt stkSt.stack bn
+              (.vBool true) hFresh hAgrees.1
+    · show (anfSt.addBinding bn (.vBool true)).props = stkSt.props
+      unfold State.addBinding; exact hAgrees.2.1
+    · show (anfSt.addBinding bn (.vBool true)).outputs = stkSt.outputs
+      unfold State.addBinding; exact hAgrees.2.2
+
 /-! ## Phase 6 Step 5 tail — methodCall + loop
 
 `methodCall` inlines the callee's body into the caller; `loop`

@@ -2821,7 +2821,7 @@ Trust surface unchanged: 62 axioms (61 crypto/builtin + 1 linking)
   dev hardware (multi-hour batch). Update
   `cryptoAxiomPendingExpected` lookup table. Promote any
   byte-exact fixtures into `baselineMatches`.
-* **Phase 7.3 — Stage B fan-out continuation**: ~141 remaining
+* **Phase 7.3 — Stage B fan-out continuation**: ~132 remaining
   unconditional preservation lemmas, mechanical.
 * **Phase 7.4 — Concrete `StepRel`**: instantiate Stage C closure
   for the SimpleANF subset using the unconditional Stage B lemmas.
@@ -2829,3 +2829,54 @@ Trust surface unchanged: 62 axioms (61 crypto/builtin + 1 linking)
   a small subset of `compile` extraction via hand-written Lean →
   Rust translator. Establish feasibility before committing to the
   full project.
+
+---
+
+## 34. Phase 7.3 continuation — Stage B fan-out (2026-05-05)
+
+Followed up on §33.3 with another batch of mechanical fan-out
+lemmas, raising the unconditional Stage B count from 9 to 18.
+
+### 34.1 What landed (`Stack/Agrees.lean`)
+
+Depth-1 ABS / 1ADD / 1SUB (uses `run_over_deep` for the load step):
+* `agreesTagged_unaryOp_ABS_d1_unconditional`
+* `agreesTagged_unaryOp_1ADD_d1_unconditional`
+* `agreesTagged_unaryOp_1SUB_d1_unconditional`
+
+Depth-≥ 2 NEGATE / NOT / ABS / 1ADD / 1SUB / assert (uses
+`run_pickStruct_at_depth` + `taggedStackAligned_at_index`):
+* `agreesTagged_unaryOp_NEGATE_dge2_unconditional`
+* `agreesTagged_unaryOp_NOT_dge2_unconditional`
+* `agreesTagged_unaryOp_ABS_dge2_unconditional`
+* `agreesTagged_unaryOp_1ADD_dge2_unconditional`
+* `agreesTagged_unaryOp_1SUB_dge2_unconditional`
+* `agreesTagged_assert_dge2_unconditional`
+
+The depth-≥ 2 family is parameterised by the depth `d` and an
+`nthOpt d tsm = some (n, k)` witness, mirroring the existing
+`agreesTagged_loadRef_depth_ge2` shape.
+
+### 34.2 Tally + verification
+
+Unconditional Stage B coverage:
+* Depth 0 (6/6 unary + assert)
+* Depth 1 (6/6 unary + assert)
+* Depth ≥ 2 (6/6 unary + assert)
+* **Total 18/18 unary-class lemmas, all 3 depth tiers fully covered**
+
+Remaining ~132 lemmas: binOp variants (depth pairs × 18 opcodes ≈
+110), plus updateProp / addOutput / addRawOutput / addDataOutput /
+checkPreimage variants (~22 each at typical depths).
+
+```
+export PATH="$HOME/.elan/bin:$PATH"
+cd runar-verification
+lake build                                  # 24/24 OK
+lake env ./.lake/build/bin/goldenLoad       # 49/49 WF
+lake env ./.lake/build/bin/roundtrip        # 49/49 round-trip
+lake env ./.lake/build/bin/pipelineGolden   # 33/49 byte-exact
+```
+
+Trust surface unchanged: 62 axioms + 5 `opaque` defs.
+Zero `sorry`/`admit`. No new global axioms.
