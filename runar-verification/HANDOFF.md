@@ -2688,3 +2688,144 @@ remain:
    the constants when the lowering changes intentionally.
 
 Neither was implemented in this session; both remain Phase 7 work.
+
+## 33. Phase 7 — pre-computed crypto constants + Stage B fan-out (2026-05-05)
+
+Three substreams advanced; one deferred with documented findings.
+
+### 33.1 (1) `if-without-else-multi-temp` — DEFERRED
+
+Initial investigation revealed the divergence is broader than HANDOFF
+§25.2 predicted. The first byte difference is at offset 74, where
+expected has `push 9, swap, ADD` (3 bytes) but actual has
+`push 8, OP_1ADD, swap, ADD` (4 bytes). The pre-peephole sequence
+isn't `[push 8, push 1, swap, swap, ADD]` (which would peephole-fold
+to `[push 9]` via `doubleSwap` + `pushPushAdd`). Root cause is
+likely in liveness-aware load (`bringToTop` consume vs copy choice)
+or in `lowerIf`'s post-branch reconciliation cascading through
+multiple if-blocks.
+
+Closing this requires per-binding ops dump tooling that wasn't
+implemented in this session. Deferred to a focused session that
+can build the tooling and trace one fixture end-to-end.
+
+### 33.2 (2b) Pre-computed hex constants — IMPLEMENTED
+
+Two-tier gating infrastructure for the 11 cryptoAxiomPending
+fixtures (EC × 5, P-256 × 2, P-384 × 2, SLH-DSA × 2):
+
+* **`cryptoAxiomPendingExpected : String → Option String`** in
+  `tests/PipelineGolden.lean`. Lookup table mapping fixture name
+  to the stored Lean `compileHex` output. Initially `none` for all
+  11 fixtures (each takes >25 min to evaluate locally per §32.3).
+
+* **Default mode** now compares the stored constant against
+  `expected-script.hex` for cryptoAxiomPending fixtures. Instant
+  string equality. Surfaces unpopulated constants as a NOTICE.
+
+* **`RUNAR_VERIFICATION_REGEN=1`** mode: runs live `compileHex`,
+  compares against the stored constant. If divergent → "stale" and
+  fails the regen check (lowering changed; constant must be
+  refreshed). If the constant is `none` → "unpopulated". Either
+  way, the live hex is dumped to `/tmp/regen-<fixture>.hex` for
+  offline copy-paste back into the lookup table.
+
+* **`RUNAR_VERIFICATION_FULL=1`** mode unchanged.
+
+Currently all 11 constants are `none`. To populate, run the regen
+mode on dev hardware (multi-hour batch), capture the resulting
+files, and update the lookup table. Until populated, the default
+mode reports the gap loudly without silently skipping.
+
+### 33.3 (3) Stage B fan-out — 6 NEW LEMMAS
+
+Phase 6 closeout shipped 3 representative unconditional Stage B
+preservation lemmas (`unaryOp_NEGATE_d0`, `unaryOp_NOT_d0`,
+`assert_d0`). Phase 7 adds 6 more covering more opcodes + depth 1:
+
+Depth 0 (uses `run_dup_nonEmpty` for the load step):
+* `agreesTagged_unaryOp_ABS_d0_unconditional`   — `OP_ABS` on int
+* `agreesTagged_unaryOp_1ADD_d0_unconditional`  — `OP_1ADD` on int
+* `agreesTagged_unaryOp_1SUB_d0_unconditional`  — `OP_1SUB` on int
+
+Depth 1 (uses `run_over_deep` for the load step):
+* `agreesTagged_unaryOp_NEGATE_d1_unconditional` — `OP_NEGATE` on int
+* `agreesTagged_unaryOp_NOT_d1_unconditional`    — `OP_NOT` on bool
+* `agreesTagged_assert_d1_unconditional`         — `OP_VERIFY` on
+                                                  `vBool true`
+
+Total unconditional Stage B lemmas: 3 (Phase 6) + 6 (Phase 7) = 9
+of the ~150 in the full fan-out. Recipe is mechanical — adding a
+new (opcode, depth) pair is ~25 lines following the established
+template. The remaining ~141 lemmas cover:
+
+* Depth-≥2 cases for all 5 unary opcodes + assert (uses
+  `run_pickStruct_at_depth` for the load step).
+* Binary opcodes at depth-pair (0,0) / (0,1) / (1,0) / (0,≥2) /
+  (1,≥2) / (≥2,≥2): 18 binary opcodes × 6 pairs ≈ 110 lemmas.
+
+Once landed, plug a concrete `StepRel` instance into
+`agreesTagged_chain_preserves` for a fully-closed Stage C
+simulation. Substantive multi-week work, but each lemma is small
+and independent.
+
+### 33.4 (4) `lean4export` extraction — INVESTIGATED, NOT FEASIBLE
+
+Investigation result: `lean4export`
+(https://github.com/leanprover/lean4export) is a *plain-text
+declaration exporter*, not a Rust/TS code generator. It produces
+an export format suitable for independent proof checkers, not for
+direct compilation to other languages.
+
+There is no mature tool for Lean 4 → Rust/TS source extraction.
+The realistic alternatives:
+
+1. **Hand-port `compile` to Rust/TS.** This is what the existing
+   7-compiler suite already does — each compiler is a hand-ported
+   implementation of the same lowering spec. The Lean version is
+   the verified reference; bytes-identical output across all 7
+   compilers (33 of 49 fixtures today) provides the differential
+   check.
+2. **Lean → C via `@[implemented_by]` + Rust FFI.** Compiles the
+   Lean function to C, then wraps from Rust. Works, but exposes
+   the Lean runtime (Rust callers depend on libleanruntime). Heavy
+   integration cost.
+3. **Build a Lean → Rust translator.** Significant project (months).
+
+The existing differential check (33/49 byte-exact across 7
+compilers, all derived from the same spec) already provides the
+value an extracted Lean reference would. **Marginal value of
+extraction is unclear.** Mark (4) as documented + deferred.
+
+### 33.5 Verification (Phase 7 exit)
+
+```
+export PATH="$HOME/.elan/bin:$PATH"
+cd runar-verification
+lake build                                  # 24 jobs OK
+lake env ./.lake/build/bin/goldenLoad       # 49/49 WF
+lake env ./.lake/build/bin/roundtrip        # 49/49 round-trip
+lake env ./.lake/build/bin/pipelineGolden   # 33/49 byte-exact + NOTICE on
+                                            # 11 unpopulated constants
+```
+
+Trust surface unchanged: 62 axioms (61 crypto/builtin + 1 linking)
++ 5 `opaque` defs. Zero `sorry`/`admit`. No new global axioms.
+
+### 33.6 What remains (Phase 8+)
+
+* **Phase 7.1 — `if-without-else-multi-temp`**: build per-binding
+  ops dump tooling, trace divergence end-to-end, fix root cause.
+  ~3-5 days.
+* **Phase 7.2 — Crypto constants populate**: offline regen run on
+  dev hardware (multi-hour batch). Update
+  `cryptoAxiomPendingExpected` lookup table. Promote any
+  byte-exact fixtures into `baselineMatches`.
+* **Phase 7.3 — Stage B fan-out continuation**: ~141 remaining
+  unconditional preservation lemmas, mechanical.
+* **Phase 7.4 — Concrete `StepRel`**: instantiate Stage C closure
+  for the SimpleANF subset using the unconditional Stage B lemmas.
+* **Phase 7.5 — Lean → Rust prototype** (optional): demonstrate
+  a small subset of `compile` extraction via hand-written Lean →
+  Rust translator. Establish feasibility before committing to the
+  full project.
