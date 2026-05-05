@@ -3,6 +3,7 @@
 package integration
 
 import (
+	"fmt"
 	"math/big"
 	"os"
 	"strings"
@@ -30,11 +31,8 @@ func readTrimmed(path string) (string, error) {
 // regtest, and advanced once with a real SP1 proof + 5 public-input
 // scalars pushed as part of the witness bundle.
 //
-// The positive case asserts the script accepts the proof. The negative
-// case (deferred — see TODO below) will assert that replacing any of the
-// 5 pub_i scalars with a wrong value causes the on-chain MSM to disagree
-// with the prover-supplied prepared_inputs, which aborts the script at
-// the MSM equality check.
+// The positive case is here; the negative-tamper coverage lives in
+// TestRollupGroth16WAMSM_AdvanceState_NegativeTamper below.
 func TestRollupGroth16WAMSM_AdvanceState(t *testing.T) {
 	vkPath := sp1V6FixturePath(t, "vk.json")
 
@@ -60,6 +58,64 @@ func TestRollupGroth16WAMSM_AdvanceState(t *testing.T) {
 		t.Fatalf("advanceState: %v", err)
 	}
 	t.Logf("advance TX: %s", txid)
+}
+
+// TestRollupGroth16WAMSM_AdvanceState_NegativeTamper proves the on-chain
+// MSM-binding preamble actually checks every one of the 5 SP1 public-input
+// scalars by tampering one slot at a time and asserting the spend is rejected.
+//
+// On-chain semantics: the verifier preamble computes
+//
+//	IC[0] + sum_{i=0..4}(pub_i * IC[i+1])
+//
+// and asserts byte-equality against the prover-supplied prepared_inputs G1
+// point. Mutating any pub_i changes the on-chain accumulator and fails the
+// equality check, aborting the script. The positive
+// TestRollupGroth16WAMSM_AdvanceState above proves the gate accepts the right
+// inputs; this test proves it doesn't accept the wrong ones, which is the
+// only way to know the MSM is real coverage and not a no-op.
+//
+// Deploys a fresh contract per slot rather than reusing one across attempts:
+// a failed broadcast leaves the regtest mempool / UTXO set in an
+// SDK-implementation-defined state, so isolating each tamper attempt to its
+// own contract keeps the negative coverage independent.
+func TestRollupGroth16WAMSM_AdvanceState_NegativeTamper(t *testing.T) {
+	vkPath := sp1V6FixturePath(t, "vk.json")
+
+	for i := 0; i < 5; i++ {
+		i := i
+		t.Run(fmt.Sprintf("tamper_pub_%d", i), func(t *testing.T) {
+			contract, wallet := deployRollupGroth16WAMSM(t, vkPath)
+
+			provider := helpers.NewBatchRPCProvider()
+			defer provider.MineAll()
+			signer, err := helpers.SDKSignerFromWallet(wallet)
+			if err != nil {
+				t.Fatalf("signer: %v", err)
+			}
+
+			witness := loadSP1V6MSMWitness(t)
+			// Any nonzero delta on PublicInputs[i] suffices — IC[i+1] is
+			// nonzero (it's a G1 generator scalar-multiple from the SP1 vk),
+			// so adding 1 changes pub_i * IC[i+1] and therefore changes the
+			// on-chain MSM accumulator. We don't reduce mod r here: the
+			// witness consumer accepts arbitrary big.Int and the on-chain
+			// preamble does its own modular handling.
+			witness.PublicInputs[i] = new(big.Int).Add(witness.PublicInputs[i], big.NewInt(1))
+
+			args := []interface{}{
+				hexStateRoot(1),
+				int64(1),
+			}
+			_, _, err = contract.Call("advanceState", args, provider, signer, &runar.CallOptions{
+				Groth16WAWitness: witness,
+			})
+			if err == nil {
+				t.Fatalf("tampering PublicInputs[%d] should fail the MSM check, got nil error", i)
+			}
+			t.Logf("tamper PublicInputs[%d] rejected as expected: %v", i, err)
+		})
+	}
 }
 
 // deployRollupGroth16WAMSM compiles the RollupGroth16WAMSM stateful
