@@ -83,7 +83,11 @@ binary or script. Local devs need:
 | java | `cd java && gradle fatJar --no-daemon` → `java/build/libs/runar-anf-driver.jar` | jar path |
 | zig | `cd zig && zig build -Doptimize=ReleaseSafe` → `zig/zig-out/bin/runar-anf-driver-zig` | binary path |
 
-CI installs every toolchain in the `ts-compiler` job and builds every driver
-artifact before invoking vitest, so the matrix runs all 7 SDKs against the 6
-curated fixtures (42 tests). Set `RUNAR_ANF_DRIVERS_STRICT=1` locally to
-upgrade missing-driver suite-level skip into a hard failure (matches CI).
+CI runs the matrix in the dedicated `conformance-anf-parity` job
+(`.github/workflows/ci.yml`). That job installs every toolchain (Node / Go /
+Rust / Python / Zig / Ruby / Java), builds the three compiled drivers (Rust /
+Java / Zig), and runs `pnpm run conformance:anf-parity` with
+`RUNAR_ANF_DRIVERS_STRICT=1` so a missing driver hard-fails instead of
+silently skipping. Locally, `pnpm run conformance:anf-parity` runs the same
+suite — drivers that are not built yet skip per the table above. Set
+`RUNAR_ANF_DRIVERS_STRICT=1` locally to mirror CI's strict mode.

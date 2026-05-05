@@ -256,6 +256,7 @@ function parseArgs(argv: string[]): {
   format: 'console' | 'json' | 'markdown';
   output?: string;
   updateGolden: boolean;
+  audit: boolean;
 } {
   const args = argv.slice(2);
   let testsDir = join(ROOT, 'conformance', 'sdk-output', 'tests');
@@ -263,6 +264,7 @@ function parseArgs(argv: string[]): {
   let format: 'console' | 'json' | 'markdown' = 'console';
   let output: string | undefined;
   let updateGolden = false;
+  let audit = false;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -281,14 +283,113 @@ function parseArgs(argv: string[]): {
       case '--update-golden':
         updateGolden = true;
         break;
+      case '--audit':
+        audit = true;
+        break;
     }
   }
 
-  return { testsDir, filter, format, output, updateGolden };
+  return { testsDir, filter, format, output, updateGolden, audit };
+}
+
+/**
+ * Compare the SDK-output fixture set against the compiler-conformance fixture
+ * set, gated by `coverage-allowlist.json`.
+ *
+ * Fails on:
+ *   - any compiler-conformance fixture missing from sdk-output AND not listed
+ *     in coverage-allowlist.json (silent-omission gate);
+ *   - any allowlist entry whose fixture either no longer exists in the
+ *     compiler conformance suite OR has been backfilled into sdk-output
+ *     (stale-entry gate).
+ *
+ * Exit 0 on clean coverage; 1 on any drift.
+ */
+function runCoverageAudit(): number {
+  const compilerDir = join(ROOT, 'conformance', 'tests');
+  const sdkDir = join(ROOT, 'conformance', 'sdk-output', 'tests');
+  const allowlistPath = join(ROOT, 'conformance', 'sdk-output', 'coverage-allowlist.json');
+
+  const compilerFixtures = new Set(
+    readdirSync(compilerDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name),
+  );
+  const sdkFixtures = new Set(
+    readdirSync(sdkDir, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .filter((d) => existsSync(join(sdkDir, d.name, 'input.json')))
+      .map((d) => d.name),
+  );
+
+  const allowlist = JSON.parse(readFileSync(allowlistPath, 'utf-8')) as {
+    approvedOmissions?: Record<string, string>;
+  };
+  const approved = new Set(Object.keys(allowlist.approvedOmissions ?? {}));
+
+  const missing: string[] = [];
+  for (const f of compilerFixtures) {
+    if (sdkFixtures.has(f)) continue;
+    if (approved.has(f)) continue;
+    missing.push(f);
+  }
+
+  const stale: string[] = [];
+  for (const f of approved) {
+    if (!compilerFixtures.has(f) || sdkFixtures.has(f)) {
+      stale.push(f);
+    }
+  }
+
+  let exitCode = 0;
+  console.log('SDK-output coverage audit');
+  console.log(`  compiler-conformance fixtures: ${compilerFixtures.size}`);
+  console.log(`  sdk-output fixtures:           ${sdkFixtures.size}`);
+  console.log(`  approved omissions:            ${approved.size}`);
+
+  if (missing.length > 0) {
+    console.error(
+      `\n[FAIL] ${missing.length} compiler-conformance fixture(s) absent from sdk-output and NOT approved:`,
+    );
+    for (const f of missing) console.error(`  - ${f}`);
+    console.error(
+      `\nFix: either add conformance/sdk-output/tests/<name>/{input.json,expected-locking.hex},`,
+    );
+    console.error(
+      `or list the fixture in conformance/sdk-output/coverage-allowlist.json with a one-line rationale.`,
+    );
+    exitCode = 1;
+  }
+
+  if (stale.length > 0) {
+    console.error(
+      `\n[FAIL] ${stale.length} stale entry(ies) in coverage-allowlist.json:`,
+    );
+    for (const f of stale) console.error(`  - ${f}`);
+    console.error(
+      `\nFix: remove the stale entry from coverage-allowlist.json (the fixture either no longer exists or has been backfilled into sdk-output).`,
+    );
+    exitCode = 1;
+  }
+
+  if (exitCode === 0) console.log('\n[OK] coverage matches the pinned allowlist.');
+  return exitCode;
 }
 
 function main(): void {
   const opts = parseArgs(process.argv);
+
+  if (opts.audit) {
+    process.exit(runCoverageAudit());
+  }
+
+  // Run the SDK-output suite preceded by an in-line coverage audit so the
+  // suite can never silently drop a compiler-conformance fixture without
+  // a coverage-allowlist.json update in the same commit.
+  const auditExit = runCoverageAudit();
+  if (auditExit !== 0) process.exit(auditExit);
+  console.log();
+
   const tools = buildSdkTools();
 
   let testDirs = readdirSync(opts.testsDir, { withFileTypes: true })

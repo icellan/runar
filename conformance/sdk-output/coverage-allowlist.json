@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "Pinned set of compiler-conformance fixtures (in conformance/tests/) that",
+    "are intentionally NOT mirrored under conformance/sdk-output/tests/.",
+    "",
+    "The SDK-output suite verifies that all 7 SDKs produce byte-identical",
+    "deploy-time *locking scripts* given the same compiled artifact + ctor",
+    "args. Most contracts that the compiler conformance suite covers also",
+    "make sense to fingerprint at the SDK layer; a few do not (e.g. tests",
+    "that exercise method-call-time behaviour but are otherwise structurally",
+    "redundant with an existing SDK-output fixture).",
+    "",
+    "Rules for editing this file:",
+    "  1. Adding an entry requires a short rationale on the line — no silent",
+    "     omissions. The audit (sdk-runner.ts --audit) fails CI if any",
+    "     compiler-conformance fixture is missing from sdk-output/tests/ AND",
+    "     not listed here.",
+    "  2. Removing an entry means the fixture must gain a matching",
+    "     conformance/sdk-output/tests/<name>/{input.json,expected-locking.hex}",
+    "     in the same commit.",
+    "  3. An entry that names a fixture which has BOTH been backfilled into",
+    "     sdk-output/ AND removed from compiler conformance is stale; the",
+    "     audit fails on stale entries.",
+    "",
+    "See conformance/README.md § \"SDK output coverage\" for the rendered",
+    "table that mirrors this file."
+  ],
+  "approvedOmissions": {
+    "add-data-output":                  "Method-time data-output behaviour; deploy locking script is identical to the parent stateless contract already covered by basic-p2pkh.",
+    "add-raw-output":                   "Method-time raw-output behaviour; deploy locking script identical to a stateless wrapper. Method-call output mismatch is caught by ANF parity.",
+    "conditional-data-output-stateful": "Method-time conditional output; deploy locking script is the stateful continuation already covered by stateful / stateful-counter.",
+    "private-helper-outputs":           "Inlining of private helpers does not affect deploy locking script when the helper is fully inlined; method-call output is covered by ANF parity.",
+    "ec-unit":                          "Compiler unit fixture for EC primitive opcode emission; its contract shape is structurally redundant with ec-demo / ec-primitives which are SDK-output covered.",
+    "go-dsl-bytestring-literal":        "Go-DSL surface-syntax parser test (Int/Uint/ByteString aliasing); same lowered IR as basic-p2pkh, so the deploy locking script is identical.",
+    "if-without-else-multi-temp":       "Stack-lowering edge case for if-without-else with multiple temporaries; the resulting locking script is structurally captured by if-else / if-without-else (SDK-output covered).",
+    "bitwise-ops":                      "Compiler-level bitwise codegen unit; deploy locking script behaviour is captured by arithmetic / boolean-logic / shift-ops parity.",
+    "shift-ops":                        "Companion to bitwise-ops; same reasoning.",
+    "state-ripemd160":                  "Stateful RIPEMD-160 unit test; structurally redundant with stateful-bytestring + stateful-counter for the deploy locking script."
+  }
+}

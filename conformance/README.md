@@ -393,10 +393,18 @@ Golden file updates should always be reviewed carefully. An unexpected change in
 | `token-ft` | Fungible token with split/merge | Yes |
 | `token-nft` | NFT with transfer/burn | Yes |
 
-### SDK-output conformance (41 fixtures, 6 SDKs)
+### SDK-output conformance (45 fixtures, 7 SDKs)
 
-`sdk-output/tests/` contains 41 additional fixtures (one `input.json` + one
+`sdk-output/tests/` contains 45 fixtures (one `input.json` + one
 `expected-locking.hex` per directory). The runner in `sdk-output/runner/sdk-runner.ts`
-compiles each fixture through all six SDK tools in `sdk-output/tools/` (TypeScript,
-Go, Python, Ruby, Rust, Zig) and asserts byte-identical locking-script hex across
-every SDK. Invoke with `pnpm run sdk-output`.
+compiles each fixture through all seven SDK tools in `sdk-output/tools/` (TypeScript,
+Go, Python, Ruby, Rust, Zig, Java) and asserts byte-identical locking-script hex
+across every SDK. Invoke with `pnpm run sdk-output`.
+
+Coverage gate: `sdk-runner.ts` runs `--audit` before each suite execution
+(and exposes the same audit standalone via `npx tsx conformance/sdk-output/runner/sdk-runner.ts --audit`).
+The audit fails CI on any compiler-conformance fixture (`conformance/tests/`)
+that is absent from `sdk-output/tests/` AND not listed in
+`conformance/sdk-output/coverage-allowlist.json`. The allowlist is the only
+approved way to opt a fixture out of SDK-output coverage; every entry carries
+a one-line rationale and is checked for staleness on each audit run.
