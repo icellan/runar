@@ -7,8 +7,8 @@
 //!     existing `inputs/*.json` fixtures, from `<repo>/conformance/tests/<case>/expected-ir.json`)
 //!   - calls `compute_new_state_and_data_outputs(...)` (lenient) or
 //!     `execute_strict(...)` (strict)
-//!   - prints `{ state, dataOutputs }` JSON to stdout, with bigints
-//!     re-encoded as `"Xn"` strings
+//!   - prints `{ state, dataOutputs, rawOutputs }` JSON to stdout, with
+//!     bigints re-encoded as `"Xn"` strings
 //!
 //! Invocation:
 //!
@@ -17,8 +17,8 @@
 //!
 //! Strict mode emits `{error: "AssertionFailureError", methodName, bindingName}`
 //! on the first falsy `assert(...)` predicate; otherwise the same
-//! `{state, dataOutputs}` envelope as lenient. Order of args is irrelevant
-//! (the input file may appear in any position).
+//! `{state, dataOutputs, rawOutputs}` envelope as lenient. Order of args is
+//! irrelevant (the input file may appear in any position).
 
 use std::collections::HashMap;
 use std::env;
@@ -30,6 +30,7 @@ use serde_json::{Map, Value};
 
 use runar_lang::sdk::anf_interpreter::{
     compute_new_state_and_data_outputs, execute_strict, ANFProgram, DataOutputEntry,
+    RawOutputEntry,
 };
 use runar_lang::sdk::types::SdkValue;
 
@@ -103,8 +104,8 @@ fn run(input_path: &str, strict: bool) -> Result<String, String> {
 
     if strict {
         match execute_strict(&anf, &method_name, &current_state, &args, &constructor_args) {
-            Ok((new_state, data_outputs)) => {
-                let out_value = encode_output(&new_state, &data_outputs);
+            Ok((new_state, data_outputs, raw_outputs)) => {
+                let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
                 let mut out = serde_json::to_string_pretty(&out_value)
                     .map_err(|e| format!("failed to serialize output: {}", e))?;
                 out.push('\n');
@@ -129,7 +130,7 @@ fn run(input_path: &str, strict: bool) -> Result<String, String> {
             }
         }
     } else {
-        let (new_state, data_outputs) = compute_new_state_and_data_outputs(
+        let (new_state, data_outputs, raw_outputs) = compute_new_state_and_data_outputs(
             &anf,
             &method_name,
             &current_state,
@@ -138,7 +139,7 @@ fn run(input_path: &str, strict: bool) -> Result<String, String> {
         )
         .map_err(|e| format!("compute_new_state_and_data_outputs failed: {}", e))?;
 
-        let out_value = encode_output(&new_state, &data_outputs);
+        let out_value = encode_output(&new_state, &data_outputs, &raw_outputs);
         let mut out = serde_json::to_string_pretty(&out_value)
             .map_err(|e| format!("failed to serialize output: {}", e))?;
         out.push('\n');
@@ -262,6 +263,7 @@ fn is_bigint_literal(s: &str) -> bool {
 fn encode_output(
     state: &HashMap<String, SdkValue>,
     data_outputs: &[DataOutputEntry],
+    raw_outputs: &[RawOutputEntry],
 ) -> Value {
     let mut state_obj = Map::new();
     // Sort keys for stable output.
@@ -282,9 +284,21 @@ fn encode_output(
         outs.push(Value::Object(obj));
     }
 
+    let mut raws = Vec::with_capacity(raw_outputs.len());
+    for r in raw_outputs {
+        let mut obj = Map::new();
+        obj.insert(
+            "satoshis".to_string(),
+            Value::String(format!("{}n", r.satoshis)),
+        );
+        obj.insert("script".to_string(), Value::String(r.script.clone()));
+        raws.push(Value::Object(obj));
+    }
+
     let mut top = Map::new();
     top.insert("state".to_string(), Value::Object(state_obj));
     top.insert("dataOutputs".to_string(), Value::Array(outs));
+    top.insert("rawOutputs".to_string(), Value::Array(raws));
     Value::Object(top)
 }
 

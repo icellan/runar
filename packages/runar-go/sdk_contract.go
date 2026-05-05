@@ -482,7 +482,7 @@ func (c *RunarContract) PrepareCall(
 	var autoComputedState map[string]interface{}
 	if isStateful && c.Artifact.ANF != nil {
 		namedArgs := buildNamedArgs(userParams, resolvedArgs)
-		if state, dataOuts, err := ComputeNewStateAndDataOutputs(
+		if state, dataOuts, _, err := ComputeNewStateAndDataOutputs(
 			c.Artifact.ANF, methodName, c.state, namedArgs, c.constructorArgs,
 		); err == nil {
 			autoComputedState = state

@@ -38,6 +38,7 @@ interface CaseInput {
 interface SuccessOutput {
   state: Record<string, unknown>;
   dataOutputs: Array<{ satoshis: string; script: string }>;
+  rawOutputs: Array<{ satoshis: string; script: string }>;
 }
 
 interface AssertFailureOutput {
@@ -65,7 +66,7 @@ function decodeBigints(v: unknown): unknown {
   return v;
 }
 
-function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: Array<{ satoshis: bigint | number; script: string }> }): SuccessOutput {
+function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: Array<{ satoshis: bigint | number; script: string }>; rawOutputs?: Array<{ satoshis: bigint | number; script: string }> }): SuccessOutput {
   function encode(v: unknown): unknown {
     if (typeof v === 'bigint') return v.toString() + 'n';
     if (Array.isArray(v)) return v.map(encode);
@@ -76,12 +77,14 @@ function normalizeResult(result: { state: Record<string, unknown>; dataOutputs: 
     }
     return v;
   }
+  const encodeOutput = (d: { satoshis: bigint | number; script: string }) => ({
+    satoshis: typeof d.satoshis === 'bigint' ? d.satoshis.toString() + 'n' : String(d.satoshis) + 'n',
+    script: d.script,
+  });
   return {
     state: encode(result.state) as Record<string, unknown>,
-    dataOutputs: result.dataOutputs.map(d => ({
-      satoshis: typeof d.satoshis === 'bigint' ? d.satoshis.toString() + 'n' : String(d.satoshis) + 'n',
-      script: d.script,
-    })),
+    dataOutputs: result.dataOutputs.map(encodeOutput),
+    rawOutputs: (result.rawOutputs ?? []).map(encodeOutput),
   };
 }
 

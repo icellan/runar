@@ -89,43 +89,54 @@ func ComputeNewState(
 	args map[string]interface{},
 	constructorArgs []interface{},
 ) (map[string]interface{}, error) {
-	state, _, err := ComputeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs)
+	state, _, _, err := ComputeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs)
 	return state, err
 }
 
 // ExecuteStrict is the strict-mode counterpart of
 // ComputeNewStateAndDataOutputs: it walks the same ANF body but returns
-// (nil, nil, *AssertionFailureError) on the first `assert(predicate)` whose
-// predicate is falsy. Crypto built-ins (`checkSig`, `checkMultiSig`,
+// (nil, nil, nil, *AssertionFailureError) on the first `assert(predicate)`
+// whose predicate is falsy. Crypto built-ins (`checkSig`, `checkMultiSig`,
 // `checkPreimage`) still mock-return `true`; only explicit `assert(...)`
 // predicates are enforced.
+//
+// The third return value is the slice of raw outputs resolved from
+// `this.addRawOutput(satoshis, scriptBytes)` calls in declaration order.
+// The simulator does not introspect the script bytes; it surfaces them so
+// the caller can splice them into the broadcast transaction.
 func ExecuteStrict(
 	anf *ANFProgram,
 	methodName string,
 	currentState map[string]interface{},
 	args map[string]interface{},
 	constructorArgs []interface{},
-) (map[string]interface{}, []ContractOutput, error) {
+) (map[string]interface{}, []ContractOutput, []ContractOutput, error) {
 	return runMethod(anf, methodName, currentState, args, constructorArgs, &strictCtx{methodName: methodName})
 }
 
 // ComputeNewStateAndDataOutputs is like ComputeNewState but also returns
-// data outputs resolved from this.addDataOutput(...) calls in the method
-// body, in declaration order. The returned ContractOutput entries have
-// Script as the hex-encoded ByteString and Satoshis as declared.
+// data outputs resolved from this.addDataOutput(...) calls and raw outputs
+// resolved from this.addRawOutput(...) calls in the method body, in
+// declaration order. The returned ContractOutput entries have Script as the
+// hex-encoded ByteString and Satoshis as declared.
 //
 // Data outputs are what the compiler's auto-injected continuation-hash
 // check expects to see in the spending tx between the state outputs and
 // the change output. The SDK uses the returned slice to populate
 // BuildCallOptions.DataOutputs so BuildCallTransaction emits them at the
 // correct position.
+//
+// Raw outputs are caller-supplied locking-script outputs declared via
+// `this.addRawOutput(satoshis, scriptBytes)`. The simulator forwards the
+// script bytes (hex-encoded) without introspecting them so an off-chain
+// transaction builder can splice them in at the correct index.
 func ComputeNewStateAndDataOutputs(
 	anf *ANFProgram,
 	methodName string,
 	currentState map[string]interface{},
 	args map[string]interface{},
 	constructorArgs []interface{},
-) (map[string]interface{}, []ContractOutput, error) {
+) (map[string]interface{}, []ContractOutput, []ContractOutput, error) {
 	return runMethod(anf, methodName, currentState, args, constructorArgs, nil)
 }
 
@@ -140,7 +151,7 @@ func runMethod(
 	args map[string]interface{},
 	constructorArgs []interface{},
 	strict *strictCtx,
-) (resultState map[string]interface{}, resultOutputs []ContractOutput, retErr error) {
+) (resultState map[string]interface{}, resultDataOutputs []ContractOutput, resultRawOutputs []ContractOutput, retErr error) {
 	// Find the method
 	var method *ANFMethod
 	for i := range anf.Methods {
@@ -150,7 +161,7 @@ func runMethod(
 		}
 	}
 	if method == nil {
-		return nil, nil, fmt.Errorf("computeNewState: method '%s' not found in ANF IR", methodName)
+		return nil, nil, nil, fmt.Errorf("computeNewState: method '%s' not found in ANF IR", methodName)
 	}
 
 	// Initialize environment with property values: mutable fields from
@@ -192,9 +203,12 @@ func runMethod(
 		}
 	}
 
-	// Track state mutations and data outputs
+	// Track state mutations, data outputs, and raw outputs.
+	// rawOutputs holds entries from `add_raw_output` ANF kinds; the simulator
+	// does not introspect the script bytes (caller-supplied locking script).
 	stateDelta := make(map[string]interface{})
 	var dataOutputs []ContractOutput
+	var rawOutputs []ContractOutput
 
 	// Strict mode signals an assert failure by panicking with a sentinel
 	// so the panic unwinds out of nested if / loop / private-method calls
@@ -205,7 +219,8 @@ func runMethod(
 			if r := recover(); r != nil {
 				if af, ok := r.(*AssertionFailureError); ok {
 					resultState = nil
-					resultOutputs = nil
+					resultDataOutputs = nil
+					resultRawOutputs = nil
 					retErr = af
 					return
 				}
@@ -217,7 +232,7 @@ func runMethod(
 	}
 
 	// Walk bindings
-	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs, strict)
+	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs, &rawOutputs, strict)
 
 	// Merge delta into current state
 	result := make(map[string]interface{})
@@ -227,7 +242,7 @@ func runMethod(
 	for k, v := range stateDelta {
 		result[k] = v
 	}
-	return result, dataOutputs, nil
+	return result, dataOutputs, rawOutputs, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -240,10 +255,11 @@ func anfEvalBindings(
 	env map[string]interface{},
 	stateDelta map[string]interface{},
 	dataOutputs *[]ContractOutput,
+	rawOutputs *[]ContractOutput,
 	strict *strictCtx,
 ) {
 	for _, binding := range bindings {
-		val := anfEvalValue(anf, binding.Value, env, stateDelta, dataOutputs, strict, binding.Name)
+		val := anfEvalValue(anf, binding.Value, env, stateDelta, dataOutputs, rawOutputs, strict, binding.Name)
 		env[binding.Name] = val
 	}
 }
@@ -254,6 +270,7 @@ func anfEvalValue(
 	env map[string]interface{},
 	stateDelta map[string]interface{},
 	dataOutputs *[]ContractOutput,
+	rawOutputs *[]ContractOutput,
 	strict *strictCtx,
 	bindingName string,
 ) interface{} {
@@ -337,7 +354,7 @@ func anfEvalValue(
 						}
 					}
 					// Evaluate method body
-					anfEvalBindings(anf, m.Body, callEnv, stateDelta, dataOutputs, strict)
+					anfEvalBindings(anf, m.Body, callEnv, stateDelta, dataOutputs, rawOutputs, strict)
 					// Copy updated property values back to caller env
 					for _, prop := range anf.Properties {
 						if v, ok := callEnv[prop.Name]; ok {
@@ -368,7 +385,7 @@ func anfEvalValue(
 		for k, v := range env {
 			childEnv[k] = v
 		}
-		anfEvalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict)
+		anfEvalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, strict)
 		// Copy new bindings back
 		for k, v := range childEnv {
 			env[k] = v
@@ -390,7 +407,7 @@ func anfEvalValue(
 			for k, v := range env {
 				loopEnv[k] = v
 			}
-			anfEvalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict)
+			anfEvalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, strict)
 			for k, v := range loopEnv {
 				env[k] = v
 			}
@@ -461,8 +478,26 @@ func anfEvalValue(
 		}
 		return nil
 
+	case "add_raw_output":
+		// `addRawOutput(satoshis, scriptBytes)`. The simulator does not
+		// introspect the script bytes (they're caller-supplied raw locking
+		// script); it simply forwards them in the result envelope so an
+		// off-chain transaction builder can emit the output at the correct
+		// index. Crypto built-ins remain mocked even in strict mode.
+		satRef, _ := value["satoshis"].(string)
+		scriptRef, _ := value["scriptBytes"].(string)
+		sats := anfToBigInt(env[satRef]).Int64()
+		scriptHex := anfToString(env[scriptRef])
+		if rawOutputs != nil {
+			*rawOutputs = append(*rawOutputs, ContractOutput{
+				Script:   scriptHex,
+				Satoshis: sats,
+			})
+		}
+		return nil
+
 	// On-chain-only operations — skip
-	case "check_preimage", "deserialize_state", "get_state_script", "add_raw_output":
+	case "check_preimage", "deserialize_state", "get_state_script":
 		return nil
 	}
 

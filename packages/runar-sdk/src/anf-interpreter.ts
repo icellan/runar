@@ -59,6 +59,34 @@ export interface DataOutputEntry {
   script: string;
 }
 
+/**
+ * Raw outputs produced by `this.addRawOutput(satoshis, scriptBytes)` in the
+ * method body. `script` is the **caller-supplied** locking-script bytes
+ * (hex-encoded), in contrast to `DataOutputEntry.script`, which is the hex
+ * payload that becomes part of an `OP_RETURN` data output. The simulator
+ * cannot introspect these bytes — it surfaces them so a caller building
+ * the broadcast transaction off-chain can splice them in at the correct
+ * position. Entries appear in declaration order, after the state output
+ * and after `dataOutputs`.
+ */
+export interface RawOutputEntry {
+  satoshis: bigint | number;
+  script: string;
+}
+
+/**
+ * The full result envelope produced by
+ * {@link computeNewStateAndDataOutputs}, {@link executeStrict}, and
+ * {@link executeOnChainAuthoritative}. All three modes return the same
+ * shape; mode-specific behaviour only changes whether asserts and crypto
+ * primitives are enforced or mocked, not what fields are populated.
+ */
+export interface ExecutionResult {
+  state: Record<string, unknown>;
+  dataOutputs: DataOutputEntry[];
+  rawOutputs: RawOutputEntry[];
+}
+
 export function computeNewState(
   anf: ANFProgram,
   methodName: string,
@@ -73,7 +101,8 @@ export function computeNewState(
 
 /**
  * Like {@link computeNewState} but also returns data outputs resolved
- * from `this.addDataOutput(...)` in the method body. Entries appear in
+ * from `this.addDataOutput(...)` and raw outputs resolved from
+ * `this.addRawOutput(...)` in the method body. Entries appear in
  * declaration order and are what `buildCallTransaction` should emit
  * between state outputs and the change output so the on-chain
  * continuation-hash check passes.
@@ -84,7 +113,7 @@ export function computeNewStateAndDataOutputs(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
-): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+): ExecutionResult {
   return runMethod(anf, methodName, currentState, args, constructorArgs, null);
 }
 
@@ -122,7 +151,7 @@ export function executeStrict(
   currentState: Record<string, unknown>,
   args: Record<string, unknown>,
   constructorArgs: unknown[] = [],
-): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+): ExecutionResult {
   return runMethod(anf, methodName, currentState, args, constructorArgs, {
     methodName,
   });
@@ -169,7 +198,7 @@ export function executeOnChainAuthoritative(
   args: Record<string, unknown>,
   constructorArgs: unknown[],
   ctx: OnChainCryptoContext,
-): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+): ExecutionResult {
   const sighash = normalizeSighash(ctx.sighash);
   return runMethod(anf, methodName, currentState, args, constructorArgs, {
     methodName,
@@ -205,7 +234,7 @@ function runMethod(
   args: Record<string, unknown>,
   constructorArgs: unknown[],
   strict: StrictCtx | null,
-): { state: Record<string, unknown>; dataOutputs: DataOutputEntry[] } {
+): ExecutionResult {
   // Find the method in ANF
   const method = anf.methods.find(
     (m) => m.name === methodName && m.isPublic,
@@ -250,14 +279,19 @@ function runMethod(
     }
   }
 
-  // Track state mutations and data outputs
+  // Track state mutations, data outputs, and raw outputs.
+  // `rawOutputs` holds entries from `add_raw_output` ANF kinds, which the
+  // simulator does NOT introspect (the script is caller-supplied). They
+  // are surfaced in the result envelope so an off-chain transaction
+  // builder can splice them in at the correct index.
   const stateDelta: Record<string, unknown> = {};
   const dataOutputs: DataOutputEntry[] = [];
+  const rawOutputs: RawOutputEntry[] = [];
 
   // Walk bindings
-  evalBindings(method.body, env, stateDelta, dataOutputs, anf, strict);
+  evalBindings(method.body, env, stateDelta, dataOutputs, rawOutputs, anf, strict);
 
-  return { state: { ...currentState, ...stateDelta }, dataOutputs };
+  return { state: { ...currentState, ...stateDelta }, dataOutputs, rawOutputs };
 }
 
 // ---------------------------------------------------------------------------
@@ -269,12 +303,13 @@ function evalBindings(
   env: Record<string, unknown>,
   stateDelta: Record<string, unknown>,
   dataOutputs: DataOutputEntry[],
+  rawOutputs: RawOutputEntry[],
   anf?: ANFProgram,
   strict: StrictCtx | null = null,
 ): void {
   for (const binding of bindings) {
     const val = evalValue(
-      binding.value, env, stateDelta, dataOutputs, anf, strict, binding.name,
+      binding.value, env, stateDelta, dataOutputs, rawOutputs, anf, strict, binding.name,
     );
     env[binding.name] = val;
   }
@@ -285,6 +320,7 @@ function evalValue(
   env: Record<string, unknown>,
   stateDelta: Record<string, unknown>,
   dataOutputs: DataOutputEntry[],
+  rawOutputs: RawOutputEntry[],
   anf?: ANFProgram,
   strict: StrictCtx | null = null,
   bindingName: string = '<anonymous>',
@@ -340,6 +376,7 @@ function evalValue(
         value.args.map((a: string) => env[a]),
         stateDelta,
         dataOutputs,
+        rawOutputs,
         anf,
       );
 
@@ -348,7 +385,7 @@ function evalValue(
       const branch = isTruthy(cond) ? value.then : value.else;
       // Create a child env for the branch
       const childEnv = { ...env };
-      evalBindings(branch, childEnv, stateDelta, dataOutputs, anf, strict);
+      evalBindings(branch, childEnv, stateDelta, dataOutputs, rawOutputs, anf, strict);
       // Copy any new bindings back (the last binding is typically the branch result)
       Object.assign(env, childEnv);
       // Return the last binding's value from the branch
@@ -364,7 +401,7 @@ function evalValue(
       for (let i = 0; i < count; i++) {
         env[iterVar] = BigInt(i);
         const loopEnv = { ...env };
-        evalBindings(body, loopEnv, stateDelta, dataOutputs, anf, strict);
+        evalBindings(body, loopEnv, stateDelta, dataOutputs, rawOutputs, anf, strict);
         // Copy loop bindings back
         Object.assign(env, loopEnv);
         if (body.length > 0) {
@@ -419,11 +456,26 @@ function evalValue(
       return undefined;
     }
 
-    // On-chain-only operations — skip in simulation
+    case 'add_raw_output': {
+      // `addRawOutput(satoshis, scriptBytes)`. The simulator does not
+      // introspect the script bytes (they're caller-supplied raw locking
+      // script); it simply forwards them in the result envelope so an
+      // off-chain transaction builder can emit the output at the correct
+      // index. Crypto built-ins remain mocked even in strict mode.
+      const sats = toBigInt(env[value.satoshis]);
+      const script = env[value.scriptBytes];
+      rawOutputs.push({
+        satoshis: sats,
+        script: typeof script === 'string' ? script : '',
+      });
+      return undefined;
+    }
+
+    // On-chain-only operations — skip in simulation. These ANF kinds are
+    // markers consumed by the codegen, not by the off-chain interpreter.
     case 'check_preimage':
     case 'deserialize_state':
     case 'get_state_script':
-    case 'add_raw_output':
       return undefined;
 
     default:
@@ -660,6 +712,7 @@ function evalMethodCall(
   args: unknown[],
   stateDelta: Record<string, unknown>,
   dataOutputs: DataOutputEntry[],
+  rawOutputs: RawOutputEntry[],
   anf?: ANFProgram,
 ): unknown {
   // Private method calls appear in the ANF with their bodies available
@@ -684,7 +737,7 @@ function evalMethodCall(
 
       // Execute the method body — pass real stateDelta so update_prop
       // mutations in private methods are captured
-      evalBindings(method.body, methodEnv, stateDelta, dataOutputs, anf);
+      evalBindings(method.body, methodEnv, stateDelta, dataOutputs, rawOutputs, anf);
 
       // Propagate property changes back to the caller's env
       for (const prop of anf.properties) {

@@ -7,9 +7,9 @@ const bsvz = @import("bsvz");
 // Given a compiled artifact's ANF IR, the current contract state, and
 // method arguments, this interpreter walks the ANF bindings and computes
 // the new state. It handles `update_prop` and `add_output` nodes to track
-// state mutations, while skipping on-chain-only operations like
-// `check_preimage`, `deserialize_state`, `get_state_script`, `add_raw_output`,
-// and `add_data_output`.
+// state mutations, surfaces `add_data_output` and `add_raw_output` entries
+// in the result envelope, and skips on-chain-only operations like
+// `check_preimage`, `deserialize_state`, and `get_state_script`.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -119,7 +119,10 @@ pub const ANFNode = union(enum) {
     check_preimage: struct {},
     deserialize_state: struct {},
     get_state_script: struct {},
-    add_raw_output: struct {},
+    add_raw_output: struct {
+        satoshis: []const u8 = "",
+        script_bytes: []const u8 = "",
+    },
     add_data_output: struct {
         satoshis: []const u8 = "",
         script_bytes: []const u8 = "",
@@ -187,11 +190,20 @@ pub const DataOutputEntry = struct {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Result of `computeNewStateAndDataOutputs`: the new state map and a
-/// slice of data outputs. Caller owns both.
+/// Result of `computeNewStateAndDataOutputs`: the new state map, a slice
+/// of data outputs (from `this.addDataOutput(...)`), and a slice of raw
+/// outputs (from `this.addRawOutput(...)`). Caller owns all three.
+///
+/// Raw outputs carry caller-supplied locking-script bytes that the
+/// simulator does not introspect — they are surfaced verbatim so an
+/// off-chain transaction builder can splice them in at the correct index.
+/// Entries appear in declaration order, after the state output and after
+/// `data_outputs`. Each entry's `script` is duped into the caller
+/// allocator (same lifetime semantics as `data_outputs`).
 pub const NewStateResult = struct {
     state: std.StringHashMap(ANFValue),
     data_outputs: []DataOutputEntry,
+    raw_outputs: []DataOutputEntry,
 };
 
 /// Compute the new state after executing a contract method.
@@ -208,9 +220,11 @@ pub fn computeNewState(
     const result = try computeNewStateAndDataOutputs(
         allocator, anf, method_name, current_state, args, constructor_args,
     );
-    // Discard data outputs — free their script allocations.
+    // Discard data + raw outputs — free their script allocations.
     for (result.data_outputs) |d| allocator.free(d.script);
     allocator.free(result.data_outputs);
+    for (result.raw_outputs) |d| allocator.free(d.script);
+    allocator.free(result.raw_outputs);
     return result.state;
 }
 
@@ -384,10 +398,12 @@ fn runMethod(
         }
     }
 
-    // Track state mutations and data outputs. data_outputs holds arena
-    // slices; we dupe them into the caller allocator below.
+    // Track state mutations, data outputs, and raw outputs. Both output
+    // arenas hold arena-allocated scripts; we dupe them into the caller
+    // allocator below so they survive the arena deinit.
     var state_delta = std.StringHashMap(ANFValue).init(arena_alloc);
     var data_outputs_arena = std.ArrayList(DataOutputEntry).empty;
+    var raw_outputs_arena = std.ArrayList(DataOutputEntry).empty;
 
     // Walk bindings — strict-mode context (or null for lenient). When
     // `real_crypto` is non-null we wire it into StrictCtx so crypto
@@ -395,7 +411,7 @@ fn runMethod(
     // mock-returning true.
     var strict_ctx_storage: StrictCtx = .{ .method_name = method_name, .real_crypto = real_crypto };
     const strict_ctx_ptr: ?*StrictCtx = if (strict) &strict_ctx_storage else null;
-    evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf, strict_ctx_ptr) catch |err| {
+    evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, &raw_outputs_arena, anf, strict_ctx_ptr) catch |err| {
         // On strict-mode AssertionFailure, populate the caller-supplied
         // out_failure_info (if any) so the driver can emit a structured
         // {error, methodName, bindingName} envelope on the wire. Both names
@@ -426,14 +442,18 @@ fn runMethod(
         try result.put(entry.key_ptr.*, val);
     }
 
-    // Dupe data-output scripts into the caller allocator so they survive
-    // the arena deinit.
+    // Dupe data-output and raw-output scripts into the caller allocator so
+    // they survive the arena deinit.
     const do_out = try allocator.alloc(DataOutputEntry, data_outputs_arena.items.len);
     for (data_outputs_arena.items, 0..) |d, i| {
         do_out[i] = .{ .satoshis = d.satoshis, .script = try allocator.dupe(u8, d.script) };
     }
+    const ro_out = try allocator.alloc(DataOutputEntry, raw_outputs_arena.items.len);
+    for (raw_outputs_arena.items, 0..) |d, i| {
+        ro_out[i] = .{ .satoshis = d.satoshis, .script = try allocator.dupe(u8, d.script) };
+    }
 
-    return .{ .state = result, .data_outputs = do_out };
+    return .{ .state = result, .data_outputs = do_out, .raw_outputs = ro_out };
 }
 
 // ---------------------------------------------------------------------------
@@ -457,12 +477,13 @@ fn evalBindings(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
+    raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
     strict_ctx: ?*StrictCtx,
 ) error{ OutOfMemory, AssertionFailure }!void {
     for (bindings) |binding| {
         if (strict_ctx) |ctx| ctx.last_binding_name = binding.name;
-        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, anf, strict_ctx);
+        const val = try evalNode(allocator, binding.value, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
         try env.put(binding.name, val);
     }
 }
@@ -473,6 +494,7 @@ fn evalNode(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
+    raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
     strict_ctx: ?*StrictCtx,
 ) error{ OutOfMemory, AssertionFailure }!ANFValue {
@@ -522,12 +544,12 @@ fn evalNode(
             return evalCall(allocator, c.func, c.args, env, real_crypto);
         },
         .method_call => |mc| {
-            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, anf, strict_ctx);
+            return evalMethodCall(allocator, mc.method, mc.args, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
         },
         .if_node => |ifn| {
             const cond = env.get(ifn.cond) orelse anf_none;
             const branch = if (isTruthy(cond)) ifn.then_branch else ifn.else_branch;
-            try evalBindings(allocator, branch, env, state_delta, data_outputs, anf, strict_ctx);
+            try evalBindings(allocator, branch, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
             if (branch.len > 0) {
                 return env.get(branch[branch.len - 1].name) orelse anf_none;
             }
@@ -537,7 +559,7 @@ fn evalNode(
             var last_val: ANFValue = anf_none;
             for (0..ln.count) |i| {
                 try env.put(ln.iter_var, .{ .int = @intCast(i) });
-                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, anf, strict_ctx);
+                try evalBindings(allocator, ln.body, env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
                 if (ln.body.len > 0) {
                     last_val = env.get(ln.body[ln.body.len - 1].name) orelse anf_none;
                 }
@@ -584,10 +606,7 @@ fn evalNode(
             // Resolve the two arg refs from env and record the data output.
             const sat_val = env.get(ado.satoshis) orelse anf_none;
             const script_val = env.get(ado.script_bytes) orelse anf_none;
-            const sats: i64 = switch (sat_val) {
-                .int => |n| n,
-                else => 0,
-            };
+            const sats: i64 = toInt(sat_val);
             const script_bytes: []const u8 = switch (script_val) {
                 .bytes => |b| b,
                 else => "",
@@ -598,8 +617,29 @@ fn evalNode(
             });
             return anf_none;
         },
+        .add_raw_output => |aro| {
+            // `addRawOutput(satoshis, scriptBytes)`. The simulator does not
+            // introspect the script bytes (they're caller-supplied raw
+            // locking script); it simply forwards them in the result envelope
+            // so an off-chain transaction builder can emit the output at the
+            // correct index. Crypto built-ins remain mocked even in strict
+            // mode (matches TS reference at
+            // packages/runar-sdk/src/anf-interpreter.ts).
+            const sat_val = env.get(aro.satoshis) orelse anf_none;
+            const script_val = env.get(aro.script_bytes) orelse anf_none;
+            const sats: i64 = toInt(sat_val);
+            const script_bytes: []const u8 = switch (script_val) {
+                .bytes => |b| b,
+                else => "",
+            };
+            try raw_outputs.append(allocator, .{
+                .satoshis = sats,
+                .script = try allocator.dupe(u8, script_bytes),
+            });
+            return anf_none;
+        },
         // On-chain-only operations — skip
-        .check_preimage, .deserialize_state, .get_state_script, .add_raw_output => {
+        .check_preimage, .deserialize_state, .get_state_script => {
             return anf_none;
         },
         .array_literal => |al| {
@@ -1001,6 +1041,7 @@ fn evalMethodCall(
     env: *std.StringHashMap(ANFValue),
     state_delta: *std.StringHashMap(ANFValue),
     data_outputs: *std.ArrayList(DataOutputEntry),
+    raw_outputs: *std.ArrayList(DataOutputEntry),
     anf: *const ANFProgram,
     strict_ctx: ?*StrictCtx,
 ) error{ OutOfMemory, AssertionFailure }!ANFValue {
@@ -1027,7 +1068,7 @@ fn evalMethodCall(
 
             // Execute the method body — propagate strict_ctx so nested
             // private-method asserts also abort.
-            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, anf, strict_ctx);
+            try evalBindings(allocator, m.body, &method_env, state_delta, data_outputs, raw_outputs, anf, strict_ctx);
 
             // Propagate property changes back
             for (anf.properties) |prop| {
@@ -1596,7 +1637,12 @@ fn parseANFNode(allocator: std.mem.Allocator, val: std.json.Value) error{OutOfMe
     if (std.mem.eql(u8, kind, "check_preimage")) return .{ .check_preimage = .{} };
     if (std.mem.eql(u8, kind, "deserialize_state")) return .{ .deserialize_state = .{} };
     if (std.mem.eql(u8, kind, "get_state_script")) return .{ .get_state_script = .{} };
-    if (std.mem.eql(u8, kind, "add_raw_output")) return .{ .add_raw_output = .{} };
+    if (std.mem.eql(u8, kind, "add_raw_output")) {
+        return .{ .add_raw_output = .{
+            .satoshis = if (obj.get("satoshis")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+            .script_bytes = if (obj.get("scriptBytes")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
+        } };
+    }
     if (std.mem.eql(u8, kind, "add_data_output")) {
         return .{ .add_data_output = .{
             .satoshis = if (obj.get("satoshis")) |v| (if (v == .string) try allocator.dupe(u8, v.string) else "") else "",
@@ -1949,6 +1995,8 @@ test "executeStrict — strict mode passes for valid input" {
     defer {
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
 
     try std.testing.expectEqual(@as(i64, 15), state.get("value").?.int);
@@ -2044,6 +2092,8 @@ test "executeStrict — crypto mocks (checkSig/checkMultiSig/checkPreimage) stil
     defer {
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
 
     // checkSig mocked to true → strict assert passes → value mutates to 1.
@@ -2127,6 +2177,8 @@ test "executeStrict — strict mode evaluates call(assert, ...) lowering" {
         defer {
             for (result.data_outputs) |d| allocator.free(d.script);
             allocator.free(result.data_outputs);
+            for (result.raw_outputs) |d| allocator.free(d.script);
+            allocator.free(result.raw_outputs);
         }
         try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
     }
@@ -2268,6 +2320,8 @@ test "executeOnChainAuthoritative — checkSig passes with a real signature" {
     defer {
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
     try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
 }
@@ -2344,6 +2398,8 @@ test "executeOnChainAuthoritative — checkPreimage passes when hash256(preimage
     defer {
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
     try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
 }
@@ -2412,6 +2468,8 @@ test "executeOnChainAuthoritative — lenient + strict modes still mock checkSig
         defer {
             for (r.data_outputs) |d| allocator.free(d.script);
             allocator.free(r.data_outputs);
+            for (r.raw_outputs) |d| allocator.free(d.script);
+            allocator.free(r.raw_outputs);
         }
         try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
     }
@@ -2522,6 +2580,8 @@ test "executeOnChainAuthoritative — checkMultiSig 1-of-2 passes when sig match
     defer {
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
     try std.testing.expectEqual(@as(i64, 1), state.get("value").?.int);
 }

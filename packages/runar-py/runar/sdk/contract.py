@@ -453,7 +453,7 @@ class RunarContract:
                 self.artifact.abi.constructor_params,
             )
             try:
-                computed, data_outs = compute_new_state_and_data_outputs(
+                computed, data_outs, _raw_outs = compute_new_state_and_data_outputs(
                     self.artifact.anf, method_name, flat_state, named_args,
                     flat_ctor_args,
                 )

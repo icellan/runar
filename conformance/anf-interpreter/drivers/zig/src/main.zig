@@ -158,9 +158,12 @@ fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, s
         );
     };
     defer {
-        // Clean up data-output script slices (state map is freed below).
+        // Clean up data-output and raw-output script slices (state map is
+        // freed below).
         for (result.data_outputs) |d| allocator.free(d.script);
         allocator.free(result.data_outputs);
+        for (result.raw_outputs) |d| allocator.free(d.script);
+        allocator.free(result.raw_outputs);
     }
 
     // Emit JSON to stdout.
@@ -304,6 +307,15 @@ fn writeOutputJson(
     }
     try w.writeAll("},\"dataOutputs\":[");
     for (result.data_outputs, 0..) |d, i| {
+        if (i != 0) try w.writeAll(",");
+        try w.writeAll("{\"satoshis\":\"");
+        try w.print("{d}", .{d.satoshis});
+        try w.writeAll("n\",\"script\":");
+        try writeJsonString(w, d.script);
+        try w.writeAll("}");
+    }
+    try w.writeAll("],\"rawOutputs\":[");
+    for (result.raw_outputs, 0..) |d, i| {
         if (i != 0) try w.writeAll(",");
         try w.writeAll("{\"satoshis\":\"");
         try w.print("{d}", .{d.satoshis});

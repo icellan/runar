@@ -8,8 +8,11 @@ require 'digest'
 # method arguments, this interpreter walks the ANF bindings and computes
 # the new state. It handles +update_prop+ nodes to track state mutations,
 # while skipping on-chain-only operations like +check_preimage+,
-# +deserialize_state+, +get_state_script+, +add_output+, +add_raw_output+,
-# and +add_data_output+.
+# +deserialize_state+, and +get_state_script+. +add_data_output+ entries
+# are surfaced through the +data_outputs+ array, and +add_raw_output+
+# entries through the +raw_outputs+ array — the simulator does not
+# introspect raw scripts (they're caller-supplied) but forwards them so
+# off-chain transaction builders can splice them in at the correct index.
 #
 # This enables the SDK to auto-compute +new_state+ for stateful contract
 # calls, so callers don't need to duplicate contract logic.
@@ -64,7 +67,7 @@ module Runar
       # @return [Hash] the updated state (merged with current_state)
       # @raise [ArgumentError] when method_name is not found as a public method in the ANF IR
       def compute_new_state(anf, method_name, current_state, args, constructor_args: [], max_loop_iterations: MAX_LOOP_ITERATIONS)
-        state, _ = compute_new_state_and_data_outputs(
+        state, _data_outputs, _raw_outputs = compute_new_state_and_data_outputs(
           anf, method_name, current_state, args,
           constructor_args: constructor_args,
           max_loop_iterations: max_loop_iterations,
@@ -73,10 +76,17 @@ module Runar
       end
 
       # Like #compute_new_state but also returns data outputs resolved
-      # from +this.addDataOutput(...)+ in declaration order. Each entry
-      # is +{satoshis: Integer, script: String}+. The SDK uses these
-      # to populate the tx between state outputs and the change output
-      # so the on-chain continuation-hash check matches.
+      # from +this.addDataOutput(...)+ and raw outputs resolved from
+      # +this.addRawOutput(...)+ in declaration order. Each data-output
+      # entry is +{satoshis: Integer, script: String}+ where +script+ is
+      # the +OP_RETURN+ payload bytes; each raw-output entry shares the
+      # same shape but +script+ is the caller-supplied raw locking
+      # script. The SDK uses these to populate the tx between state
+      # outputs and the change output so the on-chain continuation-hash
+      # check matches.
+      #
+      # @return [Array(Hash, Array<Hash>, Array<Hash>)]
+      #   +[new_state, data_outputs, raw_outputs]+
       def compute_new_state_and_data_outputs(anf, method_name, current_state, args, constructor_args: [], max_loop_iterations: MAX_LOOP_ITERATIONS)
         run_method(anf, method_name, current_state, args, constructor_args, nil, max_loop_iterations)
       end
@@ -89,7 +99,8 @@ module Runar
       # +checkMultiSig+, +checkPreimage+) still mock-return +true+; only
       # explicit +assert(...)+ predicates are enforced.
       #
-      # @return [Array(Hash, Array<Hash>)] +[new_state, data_outputs]+
+      # @return [Array(Hash, Array<Hash>, Array<Hash>)]
+      #   +[new_state, data_outputs, raw_outputs]+
       # @raise  [Runar::SDK::AssertionFailureError] on the first falsy assert
       def execute_strict(anf, method_name, current_state, args, constructor_args = [], max_loop_iterations: MAX_LOOP_ITERATIONS)
         run_method(anf, method_name, current_state, args, constructor_args, method_name, max_loop_iterations)
@@ -151,9 +162,14 @@ module Runar
 
         state_delta = {}
         data_outputs = []
-        eval_bindings(Array(method['body']), env, state_delta, data_outputs, anf)
+        # +raw_outputs+ collects entries from +add_raw_output+ ANF kinds.
+        # The simulator does NOT introspect their script bytes (the script
+        # is caller-supplied); it surfaces them so an off-chain transaction
+        # builder can emit the output at the correct index.
+        raw_outputs = []
+        eval_bindings(Array(method['body']), env, state_delta, data_outputs, raw_outputs, anf)
 
-        [current_state.merge(state_delta), data_outputs]
+        [current_state.merge(state_delta), data_outputs, raw_outputs]
       ensure
         Thread.current[:runar_max_loop_iterations] = nil
         Thread.current[:runar_strict_method] = nil
@@ -164,23 +180,27 @@ module Runar
       # @param bindings    [Array<Hash>] list of { name:, value: } binding nodes
       # @param env         [Hash]        current name → value environment (mutated in place)
       # @param state_delta [Hash]        accumulated state mutations (mutated in place)
+      # @param data_outputs [Array<Hash>] accumulated +add_data_output+ entries
+      # @param raw_outputs  [Array<Hash>] accumulated +add_raw_output+ entries
       # @param anf         [Hash, nil]   full ANF IR (for method lookup)
-      def eval_bindings(bindings, env, state_delta, data_outputs, anf = nil)
+      def eval_bindings(bindings, env, state_delta, data_outputs, raw_outputs, anf = nil)
         bindings.each do |binding|
-          val = eval_value(binding['value'], env, state_delta, data_outputs, anf, binding['name'])
+          val = eval_value(binding['value'], env, state_delta, data_outputs, raw_outputs, anf, binding['name'])
           env[binding['name']] = val
         end
       end
 
       # Evaluate a single ANF value node, dispatching on its kind.
       #
-      # @param value       [Hash]
-      # @param env         [Hash]
-      # @param state_delta [Hash]
-      # @param anf         [Hash, nil]
+      # @param value        [Hash]
+      # @param env          [Hash]
+      # @param state_delta  [Hash]
+      # @param data_outputs [Array<Hash>]
+      # @param raw_outputs  [Array<Hash>]
+      # @param anf          [Hash, nil]
       # @return [Object]
       # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
-      def eval_value(value, env, state_delta, data_outputs, anf = nil, binding_name = nil)
+      def eval_value(value, env, state_delta, data_outputs, raw_outputs, anf = nil, binding_name = nil)
         kind = value['kind'].to_s
 
         case kind
@@ -225,13 +245,13 @@ module Runar
 
         when 'method_call'
           call_args = Array(value['args']).map { |a| env[a] }
-          eval_method_call(env[value['object']], value['method'], call_args, env, state_delta, data_outputs, anf)
+          eval_method_call(env[value['object']], value['method'], call_args, env, state_delta, data_outputs, raw_outputs, anf)
 
         when 'if'
           cond   = env[value['cond']]
           branch = is_truthy(cond) ? value['then'] : value['else']
           child_env = env.dup
-          eval_bindings(Array(branch), child_env, state_delta, data_outputs, anf)
+          eval_bindings(Array(branch), child_env, state_delta, data_outputs, raw_outputs, anf)
           env.merge!(child_env)
           branch && !branch.empty? ? child_env[branch.last['name']] : nil
 
@@ -248,7 +268,7 @@ module Runar
           count.times do |i|
             env[iter_var] = i
             loop_env = env.dup
-            eval_bindings(body, loop_env, state_delta, data_outputs, anf)
+            eval_bindings(body, loop_env, state_delta, data_outputs, raw_outputs, anf)
             env.merge!(loop_env)
             last_val = body.empty? ? nil : loop_env[body.last['name']]
           end
@@ -301,7 +321,23 @@ module Runar
           data_outputs << { satoshis: sats || 0, script: script_hex }
           nil
 
-        when 'check_preimage', 'deserialize_state', 'get_state_script', 'add_raw_output'
+        when 'add_raw_output'
+          # +addRawOutput(satoshis, scriptBytes)+. The simulator does not
+          # introspect the script bytes (they are caller-supplied raw
+          # locking script); it forwards them in the result envelope so an
+          # off-chain transaction builder can emit the output at the
+          # correct index. Crypto built-ins remain mocked even in strict
+          # mode. Mirrors the +add_data_output+ arm above.
+          sat_ref = value['satoshis']
+          script_ref = value['scriptBytes']
+          sats = env[sat_ref]
+          sats = sats.to_i if sats
+          script_val = env[script_ref]
+          script_hex = script_val.is_a?(String) ? script_val : ''
+          raw_outputs << { satoshis: sats || 0, script: script_hex }
+          nil
+
+        when 'check_preimage', 'deserialize_state', 'get_state_script'
           # On-chain-only operations — skip in simulation.
           nil
 
@@ -572,14 +608,16 @@ module Runar
       # propagates any state mutations back to the caller, and returns the
       # value of the last binding.
       #
-      # @param _obj        [Object]      receiver (unused — all calls are this-calls)
-      # @param method_name [String, nil]
-      # @param args        [Array]
-      # @param caller_env  [Hash, nil]
-      # @param state_delta [Hash, nil]
-      # @param anf         [Hash, nil]
+      # @param _obj         [Object]      receiver (unused — all calls are this-calls)
+      # @param method_name  [String, nil]
+      # @param args         [Array]
+      # @param caller_env   [Hash, nil]
+      # @param state_delta  [Hash, nil]
+      # @param data_outputs [Array<Hash>]
+      # @param raw_outputs  [Array<Hash>]
+      # @param anf          [Hash, nil]
       # @return [Object]
-      def eval_method_call(_obj, method_name, args, caller_env = nil, state_delta = nil, data_outputs = [], anf = nil)
+      def eval_method_call(_obj, method_name, args, caller_env = nil, state_delta = nil, data_outputs = [], raw_outputs = [], anf = nil)
         return nil unless anf && method_name
 
         private_method = Array(anf['methods']).find do |m|
@@ -605,7 +643,7 @@ module Runar
 
         body = Array(private_method['body'])
         child_delta = {}
-        eval_bindings(body, new_env, child_delta, data_outputs, anf)
+        eval_bindings(body, new_env, child_delta, data_outputs, raw_outputs, anf)
 
         # Propagate state mutations back to the caller environment.
         state_delta&.merge!(child_delta)

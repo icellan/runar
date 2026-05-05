@@ -243,14 +243,15 @@ func run() error {
 	var (
 		state       map[string]interface{}
 		dataOutputs []runar.ContractOutput
+		rawOutputs  []runar.ContractOutput
 		interpErr   error
 	)
 	if strict {
-		state, dataOutputs, interpErr = runar.ExecuteStrict(
+		state, dataOutputs, rawOutputs, interpErr = runar.ExecuteStrict(
 			&anf, methodName, currentState, args, constructorArgs,
 		)
 	} else {
-		state, dataOutputs, interpErr = runar.ComputeNewStateAndDataOutputs(
+		state, dataOutputs, rawOutputs, interpErr = runar.ComputeNewStateAndDataOutputs(
 			&anf, methodName, currentState, args, constructorArgs,
 		)
 	}
@@ -283,9 +284,18 @@ func run() error {
 		})
 	}
 
+	encodedRawOutputs := make([]map[string]interface{}, 0, len(rawOutputs))
+	for _, out := range rawOutputs {
+		encodedRawOutputs = append(encodedRawOutputs, map[string]interface{}{
+			"satoshis": fmt.Sprintf("%dn", out.Satoshis),
+			"script":   out.Script,
+		})
+	}
+
 	result := map[string]interface{}{
 		"state":       encodedState,
 		"dataOutputs": encodedOutputs,
+		"rawOutputs":  encodedRawOutputs,
 	}
 
 	enc := json.NewEncoder(os.Stdout)

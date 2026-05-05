@@ -17,7 +17,8 @@
 #
 # Strict mode emits {error: "AssertionFailureError", methodName, bindingName}
 # (and exits 0) on the first falsy +assert(...)+ predicate; otherwise the
-# same {state, dataOutputs} envelope as lenient. Flag order is irrelevant.
+# same {state, dataOutputs, rawOutputs} envelope as lenient. Flag order is
+# irrelevant.
 
 require 'json'
 require 'pathname'
@@ -127,7 +128,7 @@ def main
   anf = JSON.parse(File.read(anf_path))
 
   begin
-    state, data_outputs =
+    state, data_outputs, raw_outputs =
       if strict
         Runar::SDK::ANFInterpreter.execute_strict(
           anf,
@@ -159,21 +160,27 @@ def main
     exit 0
   end
 
-  encoded_state = encode_bigints(state)
-  encoded_outputs = (data_outputs || []).map do |out|
-    sats = out[:satoshis]
-    sats = out['satoshis'] if sats.nil?
-    script = out[:script]
-    script = out['script'] if script.nil?
-    {
-      'satoshis' => "#{sats.to_i}n",
-      'script' => (script || '').to_s,
-    }
+  encode_outputs = lambda do |entries|
+    Array(entries).map do |out|
+      sats = out[:satoshis]
+      sats = out['satoshis'] if sats.nil?
+      script = out[:script]
+      script = out['script'] if script.nil?
+      {
+        'satoshis' => "#{sats.to_i}n",
+        'script' => (script || '').to_s,
+      }
+    end
   end
+
+  encoded_state = encode_bigints(state)
+  encoded_outputs = encode_outputs.call(data_outputs)
+  encoded_raw_outputs = encode_outputs.call(raw_outputs)
 
   output = {
     'state' => encoded_state,
     'dataOutputs' => encoded_outputs,
+    'rawOutputs' => encoded_raw_outputs,
   }
 
   puts JSON.generate(output)

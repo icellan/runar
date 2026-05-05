@@ -63,8 +63,7 @@ public final class AnfInterpreter {
     );
 
     private static final Set<String> CHAIN_ONLY_KINDS = Set.of(
-        "check_preimage", "deserialize_state", "get_state_script",
-        "add_raw_output"
+        "check_preimage", "deserialize_state", "get_state_script"
     );
 
     private AnfInterpreter() {}
@@ -107,17 +106,33 @@ public final class AnfInterpreter {
         List<Object> constructorArgs
     ) {
         Run r = run(anf, methodName, currentState, args, constructorArgs, false, null);
-        return new ExecutionResult(r.newState, r.dataOutputs);
+        return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
-    /** Result bundle returned from a strict execution. */
+    /**
+     * Result bundle returned from a strict / lenient / on-chain-authoritative
+     * execution. Carries the post-call state, the data outputs declared via
+     * {@code this.addDataOutput(...)}, and the raw outputs declared via
+     * {@code this.addRawOutput(...)} in the method body.
+     *
+     * <p>{@code rawOutputs} entries are surfaced verbatim — the simulator
+     * does NOT introspect their script bytes (they are caller-supplied raw
+     * locking-script bytes). Callers building the broadcast transaction
+     * off-chain splice them in at the correct index.
+     */
     public static final class ExecutionResult {
         public final Map<String, Object> newState;
         public final List<DataOutput> dataOutputs;
+        public final List<DataOutput> rawOutputs;
 
-        ExecutionResult(Map<String, Object> newState, List<DataOutput> dataOutputs) {
+        ExecutionResult(
+            Map<String, Object> newState,
+            List<DataOutput> dataOutputs,
+            List<DataOutput> rawOutputs
+        ) {
             this.newState = Collections.unmodifiableMap(newState);
             this.dataOutputs = Collections.unmodifiableList(dataOutputs);
+            this.rawOutputs = Collections.unmodifiableList(rawOutputs);
         }
     }
 
@@ -146,7 +161,7 @@ public final class AnfInterpreter {
         List<Object> constructorArgs
     ) {
         Run r = run(anf, methodName, currentState, args, constructorArgs, true, null);
-        return new ExecutionResult(r.newState, r.dataOutputs);
+        return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
     /**
@@ -188,7 +203,7 @@ public final class AnfInterpreter {
             );
         }
         Run r = run(anf, methodName, currentState, args, constructorArgs, true, ctx);
-        return new ExecutionResult(r.newState, r.dataOutputs);
+        return new ExecutionResult(r.newState, r.dataOutputs, r.rawOutputs);
     }
 
     /**
@@ -262,7 +277,12 @@ public final class AnfInterpreter {
     private static final class Run {
         final Map<String, Object> newState;
         final List<DataOutput> dataOutputs;
-        Run(Map<String, Object> s, List<DataOutput> o) { this.newState = s; this.dataOutputs = o; }
+        final List<DataOutput> rawOutputs;
+        Run(Map<String, Object> s, List<DataOutput> o, List<DataOutput> r) {
+            this.newState = s;
+            this.dataOutputs = o;
+            this.rawOutputs = r;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -340,13 +360,14 @@ public final class AnfInterpreter {
 
         Map<String, Object> stateDelta = new LinkedHashMap<>();
         List<DataOutput> dataOutputs = new ArrayList<>();
+        List<DataOutput> rawOutputs = new ArrayList<>();
 
-        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, strict, realCrypto, methodName);
+        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
 
         Map<String, Object> newState = new LinkedHashMap<>();
         newState.putAll(currentState);
         newState.putAll(stateDelta);
-        return new Run(newState, dataOutputs);
+        return new Run(newState, dataOutputs, rawOutputs);
     }
 
     // ------------------------------------------------------------------
@@ -359,13 +380,14 @@ public final class AnfInterpreter {
         Map<String, Object> env,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
+        List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
         String methodName
     ) {
         for (Map<String, Object> binding : bindings) {
             String bindingName = (String) binding.get("name");
-            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, strict, realCrypto, methodName, bindingName);
+            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName, bindingName);
             env.put(bindingName, val);
         }
     }
@@ -376,6 +398,7 @@ public final class AnfInterpreter {
         Map<String, Object> env,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
+        List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
         String methodName,
@@ -429,7 +452,7 @@ public final class AnfInterpreter {
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
-                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, strict, realCrypto, methodName);
+                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
             }
             case "if": {
                 Object cond = env.get((String) value.get("cond"));
@@ -437,7 +460,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict, realCrypto, methodName);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     return childEnv.get((String) branch.get(branch.size() - 1).get("name"));
@@ -452,7 +475,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, BigInteger.valueOf(i));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict, realCrypto, methodName);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, rawOutputs, strict, realCrypto, methodName);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         lastVal = loopEnv.get((String) body.get(body.size() - 1).get("name"));
@@ -501,6 +524,19 @@ public final class AnfInterpreter {
                 dataOutputs.add(new DataOutput(sats, scriptHex));
                 return null;
             }
+            case "add_raw_output": {
+                // `addRawOutput(satoshis, scriptBytes)`. The simulator does
+                // NOT introspect the script bytes (they're caller-supplied
+                // raw locking script); it forwards them in the result
+                // envelope so an off-chain transaction builder can splice
+                // the output in at the correct index. Crypto built-ins
+                // remain mocked even in strict mode.
+                long sats = toBigInt(env.get((String) value.get("satoshis"))).longValueExact();
+                String script = (String) env.get((String) value.get("scriptBytes"));
+                if (script == null) script = "";
+                rawOutputs.add(new DataOutput(sats, script));
+                return null;
+            }
             default:
                 if (CHAIN_ONLY_KINDS.contains(kind)) return null;
                 return null;
@@ -514,6 +550,7 @@ public final class AnfInterpreter {
         Map<String, Object> callerEnv,
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
+        List<DataOutput> rawOutputs,
         boolean strict,
         OnChainCryptoContext realCrypto,
         String callerMethodName
@@ -539,7 +576,7 @@ public final class AnfInterpreter {
                 // Strict-mode failures inside a private helper still report
                 // the public method name the caller invoked. Mirrors how the
                 // TS SDK threads `methodName` through evalMethodCall.
-                evalBindings(anf, body, callEnv, childDelta, dataOutputs, strict, realCrypto, callerMethodName);
+                evalBindings(anf, body, callEnv, childDelta, dataOutputs, rawOutputs, strict, realCrypto, callerMethodName);
                 stateDelta.putAll(childDelta);
                 // Mirror property mutations back into caller env
                 for (Map.Entry<String, Object> e : childDelta.entrySet()) {

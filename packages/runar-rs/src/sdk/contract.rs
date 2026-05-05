@@ -522,7 +522,7 @@ impl RunarContract {
         if is_stateful {
             if let Some(ref anf) = self.artifact.anf {
                 let named_args = build_named_args(&user_params, &resolved_args);
-                if let Ok((state, data_outs)) = anf_interpreter::compute_new_state_and_data_outputs(
+                if let Ok((state, data_outs, _raw_outs)) = anf_interpreter::compute_new_state_and_data_outputs(
                     anf, method_name, &self.state, &named_args,
                     &self.constructor_args,
                 ) {

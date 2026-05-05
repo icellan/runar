@@ -333,10 +333,11 @@ module Runar
         end
         if is_stateful && @artifact.anf
           named_args = build_named_args(user_params, resolved_args)
-          computed_state, anf_data_outputs = ANFInterpreter.compute_new_state_and_data_outputs(
-            @artifact.anf, method_name, @state, named_args,
-            constructor_args: @constructor_args
-          )
+          computed_state, anf_data_outputs, _anf_raw_outputs =
+            ANFInterpreter.compute_new_state_and_data_outputs(
+              @artifact.anf, method_name, @state, named_args,
+              constructor_args: @constructor_args
+            )
           if opts.new_state.nil?
             opts = opts.dup
             opts.new_state = computed_state

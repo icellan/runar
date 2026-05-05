@@ -4,8 +4,9 @@ Given a compiled artifact's ANF IR, the current contract state, and
 method arguments, this interpreter walks the ANF bindings and computes
 the new state. It handles ``update_prop`` nodes to track state mutations,
 while skipping on-chain-only operations like ``check_preimage``,
-``deserialize_state``, ``get_state_script``, ``add_output``, ``add_raw_output``,
-and ``add_data_output``.
+``deserialize_state``, and ``get_state_script``. ``add_data_output`` and
+``add_raw_output`` are surfaced through the result envelope rather than
+skipped — see below.
 
 This enables the SDK to auto-compute ``newState`` for stateful contract
 calls, so callers don't need to duplicate contract logic.
@@ -19,6 +20,13 @@ Two execution modes are exposed:
   binding name) on the first falsy one. Crypto built-ins (``checkSig``,
   ``checkMultiSig``, ``checkPreimage``) still mock-return ``True`` in strict
   mode; only explicit ``assert(...)`` predicates are enforced.
+
+Both lenient and strict modes return a 3-tuple
+``(state, data_outputs, raw_outputs)``. ``raw_outputs`` collects entries
+from ``this.addRawOutput(satoshis, scriptBytes)`` in the method body; the
+script bytes are caller-supplied raw locking-script hex and the simulator
+does NOT introspect them — it forwards them verbatim so an off-chain
+transaction builder can splice them in at the correct position.
 """
 
 from __future__ import annotations
@@ -85,7 +93,7 @@ def compute_new_state(
     Returns:
         The updated state (merged with current_state).
     """
-    state, _ = compute_new_state_and_data_outputs(
+    state, _, _ = compute_new_state_and_data_outputs(
         anf, method_name, current_state, args, constructor_args,
     )
     return state
@@ -97,16 +105,27 @@ def compute_new_state_and_data_outputs(
     current_state: dict,
     args: dict,
     constructor_args: list = None,
-):
-    """Like :func:`compute_new_state` but also returns data outputs.
+) -> Tuple[dict, list, list]:
+    """Like :func:`compute_new_state` but also returns data + raw outputs.
 
     Data outputs come from ``this.addDataOutput(...)`` calls in the method
-    body, in declaration order. Each entry is a ``{"script": hex, "satoshis": int}``
-    dict. The SDK uses these to populate the tx between state outputs and
-    the change output so the on-chain continuation-hash check matches.
+    body, in declaration order. Each entry is a
+    ``{"script": hex, "satoshis": int}`` dict that becomes the payload of an
+    ``OP_RETURN`` data output. The SDK uses these to populate the tx between
+    state outputs and the change output so the on-chain continuation-hash
+    check matches.
+
+    Raw outputs come from ``this.addRawOutput(satoshis, scriptBytes)`` calls
+    in the method body, in declaration order. Each entry is a
+    ``{"script": hex, "satoshis": int}`` dict where ``script`` is the
+    **caller-supplied** raw locking-script bytes. The simulator does NOT
+    introspect those bytes; it forwards them so an off-chain transaction
+    builder can splice them in at the correct index (after the state output
+    and after data outputs).
 
     Returns:
-        (state, data_outputs) — the new state dict and a list of data output dicts.
+        ``(state, data_outputs, raw_outputs)`` — the new state dict, a list
+        of data output dicts, and a list of raw output dicts.
     """
     return _run_method(
         anf, method_name, current_state, args, constructor_args, strict=None,
@@ -119,7 +138,7 @@ def execute_strict(
     current_state: dict,
     args: dict,
     constructor_args: list = None,
-) -> Tuple[dict, list]:
+) -> Tuple[dict, list, list]:
     """Strict-mode counterpart to :func:`compute_new_state_and_data_outputs`.
 
     Walks the same ANF body but raises :class:`AssertionFailureError` on the
@@ -130,7 +149,7 @@ def execute_strict(
     ``True`` — strict mode only enforces explicit ``assert(...)`` predicates.
 
     Returns:
-        ``(state, data_outputs)`` — same envelope as
+        ``(state, data_outputs, raw_outputs)`` — same envelope as
         :func:`compute_new_state_and_data_outputs`.
 
     Raises:
@@ -149,7 +168,7 @@ def _run_method(
     args: dict,
     constructor_args: Optional[list],
     strict: Optional[_StrictCtx],
-) -> Tuple[dict, list]:
+) -> Tuple[dict, list, list]:
     """Shared entry-point for both lenient and strict modes.
 
     ``strict is None`` -> lenient (asserts skipped).
@@ -199,16 +218,23 @@ def _run_method(
         if pname in args:
             env[pname] = args[pname]
 
-    # Track state mutations and data outputs
+    # Track state mutations, data outputs, and raw outputs.
+    # ``raw_outputs`` collects ``add_raw_output`` entries; the simulator does
+    # not introspect the script bytes (they're caller-supplied) and forwards
+    # them so an off-chain tx builder can splice them in at the correct index.
     state_delta: Dict[str, Any] = {}
     data_outputs: List[dict] = []
+    raw_outputs: List[dict] = []
 
     # Walk bindings. In strict mode an AssertionFailureError raised from any
     # nested if/loop/private-method call propagates up out of this function
     # to the caller — there is no special unwind logic needed in Python.
-    _eval_bindings(method.get('body', []), env, state_delta, data_outputs, anf, strict)
+    _eval_bindings(
+        method.get('body', []), env, state_delta, data_outputs, raw_outputs,
+        anf, strict,
+    )
 
-    return {**current_state, **state_delta}, data_outputs
+    return {**current_state, **state_delta}, data_outputs, raw_outputs
 
 
 # ---------------------------------------------------------------------------
@@ -220,12 +246,13 @@ def _eval_bindings(
     env: Dict[str, Any],
     state_delta: Dict[str, Any],
     data_outputs: List[dict],
+    raw_outputs: List[dict],
     anf: Optional[dict] = None,
     strict: Optional[_StrictCtx] = None,
 ) -> None:
     for binding in bindings:
         val = _eval_value(
-            binding['value'], env, state_delta, data_outputs, anf,
+            binding['value'], env, state_delta, data_outputs, raw_outputs, anf,
             strict=strict, binding_name=binding['name'],
         )
         env[binding['name']] = val
@@ -236,6 +263,7 @@ def _eval_value(
     env: Dict[str, Any],
     state_delta: Dict[str, Any],
     data_outputs: List[dict],
+    raw_outputs: List[dict],
     anf: Optional[dict] = None,
     strict: Optional[_StrictCtx] = None,
     binding_name: str = '<anonymous>',
@@ -285,14 +313,16 @@ def _eval_value(
         call_args = [env.get(a) for a in value.get('args', [])]
         return _eval_method_call(
             env.get(value.get('object')), value.get('method'), call_args,
-            env, state_delta, data_outputs, anf, strict=strict,
+            env, state_delta, data_outputs, raw_outputs, anf, strict=strict,
         )
 
     if kind == 'if':
         cond = env.get(value['cond'])
         branch = value['then'] if _is_truthy(cond) else value['else']
         child_env = dict(env)
-        _eval_bindings(branch, child_env, state_delta, data_outputs, anf, strict)
+        _eval_bindings(
+            branch, child_env, state_delta, data_outputs, raw_outputs, anf, strict,
+        )
         env.update(child_env)
         if branch:
             return child_env.get(branch[-1]['name'])
@@ -306,7 +336,9 @@ def _eval_value(
         for i in range(count):
             env[iter_var] = i
             loop_env = dict(env)
-            _eval_bindings(body, loop_env, state_delta, data_outputs, anf, strict)
+            _eval_bindings(
+                body, loop_env, state_delta, data_outputs, raw_outputs, anf, strict,
+            )
             env.update(loop_env)
             if body:
                 last_val = loop_env.get(body[-1]['name'])
@@ -356,9 +388,21 @@ def _eval_value(
         data_outputs.append({'satoshis': sats, 'script': script_hex})
         return None
 
+    if kind == 'add_raw_output':
+        # ``addRawOutput(satoshis, scriptBytes)``. The simulator does not
+        # introspect the script bytes (they're caller-supplied raw locking
+        # script); it forwards them in the result envelope so an off-chain
+        # transaction builder can emit the output at the correct index.
+        sat_ref = value.get('satoshis', '')
+        script_ref = value.get('scriptBytes', '')
+        sats = _to_int(env.get(sat_ref))
+        script_val = env.get(script_ref)
+        script_hex = script_val if isinstance(script_val, str) else ''
+        raw_outputs.append({'satoshis': sats, 'script': script_hex})
+        return None
+
     # On-chain-only operations -- skip in simulation
-    if kind in ('check_preimage', 'deserialize_state', 'get_state_script',
-                'add_raw_output'):
+    if kind in ('check_preimage', 'deserialize_state', 'get_state_script'):
         return None
 
     return None
@@ -581,11 +625,14 @@ def _eval_method_call(
     caller_env: Optional[Dict[str, Any]] = None,
     state_delta: Optional[Dict[str, Any]] = None,
     data_outputs: Optional[List[dict]] = None,
+    raw_outputs: Optional[List[dict]] = None,
     anf: Optional[dict] = None,
     strict: Optional[_StrictCtx] = None,
 ) -> Any:
     if data_outputs is None:
         data_outputs = []
+    if raw_outputs is None:
+        raw_outputs = []
     # Look up private method in ANF IR
     if anf and method:
         for m in anf.get('methods', []):
@@ -605,7 +652,10 @@ def _eval_method_call(
                 # Evaluate method body (strict mode propagates into the callee)
                 body = m.get('body', [])
                 child_delta: Dict[str, Any] = {}
-                _eval_bindings(body, new_env, child_delta, data_outputs, anf, strict)
+                _eval_bindings(
+                    body, new_env, child_delta, data_outputs, raw_outputs,
+                    anf, strict,
+                )
                 # Propagate state delta back
                 if state_delta is not None:
                     state_delta.update(child_delta)

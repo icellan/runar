@@ -27,7 +27,7 @@
   ],
   "approvedOmissions": {
     "add-data-output":                  "Method-time data-output behaviour; deploy locking script is identical to the parent stateless contract already covered by basic-p2pkh.",
-    "add-raw-output":                   "Method-time raw-output behaviour; deploy locking script identical to a stateless wrapper. Method-call output mismatch is caught by ANF parity.",
+    "add-raw-output":                   "Method-time raw-output behaviour; deploy locking script identical to a stateless wrapper. Method-call output mismatch is caught by the dedicated ANF parity fixture conformance/anf-interpreter/inputs/add-raw-output-publish.json (lenient + strict goldens), which fans out across all 7 SDK driver outputs and asserts byte-equal {state, dataOutputs, rawOutputs} envelopes.",
     "conditional-data-output-stateful": "Method-time conditional output; deploy locking script is the stateful continuation already covered by stateful / stateful-counter.",
     "private-helper-outputs":           "Inlining of private helpers does not affect deploy locking script when the helper is fully inlined; method-call output is covered by ANF parity.",
     "ec-unit":                          "Compiler unit fixture for EC primitive opcode emission; its contract shape is structurally redundant with ec-demo / ec-primitives which are SDK-output covered.",

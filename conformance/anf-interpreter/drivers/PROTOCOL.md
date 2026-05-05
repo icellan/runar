@@ -56,13 +56,40 @@ satoshis fields.
   "state": { "count": "1n" },
   "dataOutputs": [
     { "satoshis": "42n", "script": "0001020304" }
+  ],
+  "rawOutputs": [
+    { "satoshis": "1000n", "script": "76a91488ac" }
   ]
 }
 ```
 
 - `state` — full updated state map (current + delta), bigint-encoded
-- `dataOutputs` — list of `{ satoshis, script }` records in declaration order;
-  `satoshis` is bigint-encoded, `script` is hex string
+- `dataOutputs` — list of `{ satoshis, script }` records in declaration order
+  resolved from `this.addDataOutput(satoshis, scriptBytes)` calls.
+  `satoshis` is bigint-encoded, `script` is the hex payload.
+- `rawOutputs` — list of `{ satoshis, script }` records in declaration order
+  resolved from `this.addRawOutput(satoshis, scriptBytes)` calls. The
+  simulator does NOT introspect these script bytes (they are caller-supplied
+  raw locking-script bytes); the field is surfaced so an off-chain transaction
+  builder can splice them at the correct output index. Encoded identically
+  to `dataOutputs`. MUST be present (as `[]` if empty) — every driver and
+  every golden file in `expected/` and `expected-strict/` carries this key.
+
+### Strict-mode failure shape (cross-interpreter-strict.test.ts only)
+
+When invoked with `--mode=strict` and the contract method body fires an
+`assert(...)` that evaluates to false, drivers print:
+
+```json
+{
+  "error": "AssertionFailureError",
+  "methodName": "<method>",
+  "bindingName": "<binding-id>"
+}
+```
+
+instead of the success envelope above. Exit code stays 0; only real driver
+errors (missing IR, malformed input) exit non-zero with a stderr message.
 
 The TS reference implementation lives at
 `packages/runar-sdk/src/anf-interpreter.ts::computeNewStateAndDataOutputs`. The

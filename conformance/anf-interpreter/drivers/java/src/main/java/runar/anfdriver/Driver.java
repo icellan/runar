@@ -127,6 +127,15 @@ public final class Driver {
         }
         output.put("dataOutputs", outDataOutputs);
 
+        List<Object> outRawOutputs = new ArrayList<>(result.rawOutputs.size());
+        for (DataOutput d : result.rawOutputs) {
+            Map<String, Object> o = new LinkedHashMap<>();
+            o.put("satoshis", d.satoshis() + "n");
+            o.put("script", d.script() == null ? "" : d.script());
+            outRawOutputs.add(o);
+        }
+        output.put("rawOutputs", outRawOutputs);
+
         // Single trailing newline for parity with the Python/Ruby drivers.
         System.out.println(MiniJson.toJson(output));
     }

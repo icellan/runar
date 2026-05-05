@@ -66,30 +66,30 @@ will pin canonical real-crypto semantics, and any cross-tier real-crypto
 fixtures should be derived from there rather than from the working ground
 truth captured in the three current implementations.
 
-### `add_raw_output` simulation — out of scope
+### `add_raw_output` simulation — supported (pass-through only)
 
 `this.addRawOutput(satoshis, scriptBytes)` emits a Bitcoin output whose
-locking script is supplied by the caller as raw bytes. None of the seven
-ANF interpreters simulate this kind, and none of them surface raw outputs
-in the result envelope. This is **deliberate**, not a gap: raw outputs
-have arbitrary script bytes that the simulator cannot introspect without
-re-implementing the Bitcoin Script VM. On-chain enforcement happens via
-`OP_PUSH_TX` / `extractOutputHash`, which the on-chain VM verifies
-authoritatively.
+locking script is supplied by the caller as raw bytes. All seven ANF
+interpreters now surface these outputs in the result envelope under a
+new `rawOutputs` field, **without** introspecting the script bytes — the
+simulator cannot, in general, recompute or validate caller-supplied
+locking scripts. The rawOutputs entries are pass-through `{satoshis,
+script}` records that an off-chain transaction builder splices into the
+broadcast tx at the correct position so the compiled
+`OP_PUSH_TX`/`extractOutputHash` checks pass.
 
-Off-chain consumers that need raw-output simulation must extend the
-interpreter explicitly. Doing so requires:
+The result envelope shape is
+`{ state, dataOutputs, rawOutputs }` across all seven SDKs, all three
+modes (lenient / strict / on-chain authoritative), and all per-driver
+output protocols (`conformance/anf-interpreter/drivers/PROTOCOL.md`).
+Cross-interpreter parity for `add_raw_output` is exercised by
+`conformance/anf-interpreter/inputs/add-raw-output-publish.json` plus
+its `expected/` and `expected-strict/` goldens — every SDK driver must
+emit byte-equal envelopes.
 
-1. Extending the result type from `{state, dataOutputs}` to
-   `{state, dataOutputs, rawOutputs}` across all seven SDKs.
-2. Updating the cross-interpreter parity goldens to include a
-   `rawOutputs[]` field.
-3. Bumping the wire protocol in
-   `conformance/anf-interpreter/drivers/PROTOCOL.md` and every driver.
-
-This is a breaking change to the public ANF-interpreter API and is not
-on the roadmap. Track the scope decision against this contract document
-rather than re-deriving it from the per-SDK source.
+What is NOT in scope: real-script *validation* of raw-output bytes. The
+simulator forwards the bytes as-is; if the caller passed an invalid
+locking script, only the on-chain VM catches it.
 
 ### When to use which mode
 

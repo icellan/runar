@@ -4,8 +4,10 @@
 //! method arguments, this interpreter walks the ANF bindings and computes
 //! the new state.  It handles `update_prop` nodes to track state mutations,
 //! while skipping on-chain-only operations like `check_preimage`,
-//! `deserialize_state`, `get_state_script`, `add_output`, `add_raw_output`,
-//! and `add_data_output`.
+//! `deserialize_state`, and `get_state_script`. It also resolves
+//! `add_data_output` and `add_raw_output` bindings into the result envelope
+//! so callers building the broadcast transaction off-chain can splice them
+//! in at the correct index.
 //!
 //! This enables the SDK to auto-compute `newState` for stateful contract
 //! calls, so callers don't need to duplicate contract logic.
@@ -174,6 +176,20 @@ pub struct DataOutputEntry {
     pub script: String,
 }
 
+/// A raw output resolved from `this.addRawOutput(satoshis, scriptBytes)` in
+/// the method body. `script` is the **caller-supplied** locking-script bytes
+/// (hex-encoded), in contrast to `DataOutputEntry.script`, which is the hex
+/// payload that becomes part of an `OP_RETURN` data output. The simulator
+/// does not introspect these bytes — it surfaces them so a caller building
+/// the broadcast transaction off-chain can splice them in at the correct
+/// position. Entries appear in declaration order, after the state output
+/// and after `data_outputs`.
+#[derive(Debug, Clone)]
+pub struct RawOutputEntry {
+    pub satoshis: i64,
+    pub script: String,
+}
+
 /// Returned by [`execute_strict`] when an `assert(...)` predicate evaluates
 /// to a falsy value during strict-mode interpretation.
 ///
@@ -222,19 +238,20 @@ pub fn compute_new_state(
     constructor_args: &[SdkValue],
 ) -> Result<HashMap<String, SdkValue>, String> {
     compute_new_state_and_data_outputs(anf, method_name, current_state, args, constructor_args)
-        .map(|(state, _)| state)
+        .map(|(state, _, _)| state)
 }
 
-/// Compute the new state AND resolved data outputs after executing a
+/// Compute the new state AND resolved data / raw outputs after executing a
 /// contract method. See [`compute_new_state`] for state semantics; data
-/// outputs come from `this.addDataOutput(...)` calls in declaration order.
+/// outputs come from `this.addDataOutput(...)` calls and raw outputs come
+/// from `this.addRawOutput(...)` calls, both in declaration order.
 pub fn compute_new_state_and_data_outputs(
     anf: &ANFProgram,
     method_name: &str,
     current_state: &HashMap<String, SdkValue>,
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
-) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), String> {
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>), String> {
     // Lenient mode: any assert() in the body is skipped — the on-chain
     // script handles enforcement, and `run_method` cannot return an
     // AssertionFailureError when `strict = None`.
@@ -265,7 +282,7 @@ pub fn execute_strict(
     current_state: &HashMap<String, SdkValue>,
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
-) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), AssertionFailureError> {
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>), AssertionFailureError> {
     let strict = StrictCtx {
         method_name: method_name.to_string(),
     };
@@ -295,8 +312,10 @@ fn run_method(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
     strict: Option<&StrictCtx>,
-) -> Result<Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), String>, AssertionFailureError>
-{
+) -> Result<
+    Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>, Vec<RawOutputEntry>), String>,
+    AssertionFailureError,
+> {
     // Find the public method
     let method = match anf
         .methods
@@ -351,9 +370,14 @@ fn run_method(
         }
     }
 
-    // Track state mutations and data outputs
+    // Track state mutations, data outputs, and raw outputs.
+    // `raw_outputs` holds entries from `add_raw_output` ANF kinds, which the
+    // simulator does NOT introspect (the script is caller-supplied). They
+    // are surfaced in the result envelope so an off-chain transaction
+    // builder can splice them in at the correct index.
     let mut state_delta: HashMap<String, Val> = HashMap::new();
     let mut data_outputs: Vec<DataOutputEntry> = Vec::new();
+    let mut raw_outputs: Vec<RawOutputEntry> = Vec::new();
 
     // Walk bindings — strict-mode assert failures bubble up through `?`.
     eval_bindings(
@@ -361,6 +385,7 @@ fn run_method(
         &mut env,
         &mut state_delta,
         &mut data_outputs,
+        &mut raw_outputs,
         anf,
         strict,
     )?;
@@ -370,7 +395,7 @@ fn run_method(
     for (k, v) in state_delta {
         result.insert(k, v.to_sdk());
     }
-    Ok(Ok((result, data_outputs)))
+    Ok(Ok((result, data_outputs, raw_outputs)))
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +407,7 @@ fn eval_bindings(
     env: &mut HashMap<String, Val>,
     state_delta: &mut HashMap<String, Val>,
     data_outputs: &mut Vec<DataOutputEntry>,
+    raw_outputs: &mut Vec<RawOutputEntry>,
     anf: &ANFProgram,
     strict: Option<&StrictCtx>,
 ) -> Result<(), AssertionFailureError> {
@@ -391,6 +417,7 @@ fn eval_bindings(
             env,
             state_delta,
             data_outputs,
+            raw_outputs,
             anf,
             strict,
             &binding.name,
@@ -405,6 +432,7 @@ fn eval_value(
     env: &mut HashMap<String, Val>,
     state_delta: &mut HashMap<String, Val>,
     data_outputs: &mut Vec<DataOutputEntry>,
+    raw_outputs: &mut Vec<RawOutputEntry>,
     anf: &ANFProgram,
     strict: Option<&StrictCtx>,
     binding_name: &str,
@@ -498,7 +526,7 @@ fn eval_value(
                         child_env.insert(param.name.clone(), arg_val.clone());
                     }
                 }
-                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, anf, strict)?;
+                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, raw_outputs, anf, strict)?;
                 // Copy property updates back to caller env
                 for prop in &anf.properties {
                     if let Some(v) = child_env.get(&prop.name) {
@@ -526,7 +554,7 @@ fn eval_value(
                     .collect();
                 // Create child env for the branch
                 let mut child_env = env.clone();
-                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, anf, strict)?;
+                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, raw_outputs, anf, strict)?;
                 // Copy new bindings back
                 for (k, v) in &child_env {
                     env.insert(k.clone(), v.clone());
@@ -554,7 +582,7 @@ fn eval_value(
                 for i in 0..count {
                     env.insert(iter_var.clone(), Val::Int(i));
                     let mut loop_env = env.clone();
-                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, anf, strict)?;
+                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, raw_outputs, anf, strict)?;
                     // Copy loop bindings back
                     for (k, v) in &loop_env {
                         env.insert(k.clone(), v.clone());
@@ -621,9 +649,22 @@ fn eval_value(
             Val::Undefined
         }
 
+        "add_raw_output" => {
+            // `addRawOutput(satoshis, scriptBytes)`. The simulator does not
+            // introspect the script bytes (they're caller-supplied raw
+            // locking script); it simply forwards them in the result
+            // envelope so an off-chain transaction builder can emit the
+            // output at the correct index.
+            let sat_ref = str_field(value, "satoshis");
+            let script_ref = str_field(value, "scriptBytes");
+            let sats = env.get(&sat_ref).map(|v| v.to_i64()).unwrap_or(0);
+            let script_hex = env.get(&script_ref).map(|v| v.as_hex()).unwrap_or_default();
+            raw_outputs.push(RawOutputEntry { satoshis: sats, script: script_hex });
+            Val::Undefined
+        }
+
         // On-chain-only operations — skip in simulation
-        "check_preimage" | "deserialize_state" | "get_state_script"
-        | "add_raw_output" => Val::Undefined,
+        "check_preimage" | "deserialize_state" | "get_state_script" => Val::Undefined,
 
         _ => Val::Undefined,
     };

@@ -14,7 +14,7 @@ Invocation::
 
 Strict mode emits ``{error: "AssertionFailureError", methodName, bindingName}``
 on the first falsy ``assert(...)`` predicate; otherwise the same
-``{state, dataOutputs}`` envelope as lenient.
+``{state, dataOutputs, rawOutputs}`` envelope as lenient.
 
 Bigints are encoded as ``"42n"`` strings on the wire and decoded to / from
 Python ``int`` at the boundary.
@@ -127,11 +127,11 @@ def main(argv: list) -> int:
 
     try:
         if strict:
-            state, data_outputs = execute_strict(
+            state, data_outputs, raw_outputs = execute_strict(
                 anf, method_name, current_state, args, constructor_args,
             )
         else:
-            state, data_outputs = compute_new_state_and_data_outputs(
+            state, data_outputs, raw_outputs = compute_new_state_and_data_outputs(
                 anf, method_name, current_state, args, constructor_args,
             )
     except AssertionFailureError as af:
@@ -149,20 +149,30 @@ def main(argv: list) -> int:
         return 0
 
     encoded_state = _encode_bigints(state)
-    encoded_outputs = []
-    for d in data_outputs:
-        sat = d.get("satoshis", 0)
-        if isinstance(sat, str) and _BIGINT_RE.match(sat):
-            sat_str = sat
-        else:
-            sat_str = f"{int(sat)}n"
-        script_val = d.get("script", "")
-        encoded_outputs.append({
-            "satoshis": sat_str,
-            "script": script_val if isinstance(script_val, str) else "",
-        })
 
-    out = {"state": encoded_state, "dataOutputs": encoded_outputs}
+    def _encode_outputs(entries: list) -> list:
+        out_list = []
+        for d in entries:
+            sat = d.get("satoshis", 0)
+            if isinstance(sat, str) and _BIGINT_RE.match(sat):
+                sat_str = sat
+            else:
+                sat_str = f"{int(sat)}n"
+            script_val = d.get("script", "")
+            out_list.append({
+                "satoshis": sat_str,
+                "script": script_val if isinstance(script_val, str) else "",
+            })
+        return out_list
+
+    encoded_outputs = _encode_outputs(data_outputs)
+    encoded_raw_outputs = _encode_outputs(raw_outputs)
+
+    out = {
+        "state": encoded_state,
+        "dataOutputs": encoded_outputs,
+        "rawOutputs": encoded_raw_outputs,
+    }
     sys.stdout.write(json.dumps(out, sort_keys=True))
     sys.stdout.write("\n")
     return 0
