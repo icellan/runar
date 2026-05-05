@@ -22,6 +22,22 @@ require 'digest'
 
 module Runar
   module SDK
+    # Raised by {ANFInterpreter.execute_strict} when an +assert(predicate)+
+    # in the ANF body evaluates to a falsy value during strict-mode
+    # interpretation. Carries the contract method name plus the ANF binding
+    # name (e.g. +t17+, +t8+) so a developer can pinpoint the exact failing
+    # guard. The +to_s+ / +message+ rendering matches the TS / Go / Java /
+    # Zig SDKs byte-for-byte so cross-tier diffing on the wire is stable.
+    class AssertionFailureError < StandardError
+      attr_reader :method_name, :binding_name
+
+      def initialize(method_name, binding_name)
+        @method_name = method_name
+        @binding_name = binding_name
+        super("assert failed in #{method_name}: binding '#{binding_name}' evaluated to false")
+      end
+    end
+
     module ANFInterpreter
       module_function
 
@@ -62,6 +78,29 @@ module Runar
       # to populate the tx between state outputs and the change output
       # so the on-chain continuation-hash check matches.
       def compute_new_state_and_data_outputs(anf, method_name, current_state, args, constructor_args: [], max_loop_iterations: MAX_LOOP_ITERATIONS)
+        run_method(anf, method_name, current_state, args, constructor_args, nil, max_loop_iterations)
+      end
+
+      # Strict-mode counterpart of #compute_new_state_and_data_outputs.
+      #
+      # Walks the same ANF body but raises {Runar::SDK::AssertionFailureError}
+      # on the first +assert(predicate)+ binding (or +call(func: 'assert')+
+      # lowering) whose predicate is falsy. Crypto built-ins (+checkSig+,
+      # +checkMultiSig+, +checkPreimage+) still mock-return +true+; only
+      # explicit +assert(...)+ predicates are enforced.
+      #
+      # @return [Array(Hash, Array<Hash>)] +[new_state, data_outputs]+
+      # @raise  [Runar::SDK::AssertionFailureError] on the first falsy assert
+      def execute_strict(anf, method_name, current_state, args, constructor_args = [], max_loop_iterations: MAX_LOOP_ITERATIONS)
+        run_method(anf, method_name, current_state, args, constructor_args, method_name, max_loop_iterations)
+      end
+
+      # Shared entry-point for both lenient and strict modes.
+      #
+      # +strict_method_name+ == nil → lenient (asserts skipped).
+      # +strict_method_name+ != nil → strict (asserts enforced; first falsy
+      # predicate raises {Runar::SDK::AssertionFailureError}).
+      def run_method(anf, method_name, current_state, args, constructor_args, strict_method_name, max_loop_iterations)
         method = find_public_method(anf, method_name)
 
         unless method
@@ -71,6 +110,10 @@ module Runar
 
         # Store the configurable loop limit for use in eval_value.
         Thread.current[:runar_max_loop_iterations] = max_loop_iterations
+        # Thread strict-mode state through the evaluator without changing
+        # the existing eval_bindings / eval_value signatures (mirrors the
+        # loop-limit pattern above). nil = lenient.
+        Thread.current[:runar_strict_method] = strict_method_name
 
         # Build constructor param index: position among non-initialized properties.
         # Properties with initialValue are excluded from the constructor, so
@@ -113,6 +156,7 @@ module Runar
         [current_state.merge(state_delta), data_outputs]
       ensure
         Thread.current[:runar_max_loop_iterations] = nil
+        Thread.current[:runar_strict_method] = nil
       end
 
       # Walk a list of ANF bindings, updating env with each result.
@@ -123,7 +167,7 @@ module Runar
       # @param anf         [Hash, nil]   full ANF IR (for method lookup)
       def eval_bindings(bindings, env, state_delta, data_outputs, anf = nil)
         bindings.each do |binding|
-          val = eval_value(binding['value'], env, state_delta, data_outputs, anf)
+          val = eval_value(binding['value'], env, state_delta, data_outputs, anf, binding['name'])
           env[binding['name']] = val
         end
       end
@@ -136,7 +180,7 @@ module Runar
       # @param anf         [Hash, nil]
       # @return [Object]
       # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/MethodLength, Metrics/PerceivedComplexity
-      def eval_value(value, env, state_delta, data_outputs, anf = nil)
+      def eval_value(value, env, state_delta, data_outputs, anf = nil, binding_name = nil)
         kind = value['kind'].to_s
 
         case kind
@@ -165,7 +209,19 @@ module Runar
 
         when 'call'
           call_args = Array(value['args']).map { |a| env[a] }
-          eval_call(value['func'], call_args)
+          # Strict mode: a +call(func: 'assert', args: [pred])+ lowering path
+          # enforces the predicate the same way the dedicated +assert+ ANF
+          # node does.
+          strict_method = Thread.current[:runar_strict_method]
+          if strict_method && value['func'] == 'assert'
+            unless is_truthy(call_args.first)
+              raise AssertionFailureError.new(strict_method, binding_name)
+            end
+
+            nil
+          else
+            eval_call(value['func'], call_args)
+          end
 
         when 'method_call'
           call_args = Array(value['args']).map { |a| env[a] }
@@ -199,6 +255,15 @@ module Runar
           last_val
 
         when 'assert'
+          # Lenient mode: skip; the on-chain script enforces.
+          # Strict mode: enforce — falsy predicate raises AssertionFailureError.
+          strict_method = Thread.current[:runar_strict_method]
+          if strict_method
+            pred = env[value['value']]
+            unless is_truthy(pred)
+              raise AssertionFailureError.new(strict_method, binding_name)
+            end
+          end
           nil
 
         when 'update_prop'

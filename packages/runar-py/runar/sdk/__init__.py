@@ -16,7 +16,12 @@ from runar.sdk.deployment import build_deploy_transaction, select_utxos, estimat
 from runar.sdk.calling import build_call_transaction, insert_unlocking_script, estimate_call_fee
 from runar.sdk.state import serialize_state, deserialize_state, find_last_op_return
 from runar.sdk.oppushtx import compute_op_push_tx
-from runar.sdk.anf_interpreter import compute_new_state
+from runar.sdk.anf_interpreter import (
+    compute_new_state,
+    compute_new_state_and_data_outputs,
+    execute_strict,
+    AssertionFailureError,
+)
 from runar.sdk.codegen import generate_python
 from runar.sdk.script_utils import extract_constructor_args, matches_artifact
 from runar.sdk.token_wallet import TokenWallet
@@ -43,7 +48,8 @@ __all__ = [
     'build_call_transaction', 'insert_unlocking_script', 'estimate_call_fee',
     'serialize_state', 'deserialize_state', 'find_last_op_return',
     'compute_op_push_tx',
-    'compute_new_state',
+    'compute_new_state', 'compute_new_state_and_data_outputs',
+    'execute_strict', 'AssertionFailureError',
     'generate_python',
     'extract_constructor_args', 'matches_artifact',
     'TokenWallet',

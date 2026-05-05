@@ -9,18 +9,62 @@ and ``add_data_output``.
 
 This enables the SDK to auto-compute ``newState`` for stateful contract
 calls, so callers don't need to duplicate contract logic.
+
+Two execution modes are exposed:
+
+* **Lenient** (:func:`compute_new_state`, :func:`compute_new_state_and_data_outputs`)
+  — skips ``assert`` predicates, deferring enforcement to the on-chain script.
+* **Strict** (:func:`execute_strict`) — evaluates every ``assert`` predicate and
+  raises :class:`AssertionFailureError` (carrying the contract method + ANF
+  binding name) on the first falsy one. Crypto built-ins (``checkSig``,
+  ``checkMultiSig``, ``checkPreimage``) still mock-return ``True`` in strict
+  mode; only explicit ``assert(...)`` predicates are enforced.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+class AssertionFailureError(Exception):
+    """Raised by :func:`execute_strict` on the first failing ``assert`` predicate.
+
+    Carries enough context to point a developer at the exact ANF binding that
+    aborted: the method being executed (``method_name``) and the binding name
+    (``binding_name``, e.g. ``t17`` or ``assertPositive``). The string form
+    matches the TS / Go / Java / Zig SDKs byte-for-byte so cross-tier diffing
+    on the wire is stable.
+    """
+
+    def __init__(self, method_name: str, binding_name: str) -> None:
+        super().__init__(
+            f"assert failed in {method_name}: binding '{binding_name}' "
+            f"evaluated to false"
+        )
+        self.method_name = method_name
+        self.binding_name = binding_name
+
+    def __str__(self) -> str:
+        return (
+            f"assert failed in {self.method_name}: binding "
+            f"'{self.binding_name}' evaluated to false"
+        )
+
+
+class _StrictCtx:
+    """Per-evaluation strict-mode handle. ``None`` (in callers) = lenient."""
+
+    __slots__ = ("method_name",)
+
+    def __init__(self, method_name: str) -> None:
+        self.method_name = method_name
+
 
 def compute_new_state(
     anf: dict,
@@ -63,6 +107,54 @@ def compute_new_state_and_data_outputs(
 
     Returns:
         (state, data_outputs) — the new state dict and a list of data output dicts.
+    """
+    return _run_method(
+        anf, method_name, current_state, args, constructor_args, strict=None,
+    )
+
+
+def execute_strict(
+    anf: dict,
+    method_name: str,
+    current_state: dict,
+    args: dict,
+    constructor_args: list = None,
+) -> Tuple[dict, list]:
+    """Strict-mode counterpart to :func:`compute_new_state_and_data_outputs`.
+
+    Walks the same ANF body but raises :class:`AssertionFailureError` on the
+    first ``assert(predicate)`` whose predicate evaluates to a falsy value.
+    Use this before broadcasting a transaction to surface guard failures
+    off-chain instead of relying on a node rejection. Crypto built-ins
+    (``checkSig``, ``checkMultiSig``, ``checkPreimage``) still mock-return
+    ``True`` — strict mode only enforces explicit ``assert(...)`` predicates.
+
+    Returns:
+        ``(state, data_outputs)`` — same envelope as
+        :func:`compute_new_state_and_data_outputs`.
+
+    Raises:
+        AssertionFailureError: on the first falsy assert predicate.
+    """
+    return _run_method(
+        anf, method_name, current_state, args, constructor_args,
+        strict=_StrictCtx(method_name),
+    )
+
+
+def _run_method(
+    anf: dict,
+    method_name: str,
+    current_state: dict,
+    args: dict,
+    constructor_args: Optional[list],
+    strict: Optional[_StrictCtx],
+) -> Tuple[dict, list]:
+    """Shared entry-point for both lenient and strict modes.
+
+    ``strict is None`` -> lenient (asserts skipped).
+    ``strict is not None`` -> strict (first falsy assert raises
+    :class:`AssertionFailureError`).
     """
     if constructor_args is None:
         constructor_args = []
@@ -111,8 +203,10 @@ def compute_new_state_and_data_outputs(
     state_delta: Dict[str, Any] = {}
     data_outputs: List[dict] = []
 
-    # Walk bindings
-    _eval_bindings(method.get('body', []), env, state_delta, data_outputs, anf)
+    # Walk bindings. In strict mode an AssertionFailureError raised from any
+    # nested if/loop/private-method call propagates up out of this function
+    # to the caller — there is no special unwind logic needed in Python.
+    _eval_bindings(method.get('body', []), env, state_delta, data_outputs, anf, strict)
 
     return {**current_state, **state_delta}, data_outputs
 
@@ -127,9 +221,13 @@ def _eval_bindings(
     state_delta: Dict[str, Any],
     data_outputs: List[dict],
     anf: Optional[dict] = None,
+    strict: Optional[_StrictCtx] = None,
 ) -> None:
     for binding in bindings:
-        val = _eval_value(binding['value'], env, state_delta, data_outputs, anf)
+        val = _eval_value(
+            binding['value'], env, state_delta, data_outputs, anf,
+            strict=strict, binding_name=binding['name'],
+        )
         env[binding['name']] = val
 
 
@@ -139,6 +237,8 @@ def _eval_value(
     state_delta: Dict[str, Any],
     data_outputs: List[dict],
     anf: Optional[dict] = None,
+    strict: Optional[_StrictCtx] = None,
+    binding_name: str = '<anonymous>',
 ) -> Any:
     kind = value.get('kind', '')
 
@@ -172,17 +272,27 @@ def _eval_value(
 
     if kind == 'call':
         call_args = [env.get(a) for a in value.get('args', [])]
+        # Strict mode: a `call(assert, x)` lowering path must enforce the
+        # predicate the same way the dedicated `assert` ANF node does.
+        if strict is not None and value.get('func') == 'assert':
+            pred = call_args[0] if call_args else None
+            if not _is_truthy(pred):
+                raise AssertionFailureError(strict.method_name, binding_name)
+            return None
         return _eval_call(value['func'], call_args)
 
     if kind == 'method_call':
         call_args = [env.get(a) for a in value.get('args', [])]
-        return _eval_method_call(env.get(value.get('object')), value.get('method'), call_args, env, state_delta, data_outputs, anf)
+        return _eval_method_call(
+            env.get(value.get('object')), value.get('method'), call_args,
+            env, state_delta, data_outputs, anf, strict=strict,
+        )
 
     if kind == 'if':
         cond = env.get(value['cond'])
         branch = value['then'] if _is_truthy(cond) else value['else']
         child_env = dict(env)
-        _eval_bindings(branch, child_env, state_delta, data_outputs, anf)
+        _eval_bindings(branch, child_env, state_delta, data_outputs, anf, strict)
         env.update(child_env)
         if branch:
             return child_env.get(branch[-1]['name'])
@@ -196,13 +306,22 @@ def _eval_value(
         for i in range(count):
             env[iter_var] = i
             loop_env = dict(env)
-            _eval_bindings(body, loop_env, state_delta, data_outputs, anf)
+            _eval_bindings(body, loop_env, state_delta, data_outputs, anf, strict)
             env.update(loop_env)
             if body:
                 last_val = loop_env.get(body[-1]['name'])
         return last_val
 
     if kind == 'assert':
+        # Lenient mode: skip; the on-chain script enforces.
+        # Strict mode: enforce — raise AssertionFailureError on first falsy
+        # predicate, which propagates up out of any nested if/loop/private
+        # call to the original execute_strict caller.
+        if strict is not None:
+            pred_ref = value.get('value', '')
+            pred = env.get(pred_ref)
+            if not _is_truthy(pred):
+                raise AssertionFailureError(strict.method_name, binding_name)
         return None
 
     if kind == 'update_prop':
@@ -463,6 +582,7 @@ def _eval_method_call(
     state_delta: Optional[Dict[str, Any]] = None,
     data_outputs: Optional[List[dict]] = None,
     anf: Optional[dict] = None,
+    strict: Optional[_StrictCtx] = None,
 ) -> Any:
     if data_outputs is None:
         data_outputs = []
@@ -482,10 +602,10 @@ def _eval_method_call(
                 for i, param in enumerate(params):
                     if i < len(args):
                         new_env[param['name']] = args[i]
-                # Evaluate method body
+                # Evaluate method body (strict mode propagates into the callee)
                 body = m.get('body', [])
                 child_delta: Dict[str, Any] = {}
-                _eval_bindings(body, new_env, child_delta, data_outputs, anf)
+                _eval_bindings(body, new_env, child_delta, data_outputs, anf, strict)
                 # Propagate state delta back
                 if state_delta is not None:
                     state_delta.update(child_delta)

@@ -49,13 +49,35 @@ public final class Driver {
     }
 
     private static void run(String[] args) throws IOException {
-        if (args.length < 1) {
-            System.err.println("usage: java -jar runar-anf-driver.jar <input-json-file>");
+        // Parse flags: optional --mode=strict (or --mode=lenient, the default).
+        // Anything else is the positional input file. Order is irrelevant.
+        boolean strict = false;
+        String inputArg = null;
+        for (String a : args) {
+            if ("--mode=strict".equals(a)) {
+                strict = true;
+            } else if ("--mode=lenient".equals(a)) {
+                strict = false;
+            } else if (a.startsWith("--")) {
+                System.err.println("unknown flag: " + a);
+                System.exit(2);
+                return;
+            } else {
+                if (inputArg != null) {
+                    System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict] <input-json-file>");
+                    System.exit(2);
+                    return;
+                }
+                inputArg = a;
+            }
+        }
+        if (inputArg == null) {
+            System.err.println("usage: java -jar runar-anf-driver.jar [--mode=strict] <input-json-file>");
             System.exit(2);
             return;
         }
 
-        Path inputPath = Paths.get(args[0]).toAbsolutePath();
+        Path inputPath = Paths.get(inputArg).toAbsolutePath();
         String inputJson = Files.readString(inputPath);
         Map<String, Object> input = MiniJson.asObject(MiniJson.parse(inputJson));
 
@@ -76,13 +98,22 @@ public final class Driver {
         String anfJson = Files.readString(anfPath);
         Map<String, Object> anf = MiniJson.asObject(MiniJson.parse(anfJson));
 
-        ExecutionResult result = AnfInterpreter.computeNewStateAndDataOutputs(
-            anf,
-            methodName,
-            currentState,
-            methodArgs,
-            constructorArgs
-        );
+        ExecutionResult result;
+        try {
+            result = strict
+                ? AnfInterpreter.executeStrict(anf, methodName, currentState, methodArgs, constructorArgs)
+                : AnfInterpreter.computeNewStateAndDataOutputs(anf, methodName, currentState, methodArgs, constructorArgs);
+        } catch (AnfInterpreter.AssertionFailureException ex) {
+            // Strict-mode assertion failure: emit the standard envelope so the
+            // cross-tier parity test can byte-compare. Real driver errors
+            // (missing IR, malformed input) still escape to the outer catch.
+            Map<String, Object> failure = new LinkedHashMap<>();
+            failure.put("error", "AssertionFailureError");
+            failure.put("methodName", ex.methodName());
+            failure.put("bindingName", ex.bindingName());
+            System.out.println(MiniJson.toJson(failure));
+            return;
+        }
 
         Map<String, Object> output = new LinkedHashMap<>();
         output.put("state", encodeBigints(result.newState));

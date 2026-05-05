@@ -26,19 +26,41 @@ pub fn main(init: std.process.Init) !void {
     }
     const args = args_list.items;
 
+    // Parse flags: optional --mode=strict (or --mode=lenient, the default).
+    // Anything else is the positional input file. argv[0] is the program name.
+    var strict = false;
+    var input_path: ?[]const u8 = null;
     if (args.len < 2) {
-        std.debug.print("usage: runar-anf-driver-zig <input-json-file>\n", .{});
+        std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
         std.process.exit(1);
     }
-
-    const input_path = args[1];
-    runDriver(allocator, io, input_path) catch |err| {
+    for (args[1..]) |a| {
+        if (std.mem.eql(u8, a, "--mode=strict")) {
+            strict = true;
+        } else if (std.mem.eql(u8, a, "--mode=lenient")) {
+            strict = false;
+        } else if (std.mem.startsWith(u8, a, "--")) {
+            std.debug.print("unknown flag: {s}\n", .{a});
+            std.process.exit(2);
+        } else {
+            if (input_path != null) {
+                std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
+                std.process.exit(1);
+            }
+            input_path = a;
+        }
+    }
+    if (input_path == null) {
+        std.debug.print("usage: runar-anf-driver-zig [--mode=strict] <input-json-file>\n", .{});
+        std.process.exit(1);
+    }
+    runDriver(allocator, io, input_path.?, strict) catch |err| {
         std.debug.print("driver error: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
 }
 
-fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8) !void {
+fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8, strict: bool) !void {
     // Load the input JSON.
     const input_data = try std.Io.Dir.cwd().readFileAlloc(io, input_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(input_data);
@@ -96,15 +118,45 @@ fn runDriver(allocator: std.mem.Allocator, io: std.Io, input_path: []const u8) !
         }
     }
 
-    // Run the interpreter.
-    const result: NewStateResult = try runar.sdk_anf_interpreter.computeNewStateAndDataOutputs(
-        allocator,
-        &anf,
-        method_name,
-        current_state,
-        arg_map,
-        ctor_args.items,
-    );
+    // Run the interpreter — strict or lenient. In strict mode, an
+    // AssertionFailure populates `failure_info` (method + binding name) so
+    // we can emit the cross-tier `{error, methodName, bindingName}` envelope.
+    const result: NewStateResult = blk: {
+        if (strict) {
+            var failure_info: runar.sdk_anf_interpreter.AssertionFailureInfo = .{};
+            const r = runar.sdk_anf_interpreter.executeStrictWithFailureInfo(
+                allocator,
+                &anf,
+                method_name,
+                current_state,
+                arg_map,
+                ctor_args.items,
+                &failure_info,
+            ) catch |err| switch (err) {
+                error.AssertionFailure => {
+                    var fail_buf: [1024]u8 = undefined;
+                    var fail_w = std.Io.File.stdout().writer(io, &fail_buf);
+                    try fail_w.interface.writeAll("{\"error\":\"AssertionFailureError\",\"methodName\":");
+                    try writeJsonString(&fail_w.interface, failure_info.method_name);
+                    try fail_w.interface.writeAll(",\"bindingName\":");
+                    try writeJsonString(&fail_w.interface, failure_info.binding_name);
+                    try fail_w.interface.writeAll("}\n");
+                    try fail_w.interface.flush();
+                    return;
+                },
+                else => |e| return e,
+            };
+            break :blk r;
+        }
+        break :blk try runar.sdk_anf_interpreter.computeNewStateAndDataOutputs(
+            allocator,
+            &anf,
+            method_name,
+            current_state,
+            arg_map,
+            ctor_args.items,
+        );
+    };
     defer {
         // Clean up data-output script slices (state map is freed below).
         for (result.data_outputs) |d| allocator.free(d.script);

@@ -214,6 +214,16 @@ pub fn computeNewState(
     return result.state;
 }
 
+/// On `error.AssertionFailure`, callers that supply
+/// `executeStrictWithFailureInfo`'s `out_info` parameter can read the
+/// failing method + binding name. Both fields point into the ANF program's
+/// own storage (which the caller owns), so they remain valid as long as
+/// the ANF stays alive.
+pub const AssertionFailureInfo = struct {
+    method_name: []const u8 = "",
+    binding_name: []const u8 = "",
+};
+
 /// Strict-mode counterpart to `computeNewStateAndDataOutputs`: walks the same
 /// ANF body but returns `error.AssertionFailure` on the first `assert(...)`
 /// whose predicate evaluates to a falsy value. Use this before broadcasting a
@@ -231,7 +241,25 @@ pub fn executeStrict(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, null);
+}
+
+/// Like `executeStrict` but additionally populates `out_info.method_name`
+/// and `out_info.binding_name` with the failing context when
+/// `error.AssertionFailure` is returned. Use this from drivers that need to
+/// emit a structured assertion-failure envelope on the wire (`{error,
+/// methodName, bindingName}`) for cross-tier parity. On success or any other
+/// error variant `out_info` is left untouched.
+pub fn executeStrictWithFailureInfo(
+    allocator: std.mem.Allocator,
+    anf: *const ANFProgram,
+    method_name: []const u8,
+    current_state: std.StringHashMap(ANFValue),
+    args: std.StringHashMap(ANFValue),
+    constructor_args: []const ANFValue,
+    out_info: *AssertionFailureInfo,
+) StrictError!NewStateResult {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, null, out_info);
 }
 
 /// On-chain authoritative simulation: strict assert enforcement PLUS real
@@ -265,7 +293,7 @@ pub fn executeOnChainAuthoritative(
     constructor_args: []const ANFValue,
     ctx: RealCryptoCtx,
 ) StrictError!NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx);
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, true, &ctx, null);
 }
 
 /// Like `computeNewState` but also returns data outputs resolved from
@@ -280,7 +308,7 @@ pub fn computeNewStateAndDataOutputs(
     args: std.StringHashMap(ANFValue),
     constructor_args: []const ANFValue,
 ) !NewStateResult {
-    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false, null) catch |err| switch (err) {
+    return runMethod(allocator, anf, method_name, current_state, args, constructor_args, false, null, null) catch |err| switch (err) {
         // Lenient mode never reports AssertionFailure (asserts are skipped),
         // but the unified runMethod return type includes it, so coerce away.
         error.AssertionFailure => unreachable,
@@ -300,6 +328,7 @@ fn runMethod(
     constructor_args: []const ANFValue,
     strict: bool,
     real_crypto: ?*const RealCryptoCtx,
+    out_failure_info: ?*AssertionFailureInfo,
 ) StrictError!NewStateResult {
     // Use an arena for all intermediate allocations during interpretation
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -366,7 +395,20 @@ fn runMethod(
     // mock-returning true.
     var strict_ctx_storage: StrictCtx = .{ .method_name = method_name, .real_crypto = real_crypto };
     const strict_ctx_ptr: ?*StrictCtx = if (strict) &strict_ctx_storage else null;
-    try evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf, strict_ctx_ptr);
+    evalBindings(arena_alloc, meth.body, &env, &state_delta, &data_outputs_arena, anf, strict_ctx_ptr) catch |err| {
+        // On strict-mode AssertionFailure, populate the caller-supplied
+        // out_failure_info (if any) so the driver can emit a structured
+        // {error, methodName, bindingName} envelope on the wire. Both names
+        // are slices into the ANF program's own storage, not the arena, so
+        // they remain valid after this function returns.
+        if (err == error.AssertionFailure) {
+            if (out_failure_info) |info| {
+                info.method_name = strict_ctx_storage.method_name;
+                info.binding_name = strict_ctx_storage.last_binding_name;
+            }
+        }
+        return err;
+    };
 
     // Merge with current state — use caller allocator for result
     var result = std.StringHashMap(ANFValue).init(allocator);

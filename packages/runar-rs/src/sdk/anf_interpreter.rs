@@ -174,6 +174,39 @@ pub struct DataOutputEntry {
     pub script: String,
 }
 
+/// Returned by [`execute_strict`] when an `assert(...)` predicate evaluates
+/// to a falsy value during strict-mode interpretation.
+///
+/// Carries the contract method name plus the ANF binding name (e.g. `t17`,
+/// `t8`) so a developer can pinpoint the exact failing guard. The `Display`
+/// impl renders the same string the TS / Go / Java / Zig SDKs produce so
+/// cross-tier diffing on the wire is byte-stable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssertionFailureError {
+    pub method_name: String,
+    pub binding_name: String,
+}
+
+impl std::fmt::Display for AssertionFailureError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "assert failed in {}: binding '{}' evaluated to false",
+            self.method_name, self.binding_name
+        )
+    }
+}
+
+impl std::error::Error for AssertionFailureError {}
+
+/// Per-evaluation strict-mode handle. `None` (lenient) skips assert checks;
+/// `Some` (strict) enforces them, returning [`AssertionFailureError`] on the
+/// first falsy `assert(predicate)`.
+#[derive(Debug, Clone)]
+pub(crate) struct StrictCtx {
+    pub(crate) method_name: String,
+}
+
 /// Compute the new state after executing a contract method.
 ///
 /// Returns the updated state (merged with `current_state`).
@@ -202,9 +235,82 @@ pub fn compute_new_state_and_data_outputs(
     args: &HashMap<String, SdkValue>,
     constructor_args: &[SdkValue],
 ) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), String> {
+    // Lenient mode: any assert() in the body is skipped — the on-chain
+    // script handles enforcement, and `run_method` cannot return an
+    // AssertionFailureError when `strict = None`.
+    match run_method(anf, method_name, current_state, args, constructor_args, None) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(s)) => Err(s),
+        // Unreachable: lenient mode never produces strict assertion failures.
+        Err(af) => Err(format!("unexpected strict assertion in lenient mode: {}", af)),
+    }
+}
+
+/// Strict-mode counterpart of [`compute_new_state_and_data_outputs`]: walks
+/// the same ANF body but returns
+/// `Err(AssertionFailureError)` on the first `assert(predicate)` whose
+/// predicate is falsy. Crypto built-ins (`checkSig`, `checkMultiSig`,
+/// `checkPreimage`) still mock-return `true`; only explicit `assert(...)`
+/// predicates are enforced.
+///
+/// Non-assertion interpreter errors (e.g. `methodName` not present in the
+/// ANF IR) panic in strict mode to keep the public signature the spec
+/// requires (`Result<_, AssertionFailureError>`); driver-level validation
+/// is expected to make those impossible. Real driver errors (missing IR,
+/// malformed input) are surfaced by the conformance driver before this
+/// function is ever called.
+pub fn execute_strict(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+) -> Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), AssertionFailureError> {
+    let strict = StrictCtx {
+        method_name: method_name.to_string(),
+    };
+    match run_method(
+        anf,
+        method_name,
+        current_state,
+        args,
+        constructor_args,
+        Some(&strict),
+    ) {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(s)) => panic!("execute_strict: interpreter error: {}", s),
+        Err(af) => Err(af),
+    }
+}
+
+/// Shared entry-point for both lenient and strict modes.
+///
+/// Outer `Result`: strict-mode assertion failure (`Err`) vs successful
+/// strict / any lenient walk (`Ok`).
+/// Inner `Result`: real interpreter errors (e.g. method not found).
+fn run_method(
+    anf: &ANFProgram,
+    method_name: &str,
+    current_state: &HashMap<String, SdkValue>,
+    args: &HashMap<String, SdkValue>,
+    constructor_args: &[SdkValue],
+    strict: Option<&StrictCtx>,
+) -> Result<Result<(HashMap<String, SdkValue>, Vec<DataOutputEntry>), String>, AssertionFailureError>
+{
     // Find the public method
-    let method = anf.methods.iter().find(|m| m.name == method_name && m.is_public)
-        .ok_or_else(|| format!("compute_new_state: method '{}' not found in ANF IR", method_name))?;
+    let method = match anf
+        .methods
+        .iter()
+        .find(|m| m.name == method_name && m.is_public)
+    {
+        Some(m) => m,
+        None => {
+            return Ok(Err(format!(
+                "compute_new_state: method '{}' not found in ANF IR",
+                method_name
+            )));
+        }
+    };
 
     let mut env: HashMap<String, Val> = HashMap::new();
 
@@ -249,15 +355,22 @@ pub fn compute_new_state_and_data_outputs(
     let mut state_delta: HashMap<String, Val> = HashMap::new();
     let mut data_outputs: Vec<DataOutputEntry> = Vec::new();
 
-    // Walk bindings
-    eval_bindings(&method.body, &mut env, &mut state_delta, &mut data_outputs, anf);
+    // Walk bindings — strict-mode assert failures bubble up through `?`.
+    eval_bindings(
+        &method.body,
+        &mut env,
+        &mut state_delta,
+        &mut data_outputs,
+        anf,
+        strict,
+    )?;
 
     // Merge delta into current_state
     let mut result = current_state.clone();
     for (k, v) in state_delta {
         result.insert(k, v.to_sdk());
     }
-    Ok((result, data_outputs))
+    Ok(Ok((result, data_outputs)))
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +383,21 @@ fn eval_bindings(
     state_delta: &mut HashMap<String, Val>,
     data_outputs: &mut Vec<DataOutputEntry>,
     anf: &ANFProgram,
-) {
+    strict: Option<&StrictCtx>,
+) -> Result<(), AssertionFailureError> {
     for binding in bindings {
-        let val = eval_value(&binding.value, env, state_delta, data_outputs, anf);
+        let val = eval_value(
+            &binding.value,
+            env,
+            state_delta,
+            data_outputs,
+            anf,
+            strict,
+            &binding.name,
+        )?;
         env.insert(binding.name.clone(), val);
     }
+    Ok(())
 }
 
 fn eval_value(
@@ -283,13 +406,15 @@ fn eval_value(
     state_delta: &mut HashMap<String, Val>,
     data_outputs: &mut Vec<DataOutputEntry>,
     anf: &ANFProgram,
-) -> Val {
+    strict: Option<&StrictCtx>,
+    binding_name: &str,
+) -> Result<Val, AssertionFailureError> {
     let kind = match value.get("kind").and_then(|k| k.as_str()) {
         Some(k) => k,
-        None => return Val::Undefined,
+        None => return Ok(Val::Undefined),
     };
 
-    match kind {
+    let result = match kind {
         "load_param" => {
             let name = str_field(value, "name");
             env.get(&name).cloned().unwrap_or(Val::Undefined)
@@ -305,7 +430,7 @@ fn eval_value(
             if let Some(s) = raw.as_str() {
                 // Handle @ref: aliases
                 if let Some(target) = s.strip_prefix("@ref:") {
-                    return env.get(target).cloned().unwrap_or(Val::Undefined);
+                    return Ok(env.get(target).cloned().unwrap_or(Val::Undefined));
                 }
             }
             json_to_val(raw)
@@ -335,6 +460,20 @@ fn eval_value(
             let args: Vec<Val> = arg_names.iter()
                 .map(|n| env.get(n).cloned().unwrap_or(Val::Undefined))
                 .collect();
+            // Strict mode: a `call(assert, x)` lowering path enforces the
+            // predicate the same way the dedicated `assert` ANF node does.
+            if let Some(ctx) = strict {
+                if func == "assert" {
+                    let predicate = args.first().cloned().unwrap_or(Val::Undefined);
+                    if !predicate.is_truthy() {
+                        return Err(AssertionFailureError {
+                            method_name: ctx.method_name.clone(),
+                            binding_name: binding_name.to_string(),
+                        });
+                    }
+                    return Ok(Val::Undefined);
+                }
+            }
             eval_call(&func, &args)
         }
 
@@ -359,7 +498,7 @@ fn eval_value(
                         child_env.insert(param.name.clone(), arg_val.clone());
                     }
                 }
-                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, anf);
+                eval_bindings(&method.body, &mut child_env, state_delta, data_outputs, anf, strict)?;
                 // Copy property updates back to caller env
                 for prop in &anf.properties {
                     if let Some(v) = child_env.get(&prop.name) {
@@ -387,7 +526,7 @@ fn eval_value(
                     .collect();
                 // Create child env for the branch
                 let mut child_env = env.clone();
-                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, anf);
+                eval_bindings(&bindings, &mut child_env, state_delta, data_outputs, anf, strict)?;
                 // Copy new bindings back
                 for (k, v) in &child_env {
                     env.insert(k.clone(), v.clone());
@@ -415,7 +554,7 @@ fn eval_value(
                 for i in 0..count {
                     env.insert(iter_var.clone(), Val::Int(i));
                     let mut loop_env = env.clone();
-                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, anf);
+                    eval_bindings(&bindings, &mut loop_env, state_delta, data_outputs, anf, strict)?;
                     // Copy loop bindings back
                     for (k, v) in &loop_env {
                         env.insert(k.clone(), v.clone());
@@ -428,7 +567,22 @@ fn eval_value(
             last_val
         }
 
-        "assert" => Val::Undefined,
+        "assert" => {
+            // Lenient mode: skip; the on-chain script enforces.
+            // Strict mode: enforce — falsy predicate returns
+            // AssertionFailureError, propagated up via `?`.
+            if let Some(ctx) = strict {
+                let pred_ref = str_field(value, "value");
+                let predicate = env.get(&pred_ref).cloned().unwrap_or(Val::Undefined);
+                if !predicate.is_truthy() {
+                    return Err(AssertionFailureError {
+                        method_name: ctx.method_name.clone(),
+                        binding_name: binding_name.to_string(),
+                    });
+                }
+            }
+            Val::Undefined
+        }
 
         "update_prop" => {
             let name = str_field(value, "name");
@@ -472,7 +626,9 @@ fn eval_value(
         | "add_raw_output" => Val::Undefined,
 
         _ => Val::Undefined,
-    }
+    };
+
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------

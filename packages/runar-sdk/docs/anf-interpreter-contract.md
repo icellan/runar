@@ -29,10 +29,10 @@ non-TS SDK is exercised through a small CLI driver under
 | TS SDK   | `packages/runar-sdk/src/anf-interpreter.ts` — three modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient), `executeStrict` (throws `AssertionFailureError`), and `executeOnChainAuthoritative(..., { sighash })` (strict + real ECDSA + real preimage) | ANF JSON loaded as `ANFProgram` |
 | Java SDK | `packages/runar-java/src/main/java/runar/lang/sdk/AnfInterpreter.java` — three modes: `computeNewState`, `executeStrict` (throws `AssertionFailureException`), and `executeOnChainAuthoritative(..., new OnChainCryptoContext(sighash))` (strict + real ECDSA + real preimage) | ANF JSON loaded as `Map<String, Object>` |
 | Zig SDK  | `packages/runar-zig/src/sdk_anf_interpreter.zig` — three modes: `computeNewState` / `computeNewStateAndDataOutputs` (lenient), `executeStrict` (returns `error.AssertionFailure`), and `executeOnChainAuthoritative(..., .{ .sighash = digest })` (strict + real ECDSA + real preimage) | ANF JSON loaded as `ANFProgram` |
-| Go SDK   | `packages/runar-go/anf_interpreter.go` — `ComputeNewState` / `ComputeNewStateAndDataOutputs` (lenient mode); strict + real-crypto modes are not yet ported (lenient parity is enforced by the cross-interpreter test) | ANF JSON loaded as `*ANFProgram` |
-| Rust SDK | `packages/runar-rs/src/sdk/anf_interpreter.rs` — `compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `ANFProgram` |
-| Python SDK | `packages/runar-py/runar/sdk/anf_interpreter.py` — `compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `dict` |
-| Ruby SDK | `packages/runar-rb/lib/runar/sdk/anf_interpreter.rb` — `Runar::SDK::ANFInterpreter.compute_new_state` / `compute_new_state_and_data_outputs` (lenient); strict + real-crypto modes not yet ported | ANF JSON loaded as `Hash` |
+| Go SDK   | `packages/runar-go/anf_interpreter.go` — two modes: `ComputeNewState` / `ComputeNewStateAndDataOutputs` (lenient) and `ExecuteStrict` (strict — returns `*AssertionFailureError`). Real-crypto mode is not yet ported (cross-tier strict parity is enforced; real-crypto cross-parity is exercised by per-SDK unit tests on the TS / Java / Zig SDKs only) | ANF JSON loaded as `*ANFProgram` |
+| Rust SDK | `packages/runar-rs/src/sdk/anf_interpreter.rs` — two modes: `compute_new_state` / `compute_new_state_and_data_outputs` (lenient) and `execute_strict` (strict — returns `Result<_, AssertionFailureError>`). Real-crypto mode not yet ported | ANF JSON loaded as `ANFProgram` |
+| Python SDK | `packages/runar-py/runar/sdk/anf_interpreter.py` — two modes: `compute_new_state` / `compute_new_state_and_data_outputs` (lenient) and `execute_strict` (strict — raises `AssertionFailureError`). Real-crypto mode not yet ported | ANF JSON loaded as `dict` |
+| Ruby SDK | `packages/runar-rb/lib/runar/sdk/anf_interpreter.rb` — two modes: `Runar::SDK::ANFInterpreter.compute_new_state` / `compute_new_state_and_data_outputs` (lenient) and `execute_strict` (strict — raises `Runar::SDK::AssertionFailureError`). Real-crypto mode not yet ported | ANF JSON loaded as `Hash` |
 
 A fourth interpreter, `packages/runar-testing/src/interpreter/interpreter.ts`,
 operates on the **AST** (pre-ANF) and has stricter coverage (real ECDSA, real
@@ -95,12 +95,17 @@ each implementation.
 
 ### Per-kind behaviour for the four ANF-only SDKs
 
-The Go, Rust, Python, and Ruby SDKs implement the lenient mode of the
-contract (`compute_new_state` / `compute_new_state_and_data_outputs`) with
-the same per-kind contract as the TS / Zig / Java reference. Strict and
-real-crypto modes are TS-, Java-, and Zig-only today; the four SDKs below
-ship lenient mode only and are exercised by the cross-interpreter parity
-test in lenient mode.
+The Go, Rust, Python, and Ruby SDKs implement the lenient AND strict modes
+of the contract with the same per-kind contract as the TS / Zig / Java
+reference: `assert` (the dedicated kind) and `call(assert, ...)` (the call
+lowering) both raise `AssertionFailureError` on a falsy predicate when the
+strict entry point is invoked. Cross-tier strict parity is enforced by
+`conformance/anf-interpreter/cross-interpreter-strict.test.ts`; each
+non-TS SDK ships a strict-mode driver under
+`conformance/anf-interpreter/drivers/<lang>/` that the harness invokes with
+`--mode=strict`. Real-crypto mode (`executeOnChainAuthoritative`) is still
+TS-, Java-, and Zig-only; cross-tier real-crypto parity is exercised
+per-SDK in unit tests, not in the cross-interpreter golden suite.
 
 | Kind | Go (`anf_interpreter.go`) | Rust (`anf_interpreter.rs`) | Python (`anf_interpreter.py`) | Ruby (`anf_interpreter.rb`) |
 |---|---|---|---|---|
@@ -119,10 +124,12 @@ test in lenient mode.
 | on-chain-only kinds (skipped) | 367 | 471 | 241 | 239 |
 | `array_literal` | default (undefined) | default (undefined) | default (undefined) | default (undefined) |
 
-These four SDKs do not yet have a strict mode (`executeStrict`) or a
-real-crypto mode (`executeOnChainAuthoritative`). When those land, this
-matrix should grow `assert` enforcement and `checkSig` / `checkMultiSig` /
-`checkPreimage` real-crypto rows for each.
+These four SDKs ship both lenient and strict modes; the strict entry
+point (`ExecuteStrict` / `execute_strict`) raises `AssertionFailureError`
+on the first falsy `assert(...)` predicate (carrying `methodName` plus the
+ANF binding name). Real-crypto mode (`executeOnChainAuthoritative`) is
+still TS / Java / Zig only; when it lands, this matrix should grow
+`checkSig` / `checkMultiSig` / `checkPreimage` real-crypto rows for each.
 
 ### Summary of intentional skips
 
@@ -171,5 +178,14 @@ continuation locking script. The on-chain runtime handles that via
 
 ## Future directions
 
-- The Lean Eval reference (`runar-verification/`) will define the canonical semantics. When it lands, this document should be re-derived from Lean rather than from the three implementations.
-- `add_raw_output` recording and a TS/Java/Zig real-crypto cross-parity golden suite are deferred to that effort. (`array_literal` element resolution in Zig has now landed — see the per-kind matrix and the multisig tests.)
+- The Lean Eval reference (`runar-verification/`) will define the canonical semantics. When it lands, this document should be re-derived from Lean rather than from the seven implementations.
+- All seven SDKs now ship strict mode and are exercised by
+  `conformance/anf-interpreter/cross-interpreter-strict.test.ts`
+  (7 SDKs × 6 fixtures = 42 tests). Real-crypto cross-parity is the
+  remaining gap: TS / Java / Zig ship `executeOnChainAuthoritative`; Go /
+  Rust / Python / Ruby do not. Unit tests on the three SDKs that do ship
+  it cover the per-SDK semantics; a golden cross-parity suite is the
+  natural follow-up once Lean Eval pins the canonical semantics.
+- `add_raw_output` recording is also deferred to that effort. (`array_literal`
+  element resolution in Zig has landed — see the per-kind matrix and the
+  multisig tests.)

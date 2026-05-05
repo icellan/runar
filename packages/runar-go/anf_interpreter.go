@@ -55,6 +55,29 @@ type ANFBinding struct {
 // Public API
 // ---------------------------------------------------------------------------
 
+// AssertionFailureError is returned by ExecuteStrict when an `assert(...)`
+// predicate evaluates to a falsy value during strict-mode interpretation.
+// It carries the contract method name plus the ANF binding name (e.g.
+// `t17`, `t8`) so a developer can pinpoint the exact failing guard.
+type AssertionFailureError struct {
+	MethodName  string
+	BindingName string
+}
+
+// Error renders the failure with the same shape the TS / Java / Zig SDKs
+// produce so cross-tier diffing on the wire is byte-stable.
+func (e *AssertionFailureError) Error() string {
+	return fmt.Sprintf(
+		"assert failed in %s: binding '%s' evaluated to false",
+		e.MethodName, e.BindingName,
+	)
+}
+
+// strictCtx is the per-evaluation strict-mode handle. nil = lenient mode.
+type strictCtx struct {
+	methodName string
+}
+
 // ComputeNewState interprets the ANF IR to compute the state transition for
 // a contract method call. It returns the updated state (merged with current).
 // constructorArgs provides deploy-time values for readonly properties that are
@@ -68,6 +91,22 @@ func ComputeNewState(
 ) (map[string]interface{}, error) {
 	state, _, err := ComputeNewStateAndDataOutputs(anf, methodName, currentState, args, constructorArgs)
 	return state, err
+}
+
+// ExecuteStrict is the strict-mode counterpart of
+// ComputeNewStateAndDataOutputs: it walks the same ANF body but returns
+// (nil, nil, *AssertionFailureError) on the first `assert(predicate)` whose
+// predicate is falsy. Crypto built-ins (`checkSig`, `checkMultiSig`,
+// `checkPreimage`) still mock-return `true`; only explicit `assert(...)`
+// predicates are enforced.
+func ExecuteStrict(
+	anf *ANFProgram,
+	methodName string,
+	currentState map[string]interface{},
+	args map[string]interface{},
+	constructorArgs []interface{},
+) (map[string]interface{}, []ContractOutput, error) {
+	return runMethod(anf, methodName, currentState, args, constructorArgs, &strictCtx{methodName: methodName})
 }
 
 // ComputeNewStateAndDataOutputs is like ComputeNewState but also returns
@@ -87,6 +126,21 @@ func ComputeNewStateAndDataOutputs(
 	args map[string]interface{},
 	constructorArgs []interface{},
 ) (map[string]interface{}, []ContractOutput, error) {
+	return runMethod(anf, methodName, currentState, args, constructorArgs, nil)
+}
+
+// runMethod is the shared entry-point for both lenient and strict modes.
+// strict == nil -> lenient (asserts skipped).
+// strict != nil -> strict (asserts enforced; first falsy predicate returns
+// *AssertionFailureError).
+func runMethod(
+	anf *ANFProgram,
+	methodName string,
+	currentState map[string]interface{},
+	args map[string]interface{},
+	constructorArgs []interface{},
+	strict *strictCtx,
+) (resultState map[string]interface{}, resultOutputs []ContractOutput, retErr error) {
 	// Find the method
 	var method *ANFMethod
 	for i := range anf.Methods {
@@ -142,8 +196,28 @@ func ComputeNewStateAndDataOutputs(
 	stateDelta := make(map[string]interface{})
 	var dataOutputs []ContractOutput
 
+	// Strict mode signals an assert failure by panicking with a sentinel
+	// so the panic unwinds out of nested if / loop / private-method calls
+	// without threading an error return through every recursion. Recover
+	// here and surface as a typed *AssertionFailureError.
+	if strict != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				if af, ok := r.(*AssertionFailureError); ok {
+					resultState = nil
+					resultOutputs = nil
+					retErr = af
+					return
+				}
+				// Re-panic on anything that isn't an assert failure — those
+				// are real bugs and should not be silently coerced.
+				panic(r)
+			}
+		}()
+	}
+
 	// Walk bindings
-	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs)
+	anfEvalBindings(anf, method.Body, env, stateDelta, &dataOutputs, strict)
 
 	// Merge delta into current state
 	result := make(map[string]interface{})
@@ -166,9 +240,10 @@ func anfEvalBindings(
 	env map[string]interface{},
 	stateDelta map[string]interface{},
 	dataOutputs *[]ContractOutput,
+	strict *strictCtx,
 ) {
 	for _, binding := range bindings {
-		val := anfEvalValue(anf, binding.Value, env, stateDelta, dataOutputs)
+		val := anfEvalValue(anf, binding.Value, env, stateDelta, dataOutputs, strict, binding.Name)
 		env[binding.Name] = val
 	}
 }
@@ -179,6 +254,8 @@ func anfEvalValue(
 	env map[string]interface{},
 	stateDelta map[string]interface{},
 	dataOutputs *[]ContractOutput,
+	strict *strictCtx,
+	bindingName string,
 ) interface{} {
 	kind, _ := value["kind"].(string)
 
@@ -219,6 +296,18 @@ func anfEvalValue(
 		for i, name := range argNames {
 			argVals[i] = env[name]
 		}
+		// Strict mode: a `call(assert, x)` lowering path enforces the
+		// predicate the same way the dedicated `assert` ANF node does.
+		if strict != nil && funcName == "assert" {
+			var pred interface{}
+			if len(argVals) > 0 {
+				pred = argVals[0]
+			}
+			if !anfIsTruthy(pred) {
+				panic(&AssertionFailureError{MethodName: strict.methodName, BindingName: bindingName})
+			}
+			return nil
+		}
 		return anfEvalCall(funcName, argVals)
 
 	case "method_call":
@@ -248,7 +337,7 @@ func anfEvalValue(
 						}
 					}
 					// Evaluate method body
-					anfEvalBindings(anf, m.Body, callEnv, stateDelta, dataOutputs)
+					anfEvalBindings(anf, m.Body, callEnv, stateDelta, dataOutputs, strict)
 					// Copy updated property values back to caller env
 					for _, prop := range anf.Properties {
 						if v, ok := callEnv[prop.Name]; ok {
@@ -279,7 +368,7 @@ func anfEvalValue(
 		for k, v := range env {
 			childEnv[k] = v
 		}
-		anfEvalBindings(anf, branch, childEnv, stateDelta, dataOutputs)
+		anfEvalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict)
 		// Copy new bindings back
 		for k, v := range childEnv {
 			env[k] = v
@@ -301,7 +390,7 @@ func anfEvalValue(
 			for k, v := range env {
 				loopEnv[k] = v
 			}
-			anfEvalBindings(anf, body, loopEnv, stateDelta, dataOutputs)
+			anfEvalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict)
 			for k, v := range loopEnv {
 				env[k] = v
 			}
@@ -312,7 +401,16 @@ func anfEvalValue(
 		return lastVal
 
 	case "assert":
-		// Skip in simulation
+		// Lenient mode: skip; the on-chain script enforces.
+		// Strict mode: enforce — falsy predicate panics with
+		// *AssertionFailureError, recovered in runMethod.
+		if strict != nil {
+			predRef, _ := value["value"].(string)
+			pred := env[predRef]
+			if !anfIsTruthy(pred) {
+				panic(&AssertionFailureError{MethodName: strict.methodName, BindingName: bindingName})
+			}
+		}
 		return nil
 
 	case "update_prop":

@@ -3,9 +3,18 @@
 
 Spec: ../PROTOCOL.md
 
-Reads a single JSON input file (path in argv[1]), invokes the Python SDK's
-``compute_new_state_and_data_outputs`` ANF interpreter entry point, and prints
-a single JSON output object on stdout.
+Reads a single JSON input file, invokes the Python SDK's
+``compute_new_state_and_data_outputs`` (lenient) or ``execute_strict`` (strict)
+ANF interpreter entry point, and prints a single JSON output object on stdout.
+
+Invocation::
+
+    driver.py <input.json>                # lenient (default)
+    driver.py --mode=strict <input.json>  # strict
+
+Strict mode emits ``{error: "AssertionFailureError", methodName, bindingName}``
+on the first falsy ``assert(...)`` predicate; otherwise the same
+``{state, dataOutputs}`` envelope as lenient.
 
 Bigints are encoded as ``"42n"`` strings on the wire and decoded to / from
 Python ``int`` at the boundary.
@@ -17,7 +26,7 @@ import json
 import os
 import re
 import sys
-from typing import Any
+from typing import Any, Tuple
 
 
 _BIGINT_RE = re.compile(r"^-?\d+n$")
@@ -66,12 +75,30 @@ def _resolve_anf_path(input_obj: dict, input_file: str) -> str:
     raise ValueError("input JSON missing both 'anfPath' and 'case' fields")
 
 
-def main(argv: list) -> int:
-    if len(argv) < 2:
-        print("usage: driver.py <input-json-file>", file=sys.stderr)
-        return 2
+def _parse_args(argv: list) -> Tuple[bool, str]:
+    """Parse argv into (strict, input_file). Order is irrelevant."""
+    strict = False
+    input_file = ""
+    for a in argv[1:]:
+        if a == "--mode=strict":
+            strict = True
+        elif a == "--mode=lenient":
+            strict = False
+        elif a.startswith("--"):
+            raise ValueError(f"unknown flag: {a}")
+        else:
+            if input_file:
+                raise ValueError(
+                    "usage: driver.py [--mode=strict] <input-json-file>"
+                )
+            input_file = a
+    if not input_file:
+        raise ValueError("usage: driver.py [--mode=strict] <input-json-file>")
+    return strict, input_file
 
-    input_file = argv[1]
+
+def main(argv: list) -> int:
+    strict, input_file = _parse_args(argv)
 
     # Wire up the runar-py package: drivers/python/driver.py → packages/runar-py
     here = os.path.dirname(os.path.abspath(__file__))
@@ -80,7 +107,11 @@ def main(argv: list) -> int:
         sys.path.insert(0, runar_py_pkg)
 
     # Import after sys.path is set up.
-    from runar.sdk.anf_interpreter import compute_new_state_and_data_outputs
+    from runar.sdk.anf_interpreter import (
+        AssertionFailureError,
+        compute_new_state_and_data_outputs,
+        execute_strict,
+    )
 
     with open(input_file, "r", encoding="utf-8") as fh:
         raw = json.load(fh)
@@ -94,9 +125,28 @@ def main(argv: list) -> int:
     with open(anf_path, "r", encoding="utf-8") as fh:
         anf = json.load(fh)
 
-    state, data_outputs = compute_new_state_and_data_outputs(
-        anf, method_name, current_state, args, constructor_args,
-    )
+    try:
+        if strict:
+            state, data_outputs = execute_strict(
+                anf, method_name, current_state, args, constructor_args,
+            )
+        else:
+            state, data_outputs = compute_new_state_and_data_outputs(
+                anf, method_name, current_state, args, constructor_args,
+            )
+    except AssertionFailureError as af:
+        # Strict-mode assert failure: emit the standard envelope so the
+        # cross-tier parity test can byte-compare. Real driver errors
+        # (missing IR, malformed input, …) still surface via the
+        # non-zero exit + stderr message in __main__.
+        out = {
+            "error": "AssertionFailureError",
+            "methodName": af.method_name,
+            "bindingName": af.binding_name,
+        }
+        sys.stdout.write(json.dumps(out, sort_keys=True))
+        sys.stdout.write("\n")
+        return 0
 
     encoded_state = _encode_bigints(state)
     encoded_outputs = []
@@ -113,7 +163,7 @@ def main(argv: list) -> int:
         })
 
     out = {"state": encoded_state, "dataOutputs": encoded_outputs}
-    sys.stdout.write(json.dumps(out))
+    sys.stdout.write(json.dumps(out, sort_keys=True))
     sys.stdout.write("\n")
     return 0
 

@@ -4,9 +4,18 @@
 //
 // Spec: ../PROTOCOL.md
 //
-// Reads a single JSON input file (path in argv[1]), invokes the Go SDK's
-// ComputeNewStateAndDataOutputs ANF interpreter entry point in lenient mode,
-// and prints a single JSON output object on stdout.
+// Reads a single JSON input file, invokes the Go SDK's
+// ComputeNewStateAndDataOutputs (lenient) or ExecuteStrict (strict) ANF
+// interpreter entry point, and prints a single JSON output object on stdout.
+//
+// Invocation:
+//
+//	driver <input.json>                # lenient (default)
+//	driver --mode=strict <input.json>  # strict
+//
+// Strict mode emits {error: "AssertionFailureError", methodName, bindingName}
+// on the first falsy `assert(...)` predicate; otherwise the same
+// {state, dataOutputs} envelope as lenient.
 //
 // Bigints travel as "42n"-suffixed strings on the wire. The driver decodes
 // them to *big.Int when reading currentState/args/constructorArgs and
@@ -21,6 +30,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -174,10 +184,28 @@ func toSlice(v interface{}) []interface{} {
 }
 
 func run() error {
-	if len(os.Args) < 2 {
-		return fmt.Errorf("usage: driver <input-json-file>")
+	// Parse flags: optional --mode=strict (or --mode=lenient, the default).
+	// Anything else is the input file. Order is irrelevant.
+	strict := false
+	var inputFile string
+	for _, a := range os.Args[1:] {
+		switch {
+		case a == "--mode=strict":
+			strict = true
+		case a == "--mode=lenient":
+			strict = false
+		case strings.HasPrefix(a, "--"):
+			return fmt.Errorf("unknown flag: %s", a)
+		default:
+			if inputFile != "" {
+				return fmt.Errorf("usage: driver [--mode=strict] <input-json-file>")
+			}
+			inputFile = a
+		}
 	}
-	inputFile := os.Args[1]
+	if inputFile == "" {
+		return fmt.Errorf("usage: driver [--mode=strict] <input-json-file>")
+	}
 
 	rawData, err := os.ReadFile(inputFile)
 	if err != nil {
@@ -212,15 +240,37 @@ func run() error {
 		return fmt.Errorf("parse ANF IR: %w", err)
 	}
 
-	state, dataOutputs, err := runar.ComputeNewStateAndDataOutputs(
-		&anf,
-		methodName,
-		currentState,
-		args,
-		constructorArgs,
+	var (
+		state       map[string]interface{}
+		dataOutputs []runar.ContractOutput
+		interpErr   error
 	)
-	if err != nil {
-		return fmt.Errorf("interpreter: %w", err)
+	if strict {
+		state, dataOutputs, interpErr = runar.ExecuteStrict(
+			&anf, methodName, currentState, args, constructorArgs,
+		)
+	} else {
+		state, dataOutputs, interpErr = runar.ComputeNewStateAndDataOutputs(
+			&anf, methodName, currentState, args, constructorArgs,
+		)
+	}
+	if interpErr != nil {
+		// Strict-mode AssertionFailure: emit the standard envelope so the
+		// cross-tier parity test can byte-compare. All other errors are
+		// real driver bugs (missing IR, malformed input, …) and surface
+		// via the non-zero exit + stderr message.
+		var af *runar.AssertionFailureError
+		if strict && errors.As(interpErr, &af) {
+			result := map[string]interface{}{
+				"error":       "AssertionFailureError",
+				"methodName":  af.MethodName,
+				"bindingName": af.BindingName,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetEscapeHTML(false)
+			return enc.Encode(result)
+		}
+		return fmt.Errorf("interpreter: %w", interpErr)
 	}
 
 	encodedState := encodeBigints(state).(map[string]interface{})

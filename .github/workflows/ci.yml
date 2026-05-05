@@ -667,8 +667,15 @@ jobs:
         run: cd conformance/anf-interpreter/drivers/java && gradle fatJar --no-daemon
       - name: Build Zig ANF driver
         run: cd conformance/anf-interpreter/drivers/zig && zig build -Doptimize=ReleaseSafe
-      - name: Run ANF cross-interpreter parity (7 SDKs × 6 fixtures)
+      - name: Run ANF cross-interpreter parity — lenient (7 SDKs × 6 fixtures)
         run: pnpm run conformance:anf-parity
+      - name: Run ANF cross-interpreter parity — strict (7 SDKs × 6 fixtures)
+        # Strict mode also asserts cross-tier byte-equality of the
+        # `{error, methodName, bindingName}` envelope on the four fixtures
+        # whose `assert(...)` predicates fire under mocked crypto. Two
+        # fixtures (if-else-check-{true,false}) have no failing asserts and
+        # produce the same `{state, dataOutputs}` shape as lenient mode.
+        run: pnpm run conformance:anf-parity:strict
 
   runar-verification:
     name: Runar Verification (Lean 4)

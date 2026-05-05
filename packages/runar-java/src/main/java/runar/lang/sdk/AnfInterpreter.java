@@ -207,10 +207,44 @@ public final class AnfInterpreter {
         }
     }
 
-    /** Thrown when an {@code assert} binding's condition is falsy in strict mode. */
+    /**
+     * Thrown when an {@code assert} binding's condition is falsy in strict
+     * mode. Carries the contract method name plus the ANF binding name (e.g.
+     * {@code t17}, {@code t8}) so a developer can pinpoint the exact failing
+     * guard. Cross-tier wire format mirrors the TS / Go / Zig / Ruby SDKs:
+     *
+     * <pre>{@code
+     * assert failed in <methodName>: binding '<bindingName>' evaluated to false
+     * }</pre>
+     */
     public static final class AssertionFailureException extends RuntimeException {
+        private final String methodName;
+        private final String bindingName;
+
+        public AssertionFailureException(String methodName, String bindingName) {
+            super(formatMessage(methodName, bindingName));
+            this.methodName = methodName == null ? "" : methodName;
+            this.bindingName = bindingName == null ? "" : bindingName;
+        }
+
+        /**
+         * Legacy single-arg constructor retained for source-compatibility with
+         * callers that don't yet carry the method/binding context. The
+         * standard message format is parsed when possible to populate the
+         * fields; otherwise they default to empty strings.
+         */
         public AssertionFailureException(String message) {
             super(message);
+            this.methodName = "";
+            this.bindingName = "";
+        }
+
+        public String methodName() { return methodName; }
+        public String bindingName() { return bindingName; }
+
+        private static String formatMessage(String methodName, String bindingName) {
+            return "assert failed in " + (methodName == null ? "" : methodName)
+                + ": binding '" + (bindingName == null ? "" : bindingName) + "' evaluated to false";
         }
     }
 
@@ -307,7 +341,7 @@ public final class AnfInterpreter {
         Map<String, Object> stateDelta = new LinkedHashMap<>();
         List<DataOutput> dataOutputs = new ArrayList<>();
 
-        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, strict, realCrypto);
+        evalBindings(anf, listOfObjects(method.get("body")), env, stateDelta, dataOutputs, strict, realCrypto, methodName);
 
         Map<String, Object> newState = new LinkedHashMap<>();
         newState.putAll(currentState);
@@ -326,11 +360,13 @@ public final class AnfInterpreter {
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
         boolean strict,
-        OnChainCryptoContext realCrypto
+        OnChainCryptoContext realCrypto,
+        String methodName
     ) {
         for (Map<String, Object> binding : bindings) {
-            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, strict, realCrypto);
-            env.put((String) binding.get("name"), val);
+            String bindingName = (String) binding.get("name");
+            Object val = evalValue(anf, asObject(binding.get("value")), env, stateDelta, dataOutputs, strict, realCrypto, methodName, bindingName);
+            env.put(bindingName, val);
         }
     }
 
@@ -341,7 +377,9 @@ public final class AnfInterpreter {
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
         boolean strict,
-        OnChainCryptoContext realCrypto
+        OnChainCryptoContext realCrypto,
+        String methodName,
+        String bindingName
     ) {
         String kind = String.valueOf(value.getOrDefault("kind", ""));
 
@@ -375,6 +413,15 @@ public final class AnfInterpreter {
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
+                // Strict mode: a `call(assert, x)` lowering path enforces the
+                // predicate the same way the dedicated `assert` ANF node does.
+                if (strict && "assert".equals(func)) {
+                    Object pred = argVals.isEmpty() ? null : argVals.get(0);
+                    if (!isTruthy(pred)) {
+                        throw new AssertionFailureException(methodName, bindingName);
+                    }
+                    return null;
+                }
                 return evalCall(func, argVals, realCrypto);
             }
             case "method_call": {
@@ -382,7 +429,7 @@ public final class AnfInterpreter {
                 List<String> argNames = stringList(value.get("args"));
                 List<Object> argVals = new ArrayList<>(argNames.size());
                 for (String n : argNames) argVals.add(env.get(n));
-                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, strict, realCrypto);
+                return evalMethodCall(anf, mname, argVals, env, stateDelta, dataOutputs, strict, realCrypto, methodName);
             }
             case "if": {
                 Object cond = env.get((String) value.get("cond"));
@@ -390,7 +437,7 @@ public final class AnfInterpreter {
                     ? listOfObjects(value.get("then"))
                     : listOfObjects(value.get("else"));
                 Map<String, Object> childEnv = new LinkedHashMap<>(env);
-                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict, realCrypto);
+                evalBindings(anf, branch, childEnv, stateDelta, dataOutputs, strict, realCrypto, methodName);
                 env.putAll(childEnv);
                 if (!branch.isEmpty()) {
                     return childEnv.get((String) branch.get(branch.size() - 1).get("name"));
@@ -405,7 +452,7 @@ public final class AnfInterpreter {
                 for (long i = 0; i < count; i++) {
                     env.put(iterVar, BigInteger.valueOf(i));
                     Map<String, Object> loopEnv = new LinkedHashMap<>(env);
-                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict, realCrypto);
+                    evalBindings(anf, body, loopEnv, stateDelta, dataOutputs, strict, realCrypto, methodName);
                     env.putAll(loopEnv);
                     if (!body.isEmpty()) {
                         lastVal = loopEnv.get((String) body.get(body.size() - 1).get("name"));
@@ -417,10 +464,7 @@ public final class AnfInterpreter {
                 if (strict) {
                     Object cond = env.get((String) value.get("value"));
                     if (!isTruthy(cond)) {
-                        throw new AssertionFailureException(
-                            "AnfInterpreter: assert failed on '" + value.get("value")
-                                + "' (cond=" + cond + ")"
-                        );
+                        throw new AssertionFailureException(methodName, bindingName);
                     }
                 }
                 return null;
@@ -471,7 +515,8 @@ public final class AnfInterpreter {
         Map<String, Object> stateDelta,
         List<DataOutput> dataOutputs,
         boolean strict,
-        OnChainCryptoContext realCrypto
+        OnChainCryptoContext realCrypto,
+        String callerMethodName
     ) {
         if (anf == null || methodName == null) return null;
         for (Map<String, Object> m : listOfObjects(anf.get("methods"))) {
@@ -491,7 +536,10 @@ public final class AnfInterpreter {
                 }
                 List<Map<String, Object>> body = listOfObjects(m.get("body"));
                 Map<String, Object> childDelta = new LinkedHashMap<>();
-                evalBindings(anf, body, callEnv, childDelta, dataOutputs, strict, realCrypto);
+                // Strict-mode failures inside a private helper still report
+                // the public method name the caller invoked. Mirrors how the
+                // TS SDK threads `methodName` through evalMethodCall.
+                evalBindings(anf, body, callEnv, childDelta, dataOutputs, strict, realCrypto, callerMethodName);
                 stateDelta.putAll(childDelta);
                 // Mirror property mutations back into caller env
                 for (Map.Entry<String, Object> e : childDelta.entrySet()) {

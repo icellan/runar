@@ -4,8 +4,20 @@
 # ANF interpreter parity driver — Ruby SDK.
 #
 # See ../PROTOCOL.md for the input/output spec. Reads a single JSON input
-# file from ARGV[0], invokes the Ruby SDK's ANF interpreter, and prints the
-# result as JSON on stdout. Exits 0 on success, non-zero on any error.
+# file, invokes the Ruby SDK's lenient (compute_new_state_and_data_outputs)
+# or strict (execute_strict) ANF interpreter entry point, and prints a single
+# JSON object on stdout. Exits 0 on success, non-zero on real driver errors
+# (missing IR, malformed input, etc.).
+#
+# Invocation:
+#
+#   driver.rb <input.json>                 # lenient (default)
+#   driver.rb --mode=strict <input.json>   # strict
+#   driver.rb --mode=lenient <input.json>  # explicit lenient
+#
+# Strict mode emits {error: "AssertionFailureError", methodName, bindingName}
+# (and exits 0) on the first falsy +assert(...)+ predicate; otherwise the
+# same {state, dataOutputs} envelope as lenient. Flag order is irrelevant.
 
 require 'json'
 require 'pathname'
@@ -85,8 +97,24 @@ def resolve_anf_path(input, input_file_path)
 end
 
 def main
-  input_path = ARGV[0]
-  raise 'usage: driver.rb <input-json-file>' unless input_path
+  # Parse args: optional --mode=strict (or --mode=lenient, the default).
+  # Anything else is the input file. Order is irrelevant.
+  strict = false
+  input_path = nil
+  ARGV.each do |a|
+    case a
+    when '--mode=strict'
+      strict = true
+    when '--mode=lenient'
+      strict = false
+    else
+      raise "unknown flag: #{a}" if a.start_with?('--')
+      raise 'usage: driver.rb [--mode=strict] <input-json-file>' if input_path
+
+      input_path = a
+    end
+  end
+  raise 'usage: driver.rb [--mode=strict] <input-json-file>' unless input_path
 
   raw = JSON.parse(File.read(input_path))
 
@@ -98,13 +126,38 @@ def main
   anf_path = resolve_anf_path(raw, input_path)
   anf = JSON.parse(File.read(anf_path))
 
-  state, data_outputs = Runar::SDK::ANFInterpreter.compute_new_state_and_data_outputs(
-    anf,
-    method_name,
-    current_state,
-    args,
-    constructor_args: constructor_args,
-  )
+  begin
+    state, data_outputs =
+      if strict
+        Runar::SDK::ANFInterpreter.execute_strict(
+          anf,
+          method_name,
+          current_state,
+          args,
+          constructor_args,
+        )
+      else
+        Runar::SDK::ANFInterpreter.compute_new_state_and_data_outputs(
+          anf,
+          method_name,
+          current_state,
+          args,
+          constructor_args: constructor_args,
+        )
+      end
+  rescue Runar::SDK::AssertionFailureError => e
+    # Strict-mode assert failure: emit the standard error envelope so the
+    # cross-tier parity test can byte-compare. Real driver errors (missing
+    # IR, malformed input, …) still surface via the rescue block in the
+    # outer wrapper with a non-zero exit + stderr message.
+    output = {
+      'error' => 'AssertionFailureError',
+      'methodName' => e.method_name,
+      'bindingName' => e.binding_name,
+    }
+    puts JSON.generate(output)
+    exit 0
+  end
 
   encoded_state = encode_bigints(state)
   encoded_outputs = (data_outputs || []).map do |out|
