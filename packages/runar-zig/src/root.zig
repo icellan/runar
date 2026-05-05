@@ -43,6 +43,7 @@ pub const DeployOptions = sdk_types.DeployOptions;
 pub const CallOptions = sdk_types.CallOptions;
 pub const ContractOutput = sdk_types.ContractOutput;
 pub const TerminalOutput = sdk_types.TerminalOutput;
+pub const OutputSpec = sdk_types.OutputSpec;
 pub const StateValue = sdk_types.StateValue;
 pub const resolveTerminalOutputs = sdk_call.resolveTerminalOutputs;
 pub const freeResolvedTerminalOutputs = sdk_call.freeResolvedTerminalOutputs;

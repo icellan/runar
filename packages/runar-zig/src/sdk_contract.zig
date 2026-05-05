@@ -317,6 +317,19 @@ pub const RunarContract = struct {
 
         var sig_indices: std.ArrayListUnmanaged(usize) = .empty;
         defer sig_indices.deinit(self.allocator);
+        // Indices of `ByteString` / `Ripemd160` user params the caller passed
+        // as the placeholder `0` to request auto-resolution as `allPrevouts`
+        // (concatenated outpoints of every input). Mirrors the Go SDK's
+        // `prevoutsIndices` (sdk_contract.go:381) — populated below and
+        // consumed after the tx converges to substitute the real bytes.
+        var prevouts_indices: std.ArrayListUnmanaged(usize) = .empty;
+        defer prevouts_indices.deinit(self.allocator);
+
+        // Number of additional contract inputs the caller is providing; used
+        // to size the allPrevouts placeholder so the convergence loop's
+        // preimage and final tx size agree.
+        const n_extra_contract_inputs: usize =
+            if (options) |o| (if (o.additional_contract_inputs) |aci| aci.len else 0) else 0;
 
         for (args, 0..) |arg, i| {
             const param_type = user_params[i].type_name;
@@ -328,6 +341,20 @@ pub const RunarContract = struct {
                 // Auto-fill from signer
                 const pk = try sign.getPublicKey(self.allocator);
                 resolved_args[i] = .{ .bytes = pk };
+            } else if ((std.mem.eql(u8, param_type, "ByteString") or
+                std.mem.eql(u8, param_type, "Ripemd160")) and
+                arg == .int and arg.int == 0)
+            {
+                // Auto-resolve `allPrevouts`: placeholder of 36*(1+n_extra+1)
+                // zero bytes — sized for the primary contract input + every
+                // additional contract input + one P2PKH funding input. The
+                // real bytes are spliced in after tx convergence below.
+                try prevouts_indices.append(self.allocator, i);
+                const placeholder_inputs: usize = 1 + n_extra_contract_inputs + 1;
+                const placeholder_hex_len: usize = 36 * 2 * placeholder_inputs;
+                const buf = try self.allocator.alloc(u8, placeholder_hex_len);
+                @memset(buf, '0');
+                resolved_args[i] = .{ .bytes = buf };
             } else {
                 resolved_args[i] = try arg.clone(self.allocator);
             }
@@ -388,15 +415,84 @@ pub const RunarContract = struct {
             if (anf_data_outputs.len > 0) self.allocator.free(anf_data_outputs);
         }
 
+        // Multi-output continuation: methods like `transfer` on a fungible
+        // token emit N continuation outputs (each with the same code part +
+        // a different state push). Caller supplies one OutputSpec per
+        // continuation; we materialise N { script: codePart || 6a ||
+        // serializeState(out.state), satoshis } records and skip the
+        // single-`new_locking_script` continuation path. Owned slice; freed
+        // at call-scope exit. Exclusive with `terminal_outputs` and
+        // mutually-overrides `new_state` for the continuation count.
+        var multi_outputs_hex: std.ArrayListUnmanaged(types.ContractOutput) = .empty;
+        defer {
+            for (multi_outputs_hex.items) |co| self.allocator.free(@constCast(co.script));
+            multi_outputs_hex.deinit(self.allocator);
+        }
+        const multi_output_specs: ?[]const types.OutputSpec =
+            if (options) |o| o.outputs else null;
+        const has_multi_output =
+            multi_output_specs != null and multi_output_specs.?.len > 0 and
+            !is_terminal_call;
+
         if (is_stateful and !is_terminal_call) {
             new_satoshis = contract_utxo.satoshis;
             if (options) |o| {
                 if (o.satoshis > 0) new_satoshis = o.satoshis;
             }
-            // Apply new state: explicit newState takes priority (backward compat);
-            // otherwise auto-compute from ANF IR if available.
+            // Resolve new state + data outputs. Three paths:
+            //   - `options.outputs` (multi-output): caller supplies N
+            //     OutputSpec entries; we build one continuation output per
+            //     entry below. Still run ANF for data-output side effects
+            //     (no state mutation — the multi-output specs ARE the
+            //     state). Most fungible-token / NFT methods use this.
+            //   - explicit `options.new_state`: caller-supplied state takes
+            //     priority. We STILL run the ANF interpreter (without mutating
+            //     self.state) to extract any addDataOutput(...) emissions, so
+            //     the broadcast tx contains the data outputs the contract's
+            //     compile-time hashOutputs check expects between the state
+            //     and change outputs. Without this, a stateful method that
+            //     calls addDataOutput would build a tx with no data output
+            //     and the on-chain hashOutputs equality check would fail.
+            //   - no explicit state: auto-compute both from ANF.
             const has_explicit_state = if (options) |o| o.new_state != null else false;
-            if (has_explicit_state) {
+            if (has_multi_output) {
+                if (needs_change and self.artifact.anf_json != null) {
+                    anf_data_outputs = self.autoComputeDataOutputs(method_name, user_params, resolved_args) catch &.{};
+                }
+                const code_part = try self.getCodePartHex();
+                defer self.allocator.free(code_part);
+                for (multi_output_specs.?) |out| {
+                    const state_hex = try state_mod.serializeState(
+                        self.allocator,
+                        self.artifact.state_fields,
+                        out.state,
+                    );
+                    defer self.allocator.free(state_hex);
+                    const script_hex = try std.mem.concat(self.allocator, u8, &[_][]const u8{ code_part, "6a", state_hex });
+                    try multi_outputs_hex.append(self.allocator, .{
+                        .script = script_hex,
+                        .satoshis = out.satoshis,
+                    });
+                }
+                // Mirror the first OutputSpec's state into self.state so any
+                // post-call observers (or follow-up call without explicit
+                // new_state) see consistent contract state. The "primary"
+                // continuation is by convention the first entry.
+                const primary_state = multi_output_specs.?[0].state;
+                for (self.state) |*s| s.deinit(self.allocator);
+                if (self.state.len > 0) self.allocator.free(self.state);
+                var vals = try self.allocator.alloc(types.StateValue, primary_state.len);
+                for (primary_state, 0..) |s, i| {
+                    vals[i] = try s.clone(self.allocator);
+                }
+                self.state = vals;
+                new_satoshis = multi_output_specs.?[0].satoshis;
+                // Skip new_locking_script — multi_outputs_hex feeds the
+                // tx builder via stateful_contract_outputs below.
+            } else if (has_explicit_state) {
+                if (needs_change and self.artifact.anf_json != null) {
+                    anf_data_outputs = self.autoComputeDataOutputs(method_name, user_params, resolved_args) catch &.{};
+                }
                 const ns = options.?.new_state.?;
                 for (self.state) |*s| s.deinit(self.allocator);
                 if (self.state.len > 0) self.allocator.free(self.state);
@@ -405,11 +501,14 @@ pub const RunarContract = struct {
                     vals[i] = try s.clone(self.allocator);
                 }
                 self.state = vals;
+                new_locking_script = try self.getLockingScript();
             } else if (needs_change and self.artifact.anf_json != null) {
                 // Auto-compute new state + data outputs from ANF IR
                 anf_data_outputs = self.autoComputeState(method_name, user_params, resolved_args) catch &.{};
+                new_locking_script = try self.getLockingScript();
+            } else {
+                new_locking_script = try self.getLockingScript();
             }
-            new_locking_script = try self.getLockingScript();
         }
 
         // Compute change PKH for stateful methods that need it
@@ -440,6 +539,91 @@ pub const RunarContract = struct {
         }
 
         const code_sep_idx = try self.getCodeSepIndex(method_index);
+
+        // ---------------------------------------------------------------
+        // Additional contract inputs (e.g. `merge` on a fungible token spends
+        // 2 contract UTXOs into 1). Each entry is unlocked with the same
+        // method but possibly different args (per
+        // options.additional_contract_input_args). Mirrors Go's
+        // AdditionalContractInputs/AdditionalContractInputArgs handling at
+        // sdk_contract.go:466-585.
+        // ---------------------------------------------------------------
+        const extra_contract_utxos: []const types.UTXO =
+            if (options) |o| (if (o.additional_contract_inputs) |aci| aci else &.{}) else &.{};
+
+        // Per-input resolved args. Owned by `self.allocator`. Each
+        // resolved_args entry mirrors the primary `resolved_args` shape:
+        // a slice of StateValue with placeholders pre-filled.
+        var extra_resolved_args_list: std.ArrayListUnmanaged([]types.StateValue) = .empty;
+        defer {
+            for (extra_resolved_args_list.items) |slice| {
+                for (slice) |*sv| sv.deinit(self.allocator);
+                if (slice.len > 0) self.allocator.free(slice);
+            }
+            extra_resolved_args_list.deinit(self.allocator);
+        }
+
+        for (extra_contract_utxos, 0..) |_, ei| {
+            const per_input_args: ?[]const types.StateValue = blk: {
+                if (options) |o| {
+                    if (o.additional_contract_input_args) |aia| {
+                        if (ei < aia.len) break :blk aia[ei];
+                    }
+                }
+                break :blk null;
+            };
+
+            // If the caller did not supply per-input args, reuse the primary
+            // resolved_args wholesale (same as Go's `extraResolvedArgs[i] =
+            // resolvedArgs` fallback at sdk_contract.go:584).
+            if (per_input_args == null) {
+                var clone_slice = try self.allocator.alloc(types.StateValue, resolved_args.len);
+                errdefer {
+                    for (clone_slice) |*sv| sv.deinit(self.allocator);
+                    self.allocator.free(clone_slice);
+                }
+                for (resolved_args, 0..) |a, j| clone_slice[j] = try a.clone(self.allocator);
+                try extra_resolved_args_list.append(self.allocator, clone_slice);
+                continue;
+            }
+
+            // Per-input args supplied: clone with the same placeholder rules
+            // we apply to the primary args. nil entries (encoded as `int 0`
+            // for Sig/PubKey/ByteString/Ripemd160 typed user params) get
+            // auto-resolved exactly like the primary call.
+            const per = per_input_args.?;
+            var slice = try self.allocator.alloc(types.StateValue, per.len);
+            errdefer {
+                for (slice) |*sv| sv.deinit(self.allocator);
+                self.allocator.free(slice);
+            }
+            for (per, 0..) |arg, j| {
+                if (j >= user_params.len) {
+                    slice[j] = try arg.clone(self.allocator);
+                    continue;
+                }
+                const param_type = user_params[j].type_name;
+                if (std.mem.eql(u8, param_type, "Sig") and arg == .int and arg.int == 0) {
+                    slice[j] = .{ .bytes = try self.allocator.dupe(u8, "00" ** 72) };
+                } else if (std.mem.eql(u8, param_type, "PubKey") and arg == .int and arg.int == 0) {
+                    const pk = try sign.getPublicKey(self.allocator);
+                    slice[j] = .{ .bytes = pk };
+                } else if ((std.mem.eql(u8, param_type, "ByteString") or
+                    std.mem.eql(u8, param_type, "Ripemd160")) and
+                    arg == .int and arg.int == 0)
+                {
+                    const placeholder_inputs: usize = 1 + n_extra_contract_inputs + 1;
+                    const placeholder_hex_len: usize = 36 * 2 * placeholder_inputs;
+                    const buf = try self.allocator.alloc(u8, placeholder_hex_len);
+                    @memset(buf, '0');
+                    slice[j] = .{ .bytes = buf };
+                } else {
+                    slice[j] = try arg.clone(self.allocator);
+                }
+            }
+            try extra_resolved_args_list.append(self.allocator, slice);
+        }
+        const extra_resolved_args: [][]types.StateValue = extra_resolved_args_list.items;
 
         // Convert data outputs (interpreter DataOutputEntry -> ContractOutput
         // with hex-encoded scripts) for the tx builder. The scripts must be
@@ -575,28 +759,72 @@ pub const RunarContract = struct {
         );
         defer self.allocator.free(placeholder_unlock);
 
+        // Build placeholder unlocks for additional contract inputs. Owned;
+        // freed at call-scope exit. Each is a stateful unlock with the same
+        // shape as the primary placeholder (zero-sig + zero-preimage), built
+        // from per-input resolved args so the placeholder size accurately
+        // reflects what each extra input's final unlock will look like.
+        var extra_placeholder_unlocks: std.ArrayListUnmanaged([]u8) = .empty;
+        defer {
+            for (extra_placeholder_unlocks.items) |u| self.allocator.free(u);
+            extra_placeholder_unlocks.deinit(self.allocator);
+        }
+        for (extra_resolved_args) |earg| {
+            const u = try self.buildStatefulUnlockScript(
+                "00" ** 72,
+                earg,
+                needs_change,
+                change_pkh_hex,
+                0,
+                needs_new_amount,
+                new_satoshis,
+                "00" ** 181,
+                method_selector_hex,
+            );
+            try extra_placeholder_unlocks.append(self.allocator, u);
+        }
+
+        // Build the AdditionalContractInput slice for the call_mod builder.
+        // Reused (with updated unlocks) across the placeholder/rebuild/final
+        // tx-build passes.
+        var extra_call_inputs: std.ArrayListUnmanaged(call_mod.AdditionalContractInput) = .empty;
+        defer extra_call_inputs.deinit(self.allocator);
+        for (extra_contract_utxos, 0..) |u, ei| {
+            try extra_call_inputs.append(self.allocator, .{
+                .utxo = u,
+                .unlocking_script = extra_placeholder_unlocks.items[ei],
+            });
+        }
+
         // For terminal stateful calls, the contract is fully spent: outputs
         // are exactly `terminal_outputs` (no continuation), there is no
-        // change, and funding inputs come from `funding_utxos`. For
-        // non-terminal stateful, we keep the regular continuation +
-        // optional `data_outputs` layout.
-        const stateful_contract_outputs: []const types.ContractOutput =
-            if (is_terminal_call) terminal_outputs else &.{};
+        // change, and funding inputs come from `funding_utxos`.
+        // For multi-output stateful (e.g. token transfer): contract_outputs
+        // carry the N continuation outputs and we skip the single
+        // new_locking_script slot.
+        // Otherwise (regular single-continuation stateful), we keep the
+        // traditional `new_locking_script + data_outputs + change` layout.
+        const stateful_contract_outputs: []const types.ContractOutput = blk: {
+            if (is_terminal_call) break :blk terminal_outputs;
+            if (has_multi_output) break :blk multi_outputs_hex.items;
+            break :blk &.{};
+        };
         const stateful_data_outputs: []const types.ContractOutput =
             if (is_terminal_call) &.{} else data_outputs_hex.items;
         const stateful_change_address: ?[]const u8 =
             if (is_terminal_call) null else change_address;
         const stateful_new_locking_script: []const u8 =
-            if (is_terminal_call) "" else new_locking_script;
+            if (is_terminal_call or has_multi_output) "" else new_locking_script;
         const stateful_new_satoshis: i64 =
-            if (is_terminal_call) 0 else new_satoshis;
+            if (is_terminal_call or has_multi_output) 0 else new_satoshis;
 
         const build_opts: call_mod.CallBuildOptions = .{
             .contract_outputs = stateful_contract_outputs,
             .data_outputs = stateful_data_outputs,
+            .additional_contract_inputs = extra_call_inputs.items,
         };
         const build_opts_ptr: ?*const call_mod.CallBuildOptions =
-            if (is_terminal_call or data_outputs_hex.items.len > 0) &build_opts else null;
+            if (is_terminal_call or has_multi_output or data_outputs_hex.items.len > 0 or extra_call_inputs.items.len > 0) &build_opts else null;
 
         var call_result = call_mod.buildCallTransaction(
             self.allocator,
@@ -613,14 +841,15 @@ pub const RunarContract = struct {
 
         var change_amount = call_result.change_amount;
 
-        // Sign P2PKH funding inputs
+        // Sign P2PKH funding inputs (offset past contract + extra-contract inputs).
         var signed_tx = try self.allocator.dupe(u8, call_result.tx_hex);
         errdefer self.allocator.free(signed_tx);
 
+        const p2pkh_start: usize = 1 + extra_contract_utxos.len;
         {
-            var inp_idx: usize = 1;
+            var inp_idx: usize = p2pkh_start;
             while (inp_idx < call_result.input_count) : (inp_idx += 1) {
-                const utxo_idx = inp_idx - 1;
+                const utxo_idx = inp_idx - p2pkh_start;
                 if (utxo_idx < additional_utxos.items.len) {
                     const utxo = additional_utxos.items[utxo_idx];
                     const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
@@ -689,28 +918,29 @@ pub const RunarContract = struct {
 
         self.allocator.free(first_unlock);
 
-        // Re-sign P2PKH funding inputs
+        // Re-sign P2PKH funding inputs. Input layout in the tx:
+        //   0:                       primary contract input
+        //   1..1+n_extra:            additional contract inputs
+        //   1+n_extra..end:          P2PKH funding inputs (these — sign here)
+        // Extra contract inputs keep their pre-built placeholder unlocks for
+        // this convergence pass; we patch real ones below in the final pass.
         {
-            const input_count = 1 + additional_utxos.items.len;
-            var inp_idx: usize = 1;
-            while (inp_idx < input_count) : (inp_idx += 1) {
-                const utxo_idx = inp_idx - 1;
-                if (utxo_idx < additional_utxos.items.len) {
-                    const utxo = additional_utxos.items[utxo_idx];
-                    const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
-                    defer self.allocator.free(sig_val);
-                    const pub_key = try sign.getPublicKey(self.allocator);
-                    defer self.allocator.free(pub_key);
-                    const sig_push = try state_mod.encodePushData(self.allocator, sig_val);
-                    defer self.allocator.free(sig_push);
-                    const pk_push = try state_mod.encodePushData(self.allocator, pub_key);
-                    defer self.allocator.free(pk_push);
-                    const p2pkh_unlock = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sig_push, pk_push });
-                    defer self.allocator.free(p2pkh_unlock);
-                    const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_unlock);
-                    self.allocator.free(signed_tx);
-                    signed_tx = new_tx;
-                }
+            const funding_offset: usize = 1 + extra_call_inputs.items.len;
+            for (additional_utxos.items, 0..) |utxo, ui| {
+                const inp_idx = funding_offset + ui;
+                const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
+                defer self.allocator.free(sig_val);
+                const pub_key = try sign.getPublicKey(self.allocator);
+                defer self.allocator.free(pub_key);
+                const sig_push = try state_mod.encodePushData(self.allocator, sig_val);
+                defer self.allocator.free(sig_push);
+                const pk_push = try state_mod.encodePushData(self.allocator, pub_key);
+                defer self.allocator.free(pk_push);
+                const p2pkh_unlock = try std.mem.concat(self.allocator, u8, &[_][]const u8{ sig_push, pk_push });
+                defer self.allocator.free(p2pkh_unlock);
+                const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_unlock);
+                self.allocator.free(signed_tx);
+                signed_tx = new_tx;
             }
         }
 
@@ -746,6 +976,20 @@ pub const RunarContract = struct {
             }
         }
 
+        // Substitute the real concatenated prevouts into every ByteString
+        // param the caller asked us to auto-resolve. The contract verifies
+        // hash256(allPrevouts) == extractHashPrevouts(ctx.txPreimage); the
+        // placeholder zero-byte string we used during the convergence pass
+        // would fail that check. Mirrors Go's loop at sdk_contract.go:686.
+        if (prevouts_indices.items.len > 0) {
+            const real_prevouts = try extractAllPrevoutsHex(self.allocator, signed_tx);
+            defer self.allocator.free(real_prevouts);
+            for (prevouts_indices.items) |idx| {
+                resolved_args[idx].deinit(self.allocator);
+                resolved_args[idx] = .{ .bytes = try self.allocator.dupe(u8, real_prevouts) };
+            }
+        }
+
         // Build final unlocking script
         const final_unlock = try self.buildStatefulUnlockScript(
             ptx_result.sig_hex,
@@ -764,28 +1008,107 @@ pub const RunarContract = struct {
         self.allocator.free(signed_tx);
         signed_tx = final_tx;
 
-        // Re-sign P2PKH funding inputs after final unlock insertion (matches Go/Python SDKs)
-        {
-            const input_count = 1 + additional_utxos.items.len;
-            var inp_idx: usize = 1;
-            while (inp_idx < input_count) : (inp_idx += 1) {
-                const utxo_idx = inp_idx - 1;
-                if (utxo_idx < additional_utxos.items.len) {
-                    const utxo = additional_utxos.items[utxo_idx];
-                    const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
-                    defer self.allocator.free(sig_val);
-                    const pub_key = try sign.getPublicKey(self.allocator);
-                    defer self.allocator.free(pub_key);
-                    const s_push = try state_mod.encodePushData(self.allocator, sig_val);
-                    defer self.allocator.free(s_push);
-                    const p_push = try state_mod.encodePushData(self.allocator, pub_key);
-                    defer self.allocator.free(p_push);
-                    const p2pkh_u = try std.mem.concat(self.allocator, u8, &[_][]const u8{ s_push, p_push });
-                    defer self.allocator.free(p2pkh_u);
-                    const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_u);
-                    self.allocator.free(signed_tx);
-                    signed_tx = new_tx;
+        // Build & insert real unlocks for each additional contract input.
+        // Each input gets its own preimage (BIP-143 sighash depends on input
+        // index) and its own placeholder→real arg resolution. nil entries
+        // inside an input's arg slot mean "auto-resolve" — Sig auto-signs,
+        // ByteString param treated as allPrevouts gets the substituted value.
+        for (extra_contract_utxos, 0..) |xu, ei| {
+            const inp_idx = 1 + ei;
+            // Per-input args: copy primary resolved_args (which already has
+            // real sig for slot 0 and real prevouts substituted), then apply
+            // any per-input overrides from `additional_contract_input_args`.
+            var per_input_args = try self.allocator.alloc(types.StateValue, resolved_args.len);
+            defer {
+                for (per_input_args) |*pa| pa.deinit(self.allocator);
+                self.allocator.free(per_input_args);
+            }
+            for (resolved_args, 0..) |a, ai| per_input_args[ai] = try a.clone(self.allocator);
+
+            if (options) |o| {
+                if (o.additional_contract_input_args) |aia| {
+                    if (ei < aia.len) {
+                        const overrides = aia[ei];
+                        for (overrides, 0..) |ov, oi| {
+                            if (oi >= per_input_args.len) break;
+                            // `.int = 0` means "auto-resolve" for Sig/ByteString
+                            // (same convention as the primary args). For other
+                            // types, a literal 0 user value is taken at face.
+                            if (ov == .int and ov.int == 0) {
+                                const ptype = user_params[oi].type_name;
+                                if (std.mem.eql(u8, ptype, "Sig")) {
+                                    var sig_subscript = xu.script;
+                                    if (code_sep_idx) |cs| {
+                                        const off: usize = @intCast((@as(usize, @intCast(cs)) + 1) * 2);
+                                        if (off <= sig_subscript.len) sig_subscript = sig_subscript[off..];
+                                    }
+                                    const real_sig = try sign.sign(self.allocator, signed_tx, inp_idx, sig_subscript, xu.satoshis, null);
+                                    per_input_args[oi].deinit(self.allocator);
+                                    per_input_args[oi] = .{ .bytes = real_sig };
+                                    continue;
+                                }
+                                if (std.mem.eql(u8, ptype, "ByteString") or std.mem.eql(u8, ptype, "Ripemd160")) {
+                                    const real_pv = try extractAllPrevoutsHex(self.allocator, signed_tx);
+                                    per_input_args[oi].deinit(self.allocator);
+                                    per_input_args[oi] = .{ .bytes = real_pv };
+                                    continue;
+                                }
+                            }
+                            per_input_args[oi].deinit(self.allocator);
+                            per_input_args[oi] = try ov.clone(self.allocator);
+                        }
+                    }
                 }
+            }
+
+            // Compute OP_PUSH_TX preimage for this input.
+            var xptx = oppushtx_mod.computeOpPushTx(
+                self.allocator,
+                signed_tx,
+                inp_idx,
+                xu.script,
+                xu.satoshis,
+                code_sep_idx orelse -1,
+            ) catch return ContractError.CallFailed;
+            defer xptx.deinit(self.allocator);
+
+            const x_unlock = try self.buildStatefulUnlockScript(
+                xptx.sig_hex,
+                per_input_args,
+                needs_change,
+                change_pkh_hex,
+                change_amount,
+                needs_new_amount,
+                new_satoshis,
+                xptx.preimage_hex,
+                method_selector_hex,
+            );
+            defer self.allocator.free(x_unlock);
+            const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, x_unlock);
+            self.allocator.free(signed_tx);
+            signed_tx = new_tx;
+        }
+
+        // Re-sign P2PKH funding inputs after final unlock insertion (matches Go/Python SDKs).
+        // Funding inputs sit AFTER the primary contract input and AFTER any
+        // additional contract inputs.
+        {
+            const funding_offset: usize = 1 + extra_call_inputs.items.len;
+            for (additional_utxos.items, 0..) |utxo, ui| {
+                const inp_idx = funding_offset + ui;
+                const sig_val = try sign.sign(self.allocator, signed_tx, inp_idx, utxo.script, utxo.satoshis, null);
+                defer self.allocator.free(sig_val);
+                const pub_key = try sign.getPublicKey(self.allocator);
+                defer self.allocator.free(pub_key);
+                const s_push = try state_mod.encodePushData(self.allocator, sig_val);
+                defer self.allocator.free(s_push);
+                const p_push = try state_mod.encodePushData(self.allocator, pub_key);
+                defer self.allocator.free(p_push);
+                const p2pkh_u = try std.mem.concat(self.allocator, u8, &[_][]const u8{ s_push, p_push });
+                defer self.allocator.free(p2pkh_u);
+                const new_tx = try insertUnlockingScript(self.allocator, signed_tx, inp_idx, p2pkh_u);
+                self.allocator.free(signed_tx);
+                signed_tx = new_tx;
             }
         }
 
@@ -1794,6 +2117,57 @@ pub const RunarContract = struct {
         return result.data_outputs;
     }
 
+    /// Run the ANF interpreter purely for the side-emission of data outputs
+    /// (`this.addDataOutput(...)`); do NOT mutate `self.state`.
+    ///
+    /// Used when the caller supplies an explicit `options.new_state`: their
+    /// state value wins, but we still need to materialise any data outputs
+    /// the method body emits so the broadcast tx layout matches the contract's
+    /// compile-time `hashOutputs` check.
+    fn autoComputeDataOutputs(
+        self: *RunarContract,
+        method_name: []const u8,
+        user_params: []types.ABIParam,
+        resolved_args: []const types.StateValue,
+    ) ![]anf_interp.DataOutputEntry {
+        const empty: []anf_interp.DataOutputEntry = &.{};
+        const anf_json = self.artifact.anf_json orelse return empty;
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const work = arena.allocator();
+
+        const anf_program = anf_interp.parseANFFromJson(work, anf_json) catch return empty;
+
+        var current_state = std.StringHashMap(anf_interp.ANFValue).init(work);
+        for (self.artifact.state_fields, 0..) |field, i| {
+            if (i < self.state.len) {
+                current_state.put(field.name, stateValueToAnf(self.state[i])) catch continue;
+            }
+        }
+
+        var named_args = std.StringHashMap(anf_interp.ANFValue).init(work);
+        for (user_params, 0..) |param, i| {
+            if (i < resolved_args.len) {
+                named_args.put(param.name, stateValueToAnf(resolved_args[i])) catch continue;
+            }
+        }
+
+        var ctor_anf_args = try work.alloc(anf_interp.ANFValue, self.constructor_args.len);
+        for (self.constructor_args, 0..) |arg, i| {
+            ctor_anf_args[i] = stateValueToAnf(arg);
+        }
+
+        const result = anf_interp.computeNewStateAndDataOutputs(
+            self.allocator, &anf_program, method_name, current_state, named_args, ctor_anf_args,
+        ) catch return empty;
+        // Drop computed state; caller provides an explicit override.
+        var state_map = result.state;
+        state_map.deinit();
+
+        return result.data_outputs;
+    }
+
     // ---------------------------------------------------------------------------
     // Private helpers
     // ---------------------------------------------------------------------------
@@ -2121,6 +2495,38 @@ fn computeBip143Sighash(
     const out = try allocator.alloc(u8, 64);
     _ = try bsvz.primitives.hex.encodeLower(&digest_result.bytes, out);
     return out;
+}
+
+/// Extract `prev_txid (32 bytes LE) || prev_index (4 bytes LE)` for every
+/// input in `tx_hex`, concatenated. Returns the lower-hex string. The
+/// format mirrors Bitcoin's `hashPrevouts` preimage — used by contracts
+/// that declare an `allPrevouts: ByteString` param to assert
+/// `hash256(allPrevouts) == extractHashPrevouts(ctx.txPreimage)`. Mirrors
+/// Go's `extractAllPrevouts` (`packages/runar-go/sdk_contract.go:1664`).
+pub fn extractAllPrevoutsHex(allocator: std.mem.Allocator, tx_hex: []const u8) ![]u8 {
+    if (tx_hex.len < 10) return allocator.dupe(u8, "");
+    var pos: usize = 8; // skip version (4 bytes = 8 hex chars)
+    const ic = readVarIntHex(tx_hex, pos);
+    const input_count = ic.value;
+    pos += ic.hex_len;
+
+    var out: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input_count) : (i += 1) {
+        // outpoint = 32 bytes txid + 4 bytes vout = 36 bytes = 72 hex chars
+        if (pos + 72 > tx_hex.len) break;
+        try out.appendSlice(allocator, tx_hex[pos .. pos + 72]);
+        pos += 72;
+        // skip scriptSig
+        const sl = readVarIntHex(tx_hex, pos);
+        pos += sl.hex_len + sl.value * 2;
+        // skip sequence (4 bytes = 8 hex chars)
+        pos += 8;
+    }
+
+    return out.toOwnedSlice(allocator);
 }
 
 pub fn insertUnlockingScript(allocator: std.mem.Allocator, tx_hex: []const u8, input_index: usize, unlock_script_hex: []const u8) ![]u8 {

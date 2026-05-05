@@ -16,6 +16,22 @@ pub const CallBuildOptions = struct {
     /// output, in declaration order — matching the compile-time
     /// continuation-hash layout.
     data_outputs: []const types.ContractOutput = &.{},
+    /// Extra contract inputs (e.g. `merge` on a fungible token spends two
+    /// contract UTXOs into one). Each entry carries its own pre-built
+    /// unlocking script (typically a stateful unlock with placeholder
+    /// preimage during the pre-convergence pass). Inserted in the input
+    /// list immediately after the primary contract input and before any
+    /// P2PKH funding inputs. Mirrors Go's `AdditionalContractInputs`
+    /// inside `BuildCallOptions`.
+    additional_contract_inputs: []const AdditionalContractInput = &.{},
+};
+
+/// AdditionalContractInput pairs an extra contract UTXO with its
+/// (placeholder-or-real) unlocking script for the same tx. Mirrors Go's
+/// `AdditionalContractInput`.
+pub const AdditionalContractInput = struct {
+    utxo: types.UTXO,
+    unlocking_script: []const u8,
 };
 
 pub const CallResult = struct {
@@ -60,8 +76,12 @@ pub fn buildCallTransaction(
     const data_outputs: []const types.ContractOutput =
         if (opts != null) opts.?.data_outputs else &.{};
 
+    const extra_contract_inputs: []const AdditionalContractInput =
+        if (opts != null) opts.?.additional_contract_inputs else &.{};
+
     // Calculate total inputs
     var total_input: i64 = current_utxo.satoshis;
+    for (extra_contract_inputs) |ci| total_input += ci.utxo.satoshis;
     for (additional_utxos) |u| total_input += u.satoshis;
 
     var contract_output_sats: i64 = 0;
@@ -71,8 +91,13 @@ pub fn buildCallTransaction(
     // Estimate fee
     const input0_script_len = unlocking_script_hex.len / 2;
     const input0_size = 32 + 4 + varIntByteSize(input0_script_len) + input0_script_len + 4;
+    var extra_contract_inputs_size: usize = 0;
+    for (extra_contract_inputs) |ci| {
+        const ci_script_len = ci.unlocking_script.len / 2;
+        extra_contract_inputs_size += 32 + 4 + varIntByteSize(ci_script_len) + ci_script_len + 4;
+    }
     const p2pkh_inputs_size = additional_utxos.len * 148;
-    const inputs_size = input0_size + p2pkh_inputs_size;
+    const inputs_size = input0_size + extra_contract_inputs_size + p2pkh_inputs_size;
 
     var outputs_size: usize = 0;
     for (contract_outputs.items) |co| {
@@ -115,6 +140,29 @@ pub fn buildCallTransaction(
             .source_output = .{
                 .satoshis = current_utxo.satoshis,
                 .locking_script = bsvz.script.Script.init(utxo_script_bytes),
+            },
+        });
+    }
+
+    // Additional contract inputs (each with its own pre-built unlocking script)
+    for (extra_contract_inputs) |ci| {
+        const txid_chain = bsvz.primitives.chainhash.Hash.fromHex(ci.utxo.txid) catch return error.OutOfMemory;
+        const txid_hash = bsvz.crypto.Hash256{ .bytes = txid_chain.bytes };
+        const ci_unlock_bytes = try bsvz.primitives.hex.decode(allocator, ci.unlocking_script);
+        defer allocator.free(ci_unlock_bytes);
+        const ci_script_bytes = try bsvz.primitives.hex.decode(allocator, ci.utxo.script);
+        defer allocator.free(ci_script_bytes);
+
+        try builder.addInput(.{
+            .previous_outpoint = .{
+                .txid = txid_hash,
+                .index = @intCast(ci.utxo.output_index),
+            },
+            .unlocking_script = bsvz.script.Script.init(ci_unlock_bytes),
+            .sequence = 0xffffffff,
+            .source_output = .{
+                .satoshis = ci.utxo.satoshis,
+                .locking_script = bsvz.script.Script.init(ci_script_bytes),
             },
         });
     }
@@ -181,7 +229,7 @@ pub fn buildCallTransaction(
 
     return .{
         .tx_hex = hex_buf,
-        .input_count = 1 + additional_utxos.len,
+        .input_count = 1 + extra_contract_inputs.len + additional_utxos.len,
         .change_amount = if (change > 0) change else 0,
     };
 }

@@ -93,8 +93,13 @@ test "TicTacToe_Join" {
     defer allocator.free(fund_o);
     var signer_o = try player_o.localSigner();
 
-    // join(opponentPK, sig) -- playerO joins
-    // State after join: playerO=po_hex, c0-c8=0, turn=1, status=1
+    // join(opponentPK, sig) -- playerO joins. Pass null options so the
+    // SDK auto-computes the new state via the ANF interpreter (matches the
+    // Go integration test pattern). Explicit `new_state` worked in the
+    // legacy SDK path but stops broadcasting once `playerO` (a PubKey) is
+    // serialised through state_mod.serializeState — auto-compute is the
+    // canonical path because it produces exactly the bytes the contract's
+    // hashOutputs check expects.
     const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
@@ -103,20 +108,7 @@ test "TicTacToe_Join" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 0 }, // c4
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn
-            .{ .int = 1 }, // status
-        } },
+        null,
     );
     defer allocator.free(join_txid);
     std.log.info("TicTacToe join TX: {s}", .{join_txid});
@@ -163,7 +155,7 @@ test "TicTacToe_Move" {
     defer allocator.free(fund_o);
     var signer_o = try player_o.localSigner();
 
-    // Join -- state after join: playerO=po_hex, c0-c8=0, turn=1, status=1
+    // Join — let the SDK auto-compute new state via the ANF interpreter.
     const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
@@ -172,25 +164,12 @@ test "TicTacToe_Move" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 0 }, // c4
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn
-            .{ .int = 1 }, // status
-        } },
+        null,
     );
     allocator.free(join_txid);
 
-    // Move: player X plays position 4 (center)
-    // State after move(4, X): c4=1, turn=2 (flipped from 1)
+    // Move: player X plays position 4 (center). SDK auto-computes new
+    // state — c4=1, turn flips from 1 to 2.
     const move_txid = try contract.call(
         "move",
         &[_]runar.StateValue{
@@ -200,20 +179,7 @@ test "TicTacToe_Move" {
         },
         rpc_provider.provider(),
         signer_x.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO (unchanged)
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 1 }, // c4 = turn (1 = X)
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 2 }, // turn = flipped to 2
-            .{ .int = 1 }, // status (unchanged)
-        } },
+        null,
     );
     defer allocator.free(move_txid);
     std.log.info("TicTacToe move TX: {s}", .{move_txid});
@@ -277,7 +243,7 @@ test "TicTacToe_WrongPlayerRejected" {
     defer allocator.free(fund_o);
     var signer_o = try player_o.localSigner();
 
-    // Join -- playerO enters the game
+    // Join — let SDK auto-compute new state via ANF interpreter.
     const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
@@ -286,20 +252,7 @@ test "TicTacToe_WrongPlayerRejected" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 0 }, // c4
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn
-            .{ .int = 1 }, // status
-        } },
+        null,
     );
     allocator.free(join_txid);
 
@@ -314,20 +267,7 @@ test "TicTacToe_WrongPlayerRejected" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO (unchanged)
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 2 }, // c4 = turn (2 = O)
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn = flipped to 1
-            .{ .int = 1 }, // status (unchanged)
-        } },
+        null,
     );
 
     if (move_result) |move_txid| {
@@ -388,7 +328,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
     defer allocator.free(fund_intruder);
     var signer_intruder = try intruder.localSigner();
 
-    // Join -- playerO enters the game
+    // Join — let SDK auto-compute new state via ANF interpreter.
     const join_txid = try contract.call(
         "join",
         &[_]runar.StateValue{
@@ -397,20 +337,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
         },
         rpc_provider.provider(),
         signer_o.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = po_hex }, // playerO
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 0 }, // c4
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn
-            .{ .int = 1 }, // status
-        } },
+        null,
     );
     allocator.free(join_txid);
 
@@ -423,20 +350,7 @@ test "TicTacToe_JoinAfterPlayingRejected" {
         },
         rpc_provider.provider(),
         signer_intruder.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = intruder_hex }, // playerO (would-be replacement)
-            .{ .int = 0 }, // c0
-            .{ .int = 0 }, // c1
-            .{ .int = 0 }, // c2
-            .{ .int = 0 }, // c3
-            .{ .int = 0 }, // c4
-            .{ .int = 0 }, // c5
-            .{ .int = 0 }, // c6
-            .{ .int = 0 }, // c7
-            .{ .int = 0 }, // c8
-            .{ .int = 1 }, // turn
-            .{ .int = 1 }, // status
-        } },
+        null,
     );
 
     if (second_join_result) |txid| {

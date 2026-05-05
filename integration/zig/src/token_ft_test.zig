@@ -345,7 +345,11 @@ test "FungibleToken_Transfer" {
     std.log.info("FungibleToken deployed for transfer test: {s}", .{deploy_txid});
 
     // transfer(sig, to, amount, outputSatoshis) -- splits UTXO into 2 outputs
-    // Output 0: recipient gets `amount`, Output 1: sender keeps remainder
+    // Output 0: recipient gets `amount`, Output 1: sender keeps remainder.
+    // The contract emits two ctx.addOutput calls (the second guarded by
+    // `if (amount < totalBalance)`), so the spend tx must carry both
+    // continuations or the on-chain hashOutputs check fails.
+    const remainder = initial_balance - amount;
     const txid = try contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -356,10 +360,17 @@ test "FungibleToken_Transfer" {
         },
         rpc_provider.provider(),
         local_signer.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = recipient_pk },
-            .{ .int = amount },
-            .{ .int = 0 },
+        .{ .outputs = &[_]runar.OutputSpec{
+            .{ .satoshis = output_sats, .state = &[_]runar.StateValue{
+                .{ .bytes = recipient_pk },
+                .{ .int = amount },
+                .{ .int = 0 },
+            } },
+            .{ .satoshis = output_sats, .state = &[_]runar.StateValue{
+                .{ .bytes = owner_pk },
+                .{ .int = remainder },
+                .{ .int = 0 },
+            } },
         } },
     );
     defer allocator.free(txid);
@@ -409,7 +420,10 @@ test "FungibleToken_TransferExactBalance" {
     defer allocator.free(deploy_txid);
     std.log.info("FungibleToken deployed for exact transfer test: {s}", .{deploy_txid});
 
-    // Transfer entire balance to recipient -- should produce 1 output (no change)
+    // Transfer entire balance to recipient -- should produce 1 output (no
+    // change). The conditional second ctx.addOutput in the contract is
+    // guarded by `if (amount < totalBalance)`, so when amount ==
+    // initialBalance the contract emits exactly one continuation.
     const txid = try contract.call(
         "transfer",
         &[_]runar.StateValue{
@@ -420,10 +434,12 @@ test "FungibleToken_TransferExactBalance" {
         },
         rpc_provider.provider(),
         local_signer.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = recipient_pk },
-            .{ .int = initial_balance },
-            .{ .int = 0 },
+        .{ .outputs = &[_]runar.OutputSpec{
+            .{ .satoshis = output_sats, .state = &[_]runar.StateValue{
+                .{ .bytes = recipient_pk },
+                .{ .int = initial_balance },
+                .{ .int = 0 },
+            } },
         } },
     );
     defer allocator.free(txid);
@@ -836,22 +852,41 @@ test "FungibleToken_Merge" {
     std.log.info("FungibleToken contract2 deployed for merge test: {s}", .{deploy_txid2});
 
     // merge(sig, otherBalance, allPrevouts, outputSatoshis)
-    // Merges two UTXOs into one with combined balance
+    // Merges two UTXOs (contract1 + contract2) into one output with the
+    // combined balance. The on-chain semantics (mirrors the Go SDK):
+    //   - input 0: contract1, otherBalance = balance2
+    //   - input 1: contract2, otherBalance = balance1
+    //   - allPrevouts: auto-resolved by SDK from the actual tx input list
+    //   - one continuation output carrying the merged balance.
+    const utxo2 = contract2.getCurrentUtxo() orelse return error.TestUnexpectedResult;
     const txid = try contract1.call(
         "merge",
         &[_]runar.StateValue{
             .{ .int = 0 }, // sig: auto-sign
-            .{ .int = balance2 }, // otherBalance
-            .{ .int = 0 }, // allPrevouts: auto-computed
+            .{ .int = balance2 }, // otherBalance for input 0
+            .{ .int = 0 }, // allPrevouts: auto-fill
             .{ .int = output_sats },
         },
         rpc_provider.provider(),
         local_signer.signer(),
-        .{ .new_state = &[_]runar.StateValue{
-            .{ .bytes = owner_pk },
-            .{ .int = balance1 },
-            .{ .int = balance2 },
-        } },
+        .{
+            .outputs = &[_]runar.OutputSpec{
+                .{ .satoshis = output_sats, .state = &[_]runar.StateValue{
+                    .{ .bytes = owner_pk },
+                    .{ .int = balance1 },
+                    .{ .int = balance2 },
+                } },
+            },
+            .additional_contract_inputs = &[_]runar.UTXO{utxo2},
+            .additional_contract_input_args = &[_][]const runar.StateValue{
+                &[_]runar.StateValue{
+                    .{ .int = 0 }, // sig (auto-sign for input 1)
+                    .{ .int = balance1 }, // otherBalance for input 1 = balance of input 0
+                    .{ .int = 0 }, // allPrevouts auto-fill (same value as input 0)
+                    .{ .int = output_sats },
+                },
+            },
+        },
     );
     defer allocator.free(txid);
     std.log.info("FungibleToken merge TX: {s}", .{txid});

@@ -76,6 +76,15 @@ pub const CallOptions = struct {
     satoshis: i64 = 0,
     change_address: ?[]const u8 = null,
     new_state: ?[]const StateValue = null,
+    /// Multiple continuation outputs for multi-output methods (e.g.
+    /// `transfer` on a fungible token where the contract emits one output
+    /// for the receiver and one residual change output, both back into
+    /// the same locking-script template with different state). Each
+    /// `OutputSpec` is `{ satoshis, state: [positional StateValue] }` —
+    /// the SDK builds one continuation output per entry, replacing the
+    /// single-continuation path that `new_state` drives. Mutually
+    /// exclusive with `new_state`; when both are set, `outputs` wins.
+    outputs: ?[]const OutputSpec = null,
     /// Optional explicit override for data outputs emitted via
     /// `this.addDataOutput(...)` in the method body. When null, the SDK
     /// resolves data outputs automatically by running the ANF interpreter.
@@ -98,6 +107,28 @@ pub const CallOptions = struct {
     /// `terminal_outputs` + fee. Ignored unless `terminal_outputs` is
     /// non-null. Each UTXO is signed with the configured signer's key.
     funding_utxos: ?[]const UTXO = null,
+    /// Additional contract UTXOs to include as inputs (e.g. `merge` on a
+    /// fungible token spends two contract UTXOs into one). Each entry is
+    /// unlocked with the same method + arg shape as the primary call;
+    /// `Sig` params are auto-signed per input (same as the primary
+    /// unlocking script). Mirrors Go's `AdditionalContractInputs`.
+    additional_contract_inputs: ?[]const UTXO = null,
+    /// Per-input arg overrides for `additional_contract_inputs`. Slot `i`
+    /// applies to additional input `i`. nil entries inside a slot mean
+    /// "auto-resolve" (same as the primary unlocking — Sig auto-signs,
+    /// `_allPrevouts` auto-fills). Use this when a multi-input call
+    /// passes different per-input args (e.g. each additional input has
+    /// its own `otherBalance` value). Mirrors Go's
+    /// `AdditionalContractInputArgs`.
+    additional_contract_input_args: ?[]const []const StateValue = null,
+};
+
+/// OutputSpec describes one continuation output for a multi-output method.
+/// `state` is the positional state slice for the continuation, encoded the
+/// same way as `CallOptions.new_state`.
+pub const OutputSpec = struct {
+    satoshis: i64,
+    state: []const StateValue,
 };
 
 /// ContractOutput describes one contract continuation output.
