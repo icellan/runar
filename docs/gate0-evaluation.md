@@ -350,11 +350,11 @@ Basefold verifier that combines them into the full verification protocol.
 | Fp2 extension | `bn254_ext.go` | Complete | Add, sub, mul, sqr, inv, conjugate, mulByNonResidue |
 | Fp6 extension | `bn254_ext.go` | Complete | Add, sub, mul, neg, inv, mulByNonResidue |
 | Fp12 extension | `bn254_ext.go` | Complete | Add, sub, mul, sqr, inv, conjugate, expByX |
-| Fp12 Frobenius | `bn254_ext.go` | Complete | FrobeniusP, FrobeniusP2 (TODO: verify constants) |
+| Fp12 Frobenius | `bn254_ext.go` | Complete | FrobeniusP, FrobeniusP2 (constants verified against gnark golden vectors) |
 | Miller loop | `bn254_pairing.go` | Complete | Optimal Ate, NAF of |6x+2|, G2 Frobenius corrections |
 | Final exponentiation | `bn254_pairing.go` | Complete | Easy part + hard part (Devegili decomposition) |
 | Full pairing | `bn254_pairing.go` | Complete | EmitBN254Pairing entry point (2,444,695 ops) |
-| Groth16 verifier contract | `integration/go/contracts/` | Structural | Frontend compiles; codegen builtins TODO |
+| Groth16 verifier contract | `integration/go/contracts/` | Structural | Frontend compiles; codegen builtins now wired (see `EmitGroth16VerifyWitness` in `compilers/go/codegen/bn254_groth16.go`) |
 | Sparse Fp12 multiply | -- | Not started | Key optimization for Miller loop |
 
 The full pairing codegen is complete and emits 2.44M StackOps (6.4 MB per pairing).

@@ -1129,12 +1129,12 @@ is:
 mod fake_helpers {
     use runar::sdk::{RPCProvider, RunarArtifact, Signer};
     pub fn skip_if_no_node() {}
-    pub fn compile_contract(_path: &str) -> RunarArtifact { unimplemented!() }
+    pub fn compile_contract(_path: &str) -> RunarArtifact { panic!("doc example only") }
     pub fn create_provider() -> RPCProvider {
         RPCProvider::new_regtest("http://localhost:18332", "bitcoin", "bitcoin")
     }
     pub fn create_funded_wallet(_p: &mut RPCProvider) -> (Box<dyn Signer>, ()) {
-        unimplemented!()
+        panic!("doc example only")
     }
 }
 
@@ -1306,7 +1306,7 @@ fn build_call_transaction(
     change_script: Option<&str>,
     additional_utxos: Option<&[runar::sdk::Utxo]>,
     fee_rate: Option<i64>,
-) -> (String, usize, i64) { unimplemented!() }
+) -> (String, usize, i64) { panic!("doc example only") }
 ```
 
 #### `pub fn build_call_transaction_ext(..., options: Option<&CallTxOptions>) -> (String, usize, i64)`
@@ -1324,7 +1324,7 @@ fn build_deploy_transaction(
     change_address: &str,
     change_script: &str,
     fee_rate: Option<i64>,
-) -> (String, usize) { unimplemented!() }
+) -> (String, usize) { panic!("doc example only") }
 ```
 
 #### `pub fn build_inscription_envelope(content_type: &str, data: &str) -> String`
@@ -1618,18 +1618,18 @@ pub struct RunarContract { /* private */ }
 impl RunarContract {
     // Construction
     pub fn new(artifact: RunarArtifact, constructor_args: Vec<SdkValue>) -> Self
-    { unimplemented!() }
+    { panic!("doc example only") }
     pub fn from_txid(
         artifact: RunarArtifact,
         txid: &str,
         output_index: usize,
         provider: &dyn Provider,
-    ) -> Result<Self, String> { unimplemented!() }
+    ) -> Result<Self, String> { panic!("doc example only") }
     pub fn from_utxo(artifact: RunarArtifact, utxo: &Utxo) -> Self
-    { unimplemented!() }
+    { panic!("doc example only") }
 
     // State / UTXO access
-    pub fn state(&self) -> &HashMap<String, SdkValue> { unimplemented!() }
+    pub fn state(&self) -> &HashMap<String, SdkValue> { panic!("doc example only") }
     pub fn set_state(&mut self, _new_state: HashMap<String, SdkValue>) {}
     pub fn get_utxo(&self) -> Option<&Utxo> { None }
 
@@ -1651,7 +1651,7 @@ impl RunarContract {
         _provider: &mut dyn Provider,
         _signer: &dyn Signer,
         _options: &DeployOptions,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
     pub fn call(
         &mut self,
         _method_name: &str,
@@ -1659,7 +1659,7 @@ impl RunarContract {
         _provider: &mut dyn Provider,
         _signer: &dyn Signer,
         _options: Option<&CallOptions>,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
     pub fn prepare_call(
         &mut self,
         _method_name: &str,
@@ -1667,37 +1667,37 @@ impl RunarContract {
         _provider: &mut dyn Provider,
         _signer: &dyn Signer,
         _options: Option<&CallOptions>,
-    ) -> Result<PreparedCall, String> { unimplemented!() }
+    ) -> Result<PreparedCall, String> { panic!("doc example only") }
     pub fn finalize_call(
         &mut self,
         _prepared: &PreparedCall,
         _signatures: &HashMap<usize, String>,
         _provider: &mut dyn Provider,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
 
     // Connected variants (after .connect()):
     pub fn connect(&mut self, _p: Box<dyn Provider>, _s: Box<dyn Signer>) {}
     pub fn deploy_connected(
         &mut self,
         _options: &DeployOptions,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
     pub fn call_connected(
         &mut self,
         _method_name: &str,
         _args: &[SdkValue],
         _options: Option<&CallOptions>,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
     pub fn prepare_call_connected(
         &mut self,
         _method_name: &str,
         _args: &[SdkValue],
         _options: Option<&CallOptions>,
-    ) -> Result<PreparedCall, String> { unimplemented!() }
+    ) -> Result<PreparedCall, String> { panic!("doc example only") }
     pub fn finalize_call_connected(
         &mut self,
         _prepared: &PreparedCall,
         _signatures: &HashMap<usize, String>,
-    ) -> Result<(String, TransactionData), String> { unimplemented!() }
+    ) -> Result<(String, TransactionData), String> { panic!("doc example only") }
 }
 ```
 
@@ -1720,9 +1720,9 @@ pub enum SdkValue {
 }
 
 impl SdkValue {
-    pub fn as_int(&self) -> i64 { unimplemented!() }    // panics on non-numeric or BigInt > i64::MAX
-    pub fn as_bool(&self) -> bool { unimplemented!() }  // panics on non-Bool
-    pub fn as_bytes(&self) -> &str { unimplemented!() } // panics on non-Bytes
+    pub fn as_int(&self) -> i64 { panic!("doc example only") }    // panics on non-numeric or BigInt > i64::MAX
+    pub fn as_bool(&self) -> bool { panic!("doc example only") }  // panics on non-Bool
+    pub fn as_bytes(&self) -> &str { panic!("doc example only") } // panics on non-Bytes
 }
 ```
 

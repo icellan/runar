@@ -588,7 +588,7 @@ cd examples/python && PYTHONPATH=../../packages/runar-py python3 -m pytest
 > suites gated on installed toolchains). Every skip is inventoried with its
 > rationale in [`docs/test-skips.md`](docs/test-skips.md). The audit deliberately
 > contains zero "Stale" or "Gap" skips — any new skip should fall into one
-> bucket and either get a `TODO(...)` comment or join that document.
+> bucket and join that document.
 
 ---
 
